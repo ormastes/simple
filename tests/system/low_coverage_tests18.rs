@@ -32,7 +32,7 @@ mod parser_stmt_size_tests {
 // Parser Macro Types
 // ============================================================================
 mod parser_macro_tests {
-    use simple_parser::{MacroDef, MacroInvocation, MacroArg};
+    use simple_parser::{MacroArg, MacroDef, MacroInvocation};
 
     #[test]
     fn test_macro_def_size() {
@@ -66,7 +66,7 @@ mod parser_match_tests {
 // Parser Module Types
 // ============================================================================
 mod parser_module_tests {
-    use simple_parser::{UseStmt, ImportTarget, ModulePath};
+    use simple_parser::{ImportTarget, ModulePath, UseStmt};
 
     #[test]
     fn test_use_stmt_size() {
@@ -100,7 +100,7 @@ mod parser_node_tests {
 // Loader Startup Types
 // ============================================================================
 mod loader_startup_tests {
-    use simple_loader::{StartupLoader, StartupError, LoadedSettlement};
+    use simple_loader::{LoadedSettlement, StartupError, StartupLoader};
 
     #[test]
     fn test_startup_loader_size() {
@@ -139,7 +139,7 @@ mod loader_cross_test_extended_tests {
 // Loader Package Types
 // ============================================================================
 mod loader_package_tests {
-    use simple_loader::package::{PackageTrailer, ManifestSection};
+    use simple_loader::package::{ManifestSection, PackageTrailer};
 
     #[test]
     fn test_package_trailer_size() {
@@ -175,10 +175,8 @@ mod loader_arch_validate_tests {
 // ============================================================================
 mod compiler_value_extended_tests {
     use simple_compiler::value::{
-        BorrowValue, BorrowMutValue, ChannelValue, FutureValue,
-        GeneratorValue, GeneratorState, ManualHandleValue,
-        ManualSharedValue, ManualUniqueValue, ManualWeakValue,
-        ThreadPoolValue,
+        BorrowMutValue, BorrowValue, ChannelValue, FutureValue, GeneratorState, GeneratorValue,
+        ManualHandleValue, ManualSharedValue, ManualUniqueValue, ManualWeakValue, ThreadPoolValue,
     };
 
     #[test]
@@ -258,7 +256,7 @@ mod compiler_newtypes_tests {
 // Compiler MIR Types Extended
 // ============================================================================
 mod compiler_mir_extended_tests {
-    use simple_compiler::mir::{BlockId, Terminator, Effect, EffectSet};
+    use simple_compiler::mir::{BlockId, Effect, EffectSet, Terminator};
 
     #[test]
     fn test_block_id_tuple() {
@@ -286,7 +284,7 @@ mod compiler_mir_extended_tests {
 // Compiler HIR Types Extended
 // ============================================================================
 mod compiler_hir_more_tests {
-    use simple_compiler::hir::{HirFunction, HirExpr, HirStmt, HirModule};
+    use simple_compiler::hir::{HirExpr, HirFunction, HirModule, HirStmt};
 
     #[test]
     fn test_hir_function_size() {
@@ -414,7 +412,7 @@ mod pkg_version_extended_tests {
 // Dependency Tracker Symbol Types
 // ============================================================================
 mod dep_tracker_symbol_tests {
-    use simple_dependency_tracker::{Symbol, SymbolKind, SymbolId};
+    use simple_dependency_tracker::{Symbol, SymbolId, SymbolKind};
 
     #[test]
     fn test_symbol_size() {
@@ -448,7 +446,7 @@ mod driver_runner_tests {
 // Loader Settlement Types
 // ============================================================================
 mod loader_settlement_more_tests {
-    use simple_loader::settlement::{SlotRange, SettlementError, SlotAllocator};
+    use simple_loader::settlement::{SettlementError, SlotAllocator, SlotRange};
 
     #[test]
     fn test_slot_range_size() {
@@ -470,7 +468,7 @@ mod loader_settlement_more_tests {
 // Compiler Module Resolver Types
 // ============================================================================
 mod compiler_resolver_tests {
-    use simple_compiler::{ModuleResolver, DirectoryManifest, ResolvedModule};
+    use simple_compiler::{DirectoryManifest, ModuleResolver, ResolvedModule};
 
     #[test]
     fn test_module_resolver_size() {

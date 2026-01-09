@@ -26,9 +26,7 @@ pub fn type_uses_param(ty: &AstType, param: &str) -> bool {
         AstType::Tuple(elems) => elems.iter().any(|e| type_uses_param(e, param)),
         AstType::Function { params, ret } => {
             params.iter().any(|p| type_uses_param(p, param))
-                || ret
-                    .as_ref()
-                    .map_or(false, |r| type_uses_param(r, param))
+                || ret.as_ref().map_or(false, |r| type_uses_param(r, param))
         }
         AstType::Optional(inner) => type_uses_param(inner, param),
         AstType::Pointer { inner, .. } => type_uses_param(inner, param),
@@ -37,21 +35,23 @@ pub fn type_uses_param(ty: &AstType, param: &str) -> bool {
 }
 
 /// Infer the concrete type of an expression.
-pub fn infer_concrete_type(expr: &Expr, type_context: &HashMap<String, ConcreteType>) -> Option<ConcreteType> {
+pub fn infer_concrete_type(
+    expr: &Expr,
+    type_context: &HashMap<String, ConcreteType>,
+) -> Option<ConcreteType> {
     match expr {
         Expr::Integer(_) | Expr::TypedInteger(_, _) => Some(ConcreteType::Int),
         Expr::Float(_) | Expr::TypedFloat(_, _) => Some(ConcreteType::Float),
         Expr::Bool(_) => Some(ConcreteType::Bool),
-        Expr::String(_) | Expr::TypedString(_, _) | Expr::FString(_) => {
-            Some(ConcreteType::String)
-        }
+        Expr::String(_) | Expr::TypedString(_, _) | Expr::FString(_) => Some(ConcreteType::String),
         Expr::Nil => Some(ConcreteType::Nil),
         Expr::Identifier(name) => type_context.get(name).cloned(),
         Expr::Array(elems) => {
             if let Some(first) = elems.first() {
-                Some(ConcreteType::Array(Box::new(
-                    infer_concrete_type(first, type_context)?,
-                )))
+                Some(ConcreteType::Array(Box::new(infer_concrete_type(
+                    first,
+                    type_context,
+                )?)))
             } else {
                 None
             }
@@ -330,12 +330,10 @@ pub fn concrete_to_ast_type(concrete: &ConcreteType) -> AstType {
         ConcreteType::Tuple(elems) => {
             AstType::Tuple(elems.iter().map(concrete_to_ast_type).collect())
         }
-        ConcreteType::Dict { key, value } => {
-            AstType::Generic {
-                name: "Dict".to_string(),
-                args: vec![concrete_to_ast_type(key), concrete_to_ast_type(value)],
-            }
-        }
+        ConcreteType::Dict { key, value } => AstType::Generic {
+            name: "Dict".to_string(),
+            args: vec![concrete_to_ast_type(key), concrete_to_ast_type(value)],
+        },
         ConcreteType::Function { params, ret } => AstType::Function {
             params: params.iter().map(concrete_to_ast_type).collect(),
             ret: Some(Box::new(concrete_to_ast_type(ret))),
@@ -355,8 +353,6 @@ pub fn concrete_to_ast_type(concrete: &ConcreteType) -> AstType {
                 inner: Box::new(concrete_to_ast_type(inner)),
             }
         }
-        ConcreteType::Specialized { name, args: _ } => {
-            AstType::Simple(name.clone())
-        }
+        ConcreteType::Specialized { name, args: _ } => AstType::Simple(name.clone()),
     }
 }

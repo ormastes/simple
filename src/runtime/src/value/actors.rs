@@ -60,11 +60,7 @@ fn as_actor_ptr(value: RuntimeValue) -> Option<*mut RuntimeActor> {
 }
 
 fn get_actor_handle(actor_id: usize) -> Option<ActorHandle> {
-    ACTOR_REGISTRY
-        .read()
-        .ok()?
-        .get(&actor_id)
-        .cloned()
+    ACTOR_REGISTRY.read().ok()?.get(&actor_id).cloned()
 }
 
 /// Spawn a new actor. `body_func` is a pointer to the actor body.

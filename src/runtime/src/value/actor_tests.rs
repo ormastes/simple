@@ -1,9 +1,10 @@
 //! Tests for actor functionality
 
-use super::{rt_actor_spawn, rt_actor_send, rt_actor_recv, rt_actor_join,
-            rt_actor_id, rt_actor_is_alive};
+use super::{
+    rt_actor_id, rt_actor_is_alive, rt_actor_join, rt_actor_recv, rt_actor_send, rt_actor_spawn,
+};
 use crate::value::RuntimeValue;
-use std::sync::atomic::{AtomicI32, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -50,10 +51,7 @@ extern "C" fn flag_setting_actor(_ctx: *const u8) {
 fn test_actor_spawn() {
     ACTOR_COUNTER.store(0, Ordering::SeqCst);
 
-    let actor = rt_actor_spawn(
-        counting_actor as u64,
-        RuntimeValue::NIL
-    );
+    let actor = rt_actor_spawn(counting_actor as u64, RuntimeValue::NIL);
 
     // Should return a valid actor handle
     assert!(actor.is_heap());

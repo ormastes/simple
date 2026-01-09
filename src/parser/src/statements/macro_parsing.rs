@@ -8,8 +8,8 @@
 
 use crate::ast::*;
 use crate::error::ParseError;
-use crate::token::{Span, TokenKind};
 use crate::parser_impl::core::Parser;
+use crate::token::{Span, TokenKind};
 
 impl<'a> Parser<'a> {
     /// Parse a macro definition: macro name(params) -> (contract): body
@@ -89,7 +89,12 @@ impl<'a> Parser<'a> {
             ));
         }
 
-        Ok(MacroParam { name, ty, is_const, is_variadic })
+        Ok(MacroParam {
+            name,
+            ty,
+            is_const,
+            is_variadic,
+        })
     }
 
     pub(super) fn parse_macro_contract_items(
@@ -178,7 +183,11 @@ impl<'a> Parser<'a> {
             let body = self.parse_macro_intro_spec_block(&[TokenKind::Comma, TokenKind::RParen])?;
             Ok(MacroIntroSpec::For {
                 name,
-                range: MacroConstRange { start, end, inclusive },
+                range: MacroConstRange {
+                    start,
+                    end,
+                    inclusive,
+                },
                 body,
             })
         } else if self.check(&TokenKind::If) {

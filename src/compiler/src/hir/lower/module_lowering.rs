@@ -1,9 +1,9 @@
 use simple_parser::{self as ast, Module, Node};
 
+use super::super::types::*;
 use super::context::{ContractLoweringContext, FunctionContext};
 use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
-use super::super::types::*;
 
 impl Lowerer {
     pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
@@ -109,7 +109,7 @@ impl Lowerer {
                         let hir_func = self.lower_function(method, Some(&c.name))?;
                         self.module.functions.push(hir_func);
                     }
-                    
+
                     // Lower mixin methods applied to this class
                     for mixin_ref in &c.mixins {
                         if let Some(mixin_decl) = ast_module.items.iter().find_map(|item| {
@@ -182,7 +182,10 @@ impl Lowerer {
                             format!(
                                 "expect {}(...) -> {:?}",
                                 exp.method_name,
-                                exp.return_type.as_ref().map(|t| format!("{:?}", t)).unwrap_or_else(|| "()".to_string())
+                                exp.return_type
+                                    .as_ref()
+                                    .map(|t| format!("{:?}", t))
+                                    .unwrap_or_else(|| "()".to_string())
                             )
                         })
                         .collect();
@@ -200,11 +203,8 @@ impl Lowerer {
         // Fourth pass: lower import statements for dependency tracking
         for item in &ast_module.items {
             if let Node::UseStmt(use_stmt) = item {
-                let import = self.lower_import(
-                    &use_stmt.path,
-                    &use_stmt.target,
-                    use_stmt.is_type_only,
-                );
+                let import =
+                    self.lower_import(&use_stmt.path, &use_stmt.target, use_stmt.is_type_only);
                 self.module.imports.push(import);
             }
         }
@@ -310,7 +310,7 @@ impl Lowerer {
                 }
             }
         }
-        ConcurrencyMode::Actor  // Default
+        ConcurrencyMode::Actor // Default
     }
 
     /// Detect if a function is a constructor
@@ -332,9 +332,7 @@ impl Lowerer {
         };
 
         // Must not take self (static method)
-        let takes_self = f.params.first()
-            .map(|p| p.name == "self")
-            .unwrap_or(false);
+        let takes_self = f.params.first().map(|p| p.name == "self").unwrap_or(false);
         if takes_self {
             return false;
         }
@@ -347,10 +345,9 @@ impl Lowerer {
         }
 
         // Also check common constructor names as a heuristic
-        matches!(
-            f.name.as_str(),
-            "new" | "create" | "default" | "init"
-        ) || f.name.starts_with("from_") || f.name.starts_with("with_")
+        matches!(f.name.as_str(), "new" | "create" | "default" | "init")
+            || f.name.starts_with("from_")
+            || f.name.starts_with("with_")
     }
 
     /// Extract layout hint from #[layout(...)] attributes.
@@ -439,16 +436,13 @@ impl Lowerer {
             self.current_class_type = self.module.types.lookup(type_name);
         }
 
-        let inject = f
-            .decorators
-            .iter()
-            .any(|dec| {
-                if let ast::Expr::Identifier(name) = &dec.name {
-                    name == "inject" || name == "sys_inject"
-                } else {
-                    false
-                }
-            });
+        let inject = f.decorators.iter().any(|dec| {
+            if let ast::Expr::Identifier(name) = &dec.name {
+                name == "inject" || name == "sys_inject"
+            } else {
+                false
+            }
+        });
 
         // Parse concurrency mode from attributes
         let concurrency_mode = Self::parse_concurrency_mode(&f.attributes);
@@ -462,11 +456,8 @@ impl Lowerer {
                 // Check if parameter has a capability that's incompatible with the mode
                 if let ast::Type::Capability { capability, .. } = t {
                     use super::super::capability::CapabilityEnv;
-                    CapabilityEnv::check_mode_compatibility(
-                        *capability,
-                        concurrency_mode,
-                        &f.name,
-                    ).map_err(LowerError::Capability)?;
+                    CapabilityEnv::check_mode_compatibility(*capability, concurrency_mode, &f.name)
+                        .map_err(LowerError::Capability)?;
                 }
                 self.resolve_type(t)?
             } else {
@@ -510,11 +501,14 @@ impl Lowerer {
             // Check parameter types for invariants (add as preconditions)
             for (param_idx, param) in params.iter().enumerate() {
                 if let Some(type_name) = self.module.types.get_type_name(param.ty) {
-                    if let Some(type_invariant) = self.module.type_invariants.get(type_name).cloned() {
+                    if let Some(type_invariant) =
+                        self.module.type_invariants.get(type_name).cloned()
+                    {
                         let contract = contract.get_or_insert_with(HirContract::default);
                         for clause in &type_invariant.conditions {
                             // Substitute self (local 0) with the parameter index
-                            let substituted_condition = clause.condition.substitute_local(0, param_idx);
+                            let substituted_condition =
+                                clause.condition.substitute_local(0, param_idx);
                             contract.preconditions.push(HirContractClause {
                                 condition: substituted_condition,
                                 message: clause.message.clone().or_else(|| {
@@ -535,9 +529,10 @@ impl Lowerer {
                         let substituted_condition = clause.condition.substitute_self_with_result();
                         contract.postconditions.push(HirContractClause {
                             condition: substituted_condition,
-                            message: clause.message.clone().or_else(|| {
-                                Some("Type invariant for return value".to_string())
-                            }),
+                            message: clause
+                                .message
+                                .clone()
+                                .or_else(|| Some("Type invariant for return value".to_string())),
                         });
                     }
                 }
@@ -545,11 +540,7 @@ impl Lowerer {
         }
 
         // Extract attributes for AOP predicate matching
-        let attributes: Vec<String> = f
-            .attributes
-            .iter()
-            .map(|attr| attr.name.clone())
-            .collect();
+        let attributes: Vec<String> = f.attributes.iter().map(|attr| attr.name.clone()).collect();
 
         // Extract layout hint from #[layout(...)] attribute
         let layout_hint = self.extract_layout_hint(&f.attributes);

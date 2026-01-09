@@ -9,17 +9,22 @@
 //! - Phase 6: Await inference
 //! - Phase 7: End-to-end integration
 
-use simple_type::effects::{
-    build_effect_env, infer_function_effect, needs_promise_wrapping, needs_await,
-    statement_needs_await, validate_suspension_context, Effect, AwaitMode, ReturnWrapMode,
-    get_return_wrap_mode,
-};
-use simple_parser::ast::{Block, Expr, FunctionDef, Node, AssignOp};
+use simple_parser::ast::{AssignOp, Block, Expr, FunctionDef, Node};
 use simple_parser::Span;
+use simple_type::effects::{
+    build_effect_env, get_return_wrap_mode, infer_function_effect, needs_await,
+    needs_promise_wrapping, statement_needs_await, validate_suspension_context, AwaitMode, Effect,
+    ReturnWrapMode,
+};
 use std::collections::HashMap;
 
 /// Helper to create a minimal function definition
-fn make_function(name: &str, is_sync: bool, has_async_effect: bool, body: Vec<Node>) -> FunctionDef {
+fn make_function(
+    name: &str,
+    is_sync: bool,
+    has_async_effect: bool,
+    body: Vec<Node>,
+) -> FunctionDef {
     FunctionDef {
         span: Span::new(0, 0, 0, 0),
         name: name.to_string(),
@@ -74,19 +79,25 @@ fn test_phase_2_mutual_recursion() {
     // func_a calls func_b, func_b calls func_a
     // func_b has @async, so both should be inferred as async
 
-    let func_a = make_function("func_a", false, false, vec![
-        Node::Expression(Expr::Call {
+    let func_a = make_function(
+        "func_a",
+        false,
+        false,
+        vec![Node::Expression(Expr::Call {
             callee: Box::new(Expr::Identifier("func_b".to_string())),
             args: vec![],
-        })
-    ]);
+        })],
+    );
 
-    let func_b = make_function("func_b", false, true, vec![
-        Node::Expression(Expr::Call {
+    let func_b = make_function(
+        "func_b",
+        false,
+        true,
+        vec![Node::Expression(Expr::Call {
             callee: Box::new(Expr::Identifier("func_a".to_string())),
             args: vec![],
-        })
-    ]);
+        })],
+    );
 
     let env = build_effect_env(&[func_a.clone(), func_b.clone()]);
 
@@ -132,7 +143,10 @@ fn test_phase_5_promise_wrapping() {
 
     // Async function needs Promise wrapping
     assert!(needs_promise_wrapping(&async_func, &env));
-    assert_eq!(get_return_wrap_mode(&async_func, &env), ReturnWrapMode::Resolved);
+    assert_eq!(
+        get_return_wrap_mode(&async_func, &env),
+        ReturnWrapMode::Resolved
+    );
 
     // Sync function doesn't need Promise wrapping
     assert!(!needs_promise_wrapping(&sync_func, &env));
@@ -169,19 +183,25 @@ fn test_phase_7_end_to_end_async() {
     // Scenario: async function that calls another async function
 
     // Define two async functions
-    let fetch_data = make_function("fetch_data", false, true, vec![
-        Node::Return(simple_parser::ast::ReturnStmt {
+    let fetch_data = make_function(
+        "fetch_data",
+        false,
+        true,
+        vec![Node::Return(simple_parser::ast::ReturnStmt {
             span: Span::new(0, 0, 0, 0),
             value: Some(Expr::Integer(42)),
-        })
-    ]);
+        })],
+    );
 
-    let process_data = make_function("process_data", false, false, vec![
-        Node::Expression(Expr::Call {
+    let process_data = make_function(
+        "process_data",
+        false,
+        false,
+        vec![Node::Expression(Expr::Call {
             callee: Box::new(Expr::Identifier("fetch_data".to_string())),
             args: vec![],
-        })
-    ]);
+        })],
+    );
 
     // Build effect environment with fixed-point iteration
     let env = build_effect_env(&[fetch_data.clone(), process_data.clone()]);
@@ -209,9 +229,14 @@ fn test_phase_7_end_to_end_async() {
 fn test_phase_7_sync_async_boundary() {
     // Phase 7: Sync function cannot use suspension operators
 
-    let sync_with_await = make_function("sync_with_await", true, false, vec![
-        Node::Expression(Expr::Await(Box::new(Expr::Identifier("promise".to_string()))))
-    ]);
+    let sync_with_await = make_function(
+        "sync_with_await",
+        true,
+        false,
+        vec![Node::Expression(Expr::Await(Box::new(Expr::Identifier(
+            "promise".to_string(),
+        ))))],
+    );
 
     let env = HashMap::new();
 
@@ -228,20 +253,26 @@ fn test_phase_7_async_by_default() {
     // 3. Have @async effect
 
     // Define an explicitly async function
-    let async_io = make_function("async_io", false, true, vec![
-        Node::Return(simple_parser::ast::ReturnStmt {
+    let async_io = make_function(
+        "async_io",
+        false,
+        true,
+        vec![Node::Return(simple_parser::ast::ReturnStmt {
             span: Span::new(0, 0, 0, 0),
             value: Some(Expr::Integer(1)),
-        })
-    ]);
+        })],
+    );
 
     // Function that calls async function -> inferred as async
-    let caller = make_function("caller", false, false, vec![
-        Node::Expression(Expr::Call {
+    let caller = make_function(
+        "caller",
+        false,
+        false,
+        vec![Node::Expression(Expr::Call {
             callee: Box::new(Expr::Identifier("async_io".to_string())),
             args: vec![],
-        })
-    ]);
+        })],
+    );
 
     // Build environment with both functions
     let env = build_effect_env(&[async_io.clone(), caller.clone()]);

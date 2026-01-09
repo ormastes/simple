@@ -7,7 +7,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 
 use super::super::{
-    evaluate_call, evaluate_method_call, exec_method_function, ClassDef, Env, Enums, FunctionDef,
+    evaluate_call, evaluate_method_call, exec_method_function, ClassDef, Enums, Env, FunctionDef,
     ImplMethods,
 };
 
@@ -29,7 +29,11 @@ pub(super) fn eval_call_expr(
             enums,
             impl_methods,
         )?)),
-        Expr::MethodCall { receiver, method, args } => Ok(Some(evaluate_method_call(
+        Expr::MethodCall {
+            receiver,
+            method,
+            args,
+        } => Ok(Some(evaluate_method_call(
             receiver,
             method,
             args,
@@ -58,11 +62,14 @@ pub(super) fn eval_call_expr(
                 }
             }
 
-            let recv_val =
-                evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
-                    .deref_pointer();
+            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
+                .deref_pointer();
             let result = match recv_val {
-                Value::Object { ref fields, ref class, .. } => {
+                Value::Object {
+                    ref fields,
+                    ref class,
+                    ..
+                } => {
                     // First, try direct field access
                     if let Some(val) = fields.get(field) {
                         return Ok(Some(val.clone()));
@@ -134,7 +141,9 @@ pub(super) fn eval_call_expr(
                             )))
                         }
                     } else {
-                        Err(CompileError::Semantic(format!("unknown class {class_name}")))
+                        Err(CompileError::Semantic(format!(
+                            "unknown class {class_name}"
+                        )))
                     }
                 }
                 // Enum type field access - construct enum variants
@@ -163,7 +172,8 @@ pub(super) fn eval_call_expr(
                             }
                         } else {
                             // Check for enum methods
-                            if let Some(method) = enum_def.methods.iter().find(|m| m.name == *field) {
+                            if let Some(method) = enum_def.methods.iter().find(|m| m.name == *field)
+                            {
                                 Ok(Value::Function {
                                     name: method.name.clone(),
                                     def: Box::new(method.clone()),
@@ -221,7 +231,11 @@ pub(super) fn eval_call_expr(
                     }
                 },
                 // Enum property access (Option/Result properties)
-                Value::Enum { ref enum_name, ref variant, .. } => {
+                Value::Enum {
+                    ref enum_name,
+                    ref variant,
+                    ..
+                } => {
                     if enum_name == "Option" {
                         match field.as_str() {
                             "is_some" => Ok(Value::Bool(variant == "Some")),
@@ -248,7 +262,11 @@ pub(super) fn eval_call_expr(
             };
             Ok(Some(result?))
         }
-        Expr::FunctionalUpdate { target, method, args } => {
+        Expr::FunctionalUpdate {
+            target,
+            method,
+            args,
+        } => {
             let method_call = Expr::MethodCall {
                 receiver: target.clone(),
                 method: method.clone(),

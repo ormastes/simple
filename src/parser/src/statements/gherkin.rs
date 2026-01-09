@@ -35,8 +35,14 @@ impl<'a> Parser<'a> {
         let call_expr = Expr::Call {
             callee: Box::new(Expr::Identifier("examples".to_string())),
             args: vec![
-                Argument { name: None, value: Expr::String(name) },
-                Argument { name: None, value: rows_expr },
+                Argument {
+                    name: None,
+                    value: Expr::String(name),
+                },
+                Argument {
+                    name: None,
+                    value: rows_expr,
+                },
             ],
         };
 
@@ -59,8 +65,14 @@ impl<'a> Parser<'a> {
         let call_expr = Expr::Call {
             callee: Box::new(Expr::Identifier("feature".to_string())),
             args: vec![
-                Argument { name: None, value: Expr::String(name) },
-                Argument { name: None, value: Expr::DoBlock(block.statements) },
+                Argument {
+                    name: None,
+                    value: Expr::String(name),
+                },
+                Argument {
+                    name: None,
+                    value: Expr::DoBlock(block.statements),
+                },
             ],
         };
 
@@ -91,8 +103,14 @@ impl<'a> Parser<'a> {
         let call_expr = Expr::Call {
             callee: Box::new(Expr::Identifier(fn_name.to_string())),
             args: vec![
-                Argument { name: None, value: Expr::String(name) },
-                Argument { name: None, value: Expr::DoBlock(block.statements) },
+                Argument {
+                    name: None,
+                    value: Expr::String(name),
+                },
+                Argument {
+                    name: None,
+                    value: Expr::DoBlock(block.statements),
+                },
             ],
         };
 
@@ -147,8 +165,14 @@ impl<'a> Parser<'a> {
         let call_expr = Expr::Call {
             callee: Box::new(Expr::Identifier(fn_name.to_string())),
             args: vec![
-                Argument { name: None, value: Expr::String(pattern) },
-                Argument { name: None, value: body_expr },
+                Argument {
+                    name: None,
+                    value: Expr::String(pattern),
+                },
+                Argument {
+                    name: None,
+                    value: body_expr,
+                },
             ],
         };
 
@@ -314,13 +338,17 @@ impl<'a> Parser<'a> {
     /// Convert a block's statements to an array expression
     /// Each statement becomes an element in the array
     fn block_to_array_expr(&self, block: &Block, span: Span) -> Expr {
-        let elements: Vec<Expr> = block.statements.iter().filter_map(|stmt| {
-            if let Node::Expression(expr) = stmt {
-                Some(expr.clone())
-            } else {
-                None
-            }
-        }).collect();
+        let elements: Vec<Expr> = block
+            .statements
+            .iter()
+            .filter_map(|stmt| {
+                if let Node::Expression(expr) = stmt {
+                    Some(expr.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         Expr::Array(elements)
     }
@@ -328,9 +356,9 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::parser_impl::core::Parser;
-    use crate::ast::{Module, Node, Expr, Argument};
+    use crate::ast::{Argument, Expr, Module, Node};
     use crate::error::ParseError;
+    use crate::parser_impl::core::Parser;
     use crate::TokenKind;
 
     fn parse_source(src: &str) -> Result<Module, ParseError> {

@@ -44,7 +44,7 @@ impl Lowerer {
             "barrier" => {
                 if !args.is_empty() {
                     return Err(LowerError::Unsupported(
-                        "gpu.barrier() takes no arguments".to_string()
+                        "gpu.barrier() takes no arguments".to_string(),
                     ));
                 }
                 Ok(Some(HirExpr {
@@ -58,7 +58,7 @@ impl Lowerer {
             "mem_fence" => {
                 if !args.is_empty() {
                     return Err(LowerError::Unsupported(
-                        "gpu.mem_fence() takes no arguments".to_string()
+                        "gpu.mem_fence() takes no arguments".to_string(),
                     ));
                 }
                 Ok(Some(HirExpr {
@@ -70,13 +70,11 @@ impl Lowerer {
                 }))
             }
             // Atomic operations
-            "atomic_add" | "atomic_sub" | "atomic_min" | "atomic_max"
-            | "atomic_and" | "atomic_or" | "atomic_xor" | "atomic_exchange" => {
+            "atomic_add" | "atomic_sub" | "atomic_min" | "atomic_max" | "atomic_and"
+            | "atomic_or" | "atomic_xor" | "atomic_exchange" => {
                 self.lower_gpu_atomic_binary(method, args, ctx).map(Some)
             }
-            "atomic_compare_exchange" => {
-                self.lower_gpu_atomic_cas(args, ctx).map(Some)
-            }
+            "atomic_compare_exchange" => self.lower_gpu_atomic_cas(args, ctx).map(Some),
             _ => Ok(None),
         }
     }
@@ -122,7 +120,8 @@ impl Lowerer {
     ) -> LowerResult<HirExpr> {
         if args.len() != 3 {
             return Err(LowerError::Unsupported(
-                "gpu.atomic_compare_exchange(ptr, expected, desired) requires exactly 3 arguments".to_string(),
+                "gpu.atomic_compare_exchange(ptr, expected, desired) requires exactly 3 arguments"
+                    .to_string(),
             ));
         }
         let ptr_hir = self.lower_expr(&args[0].value, ctx)?;
@@ -146,19 +145,32 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
         let simd_ty = match type_name {
-            "f32x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::F32 }),
-            "f64x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::F64 }),
-            "i32x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::I32 }),
-            "i64x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::I64 }),
+            "f32x4" => self.module.types.register(HirType::Simd {
+                lanes: 4,
+                element: TypeId::F32,
+            }),
+            "f64x4" => self.module.types.register(HirType::Simd {
+                lanes: 4,
+                element: TypeId::F64,
+            }),
+            "i32x4" => self.module.types.register(HirType::Simd {
+                lanes: 4,
+                element: TypeId::I32,
+            }),
+            "i64x4" => self.module.types.register(HirType::Simd {
+                lanes: 4,
+                element: TypeId::I64,
+            }),
             _ => unreachable!(),
         };
 
         match method {
             "load" => {
                 if args.len() != 2 {
-                    return Err(LowerError::Unsupported(
-                        format!("{}.load(array, offset) requires exactly 2 arguments", type_name),
-                    ));
+                    return Err(LowerError::Unsupported(format!(
+                        "{}.load(array, offset) requires exactly 2 arguments",
+                        type_name
+                    )));
                 }
                 let array_hir = self.lower_expr(&args[0].value, ctx)?;
                 let offset_hir = self.lower_expr(&args[1].value, ctx)?;
@@ -172,9 +184,10 @@ impl Lowerer {
             }
             "gather" => {
                 if args.len() != 2 {
-                    return Err(LowerError::Unsupported(
-                        format!("{}.gather(array, indices) requires exactly 2 arguments", type_name),
-                    ));
+                    return Err(LowerError::Unsupported(format!(
+                        "{}.gather(array, indices) requires exactly 2 arguments",
+                        type_name
+                    )));
                 }
                 let array_hir = self.lower_expr(&args[0].value, ctx)?;
                 let indices_hir = self.lower_expr(&args[1].value, ctx)?;
@@ -188,9 +201,10 @@ impl Lowerer {
             }
             "load_masked" => {
                 if args.len() != 4 {
-                    return Err(LowerError::Unsupported(
-                        format!("{}.load_masked(array, offset, mask, default) requires exactly 4 arguments", type_name),
-                    ));
+                    return Err(LowerError::Unsupported(format!(
+                        "{}.load_masked(array, offset, mask, default) requires exactly 4 arguments",
+                        type_name
+                    )));
                 }
                 let array_hir = self.lower_expr(&args[0].value, ctx)?;
                 let offset_hir = self.lower_expr(&args[1].value, ctx)?;
@@ -255,12 +269,16 @@ impl Lowerer {
             }
 
             // Element-wise operations
-            if let Some(result) = self.lower_simd_elementwise(receiver_hir, method, simd_ty, element, args, ctx)? {
+            if let Some(result) =
+                self.lower_simd_elementwise(receiver_hir, method, simd_ty, element, args, ctx)?
+            {
                 return Ok(Some(result));
             }
 
             // Memory operations
-            if let Some(result) = self.lower_simd_memory(receiver_hir, method, simd_ty, args, ctx)? {
+            if let Some(result) =
+                self.lower_simd_memory(receiver_hir, method, simd_ty, args, ctx)?
+            {
                 return Ok(Some(result));
             }
         }
@@ -285,15 +303,17 @@ impl Lowerer {
         };
 
         if !args.is_empty() && method != "min" && method != "max" {
-            return Err(LowerError::Unsupported(
-                format!("vec.{}() takes no arguments", method)
-            ));
+            return Err(LowerError::Unsupported(format!(
+                "vec.{}() takes no arguments",
+                method
+            )));
         }
 
         if requires_bool && element != TypeId::BOOL {
-            return Err(LowerError::Unsupported(
-                format!("vec.{}() only valid for bool vectors", method)
-            ));
+            return Err(LowerError::Unsupported(format!(
+                "vec.{}() only valid for bool vectors",
+                method
+            )));
         }
 
         let result_ty = if requires_bool { TypeId::BOOL } else { element };
@@ -328,7 +348,7 @@ impl Lowerer {
             "with" => {
                 if args.len() != 2 {
                     return Err(LowerError::Unsupported(
-                        "vec.with(idx, val) takes exactly 2 arguments".to_string()
+                        "vec.with(idx, val) takes exactly 2 arguments".to_string(),
                     ));
                 }
                 let idx_hir = self.lower_expr(&args[0].value, ctx)?;
@@ -359,7 +379,8 @@ impl Lowerer {
             "blend" => {
                 if args.len() != 2 {
                     return Err(LowerError::Unsupported(
-                        "vec.blend() requires two arguments (other vector and indices array)".to_string(),
+                        "vec.blend() requires two arguments (other vector and indices array)"
+                            .to_string(),
                     ));
                 }
                 let other_hir = self.lower_expr(&args[0].value, ctx)?;
@@ -392,7 +413,7 @@ impl Lowerer {
             "fma" => {
                 if args.len() != 2 {
                     return Err(LowerError::Unsupported(
-                        "vec.fma(b, c) requires exactly two arguments".to_string()
+                        "vec.fma(b, c) requires exactly two arguments".to_string(),
                     ));
                 }
                 let b_hir = self.lower_expr(&args[0].value, ctx)?;
@@ -408,7 +429,7 @@ impl Lowerer {
             "clamp" => {
                 if args.len() != 2 {
                     return Err(LowerError::Unsupported(
-                        "vec.clamp(lo, hi) requires exactly two arguments".to_string()
+                        "vec.clamp(lo, hi) requires exactly two arguments".to_string(),
                     ));
                 }
                 let lo_hir = self.lower_expr(&args[0].value, ctx)?;
@@ -483,7 +504,8 @@ impl Lowerer {
             "store_masked" => {
                 if args.len() != 3 {
                     return Err(LowerError::Unsupported(
-                        "vec.store_masked(array, offset, mask) requires exactly three arguments".to_string(),
+                        "vec.store_masked(array, offset, mask) requires exactly three arguments"
+                            .to_string(),
                     ));
                 }
                 let array_hir = self.lower_expr(&args[0].value, ctx)?;
@@ -500,5 +522,4 @@ impl Lowerer {
             _ => Ok(None),
         }
     }
-
 }

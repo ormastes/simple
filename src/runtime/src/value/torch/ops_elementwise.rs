@@ -21,13 +21,19 @@ macro_rules! tensor_binary_op {
             #[cfg(feature = "pytorch")]
             {
                 let registry = TENSOR_REGISTRY.lock();
-                let Some(a) = registry.get(&a_handle).cloned() else { return 0; };
-                let Some(b) = registry.get(&b_handle).cloned() else { return 0; };
+                let Some(a) = registry.get(&a_handle).cloned() else {
+                    return 0;
+                };
+                let Some(b) = registry.get(&b_handle).cloned() else {
+                    return 0;
+                };
                 drop(registry);
 
                 let result = $operation(&a.0, &b.0);
                 let handle = next_handle();
-                TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
+                TENSOR_REGISTRY
+                    .lock()
+                    .insert(handle, Arc::new(TensorWrapper(result)));
                 handle
             }
             #[cfg(not(feature = "pytorch"))]
@@ -47,12 +53,16 @@ macro_rules! tensor_scalar_op {
             #[cfg(feature = "pytorch")]
             {
                 let registry = TENSOR_REGISTRY.lock();
-                let Some(tensor) = registry.get(&tensor_handle).cloned() else { return 0; };
+                let Some(tensor) = registry.get(&tensor_handle).cloned() else {
+                    return 0;
+                };
                 drop(registry);
 
                 let result = $operation(&tensor.0, scalar);
                 let handle = next_handle();
-                TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
+                TENSOR_REGISTRY
+                    .lock()
+                    .insert(handle, Arc::new(TensorWrapper(result)));
                 handle
             }
             #[cfg(not(feature = "pytorch"))]
@@ -72,12 +82,16 @@ macro_rules! tensor_unary_op {
             #[cfg(feature = "pytorch")]
             {
                 let registry = TENSOR_REGISTRY.lock();
-                let Some(tensor) = registry.get(&tensor_handle).cloned() else { return 0; };
+                let Some(tensor) = registry.get(&tensor_handle).cloned() else {
+                    return 0;
+                };
                 drop(registry);
 
                 let result = $operation(&tensor.0);
                 let handle = next_handle();
-                TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
+                TENSOR_REGISTRY
+                    .lock()
+                    .insert(handle, Arc::new(TensorWrapper(result)));
                 handle
             }
             #[cfg(not(feature = "pytorch"))]
@@ -148,13 +162,23 @@ pub extern "C" fn rt_torch_clamp(tensor_handle: u64, min: f64, max: f64) -> u64 
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
-        let Some(tensor) = registry.get(&tensor_handle).cloned() else { return 0; };
+        let Some(tensor) = registry.get(&tensor_handle).cloned() else {
+            return 0;
+        };
         drop(registry);
 
         let result = tensor.0.clamp(min, max);
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!("rt_torch_clamp: {} clamp({}, {}) -> handle={}", tensor_handle, min, max, handle);
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!(
+            "rt_torch_clamp: {} clamp({}, {}) -> handle={}",
+            tensor_handle,
+            min,
+            max,
+            handle
+        );
         handle
     }
     #[cfg(not(feature = "pytorch"))]

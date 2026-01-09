@@ -123,7 +123,9 @@ fn read_existing_lean_files() -> Result<HashMap<String, String>, String> {
             break current;
         }
         if !current.pop() {
-            return Err("Could not find verification/ directory. Run from project root.".to_string());
+            return Err(
+                "Could not find verification/ directory. Run from project root.".to_string(),
+            );
         }
     };
 
@@ -183,7 +185,10 @@ fn main() -> Int:
     // Write runner to a temp file in std_lib/src to have correct module resolution
     let runner_path = std_lib_path.join("src/_gen_lean_runner.spl");
     if let Err(e) = fs::write(&runner_path, runner_code) {
-        eprintln!("Note: Could not create runner file ({}) - using existing Lean files", e);
+        eprintln!(
+            "Note: Could not create runner file ({}) - using existing Lean files",
+            e
+        );
         return read_existing_lean_files();
     }
 
@@ -201,9 +206,7 @@ fn main() -> Int:
     let _ = fs::remove_file(&runner_path);
 
     match result {
-        Ok(res) if res.exit_code == 0 => {
-            parse_regenerate_output(&res.stdout)
-        }
+        Ok(res) if res.exit_code == 0 => parse_regenerate_output(&res.stdout),
         Ok(res) => {
             eprintln!("Note: Regeneration module failed (code {})", res.exit_code);
             eprintln!("      The Simple interpreter may not support all syntax yet.");
@@ -374,23 +377,26 @@ fn extract_lean_definitions(content: &str) -> Vec<LeanDefinition> {
 }
 
 /// Check if generated code covers all definitions from existing code
-fn check_completeness(existing_defs: &[LeanDefinition], generated_defs: &[LeanDefinition]) -> (Vec<String>, Vec<String>) {
-    let generated_names: std::collections::HashSet<_> = generated_defs.iter()
-        .map(|d| d.name.as_str())
-        .collect();
+fn check_completeness(
+    existing_defs: &[LeanDefinition],
+    generated_defs: &[LeanDefinition],
+) -> (Vec<String>, Vec<String>) {
+    let generated_names: std::collections::HashSet<_> =
+        generated_defs.iter().map(|d| d.name.as_str()).collect();
 
-    let existing_names: std::collections::HashSet<_> = existing_defs.iter()
-        .map(|d| d.name.as_str())
-        .collect();
+    let existing_names: std::collections::HashSet<_> =
+        existing_defs.iter().map(|d| d.name.as_str()).collect();
 
     // Find missing definitions (in existing but not in generated)
-    let missing: Vec<String> = existing_defs.iter()
+    let missing: Vec<String> = existing_defs
+        .iter()
         .filter(|d| !generated_names.contains(d.name.as_str()))
         .map(|d| format!("{:?} {} (line {})", d.def_type, d.name, d.line_num))
         .collect();
 
     // Find new definitions (in generated but not in existing)
-    let new_defs: Vec<String> = generated_defs.iter()
+    let new_defs: Vec<String> = generated_defs
+        .iter()
         .filter(|d| !existing_names.contains(d.name.as_str()))
         .map(|d| format!("{:?} {}", d.def_type, d.name))
         .collect();
@@ -441,7 +447,8 @@ fn compare_lean_files(opts: &GenLeanOptions) -> i32 {
                         // Extract definitions for completeness check
                         let existing_defs = extract_lean_definitions(&existing);
                         let generated_defs = extract_lean_definitions(generated);
-                        let (missing, new_defs) = check_completeness(&existing_defs, &generated_defs);
+                        let (missing, new_defs) =
+                            check_completeness(&existing_defs, &generated_defs);
 
                         total_missing_defs += missing.len();
                         total_new_defs += new_defs.len();
@@ -450,7 +457,11 @@ fn compare_lean_files(opts: &GenLeanOptions) -> i32 {
                         if missing.is_empty() {
                             println!("  [complete]  {} (can replace)", rel_path);
                         } else {
-                            println!("  [INCOMPLETE] {} (missing {} definitions)", rel_path, missing.len());
+                            println!(
+                                "  [INCOMPLETE] {} (missing {} definitions)",
+                                rel_path,
+                                missing.len()
+                            );
                         }
                         different += 1;
 
@@ -476,14 +487,19 @@ fn compare_lean_files(opts: &GenLeanOptions) -> i32 {
                             let generated_lines = generated.lines().count();
                             let diff = generated_lines as i64 - existing_lines as i64;
                             if diff != 0 {
-                                println!("    Line diff: {} -> {} ({:+} lines)",
-                                    existing_lines, generated_lines, diff);
+                                println!(
+                                    "    Line diff: {} -> {} ({:+} lines)",
+                                    existing_lines, generated_lines, diff
+                                );
                             }
                             println!();
                         } else {
                             // Brief summary
                             if !missing.is_empty() {
-                                println!("              WARNING: {} definitions missing", missing.len());
+                                println!(
+                                    "              WARNING: {} definitions missing",
+                                    missing.len()
+                                );
                             }
                         }
                     }
@@ -500,10 +516,16 @@ fn compare_lean_files(opts: &GenLeanOptions) -> i32 {
     }
 
     println!("\nSummary:");
-    println!("  Files: {} identical, {} different, {} new", identical, different, missing_files);
+    println!(
+        "  Files: {} identical, {} different, {} new",
+        identical, different, missing_files
+    );
 
     if total_missing_defs > 0 {
-        println!("  WARNING: {} definitions missing in generated code!", total_missing_defs);
+        println!(
+            "  WARNING: {} definitions missing in generated code!",
+            total_missing_defs
+        );
         println!("  Use --diff to see which definitions are missing.");
     } else if different > 0 {
         println!("  All definitions covered - generated files can safely replace existing ones.");
@@ -514,11 +536,11 @@ fn compare_lean_files(opts: &GenLeanOptions) -> i32 {
     }
 
     if total_missing_defs > 0 {
-        2  // Return 2 for incomplete (missing definitions)
+        2 // Return 2 for incomplete (missing definitions)
     } else if different > 0 || missing_files > 0 {
-        1  // Return 1 for differences but complete
+        1 // Return 1 for differences but complete
     } else {
-        0  // Return 0 for identical
+        0 // Return 0 for identical
     }
 }
 

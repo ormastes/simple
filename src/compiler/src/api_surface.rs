@@ -126,8 +126,11 @@ impl ApiSurface {
     }
 
     fn add_function(&mut self, func: &FunctionDef) {
-        let is_async = func.effects.iter().any(|e| matches!(e, simple_parser::ast::Effect::Async));
-        
+        let is_async = func
+            .effects
+            .iter()
+            .any(|e| matches!(e, simple_parser::ast::Effect::Async));
+
         let sig = FunctionSignature {
             name: func.name.clone(),
             params: func
@@ -275,8 +278,9 @@ impl ApiSurface {
         for (name, sig) in &self.functions {
             match other.functions.get(name) {
                 None => diff.removed_functions.push(name.clone()),
-                Some(other_sig) if sig.params.len() != other_sig.params.len()
-                    || sig.return_type != other_sig.return_type =>
+                Some(other_sig)
+                    if sig.params.len() != other_sig.params.len()
+                        || sig.return_type != other_sig.return_type =>
                 {
                     diff.modified_functions.push(name.clone())
                 }
@@ -349,18 +353,31 @@ fn type_to_string(ty: &Type) -> String {
                 format!(
                     "{}[{}]",
                     name,
-                    args.iter().map(type_to_string).collect::<Vec<_>>().join(", ")
+                    args.iter()
+                        .map(type_to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )
             }
         }
         Type::Tuple(types) => format!(
             "({})",
-            types.iter().map(type_to_string).collect::<Vec<_>>().join(", ")
+            types
+                .iter()
+                .map(type_to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         Type::Function { params, ret } => format!(
             "({}) -> {}",
-            params.iter().map(type_to_string).collect::<Vec<_>>().join(", "),
-            ret.as_ref().map(|r| type_to_string(r)).unwrap_or_else(|| "void".to_string())
+            params
+                .iter()
+                .map(type_to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            ret.as_ref()
+                .map(|r| type_to_string(r))
+                .unwrap_or_else(|| "void".to_string())
         ),
         Type::Pointer { inner, .. } => format!("*{}", type_to_string(inner)),
         Type::Union(types) => types
@@ -399,7 +416,7 @@ fn internal():
 
         assert_eq!(surface.functions.len(), 1);
         assert!(surface.functions.contains_key("calculate"));
-        
+
         let calc = &surface.functions["calculate"];
         assert_eq!(calc.params.len(), 2);
         assert_eq!(calc.return_type, Some("i64".to_string()));
@@ -418,7 +435,7 @@ pub struct User:
 
         assert_eq!(surface.structs.len(), 1);
         assert!(surface.structs.contains_key("User"));
-        
+
         let user = &surface.structs["User"];
         assert_eq!(user.fields.len(), 3);
     }

@@ -3,13 +3,13 @@
 //! Normalizes activations across feature dimensions for stable training.
 
 #[cfg(feature = "pytorch")]
-use super::{ModuleState, MODULE_REGISTRY, next_module_handle};
+use super::{next_module_handle, ModuleState, MODULE_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-use super::{TENSOR_REGISTRY, TensorWrapper, next_handle};
+use super::{next_handle, TensorWrapper, TENSOR_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-use super::{rt_torch_ones, rt_torch_zeros, rt_torch_free};
+use super::{rt_torch_free, rt_torch_ones, rt_torch_zeros};
 
 /// Create a LayerNorm module
 /// normalized_shape_ptr: pointer to array of dimensions to normalize over
@@ -29,8 +29,9 @@ pub unsafe extern "C" fn rt_torch_layernorm_new(
             return 0;
         }
 
-        let normalized_shape = std::slice::from_raw_parts(normalized_shape_ptr, normalized_shape_len as usize)
-            .to_vec();
+        let normalized_shape =
+            std::slice::from_raw_parts(normalized_shape_ptr, normalized_shape_len as usize)
+                .to_vec();
 
         // Create weight and bias parameters if elementwise_affine is true
         // Weight and bias should have the same shape as normalized_shape
@@ -62,7 +63,9 @@ pub unsafe extern "C" fn rt_torch_layernorm_new(
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(module));
+        MODULE_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(module));
 
         tracing::debug!(
             "rt_torch_layernorm_new: handle={} shape_len={} eps={} affine={}",
@@ -75,7 +78,12 @@ pub unsafe extern "C" fn rt_torch_layernorm_new(
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        let _ = (normalized_shape_ptr, normalized_shape_len, eps, elementwise_affine);
+        let _ = (
+            normalized_shape_ptr,
+            normalized_shape_len,
+            eps,
+            elementwise_affine,
+        );
         0
     }
 }
@@ -84,10 +92,7 @@ pub unsafe extern "C" fn rt_torch_layernorm_new(
 /// module_handle: handle to LayerNorm module
 /// input_handle: handle to input tensor
 #[no_mangle]
-pub extern "C" fn rt_torch_layernorm_forward(
-    module_handle: u64,
-    input_handle: u64,
-) -> u64 {
+pub extern "C" fn rt_torch_layernorm_forward(module_handle: u64, input_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let module_registry = MODULE_REGISTRY.lock();
@@ -96,7 +101,13 @@ pub extern "C" fn rt_torch_layernorm_forward(
         };
         drop(module_registry);
 
-        let ModuleState::LayerNorm { normalized_shape, weight, bias, eps } = module.as_ref() else {
+        let ModuleState::LayerNorm {
+            normalized_shape,
+            weight,
+            bias,
+            eps,
+        } = module.as_ref()
+        else {
             return 0;
         };
 
@@ -118,11 +129,13 @@ pub extern "C" fn rt_torch_layernorm_forward(
             Some(&w.0),
             Some(&b.0),
             *eps,
-            false,  // cudnn_enable
+            false, // cudnn_enable
         );
 
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, std::sync::Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(TensorWrapper(result)));
 
         tracing::debug!(
             "rt_torch_layernorm_forward: module={} input={} output={}",

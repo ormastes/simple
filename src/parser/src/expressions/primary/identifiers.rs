@@ -65,7 +65,7 @@ impl<'a> Parser<'a> {
             let mut segments = vec![name];
             while self.check(&TokenKind::DoubleColon) {
                 self.advance(); // consume '::'
-                // Use expect_method_name to allow keywords like 'new', 'type', etc.
+                                // Use expect_method_name to allow keywords like 'new', 'type', etc.
                 let segment = self.expect_method_name()?;
                 segments.push(segment);
             }
@@ -76,7 +76,7 @@ impl<'a> Parser<'a> {
             && name.chars().next().map_or(false, |c| c.is_uppercase())
         {
             self.advance(); // consume '{'
-            // Skip newlines after opening brace
+                            // Skip newlines after opening brace
             while self.check(&TokenKind::Newline) {
                 self.advance();
             }
@@ -92,7 +92,7 @@ impl<'a> Parser<'a> {
                 let value = if self.check(&TokenKind::Colon) {
                     // Explicit value: field: value
                     self.advance(); // consume ':'
-                    // Skip newlines after colon
+                                    // Skip newlines after colon
                     while self.check(&TokenKind::Newline) {
                         self.advance();
                     }

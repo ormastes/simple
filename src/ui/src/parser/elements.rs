@@ -13,7 +13,10 @@ impl<'a> super::SuiParser<'a> {
         element.span = start;
 
         // Parse attributes
-        while !matches!(self.peek_kind(), SuiTokenKind::TagClose | SuiTokenKind::TagSelfClose) {
+        while !matches!(
+            self.peek_kind(),
+            SuiTokenKind::TagClose | SuiTokenKind::TagSelfClose
+        ) {
             if self.is_at_end() {
                 return Err(ParseError::UnclosedBlock {
                     block_type: format!("<{}>", tag),

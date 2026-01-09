@@ -667,8 +667,7 @@ pub extern "C" fn rt_handle_new(value: RuntimeValue) -> RuntimeValue {
         }
 
         // Use a simple counter for pool index (in a real impl, this would be from a pool)
-        static NEXT_POOL_INDEX: std::sync::atomic::AtomicU32 =
-            std::sync::atomic::AtomicU32::new(1);
+        static NEXT_POOL_INDEX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
         let pool_index = NEXT_POOL_INDEX.fetch_add(1, Ordering::SeqCst);
 
         (*ptr).header = HeapHeader::new(HeapObjectType::Unique, size as u32); // Using Unique type for handles

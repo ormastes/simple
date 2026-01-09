@@ -122,7 +122,7 @@ impl StatusCode {
             StatusCode::SwitchingProtocols => "Switching Protocols",
             StatusCode::Processing => "Processing",
             StatusCode::EarlyHints => "Early Hints",
-            
+
             StatusCode::Ok => "OK",
             StatusCode::Created => "Created",
             StatusCode::Accepted => "Accepted",
@@ -133,7 +133,7 @@ impl StatusCode {
             StatusCode::MultiStatus => "Multi-Status",
             StatusCode::AlreadyReported => "Already Reported",
             StatusCode::ImUsed => "IM Used",
-            
+
             StatusCode::MultipleChoices => "Multiple Choices",
             StatusCode::MovedPermanently => "Moved Permanently",
             StatusCode::Found => "Found",
@@ -142,7 +142,7 @@ impl StatusCode {
             StatusCode::UseProxy => "Use Proxy",
             StatusCode::TemporaryRedirect => "Temporary Redirect",
             StatusCode::PermanentRedirect => "Permanent Redirect",
-            
+
             StatusCode::BadRequest => "Bad Request",
             StatusCode::Unauthorized => "Unauthorized",
             StatusCode::PaymentRequired => "Payment Required",
@@ -172,7 +172,7 @@ impl StatusCode {
             StatusCode::TooManyRequests => "Too Many Requests",
             StatusCode::RequestHeaderFieldsTooLarge => "Request Header Fields Too Large",
             StatusCode::UnavailableForLegalReasons => "Unavailable For Legal Reasons",
-            
+
             StatusCode::InternalServerError => "Internal Server Error",
             StatusCode::NotImplemented => "Not Implemented",
             StatusCode::BadGateway => "Bad Gateway",
@@ -219,7 +219,7 @@ impl StatusCode {
             101 => Some(StatusCode::SwitchingProtocols),
             102 => Some(StatusCode::Processing),
             103 => Some(StatusCode::EarlyHints),
-            
+
             200 => Some(StatusCode::Ok),
             201 => Some(StatusCode::Created),
             202 => Some(StatusCode::Accepted),
@@ -230,7 +230,7 @@ impl StatusCode {
             207 => Some(StatusCode::MultiStatus),
             208 => Some(StatusCode::AlreadyReported),
             226 => Some(StatusCode::ImUsed),
-            
+
             300 => Some(StatusCode::MultipleChoices),
             301 => Some(StatusCode::MovedPermanently),
             302 => Some(StatusCode::Found),
@@ -239,7 +239,7 @@ impl StatusCode {
             305 => Some(StatusCode::UseProxy),
             307 => Some(StatusCode::TemporaryRedirect),
             308 => Some(StatusCode::PermanentRedirect),
-            
+
             400 => Some(StatusCode::BadRequest),
             401 => Some(StatusCode::Unauthorized),
             402 => Some(StatusCode::PaymentRequired),
@@ -269,7 +269,7 @@ impl StatusCode {
             429 => Some(StatusCode::TooManyRequests),
             431 => Some(StatusCode::RequestHeaderFieldsTooLarge),
             451 => Some(StatusCode::UnavailableForLegalReasons),
-            
+
             500 => Some(StatusCode::InternalServerError),
             501 => Some(StatusCode::NotImplemented),
             502 => Some(StatusCode::BadGateway),
@@ -281,7 +281,7 @@ impl StatusCode {
             508 => Some(StatusCode::LoopDetected),
             510 => Some(StatusCode::NotExtended),
             511 => Some(StatusCode::NetworkAuthenticationRequired),
-            
+
             _ => None,
         }
     }
@@ -312,21 +312,36 @@ mod tests {
 
     #[test]
     fn test_status_code_categories() {
-        assert!(matches!(StatusCode::Ok.category(), StatusCodeCategory::Success));
-        assert!(matches!(StatusCode::NotFound.category(), StatusCodeCategory::ClientError));
-        assert!(matches!(StatusCode::InternalServerError.category(), StatusCodeCategory::ServerError));
-        assert!(matches!(StatusCode::MovedPermanently.category(), StatusCodeCategory::Redirection));
-        assert!(matches!(StatusCode::Continue.category(), StatusCodeCategory::Informational));
+        assert!(matches!(
+            StatusCode::Ok.category(),
+            StatusCodeCategory::Success
+        ));
+        assert!(matches!(
+            StatusCode::NotFound.category(),
+            StatusCodeCategory::ClientError
+        ));
+        assert!(matches!(
+            StatusCode::InternalServerError.category(),
+            StatusCodeCategory::ServerError
+        ));
+        assert!(matches!(
+            StatusCode::MovedPermanently.category(),
+            StatusCodeCategory::Redirection
+        ));
+        assert!(matches!(
+            StatusCode::Continue.category(),
+            StatusCodeCategory::Informational
+        ));
     }
 
     #[test]
     fn test_status_code_predicates() {
         assert!(StatusCode::Ok.is_success());
         assert!(!StatusCode::NotFound.is_success());
-        
+
         assert!(StatusCode::NotFound.is_client_error());
         assert!(StatusCode::InternalServerError.is_server_error());
-        
+
         assert!(StatusCode::NotFound.is_error());
         assert!(StatusCode::InternalServerError.is_error());
         assert!(!StatusCode::Ok.is_error());
@@ -336,7 +351,10 @@ mod tests {
     fn test_reason_phrases() {
         assert_eq!(StatusCode::Ok.reason_phrase(), "OK");
         assert_eq!(StatusCode::NotFound.reason_phrase(), "Not Found");
-        assert_eq!(StatusCode::InternalServerError.reason_phrase(), "Internal Server Error");
+        assert_eq!(
+            StatusCode::InternalServerError.reason_phrase(),
+            "Internal Server Error"
+        );
     }
 
     #[test]

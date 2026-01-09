@@ -5,12 +5,9 @@ use crate::value::{Env, Value, BUILTIN_RANGE};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, LambdaParam, Pattern};
 use std::collections::HashMap;
 
-use super::super::{
-    evaluate_expr, exec_function,
-    Control, Enums, ImplMethods,
-};
-use super::patterns::bind_pattern;
+use super::super::{evaluate_expr, exec_function, Control, Enums, ImplMethods};
 use super::args::apply_lambda_to_vec;
+use super::patterns::bind_pattern;
 
 pub(crate) fn eval_array_map(
     arr: &[Value],
@@ -42,10 +39,17 @@ fn with_lambda_predicate<F>(
 where
     F: FnMut(&[String], &Expr, &Env) -> Result<Value, CompileError>,
 {
-    if let Value::Lambda { params, body, env: captured } = func {
+    if let Value::Lambda {
+        params,
+        body,
+        env: captured,
+    } = func
+    {
         process(&params, &body, &captured)
     } else {
-        Err(CompileError::Semantic(format!("{operation} expects lambda argument")))
+        Err(CompileError::Semantic(format!(
+            "{operation} expects lambda argument"
+        )))
     }
 }
 
@@ -80,7 +84,12 @@ pub(crate) fn eval_array_reduce(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    if let Value::Lambda { params, body, env: captured } = func {
+    if let Value::Lambda {
+        params,
+        body,
+        env: captured,
+    } = func
+    {
         let mut acc = init;
         for item in arr {
             let mut local_env = captured.clone();
@@ -94,7 +103,9 @@ pub(crate) fn eval_array_reduce(
         }
         Ok(acc)
     } else {
-        Err(CompileError::Semantic("reduce expects lambda argument".into()))
+        Err(CompileError::Semantic(
+            "reduce expects lambda argument".into(),
+        ))
     }
 }
 
@@ -159,18 +170,21 @@ pub(crate) fn eval_array_all(
 }
 
 /// Helper for dict operations with lambda
-fn with_dict_lambda<F>(
-    func: Value,
-    operation: &str,
-    process: F,
-) -> Result<Value, CompileError>
+fn with_dict_lambda<F>(func: Value, operation: &str, process: F) -> Result<Value, CompileError>
 where
     F: FnOnce(&[String], &Expr, &Env) -> Result<Value, CompileError>,
 {
-    if let Value::Lambda { params, body, env: captured } = func {
+    if let Value::Lambda {
+        params,
+        body,
+        env: captured,
+    } = func
+    {
         process(&params, &body, &captured)
     } else {
-        Err(CompileError::Semantic(format!("{operation} expects lambda argument")))
+        Err(CompileError::Semantic(format!(
+            "{operation} expects lambda argument"
+        )))
     }
 }
 
@@ -237,7 +251,10 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
         Value::Dict(map) => Ok(map.keys().map(|k| Value::Str(k.clone())).collect()),
         Value::Object { class, fields } if class == BUILTIN_RANGE => {
             // Range object
-            let start = fields.get("start").and_then(|v| v.as_int().ok()).unwrap_or(0);
+            let start = fields
+                .get("start")
+                .and_then(|v| v.as_int().ok())
+                .unwrap_or(0);
             let end = fields.get("end").and_then(|v| v.as_int().ok()).unwrap_or(0);
             let inclusive = fields.get("inclusive").map(|v| v.truthy()).unwrap_or(false);
             let items: Vec<Value> = if inclusive {
@@ -247,22 +264,29 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
             };
             Ok(items)
         }
-        _ => Err(CompileError::Semantic("cannot iterate over this type".into())),
+        _ => Err(CompileError::Semantic(
+            "cannot iterate over this type".into(),
+        )),
     }
 }
 
 /// Helper for binding sequence patterns (Tuple and Array) during comprehensions
-pub(crate) fn bind_sequence_pattern(value: &Value, patterns: &[Pattern], env: &mut Env, allow_tuple: bool) -> bool {
+pub(crate) fn bind_sequence_pattern(
+    value: &Value,
+    patterns: &[Pattern],
+    env: &mut Env,
+    allow_tuple: bool,
+) -> bool {
     let values = match value {
         Value::Tuple(vals) if allow_tuple => vals,
         Value::Array(vals) => vals,
         _ => return false,
     };
-    
+
     if patterns.len() != values.len() {
         return false;
     }
-    
+
     for (pat, val) in patterns.iter().zip(values.iter()) {
         if !bind_pattern(pat, val, env) {
             return false;

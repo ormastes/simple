@@ -2,13 +2,13 @@
 
 use std::path::PathBuf;
 
+use rustyline::completion::Completer;
 use rustyline::error::ReadlineError;
-use rustyline::{Config, Editor, Helper, Cmd, KeyEvent, EventHandler, EventContext};
-use rustyline::history::DefaultHistory;
-use rustyline::validate::{Validator, ValidationContext, ValidationResult};
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
-use rustyline::completion::Completer;
+use rustyline::history::DefaultHistory;
+use rustyline::validate::{ValidationContext, ValidationResult, Validator};
+use rustyline::{Cmd, Config, Editor, EventContext, EventHandler, Helper, KeyEvent};
 use rustyline::{Event, RepeatCount};
 use rustyline::{KeyCode, Modifiers};
 
@@ -106,7 +106,7 @@ impl rustyline::ConditionalEventHandler for DedentHandler {
         }
 
         // Check if we can delete 4 spaces before cursor
-        if pos >= 4 && line[pos-4..pos] == *"    " {
+        if pos >= 4 && line[pos - 4..pos] == *"    " {
             if std::env::var("REPL_DEBUG").is_ok() {
                 eprintln!("[REPL_DEBUG]   Action: Delete 4 spaces");
             }
@@ -119,7 +119,9 @@ impl rustyline::ConditionalEventHandler for DedentHandler {
                 if std::env::var("REPL_DEBUG").is_ok() {
                     eprintln!("[REPL_DEBUG]   Action: Delete {} spaces", spaces_before);
                 }
-                Some(Cmd::Kill(rustyline::Movement::BackwardChar(spaces_before.min(pos))))
+                Some(Cmd::Kill(rustyline::Movement::BackwardChar(
+                    spaces_before.min(pos),
+                )))
             } else {
                 if std::env::var("REPL_DEBUG").is_ok() {
                     eprintln!("[REPL_DEBUG]   Action: No spaces to delete");
@@ -265,8 +267,8 @@ pub fn run_repl(version: &str, mut runner: Runner) -> i32 {
 
     let mut prelude = String::new();
     let config = Config::builder()
-        .auto_add_history(false)  // We'll add history manually
-        .edit_mode(rustyline::EditMode::Emacs)  // Ensure we're in a mode that supports bindings
+        .auto_add_history(false) // We'll add history manually
+        .edit_mode(rustyline::EditMode::Emacs) // Ensure we're in a mode that supports bindings
         .build();
     let mut rl: Editor<ReplHelper, DefaultHistory> = match Editor::with_config(config) {
         Ok(mut editor) => {
@@ -274,13 +276,13 @@ pub fn run_repl(version: &str, mut runner: Runner) -> i32 {
 
             // Bind Tab to insert 4 spaces (indentation)
             editor.bind_sequence(
-                KeyEvent::from('\t'),  // Tab key
+                KeyEvent::from('\t'), // Tab key
                 EventHandler::Conditional(Box::new(TabHandler)),
             );
 
             // Bind Ctrl+U to dedent (delete 4 spaces)
             editor.bind_sequence(
-                KeyEvent::ctrl('u'),  // Ctrl+U for dedent (Unindent)
+                KeyEvent::ctrl('u'), // Ctrl+U for dedent (Unindent)
                 EventHandler::Conditional(Box::new(DedentHandler)),
             );
 
@@ -393,7 +395,9 @@ pub fn run_repl(version: &str, mut runner: Runner) -> i32 {
                 // Check if we need more input
                 if needs_continuation(&accumulated_lines) {
                     if std::env::var("REPL_DEBUG").is_ok() {
-                        eprintln!("[REPL_DEBUG] Needs continuation - entering/staying in multiline mode");
+                        eprintln!(
+                            "[REPL_DEBUG] Needs continuation - entering/staying in multiline mode"
+                        );
                     }
                     in_multiline = true;
                     continue;

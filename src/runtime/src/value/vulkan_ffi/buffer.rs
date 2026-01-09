@@ -3,7 +3,7 @@
 //! Provides FFI-compatible functions for allocating, freeing, and transferring data
 //! to and from GPU buffers.
 
-use super::common::{next_handle, VulkanFfiError, DEVICE_REGISTRY, BUFFER_REGISTRY};
+use super::common::{next_handle, VulkanFfiError, BUFFER_REGISTRY, DEVICE_REGISTRY};
 
 /// Allocate a GPU buffer
 ///
@@ -46,7 +46,9 @@ pub extern "C" fn rt_vk_buffer_alloc(device_handle: u64, size: u64) -> u64 {
                 Ok(buffer) => {
                     drop(registry); // Release device registry lock
                     let handle = next_handle();
-                    BUFFER_REGISTRY.lock().insert(handle, std::sync::Arc::new(buffer));
+                    BUFFER_REGISTRY
+                        .lock()
+                        .insert(handle, std::sync::Arc::new(buffer));
                     tracing::debug!("Vulkan buffer {} allocated ({} bytes)", handle, size);
                     handle
                 }
@@ -149,11 +151,7 @@ pub extern "C" fn rt_vk_buffer_free(buffer_handle: u64) -> i32 {
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn rt_vk_buffer_upload(
-    buffer_handle: u64,
-    data: *const u8,
-    size: u64,
-) -> i32 {
+pub extern "C" fn rt_vk_buffer_upload(buffer_handle: u64, data: *const u8, size: u64) -> i32 {
     #[cfg(feature = "vulkan")]
     {
         if data.is_null() {
@@ -222,11 +220,7 @@ pub extern "C" fn rt_vk_buffer_upload(
 /// // ... use result ...
 /// ```
 #[no_mangle]
-pub extern "C" fn rt_vk_buffer_download(
-    buffer_handle: u64,
-    data: *mut u8,
-    size: u64,
-) -> i32 {
+pub extern "C" fn rt_vk_buffer_download(buffer_handle: u64, data: *mut u8, size: u64) -> i32 {
     #[cfg(feature = "vulkan")]
     {
         if data.is_null() {
@@ -247,11 +241,7 @@ pub extern "C" fn rt_vk_buffer_download(
                         return VulkanFfiError::BufferTooSmall as i32;
                     }
                     unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            downloaded.as_ptr(),
-                            data,
-                            size as usize,
-                        );
+                        std::ptr::copy_nonoverlapping(downloaded.as_ptr(), data, size as usize);
                     }
                     tracing::trace!("Downloaded {} bytes from buffer {}", size, buffer_handle);
                     VulkanFfiError::Success as i32

@@ -24,10 +24,10 @@
 //! - Upgrade to wasmer 4.x (requires Rust 1.75+) to fix debug mode
 
 #![cfg(feature = "wasm")]
-#![cfg(test)]  // Mark all tests in this file
+#![cfg(test)] // Mark all tests in this file
 
 mod test_helpers;
-use test_helpers::{run_expect_wasm, run_expect_wasm_output, run_expect_all_including_wasm};
+use test_helpers::{run_expect_all_including_wasm, run_expect_wasm, run_expect_wasm_output};
 
 // ============================================================================
 // Basic arithmetic and control flow tests

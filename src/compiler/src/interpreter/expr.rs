@@ -8,8 +8,8 @@ use crate::effects::check_effect_violations;
 use crate::value::{OptionVariant, ResultVariant, SpecialEnumType};
 
 use super::{
-    evaluate_macro_invocation, spawn_actor_with_expr, take_macro_introduced_symbols,
-    ClassDef, CompileError, Env, Enums, FunctionDef, ImplMethods, Value, GENERATOR_YIELDS,
+    evaluate_macro_invocation, spawn_actor_with_expr, take_macro_introduced_symbols, ClassDef,
+    CompileError, Enums, Env, FunctionDef, ImplMethods, Value, GENERATOR_YIELDS,
 };
 
 mod calls;
@@ -31,54 +31,26 @@ pub(crate) fn evaluate_expr(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    if let Some(value) = literals::eval_literal_expr(
-        expr,
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )? {
+    if let Some(value) =
+        literals::eval_literal_expr(expr, env, functions, classes, enums, impl_methods)?
+    {
         return Ok(value);
     }
-    if let Some(value) = ops::eval_op_expr(
-        expr,
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )? {
+    if let Some(value) = ops::eval_op_expr(expr, env, functions, classes, enums, impl_methods)? {
         return Ok(value);
     }
-    if let Some(value) = control::eval_control_expr(
-        expr,
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )? {
+    if let Some(value) =
+        control::eval_control_expr(expr, env, functions, classes, enums, impl_methods)?
+    {
         return Ok(value);
     }
-    if let Some(value) = calls::eval_call_expr(
-        expr,
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )? {
+    if let Some(value) = calls::eval_call_expr(expr, env, functions, classes, enums, impl_methods)?
+    {
         return Ok(value);
     }
-    if let Some(value) = collections::eval_collection_expr(
-        expr,
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )? {
+    if let Some(value) =
+        collections::eval_collection_expr(expr, env, functions, classes, enums, impl_methods)?
+    {
         return Ok(value);
     }
 
@@ -128,7 +100,10 @@ pub(crate) fn evaluate_expr(
 
             Ok(Value::Nil)
         }
-        Expr::MacroInvocation { name, args: macro_args } => {
+        Expr::MacroInvocation {
+            name,
+            args: macro_args,
+        } => {
             let result = evaluate_macro_invocation(
                 name,
                 macro_args,
@@ -151,7 +126,7 @@ pub(crate) fn evaluate_expr(
                     classes.insert(class_name, class_def);
                 }
 
-                // TODO: Execute inject code
+                // TODO: [compiler][P3] Execute inject code
                 // NOTE: Inject code requires mutable environment access and block-level modification
                 // Currently inject code is extracted and stored in contract result, but not executed
                 // Full implementation requires:
@@ -162,7 +137,7 @@ pub(crate) fn evaluate_expr(
                 // For now, inject contract items are parsed, validated, and extracted,
                 // but the code is not yet spliced into the callsite.
 
-                // TODO: Register types, variables when those contract types are implemented
+                // TODO: [compiler][P1] Register types, variables when those contract types are implemented
             }
 
             Ok(result)

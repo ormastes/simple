@@ -2,8 +2,8 @@
 //!
 //! Measures and reports startup phase durations to identify bottlenecks.
 
-use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 /// Global flag to enable startup metrics collection
 static METRICS_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -144,7 +144,8 @@ impl StartupMetrics {
 
         eprintln!("\nPhase Breakdown:");
         for timing in &self.timings {
-            eprintln!("  {:25} {:>10.2}ms",
+            eprintln!(
+                "  {:25} {:>10.2}ms",
                 timing.phase.name(),
                 timing.duration.as_secs_f64() * 1000.0
             );
@@ -153,7 +154,8 @@ impl StartupMetrics {
         if let Some(total) = self.total_time() {
             let sum: Duration = self.timings.iter().map(|t| t.duration).sum();
             let overhead = total.saturating_sub(sum);
-            eprintln!("  {:25} {:>10.2}ms",
+            eprintln!(
+                "  {:25} {:>10.2}ms",
                 "Overhead",
                 overhead.as_secs_f64() * 1000.0
             );
@@ -237,8 +239,14 @@ mod tests {
         metrics.record(StartupPhase::FilePrefetch, Duration::from_millis(50));
 
         assert_eq!(metrics.timings().len(), 2);
-        assert_eq!(metrics.get_phase(StartupPhase::EarlyArgParse), Some(Duration::from_millis(10)));
-        assert_eq!(metrics.get_phase(StartupPhase::FilePrefetch), Some(Duration::from_millis(50)));
+        assert_eq!(
+            metrics.get_phase(StartupPhase::EarlyArgParse),
+            Some(Duration::from_millis(10))
+        );
+        assert_eq!(
+            metrics.get_phase(StartupPhase::FilePrefetch),
+            Some(Duration::from_millis(50))
+        );
     }
 
     #[test]

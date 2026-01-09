@@ -5,8 +5,8 @@
 //! - Pure functions → `def` without IO monad
 //! - Effectful functions → wrapped in appropriate monad
 
-use super::types::{LeanType, TypeTranslator};
 use super::expressions::{ExprTranslator, LeanExpr};
+use super::types::{LeanType, TypeTranslator};
 use crate::hir::HirFunction;
 use crate::CompileError;
 
@@ -130,7 +130,9 @@ impl<'a> FunctionTranslator<'a> {
     /// Translate a Simple function to Lean
     pub fn translate_function(&self, func: &HirFunction) -> Result<LeanFunction, CompileError> {
         // Translate parameters (filter out ghost)
-        let params: Result<Vec<(String, LeanType)>, CompileError> = func.params.iter()
+        let params: Result<Vec<(String, LeanType)>, CompileError> = func
+            .params
+            .iter()
             .filter(|p| !p.is_ghost)
             .map(|p| {
                 let lean_type = self.type_translator.translate(p.ty)?;
@@ -142,7 +144,9 @@ impl<'a> FunctionTranslator<'a> {
         let return_type = self.type_translator.translate(func.return_type)?;
 
         // Combine params and locals for expression translation
-        let all_locals: Vec<_> = func.params.iter()
+        let all_locals: Vec<_> = func
+            .params
+            .iter()
             .chain(func.locals.iter())
             .cloned()
             .collect();

@@ -19,8 +19,8 @@ use crate::aop_config::AopConfig;
 use crate::di::DiConfig;
 pub use crate::effects::check_effect_violations;
 use crate::error::CompileError;
-use crate::value::{Env, Value};
 pub use crate::value::BUILTIN_CHANNEL;
+use crate::value::{Env, Value};
 
 // Unit system support (SI prefixes, dimensional analysis, constraints)
 pub(crate) use crate::interpreter_unit::*;
@@ -29,20 +29,20 @@ pub(crate) use crate::interpreter_unit::*;
 #[path = "interpreter_state.rs"]
 mod interpreter_state;
 pub(crate) use interpreter_state::{
-    ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER, AOP_CONFIG, BASE_UNIT_DIMENSIONS,
-    COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, CURRENT_FILE,
-    DI_CONFIG, DI_SINGLETONS, EXECUTION_MODE, EXTERN_FUNCTIONS, GENERATOR_YIELDS,
-    INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER,
-    MODULE_GLOBALS, MOVED_VARS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
-    UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
-};
-pub(crate) use interpreter_state::{
     clear_moved_vars, get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config,
     ExecutionMode,
 };
 pub use interpreter_state::{
     get_current_file, get_interpreter_args, init_signal_handlers, is_interrupted, reset_interrupt,
     set_current_file, set_interpreter_args,
+};
+pub(crate) use interpreter_state::{
+    ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER, AOP_CONFIG, BASE_UNIT_DIMENSIONS,
+    COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, CURRENT_FILE,
+    DI_CONFIG, DI_SINGLETONS, EXECUTION_MODE, EXTERN_FUNCTIONS, GENERATOR_YIELDS,
+    INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER,
+    MODULE_GLOBALS, MOVED_VARS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
+    UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 
 /// Check if an expression is a simple identifier (for move tracking)
@@ -99,7 +99,6 @@ pub(crate) type Traits = HashMap<String, simple_parser::ast::TraitDef>;
 /// Used to track which types implement which traits
 pub(crate) type TraitImpls = HashMap<(String, String), Vec<FunctionDef>>;
 
-
 /// Control flow for statement execution.
 pub(crate) enum Control {
     Next,
@@ -108,7 +107,6 @@ pub(crate) enum Control {
     Break(Option<Value>),
     Continue,
 }
-
 
 /// Evaluate the module and return the `main` binding as an i32.
 #[instrument(skip(items))]
@@ -135,7 +133,6 @@ pub fn evaluate_module_with_di_and_aop(
     set_aop_config(None);
     result
 }
-
 
 pub(crate) fn exec_node(
     node: &Node,
@@ -200,17 +197,25 @@ pub(crate) fn exec_node(
                     Some(Type::Simple(type_name)) if is_unit_type(type_name) => {
                         if let Err(e) = validate_unit_type(&value, type_name) {
                             let var_name = get_var_name(&let_stmt.pattern);
-                            return Err(CompileError::Semantic(format!("let binding '{}': {}", var_name, e)));
+                            return Err(CompileError::Semantic(format!(
+                                "let binding '{}': {}",
+                                var_name, e
+                            )));
                         }
                         value
                     }
-                    Some(Type::UnitWithRepr { name, constraints, .. }) => {
+                    Some(Type::UnitWithRepr {
+                        name, constraints, ..
+                    }) => {
                         // Validate and apply unit type constraints (range, overflow behavior)
                         match validate_unit_constraints(value, name, constraints) {
                             Ok(constrained_value) => constrained_value,
                             Err(e) => {
                                 let var_name = get_var_name(&let_stmt.pattern);
-                                return Err(CompileError::Semantic(format!("let binding '{}': {}", var_name, e)));
+                                return Err(CompileError::Semantic(format!(
+                                    "let binding '{}': {}",
+                                    var_name, e
+                                )));
                             }
                         }
                     }
@@ -627,7 +632,9 @@ macro_rules! bail_semantic {
 macro_rules! bail_unknown_method {
     ($method:expr, $type_name:expr, $available:expr) => {{
         let mut msg = format!("unknown method {} on {}", $method, $type_name);
-        if let Some(suggestion) = crate::error::typo::format_suggestion($method, $available.iter().copied()) {
+        if let Some(suggestion) =
+            crate::error::typo::format_suggestion($method, $available.iter().copied())
+        {
             msg.push_str(&format!("; {}", suggestion));
         }
         return Err(semantic_err!("{}", msg));
@@ -698,12 +705,13 @@ pub(crate) use interpreter_helpers::{
 // Include the rest of the interpreter functions
 #[path = "interpreter_call/mod.rs"]
 mod interpreter_call;
-use interpreter_call::{evaluate_call, BDD_INDENT, BDD_COUNTS, BDD_SHARED_EXAMPLES,
-                       BDD_CONTEXT_DEFS, BDD_BEFORE_EACH, BDD_AFTER_EACH, BDD_LAZY_VALUES,
-                       exec_function, exec_function_with_values, exec_function_with_captured_env,
-                       bind_args, bind_args_with_injected, exec_lambda, instantiate_class,
-                       exec_block_value};
 pub(crate) use interpreter_call::IN_NEW_METHOD;
+use interpreter_call::{
+    bind_args, bind_args_with_injected, evaluate_call, exec_block_value, exec_function,
+    exec_function_with_captured_env, exec_function_with_values, exec_lambda, instantiate_class,
+    BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES,
+    BDD_SHARED_EXAMPLES,
+};
 
 // Module caching and loading state
 #[path = "module_cache.rs"]
@@ -731,16 +739,16 @@ mod interpreter_eval;
 mod interpreter_method;
 use interpreter_method::{evaluate_method_call, evaluate_method_call_with_self_update};
 mod macros;
+pub use macros::set_macro_trace;
 pub(crate) use macros::{
     enter_block_scope, evaluate_macro_invocation, exit_block_scope, queue_tail_injection,
     take_macro_introduced_symbols,
 };
-pub use macros::set_macro_trace;
 // Native I/O helper utilities
-#[path = "native_io_helpers.rs"]
-mod native_io_helpers;
 #[path = "interpreter_native_io.rs"]
 mod interpreter_native_io;
+#[path = "native_io_helpers.rs"]
+mod native_io_helpers;
 // Re-export all native I/O functions
 pub use interpreter_native_io::*;
 #[path = "interpreter_native_net.rs"]

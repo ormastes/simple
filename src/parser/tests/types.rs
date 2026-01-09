@@ -1,4 +1,7 @@
-use simple_parser::ast::{BinaryArithmeticOp, Node, OverflowBehavior, ReferenceCapability, Type, UnaryArithmeticOp, UnitExpr};
+use simple_parser::ast::{
+    BinaryArithmeticOp, Node, OverflowBehavior, ReferenceCapability, Type, UnaryArithmeticOp,
+    UnitExpr,
+};
 use simple_parser::Parser;
 
 fn parse(src: &str) -> Vec<Node> {
@@ -242,7 +245,12 @@ fn parse_type_unit_with_repr() {
     let items = parse(code);
     if let Node::Function(f) = &items[0] {
         // Check parameter type
-        if let Type::UnitWithRepr { name, repr, constraints } = &f.params[0].ty.as_ref().unwrap() {
+        if let Type::UnitWithRepr {
+            name,
+            repr,
+            constraints,
+        } = &f.params[0].ty.as_ref().unwrap()
+        {
             assert_eq!(name, "_cm");
             let r = repr.as_ref().expect("repr");
             assert!(!r.signed);
@@ -290,7 +298,12 @@ fn parse_type_unit_with_where_clause() {
     let code = "fn measure(x: _cm where range: 0..1000) -> _cm:\n    return x";
     let items = parse(code);
     if let Node::Function(f) = &items[0] {
-        if let Type::UnitWithRepr { name, repr, constraints } = &f.params[0].ty.as_ref().unwrap() {
+        if let Type::UnitWithRepr {
+            name,
+            repr,
+            constraints,
+        } = &f.params[0].ty.as_ref().unwrap()
+        {
             assert_eq!(name, "_cm");
             assert!(repr.is_none()); // No explicit repr
             assert_eq!(constraints.range, Some((0, 1000)));
@@ -308,7 +321,12 @@ fn parse_type_unit_with_repr_and_where() {
     let code = "fn measure(x: _cm:u12 where range: 0..4000, checked) -> _cm:\n    return x";
     let items = parse(code);
     if let Node::Function(f) = &items[0] {
-        if let Type::UnitWithRepr { name, repr, constraints } = &f.params[0].ty.as_ref().unwrap() {
+        if let Type::UnitWithRepr {
+            name,
+            repr,
+            constraints,
+        } = &f.params[0].ty.as_ref().unwrap()
+        {
             assert_eq!(name, "_cm");
             let r = repr.as_ref().expect("repr");
             assert!(!r.signed);
@@ -363,7 +381,12 @@ fn parse_type_unit_where_negative_range() {
     let code = "fn offset(x: _offset:i16 where range: -500..500) -> _offset:\n    return x";
     let items = parse(code);
     if let Node::Function(f) = &items[0] {
-        if let Type::UnitWithRepr { name, repr, constraints } = &f.params[0].ty.as_ref().unwrap() {
+        if let Type::UnitWithRepr {
+            name,
+            repr,
+            constraints,
+        } = &f.params[0].ty.as_ref().unwrap()
+        {
             assert_eq!(name, "_offset");
             let r = repr.as_ref().expect("repr");
             assert!(r.signed);
@@ -449,9 +472,16 @@ fn test_capability_nested() {
     let items = parse(code);
     if let Node::Function(f) = &items[0] {
         // Should parse as Capability(Exclusive, Capability(Exclusive, Counter))
-        if let Type::Capability { capability: cap1, inner: inner1 } = &f.params[0].ty.as_ref().unwrap() {
+        if let Type::Capability {
+            capability: cap1,
+            inner: inner1,
+        } = &f.params[0].ty.as_ref().unwrap()
+        {
             assert_eq!(*cap1, ReferenceCapability::Exclusive);
-            if let Type::Capability { capability: cap2, .. } = &**inner1 {
+            if let Type::Capability {
+                capability: cap2, ..
+            } = &**inner1
+            {
                 assert_eq!(*cap2, ReferenceCapability::Exclusive);
             } else {
                 panic!("expected nested Capability");

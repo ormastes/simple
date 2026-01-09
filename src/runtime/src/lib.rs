@@ -1,20 +1,20 @@
+pub mod aop;
 pub mod concurrency;
 pub mod concurrent;
 pub mod coverage;
 pub mod cuda_runtime;
-#[cfg(feature = "vulkan")]
-pub mod vulkan;
 pub mod executor;
-pub mod aop;
 pub mod memory;
 #[cfg(feature = "monoio-net")]
 pub mod monoio_runtime;
 #[cfg(feature = "monoio-net")]
-pub mod monoio_thread;
-#[cfg(feature = "monoio-net")]
 pub mod monoio_tcp_v2;
 #[cfg(feature = "monoio-net")]
+pub mod monoio_thread;
+#[cfg(feature = "monoio-net")]
 pub mod monoio_udp_v2;
+#[cfg(feature = "vulkan")]
+pub mod vulkan;
 
 // Initialize runtime thread on first use
 #[cfg(feature = "monoio-net")]
@@ -28,15 +28,38 @@ pub mod value;
 
 // Re-export executor types and functions
 pub use executor::{
-    configure_async_mode, configure_worker_count, executor, is_manual_mode, pending_count,
-    poll_all, poll_one, spawn, AsyncMode, FutureExecutor, Promise, PromiseState,
+    configure_async_mode,
+    configure_worker_count,
+    executor,
+    is_manual_mode,
+    pending_count,
+    poll_all,
+    poll_one,
     // Executor FFI functions
-    rt_executor_get_mode, rt_executor_is_manual, rt_executor_pending_count, rt_executor_poll,
-    rt_executor_poll_all, rt_executor_set_mode, rt_executor_set_workers, rt_executor_shutdown,
+    rt_executor_get_mode,
+    rt_executor_is_manual,
+    rt_executor_pending_count,
+    rt_executor_poll,
+    rt_executor_poll_all,
+    rt_executor_set_mode,
+    rt_executor_set_workers,
+    rt_executor_shutdown,
     rt_executor_start,
+    rt_thread_available_parallelism,
+    rt_thread_free,
+    rt_thread_id,
+    rt_thread_is_done,
+    rt_thread_join,
+    rt_thread_sleep,
     // Isolated thread FFI functions
-    rt_thread_spawn_isolated, rt_thread_spawn_isolated2, rt_thread_join, rt_thread_is_done,
-    rt_thread_id, rt_thread_free, rt_thread_available_parallelism, rt_thread_sleep, rt_thread_yield,
+    rt_thread_spawn_isolated,
+    rt_thread_spawn_isolated2,
+    rt_thread_yield,
+    spawn,
+    AsyncMode,
+    FutureExecutor,
+    Promise,
+    PromiseState,
 };
 
 // Preserve the public `gc` module path for callers.
@@ -201,67 +224,100 @@ pub use value::RuntimeDict;
 
 // Re-export contract violation types and FFI functions (CTR-050-054)
 pub use value::{
-    ContractViolationKind, RuntimeContractViolation,
     rt_contract_violation_free, rt_contract_violation_func_name, rt_contract_violation_kind,
     rt_contract_violation_message, rt_contract_violation_new, rt_is_contract_violation,
+    ContractViolationKind, RuntimeContractViolation,
 };
 
 // Re-export GPU runtime FFI functions
 pub use value::{
-    // GPU work item identification
-    rt_gpu_global_id, rt_gpu_local_id, rt_gpu_group_id,
-    rt_gpu_global_size, rt_gpu_local_size, rt_gpu_num_groups,
-    // GPU synchronization
-    rt_gpu_barrier, rt_gpu_mem_fence,
+    execute_kernel_1d,
+    execute_kernel_3d,
+    get_work_item_state,
     // GPU atomic operations (i64)
-    rt_gpu_atomic_add_i64, rt_gpu_atomic_sub_i64, rt_gpu_atomic_xchg_i64,
-    rt_gpu_atomic_cmpxchg_i64, rt_gpu_atomic_min_i64, rt_gpu_atomic_max_i64,
-    rt_gpu_atomic_and_i64, rt_gpu_atomic_or_i64, rt_gpu_atomic_xor_i64,
+    rt_gpu_atomic_add_i64,
     // GPU atomic operations (u32)
-    rt_gpu_atomic_add_u32, rt_gpu_atomic_sub_u32, rt_gpu_atomic_xchg_u32,
-    rt_gpu_atomic_cmpxchg_u32, rt_gpu_atomic_min_u32, rt_gpu_atomic_max_u32,
-    rt_gpu_atomic_and_u32, rt_gpu_atomic_or_u32, rt_gpu_atomic_xor_u32,
-    // GPU shared memory
-    rt_gpu_shared_alloc, rt_gpu_shared_reset,
+    rt_gpu_atomic_add_u32,
+    rt_gpu_atomic_and_i64,
+    rt_gpu_atomic_and_u32,
+    rt_gpu_atomic_cmpxchg_i64,
+    rt_gpu_atomic_cmpxchg_u32,
+    rt_gpu_atomic_max_i64,
+    rt_gpu_atomic_max_u32,
+    rt_gpu_atomic_min_i64,
+    rt_gpu_atomic_min_u32,
+    rt_gpu_atomic_or_i64,
+    rt_gpu_atomic_or_u32,
+    rt_gpu_atomic_sub_i64,
+    rt_gpu_atomic_sub_u32,
+    rt_gpu_atomic_xchg_i64,
+    rt_gpu_atomic_xchg_u32,
+    rt_gpu_atomic_xor_i64,
+    rt_gpu_atomic_xor_u32,
+    // GPU synchronization
+    rt_gpu_barrier,
+    // GPU work item identification
+    rt_gpu_global_id,
+    rt_gpu_global_size,
+    rt_gpu_group_id,
     // GPU kernel launch
-    rt_gpu_launch, rt_gpu_launch_1d,
+    rt_gpu_launch,
+    rt_gpu_launch_1d,
+    rt_gpu_local_id,
+    rt_gpu_local_size,
+    rt_gpu_mem_fence,
+    rt_gpu_num_groups,
+    // GPU shared memory
+    rt_gpu_shared_alloc,
+    rt_gpu_shared_reset,
+    set_work_item_state,
+    GpuKernelFn,
     // GPU types and utilities
-    GpuWorkItemState, GpuKernelFn,
-    set_work_item_state, get_work_item_state,
-    execute_kernel_1d, execute_kernel_3d,
+    GpuWorkItemState,
 };
 
 // Re-export CUDA runtime types and FFI functions
 pub use cuda_runtime::{
-    CudaDevice, CudaDevicePtr, CudaError, CudaKernel, CudaModule, CudaResult,
-    get_device_count,
-    rt_cuda_init, rt_cuda_device_count, rt_cuda_available,
+    get_device_count, rt_cuda_available, rt_cuda_device_count, rt_cuda_init, CudaDevice,
+    CudaDevicePtr, CudaError, CudaKernel, CudaModule, CudaResult,
 };
 
 // Re-export Vulkan runtime types and functions
 #[cfg(feature = "vulkan")]
 pub use vulkan::{
-    // Core types
-    VulkanDevice, VulkanInstance, VulkanPhysicalDevice,
-    VulkanBuffer, StagingBuffer, BufferUsage,
-    ComputePipeline,
-    // Error types
-    VulkanError, VulkanResult,
     // Utility functions
     is_available as vulkan_is_available,
+    BufferUsage,
+    ComputePipeline,
+    StagingBuffer,
+    VulkanBuffer,
+    // Core types
+    VulkanDevice,
+    // Error types
+    VulkanError,
+    VulkanInstance,
+    VulkanPhysicalDevice,
+    VulkanResult,
 };
 
 // Re-export Vulkan FFI functions
 #[cfg(feature = "vulkan")]
 pub use value::{
     // Device management
-    rt_vk_available, rt_vk_device_create, rt_vk_device_free, rt_vk_device_sync,
+    rt_vk_available,
     // Buffer management
-    rt_vk_buffer_alloc, rt_vk_buffer_free,
-    rt_vk_buffer_upload, rt_vk_buffer_download,
+    rt_vk_buffer_alloc,
+    rt_vk_buffer_download,
+    rt_vk_buffer_free,
+    rt_vk_buffer_upload,
+    rt_vk_device_create,
+    rt_vk_device_free,
+    rt_vk_device_sync,
     // Kernel management
-    rt_vk_kernel_compile, rt_vk_kernel_free,
-    rt_vk_kernel_launch, rt_vk_kernel_launch_1d,
+    rt_vk_kernel_compile,
+    rt_vk_kernel_free,
+    rt_vk_kernel_launch,
+    rt_vk_kernel_launch_1d,
     // Error codes
     VulkanFfiError,
 };
@@ -269,83 +325,100 @@ pub use value::{
 // Re-export Ratatui TUI FFI functions
 #[cfg(feature = "ratatui-tui")]
 pub use value::{
-    // Terminal operations
-    ratatui_terminal_new, ratatui_terminal_cleanup,
-    ratatui_terminal_clear,
-    // Text buffer operations
-    ratatui_textbuffer_new,
-    ratatui_textbuffer_insert_char, ratatui_textbuffer_backspace,
-    ratatui_textbuffer_newline,
-    ratatui_textbuffer_get_text, ratatui_textbuffer_set_text,
-    // Rendering
-    ratatui_render_textbuffer,
-    // Event handling
-    ratatui_read_event, ratatui_read_event_timeout,
     // Cleanup
     ratatui_object_destroy,
+    // Event handling
+    ratatui_read_event,
+    ratatui_read_event_timeout,
+    // Rendering
+    ratatui_render_textbuffer,
+    ratatui_terminal_cleanup,
+    ratatui_terminal_clear,
+    // Terminal operations
+    ratatui_terminal_new,
+    ratatui_textbuffer_backspace,
+    ratatui_textbuffer_get_text,
+    ratatui_textbuffer_insert_char,
+    // Text buffer operations
+    ratatui_textbuffer_new,
+    ratatui_textbuffer_newline,
+    ratatui_textbuffer_set_text,
 };
 
 // Re-export CPU parallel runtime FFI functions (Rayon backend)
 pub use parallel::{
-    // Kernel context
-    KernelContext, KernelFn,
-    // Work item identification
-    rt_par_global_id, rt_par_local_id, rt_par_group_id,
-    rt_par_global_size, rt_par_local_size, rt_par_num_groups,
-    // Synchronization
-    rt_par_barrier, rt_par_mem_fence,
-    // Shared memory
-    rt_par_shared_alloc, rt_par_shared_reset,
-    // Kernel launch
-    rt_par_launch_1d, rt_par_launch,
     // Atomic operations
-    rt_par_atomic_add_i64, rt_par_atomic_sub_i64, rt_par_atomic_xchg_i64,
-    rt_par_atomic_cmpxchg_i64, rt_par_atomic_min_i64, rt_par_atomic_max_i64,
+    rt_par_atomic_add_i64,
+    rt_par_atomic_cmpxchg_i64,
+    rt_par_atomic_max_i64,
+    rt_par_atomic_min_i64,
+    rt_par_atomic_sub_i64,
+    rt_par_atomic_xchg_i64,
+    // Synchronization
+    rt_par_barrier,
+    // Work item identification
+    rt_par_global_id,
+    rt_par_global_size,
+    rt_par_group_id,
+    rt_par_launch,
+    // Kernel launch
+    rt_par_launch_1d,
+    rt_par_local_id,
+    rt_par_local_size,
+    rt_par_mem_fence,
+    rt_par_num_groups,
+    // Shared memory
+    rt_par_shared_alloc,
+    rt_par_shared_reset,
+    // Kernel context
+    KernelContext,
+    KernelFn,
 };
 
 // Re-export coverage instrumentation types and FFI functions
 pub use coverage::{
-    CoverageData,
-    rt_coverage_decision_probe, rt_coverage_condition_probe,
-    rt_coverage_path_probe, rt_coverage_path_finalize,
-    rt_coverage_dump_sdn, rt_coverage_free_sdn,
-    rt_coverage_clear, rt_coverage_enabled,
+    rt_coverage_clear, rt_coverage_condition_probe, rt_coverage_decision_probe,
+    rt_coverage_dump_sdn, rt_coverage_enabled, rt_coverage_free_sdn, rt_coverage_path_finalize,
+    rt_coverage_path_probe, CoverageData,
 };
 
 // Re-export concurrent collections types and FFI functions (#1108-#1112)
 pub use concurrent::{
-    // Types
-    ConcurrentQueue, ConcurrentMap, ConcurrentStack,
-    GcWriteBarrier, TraceConcurrent,
-    // Write barrier FFI
-    simple_gc_barrier_start_collection,
-    simple_gc_barrier_end_collection,
-    simple_gc_barrier_epoch,
-    // ConcurrentQueue FFI
-    simple_concurrent_queue_new,
-    simple_concurrent_queue_free,
-    simple_concurrent_queue_push,
-    simple_concurrent_queue_try_pop,
-    simple_concurrent_queue_is_empty,
-    simple_concurrent_queue_len,
+    simple_concurrent_map_clear,
+    simple_concurrent_map_contains_key,
+    simple_concurrent_map_free,
+    simple_concurrent_map_get,
+    simple_concurrent_map_insert,
+    simple_concurrent_map_is_empty,
+    simple_concurrent_map_len,
     // ConcurrentMap FFI
     simple_concurrent_map_new,
-    simple_concurrent_map_with_capacity,
-    simple_concurrent_map_free,
-    simple_concurrent_map_insert,
-    simple_concurrent_map_get,
     simple_concurrent_map_remove,
-    simple_concurrent_map_contains_key,
-    simple_concurrent_map_len,
-    simple_concurrent_map_is_empty,
-    simple_concurrent_map_clear,
-    // ConcurrentStack FFI
-    simple_concurrent_stack_new,
+    simple_concurrent_map_with_capacity,
+    simple_concurrent_queue_free,
+    simple_concurrent_queue_is_empty,
+    simple_concurrent_queue_len,
+    // ConcurrentQueue FFI
+    simple_concurrent_queue_new,
+    simple_concurrent_queue_push,
+    simple_concurrent_queue_try_pop,
     simple_concurrent_stack_free,
-    simple_concurrent_stack_push,
-    simple_concurrent_stack_try_pop,
     simple_concurrent_stack_is_empty,
     simple_concurrent_stack_len,
+    // ConcurrentStack FFI
+    simple_concurrent_stack_new,
+    simple_concurrent_stack_push,
+    simple_concurrent_stack_try_pop,
+    simple_gc_barrier_end_collection,
+    simple_gc_barrier_epoch,
+    // Write barrier FFI
+    simple_gc_barrier_start_collection,
+    ConcurrentMap,
+    // Types
+    ConcurrentQueue,
+    ConcurrentStack,
+    GcWriteBarrier,
+    TraceConcurrent,
 };
 
 // Re-export sandbox types and functions (#916-923)
@@ -357,59 +430,77 @@ pub use sandbox::{
 // Re-export monoio runtime types and functions (#1730-1759)
 #[cfg(feature = "monoio-net")]
 pub use monoio_runtime::{
-    // Runtime lifecycle
-    monoio_runtime_init, monoio_runtime_init_global,
-    monoio_runtime_shutdown, monoio_runtime_shutdown_global,
-    // Task management
-    monoio_spawn_local, monoio_block_on,
+    monoio_block_on,
+    monoio_configure_entries,
     // Configuration
-    monoio_get_num_cores, monoio_configure_entries,
+    monoio_get_num_cores,
     // Statistics
-    monoio_get_stats, monoio_reset_stats,
+    monoio_get_stats,
+    monoio_reset_stats,
+    // Runtime lifecycle
+    monoio_runtime_init,
+    monoio_runtime_init_global,
+    monoio_runtime_shutdown,
+    monoio_runtime_shutdown_global,
+    // Task management
+    monoio_spawn_local,
 };
 
 // Re-export monoio TCP functions (#1745-1749)
 #[cfg(feature = "monoio-net")]
 pub use monoio_tcp_v2::{
-    // Server operations
-    monoio_tcp_listen, monoio_tcp_accept, monoio_tcp_listener_close,
+    monoio_tcp_accept,
+    monoio_tcp_close,
     // Client operations
     monoio_tcp_connect,
+    monoio_tcp_flush,
+    // Server operations
+    monoio_tcp_listen,
+    monoio_tcp_listener_close,
+    monoio_tcp_local_addr,
+    monoio_tcp_peer_addr,
     // I/O operations
-    monoio_tcp_read, monoio_tcp_write, monoio_tcp_flush,
-    // Connection management
-    monoio_tcp_shutdown, monoio_tcp_close,
-    monoio_tcp_local_addr, monoio_tcp_peer_addr,
+    monoio_tcp_read,
+    monoio_tcp_set_keepalive,
     // Socket options
-    monoio_tcp_set_nodelay, monoio_tcp_set_keepalive,
+    monoio_tcp_set_nodelay,
+    // Connection management
+    monoio_tcp_shutdown,
+    monoio_tcp_write,
 };
 
 // Re-export monoio UDP functions (#1745-1749)
 #[cfg(feature = "monoio-net")]
 pub use monoio_udp_v2::{
     // Socket operations
-    monoio_udp_bind, monoio_udp_connect, monoio_udp_close,
-    // Unconnected I/O
-    monoio_udp_send_to, monoio_udp_recv_from,
-    // Connected I/O
-    monoio_udp_send, monoio_udp_recv,
+    monoio_udp_bind,
+    monoio_udp_close,
+    monoio_udp_connect,
+    // Multicast
+    monoio_udp_join_multicast,
+    monoio_udp_leave_multicast,
     // Socket info
     monoio_udp_local_addr,
+    monoio_udp_recv,
+    monoio_udp_recv_from,
+    // Connected I/O
+    monoio_udp_send,
+    // Unconnected I/O
+    monoio_udp_send_to,
     // Socket options
-    monoio_udp_set_broadcast, monoio_udp_set_multicast_ttl,
-    // Multicast
-    monoio_udp_join_multicast, monoio_udp_leave_multicast,
+    monoio_udp_set_broadcast,
+    monoio_udp_set_multicast_ttl,
 };
 
 // Unit tests
 #[cfg(test)]
 #[path = "../tests"]
 mod tests {
+    mod aop_around_tests;
+    mod concurrency_tests;
     mod gc_allocator;
     mod gc_logging;
     mod no_gc_allocator;
-    mod concurrency_tests;
-    mod aop_around_tests;
 
     #[cfg(feature = "vulkan")]
     mod vulkan_ffi_tests;

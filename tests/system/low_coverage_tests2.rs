@@ -77,7 +77,7 @@ fn test_vreg_hash() {
 // MIR Blocks Coverage (compiler/src/mir/blocks.rs - ~46%)
 // =============================================================================
 
-use simple_compiler::mir::{Terminator, BlockBuildState, BlockBuilder};
+use simple_compiler::mir::{BlockBuildState, BlockBuilder, Terminator};
 
 #[test]
 fn test_terminator_return_none() {
@@ -178,7 +178,7 @@ fn test_block_builder_finalize() {
 // MIR Effects Coverage (compiler/src/mir/effects.rs - ~40%)
 // =============================================================================
 
-use simple_compiler::mir::{Effect, EffectSet, CallTarget};
+use simple_compiler::mir::{CallTarget, Effect, EffectSet};
 
 #[test]
 fn test_effect_variants() {
@@ -346,7 +346,7 @@ fn test_settlement_error_variants() {
 // Settlement Slots Coverage (loader/src/settlement/slots.rs - 0%)
 // =============================================================================
 
-use simple_loader::settlement::{SlotRange, SlotAllocator, CODE_SLOT_SIZE, DATA_SLOT_SIZE};
+use simple_loader::settlement::{SlotAllocator, SlotRange, CODE_SLOT_SIZE, DATA_SLOT_SIZE};
 
 #[test]
 fn test_slot_range_creation() {
@@ -411,7 +411,7 @@ fn test_slot_size_constants() {
 // Settlement Tables Coverage (loader/src/settlement/tables.rs - 0%)
 // =============================================================================
 
-use simple_loader::settlement::{FunctionTable, GlobalTable, TypeTable, TableIndex};
+use simple_loader::settlement::{FunctionTable, GlobalTable, TableIndex, TypeTable};
 
 #[test]
 fn test_table_index() {
@@ -459,8 +459,8 @@ fn test_type_table_with_capacity() {
 // Dependency Tracker - ImportGraph Coverage (dependency_tracker/src/graph.rs - 0%)
 // =============================================================================
 
-use simple_dependency_tracker::{ImportGraph, ImportEdge, CyclicDependencyError};
 use simple_dependency_tracker::graph::ImportKind;
+use simple_dependency_tracker::{CyclicDependencyError, ImportEdge, ImportGraph};
 
 #[test]
 fn test_import_graph_new() {
@@ -588,11 +588,10 @@ fn test_import_kind_variants() {
 // Dependency Tracker - MacroImport Coverage (dependency_tracker/src/macro_import.rs - 0%)
 // =============================================================================
 
+use simple_dependency_tracker::macro_import::{MacroDirManifest, MacroSymbol};
 use simple_dependency_tracker::{
-    MacroExports, AutoImport, SymKind,
-    is_auto_imported, glob_import, explicit_import,
+    explicit_import, glob_import, is_auto_imported, AutoImport, MacroExports, SymKind,
 };
-use simple_dependency_tracker::macro_import::{MacroSymbol, MacroDirManifest};
 
 #[test]
 fn test_sym_kind_is_macro() {
@@ -754,7 +753,13 @@ fn test_symbol_table_new() {
 #[test]
 fn test_symbol_table_define() {
     let mut table = SymbolTable::new("mod");
-    let entry = SymbolEntry::local("func", "mod::func", SymbolKind::Function, Visibility::Public, "mod");
+    let entry = SymbolEntry::local(
+        "func",
+        "mod::func",
+        SymbolKind::Function,
+        Visibility::Public,
+        "mod",
+    );
 
     let result = table.define(entry);
     assert!(result.is_ok());
@@ -764,7 +769,15 @@ fn test_symbol_table_define() {
 #[test]
 fn test_symbol_table_lookup() {
     let mut table = SymbolTable::new("mod");
-    table.define(SymbolEntry::local("func", "mod::func", SymbolKind::Function, Visibility::Public, "mod")).unwrap();
+    table
+        .define(SymbolEntry::local(
+            "func",
+            "mod::func",
+            SymbolKind::Function,
+            Visibility::Public,
+            "mod",
+        ))
+        .unwrap();
 
     assert!(table.lookup("func").is_some());
     assert!(table.lookup("missing").is_none());
@@ -773,7 +786,15 @@ fn test_symbol_table_lookup() {
 #[test]
 fn test_symbol_table_contains() {
     let mut table = SymbolTable::new("mod");
-    table.define(SymbolEntry::local("func", "mod::func", SymbolKind::Function, Visibility::Public, "mod")).unwrap();
+    table
+        .define(SymbolEntry::local(
+            "func",
+            "mod::func",
+            SymbolKind::Function,
+            Visibility::Public,
+            "mod",
+        ))
+        .unwrap();
 
     assert!(table.contains("func"));
     assert!(!table.contains("missing"));
@@ -782,8 +803,24 @@ fn test_symbol_table_contains() {
 #[test]
 fn test_symbol_table_public_symbols() {
     let mut table = SymbolTable::new("mod");
-    table.define(SymbolEntry::local("pub_fn", "mod::pub_fn", SymbolKind::Function, Visibility::Public, "mod")).unwrap();
-    table.define(SymbolEntry::local("priv_fn", "mod::priv_fn", SymbolKind::Function, Visibility::Private, "mod")).unwrap();
+    table
+        .define(SymbolEntry::local(
+            "pub_fn",
+            "mod::pub_fn",
+            SymbolKind::Function,
+            Visibility::Public,
+            "mod",
+        ))
+        .unwrap();
+    table
+        .define(SymbolEntry::local(
+            "priv_fn",
+            "mod::priv_fn",
+            SymbolKind::Function,
+            Visibility::Private,
+            "mod",
+        ))
+        .unwrap();
 
     let public: Vec<_> = table.public_symbols().collect();
     assert_eq!(public.len(), 1);
@@ -793,8 +830,24 @@ fn test_symbol_table_public_symbols() {
 #[test]
 fn test_symbol_table_macros() {
     let mut table = SymbolTable::new("mod");
-    table.define(SymbolEntry::local("my_macro", "mod::my_macro", SymbolKind::Macro, Visibility::Public, "mod")).unwrap();
-    table.define(SymbolEntry::local("my_fn", "mod::my_fn", SymbolKind::Function, Visibility::Public, "mod")).unwrap();
+    table
+        .define(SymbolEntry::local(
+            "my_macro",
+            "mod::my_macro",
+            SymbolKind::Macro,
+            Visibility::Public,
+            "mod",
+        ))
+        .unwrap();
+    table
+        .define(SymbolEntry::local(
+            "my_fn",
+            "mod::my_fn",
+            SymbolKind::Function,
+            Visibility::Public,
+            "mod",
+        ))
+        .unwrap();
 
     let macros: Vec<_> = table.macros().collect();
     assert_eq!(macros.len(), 1);
@@ -805,7 +858,7 @@ fn test_symbol_table_macros() {
 // HIR Types Coverage (compiler/src/hir/types.rs - ~10%)
 // =============================================================================
 
-use simple_compiler::hir::{TypeId, Signedness, HirType, TypeRegistry};
+use simple_compiler::hir::{HirType, Signedness, TypeId, TypeRegistry};
 
 #[test]
 fn test_type_id_creation() {
@@ -892,7 +945,7 @@ fn test_type_registry_get() {
 // AsyncEffect Coverage (compiler/src/mir/effects.rs)
 // =============================================================================
 
-use simple_compiler::mir::{AsyncEffect, is_async, pipeline_safe, NogcInstr, nogc};
+use simple_compiler::mir::{is_async, nogc, pipeline_safe, AsyncEffect, NogcInstr};
 
 #[test]
 fn test_async_effect_variants() {

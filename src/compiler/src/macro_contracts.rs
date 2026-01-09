@@ -9,19 +9,19 @@
 use std::collections::{HashMap, HashSet};
 
 use simple_parser::ast::{
-    Block, ClassDef, Expr, Field, FunctionDef, MacroAnchor, MacroCodeKind, MacroConstRange,
-    MacroContractItem, MacroDeclStub, MacroDef, MacroFieldStub, MacroFnStub, MacroInject,
-    MacroInjectSpec, MacroIntro, MacroIntroDecl, MacroIntroKind, MacroIntroSpec, MacroParamSig,
-    MacroReturns, MacroTarget, MacroTypeStub, MacroVarStub, Parameter, Type, Visibility,
-    EnclosingTarget, Mutability,
+    Block, ClassDef, EnclosingTarget, Expr, Field, FunctionDef, MacroAnchor, MacroCodeKind,
+    MacroConstRange, MacroContractItem, MacroDeclStub, MacroDef, MacroFieldStub, MacroFnStub,
+    MacroInject, MacroInjectSpec, MacroIntro, MacroIntroDecl, MacroIntroKind, MacroIntroSpec,
+    MacroParamSig, MacroReturns, MacroTarget, MacroTypeStub, MacroVarStub, Mutability, Parameter,
+    Type, Visibility,
 };
 use simple_parser::token::Span;
 
 use crate::error::CompileError;
-use crate::value::{Env, Value};
 use crate::macro_validation::{
-    extract_symbol_scope, validate_intro_no_shadowing, validate_macro_contract, SymbolScope
+    extract_symbol_scope, validate_intro_no_shadowing, validate_macro_contract, SymbolScope,
 };
+use crate::value::{Env, Value};
 
 /// Result of processing macro contract items
 #[derive(Debug, Default, Clone)]
@@ -81,7 +81,14 @@ pub fn process_macro_contract(
                 process_returns_item(returns, &mut result)?;
             }
             MacroContractItem::Intro(intro) => {
-                process_intro_item(intro, const_bindings, env, &existing_symbols, &mut introduced_symbols, &mut result)?;
+                process_intro_item(
+                    intro,
+                    const_bindings,
+                    env,
+                    &existing_symbols,
+                    &mut introduced_symbols,
+                    &mut result,
+                )?;
             }
             MacroContractItem::Inject(inject) => {
                 process_inject_item(inject, &mut result)?;
@@ -112,7 +119,15 @@ fn process_intro_item(
     result: &mut MacroContractResult,
 ) -> Result<(), CompileError> {
     // Pass the intro label through to track emit label -> function name mapping
-    process_intro_spec(&intro.spec, const_bindings, env, existing_symbols, introduced_symbols, &intro.label, result)
+    process_intro_spec(
+        &intro.spec,
+        const_bindings,
+        env,
+        existing_symbols,
+        introduced_symbols,
+        &intro.label,
+        result,
+    )
 }
 
 /// Process an intro spec (handles Decl, For, If recursively)
@@ -126,9 +141,14 @@ fn process_intro_spec(
     result: &mut MacroContractResult,
 ) -> Result<(), CompileError> {
     match spec {
-        MacroIntroSpec::Decl(decl) => {
-            process_intro_decl(decl, const_bindings, existing_symbols, introduced_symbols, intro_label, result)
-        }
+        MacroIntroSpec::Decl(decl) => process_intro_decl(
+            decl,
+            const_bindings,
+            existing_symbols,
+            introduced_symbols,
+            intro_label,
+            result,
+        ),
         MacroIntroSpec::For { name, range, body } => {
             // Const-eval the range and expand the body for each iteration
             let (start, end) = eval_const_range(range, const_bindings, env)?;
@@ -140,19 +160,39 @@ fn process_intro_spec(
 
                 // Process each intro spec in the body
                 for spec in body {
-                    process_intro_spec(spec, &iter_bindings, env, existing_symbols, introduced_symbols, intro_label, result)?;
+                    process_intro_spec(
+                        spec,
+                        &iter_bindings,
+                        env,
+                        existing_symbols,
+                        introduced_symbols,
+                        intro_label,
+                        result,
+                    )?;
                 }
             }
             Ok(())
         }
-        MacroIntroSpec::If { condition, then_body, else_body } => {
+        MacroIntroSpec::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
             // Const-eval the condition
             let cond_result = eval_const_condition(condition, const_bindings, env)?;
 
             // Process the appropriate branch
             let body = if cond_result { then_body } else { else_body };
             for spec in body {
-                process_intro_spec(spec, const_bindings, env, existing_symbols, introduced_symbols, intro_label, result)?;
+                process_intro_spec(
+                    spec,
+                    const_bindings,
+                    env,
+                    existing_symbols,
+                    introduced_symbols,
+                    intro_label,
+                    result,
+                )?;
             }
             Ok(())
         }
@@ -175,14 +215,22 @@ fn process_intro_decl(
                     let func_def = create_function_from_stub(fn_stub, const_bindings)?;
 
                     // Validate shadowing (#1304)
-                    validate_intro_no_shadowing(&func_def.name, existing_symbols, introduced_symbols)?;
+                    validate_intro_no_shadowing(
+                        &func_def.name,
+                        existing_symbols,
+                        introduced_symbols,
+                    )?;
                     introduced_symbols.insert(func_def.name.clone());
 
                     // Record the mapping from intro label to public function name
                     // This allows functions in emit blocks to be registered with the correct public name
-                    result.intro_function_labels.insert(intro_label.to_string(), func_def.name.clone());
+                    result
+                        .intro_function_labels
+                        .insert(intro_label.to_string(), func_def.name.clone());
 
-                    result.introduced_functions.insert(func_def.name.clone(), func_def);
+                    result
+                        .introduced_functions
+                        .insert(func_def.name.clone(), func_def);
                 }
                 MacroDeclStub::Field(field_stub) => {
                     let field = create_field_from_stub(field_stub, const_bindings)?;
@@ -200,7 +248,9 @@ fn process_intro_decl(
                     validate_intro_no_shadowing(&type_name, existing_symbols, introduced_symbols)?;
                     introduced_symbols.insert(type_name.clone());
 
-                    result.introduced_types.insert(type_name, Type::Simple("_".to_string()));
+                    result
+                        .introduced_types
+                        .insert(type_name, Type::Simple("_".to_string()));
                 }
                 MacroDeclStub::Var(var_stub) => {
                     let var_name = substitute_template(&var_stub.name, const_bindings);
@@ -210,7 +260,9 @@ fn process_intro_decl(
                     introduced_symbols.insert(var_name.clone());
 
                     let is_const = matches!(decl.kind, MacroIntroKind::Const);
-                    result.introduced_vars.push((var_name, var_stub.ty.clone(), is_const));
+                    result
+                        .introduced_vars
+                        .push((var_name, var_stub.ty.clone(), is_const));
                 }
             }
         }
@@ -226,11 +278,13 @@ fn process_intro_decl(
                     introduced_symbols.insert(var_name.clone());
 
                     let is_const = matches!(decl.kind, MacroIntroKind::Const);
-                    result.introduced_vars.push((var_name, var_stub.ty.clone(), is_const));
+                    result
+                        .introduced_vars
+                        .push((var_name, var_stub.ty.clone(), is_const));
                 }
                 _ => {
                     return Err(CompileError::Semantic(
-                        "Only var/const introductions are allowed at callsite block".to_string()
+                        "Only var/const introductions are allowed at callsite block".to_string(),
                     ));
                 }
             }
@@ -247,10 +301,15 @@ fn process_inject_item(
 ) -> Result<(), CompileError> {
     // Store the mapping from emit label to inject anchor
     // This allows macro expansion to know which emit blocks contain injection code
-    result.inject_labels.insert(inject.label.clone(), inject.spec.anchor.clone());
+    result
+        .inject_labels
+        .insert(inject.label.clone(), inject.spec.anchor.clone());
 
     // Initialize the injection vector for this anchor if not present
-    result.injections.entry(inject.spec.anchor.clone()).or_insert_with(Vec::new);
+    result
+        .injections
+        .entry(inject.spec.anchor.clone())
+        .or_insert_with(Vec::new);
 
     Ok(())
 }
@@ -299,13 +358,13 @@ fn eval_const_condition(
                     })
                 }
                 _ => Err(CompileError::Semantic(
-                    "Only comparison operators are supported in macro if conditions".to_string()
-                ))
+                    "Only comparison operators are supported in macro if conditions".to_string(),
+                )),
             }
         }
         _ => Err(CompileError::Semantic(
-            "Complex expressions not yet supported in macro if conditions".to_string()
-        ))
+            "Complex expressions not yet supported in macro if conditions".to_string(),
+        )),
     }
 }
 
@@ -344,14 +403,17 @@ fn eval_const_int_expr(
                 BinOp::Mul => left_val * right_val,
                 BinOp::Div => left_val / right_val,
                 BinOp::Mod => left_val % right_val,
-                _ => return Err(CompileError::Semantic(
-                    "Only arithmetic operators are supported in macro const expressions".to_string()
-                )),
+                _ => {
+                    return Err(CompileError::Semantic(
+                        "Only arithmetic operators are supported in macro const expressions"
+                            .to_string(),
+                    ))
+                }
             })
         }
         _ => Err(CompileError::Semantic(
-            "Complex expressions not yet supported in macro const eval".to_string()
-        ))
+            "Complex expressions not yet supported in macro const eval".to_string(),
+        )),
     }
 }
 
@@ -362,16 +424,18 @@ fn create_function_from_stub(
 ) -> Result<FunctionDef, CompileError> {
     let name = substitute_template(&stub.name, const_bindings);
 
-    let params = stub.params.iter().map(|p| {
-        Parameter {
+    let params = stub
+        .params
+        .iter()
+        .map(|p| Parameter {
             span: Span::new(0, 0, 0, 0),
             name: p.name.clone(),
             ty: Some(p.ty.clone()),
             default: None,
             mutability: Mutability::Immutable,
             inject: false,
-        }
-    }).collect();
+        })
+        .collect();
 
     Ok(FunctionDef {
         span: Span::new(0, 0, 0, 0),
@@ -435,8 +499,14 @@ mod tests {
         bindings.insert("NAME".to_string(), "User".to_string());
         bindings.insert("COUNT".to_string(), "42".to_string());
 
-        assert_eq!(substitute_template("{NAME}Counter", &bindings), "UserCounter");
-        assert_eq!(substitute_template("get_{NAME}_{COUNT}", &bindings), "get_User_42");
+        assert_eq!(
+            substitute_template("{NAME}Counter", &bindings),
+            "UserCounter"
+        );
+        assert_eq!(
+            substitute_template("get_{NAME}_{COUNT}", &bindings),
+            "get_User_42"
+        );
         assert_eq!(substitute_template("no_template", &bindings), "no_template");
     }
 

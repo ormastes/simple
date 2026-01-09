@@ -32,9 +32,7 @@ impl Layer {
     /// Check if a path belongs to this layer
     pub fn contains(&self, path: &Path) -> bool {
         let path_str = path.to_string_lossy();
-        self.compiled_patterns
-            .iter()
-            .any(|p| p.matches(&path_str))
+        self.compiled_patterns.iter().any(|p| p.matches(&path_str))
     }
 
     /// Check if a module path (dot-separated) belongs to this layer

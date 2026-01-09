@@ -124,7 +124,7 @@ impl DirectoryManifest {
                 // Async is an execution model, not a capability - always allowed
                 Effect::Async => {}
                 // Verification effects are compile-time markers, always allowed
-                Effect::Verify | Effect::Trusted => {}
+                Effect::Verify | Effect::Trusted | Effect::Ghost => {}
                 // Pure requires the Pure capability
                 Effect::Pure => {
                     if !self.capabilities.contains(&Capability::Pure) {
@@ -235,7 +235,11 @@ impl ModuleResolver {
     }
 
     /// Parse a directory manifest from source
-    pub(super) fn parse_manifest(&self, source: &str, dir_path: &Path) -> ResolveResult<DirectoryManifest> {
+    pub(super) fn parse_manifest(
+        &self,
+        source: &str,
+        dir_path: &Path,
+    ) -> ResolveResult<DirectoryManifest> {
         let mut parser = Parser::new(source);
         let module = parser.parse().map_err(|e| {
             CompileError::Semantic(format!("failed to parse __init__.spl: {:?}", e))

@@ -182,8 +182,10 @@ impl<'a> Parser<'a> {
         let pointcut = self.parse_pointcut()?;
 
         // Parse optional message (string literal)
-        let message = if matches!(&self.current.kind, TokenKind::String(_) | TokenKind::FString(_))
-        {
+        let message = if matches!(
+            &self.current.kind,
+            TokenKind::String(_) | TokenKind::FString(_)
+        ) {
             match &self.current.kind {
                 TokenKind::String(s) | TokenKind::RawString(s) => {
                     let value = s.clone();
@@ -378,7 +380,7 @@ impl<'a> Parser<'a> {
         content: &str,
         span: Span,
     ) -> Result<PredicateExpr, ParseError> {
-        // TODO: Implement a simple inline predicate parser here
+        // TODO: [parser][P1] Implement a simple inline predicate parser here
         // For now, create a simple selector as placeholder
         // The full predicate parser is in the compiler crate (simple_compiler::predicate_parser)
         // and will be used during compilation/semantic analysis

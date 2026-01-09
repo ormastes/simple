@@ -3,8 +3,8 @@
 //! This module provides runtime contract validation for the interpreter,
 //! including preconditions, postconditions, invariants, and old() value capture.
 
-use crate::value::{Env, Value};
 use crate::hir::{HirContract, HirContractClause, HirExpr};
+use crate::value::{Env, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -44,12 +44,7 @@ impl OldValueCapture {
 ///
 /// # Panics
 /// Panics with a detailed message if the condition is false
-pub fn check_contract(
-    condition: bool,
-    kind: &str,
-    func_name: &str,
-    message: Option<&str>,
-) {
+pub fn check_contract(condition: bool, kind: &str, func_name: &str, message: Option<&str>) {
     if !condition {
         let msg = if let Some(custom_msg) = message {
             format!(

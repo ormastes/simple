@@ -6,7 +6,11 @@ use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
 impl Lowerer {
-    pub(in crate::hir::lower) fn infer_type(&mut self, expr: &Expr, ctx: &FunctionContext) -> LowerResult<TypeId> {
+    pub(in crate::hir::lower) fn infer_type(
+        &mut self,
+        expr: &Expr,
+        ctx: &FunctionContext,
+    ) -> LowerResult<TypeId> {
         match expr {
             Expr::Integer(_) => Ok(TypeId::I64),
             Expr::Float(_) => Ok(TypeId::F64),
@@ -113,7 +117,9 @@ impl Lowerer {
                 let (_idx, field_ty) = self.get_field_info(struct_ty, field)?;
                 Ok(field_ty)
             }
-            Expr::MethodCall { receiver, method, .. } => {
+            Expr::MethodCall {
+                receiver, method, ..
+            } => {
                 // Handle SIMD intrinsics: this.index(), this.thread_index(), this.group_index()
                 // and thread_group.barrier(), gpu.* functions
                 if let Expr::Identifier(recv_name) = receiver.as_ref() {
@@ -131,26 +137,49 @@ impl Lowerer {
                         // gpu.* intrinsic functions
                         match method.as_str() {
                             // Size/index queries return i64
-                            "global_id" | "local_id" | "group_id" | "global_size" | "local_size" | "num_groups" => {
+                            "global_id" | "local_id" | "group_id" | "global_size"
+                            | "local_size" | "num_groups" => {
                                 return Ok(TypeId::I64);
                             }
                             // Synchronization returns void
                             "barrier" | "mem_fence" => return Ok(TypeId::VOID),
                             // Atomic operations return old value (i64)
-                            "atomic_add" | "atomic_sub" | "atomic_min" | "atomic_max"
-                            | "atomic_and" | "atomic_or" | "atomic_xor" | "atomic_exchange"
+                            "atomic_add"
+                            | "atomic_sub"
+                            | "atomic_min"
+                            | "atomic_max"
+                            | "atomic_and"
+                            | "atomic_or"
+                            | "atomic_xor"
+                            | "atomic_exchange"
                             | "atomic_compare_exchange" => return Ok(TypeId::I64),
                             _ => {}
                         }
-                    } else if recv_name == "f32x4" || recv_name == "f64x4" || recv_name == "i32x4" || recv_name == "i64x4" {
+                    } else if recv_name == "f32x4"
+                        || recv_name == "f64x4"
+                        || recv_name == "i32x4"
+                        || recv_name == "i64x4"
+                    {
                         // SIMD type static methods: f32x4.load(), f32x4.gather()
                         match method.as_str() {
                             "load" | "gather" | "load_masked" => {
                                 let simd_ty = match recv_name.as_str() {
-                                    "f32x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::F32 }),
-                                    "f64x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::F64 }),
-                                    "i32x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::I32 }),
-                                    "i64x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::I64 }),
+                                    "f32x4" => self.module.types.register(HirType::Simd {
+                                        lanes: 4,
+                                        element: TypeId::F32,
+                                    }),
+                                    "f64x4" => self.module.types.register(HirType::Simd {
+                                        lanes: 4,
+                                        element: TypeId::F64,
+                                    }),
+                                    "i32x4" => self.module.types.register(HirType::Simd {
+                                        lanes: 4,
+                                        element: TypeId::I32,
+                                    }),
+                                    "i64x4" => self.module.types.register(HirType::Simd {
+                                        lanes: 4,
+                                        element: TypeId::I64,
+                                    }),
                                     _ => unreachable!(),
                                 };
                                 return Ok(simd_ty);

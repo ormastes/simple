@@ -25,33 +25,30 @@
 //! // params = ["active", 18]
 //! ```
 
-pub mod query;
 pub mod condition;
-pub mod naming;
-pub mod raw;
-pub mod model;
 pub mod migration;
+pub mod model;
+pub mod naming;
 pub mod preload;
+pub mod query;
+pub mod raw;
 
 // Re-exports
-pub use query::{Query, Order, JoinType};
 pub use condition::{Condition, Op};
-pub use naming::{to_table_name, to_column_name, to_foreign_key};
+pub use naming::{to_column_name, to_foreign_key, to_table_name};
+pub use query::{JoinType, Order, Query};
 pub use raw::RawSql;
 
 // Model re-exports
 pub use model::{
-    Column, ColumnType, Constraint, Index, ModelDef, ModelRegistry,
-    Relation, RelationType,
+    Column, ColumnType, Constraint, Index, ModelDef, ModelRegistry, Relation, RelationType,
 };
 
 // Migration re-exports
-pub use migration::{
-    Direction, Migration, MigrationRecord, MigrationStatus, Migrator, Operation,
-};
+pub use migration::{Direction, Migration, MigrationRecord, MigrationStatus, Migrator, Operation};
 
 // Preload re-exports
 pub use preload::{
-    parse_preload, group_by_foreign_key, Preload, PreloadBuilder, PreloadConfig,
-    PreloadQuery, PreloadStrategy,
+    group_by_foreign_key, parse_preload, Preload, PreloadBuilder, PreloadConfig, PreloadQuery,
+    PreloadStrategy,
 };

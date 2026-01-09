@@ -74,9 +74,9 @@ impl Default for NativeBinaryOptions {
             layout_optimize: false,
             layout_profile: None,
             strip: false,
-            pie: true,  // Default to PIE for security
+            pie: true, // Default to PIE for security
             shared: false,
-            libraries: vec!["c".to_string()],  // Link libc by default
+            libraries: vec!["c".to_string()], // Link libc by default
             library_paths,
             linker: None,
             generate_map: false,
@@ -138,10 +138,7 @@ impl NativeBinaryOptions {
         // macOS library paths
         #[cfg(target_os = "macos")]
         {
-            let candidates = [
-                "/usr/lib",
-                "/usr/local/lib",
-            ];
+            let candidates = ["/usr/lib", "/usr/local/lib"];
 
             for path in candidates {
                 let p = PathBuf::from(path);
@@ -351,10 +348,7 @@ impl NativeBinaryBuilder {
         // Debug: Print symbols in object file
         if self.options.verbose || std::env::var("SIMPLE_LINKER_DEBUG").is_ok() {
             eprintln!("Object file: {}", obj_path.display());
-            if let Ok(output) = Command::new("nm")
-                .arg(&obj_path)
-                .output()
-            {
+            if let Ok(output) = Command::new("nm").arg(&obj_path).output() {
                 eprintln!("Symbols in object file:");
                 eprintln!("{}", String::from_utf8_lossy(&output.stdout));
             }
@@ -380,8 +374,8 @@ impl NativeBinaryBuilder {
 
         // Add CRT files in order: crti, Scrt1/crt1, then user code
         if crt_files.len() >= 2 {
-            builder = builder.object(&crt_files[0]);  // crti.o
-            builder = builder.object(&crt_files[1]);  // Scrt1.o or crt1.o
+            builder = builder.object(&crt_files[0]); // crti.o
+            builder = builder.object(&crt_files[1]); // Scrt1.o or crt1.o
         }
 
         // Add user object file
@@ -436,7 +430,7 @@ impl NativeBinaryBuilder {
 
         // Add crtn.o at the end (after libraries)
         if crt_files.len() >= 3 {
-            builder = builder.object(&crt_files[2]);  // crtn.o
+            builder = builder.object(&crt_files[2]); // crtn.o
         }
 
         // Execute linking
@@ -447,13 +441,21 @@ impl NativeBinaryBuilder {
                     .map(|m| m.len())
                     .unwrap_or(0),
             }),
-            Err(LinkerError::LinkerFailed { exit_code, message, stderr }) => {
+            Err(LinkerError::LinkerFailed {
+                exit_code,
+                message,
+                stderr,
+            }) => {
                 // Print detailed linker error
                 eprintln!("Linker error (exit code {}): {}", exit_code, message);
                 if !stderr.is_empty() {
                     eprintln!("Linker stderr:\n{}", stderr);
                 }
-                Err(LinkerError::LinkFailed(format!("{}: {}", message, stderr.lines().next().unwrap_or(""))))
+                Err(LinkerError::LinkFailed(format!(
+                    "{}: {}",
+                    message,
+                    stderr.lines().next().unwrap_or("")
+                )))
             }
             Err(e) => Err(e),
         }
@@ -517,8 +519,7 @@ impl NativeBinaryBuilder {
             return Err(LinkerError::LinkFailed(format!(
                 "could not find C runtime startup files for {} (crt1.o, crti.o, crtn.o). \
                  For cross-compilation, install the cross-toolchain (e.g., gcc-{}-linux-gnu)",
-                arch_name,
-                arch_name
+                arch_name, arch_name
             )));
         }
 
@@ -585,8 +586,9 @@ impl NativeBinaryBuilder {
 
         // Write ordering file
         let ordering_path = temp_dir.join("symbol_order.txt");
-        let mut file = std::fs::File::create(&ordering_path)
-            .map_err(|e| LinkerError::LinkFailed(format!("failed to create ordering file: {}", e)))?;
+        let mut file = std::fs::File::create(&ordering_path).map_err(|e| {
+            LinkerError::LinkFailed(format!("failed to create ordering file: {}", e))
+        })?;
 
         for symbol in symbols {
             writeln!(file, "{}", symbol)

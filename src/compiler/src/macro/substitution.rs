@@ -37,12 +37,20 @@ fn try_unroll_const_for_loop(
 
     // Check if the iterable is a range expression with const bounds
     let (start, end) = match &for_stmt.iterable {
-        Expr::Range { start, end, bound: RangeBound::Exclusive } => {
+        Expr::Range {
+            start,
+            end,
+            bound: RangeBound::Exclusive,
+        } => {
             let start_val = eval_const_expr_to_i64(start.as_ref()?, const_bindings)?;
             let end_val = eval_const_expr_to_i64(end.as_ref()?, const_bindings)?;
             (start_val, end_val)
         }
-        Expr::Range { start, end, bound: RangeBound::Inclusive } => {
+        Expr::Range {
+            start,
+            end,
+            bound: RangeBound::Inclusive,
+        } => {
             let start_val = eval_const_expr_to_i64(start.as_ref()?, const_bindings)?;
             let end_val = eval_const_expr_to_i64(end.as_ref()?, const_bindings)?;
             (start_val, end_val + 1) // Inclusive, so add 1 to end
@@ -98,10 +106,7 @@ fn eval_const_expr_to_i64(expr: &Expr, const_bindings: &HashMap<String, String>)
     }
 }
 
-fn substitute_node_templates(
-    node: &Node,
-    const_bindings: &HashMap<String, String>,
-) -> Node {
+fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, String>) -> Node {
     match node {
         Node::Expression(expr) => Node::Expression(substitute_expr_templates(expr, const_bindings)),
         Node::Let(let_stmt) => Node::Let(LetStmt {
@@ -231,10 +236,7 @@ fn substitute_node_templates(
     }
 }
 
-fn substitute_expr_templates(
-    expr: &Expr,
-    const_bindings: &HashMap<String, String>,
-) -> Expr {
+fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, String>) -> Expr {
     match expr {
         Expr::String(value) => Expr::String(substitute_template_string(value, const_bindings)),
         Expr::TypedString(value, suffix) => Expr::TypedString(
@@ -398,8 +400,12 @@ fn substitute_expr_templates(
                 .as_ref()
                 .map(|expr| Box::new(substitute_expr_templates(expr, const_bindings))),
         },
-        Expr::Spread(expr) => Expr::Spread(Box::new(substitute_expr_templates(expr, const_bindings))),
-        Expr::DictSpread(expr) => Expr::DictSpread(Box::new(substitute_expr_templates(expr, const_bindings))),
+        Expr::Spread(expr) => {
+            Expr::Spread(Box::new(substitute_expr_templates(expr, const_bindings)))
+        }
+        Expr::DictSpread(expr) => {
+            Expr::DictSpread(Box::new(substitute_expr_templates(expr, const_bindings)))
+        }
         Expr::StructInit { name, fields } => Expr::StructInit {
             name: name.clone(),
             fields: fields
@@ -415,8 +421,7 @@ fn substitute_expr_templates(
         Expr::Spawn(expr) => Expr::Spawn(Box::new(substitute_expr_templates(expr, const_bindings))),
         Expr::Await(expr) => Expr::Await(Box::new(substitute_expr_templates(expr, const_bindings))),
         Expr::Yield(expr) => Expr::Yield(
-            expr
-                .as_ref()
+            expr.as_ref()
                 .map(|e| Box::new(substitute_expr_templates(e, const_bindings))),
         ),
         Expr::New { kind, expr } => Expr::New {
@@ -436,7 +441,11 @@ fn substitute_expr_templates(
                 .map(|expr| Box::new(substitute_expr_templates(expr, const_bindings))),
             bound: *bound,
         },
-        Expr::FunctionalUpdate { target, method, args } => Expr::FunctionalUpdate {
+        Expr::FunctionalUpdate {
+            target,
+            method,
+            args,
+        } => Expr::FunctionalUpdate {
             target: Box::new(substitute_expr_templates(target, const_bindings)),
             method: method.clone(),
             args: args
@@ -452,7 +461,9 @@ fn substitute_expr_templates(
             args: args
                 .iter()
                 .map(|arg| match arg {
-                    MacroArg::Expr(expr) => MacroArg::Expr(substitute_expr_templates(expr, const_bindings)),
+                    MacroArg::Expr(expr) => {
+                        MacroArg::Expr(substitute_expr_templates(expr, const_bindings))
+                    }
                 })
                 .collect(),
         },
@@ -475,10 +486,7 @@ fn substitute_expr_templates(
     }
 }
 
-fn substitute_template_string(
-    input: &str,
-    const_bindings: &HashMap<String, String>,
-) -> String {
+fn substitute_template_string(input: &str, const_bindings: &HashMap<String, String>) -> String {
     let mut output = input.to_string();
     for (key, value) in const_bindings {
         let needle = format!("{{{}}}", key);

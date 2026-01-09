@@ -76,8 +76,20 @@ impl<'a> Parser<'a> {
 
         let (body, contract, bounds_block) = if is_abstract {
             // Abstract method has no body
-            let empty_span = Span::new(start_span.start, start_span.end, start_span.line, start_span.column);
-            (Block { span: empty_span, statements: vec![] }, None, None)
+            let empty_span = Span::new(
+                start_span.start,
+                start_span.end,
+                start_span.line,
+                start_span.column,
+            );
+            (
+                Block {
+                    span: empty_span,
+                    statements: vec![],
+                },
+                None,
+                None,
+            )
         } else {
             self.expect(&TokenKind::Colon)?;
 
@@ -104,9 +116,9 @@ impl<'a> Parser<'a> {
             let body = self.parse_block_body()?;
 
             // Check for trailing bounds: block (only valid for @simd decorated functions)
-            let has_simd = decorators.iter().any(|d| {
-                matches!(&d.name, Expr::Identifier(name) if name == "simd")
-            });
+            let has_simd = decorators
+                .iter()
+                .any(|d| matches!(&d.name, Expr::Identifier(name) if name == "simd"));
 
             let bounds_block = if has_simd {
                 // Skip newlines after body to check for bounds:

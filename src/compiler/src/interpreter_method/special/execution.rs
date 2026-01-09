@@ -3,9 +3,9 @@
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
 use crate::error::CompileError;
-use crate::interpreter::{exec_block_fn, bind_args, Control, Enums, ImplMethods};
-use crate::value::{Value, Env, SpecialEnumType, OptionVariant, ResultVariant};
-use simple_parser::ast::{Argument, FunctionDef, ClassDef};
+use crate::interpreter::{bind_args, exec_block_fn, Control, Enums, ImplMethods};
+use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
+use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::collections::HashMap;
 
 /// Extract result from exec_block_fn return value
@@ -35,14 +35,34 @@ pub fn find_and_exec_method_with_self(
     // Check class methods
     if let Some(class_def) = classes.get(class).cloned() {
         if let Some(func) = class_def.methods.iter().find(|m| m.name == method) {
-            let (result, updated_self) = exec_function_with_self_return(func, args, env, functions, classes, enums, impl_methods, class, fields)?;
+            let (result, updated_self) = exec_function_with_self_return(
+                func,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                class,
+                fields,
+            )?;
             return Ok(Some((result, updated_self)));
         }
     }
     // Check impl methods
     if let Some(methods) = impl_methods.get(class) {
         if let Some(func) = methods.iter().find(|m| m.name == method) {
-            let (result, updated_self) = exec_function_with_self_return(func, args, env, functions, classes, enums, impl_methods, class, fields)?;
+            let (result, updated_self) = exec_function_with_self_return(
+                func,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                class,
+                fields,
+            )?;
             return Ok(Some((result, updated_self)));
         }
     }
@@ -89,13 +109,23 @@ pub fn exec_function_with_self_return(
     }
 
     // Execute the function body with implicit return support
-    let result = extract_block_result!(exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods));
+    let result = extract_block_result!(exec_block_fn(
+        &func.body,
+        &mut local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods
+    ));
 
     // Get the potentially modified self
-    let updated_self = local_env.get("self").cloned().unwrap_or_else(|| Value::Object {
-        class: class_name.to_string(),
-        fields: fields.clone(),
-    });
+    let updated_self = local_env
+        .get("self")
+        .cloned()
+        .unwrap_or_else(|| Value::Object {
+            class: class_name.to_string(),
+            fields: fields.clone(),
+        });
 
     Ok((result, updated_self))
 }

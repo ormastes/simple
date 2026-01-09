@@ -66,25 +66,13 @@ pub enum MemoryOperation {
         ordering: MemoryOrdering,
     },
     /// Lock acquisition
-    LockAcquire {
-        lock: LockId,
-        thread: ThreadId,
-    },
+    LockAcquire { lock: LockId, thread: ThreadId },
     /// Lock release
-    LockRelease {
-        lock: LockId,
-        thread: ThreadId,
-    },
+    LockRelease { lock: LockId, thread: ThreadId },
     /// Thread/actor spawn
-    ThreadSpawn {
-        parent: ThreadId,
-        child: ThreadId,
-    },
+    ThreadSpawn { parent: ThreadId, child: ThreadId },
     /// Thread/actor join
-    ThreadJoin {
-        parent: ThreadId,
-        child: ThreadId,
-    },
+    ThreadJoin { parent: ThreadId, child: ThreadId },
     /// Channel send
     ChannelSend {
         channel: ChannelId,
@@ -219,7 +207,9 @@ impl HappensBeforeGraph {
             MemoryOperation::LockRelease { lock, .. } => {
                 self.lock_releases.insert(*lock, op_id);
             }
-            MemoryOperation::AtomicRMW { location, ordering, .. } => {
+            MemoryOperation::AtomicRMW {
+                location, ordering, ..
+            } => {
                 self.atomic_stores
                     .entry(*location)
                     .or_insert_with(Vec::new)
@@ -287,13 +277,25 @@ impl HappensBeforeGraph {
             }
 
             // Atomic load (Acquire) synchronizes with stores (Release)
-            MemoryOperation::AtomicRMW { location, ordering, thread } => {
+            MemoryOperation::AtomicRMW {
+                location,
+                ordering,
+                thread,
+            } => {
                 let mut edges_to_add = Vec::new();
 
-                if matches!(ordering, MemoryOrdering::Acquire | MemoryOrdering::AcqRel | MemoryOrdering::SeqCst) {
+                if matches!(
+                    ordering,
+                    MemoryOrdering::Acquire | MemoryOrdering::AcqRel | MemoryOrdering::SeqCst
+                ) {
                     if let Some(stores) = self.atomic_stores.get(location) {
                         for &(store_id, store_ordering) in stores {
-                            if matches!(store_ordering, MemoryOrdering::Release | MemoryOrdering::AcqRel | MemoryOrdering::SeqCst) {
+                            if matches!(
+                                store_ordering,
+                                MemoryOrdering::Release
+                                    | MemoryOrdering::AcqRel
+                                    | MemoryOrdering::SeqCst
+                            ) {
                                 edges_to_add.push(store_id);
                             }
                         }
@@ -419,8 +421,12 @@ impl HappensBeforeGraph {
         let mut location_ops: HashMap<LocationId, Vec<OperationId>> = HashMap::new();
         for (&op_id, op) in &self.operations {
             match op {
-                MemoryOperation::Read { location, .. } | MemoryOperation::Write { location, .. } => {
-                    location_ops.entry(*location).or_insert_with(Vec::new).push(op_id);
+                MemoryOperation::Read { location, .. }
+                | MemoryOperation::Write { location, .. } => {
+                    location_ops
+                        .entry(*location)
+                        .or_insert_with(Vec::new)
+                        .push(op_id);
                 }
                 _ => {}
             }
@@ -433,7 +439,9 @@ impl HappensBeforeGraph {
                     let op1_id = ops[i];
                     let op2_id = ops[j];
 
-                    if let (Some(op1), Some(op2)) = (self.operations.get(&op1_id), self.operations.get(&op2_id)) {
+                    if let (Some(op1), Some(op2)) =
+                        (self.operations.get(&op1_id), self.operations.get(&op2_id))
+                    {
                         // Check if at least one is a write
                         let has_write = matches!(op1, MemoryOperation::Write { .. })
                             || matches!(op2, MemoryOperation::Write { .. });
@@ -549,20 +557,14 @@ mod tests {
         let child = ThreadId::new(2);
         let loc = LocationId::new(1);
 
-        let spawn = graph.add_operation(MemoryOperation::ThreadSpawn {
-            parent,
-            child,
-        });
+        let spawn = graph.add_operation(MemoryOperation::ThreadSpawn { parent, child });
 
         let child_write = graph.add_operation(MemoryOperation::Write {
             location: loc,
             thread: child,
         });
 
-        let join = graph.add_operation(MemoryOperation::ThreadJoin {
-            parent,
-            child,
-        });
+        let join = graph.add_operation(MemoryOperation::ThreadJoin { parent, child });
 
         // Child's operation happens-before join
         assert!(graph.happens_before(child_write, join));

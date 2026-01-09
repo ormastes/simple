@@ -14,7 +14,10 @@ macro bad_syntax():
 main = 0
 "#;
     let result = run_code(code, &[], "");
-    assert!(result.is_err(), "Macro without -> (contract) should fail to parse");
+    assert!(
+        result.is_err(),
+        "Macro without -> (contract) should fail to parse"
+    );
 }
 
 #[test]
@@ -27,7 +30,10 @@ macro bad_param(x) -> (returns result: Int):
 main = 0
 "#;
     let result = run_code(code, &[], "");
-    assert!(result.is_err(), "Macro param without type should fail to parse");
+    assert!(
+        result.is_err(),
+        "Macro param without type should fail to parse"
+    );
 }
 
 #[test]

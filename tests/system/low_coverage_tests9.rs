@@ -7,7 +7,7 @@
 // Compilability Tests (simple_compiler::compilability)
 // ===========================================================================
 mod compilability_tests {
-    use simple_compiler::compilability::{FallbackReason, CompilabilityStatus};
+    use simple_compiler::compilability::{CompilabilityStatus, FallbackReason};
 
     #[test]
     fn test_fallback_reason_dynamic_types() {
@@ -264,7 +264,7 @@ mod pkg_linker_tests {
 // Monomorphization Table Tests (simple_compiler::MonomorphizationTable)
 // ===========================================================================
 mod monomorphize_table_tests {
-    use simple_compiler::{MonomorphizationTable, ConcreteType, SpecializationKey};
+    use simple_compiler::{ConcreteType, MonomorphizationTable, SpecializationKey};
 
     #[test]
     fn test_monomorphization_table_new() {
@@ -341,7 +341,7 @@ mod monomorphize_table_tests {
 // Monomorphization Types Tests (simple_compiler::ConcreteType, SpecializationKey)
 // ===========================================================================
 mod monomorphize_types_tests {
-    use simple_compiler::{ConcreteType, SpecializationKey, PointerKind, TypeBindings};
+    use simple_compiler::{ConcreteType, PointerKind, SpecializationKey, TypeBindings};
 
     #[test]
     fn test_specialization_key_new() {
@@ -364,10 +364,7 @@ mod monomorphize_types_tests {
 
     #[test]
     fn test_specialization_key_mangled_name_multiple_args() {
-        let key = SpecializationKey::new(
-            "pair",
-            vec![ConcreteType::Int, ConcreteType::String],
-        );
+        let key = SpecializationKey::new("pair", vec![ConcreteType::Int, ConcreteType::String]);
         assert_eq!(key.mangled_name(), "pair$Int_String");
     }
 
@@ -551,8 +548,8 @@ mod monomorphize_types_tests {
 // ===========================================================================
 mod hir_types_tests {
     use simple_compiler::hir::{
-        Signedness, HirOverflowBehavior, HirUnitConstraints, TypeId, HirType,
-        StructLayout, FieldLayout, TypeRegistry, PointerKind,
+        FieldLayout, HirOverflowBehavior, HirType, HirUnitConstraints, PointerKind, Signedness,
+        StructLayout, TypeId, TypeRegistry,
     };
 
     #[test]

@@ -129,7 +129,10 @@ impl StartupLoader {
 
     /// Load a settlement from a file path.
     #[instrument(skip(self))]
-    pub fn load<P: AsRef<Path> + std::fmt::Debug>(&self, path: P) -> Result<LoadedSettlement, StartupError> {
+    pub fn load<P: AsRef<Path> + std::fmt::Debug>(
+        &self,
+        path: P,
+    ) -> Result<LoadedSettlement, StartupError> {
         debug!(path = ?path.as_ref(), "Loading settlement from file");
         let mut file = File::open(path.as_ref()).map_err(|e| {
             error!(path = ?path.as_ref(), error = %e, "Failed to open settlement file");
@@ -176,15 +179,20 @@ impl StartupLoader {
         const TRAILER_SIZE: u64 = 16;
 
         if file_size < TRAILER_SIZE {
-            warn!(file_size, trailer_size = TRAILER_SIZE, "File too small for trailer");
+            warn!(
+                file_size,
+                trailer_size = TRAILER_SIZE,
+                "File too small for trailer"
+            );
             return Err(StartupError::InvalidHeader);
         }
 
         // Read the trailer
-        file.seek(SeekFrom::End(-(TRAILER_SIZE as i64))).map_err(|e| {
-            error!(error = %e, "Failed to seek to trailer");
-            StartupError::IoError(e)
-        })?;
+        file.seek(SeekFrom::End(-(TRAILER_SIZE as i64)))
+            .map_err(|e| {
+                error!(error = %e, "Failed to seek to trailer");
+                StartupError::IoError(e)
+            })?;
         let mut trailer = [0u8; 16];
         file.read_exact(&mut trailer).map_err(|e| {
             error!(error = %e, "Failed to read trailer");
@@ -318,13 +326,19 @@ impl StartupLoader {
 
         // Read function table with code base for address fixup
         let loaded_code_base = code_mem.as_ptr() as u64;
-        debug!(code_base = format!("{:#x}", loaded_code_base), "Reading function table");
+        debug!(
+            code_base = format!("{:#x}", loaded_code_base),
+            "Reading function table"
+        );
         let func_table = self.read_function_table(file, offset, &header, loaded_code_base)?;
         trace!(functions = func_table.len(), "Function table loaded");
 
         // Read global table with data base for address fixup
         let loaded_data_base = data_mem.as_ptr() as u64;
-        debug!(data_base = format!("{:#x}", loaded_data_base), "Reading global table");
+        debug!(
+            data_base = format!("{:#x}", loaded_data_base),
+            "Reading global table"
+        );
         let global_table = self.read_global_table(file, offset, &header, loaded_data_base)?;
         trace!(globals = global_table.len(), "Global table loaded");
 

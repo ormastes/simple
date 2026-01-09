@@ -168,7 +168,9 @@ fn generate_dot(
         let layer_deps = build_layer_graph(layers, module_tree);
 
         // Layer colors
-        let colors = ["#a6cee3", "#b2df8a", "#fb9a99", "#fdbf6f", "#cab2d6", "#ffff99"];
+        let colors = [
+            "#a6cee3", "#b2df8a", "#fb9a99", "#fdbf6f", "#cab2d6", "#ffff99",
+        ];
 
         // Add layer nodes
         for (i, layer_name) in layers.keys().enumerate() {

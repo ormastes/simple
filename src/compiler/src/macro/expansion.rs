@@ -1,16 +1,20 @@
 use crate::error::CompileError;
-use crate::interpreter::{evaluate_expr, exec_block, exec_block_fn, exec_node, Control, Enums, ImplMethods};
+use crate::interpreter::{
+    evaluate_expr, exec_block, exec_block_fn, exec_node, Control, Enums, ImplMethods,
+};
 use crate::macro_contracts::{process_macro_contract, MacroContractResult};
 use crate::macro_validation::validate_macro_defined_before_use;
 use crate::value::{Env, Value};
-use simple_parser::ast::{ClassDef, FunctionDef, MacroAnchor, MacroArg, MacroContractItem, MacroDef, MacroStmt};
+use simple_parser::ast::{
+    ClassDef, FunctionDef, MacroAnchor, MacroArg, MacroContractItem, MacroDef, MacroStmt,
+};
 use std::collections::{HashMap, HashSet};
 
 use super::helpers::build_macro_const_bindings;
 use super::hygiene::{apply_macro_hygiene_block, apply_macro_hygiene_node, MacroHygieneContext};
 use super::state::{
-    is_macro_trace_enabled, macro_trace, pop_macro_depth, push_macro_depth,
-    queue_tail_injection, store_macro_introduced_symbols,
+    is_macro_trace_enabled, macro_trace, pop_macro_depth, push_macro_depth, queue_tail_injection,
+    store_macro_introduced_symbols,
 };
 use super::substitution::substitute_block_templates;
 
@@ -28,7 +32,15 @@ pub(super) fn expand_user_macro(
     push_macro_depth(&macro_def.name)?;
 
     // Use inner function to ensure we always pop depth, even on error
-    let result = expand_user_macro_inner(macro_def, args, env, functions, classes, enums, impl_methods);
+    let result = expand_user_macro_inner(
+        macro_def,
+        args,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    );
     pop_macro_depth();
     result
 }
@@ -46,16 +58,26 @@ fn expand_user_macro_inner(
     macro_trace(&format!("expanding {}!(...)", macro_def.name));
 
     // Validate ordering: macro must be defined before use (#1304)
-    let definition_order = crate::interpreter::MACRO_DEFINITION_ORDER.with(|cell| cell.borrow().clone());
+    let definition_order =
+        crate::interpreter::MACRO_DEFINITION_ORDER.with(|cell| cell.borrow().clone());
     validate_macro_defined_before_use(&macro_def.name, 0, &definition_order)?;
 
     let mut local_env = env.clone();
-    let const_bindings = build_macro_const_bindings(macro_def, args, env, functions, classes, enums, impl_methods)?;
+    let const_bindings = build_macro_const_bindings(
+        macro_def,
+        args,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )?;
     let mut hygiene_ctx = MacroHygieneContext::new();
 
     // Process macro contracts to determine introduced symbols (#1303)
     // Also performs shadowing validation (#1304)
-    let mut contract_result = process_macro_contract(macro_def, &const_bindings, env, functions, classes)?;
+    let mut contract_result =
+        process_macro_contract(macro_def, &const_bindings, env, functions, classes)?;
 
     // Find if there's a variadic parameter (must be last if present)
     if let Some(variadic_idx) = macro_def.params.iter().position(|p| p.is_variadic) {
@@ -94,7 +116,14 @@ fn expand_user_macro_inner(
         match stmt {
             MacroStmt::ConstEval(block) => {
                 let hygienic_block = apply_macro_hygiene_block(block, &mut hygiene_ctx, false);
-                match exec_block(&hygienic_block, &mut local_env, functions, classes, enums, impl_methods)? {
+                match exec_block(
+                    &hygienic_block,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
                     Control::Return(v) => return Ok(v),
                     Control::Break(_) | Control::Continue => {}
                     Control::Next => {}
@@ -107,11 +136,18 @@ fn expand_user_macro_inner(
                 // Snapshot current functions in local_env before executing emit block
                 let functions_before: HashSet<String> = local_env
                     .iter()
-                    .filter_map(|(k, v)| if matches!(v, Value::Function { .. }) { Some(k.clone()) } else { None })
+                    .filter_map(|(k, v)| {
+                        if matches!(v, Value::Function { .. }) {
+                            Some(k.clone())
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
 
                 let expanded_block = substitute_block_templates(block, &const_bindings);
-                let hygienic_block = apply_macro_hygiene_block(&expanded_block, &mut hygiene_ctx, false);
+                let hygienic_block =
+                    apply_macro_hygiene_block(&expanded_block, &mut hygiene_ctx, false);
 
                 // Handle inject blocks specially based on anchor type
                 let (control, maybe_value) = if let Some(anchor) = inject_anchor {
@@ -127,16 +163,37 @@ fn expand_user_macro_inner(
                             if is_macro_trace_enabled() {
                                 macro_trace("  [warning] 'head' inject executes at callsite (cannot rewind)");
                             }
-                            exec_block_fn(&hygienic_block, &mut local_env, functions, classes, enums, impl_methods)?
+                            exec_block_fn(
+                                &hygienic_block,
+                                &mut local_env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?
                         }
                         MacroAnchor::Here => {
                             // Execute immediately at the callsite
-                            exec_block_fn(&hygienic_block, &mut local_env, functions, classes, enums, impl_methods)?
+                            exec_block_fn(
+                                &hygienic_block,
+                                &mut local_env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?
                         }
                     }
                 } else {
                     // Not an inject block - execute normally
-                    exec_block_fn(&hygienic_block, &mut local_env, functions, classes, enums, impl_methods)?
+                    exec_block_fn(
+                        &hygienic_block,
+                        &mut local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?
                 };
 
                 // Find new functions defined in this emit block and match to intro stubs
@@ -150,7 +207,10 @@ fn expand_user_macro_inner(
                             let original_name = strip_gensym_suffix(&def.name);
 
                             // Check if this matches an intro stub by name
-                            if contract_result.introduced_functions.contains_key(&original_name) {
+                            if contract_result
+                                .introduced_functions
+                                .contains_key(&original_name)
+                            {
                                 // Replace stub with real function definition
                                 let mut real_func = (**def).clone();
                                 real_func.name = original_name.clone();
@@ -198,7 +258,14 @@ fn expand_user_macro_inner(
             }
             MacroStmt::Stmt(node) => {
                 let hygienic_node = apply_macro_hygiene_node(node, &mut hygiene_ctx);
-                match exec_node(&hygienic_node, &mut local_env, functions, classes, enums, impl_methods)? {
+                match exec_node(
+                    &hygienic_node,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
                     Control::Return(v) => return Ok(v),
                     Control::Break(_) | Control::Continue => {}
                     Control::Next => {}
@@ -226,12 +293,20 @@ fn expand_user_macro_inner(
 /// Extract function definitions from local_env and add to contract result
 fn extract_introduced_functions(local_env: &Env, contract_result: &mut MacroContractResult) {
     for (name, value) in local_env.iter() {
-        if let Value::Function { name: func_name, def, .. } = value {
+        if let Value::Function {
+            name: func_name,
+            def,
+            ..
+        } = value
+        {
             // Strip gensym suffix to get the original function name
             let original_name = strip_gensym_suffix(func_name);
 
             // Check if this function matches an intro stub (by original name)
-            if contract_result.introduced_functions.contains_key(&original_name) {
+            if contract_result
+                .introduced_functions
+                .contains_key(&original_name)
+            {
                 // Replace stub with real function definition
                 contract_result
                     .introduced_functions
@@ -239,7 +314,10 @@ fn extract_introduced_functions(local_env: &Env, contract_result: &mut MacroCont
             } else {
                 // Check if the env key (which might also be gensym'd) matches an intro stub
                 let original_key = strip_gensym_suffix(name);
-                if contract_result.introduced_functions.contains_key(&original_key) {
+                if contract_result
+                    .introduced_functions
+                    .contains_key(&original_key)
+                {
                     // Replace stub with real function, using original key as the public name
                     let mut real_func = (**def).clone();
                     real_func.name = original_key.clone();

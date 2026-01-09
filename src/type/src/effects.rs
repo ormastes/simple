@@ -62,7 +62,10 @@ fn contains_suspension_node(node: &Node) -> bool {
         Node::If(if_stmt) => {
             contains_suspension_expr(&if_stmt.condition)
                 || contains_suspension(&if_stmt.then_block)
-                || if_stmt.else_block.as_ref().map_or(false, |b| contains_suspension(b))
+                || if_stmt
+                    .else_block
+                    .as_ref()
+                    .map_or(false, |b| contains_suspension(b))
         }
         Node::While(stmt) => {
             contains_suspension_expr(&stmt.condition) || contains_suspension(&stmt.body)
@@ -70,11 +73,15 @@ fn contains_suspension_node(node: &Node) -> bool {
         Node::For(stmt) => contains_suspension(&stmt.body),
         Node::Match(match_stmt) => {
             contains_suspension_expr(&match_stmt.subject)
-                || match_stmt.arms.iter().any(|arm| contains_suspension(&arm.body))
+                || match_stmt
+                    .arms
+                    .iter()
+                    .any(|arm| contains_suspension(&arm.body))
         }
-        Node::Return(stmt) => {
-            stmt.value.as_ref().map_or(false, |v| contains_suspension_expr(v))
-        }
+        Node::Return(stmt) => stmt
+            .value
+            .as_ref()
+            .map_or(false, |v| contains_suspension_expr(v)),
         _ => false,
     }
 }
@@ -92,7 +99,8 @@ fn contains_suspension_expr(expr: &Expr) -> bool {
         Expr::Unary { operand, .. } => contains_suspension_expr(operand),
         Expr::Call { args, .. } => args.iter().any(|arg| contains_suspension_expr(&arg.value)),
         Expr::MethodCall { receiver, args, .. } => {
-            contains_suspension_expr(receiver) || args.iter().any(|arg| contains_suspension_expr(&arg.value))
+            contains_suspension_expr(receiver)
+                || args.iter().any(|arg| contains_suspension_expr(&arg.value))
         }
         Expr::Index { receiver, index } => {
             contains_suspension_expr(receiver) || contains_suspension_expr(index)
@@ -112,7 +120,11 @@ pub fn infer_function_effect(func: &FunctionDef, env: &EffectEnv) -> Effect {
     }
 
     // If has @async effect annotation, it's async
-    if func.effects.iter().any(|e| matches!(e, simple_parser::ast::Effect::Async)) {
+    if func
+        .effects
+        .iter()
+        .any(|e| matches!(e, simple_parser::ast::Effect::Async))
+    {
         return Effect::Async;
     }
 
@@ -148,7 +160,10 @@ fn calls_async_function_node(node: &Node, env: &EffectEnv) -> bool {
         Node::If(if_stmt) => {
             calls_async_function_expr(&if_stmt.condition, env)
                 || calls_async_function(&if_stmt.then_block, env)
-                || if_stmt.else_block.as_ref().map_or(false, |b| calls_async_function(b, env))
+                || if_stmt
+                    .else_block
+                    .as_ref()
+                    .map_or(false, |b| calls_async_function(b, env))
         }
         Node::While(stmt) => {
             calls_async_function_expr(&stmt.condition, env) || calls_async_function(&stmt.body, env)
@@ -156,11 +171,15 @@ fn calls_async_function_node(node: &Node, env: &EffectEnv) -> bool {
         Node::For(stmt) => calls_async_function(&stmt.body, env),
         Node::Match(match_stmt) => {
             calls_async_function_expr(&match_stmt.subject, env)
-                || match_stmt.arms.iter().any(|arm| calls_async_function(&arm.body, env))
+                || match_stmt
+                    .arms
+                    .iter()
+                    .any(|arm| calls_async_function(&arm.body, env))
         }
-        Node::Return(stmt) => {
-            stmt.value.as_ref().map_or(false, |v| calls_async_function_expr(v, env))
-        }
+        Node::Return(stmt) => stmt
+            .value
+            .as_ref()
+            .map_or(false, |v| calls_async_function_expr(v, env)),
         _ => false,
     }
 }
@@ -176,11 +195,14 @@ fn calls_async_function_expr(expr: &Expr, env: &EffectEnv) -> bool {
                 }
             }
             // Check arguments
-            args.iter().any(|arg| calls_async_function_expr(&arg.value, env))
+            args.iter()
+                .any(|arg| calls_async_function_expr(&arg.value, env))
         }
         Expr::MethodCall { receiver, args, .. } => {
             calls_async_function_expr(receiver, env)
-                || args.iter().any(|arg| calls_async_function_expr(&arg.value, env))
+                || args
+                    .iter()
+                    .any(|arg| calls_async_function_expr(&arg.value, env))
         }
         Expr::Binary { left, right, .. } => {
             calls_async_function_expr(left, env) || calls_async_function_expr(right, env)
@@ -202,7 +224,11 @@ pub fn build_effect_env(functions: &[FunctionDef]) -> EffectEnv {
     for func in functions {
         if func.is_sync {
             env.insert(func.name.clone(), Effect::Sync);
-        } else if func.effects.iter().any(|e| matches!(e, simple_parser::ast::Effect::Async)) {
+        } else if func
+            .effects
+            .iter()
+            .any(|e| matches!(e, simple_parser::ast::Effect::Async))
+        {
             env.insert(func.name.clone(), Effect::Async);
         }
     }
@@ -262,7 +288,10 @@ pub fn needs_promise_wrapping(func: &FunctionDef, env: &EffectEnv) -> bool {
 
 /// Get the return type transformation status for a function
 /// Returns None for sync functions, Some(return_type) for async functions
-pub fn get_promise_wrapped_type<'a>(func: &'a FunctionDef, env: &EffectEnv) -> Option<&'a simple_parser::ast::Type> {
+pub fn get_promise_wrapped_type<'a>(
+    func: &'a FunctionDef,
+    env: &EffectEnv,
+) -> Option<&'a simple_parser::ast::Type> {
     if needs_promise_wrapping(func, env) {
         func.return_type.as_ref()
     } else {
@@ -285,7 +314,7 @@ pub enum ReturnWrapMode {
 /// Determine how a return statement should be wrapped
 pub fn get_return_wrap_mode(func: &FunctionDef, env: &EffectEnv) -> ReturnWrapMode {
     if needs_promise_wrapping(func, env) {
-        // TODO: Detect error returns vs normal returns
+        // TODO: [type][P3] Detect error returns vs normal returns
         // For now, all returns in async functions use Resolved
         ReturnWrapMode::Resolved
     } else {
@@ -321,7 +350,7 @@ pub fn needs_await(expr: &Expr, env: &EffectEnv) -> AwaitMode {
         }
         // Method calls might be async (can't determine without type info)
         Expr::MethodCall { .. } => {
-            // TODO: Requires type information to determine if method is async
+            // TODO: [type][P3] Requires type information to determine if method is async
             AwaitMode::None
         }
         // Explicit await
@@ -419,7 +448,7 @@ mod tests {
             doc_comment: None,
             contract: None,
             is_abstract: false,
-            is_sync: true,  // Explicitly marked as sync
+            is_sync: true, // Explicitly marked as sync
             bounds_block: None,
         };
 
@@ -516,7 +545,10 @@ mod tests {
 
         let env = HashMap::new();
         assert!(needs_promise_wrapping(&async_func, &env));
-        assert_eq!(get_return_wrap_mode(&async_func, &env), ReturnWrapMode::Resolved);
+        assert_eq!(
+            get_return_wrap_mode(&async_func, &env),
+            ReturnWrapMode::Resolved
+        );
     }
 
     // Phase 6: Await inference tests
@@ -603,9 +635,9 @@ mod tests {
             where_clause: vec![],
             body: Block {
                 span: Span::new(0, 0, 0, 0),
-                statements: vec![
-                    Node::Expression(Expr::Await(Box::new(Expr::Identifier("x".to_string()))))
-                ],
+                statements: vec![Node::Expression(Expr::Await(Box::new(Expr::Identifier(
+                    "x".to_string(),
+                ))))],
             },
             visibility: simple_parser::ast::Visibility::Private,
             effects: vec![],

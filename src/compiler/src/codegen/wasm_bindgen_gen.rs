@@ -21,7 +21,7 @@
 //! }
 //! ```
 
-use simple_parser::ast::{Module, Node, FunctionDef, Expr, Type, Argument};
+use simple_parser::ast::{Argument, Expr, FunctionDef, Module, Node, Type};
 use simple_parser::token::Span;
 use std::collections::HashMap;
 
@@ -77,9 +77,10 @@ impl BindingExtractor {
     /// Extract binding from a single function definition
     fn extract_from_function(&self, func_def: &FunctionDef) -> Option<BrowserBinding> {
         // Check for @extern decorator
-        let extern_decorator = func_def.decorators.iter().find(|d| {
-            matches!(&d.name, Expr::Identifier(name) if name == "extern")
-        })?;
+        let extern_decorator = func_def
+            .decorators
+            .iter()
+            .find(|d| matches!(&d.name, Expr::Identifier(name) if name == "extern"))?;
 
         // Extract arguments: @extern("browser", "console_log")
         let args = extern_decorator.args.as_ref()?;
@@ -100,8 +101,15 @@ impl BindingExtractor {
         };
 
         // Extract parameters
-        let params = func_def.params.iter()
-            .map(|p| (p.name.clone(), p.ty.clone().unwrap_or(Type::Simple("JsValue".to_string()))))
+        let params = func_def
+            .params
+            .iter()
+            .map(|p| {
+                (
+                    p.name.clone(),
+                    p.ty.clone().unwrap_or(Type::Simple("JsValue".to_string())),
+                )
+            })
             .collect();
 
         Some(BrowserBinding {
@@ -140,7 +148,8 @@ impl BindgenCodeGenerator {
         // Group bindings by module
         let mut by_module: HashMap<String, Vec<&BrowserBinding>> = HashMap::new();
         for binding in &self.bindings {
-            by_module.entry(binding.module.clone())
+            by_module
+                .entry(binding.module.clone())
                 .or_insert_with(Vec::new)
                 .push(binding);
         }
@@ -198,7 +207,9 @@ impl BindgenCodeGenerator {
         code.push_str(&format!("    fn {}(", binding.simple_name));
 
         // Parameters
-        let params: Vec<String> = binding.params.iter()
+        let params: Vec<String> = binding
+            .params
+            .iter()
             .map(|(name, ty)| format!("{}: {}", name, self.type_to_js(ty)))
             .collect();
         code.push_str(&params.join(", "));
@@ -229,7 +240,7 @@ impl BindgenCodeGenerator {
             Type::Simple(name) if name == "()" => "()".to_string(),
             Type::Simple(name) => format!("&{}", name), // Reference for class types
             Type::Tuple(types) if types.is_empty() => "()".to_string(), // Empty tuple is unit type
-            _ => "JsValue".to_string(), // Default to JsValue for complex types
+            _ => "JsValue".to_string(),                 // Default to JsValue for complex types
         }
     }
 }
@@ -246,7 +257,8 @@ impl JsGlueGenerator {
 
     /// Generate JavaScript loader code
     pub fn generate(&self) -> String {
-        format!(r#"// Generated JavaScript glue code for Simple WASM module
+        format!(
+            r#"// Generated JavaScript glue code for Simple WASM module
 // Load and initialize the WASM module
 
 async function init() {{
@@ -260,12 +272,15 @@ const wasmPromise = init();
 
 export default wasmPromise;
 export {{ init }};
-"#, self.wasm_module_name)
+"#,
+            self.wasm_module_name
+        )
     }
 
     /// Generate HTML script tag for loading WASM
     pub fn generate_html_loader(&self) -> String {
-        format!(r#"<script type="module">
+        format!(
+            r#"<script type="module">
     import init from './{}.js';
 
     async function run() {{
@@ -279,7 +294,9 @@ export {{ init }};
     }}
 
     run().catch(console.error);
-</script>"#, self.wasm_module_name)
+</script>"#,
+            self.wasm_module_name
+        )
     }
 }
 
@@ -290,43 +307,51 @@ mod tests {
     use simple_parser::enums::*;
     use simple_parser::token::Span;
 
-    fn create_extern_function(name: &str, module: &str, js_name: &str, is_async: bool) -> FunctionDef {
+    fn create_extern_function(
+        name: &str,
+        module: &str,
+        js_name: &str,
+        is_async: bool,
+    ) -> FunctionDef {
         let span = Span::new(0, 0, 0, 0);
         FunctionDef {
             span,
             name: name.to_string(),
             generic_params: vec![],
-            params: vec![
-                Parameter {
-                    span,
-                    name: "message".to_string(),
-                    ty: Some(Type::Simple("str".to_string())),
-                    default: None,
-                    mutability: Mutability::Immutable,
-                    inject: false,
-                },
-            ],
+            params: vec![Parameter {
+                span,
+                name: "message".to_string(),
+                ty: Some(Type::Simple("str".to_string())),
+                default: None,
+                mutability: Mutability::Immutable,
+                inject: false,
+            }],
             return_type: None,
             where_clause: WhereClause::default(),
-            body: Block { statements: vec![], span },
+            body: Block {
+                statements: vec![],
+                span,
+            },
             visibility: Visibility::Public,
-            effects: if is_async { vec![Effect::Async] } else { vec![] },
-            decorators: vec![
-                Decorator {
-                    span,
-                    name: Expr::Identifier("extern".to_string()),
-                    args: Some(vec![
-                        Argument {
-                            name: None,
-                            value: Expr::String(module.to_string()),
-                        },
-                        Argument {
-                            name: None,
-                            value: Expr::String(js_name.to_string()),
-                        },
-                    ]),
-                },
-            ],
+            effects: if is_async {
+                vec![Effect::Async]
+            } else {
+                vec![]
+            },
+            decorators: vec![Decorator {
+                span,
+                name: Expr::Identifier("extern".to_string()),
+                args: Some(vec![
+                    Argument {
+                        name: None,
+                        value: Expr::String(module.to_string()),
+                    },
+                    Argument {
+                        name: None,
+                        value: Expr::String(js_name.to_string()),
+                    },
+                ]),
+            }],
             attributes: vec![],
             doc_comment: None,
             contract: None,
@@ -364,16 +389,14 @@ mod tests {
 
     #[test]
     fn test_generate_bindgen_code() {
-        let bindings = vec![
-            BrowserBinding {
-                simple_name: "log".to_string(),
-                module: "browser".to_string(),
-                js_name: "console_log".to_string(),
-                params: vec![("message".to_string(), Type::Simple("str".to_string()))],
-                return_type: None,
-                is_async: false,
-            },
-        ];
+        let bindings = vec![BrowserBinding {
+            simple_name: "log".to_string(),
+            module: "browser".to_string(),
+            js_name: "console_log".to_string(),
+            params: vec![("message".to_string(), Type::Simple("str".to_string()))],
+            return_type: None,
+            is_async: false,
+        }];
 
         let generator = BindgenCodeGenerator::new(bindings);
         let code = generator.generate();
@@ -386,10 +409,22 @@ mod tests {
     fn test_type_conversion() {
         let generator = BindgenCodeGenerator::new(vec![]);
 
-        assert_eq!(generator.type_to_js(&Type::Simple("str".to_string())), "&str");
-        assert_eq!(generator.type_to_js(&Type::Simple("i32".to_string())), "i32");
-        assert_eq!(generator.type_to_js(&Type::Simple("bool".to_string())), "bool");
-        assert_eq!(generator.type_to_js(&Type::Simple("Value".to_string())), "JsValue");
+        assert_eq!(
+            generator.type_to_js(&Type::Simple("str".to_string())),
+            "&str"
+        );
+        assert_eq!(
+            generator.type_to_js(&Type::Simple("i32".to_string())),
+            "i32"
+        );
+        assert_eq!(
+            generator.type_to_js(&Type::Simple("bool".to_string())),
+            "bool"
+        );
+        assert_eq!(
+            generator.type_to_js(&Type::Simple("Value".to_string())),
+            "JsValue"
+        );
         assert_eq!(generator.type_to_js(&Type::Simple("()".to_string())), "()");
         assert_eq!(generator.type_to_js(&Type::Tuple(vec![])), "()");
     }

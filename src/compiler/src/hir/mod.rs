@@ -1,7 +1,7 @@
 pub mod arena;
 pub mod capability;
-pub mod memory_model;
 mod lower;
+pub mod memory_model;
 mod types;
 
 pub use arena::{
@@ -9,6 +9,6 @@ pub use arena::{
     init_hir_thread_arena_with_capacity, HirArena, HirArenaStats,
 };
 pub use capability::*;
-pub use memory_model::*;
 pub use lower::*;
+pub use memory_model::*;
 pub use types::*;

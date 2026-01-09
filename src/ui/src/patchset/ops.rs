@@ -34,7 +34,11 @@ pub enum PatchOp {
     SetText { node_id: NodeId, text: String },
 
     /// Set an attribute on a node
-    SetAttr { node_id: NodeId, name: String, value: String },
+    SetAttr {
+        node_id: NodeId,
+        name: String,
+        value: String,
+    },
 
     /// Remove an attribute from a node
     RemoveAttr { node_id: NodeId, name: String },
@@ -66,10 +70,18 @@ pub enum PatchOp {
     },
 
     /// Set a property (for components)
-    SetProp { node_id: NodeId, name: String, value: String },
+    SetProp {
+        node_id: NodeId,
+        name: String,
+        value: String,
+    },
 
     /// Attach an event handler
-    AttachEvent { node_id: NodeId, event: String, handler_id: u64 },
+    AttachEvent {
+        node_id: NodeId,
+        event: String,
+        handler_id: u64,
+    },
 
     /// Detach an event handler
     DetachEvent { node_id: NodeId, event: String },

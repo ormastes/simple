@@ -5,6 +5,8 @@ pub mod audit;
 pub mod basic;
 pub mod code_quality;
 pub mod compile;
+pub mod diagram_gen;
+pub mod doc_gen;
 pub mod electron;
 pub mod gen_lean;
 pub mod help;
@@ -12,8 +14,8 @@ pub mod init;
 pub mod llm_tools;
 pub mod repl;
 pub mod sandbox;
-pub mod test_discovery;
 pub mod sspec_docgen;
+pub mod test_discovery;
 pub mod test_output;
 pub mod test_runner;
 #[cfg(feature = "tui")]

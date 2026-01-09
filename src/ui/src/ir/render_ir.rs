@@ -2,8 +2,8 @@
 //!
 //! Low-level instructions for rendering templates with control flow.
 
-use crate::parser::Expr;
 use crate::ir::NodeId;
+use crate::parser::Expr;
 
 /// Virtual register for intermediate values
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

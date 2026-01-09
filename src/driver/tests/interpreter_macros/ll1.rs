@@ -71,7 +71,8 @@ fn ll1_parser_macro_registry_const_eval() {
     let registry = MacroRegistry::new();
     let mut ctx = ConstEvalContext::default();
     ctx.bindings.insert("x".to_string(), ConstValue::Int(10));
-    ctx.bindings.insert("name".to_string(), ConstValue::Str("foo".to_string()));
+    ctx.bindings
+        .insert("name".to_string(), ConstValue::Str("foo".to_string()));
 
     // Test template substitution
     let result = registry.substitute_templates("get_{name}_{x}", &ctx);

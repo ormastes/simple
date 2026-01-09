@@ -1,5 +1,5 @@
-use simple_common::gc::GcAllocator;
 use crate::gc::GcRuntime;
+use simple_common::gc::GcAllocator;
 
 #[test]
 fn allocator_contract_allocates_and_collects() {

@@ -24,9 +24,9 @@ pub fn export_table_sdn(db: &Database, table: &str, path: &Path) -> DbResult<()>
     for row in row_vec {
         let mut sdn_row = Vec::with_capacity(columns.len());
         for idx in 0..columns.len() {
-            let value = row.get_value(idx).ok_or_else(|| {
-                DbError::column_not_found(format!("index {}", idx))
-            })?;
+            let value = row
+                .get_value(idx)
+                .ok_or_else(|| DbError::column_not_found(format!("index {}", idx)))?;
             sdn_row.push(sql_to_sdn(value)?);
         }
         sdn_rows.push(sdn_row);
@@ -56,10 +56,7 @@ pub fn import_table_sdn(db: &Database, table: &str, path: &Path) -> DbResult<usi
             ));
         }
         other => {
-            return Err(DbError::type_mismatch(
-                "table",
-                other.type_name(),
-            ));
+            return Err(DbError::type_mismatch("table", other.type_name()));
         }
     };
 
@@ -153,8 +150,7 @@ fn render_sdn_value(value: &SdnValue) -> String {
 }
 
 fn render_sdn_string(value: &str) -> String {
-    if value.contains(|c: char| c.is_whitespace() || c == ',' || c == ':' || c == '"' || c == '|')
-    {
+    if value.contains(|c: char| c.is_whitespace() || c == ',' || c == ':' || c == '"' || c == '|') {
         format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         value.to_string()
@@ -171,11 +167,7 @@ mod tests {
             vec![SdnValue::Int(1), SdnValue::String("Alice".into())],
             vec![SdnValue::Int(2), SdnValue::String("Bob B".into())],
         ];
-        let output = render_named_table(
-            "users",
-            &vec!["id".into(), "name".into()],
-            &rows,
-        );
+        let output = render_named_table("users", &vec!["id".into(), "name".into()], &rows);
 
         assert!(output.starts_with("users |id, name|"));
         assert!(output.contains("1, Alice"));

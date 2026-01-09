@@ -63,10 +63,11 @@ impl ArchRulesConfig {
                 };
 
                 // Parse the predicate text
-                let predicate = match crate::predicate_parser::parse_predicate(&hir_rule.predicate_text) {
-                    Ok(pred) => pred,
-                    Err(_) => return None, // TODO: [compiler][P3] Collect parsing errors
-                };
+                let predicate =
+                    match crate::predicate_parser::parse_predicate(&hir_rule.predicate_text) {
+                        Ok(pred) => pred,
+                        Err(_) => return None, // TODO: [compiler][P3] Collect parsing errors
+                    };
 
                 Some(ArchRule {
                     action,
@@ -110,9 +111,12 @@ impl Dependency {
             DependencyKind::Depend { from, to } => MatchContext::new()
                 .with_module_path(from)
                 .with_type_name(to),
-            DependencyKind::Use { type_name, location } => {
-                MatchContext::new().with_type_name(type_name).with_module_path(location)
-            }
+            DependencyKind::Use {
+                type_name,
+                location,
+            } => MatchContext::new()
+                .with_type_name(type_name)
+                .with_module_path(location),
         }
     }
 }
@@ -275,12 +279,10 @@ impl ArchRulesChecker {
 
         // Sort by priority (higher first), then by action (Forbid before Allow)
         matched_rules.sort_by(|a, b| {
-            b.1.cmp(&a.1).then_with(|| {
-                match (a.0, b.0) {
-                    (RuleAction::Forbid, RuleAction::Allow) => std::cmp::Ordering::Less,
-                    (RuleAction::Allow, RuleAction::Forbid) => std::cmp::Ordering::Greater,
-                    _ => std::cmp::Ordering::Equal,
-                }
+            b.1.cmp(&a.1).then_with(|| match (a.0, b.0) {
+                (RuleAction::Forbid, RuleAction::Allow) => std::cmp::Ordering::Less,
+                (RuleAction::Allow, RuleAction::Forbid) => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Equal,
             })
         });
 
@@ -397,14 +399,16 @@ mod tests {
         };
 
         let violation = checker.check_dependency(&dep);
-        assert!(violation.is_none(), "Higher priority allow should override forbid");
+        assert!(
+            violation.is_none(),
+            "Higher priority allow should override forbid"
+        );
     }
 
     #[test]
     fn test_import_selector() {
         // Forbid imports from domain to infrastructure
-        let predicate =
-            parse_predicate("pc{ import(domain.**, infrastructure.**) }").unwrap();
+        let predicate = parse_predicate("pc{ import(domain.**, infrastructure.**) }").unwrap();
 
         let rule = ArchRule {
             action: RuleAction::Forbid,
@@ -440,7 +444,10 @@ mod tests {
         };
 
         let violation2 = checker.check_dependency(&dep2);
-        assert!(violation2.is_none(), "Import selector should not match reversed dependency");
+        assert!(
+            violation2.is_none(),
+            "Import selector should not match reversed dependency"
+        );
     }
 
     #[test]
@@ -583,11 +590,7 @@ mod tests {
             .filter(|d| matches!(d.kind, DependencyKind::Use { .. }))
             .collect();
 
-        assert_eq!(
-            type_deps.len(),
-            0,
-            "Built-in types should not be tracked"
-        );
+        assert_eq!(type_deps.len(), 0, "Built-in types should not be tracked");
     }
 
     #[test]

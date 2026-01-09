@@ -93,9 +93,7 @@ fn read_to_string_mmap<P: AsRef<Path>>(path: P) -> io::Result<String> {
     let mmap = unsafe { Mmap::map(&file)? };
 
     // Convert to string, validating UTF-8
-    String::from_utf8(mmap.to_vec()).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, e)
-    })
+    String::from_utf8(mmap.to_vec()).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 /// Read a file to bytes using memory mapping.

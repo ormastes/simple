@@ -3,13 +3,13 @@
 //! Provides learnable lookup tables for discrete tokens.
 
 #[cfg(feature = "pytorch")]
-use super::{ModuleState, MODULE_REGISTRY, next_module_handle};
+use super::{next_module_handle, ModuleState, MODULE_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-use super::{TENSOR_REGISTRY, TensorWrapper, next_handle};
+use super::{next_handle, TensorWrapper, TENSOR_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-use super::{rt_torch_randn, rt_torch_free, rt_torch_set_requires_grad, rt_torch_detach};
+use super::{rt_torch_detach, rt_torch_free, rt_torch_randn, rt_torch_set_requires_grad};
 
 #[cfg(feature = "pytorch")]
 use tch::Kind as TchKind;
@@ -61,7 +61,9 @@ pub extern "C" fn rt_torch_embedding_new(
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(module));
+        MODULE_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(module));
 
         tracing::debug!(
             "rt_torch_embedding_new: handle={} vocab={} dim={} pad={:?}",
@@ -84,10 +86,7 @@ pub extern "C" fn rt_torch_embedding_new(
 /// input_handle: handle to input tensor of indices (LongTensor)
 /// Returns: embedded tensor of shape [input_shape..., embedding_dim]
 #[no_mangle]
-pub extern "C" fn rt_torch_embedding_forward(
-    module_handle: u64,
-    input_handle: u64,
-) -> u64 {
+pub extern "C" fn rt_torch_embedding_forward(module_handle: u64, input_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let module_registry = MODULE_REGISTRY.lock();
@@ -96,7 +95,12 @@ pub extern "C" fn rt_torch_embedding_forward(
         };
         drop(module_registry);
 
-        let ModuleState::Embedding { weight, embedding_dim, .. } = module.as_ref() else {
+        let ModuleState::Embedding {
+            weight,
+            embedding_dim,
+            ..
+        } = module.as_ref()
+        else {
             return 0;
         };
 
@@ -126,7 +130,9 @@ pub extern "C" fn rt_torch_embedding_forward(
         let result = result_flat.view(output_shape.as_slice());
 
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, std::sync::Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(TensorWrapper(result)));
 
         tracing::debug!(
             "rt_torch_embedding_forward: module={} input={} output={}",
@@ -215,7 +221,9 @@ pub extern "C" fn rt_torch_embedding_from_pretrained(
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(module));
+        MODULE_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(module));
 
         tracing::debug!(
             "rt_torch_embedding_from_pretrained: handle={} freeze={} pad={:?}",

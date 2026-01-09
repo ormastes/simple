@@ -25,7 +25,7 @@ pub fn run_file_with_args(path: &PathBuf, gc_log: bool, gc_off: bool, args: Vec<
     let runner = create_runner(gc_log, gc_off);
     // Use interpreted mode with args for spl files
     let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let result = if extension == "spl" || extension == "" {
+    let result = if matches!(extension, "spl" | "simple" | "sscript" | "") {
         runner.run_file_interpreted_with_args(path, args)
     } else {
         runner.run_file(path)

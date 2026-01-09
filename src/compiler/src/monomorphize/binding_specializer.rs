@@ -27,9 +27,7 @@
 //!     logger.log("Hello")  // Specialized to ConsoleLogger::log
 //! ```
 
-use simple_parser::ast::{
-    Block, Expr, FunctionDef, Module, Node, Type as AstType,
-};
+use simple_parser::ast::{Block, Expr, FunctionDef, Module, Node, Type as AstType};
 use simple_parser::token::Span;
 use std::collections::HashMap;
 

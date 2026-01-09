@@ -3,7 +3,7 @@
 //! This module contains methods for emitting contract checks (preconditions,
 //! postconditions, invariants, and error contracts) during MIR lowering.
 
-use super::lowering_core::{MirLowerer, MirLowerResult};
+use super::lowering_core::{MirLowerResult, MirLowerer};
 use crate::hir::HirContract;
 use crate::mir::instructions::{ContractKind, MirInst, VReg};
 

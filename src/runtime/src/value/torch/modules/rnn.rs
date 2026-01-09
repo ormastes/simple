@@ -3,13 +3,13 @@
 //! Provides LSTM and GRU layers for sequence modeling.
 
 #[cfg(feature = "pytorch")]
-use super::{ModuleState, MODULE_REGISTRY, next_module_handle};
+use super::{next_module_handle, ModuleState, MODULE_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-use super::{TENSOR_REGISTRY, TensorWrapper, next_handle};
+use super::{next_handle, TensorWrapper, TENSOR_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-use super::{rt_torch_randn, rt_torch_zeros, rt_torch_free};
+use super::{rt_torch_free, rt_torch_randn, rt_torch_zeros};
 
 #[cfg(feature = "pytorch")]
 use tch::Tensor;
@@ -72,7 +72,8 @@ fn init_rnn_layers(
 
         // Backward direction weights (if bidirectional)
         if bidirectional {
-            let Some(layer_weights_rev) = init_rnn_weights(num_gates, hidden_size, input_dim) else {
+            let Some(layer_weights_rev) = init_rnn_weights(num_gates, hidden_size, input_dim)
+            else {
                 // Cleanup on failure
                 for (wih, whh, bih, bhh) in &weights {
                     rt_torch_free(*wih);
@@ -144,7 +145,9 @@ pub extern "C" fn rt_torch_lstm_new(
         let is_bidirectional = bidirectional != 0;
 
         // LSTM has 4 gates: input, forget, cell, output
-        let Some(weights) = init_rnn_layers(4, input_size, hidden_size, num_layers, is_bidirectional) else {
+        let Some(weights) =
+            init_rnn_layers(4, input_size, hidden_size, num_layers, is_bidirectional)
+        else {
             return 0;
         };
 
@@ -157,7 +160,9 @@ pub extern "C" fn rt_torch_lstm_new(
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(module));
+        MODULE_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(module));
 
         tracing::debug!(
             "rt_torch_lstm_new: input={} hidden={} layers={} bidir={} -> {}",
@@ -222,10 +227,22 @@ pub extern "C" fn rt_torch_lstm_forward(
                 let batch_size = input_shape[1];
 
                 // Initialize h0 and c0 if not provided
-                let Some(h0) = get_or_create_hidden_state(h0_handle, *num_layers, num_directions, batch_size, *hidden_size) else {
+                let Some(h0) = get_or_create_hidden_state(
+                    h0_handle,
+                    *num_layers,
+                    num_directions,
+                    batch_size,
+                    *hidden_size,
+                ) else {
                     return 0;
                 };
-                let Some(c0) = get_or_create_hidden_state(c0_handle, *num_layers, num_directions, batch_size, *hidden_size) else {
+                let Some(c0) = get_or_create_hidden_state(
+                    c0_handle,
+                    *num_layers,
+                    num_directions,
+                    batch_size,
+                    *hidden_size,
+                ) else {
                     return 0;
                 };
 
@@ -236,12 +253,12 @@ pub extern "C" fn rt_torch_lstm_forward(
                 let (output, _hn, _cn) = input.0.lstm(
                     &[h0, c0],
                     &params,
-                    true,            // has_biases
-                    *num_layers,     // num_layers
-                    0.0,             // dropout
-                    false,           // train mode
-                    *bidirectional,  // bidirectional
-                    false,           // batch_first
+                    true,           // has_biases
+                    *num_layers,    // num_layers
+                    0.0,            // dropout
+                    false,          // train mode
+                    *bidirectional, // bidirectional
+                    false,          // batch_first
                 );
 
                 let handle = next_handle();
@@ -284,7 +301,9 @@ pub extern "C" fn rt_torch_gru_new(
         let is_bidirectional = bidirectional != 0;
 
         // GRU has 3 gates: reset, input, new
-        let Some(weights) = init_rnn_layers(3, input_size, hidden_size, num_layers, is_bidirectional) else {
+        let Some(weights) =
+            init_rnn_layers(3, input_size, hidden_size, num_layers, is_bidirectional)
+        else {
             return 0;
         };
 
@@ -297,7 +316,9 @@ pub extern "C" fn rt_torch_gru_new(
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(module));
+        MODULE_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(module));
 
         tracing::debug!(
             "rt_torch_gru_new: input={} hidden={} layers={} bidir={} -> {}",
@@ -358,7 +379,13 @@ pub extern "C" fn rt_torch_gru_forward(
                 let batch_size = input_shape[1];
 
                 // Initialize h0 if not provided
-                let Some(h0) = get_or_create_hidden_state(h0_handle, *num_layers, num_directions, batch_size, *hidden_size) else {
+                let Some(h0) = get_or_create_hidden_state(
+                    h0_handle,
+                    *num_layers,
+                    num_directions,
+                    batch_size,
+                    *hidden_size,
+                ) else {
                     return 0;
                 };
 
@@ -369,12 +396,12 @@ pub extern "C" fn rt_torch_gru_forward(
                 let (output, _hn) = input.0.gru(
                     &h0,
                     &params,
-                    true,            // has_biases
-                    *num_layers,     // num_layers
-                    0.0,             // dropout
-                    false,           // train
-                    *bidirectional,  // bidirectional
-                    false,           // batch_first
+                    true,           // has_biases
+                    *num_layers,    // num_layers
+                    0.0,            // dropout
+                    false,          // train
+                    *bidirectional, // bidirectional
+                    false,          // batch_first
                 );
 
                 let handle = next_handle();

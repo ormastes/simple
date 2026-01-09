@@ -49,9 +49,16 @@ mod parser_expr_tests {
     #[test]
     fn test_numeric_suffix_variants() {
         let suffixes = [
-            NumericSuffix::I8, NumericSuffix::I16, NumericSuffix::I32, NumericSuffix::I64,
-            NumericSuffix::U8, NumericSuffix::U16, NumericSuffix::U32, NumericSuffix::U64,
-            NumericSuffix::F32, NumericSuffix::F64,
+            NumericSuffix::I8,
+            NumericSuffix::I16,
+            NumericSuffix::I32,
+            NumericSuffix::I64,
+            NumericSuffix::U8,
+            NumericSuffix::U16,
+            NumericSuffix::U32,
+            NumericSuffix::U64,
+            NumericSuffix::F32,
+            NumericSuffix::F64,
         ];
         for s in suffixes {
             let _ = format!("{:?}", s);
@@ -125,7 +132,7 @@ mod common_handle_tests {
 // Runtime Executor Tests
 // ============================================================================
 mod runtime_executor_tests {
-    use simple_runtime::{pending_count, is_manual_mode, AsyncMode};
+    use simple_runtime::{is_manual_mode, pending_count, AsyncMode};
 
     #[test]
     fn test_pending_count() {
@@ -261,9 +268,9 @@ mod common_config_env_tests {
 // ============================================================================
 mod runtime_value_ffi_tests {
     use simple_runtime::{
-        rt_value_int, rt_value_float, rt_value_bool, rt_value_nil,
-        rt_value_is_int, rt_value_is_float, rt_value_is_bool, rt_value_is_nil,
-        rt_value_as_int, rt_value_as_float, rt_value_as_bool,
+        rt_value_as_bool, rt_value_as_float, rt_value_as_int, rt_value_bool, rt_value_float,
+        rt_value_int, rt_value_is_bool, rt_value_is_float, rt_value_is_int, rt_value_is_nil,
+        rt_value_nil,
     };
 
     #[test]
@@ -302,7 +309,7 @@ mod runtime_value_ffi_tests {
 // Runtime Array FFI Tests
 // ============================================================================
 mod runtime_array_ffi_tests {
-    use simple_runtime::{rt_array_new, rt_array_push, rt_array_get, rt_array_len, rt_value_int};
+    use simple_runtime::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_value_int};
 
     #[test]
     fn test_array_new() {
@@ -327,7 +334,7 @@ mod runtime_array_ffi_tests {
 // Runtime Dict FFI Tests
 // ============================================================================
 mod runtime_dict_ffi_tests {
-    use simple_runtime::{rt_dict_new, rt_dict_set, rt_dict_get, rt_value_int};
+    use simple_runtime::{rt_dict_get, rt_dict_new, rt_dict_set, rt_value_int};
 
     #[test]
     fn test_dict_new() {
@@ -340,7 +347,7 @@ mod runtime_dict_ffi_tests {
 // Runtime Unique Pointer Tests
 // ============================================================================
 mod runtime_unique_ffi_tests {
-    use simple_runtime::{rt_unique_new, rt_unique_get, rt_unique_set, rt_value_int};
+    use simple_runtime::{rt_unique_get, rt_unique_new, rt_unique_set, rt_value_int};
 
     #[test]
     fn test_unique_ptr() {
@@ -359,7 +366,9 @@ mod runtime_unique_ffi_tests {
 // Runtime Shared Pointer Tests
 // ============================================================================
 mod runtime_shared_ffi_tests {
-    use simple_runtime::{rt_shared_new, rt_shared_get, rt_shared_clone, rt_shared_ref_count, rt_value_int};
+    use simple_runtime::{
+        rt_shared_clone, rt_shared_get, rt_shared_new, rt_shared_ref_count, rt_value_int,
+    };
 
     #[test]
     fn test_shared_ptr() {
@@ -443,9 +452,8 @@ mod runtime_heap_tests {
 // ============================================================================
 mod runtime_types_tests {
     use simple_runtime::{
-        RuntimeValue, RuntimeArray, RuntimeDict, RuntimeString,
-        RuntimeTuple, RuntimeObject, RuntimeClosure, RuntimeEnum,
-        RuntimeShared, RuntimeUnique, RuntimeWeak, RuntimeChannel,
+        RuntimeArray, RuntimeChannel, RuntimeClosure, RuntimeDict, RuntimeEnum, RuntimeObject,
+        RuntimeShared, RuntimeString, RuntimeTuple, RuntimeUnique, RuntimeValue, RuntimeWeak,
     };
 
     #[test]
@@ -504,10 +512,7 @@ mod common_target_tests {
 
     #[test]
     fn test_target_arch_variants() {
-        let archs = [
-            TargetArch::X86_64,
-            TargetArch::Aarch64,
-        ];
+        let archs = [TargetArch::X86_64, TargetArch::Aarch64];
         for a in archs {
             let _ = format!("{:?}", a);
         }
@@ -515,11 +520,7 @@ mod common_target_tests {
 
     #[test]
     fn test_target_os_variants() {
-        let os_list = [
-            TargetOS::Linux,
-            TargetOS::MacOS,
-            TargetOS::Windows,
-        ];
+        let os_list = [TargetOS::Linux, TargetOS::MacOS, TargetOS::Windows];
         for os in os_list {
             let _ = format!("{:?}", os);
         }

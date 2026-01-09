@@ -119,7 +119,9 @@ impl Parser<'_> {
 
     /// Parse optional let-pattern syntax: `let PATTERN =`
     /// Used by if-let and while-let constructs
-    pub(crate) fn parse_optional_let_pattern(&mut self) -> Result<(Option<Pattern>, Expr), ParseError> {
+    pub(crate) fn parse_optional_let_pattern(
+        &mut self,
+    ) -> Result<(Option<Pattern>, Expr), ParseError> {
         if self.check(&TokenKind::Let) {
             self.advance();
             let pattern = self.parse_pattern()?;
@@ -133,7 +135,9 @@ impl Parser<'_> {
 
     /// Parse use path and target (shared by use, common use, export use)
     /// Supports both Python-style (module.{A, B}) and Rust-style (module::{A, B})
-    pub(crate) fn parse_use_path_and_target(&mut self) -> Result<(ModulePath, ImportTarget), ParseError> {
+    pub(crate) fn parse_use_path_and_target(
+        &mut self,
+    ) -> Result<(ModulePath, ImportTarget), ParseError> {
         let path = self.parse_module_path()?;
 
         // Check for Rust-style :: before { or *
@@ -246,7 +250,7 @@ impl Parser<'_> {
     /// Family with arithmetic: `unit length(base: f64): m = 1.0, km = 1000.0: allow add(length) -> length`
     /// Compound: `unit velocity = length / time`
     pub(crate) fn parse_unit(&mut self) -> Result<Node, ParseError> {
-        use crate::ast::{UnitFamilyDef, CompoundUnitDef};
+        use crate::ast::{CompoundUnitDef, UnitFamilyDef};
 
         let start_span = self.current.span;
         self.expect(&TokenKind::Unit)?;
@@ -434,7 +438,11 @@ impl Parser<'_> {
                 TokenKind::Integer(n) => {
                     let val = *n as i32;
                     self.advance();
-                    if negative { -val } else { val }
+                    if negative {
+                        -val
+                    } else {
+                        val
+                    }
                 }
                 _ => {
                     return Err(ParseError::syntax_error_with_span(
@@ -721,7 +729,10 @@ impl Parser<'_> {
                             }
                         } else {
                             return Err(ParseError::syntax_error_with_span(
-                                format!("Unknown handle_pool field '{}', expected 'capacity'", field_name),
+                                format!(
+                                    "Unknown handle_pool field '{}', expected 'capacity'",
+                                    field_name
+                                ),
                                 self.previous.span,
                             ));
                         }

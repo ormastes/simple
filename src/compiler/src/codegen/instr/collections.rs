@@ -16,13 +16,11 @@ pub(super) fn create_stack_string(
     let bytes = value.as_bytes();
     let len = bytes.len();
 
-    let slot = builder.create_sized_stack_slot(
-        cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            len as u32,
-            0,
-        ),
-    );
+    let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+        len as u32,
+        0,
+    ));
 
     for (i, &byte) in bytes.iter().enumerate() {
         let byte_val = builder.ins().iconst(types::I8, byte as i64);
@@ -337,7 +335,9 @@ pub(super) fn compile_dict_lit<M: Module>(
         let wrapped_key = builder.inst_results(wrap_key)[0];
         let wrap_val = builder.ins().call(value_int_ref, &[val_val]);
         let wrapped_val = builder.inst_results(wrap_val)[0];
-        builder.ins().call(dict_set_ref, &[dict, wrapped_key, wrapped_val]);
+        builder
+            .ins()
+            .call(dict_set_ref, &[dict, wrapped_key, wrapped_val]);
     }
     ctx.vreg_values.insert(dest, dict);
 }
@@ -384,7 +384,9 @@ pub(super) fn compile_index_set<M: Module>(
     let wrap_val = builder.ins().call(value_int_ref, &[val]);
     let wrapped_val = builder.inst_results(wrap_val)[0];
 
-    builder.ins().call(index_set_ref, &[coll_val, wrapped_idx, wrapped_val]);
+    builder
+        .ins()
+        .call(index_set_ref, &[coll_val, wrapped_idx, wrapped_val]);
 }
 
 pub(super) fn compile_slice_op<M: Module>(
@@ -410,7 +412,9 @@ pub(super) fn compile_slice_op<M: Module>(
         .map(|s| ctx.vreg_values[&s])
         .unwrap_or_else(|| builder.ins().iconst(types::I64, 1));
 
-    let call = builder.ins().call(slice_ref, &[coll_val, start_val, end_val, step_val]);
+    let call = builder
+        .ins()
+        .call(slice_ref, &[coll_val, start_val, end_val, step_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
 }
@@ -425,7 +429,10 @@ pub(super) fn compile_const_string<M: Module>(
     let string_new_ref = ctx.module.declare_func_in_func(string_new_id, builder.func);
 
     let (ptr, len_val) = if value.is_empty() {
-        (builder.ins().iconst(types::I64, 0), builder.ins().iconst(types::I64, 0))
+        (
+            builder.ins().iconst(types::I64, 0),
+            builder.ins().iconst(types::I64, 0),
+        )
     } else {
         create_stack_string(builder, value)
     };
@@ -444,7 +451,9 @@ pub(super) fn compile_fstring_format<M: Module>(
     let string_new_id = ctx.runtime_funcs["rt_string_new"];
     let string_new_ref = ctx.module.declare_func_in_func(string_new_id, builder.func);
     let string_concat_id = ctx.runtime_funcs["rt_string_concat"];
-    let string_concat_ref = ctx.module.declare_func_in_func(string_concat_id, builder.func);
+    let string_concat_ref = ctx
+        .module
+        .declare_func_in_func(string_concat_id, builder.func);
 
     let null_ptr = builder.ins().iconst(types::I64, 0);
     let zero_len = builder.ins().iconst(types::I64, 0);

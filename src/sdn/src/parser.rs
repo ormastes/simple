@@ -1,7 +1,7 @@
 //! SDN parser - one-pass LL(2) parser for SDN documents.
 
 use crate::error::{Result, SdnError, Span};
-use crate::lexer::{Token, TokenKind, Lexer};
+use crate::lexer::{Lexer, Token, TokenKind};
 use crate::value::SdnValue;
 use indexmap::IndexMap;
 
@@ -68,9 +68,7 @@ impl<'a> Parser<'a> {
                 self.skip_newlines();
                 Ok(Some((name, value)))
             }
-            Some(TokenKind::Pipe) => {
-                self.parse_named_table(name)
-            }
+            Some(TokenKind::Pipe) => self.parse_named_table(name),
             _ => {
                 let span = self.current_span();
                 Err(SdnError::syntax_error_with_span(
@@ -344,6 +342,14 @@ impl<'a> Parser<'a> {
                 break;
             }
 
+            // Handle empty values (consecutive commas or trailing comma)
+            if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                // Empty value - treat as empty string
+                row.push(SdnValue::String(String::new()));
+                self.advance();
+                continue;
+            }
+
             let value = self.parse_value()?;
             row.push(value);
 
@@ -596,10 +602,7 @@ mod tests {
     fn test_simple_value() {
         let src = "name: Alice";
         let result = parse(src).unwrap();
-        assert_eq!(
-            result.get("name").and_then(|v| v.as_str()),
-            Some("Alice")
-        );
+        assert_eq!(result.get("name").and_then(|v| v.as_str()), Some("Alice"));
     }
 
     #[test]
@@ -634,7 +637,10 @@ mod tests {
         let src = "server:\n    host: localhost\n    port: 8080";
         let result = parse(src).unwrap();
         let server = result.get("server").unwrap();
-        assert_eq!(server.get("host").and_then(|v| v.as_str()), Some("localhost"));
+        assert_eq!(
+            server.get("host").and_then(|v| v.as_str()),
+            Some("localhost")
+        );
         assert_eq!(server.get("port").and_then(|v| v.as_i64()), Some(8080));
     }
 
@@ -702,5 +708,50 @@ mod tests {
         let src = "# This is a comment\nname: Alice";
         let result = parse(src).unwrap();
         assert_eq!(result.get("name").and_then(|v| v.as_str()), Some("Alice"));
+    }
+
+    #[test]
+    fn test_table_with_empty_field() {
+        let src = "data |a, b, c|\n    1, , 3";
+        let result = parse(src).unwrap();
+        if let SdnValue::Table { rows, .. } = result.get("data").unwrap() {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 3);
+            assert_eq!(rows[0][0].as_i64(), Some(1));
+            assert_eq!(rows[0][1].as_str(), Some("")); // Empty field
+            assert_eq!(rows[0][2].as_i64(), Some(3));
+        } else {
+            panic!("Expected table");
+        }
+    }
+
+    #[test]
+    fn test_table_with_empty_field_from_file_format() {
+        // Same content as would be in a file (with trailing newline)
+        let src = "data |a, b, c|\n    1, , 3\n";
+        let result = parse(src).unwrap();
+        if let SdnValue::Table { rows, .. } = result.get("data").unwrap() {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 3);
+            assert_eq!(rows[0][0].as_i64(), Some(1));
+            assert_eq!(rows[0][1].as_str(), Some("")); // Empty field
+            assert_eq!(rows[0][2].as_i64(), Some(3));
+        } else {
+            panic!("Expected table");
+        }
+    }
+
+    #[test]
+    fn test_table_with_quoted_string_containing_comma() {
+        let src = r#"data |id, name, desc|
+    1, Test, "Hello, World""#;
+        let result = parse(src).unwrap();
+        if let SdnValue::Table { rows, .. } = result.get("data").unwrap() {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 3);
+            assert_eq!(rows[0][2].as_str(), Some("Hello, World"));
+        } else {
+            panic!("Expected table");
+        }
     }
 }

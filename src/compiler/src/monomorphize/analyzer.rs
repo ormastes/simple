@@ -5,7 +5,6 @@ use super::util::{ast_type_to_concrete, infer_concrete_type, type_uses_param};
 use simple_parser::ast::{Block, Expr, FunctionDef, Module, Node};
 use std::collections::HashMap;
 
-
 /// Analyzes AST to find calls to generic functions and collect the
 /// concrete type arguments needed for monomorphization.
 ///
@@ -227,7 +226,9 @@ impl<'a> CallSiteAnalyzer<'a> {
                     if type_uses_param(ty, type_param) {
                         // Get the actual argument value
                         if let Some(arg) = args.get(i) {
-                            if let Some(concrete) = infer_concrete_type(&arg.value, &self.type_context) {
+                            if let Some(concrete) =
+                                infer_concrete_type(&arg.value, &self.type_context)
+                            {
                                 type_args.push(concrete);
                                 break;
                             }
@@ -250,7 +251,7 @@ impl<'a> CallSiteAnalyzer<'a> {
         if let Some(ty) = infer_concrete_type(expr, &self.type_context) {
             return Some(ty);
         }
-        
+
         // Handle additional cases not in shared util
         match expr {
             Expr::Tuple(elems) => {

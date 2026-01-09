@@ -267,7 +267,7 @@ impl SymbolUsageAnalyzer {
             // Match expressions
             Expr::Match { subject, .. } => {
                 self.collect_usage_from_expr(subject, usage);
-                // TODO: Collect from match arms
+                // TODO: [compiler][P3] Collect from match arms
             }
 
             // Blocks

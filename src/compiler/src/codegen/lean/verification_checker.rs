@@ -4,9 +4,9 @@
 //! Enforces the V-* and M-* rules defined in the Lean verification spec.
 
 use super::verification_diagnostics::{
-    VerificationDiagnostics, VerificationDiagnostic, VerificationErrorCode
+    VerificationDiagnostic, VerificationDiagnostics, VerificationErrorCode,
 };
-use crate::hir::{HirModule, HirFunction, HirStmt, HirExpr, HirExprKind};
+use crate::hir::{HirExpr, HirExprKind, HirFunction, HirModule, HirStmt};
 use simple_common::diagnostic::Span;
 
 /// Verification constraint checker
@@ -88,25 +88,39 @@ impl<'a> VerificationChecker<'a> {
     fn statement_calls_function(&self, stmt: &HirStmt, name: &str) -> bool {
         match stmt {
             HirStmt::Expr(expr) => self.expr_calls_function(expr, name),
-            HirStmt::Let { value, .. } => {
-                value.as_ref().map(|e| self.expr_calls_function(e, name)).unwrap_or(false)
-            }
+            HirStmt::Let { value, .. } => value
+                .as_ref()
+                .map(|e| self.expr_calls_function(e, name))
+                .unwrap_or(false),
             HirStmt::Assign { value, .. } => self.expr_calls_function(value, name),
-            HirStmt::If { condition, then_block, else_block, .. } => {
-                self.expr_calls_function(condition, name) ||
-                then_block.iter().any(|s| self.statement_calls_function(s, name)) ||
-                else_block.as_ref().map(|b| b.iter().any(|s| self.statement_calls_function(s, name))).unwrap_or(false)
+            HirStmt::If {
+                condition,
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.expr_calls_function(condition, name)
+                    || then_block
+                        .iter()
+                        .any(|s| self.statement_calls_function(s, name))
+                    || else_block
+                        .as_ref()
+                        .map(|b| b.iter().any(|s| self.statement_calls_function(s, name)))
+                        .unwrap_or(false)
             }
-            HirStmt::While { condition, body, .. } => {
-                self.expr_calls_function(condition, name) ||
-                body.iter().any(|s| self.statement_calls_function(s, name))
+            HirStmt::While {
+                condition, body, ..
+            } => {
+                self.expr_calls_function(condition, name)
+                    || body.iter().any(|s| self.statement_calls_function(s, name))
             }
             HirStmt::Loop { body, .. } => {
                 body.iter().any(|s| self.statement_calls_function(s, name))
             }
-            HirStmt::Return(value) => {
-                value.as_ref().map(|e| self.expr_calls_function(e, name)).unwrap_or(false)
-            }
+            HirStmt::Return(value) => value
+                .as_ref()
+                .map(|e| self.expr_calls_function(e, name))
+                .unwrap_or(false),
             HirStmt::Break | HirStmt::Continue => false,
         }
     }
@@ -120,32 +134,37 @@ impl<'a> VerificationChecker<'a> {
                         return true;
                     }
                 }
-                self.expr_calls_function(func, name) ||
-                args.iter().any(|a| self.expr_calls_function(a, name))
+                self.expr_calls_function(func, name)
+                    || args.iter().any(|a| self.expr_calls_function(a, name))
             }
             HirExprKind::Binary { left, right, .. } => {
                 self.expr_calls_function(left, name) || self.expr_calls_function(right, name)
             }
-            HirExprKind::Unary { operand, .. } => {
-                self.expr_calls_function(operand, name)
+            HirExprKind::Unary { operand, .. } => self.expr_calls_function(operand, name),
+            HirExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.expr_calls_function(condition, name)
+                    || self.expr_calls_function(then_branch, name)
+                    || else_branch
+                        .as_ref()
+                        .map(|e| self.expr_calls_function(e, name))
+                        .unwrap_or(false)
             }
-            HirExprKind::If { condition, then_branch, else_branch } => {
-                self.expr_calls_function(condition, name) ||
-                self.expr_calls_function(then_branch, name) ||
-                else_branch.as_ref().map(|e| self.expr_calls_function(e, name)).unwrap_or(false)
-            }
-            HirExprKind::Tuple(elements) | HirExprKind::Array(elements) | HirExprKind::VecLiteral(elements) => {
+            HirExprKind::Tuple(elements)
+            | HirExprKind::Array(elements)
+            | HirExprKind::VecLiteral(elements) => {
                 elements.iter().any(|e| self.expr_calls_function(e, name))
             }
             HirExprKind::StructInit { fields, .. } => {
                 fields.iter().any(|e| self.expr_calls_function(e, name))
             }
-            HirExprKind::FieldAccess { receiver, .. } => {
-                self.expr_calls_function(receiver, name)
-            }
-            HirExprKind::Index { receiver, index, .. } => {
-                self.expr_calls_function(receiver, name) || self.expr_calls_function(index, name)
-            }
+            HirExprKind::FieldAccess { receiver, .. } => self.expr_calls_function(receiver, name),
+            HirExprKind::Index {
+                receiver, index, ..
+            } => self.expr_calls_function(receiver, name) || self.expr_calls_function(index, name),
             HirExprKind::Ref(inner) | HirExprKind::Deref(inner) => {
                 self.expr_calls_function(inner, name)
             }
@@ -162,7 +181,12 @@ impl<'a> VerificationChecker<'a> {
                     self.check_expr_effects(e, func_name);
                 }
             }
-            HirStmt::If { condition, then_block, else_block, .. } => {
+            HirStmt::If {
+                condition,
+                then_block,
+                else_block,
+                ..
+            } => {
                 self.check_expr_effects(condition, func_name);
                 for s in then_block {
                     self.check_statement_effects(s, func_name);
@@ -173,7 +197,9 @@ impl<'a> VerificationChecker<'a> {
                     }
                 }
             }
-            HirStmt::While { condition, body, .. } => {
+            HirStmt::While {
+                condition, body, ..
+            } => {
                 self.check_expr_effects(condition, func_name);
                 for s in body {
                     self.check_statement_effects(s, func_name);
@@ -224,7 +250,12 @@ impl<'a> VerificationChecker<'a> {
                     self.check_expr_safety(e, func_name);
                 }
             }
-            HirStmt::If { condition, then_block, else_block, .. } => {
+            HirStmt::If {
+                condition,
+                then_block,
+                else_block,
+                ..
+            } => {
                 self.check_expr_safety(condition, func_name);
                 for s in then_block {
                     self.check_statement_safety(s, func_name);
@@ -301,24 +332,35 @@ impl<'a> VerificationChecker<'a> {
     /// Check if function is an IO function
     fn is_io_function(&self, name: &str) -> bool {
         // List of known IO functions
-        matches!(name,
-            "print" | "println" | "read" | "readline" | "write" |
-            "open" | "close" | "read_file" | "write_file" |
-            "spawn" | "send" | "recv" | "sleep"
+        matches!(
+            name,
+            "print"
+                | "println"
+                | "read"
+                | "readline"
+                | "write"
+                | "open"
+                | "close"
+                | "read_file"
+                | "write_file"
+                | "spawn"
+                | "send"
+                | "recv"
+                | "sleep"
         )
     }
 
     /// Check if function is mutating
     fn is_mutating_function(&self, name: &str) -> bool {
         // Functions that modify state
-        name.starts_with("set_") ||
-        name.starts_with("push") ||
-        name.starts_with("pop") ||
-        name.starts_with("insert") ||
-        name.starts_with("remove") ||
-        name.starts_with("clear") ||
-        name.starts_with("append") ||
-        name == "assign"
+        name.starts_with("set_")
+            || name.starts_with("push")
+            || name.starts_with("pop")
+            || name.starts_with("insert")
+            || name.starts_with("remove")
+            || name.starts_with("clear")
+            || name.starts_with("append")
+            || name == "assign"
     }
 
     /// Report an error

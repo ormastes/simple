@@ -13,7 +13,12 @@ pub struct Span {
 
 impl Span {
     pub fn new(start: usize, end: usize, line: usize, column: usize) -> Self {
-        Self { start, end, line, column }
+        Self {
+            start,
+            end,
+            line,
+            column,
+        }
     }
 
     pub fn merge(&self, other: &Span) -> Span {
@@ -28,7 +33,12 @@ impl Span {
 
 impl Default for Span {
     fn default() -> Self {
-        Self { start: 0, end: 0, line: 1, column: 1 }
+        Self {
+            start: 0,
+            end: 0,
+            line: 1,
+            column: 1,
+        }
     }
 }
 
@@ -50,28 +60,28 @@ impl SuiToken {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SuiTokenKind {
     // Template block delimiters
-    DirectiveOpen,     // {@
-    DirectiveClose,    // @}
-    DeclOpen,          // {$
-    DeclClose,         // $}
-    ServerOpen,        // {-
-    ServerClose,       // -}
-    ClientOpen,        // {+
-    ClientClose,       // +}
-    OutputOpen,        // {{
-    OutputClose,       // }}
-    RawOutputOpen,     // {!
-    RawOutputClose,    // !}
-    ControlOpen,       // {%
-    ControlClose,      // %}
-    CommentOpen,       // {#
-    CommentClose,      // #}
+    DirectiveOpen,  // {@
+    DirectiveClose, // @}
+    DeclOpen,       // {$
+    DeclClose,      // $}
+    ServerOpen,     // {-
+    ServerClose,    // -}
+    ClientOpen,     // {+
+    ClientClose,    // +}
+    OutputOpen,     // {{
+    OutputClose,    // }}
+    RawOutputOpen,  // {!
+    RawOutputClose, // !}
+    ControlOpen,    // {%
+    ControlClose,   // %}
+    CommentOpen,    // {#
+    CommentClose,   // #}
 
     // HTML tokens
-    TagOpen,           // <
-    TagClose,          // >
-    TagSelfClose,      // />
-    TagEndOpen,        // </
+    TagOpen,      // <
+    TagClose,     // >
+    TagSelfClose, // />
+    TagEndOpen,   // </
 
     // Literals
     Text(String),
@@ -82,36 +92,36 @@ pub enum SuiTokenKind {
     Bool(bool),
 
     // Operators
-    Assign,            // =
-    Eq,                // ==
-    NotEq,             // !=
-    Lt,                // <
-    Gt,                // >
-    LtEq,              // <=
-    GtEq,              // >=
-    Plus,              // +
-    Minus,             // -
-    Star,              // *
-    Slash,             // /
-    Percent,           // %
-    And,               // and, &&
-    Or,                // or, ||
-    Not,               // not, !
-    Dot,               // .
-    DoubleDot,         // ..
+    Assign,    // =
+    Eq,        // ==
+    NotEq,     // !=
+    Lt,        // <
+    Gt,        // >
+    LtEq,      // <=
+    GtEq,      // >=
+    Plus,      // +
+    Minus,     // -
+    Star,      // *
+    Slash,     // /
+    Percent,   // %
+    And,       // and, &&
+    Or,        // or, ||
+    Not,       // not, !
+    Dot,       // .
+    DoubleDot, // ..
 
     // Punctuation
-    Colon,             // :
-    Comma,             // ,
-    Semicolon,         // ;
-    LParen,            // (
-    RParen,            // )
-    LBracket,          // [
-    RBracket,          // ]
-    LBrace,            // {
-    RBrace,            // }
-    Pipe,              // |
-    Arrow,             // =>
+    Colon,     // :
+    Comma,     // ,
+    Semicolon, // ;
+    LParen,    // (
+    RParen,    // )
+    LBracket,  // [
+    RBracket,  // ]
+    LBrace,    // {
+    RBrace,    // }
+    Pipe,      // |
+    Arrow,     // =>
 
     // Control keywords (inside {% %})
     If,

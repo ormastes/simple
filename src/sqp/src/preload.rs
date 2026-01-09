@@ -133,11 +133,7 @@ impl<'a> PreloadBuilder<'a> {
         self.model.relations.iter().find(|r| r.name == name)
     }
 
-    fn build_relation_query(
-        &self,
-        relation: &Relation,
-        condition: &Option<Query>,
-    ) -> Query {
+    fn build_relation_query(&self, relation: &Relation, condition: &Option<Query>) -> Query {
         let related_table = crate::naming::to_table_name(&relation.related_model);
 
         let mut query = Query::table(&related_table);
@@ -148,11 +144,8 @@ impl<'a> PreloadBuilder<'a> {
                 // Child records have foreign_key pointing to parent
                 // e.g., posts.user_id IN (1, 2, 3)
                 if !self.primary_keys.is_empty() {
-                    let placeholders: Vec<String> = self
-                        .primary_keys
-                        .iter()
-                        .map(|_| "?".to_string())
-                        .collect();
+                    let placeholders: Vec<String> =
+                        self.primary_keys.iter().map(|_| "?".to_string()).collect();
                     query = query.where_raw(
                         format!("{} IN ({})", relation.foreign_key, placeholders.join(", ")),
                         self.primary_keys
@@ -173,17 +166,11 @@ impl<'a> PreloadBuilder<'a> {
                 let right_key = &relation.foreign_key;
                 query = query.join(
                     join_table,
-                    format!(
-                        "{}.id = {}.{}",
-                        related_table, join_table, right_key
-                    ),
+                    format!("{}.id = {}.{}", related_table, join_table, right_key),
                 );
                 if !self.primary_keys.is_empty() {
-                    let placeholders: Vec<String> = self
-                        .primary_keys
-                        .iter()
-                        .map(|_| "?".to_string())
-                        .collect();
+                    let placeholders: Vec<String> =
+                        self.primary_keys.iter().map(|_| "?".to_string()).collect();
                     query = query.where_raw(
                         format!(
                             "{}.{} IN ({})",

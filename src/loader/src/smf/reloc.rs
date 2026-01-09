@@ -68,11 +68,18 @@ pub fn apply_relocations(
         } else {
             match imports(sym_name) {
                 Some(addr) => {
-                    trace!(symbol = sym_name, addr = format!("{:#x}", addr), "Resolved external symbol");
+                    trace!(
+                        symbol = sym_name,
+                        addr = format!("{:#x}", addr),
+                        "Resolved external symbol"
+                    );
                     addr
                 }
                 None => {
-                    let msg = format!("Undefined symbol: {} (required by relocation {})", sym_name, reloc_idx);
+                    let msg = format!(
+                        "Undefined symbol: {} (required by relocation {})",
+                        sym_name, reloc_idx
+                    );
                     error!("{}", msg);
                     return Err(msg);
                 }
@@ -141,7 +148,10 @@ pub fn apply_relocations(
             }
 
             RelocationType::GotPcRel => {
-                warn!(reloc_idx, "GotPcRel relocation not yet implemented, skipping");
+                warn!(
+                    reloc_idx,
+                    "GotPcRel relocation not yet implemented, skipping"
+                );
             }
         }
     }

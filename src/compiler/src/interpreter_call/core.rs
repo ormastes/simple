@@ -56,15 +56,18 @@ macro_rules! extract_block_result {
 use crate::aop_config::AopConfig;
 use crate::di::DiScope;
 use crate::error::CompileError;
-use crate::interpreter::{evaluate_expr, exec_block, exec_block_fn, with_effect_context, Control, get_aop_config, get_di_config, DI_SINGLETONS};
+use crate::interpreter::{
+    evaluate_expr, exec_block, exec_block_fn, get_aop_config, get_di_config, with_effect_context,
+    Control, DI_SINGLETONS,
+};
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
-use simple_parser::ast::{Argument, Parameter, Type, SelfMode, FunctionDef, ClassDef, EnumDef};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, Parameter, SelfMode, Type};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 type Enums = HashMap<String, EnumDef>;
 
@@ -120,14 +123,25 @@ pub(crate) fn bind_args_with_injected(
     let mut bound = HashMap::new();
     let mut positional_idx = 0usize;
     for arg in args {
-        let val = evaluate_expr(&arg.value, outer_env, functions, classes, enums, impl_methods)?;
+        let val = evaluate_expr(
+            &arg.value,
+            outer_env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?;
         if let Some(name) = &arg.name {
             let param = params_to_bind.iter().find(|p| &p.name == name);
             if param.is_none() {
                 bail_semantic!("unknown argument {}", name);
             }
             let val = wrap_trait_object!(val, param.and_then(|p| p.ty.as_ref()));
-            validate_unit!(&val, param.and_then(|p| p.ty.as_ref()), format!("parameter '{}'", name));
+            validate_unit!(
+                &val,
+                param.and_then(|p| p.ty.as_ref()),
+                format!("parameter '{}'", name)
+            );
             bound.insert(name.clone(), val);
         } else {
             if positional_idx >= params_to_bind.len() {
@@ -135,7 +149,11 @@ pub(crate) fn bind_args_with_injected(
             }
             let param = params_to_bind[positional_idx];
             let val = wrap_trait_object!(val, param.ty.as_ref());
-            validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
+            validate_unit!(
+                &val,
+                param.ty.as_ref(),
+                format!("parameter '{}'", param.name)
+            );
             bound.insert(param.name.clone(), val);
             positional_idx += 1;
         }
@@ -144,9 +162,20 @@ pub(crate) fn bind_args_with_injected(
     for param in params_to_bind {
         if !bound.contains_key(&param.name) {
             if let Some(default_expr) = &param.default {
-                let v = evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?;
+                let v = evaluate_expr(
+                    default_expr,
+                    outer_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
                 let v = wrap_trait_object!(v, param.ty.as_ref());
-                validate_unit!(&v, param.ty.as_ref(), format!("parameter '{}' default value", param.name));
+                validate_unit!(
+                    &v,
+                    param.ty.as_ref(),
+                    format!("parameter '{}' default value", param.name)
+                );
                 bound.insert(param.name.clone(), v);
             } else if let Some(injected_val) = injected.get(&param.name) {
                 bound.insert(param.name.clone(), injected_val.clone());
@@ -183,13 +212,24 @@ fn bind_args_with_values(
         let value = if idx < args.len() {
             args[idx].clone()
         } else if let Some(default_expr) = &param.default {
-            evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?
+            evaluate_expr(
+                default_expr,
+                outer_env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
         } else {
             bail_semantic!("missing argument {}", param.name);
         };
 
         let value = wrap_trait_object!(value, param.ty.as_ref());
-        validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
+        validate_unit!(
+            &value,
+            param.ty.as_ref(),
+            format!("parameter '{}'", param.name)
+        );
         bound.insert(param.name.clone(), value);
     }
 
@@ -207,14 +247,21 @@ pub(crate) fn exec_lambda(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    use simple_parser::ast::Expr;
     use super::block_execution::exec_block_closure;
+    use simple_parser::ast::Expr;
 
     let mut local_env = captured_env.clone();
     let mut positional_idx = 0usize;
 
     for arg in args {
-        let val = evaluate_expr(&arg.value, call_env, functions, classes, enums, impl_methods)?;
+        let val = evaluate_expr(
+            &arg.value,
+            call_env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?;
         if let Some(name) = &arg.name {
             local_env.insert(name.clone(), val);
         } else {
@@ -250,7 +297,16 @@ pub(crate) fn exec_function(
     self_ctx: Option<(&str, &HashMap<String, Value>)>,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
-        exec_function_inner(func, args, outer_env, functions, classes, enums, impl_methods, self_ctx)
+        exec_function_inner(
+            func,
+            args,
+            outer_env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            self_ctx,
+        )
     })
 }
 
@@ -264,7 +320,15 @@ pub(crate) fn exec_function_with_values(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
-        exec_function_with_values_inner(func, args, outer_env, functions, classes, enums, impl_methods)
+        exec_function_with_values_inner(
+            func,
+            args,
+            outer_env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )
     })
 }
 
@@ -282,13 +346,33 @@ pub(crate) fn exec_function_with_captured_env(
         let mut local_env = captured_env.clone();
 
         let self_mode = SelfMode::IncludeSelf;
-        let bound_args = bind_args(&func.params, args, outer_env, functions, classes, enums, impl_methods, self_mode)?;
+        let bound_args = bind_args(
+            &func.params,
+            args,
+            outer_env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            self_mode,
+        )?;
         for (name, value) in bound_args {
             local_env.insert(name, value);
         }
 
-        let result = extract_block_result!(exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods));
-        validate_unit!(&result, func.return_type.as_ref(), format!("return type mismatch in '{}'", func.name));
+        let result = extract_block_result!(exec_block_fn(
+            &func.body,
+            &mut local_env,
+            functions,
+            classes,
+            enums,
+            impl_methods
+        ));
+        validate_unit!(
+            &result,
+            func.return_type.as_ref(),
+            format!("return type mismatch in '{}'", func.name)
+        );
 
         Ok(result)
     })
@@ -307,7 +391,7 @@ fn exec_function_inner(
     // Layout recording for 4KB page locality optimization
     crate::layout_recorder::record_function_call(&func.name);
 
-    // TODO: Re-enable coverage tracking when module is complete
+    // TODO: [compiler][P2] Re-enable coverage tracking when module is complete
     // if let Some(cov) = crate::coverage::get_global_coverage() {
     //     cov.lock().unwrap().record_function_call(&func.name);
     // }
@@ -341,8 +425,19 @@ fn exec_function_inner(
     for (name, val) in bound {
         local_env.insert(name, val);
     }
-    let result = extract_block_result!(exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods));
-    validate_unit!(&result, func.return_type.as_ref(), format!("return type mismatch in '{}'", func.name));
+    let result = extract_block_result!(exec_block_fn(
+        &func.body,
+        &mut local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods
+    ));
+    validate_unit!(
+        &result,
+        func.return_type.as_ref(),
+        format!("return type mismatch in '{}'", func.name)
+    );
 
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
@@ -362,7 +457,7 @@ fn exec_function_with_values_inner(
     // Layout recording for 4KB page locality optimization
     crate::layout_recorder::record_function_call(&func.name);
 
-    // TODO: Re-enable coverage tracking when module is complete
+    // TODO: [compiler][P2] Re-enable coverage tracking when module is complete
     // if let Some(cov) = crate::coverage::get_global_coverage() {
     //     cov.lock().unwrap().record_function_call(&func.name);
     // }
@@ -382,8 +477,19 @@ fn exec_function_with_values_inner(
     for (name, val) in bound {
         local_env.insert(name, val);
     }
-    let result = extract_block_result!(exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods));
-    validate_unit!(&result, func.return_type.as_ref(), format!("return type mismatch in '{}'", func.name));
+    let result = extract_block_result!(exec_block_fn(
+        &func.body,
+        &mut local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods
+    ));
+    validate_unit!(
+        &result,
+        func.return_type.as_ref(),
+        format!("return type mismatch in '{}'", func.name)
+    );
 
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
@@ -400,9 +506,10 @@ pub(crate) fn instantiate_class(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    let class_def = classes.get(class_name).cloned().ok_or_else(|| {
-        semantic_err!("unknown class: {}", class_name)
-    })?;
+    let class_def = classes
+        .get(class_name)
+        .cloned()
+        .ok_or_else(|| semantic_err!("unknown class: {}", class_name))?;
 
     let mut fields: HashMap<String, Value> = HashMap::new();
     for field in &class_def.fields {
@@ -468,14 +575,19 @@ pub(crate) fn instantiate_class(
             // Mark this class as currently in its `new` method
             IN_NEW_METHOD.with(|set| set.borrow_mut().insert(class_name.to_string()));
 
-            let result = match exec_block(&new_method.body, &mut local_env, functions, classes, enums, impl_methods) {
+            let result = match exec_block(
+                &new_method.body,
+                &mut local_env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            ) {
                 Ok(Control::Return(v)) => Ok(v),
-                Ok(_) => {
-                    Ok(local_env.get("self").cloned().unwrap_or(Value::Object {
-                        class: class_name.to_string(),
-                        fields,
-                    }))
-                }
+                Ok(_) => Ok(local_env.get("self").cloned().unwrap_or(Value::Object {
+                    class: class_name.to_string(),
+                    fields,
+                })),
                 Err(CompileError::TryError(val)) => Ok(val),
                 Err(e) => Err(e),
             };
@@ -556,11 +668,13 @@ fn resolve_injected_args(
         if idx < positional_count {
             continue;
         }
-        let type_name = param_type_name(param).ok_or_else(|| {
-            semantic_err!("injectable parameter '{}' missing type", param.name)
-        })?;
+        let type_name = param_type_name(param)
+            .ok_or_else(|| semantic_err!("injectable parameter '{}' missing type", param.name))?;
         let di_config = get_di_config().ok_or_else(|| {
-            semantic_err!("missing di config for injectable parameter '{}'", param.name)
+            semantic_err!(
+                "missing di config for injectable parameter '{}'",
+                param.name
+            )
         })?;
         let ctx = create_di_match_context(&type_name, class_name, &[]);
         let binding = di_config
@@ -615,20 +729,12 @@ fn resolve_binding_instance(
 
     let instance = if classes.contains_key(impl_type) {
         if let Some(aop_config) = get_aop_config() {
-            let class_def = classes.get(impl_type).ok_or_else(|| {
-                semantic_err!("unknown class: {}", impl_type)
-            })?;
+            let class_def = classes
+                .get(impl_type)
+                .ok_or_else(|| semantic_err!("unknown class: {}", impl_type))?;
             let around = collect_runtime_init_advices(impl_type, class_def, &aop_config);
             if around.is_empty() {
-                instantiate_class(
-                    impl_type,
-                    &[],
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?
+                instantiate_class(impl_type, &[], env, functions, classes, enums, impl_methods)?
             } else {
                 let ctx = Arc::new(ProceedContext {
                     env: Arc::new(env.clone()),
@@ -637,23 +743,10 @@ fn resolve_binding_instance(
                     enums: Arc::new(enums.clone()),
                     impl_methods: Arc::new(impl_methods.clone()),
                 });
-                invoke_runtime_around_chain(
-                    Arc::new(around),
-                    0,
-                    impl_type,
-                    ctx,
-                )?
+                invoke_runtime_around_chain(Arc::new(around), 0, impl_type, ctx)?
             }
         } else {
-            instantiate_class(
-                impl_type,
-                &[],
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?
+            instantiate_class(impl_type, &[], env, functions, classes, enums, impl_methods)?
         }
     } else {
         bail_semantic!("DI binding impl '{}' is not a class", impl_type);
@@ -661,7 +754,8 @@ fn resolve_binding_instance(
 
     if scope == DiScope::Singleton {
         DI_SINGLETONS.with(|cell| {
-            cell.borrow_mut().insert(impl_type.to_string(), instance.clone());
+            cell.borrow_mut()
+                .insert(impl_type.to_string(), instance.clone());
         });
     }
 
@@ -684,7 +778,11 @@ fn collect_runtime_init_advices(
     if !aop_config.runtime_enabled {
         return Vec::new();
     }
-    let attrs: Vec<String> = class_def.attributes.iter().map(|attr| attr.name.clone()).collect();
+    let attrs: Vec<String> = class_def
+        .attributes
+        .iter()
+        .map(|attr| attr.name.clone())
+        .collect();
     let ctx = crate::aop_config::create_aop_match_context(impl_type, impl_type, &attrs);
     let mut matches: Vec<_> = aop_config
         .around

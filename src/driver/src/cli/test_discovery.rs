@@ -54,9 +54,10 @@ pub fn discover_tests(dir: &Path, level: TestLevel) -> Vec<PathBuf> {
 /// Check if a file is a test file
 pub fn is_test_file(path: &Path) -> bool {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        let is_spl = name.ends_with(".spl");
-        let is_test = name.ends_with("_spec.spl") || name.ends_with("_test.spl");
-        is_spl && is_test
+        let is_simple_ext =
+            name.ends_with(".spl") || name.ends_with(".simple") || name.ends_with(".sscript");
+        let is_test = name.contains("_spec.") || name.contains("_test.");
+        is_simple_ext && is_test
     } else {
         false
     }
@@ -68,8 +69,11 @@ pub fn is_test_file(path: &Path) -> bool {
 /// - `#[tag("name")]` decorator
 /// - `@tag name` comment
 /// - `#tag: name` comment
+/// - `@name` shorthand for common tags (gui, slow, skip, wip)
 ///
-/// Also checks if the tag is in the file name (e.g., `slow_spec.spl` matches tag "slow")
+/// Also checks:
+/// - File name tags (e.g., `slow_spec.spl` matches tag "slow")
+/// - `__init__.spl` in parent directories for inherited tags
 pub fn extract_tags(path: &Path) -> Vec<String> {
     let mut tags = Vec::new();
 
@@ -90,50 +94,112 @@ pub fn extract_tags(path: &Path) -> Vec<String> {
         }
     }
 
+    // Check __init__.spl in parent directories for inherited tags
+    if let Some(parent) = path.parent() {
+        tags.extend(extract_directory_tags(parent));
+    }
+
     // Try to read file content for tag decorators/comments
     if let Ok(content) = std::fs::read_to_string(path) {
-        // Look for #[tag("name")] pattern using simple string matching
-        for line in content.lines() {
-            let trimmed = line.trim();
-
-            // Match #[tag("name")]
-            if let Some(rest) = trimmed.strip_prefix("#[tag(\"") {
-                if let Some(end) = rest.find("\")]") {
-                    let tag = &rest[..end];
-                    tags.push(tag.to_lowercase());
-                }
-            }
-
-            // Match @tag name (in comments like # @tag slow)
-            if let Some(idx) = trimmed.find("@tag ") {
-                let after = &trimmed[idx + 5..];
-                let tag: String = after
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect();
-                if !tag.is_empty() {
-                    tags.push(tag.to_lowercase());
-                }
-            }
-
-            // Match #tag: name
-            if let Some(rest) = trimmed.strip_prefix("#tag:") {
-                let tag: String = rest
-                    .trim()
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect();
-                if !tag.is_empty() {
-                    tags.push(tag.to_lowercase());
-                }
-            }
-        }
+        tags.extend(extract_tags_from_content(&content));
     }
 
     // Deduplicate
     tags.sort();
     tags.dedup();
     tags
+}
+
+/// Known shorthand tags that can be used with @name syntax
+const SHORTHAND_TAGS: &[&str] = &["gui", "slow", "skip", "wip", "fast", "flaky", "screenshot"];
+
+/// Extract tags from file content
+fn extract_tags_from_content(content: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Match #[tag("name")]
+        if let Some(rest) = trimmed.strip_prefix("#[tag(\"") {
+            if let Some(end) = rest.find("\")]") {
+                let tag = &rest[..end];
+                tags.push(tag.to_lowercase());
+            }
+        }
+
+        // Match @tag name (in comments like # @tag slow)
+        if let Some(idx) = trimmed.find("@tag ") {
+            let after = &trimmed[idx + 5..];
+            let tag: String = after
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !tag.is_empty() {
+                tags.push(tag.to_lowercase());
+            }
+        }
+
+        // Match @name shorthand for known tags (e.g., # @gui, # @slow)
+        for shorthand in SHORTHAND_TAGS {
+            let pattern = format!("@{}", shorthand);
+            if trimmed.contains(&pattern) {
+                // Make sure it's not part of a longer word
+                if let Some(idx) = trimmed.find(&pattern) {
+                    let after_idx = idx + pattern.len();
+                    let is_end = after_idx >= trimmed.len();
+                    let is_word_boundary = is_end
+                        || !trimmed
+                            .chars()
+                            .nth(after_idx)
+                            .map(|c| c.is_alphanumeric() || c == '_')
+                            .unwrap_or(false);
+                    if is_word_boundary {
+                        tags.push(shorthand.to_string());
+                    }
+                }
+            }
+        }
+
+        // Match #tag: name
+        if let Some(rest) = trimmed.strip_prefix("#tag:") {
+            let tag: String = rest
+                .trim()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !tag.is_empty() {
+                tags.push(tag.to_lowercase());
+            }
+        }
+    }
+
+    tags
+}
+
+/// Extract directory-level tags from __init__.spl files
+/// Walks up the directory tree to collect inherited tags
+fn extract_directory_tags(dir: &Path) -> Vec<String> {
+    let mut tags = Vec::new();
+    let mut current = Some(dir);
+
+    while let Some(path) = current {
+        let init_file = path.join("__init__.spl");
+        if init_file.exists() {
+            if let Ok(content) = std::fs::read_to_string(&init_file) {
+                tags.extend(extract_tags_from_content(&content));
+            }
+        }
+        current = path.parent();
+    }
+
+    tags
+}
+
+/// Check if a test has the @gui tag
+pub fn is_gui_test(path: &Path) -> bool {
+    let tags = extract_tags(path);
+    tags.contains(&"gui".to_string()) || tags.contains(&"screenshot".to_string())
 }
 
 /// Check if a file matches the tag filter.

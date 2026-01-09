@@ -3,7 +3,7 @@
 //! This module contains methods for lowering GPU intrinsic calls,
 //! extracting GPU-specific arguments, and metadata extraction for AOP matching.
 
-use super::lowering_core::{MirLowerer, MirLowerError, MirLowerResult};
+use super::lowering_core::{MirLowerError, MirLowerResult, MirLowerer};
 use crate::hir::{GpuIntrinsicKind, HirExpr, HirExprKind, HirFunction, NeighborDirection};
 use crate::mir::instructions::{GpuAtomicOp, GpuMemoryScope, MirInst, VReg};
 
@@ -48,7 +48,11 @@ macro_rules! simd_binary_op {
 }
 
 impl<'a> MirLowerer<'a> {
-    pub(super) fn lower_gpu_intrinsic(&mut self, intrinsic: GpuIntrinsicKind, args: &[HirExpr]) -> MirLowerResult<VReg> {
+    pub(super) fn lower_gpu_intrinsic(
+        &mut self,
+        intrinsic: GpuIntrinsicKind,
+        args: &[HirExpr],
+    ) -> MirLowerResult<VReg> {
         match intrinsic {
             GpuIntrinsicKind::GlobalId => gpu_dim_op!(self, args, GpuGlobalId),
             GpuIntrinsicKind::LocalId => gpu_dim_op!(self, args, GpuLocalId),
@@ -79,7 +83,9 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::GpuGlobalId { dest, dim: 0 });
+                    block
+                        .instructions
+                        .push(MirInst::GpuGlobalId { dest, dim: 0 });
                     dest
                 })
             }
@@ -88,7 +94,9 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::GpuLocalId { dest, dim: 0 });
+                    block
+                        .instructions
+                        .push(MirInst::GpuLocalId { dest, dim: 0 });
                     dest
                 })
             }
@@ -97,7 +105,9 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::GpuGroupId { dest, dim: 0 });
+                    block
+                        .instructions
+                        .push(MirInst::GpuGroupId { dest, dim: 0 });
                     dest
                 })
             }
@@ -113,9 +123,11 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block
-                        .instructions
-                        .push(MirInst::VecExtract { dest, vector, index });
+                    block.instructions.push(MirInst::VecExtract {
+                        dest,
+                        vector,
+                        index,
+                    });
                     dest
                 })
             }
@@ -147,9 +159,11 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block
-                        .instructions
-                        .push(MirInst::VecShuffle { dest, source, indices });
+                    block.instructions.push(MirInst::VecShuffle {
+                        dest,
+                        source,
+                        indices,
+                    });
                     dest
                 })
             }
@@ -328,7 +342,12 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecClamp { dest, source, lo, hi });
+                    block.instructions.push(MirInst::VecClamp {
+                        dest,
+                        source,
+                        lo,
+                        hi,
+                    });
                     dest
                 })
             }
@@ -396,10 +415,14 @@ impl<'a> MirLowerer<'a> {
                 if *n >= 0 && *n <= 2 {
                     Ok(*n as u8)
                 } else {
-                    Err(MirLowerError::Unsupported("GPU dimension must be 0, 1, or 2".to_string()))
+                    Err(MirLowerError::Unsupported(
+                        "GPU dimension must be 0, 1, or 2".to_string(),
+                    ))
                 }
             }
-            _ => Err(MirLowerError::Unsupported("GPU dimension must be a constant integer".to_string())),
+            _ => Err(MirLowerError::Unsupported(
+                "GPU dimension must be a constant integer".to_string(),
+            )),
         }
     }
 
@@ -409,13 +432,11 @@ impl<'a> MirLowerer<'a> {
             return Ok(GpuMemoryScope::All); // Default to all memory
         }
         match &args[0].kind {
-            HirExprKind::Integer(n) => {
-                match *n {
-                    0 => Ok(GpuMemoryScope::WorkGroup),
-                    1 => Ok(GpuMemoryScope::Device),
-                    _ => Ok(GpuMemoryScope::All),
-                }
-            }
+            HirExprKind::Integer(n) => match *n {
+                0 => Ok(GpuMemoryScope::WorkGroup),
+                1 => Ok(GpuMemoryScope::Device),
+                _ => Ok(GpuMemoryScope::All),
+            },
             _ => Ok(GpuMemoryScope::All),
         }
     }

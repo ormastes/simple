@@ -54,7 +54,11 @@ impl Lowerer {
     /// Swizzle mappings:
     /// - Position: x=0, y=1, z=2, w=3
     /// - Color: r=0, g=1, b=2, a=3
-    pub(in crate::hir::lower) fn parse_swizzle_pattern(&self, pattern: &str, max_lanes: u32) -> Option<Vec<u32>> {
+    pub(in crate::hir::lower) fn parse_swizzle_pattern(
+        &self,
+        pattern: &str,
+        max_lanes: u32,
+    ) -> Option<Vec<u32>> {
         // Swizzle must be 1-4 characters
         if pattern.is_empty() || pattern.len() > 4 {
             return None;
@@ -67,19 +71,35 @@ impl Lowerer {
         for c in pattern.chars() {
             let idx = match c {
                 'x' | 'r' => {
-                    if c == 'x' { seen_position = true; } else { seen_color = true; }
+                    if c == 'x' {
+                        seen_position = true;
+                    } else {
+                        seen_color = true;
+                    }
                     0
                 }
                 'y' | 'g' => {
-                    if c == 'y' { seen_position = true; } else { seen_color = true; }
+                    if c == 'y' {
+                        seen_position = true;
+                    } else {
+                        seen_color = true;
+                    }
                     1
                 }
                 'z' | 'b' => {
-                    if c == 'z' { seen_position = true; } else { seen_color = true; }
+                    if c == 'z' {
+                        seen_position = true;
+                    } else {
+                        seen_color = true;
+                    }
                     2
                 }
                 'w' | 'a' => {
-                    if c == 'w' { seen_position = true; } else { seen_color = true; }
+                    if c == 'w' {
+                        seen_position = true;
+                    } else {
+                        seen_color = true;
+                    }
                     3
                 }
                 _ => return None, // Invalid character

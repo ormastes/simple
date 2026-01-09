@@ -223,4 +223,3 @@ impl MoveMode {
         matches!(self, MoveMode::Move)
     }
 }
-

@@ -81,7 +81,7 @@ impl<'a> Parser<'a> {
 
                 if self.check(&TokenKind::Pipe) {
                     self.advance(); // consume |
-                    // Check if this is the trailing | (end of row)
+                                    // Check if this is the trailing | (end of row)
                     if self.check(&TokenKind::Newline) {
                         break;
                     }

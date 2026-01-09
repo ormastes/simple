@@ -578,7 +578,10 @@ mod tests {
 
     fn create_test_layers() -> HashMap<String, Layer> {
         let mut layers = HashMap::new();
-        layers.insert("ui".to_string(), Layer::new("ui", vec!["src/ui/**".to_string()]));
+        layers.insert(
+            "ui".to_string(),
+            Layer::new("ui", vec!["src/ui/**".to_string()]),
+        );
         layers.insert(
             "services".to_string(),
             Layer::new("services", vec!["src/services/**".to_string()]),
@@ -605,7 +608,9 @@ mod tests {
         assert!(result.is_err());
 
         let violations = result.unwrap_err();
-        assert!(violations.iter().any(|v| v.source == Some("src/ui/admin".to_string())));
+        assert!(violations
+            .iter()
+            .any(|v| v.source == Some("src/ui/admin".to_string())));
     }
 
     #[test]
@@ -645,7 +650,10 @@ mod tests {
     fn test_no_mock_in_production() {
         let mut tree = ModuleTree::new();
         tree.add_file_content("src/services/user", "@mock fn get_user(): ...".to_string());
-        tree.add_file_content("src/test/user_test", "@mock fn mock_user(): ...".to_string());
+        tree.add_file_content(
+            "src/test/user_test",
+            "@mock fn mock_user(): ...".to_string(),
+        );
 
         let rule = NoMockInProduction::default();
         let layers = HashMap::new();

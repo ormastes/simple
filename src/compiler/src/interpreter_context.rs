@@ -5,13 +5,13 @@
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
-use simple_parser::ast::{Argument, Expr, ClassDef, FunctionDef};
+use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef};
 use std::collections::HashMap;
 
 // Import parent interpreter types and functions
-use super::{Enums, ImplMethods, evaluate_expr, CONTEXT_OBJECT};
-use super::interpreter_method::find_and_exec_method_with_self;
 use super::interpreter_helpers::try_method_missing;
+use super::interpreter_method::find_and_exec_method_with_self;
+use super::{evaluate_expr, Enums, ImplMethods, CONTEXT_OBJECT};
 
 pub(super) fn dispatch_context_method(
     ctx: &Value,
@@ -25,16 +25,39 @@ pub(super) fn dispatch_context_method(
 ) -> Result<Value, CompileError> {
     if let Value::Object { class, fields } = ctx {
         // Try to find and execute the method, tracking self updates
-        if let Some((result, updated_self)) = find_and_exec_method_with_self(method, args, class.as_str(), fields, env, functions, classes, enums, impl_methods)? {
+        if let Some((result, updated_self)) = find_and_exec_method_with_self(
+            method,
+            args,
+            class.as_str(),
+            fields,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )? {
             // Update the context object with the modified self
             CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = Some(updated_self));
             return Ok(result);
         }
         // Try method_missing hook if direct method not found
-        if let Some(result) = try_method_missing(method, args, class.as_str(), fields, env, functions, classes, enums, impl_methods)? {
+        if let Some(result) = try_method_missing(
+            method,
+            args,
+            class.as_str(),
+            fields,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )? {
             return Ok(result);
         }
-        return Err(CompileError::Semantic(format!("context object has no method '{}'", method)));
+        return Err(CompileError::Semantic(format!(
+            "context object has no method '{}'",
+            method
+        )));
     }
 
     let recv_expr = value_to_expr(ctx)?;
@@ -61,6 +84,10 @@ fn value_to_expr(val: &Value) -> Result<Expr, CompileError> {
             let exprs: Result<Vec<_>, _> = items.iter().map(value_to_expr).collect();
             Expr::Tuple(exprs?)
         }
-        _ => return Err(CompileError::Semantic("cannot convert value to expression".into())),
+        _ => {
+            return Err(CompileError::Semantic(
+                "cannot convert value to expression".into(),
+            ))
+        }
     })
 }

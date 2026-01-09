@@ -74,10 +74,10 @@ fn build_smf_with_code_for_target(
         entry_point: 0,
         module_hash: 0,
         source_hash: 0,
-        app_type: 0,        // CLI application type
-        window_width: 0,    // No window hints
+        app_type: 0,     // CLI application type
+        window_width: 0, // No window hints
         window_height: 0,
-        prefetch_hint: 0,   // No prefetch by default
+        prefetch_hint: 0, // No prefetch by default
         prefetch_file_count: 0,
         reserved: [0; 1],
     };

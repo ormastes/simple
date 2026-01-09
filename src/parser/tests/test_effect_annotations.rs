@@ -1,8 +1,8 @@
 // Test suite for #881: Effect Annotations (@pure, @io, @net, @fs, @unsafe, @async)
 // Verifies parser correctly recognizes and stores effect decorators on functions.
 
-use simple_parser::Parser;
 use simple_parser::ast::{Effect, Node};
+use simple_parser::Parser;
 
 /// Helper to parse code and extract the first function
 fn parse_and_get_function(source: &str) -> simple_parser::ast::FunctionDef {
@@ -21,7 +21,11 @@ fn parse_and_get_function(source: &str) -> simple_parser::ast::FunctionDef {
 }
 
 /// Test single effect annotation
-fn test_single_effect(source: &str, effect: Effect, checker: fn(&simple_parser::ast::FunctionDef) -> bool) {
+fn test_single_effect(
+    source: &str,
+    effect: Effect,
+    checker: fn(&simple_parser::ast::FunctionDef) -> bool,
+) {
     let func = parse_and_get_function(source);
     assert_eq!(func.effects.len(), 1);
     assert!(func.effects.contains(&effect));
@@ -29,7 +33,11 @@ fn test_single_effect(source: &str, effect: Effect, checker: fn(&simple_parser::
 }
 
 /// Test multiple effects
-fn test_multiple_effects_helper(source: &str, effects: Vec<Effect>, checkers: Vec<fn(&simple_parser::ast::FunctionDef) -> bool>) {
+fn test_multiple_effects_helper(
+    source: &str,
+    effects: Vec<Effect>,
+    checkers: Vec<fn(&simple_parser::ast::FunctionDef) -> bool>,
+) {
     let func = parse_and_get_function(source);
     assert_eq!(func.effects.len(), effects.len());
     for effect in &effects {
@@ -49,7 +57,7 @@ fn add(x: i64, y: i64) -> i64:
     return x + y
 "#,
         Effect::Pure,
-        |f| f.is_pure()
+        |f| f.is_pure(),
     );
 }
 
@@ -62,7 +70,7 @@ fn print_hello():
     print("Hello, World!")
 "#,
         Effect::Io,
-        |f| f.has_io()
+        |f| f.has_io(),
     );
 }
 
@@ -75,7 +83,7 @@ fn fetch(url: str) -> str:
     return http_get(url)
 "#,
         Effect::Net,
-        |f| f.has_net()
+        |f| f.has_net(),
     );
 }
 
@@ -88,7 +96,7 @@ fn read_file(path: str) -> str:
     return File.read(path)
 "#,
         Effect::Fs,
-        |f| f.has_fs()
+        |f| f.has_fs(),
     );
 }
 
@@ -101,7 +109,7 @@ fn raw_pointer_cast(ptr: i64) -> *u8:
     return ptr as *u8
 "#,
         Effect::Unsafe,
-        |f| f.has_unsafe()
+        |f| f.has_unsafe(),
     );
 }
 
@@ -114,7 +122,7 @@ fn delayed_task():
     await sleep(1000)
 "#,
         Effect::Async,
-        |f| f.is_async()
+        |f| f.is_async(),
     );
 }
 
@@ -129,7 +137,7 @@ fn fetch_and_log(url: str):
     print(data)
 "#,
         vec![Effect::Io, Effect::Net],
-        vec![|f| f.has_io(), |f| f.has_net()]
+        vec![|f| f.has_io(), |f| f.has_net()],
     );
 }
 
@@ -146,7 +154,7 @@ fn sync_remote_file(url: str, path: str):
     print("Synced!")
 "#,
         vec![Effect::Io, Effect::Net, Effect::Fs],
-        vec![|f| f.has_io(), |f| f.has_net(), |f| f.has_fs()]
+        vec![|f| f.has_io(), |f| f.has_net(), |f| f.has_fs()],
     );
 }
 

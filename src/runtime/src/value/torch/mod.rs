@@ -36,50 +36,50 @@
 //! - `fft` - Fast Fourier Transform operations (Simple Math #1950-#1959)
 
 // Public modules
-pub mod error;
-mod registry;
-mod creation;
-mod metadata;
-mod ops_elementwise;
-mod ops_matrix;
-mod ops_shape;
-mod ops_reduction;
-mod ops_comparison;
-mod device;
-mod data_access;
 mod autograd;
+mod creation;
+pub mod data;
+mod data_access;
+mod device;
+pub mod error;
+mod fft;
+mod linalg;
+mod metadata;
+pub mod modules;
 mod nn_activations;
+mod nn_initialization;
 mod nn_loss;
 mod nn_normalization;
-mod nn_initialization;
+mod ops_comparison;
+mod ops_elementwise;
+mod ops_matrix;
+mod ops_reduction;
+mod ops_shape;
 mod optimizer;
-pub mod modules;
+mod registry;
 mod scheduler;
-pub mod data;
-mod linalg;
-mod fft;
 
 // Re-export error types
 pub use error::TorchFfiError;
 
 // Re-export all FFI functions from submodules
-pub use creation::*;
-pub use metadata::*;
-pub use ops_elementwise::*;
-pub use ops_matrix::*;
-pub use ops_shape::*;
-pub use ops_reduction::*;
-pub use ops_comparison::*;
-pub use device::*;
-pub use data_access::*;
 pub use autograd::*;
+pub use creation::*;
+pub use data::*;
+pub use data_access::*;
+pub use device::*;
+pub use fft::*;
+pub use linalg::*;
+pub use metadata::*;
+pub use modules::*;
 pub use nn_activations::*;
+pub use nn_initialization::*;
 pub use nn_loss::*;
 pub use nn_normalization::*;
-pub use nn_initialization::*;
+pub use ops_comparison::*;
+pub use ops_elementwise::*;
+pub use ops_matrix::*;
+pub use ops_reduction::*;
+pub use ops_shape::*;
 pub use optimizer::*;
-pub use modules::*;
 pub use scheduler::*;
-pub use data::*;
-pub use linalg::*;
-pub use fft::*;

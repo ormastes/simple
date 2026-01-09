@@ -1,18 +1,28 @@
 //! Tests for collection functionality (arrays, tuples, strings, dicts)
 
 use super::{
+    rt_array_clear,
+    rt_array_get,
+    rt_array_len,
     // Array functions
-    rt_array_new, rt_array_len, rt_array_get, rt_array_set,
-    rt_array_push, rt_array_pop, rt_array_clear,
-    // Tuple functions
-    rt_tuple_new, rt_tuple_len, rt_tuple_get, rt_tuple_set,
+    rt_array_new,
+    rt_array_pop,
+    rt_array_push,
+    rt_array_set,
+    rt_string_concat,
+    rt_string_data,
+    rt_string_len,
     // String functions
-    rt_string_new, rt_string_len, rt_string_data, rt_string_concat,
+    rt_string_new,
+    rt_tuple_get,
+    rt_tuple_len,
+    // Tuple functions
+    rt_tuple_new,
+    rt_tuple_set,
 };
 // Dict functions are in a sibling module, import via crate path
 use crate::value::{
-    rt_dict_new, rt_dict_len, rt_dict_get, rt_dict_set, rt_dict_clear,
-    RuntimeValue,
+    rt_dict_clear, rt_dict_get, rt_dict_len, rt_dict_new, rt_dict_set, RuntimeValue,
 };
 
 // ============================================================================
@@ -146,7 +156,7 @@ fn test_array_invalid_value() {
     let not_an_array = RuntimeValue::from_int(42);
 
     // All operations should handle invalid values gracefully
-    assert_eq!(rt_array_len(not_an_array), -1);  // Returns -1 for invalid
+    assert_eq!(rt_array_len(not_an_array), -1); // Returns -1 for invalid
     assert!(rt_array_get(not_an_array, 0).is_nil());
     assert!(!rt_array_set(not_an_array, 0, RuntimeValue::from_int(99)));
     assert!(!rt_array_push(not_an_array, RuntimeValue::from_int(99)));
@@ -204,7 +214,7 @@ fn test_tuple_out_of_bounds() {
 fn test_tuple_invalid_value() {
     let not_a_tuple = RuntimeValue::from_int(42);
 
-    assert_eq!(rt_tuple_len(not_a_tuple), -1);  // Returns -1 for invalid
+    assert_eq!(rt_tuple_len(not_a_tuple), -1); // Returns -1 for invalid
     assert!(rt_tuple_get(not_a_tuple, 0).is_nil());
     assert!(!rt_tuple_set(not_a_tuple, 0, RuntimeValue::from_int(99)));
 }
@@ -238,9 +248,7 @@ fn test_string_data() {
     assert!(!data_ptr.is_null());
 
     // Verify the data
-    let retrieved = unsafe {
-        std::slice::from_raw_parts(data_ptr, text.len())
-    };
+    let retrieved = unsafe { std::slice::from_raw_parts(data_ptr, text.len()) };
     assert_eq!(retrieved, text.as_bytes());
 }
 
@@ -255,9 +263,7 @@ fn test_string_concat() {
     assert_eq!(rt_string_len(result), 11);
 
     let data_ptr = rt_string_data(result);
-    let retrieved = unsafe {
-        std::slice::from_raw_parts(data_ptr, 11)
-    };
+    let retrieved = unsafe { std::slice::from_raw_parts(data_ptr, 11) };
     assert_eq!(retrieved, b"Hello World");
 }
 
@@ -277,9 +283,7 @@ fn test_string_unicode() {
     assert_eq!(rt_string_len(string), text.len() as i64);
 
     let data_ptr = rt_string_data(string);
-    let retrieved = unsafe {
-        std::slice::from_raw_parts(data_ptr, text.len())
-    };
+    let retrieved = unsafe { std::slice::from_raw_parts(data_ptr, text.len()) };
     assert_eq!(retrieved, text.as_bytes());
 }
 
@@ -287,7 +291,7 @@ fn test_string_unicode() {
 fn test_string_invalid_value() {
     let not_a_string = RuntimeValue::from_int(42);
 
-    assert_eq!(rt_string_len(not_a_string), -1);  // Returns -1 for invalid
+    assert_eq!(rt_string_len(not_a_string), -1); // Returns -1 for invalid
     assert!(rt_string_data(not_a_string).is_null());
 }
 
@@ -351,7 +355,7 @@ fn test_dict_overwrite() {
 
     // Overwrite with new value
     assert!(rt_dict_set(dict, key, RuntimeValue::from_int(2)));
-    assert_eq!(rt_dict_len(dict), 1);  // Still just one key
+    assert_eq!(rt_dict_len(dict), 1); // Still just one key
 
     // Verify new value
     assert_eq!(rt_dict_get(dict, key).as_int(), 2);
@@ -435,7 +439,7 @@ fn test_dict_invalid_value() {
     let key = rt_string_new("test".as_ptr(), 4);
     let val = RuntimeValue::from_int(99);
 
-    assert_eq!(rt_dict_len(not_a_dict), -1);  // Returns -1 for invalid
+    assert_eq!(rt_dict_len(not_a_dict), -1); // Returns -1 for invalid
     assert!(!rt_dict_set(not_a_dict, key, val));
     assert!(rt_dict_get(not_a_dict, key).is_nil());
     assert!(!rt_dict_clear(not_a_dict));

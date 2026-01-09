@@ -16,8 +16,8 @@ fn compile_class(source: &str) -> Result<(), String> {
 
     std::fs::write(&src_path, source).map_err(|e| format!("Failed to write source: {}", e))?;
 
-    let mut compiler = CompilerPipeline::new()
-        .map_err(|e| format!("Failed to create compiler: {:?}", e))?;
+    let mut compiler =
+        CompilerPipeline::new().map_err(|e| format!("Failed to create compiler: {:?}", e))?;
 
     match compiler.compile(&src_path, &out_path) {
         Ok(_) => Ok(()),

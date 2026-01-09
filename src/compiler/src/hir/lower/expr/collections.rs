@@ -14,7 +14,11 @@ impl Lowerer {
     /// Lower a tuple literal to HIR
     ///
     /// Creates a tuple type from the types of all elements.
-    pub(super) fn lower_tuple(&mut self, exprs: &[Expr], ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+    pub(super) fn lower_tuple(
+        &mut self,
+        exprs: &[Expr],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
         let mut hir_exprs = Vec::new();
         let mut types = Vec::new();
         for e in exprs {
@@ -35,7 +39,11 @@ impl Lowerer {
     ///
     /// Creates an array type with a fixed size.
     /// Empty arrays default to VOID element type (will fail if used without explicit type annotation).
-    pub(super) fn lower_array(&mut self, exprs: &[Expr], ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+    pub(super) fn lower_array(
+        &mut self,
+        exprs: &[Expr],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
         let mut hir_exprs = Vec::new();
         let elem_ty = if let Some(first) = exprs.first() {
             self.infer_type(first, ctx)?
@@ -64,7 +72,11 @@ impl Lowerer {
     ///
     /// Creates a SIMD vector type with the number of lanes equal to the number of elements.
     /// Empty vectors default to VOID element type (will fail if used without explicit type annotation).
-    pub(super) fn lower_vec_literal(&mut self, exprs: &[Expr], ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+    pub(super) fn lower_vec_literal(
+        &mut self,
+        exprs: &[Expr],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
         let mut hir_exprs = Vec::new();
         let elem_ty = if let Some(first) = exprs.first() {
             self.infer_type(first, ctx)?
@@ -106,7 +118,7 @@ impl Lowerer {
                 class_ty
             } else {
                 return Err(LowerError::UnknownType(
-                    "Self used outside of class/struct context".to_string()
+                    "Self used outside of class/struct context".to_string(),
                 ));
             }
         } else {

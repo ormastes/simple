@@ -3,17 +3,17 @@
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
 use crate::error::CompileError;
-use crate::interpreter::{
-    eval_arg, evaluate_expr, exec_block_fn, Control, Enums, ImplMethods,
-    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY,
-};
 use crate::interpreter::interpreter_helpers::{
-    eval_option_map, eval_option_and_then, eval_option_or_else, eval_option_filter,
-    eval_result_map, eval_result_map_err, eval_result_and_then, eval_result_or_else,
+    eval_option_and_then, eval_option_filter, eval_option_map, eval_option_or_else,
+    eval_result_and_then, eval_result_map, eval_result_map_err, eval_result_or_else,
+};
+use crate::interpreter::{
+    eval_arg, evaluate_expr, exec_block_fn, Control, Enums, ImplMethods, UNIT_FAMILY_CONVERSIONS,
+    UNIT_SUFFIX_TO_FAMILY,
 };
 use crate::interpreter_unit::decompose_si_prefix;
-use crate::value::{Value, Env, SpecialEnumType, OptionVariant, ResultVariant};
-use simple_parser::ast::{Argument, FunctionDef, ClassDef};
+use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
+use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::collections::HashMap;
 /// Extract result from exec_block_fn return value
 macro_rules! extract_block_result {
@@ -44,7 +44,13 @@ pub fn handle_unit_methods(
         "value" => return Ok(Some((**value).clone())),
         "suffix" => return Ok(Some(Value::Str(suffix.to_string()))),
         "family" => return Ok(Some(family.clone().map_or(Value::Nil, Value::Str))),
-        "to_string" => return Ok(Some(Value::Str(format!("{}_{}", value.to_display_string(), suffix)))),
+        "to_string" => {
+            return Ok(Some(Value::Str(format!(
+                "{}_{}",
+                value.to_display_string(),
+                suffix
+            ))))
+        }
         // For dynamic to_X() conversion methods, check if method starts with "to_"
         other if other.starts_with("to_") => {
             let target_suffix = &other[3..]; // Remove "to_" prefix
@@ -52,7 +58,9 @@ pub fn handle_unit_methods(
             // Get the family name - either from the Unit value or look it up (including SI prefix check)
             let family_name = family.clone().or_else(|| {
                 // First try direct lookup
-                if let Some(f) = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned()) {
+                if let Some(f) =
+                    UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned())
+                {
                     return Some(f);
                 }
                 // Try SI prefix decomposition
@@ -74,7 +82,8 @@ pub fn handle_unit_methods(
                 let families = cell.borrow();
                 let Some(conversions) = families.get(&family_name) else {
                     return Err(CompileError::Semantic(format!(
-                        "Unit family '{}' not found", family_name
+                        "Unit family '{}' not found",
+                        family_name
                     )));
                 };
 
@@ -88,7 +97,8 @@ pub fn handle_unit_methods(
                     1.0
                 } else {
                     return Err(CompileError::Semantic(format!(
-                        "Unit '{}' not found in family '{}'", suffix, family_name
+                        "Unit '{}' not found in family '{}'",
+                        suffix, family_name
                     )));
                 };
 
@@ -102,7 +112,9 @@ pub fn handle_unit_methods(
                 } else {
                     return Err(CompileError::Semantic(format!(
                         "Target unit '{}' not found in family '{}'. Available: {:?}",
-                        target_suffix, family_name, conversions.keys().collect::<Vec<_>>()
+                        target_suffix,
+                        family_name,
+                        conversions.keys().collect::<Vec<_>>()
                     )));
                 };
 
@@ -123,12 +135,11 @@ pub fn handle_unit_methods(
                         Value::Float(converted)
                     }
                 }
-                Value::Float(f) => {
-                    Value::Float(f * (source_factor / target_factor))
-                }
+                Value::Float(f) => Value::Float(f * (source_factor / target_factor)),
                 _ => {
                     return Err(CompileError::Semantic(format!(
-                        "Cannot convert non-numeric unit value: {:?}", value
+                        "Cannot convert non-numeric unit value: {:?}",
+                        value
                     )));
                 }
             };
@@ -182,7 +193,16 @@ pub fn handle_option_methods(
                     return Ok(Some(val.as_ref().clone()));
                 }
             }
-            let msg = eval_arg(args, 0, Value::Str("Option was None".into()), env, functions, classes, enums, impl_methods)?;
+            let msg = eval_arg(
+                args,
+                0,
+                Value::Str("Option was None".into()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             return Err(CompileError::Semantic(msg.to_display_string()));
         }
         "unwrap_or" => {
@@ -191,7 +211,16 @@ pub fn handle_option_methods(
                     return Ok(Some(val.as_ref().clone()));
                 }
             }
-            return Ok(Some(eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?));
+            return Ok(Some(eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?));
         }
         "unwrap_or_else" => {
             if opt_variant == Some(OptionVariant::Some) {
@@ -200,9 +229,30 @@ pub fn handle_option_methods(
                 }
             }
             // Call the function to get default value
-            let func_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            if let Value::Lambda { params: _, body, env: captured } = func_arg {
-                return Ok(Some(evaluate_expr(&body, &captured, functions, classes, enums, impl_methods)?));
+            let func_arg = eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            if let Value::Lambda {
+                params: _,
+                body,
+                env: captured,
+            } = func_arg
+            {
+                return Ok(Some(evaluate_expr(
+                    &body,
+                    &captured,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?));
             }
             return Ok(Some(Value::Nil));
         }
@@ -211,7 +261,16 @@ pub fn handle_option_methods(
             if opt_variant == Some(OptionVariant::Some) {
                 return Ok(Some(recv_val.clone()));
             }
-            return Ok(Some(eval_arg(args, 0, Value::none(), env, functions, classes, enums, impl_methods)?));
+            return Ok(Some(eval_arg(
+                args,
+                0,
+                Value::none(),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?));
         }
         "ok_or" => {
             // Converts Option to Result: Some(v) -> Ok(v), None -> Err(error)
@@ -220,27 +279,76 @@ pub fn handle_option_methods(
                     return Ok(Some(Value::ok(val.as_ref().clone())));
                 }
             }
-            let error = eval_arg(args, 0, Value::Str("None".into()), env, functions, classes, enums, impl_methods)?;
+            let error = eval_arg(
+                args,
+                0,
+                Value::Str("None".into()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             return Ok(Some(Value::err(error)));
         }
         "map" => {
-            return Ok(Some(eval_option_map(variant, payload, args, env, functions, classes, enums, impl_methods)?));
+            return Ok(Some(eval_option_map(
+                variant,
+                payload,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?));
         }
         "and_then" => {
-            return Ok(Some(eval_option_and_then(variant, payload, args, env, functions, classes, enums, impl_methods)?));
+            return Ok(Some(eval_option_and_then(
+                variant,
+                payload,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?));
         }
         "or_else" => {
-            return Ok(Some(eval_option_or_else(variant, payload, args, env, functions, classes, enums, impl_methods)?));
+            return Ok(Some(eval_option_or_else(
+                variant,
+                payload,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?));
         }
         "filter" => {
-            return Ok(Some(eval_option_filter(variant, payload, args, env, functions, classes, enums, impl_methods)?));
+            return Ok(Some(eval_option_filter(
+                variant,
+                payload,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?));
         }
         "flatten" => {
             // Option<Option<T>> -> Option<T>
             if opt_variant == Some(OptionVariant::Some) {
                 if let Some(inner) = payload {
                     // If inner is also an Option, return it
-                    if let Value::Enum { enum_name: inner_enum, .. } = inner.as_ref() {
+                    if let Value::Enum {
+                        enum_name: inner_enum,
+                        ..
+                    } = inner.as_ref()
+                    {
                         if inner_enum == "Option" {
                             return Ok(Some(inner.as_ref().clone()));
                         }
@@ -295,7 +403,10 @@ pub fn handle_result_methods(
             }
             if res_variant == Some(ResultVariant::Err) {
                 if let Some(err_val) = payload {
-                    return Err(CompileError::Semantic(format!("called unwrap on Err: {}", err_val.to_display_string())));
+                    return Err(CompileError::Semantic(format!(
+                        "called unwrap on Err: {}",
+                        err_val.to_display_string()
+                    )));
                 }
             }
             return Err(CompileError::Semantic("called unwrap on Err".into()));
@@ -306,10 +417,23 @@ pub fn handle_result_methods(
                     return Ok(Some(val.as_ref().clone()));
                 }
             }
-            let msg = eval_arg(args, 0, Value::Str("Result was Err".into()), env, functions, classes, enums, impl_methods)?;
+            let msg = eval_arg(
+                args,
+                0,
+                Value::Str("Result was Err".into()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             if res_variant == Some(ResultVariant::Err) {
                 if let Some(err_val) = payload {
-                    return Err(CompileError::Semantic(format!("{}: {}", msg.to_display_string(), err_val.to_display_string())));
+                    return Err(CompileError::Semantic(format!(
+                        "{}: {}",
+                        msg.to_display_string(),
+                        err_val.to_display_string()
+                    )));
                 }
             }
             return Err(CompileError::Semantic(msg.to_display_string()));
@@ -320,7 +444,16 @@ pub fn handle_result_methods(
                     return Ok(Some(val.as_ref().clone()));
                 }
             }
-            return Ok(Some(eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?));
+            return Ok(Some(eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?));
         }
         "unwrap_or_else" => {
             if res_variant == Some(ResultVariant::Ok) {
@@ -330,13 +463,34 @@ pub fn handle_result_methods(
             }
             // Call the function with error value to get default
             if let Some(err_val) = payload {
-                let func_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-                if let Value::Lambda { params, body, env: captured } = func_arg {
+                let func_arg = eval_arg(
+                    args,
+                    0,
+                    Value::Nil,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                if let Value::Lambda {
+                    params,
+                    body,
+                    env: captured,
+                } = func_arg
+                {
                     let mut local_env = captured.clone();
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), err_val.as_ref().clone());
                     }
-                    return Ok(Some(evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?));
+                    return Ok(Some(evaluate_expr(
+                        &body,
+                        &local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?));
                 }
             }
             return Ok(Some(Value::Nil));
@@ -355,18 +509,37 @@ pub fn handle_result_methods(
                     return Ok(Some(val.as_ref().clone()));
                 }
             }
-            let msg = eval_arg(args, 0, Value::Str("Result was Ok".into()), env, functions, classes, enums, impl_methods)?;
+            let msg = eval_arg(
+                args,
+                0,
+                Value::Str("Result was Ok".into()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             return Err(CompileError::Semantic(msg.to_display_string()));
         }
         "ok" => {
             if res_variant == Some(ResultVariant::Ok) {
-                return Ok(Some(payload.as_ref().map(|p| Value::some(p.as_ref().clone())).unwrap_or_else(Value::none)));
+                return Ok(Some(
+                    payload
+                        .as_ref()
+                        .map(|p| Value::some(p.as_ref().clone()))
+                        .unwrap_or_else(Value::none),
+                ));
             }
             return Ok(Some(Value::none()));
         }
         "err" => {
             if res_variant == Some(ResultVariant::Err) {
-                return Ok(Some(payload.as_ref().map(|p| Value::some(p.as_ref().clone())).unwrap_or_else(Value::none)));
+                return Ok(Some(
+                    payload
+                        .as_ref()
+                        .map(|p| Value::some(p.as_ref().clone()))
+                        .unwrap_or_else(Value::none),
+                ));
             }
             return Ok(Some(Value::none()));
         }
@@ -375,26 +548,75 @@ pub fn handle_result_methods(
             if res_variant == Some(ResultVariant::Ok) {
                 return Ok(Some(recv_val.clone()));
             }
-            return Ok(Some(eval_arg(args, 0, Value::err(Value::Nil), env, functions, classes, enums, impl_methods)?));
+            return Ok(Some(eval_arg(
+                args,
+                0,
+                Value::err(Value::Nil),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?));
         }
         "map" => {
-            return Ok(Some(eval_result_map(variant, payload, args, env, functions, classes, enums, impl_methods)?));
+            return Ok(Some(eval_result_map(
+                variant,
+                payload,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?));
         }
         "map_err" => {
-            return Ok(Some(eval_result_map_err(variant, payload, args, env, functions, classes, enums, impl_methods)?));
+            return Ok(Some(eval_result_map_err(
+                variant,
+                payload,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?));
         }
         "and_then" => {
-            return Ok(Some(eval_result_and_then(variant, payload, args, env, functions, classes, enums, impl_methods)?));
+            return Ok(Some(eval_result_and_then(
+                variant,
+                payload,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?));
         }
         "or_else" => {
-            return Ok(Some(eval_result_or_else(variant, payload, args, env, functions, classes, enums, impl_methods)?));
+            return Ok(Some(eval_result_or_else(
+                variant,
+                payload,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?));
         }
         "flatten" => {
             // Result<Result<T, E>, E> -> Result<T, E>
             if res_variant == Some(ResultVariant::Ok) {
                 if let Some(inner) = payload {
                     // If inner is also a Result, return it
-                    if let Value::Enum { enum_name: inner_enum, .. } = inner.as_ref() {
+                    if let Value::Enum {
+                        enum_name: inner_enum,
+                        ..
+                    } = inner.as_ref()
+                    {
                         if inner_enum == "Result" {
                             return Ok(Some(inner.as_ref().clone()));
                         }

@@ -1,24 +1,20 @@
 // Method call dispatcher - delegates to type-specific handlers
 
-mod primitives;
 mod collections;
+mod primitives;
 mod special;
 
-use crate::error::CompileError;
-use crate::value::{Value, Env};
-use simple_parser::ast::{Argument, FunctionDef, ClassDef, Expr};
-use std::collections::HashMap;
 use super::{
-    evaluate_expr,
-    eval_arg, eval_arg_usize,
-    instantiate_class,
-    exec_function, exec_function_with_captured_env,
-    find_and_exec_method, try_method_missing,
-    Enums, ImplMethods,
+    eval_arg, eval_arg_usize, evaluate_expr, exec_function, exec_function_with_captured_env,
+    find_and_exec_method, instantiate_class, try_method_missing, Enums, ImplMethods,
 };
+use crate::error::CompileError;
+use crate::value::{Env, Value};
+use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef};
+use std::collections::HashMap;
 
 // Re-export the with-self-update functions
-pub use special::{find_and_exec_method_with_self, exec_function_with_self_return};
+pub use special::{exec_function_with_self_return, find_and_exec_method_with_self};
 
 /// Main entry point for method call evaluation
 pub(crate) fn evaluate_method_call(
@@ -35,24 +31,62 @@ pub(crate) fn evaluate_method_call(
     if let Expr::Identifier(module_name) = receiver.as_ref() {
         if env.get(module_name).is_none() {
             if let Some(func) = functions.get(method).cloned() {
-                return exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
+                return exec_function(
+                    &func,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                    None,
+                );
             }
             if classes.contains_key(method) {
-                return instantiate_class(method, args, env, functions, classes, enums, impl_methods);
+                return instantiate_class(
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                );
             }
         }
     }
 
-    let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
+    let recv_val =
+        evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
 
     // Handle module (Dict) method calls - look up function in module and use its captured_env
     if let Value::Dict(module_dict) = &recv_val {
         if let Some(func_val) = module_dict.get(method) {
-            if let Value::Function { def, captured_env, .. } = func_val {
-                return exec_function_with_captured_env(def, args, env, captured_env, functions, classes, enums, impl_methods);
+            if let Value::Function {
+                def, captured_env, ..
+            } = func_val
+            {
+                return exec_function_with_captured_env(
+                    def,
+                    args,
+                    env,
+                    captured_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                );
             }
             if let Value::Constructor { class_name } = func_val {
-                return instantiate_class(class_name, args, env, functions, classes, enums, impl_methods);
+                return instantiate_class(
+                    class_name,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                );
             }
         }
     }
@@ -61,13 +95,26 @@ pub(crate) fn evaluate_method_call(
     // These work on any value type and are used with matchers like eq(5), gt(3), etc.
     match method {
         "to" | "not_to" => {
-            let matcher = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let matcher = eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             let matched = match &matcher {
                 Value::Matcher(m) => m.matches(&recv_val),
                 // If the argument isn't a Matcher, treat it as an equality check
                 other => recv_val == *other,
             };
-            let passed = if method == "not_to" { !matched } else { matched };
+            let passed = if method == "not_to" {
+                !matched
+            } else {
+                matched
+            };
             return Ok(Value::Bool(passed));
         }
         _ => {}
@@ -76,37 +123,106 @@ pub(crate) fn evaluate_method_call(
     // Dispatch to type-specific handlers
     match &recv_val {
         Value::Int(n) => {
-            if let Some(result) = primitives::handle_int_methods(*n, method, args, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = primitives::handle_int_methods(
+                *n,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
         }
         Value::Float(f) => {
-            if let Some(result) = primitives::handle_float_methods(*f, method, args, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = primitives::handle_float_methods(
+                *f,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
         }
         Value::Bool(b) => {
-            if let Some(result) = primitives::handle_bool_methods(*b, method, args, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = primitives::handle_bool_methods(
+                *b,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
         }
-        Value::Unit { value, suffix, family } => {
-            if let Some(result) = special::handle_unit_methods(value, suffix, family, method, args, env, functions, classes, enums, impl_methods)? {
+        Value::Unit {
+            value,
+            suffix,
+            family,
+        } => {
+            if let Some(result) = special::handle_unit_methods(
+                value,
+                suffix,
+                family,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
         }
         Value::Array(arr) => {
-            if let Some(result) = collections::handle_array_methods(arr, method, args, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = collections::handle_array_methods(
+                arr,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
         }
         Value::Tuple(tup) => {
-            if let Some(result) = collections::handle_tuple_methods(tup, method, args, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = collections::handle_tuple_methods(
+                tup,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
         }
         Value::Dict(map) => {
-            if let Some(result) = collections::handle_dict_methods(map, method, args, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = collections::handle_dict_methods(
+                map,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
         }
@@ -114,13 +230,41 @@ pub(crate) fn evaluate_method_call(
             // String methods are included from a separate file
             include!("string.rs");
         }
-        Value::Enum { enum_name, variant, payload } => {
+        Value::Enum {
+            enum_name,
+            variant,
+            payload,
+        } => {
             // Try Option methods
-            if let Some(result) = special::handle_option_methods(&recv_val, enum_name, variant, payload, method, args, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = special::handle_option_methods(
+                &recv_val,
+                enum_name,
+                variant,
+                payload,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
             // Try Result methods
-            if let Some(result) = special::handle_result_methods(&recv_val, enum_name, variant, payload, method, args, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = special::handle_result_methods(
+                &recv_val,
+                enum_name,
+                variant,
+                payload,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
 
@@ -132,7 +276,16 @@ pub(crate) fn evaluate_method_call(
                         // Create a fields map with just "self" for the enum value
                         let mut enum_fields = HashMap::new();
                         enum_fields.insert("self".to_string(), recv_val.clone());
-                        return exec_function(m, args, env, functions, classes, enums, impl_methods, Some((enum_name, &enum_fields)));
+                        return exec_function(
+                            m,
+                            args,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                            Some((enum_name, &enum_fields)),
+                        );
                     }
                 }
             }
@@ -144,7 +297,16 @@ pub(crate) fn evaluate_method_call(
                         // For enum methods, we pass self as a special context
                         let mut enum_fields = HashMap::new();
                         enum_fields.insert("self".to_string(), recv_val.clone());
-                        return exec_function(m, args, env, functions, classes, enums, impl_methods, Some((enum_name, &enum_fields)));
+                        return exec_function(
+                            m,
+                            args,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                            Some((enum_name, &enum_fields)),
+                        );
                     }
                 }
             }
@@ -170,13 +332,29 @@ pub(crate) fn evaluate_method_call(
                         let payload = if args.is_empty() {
                             None
                         } else if args.len() == 1 {
-                            let val = evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
+                            let val = evaluate_expr(
+                                &args[0].value,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?;
                             Some(Box::new(val))
                         } else {
                             // Multiple args - wrap in tuple
                             let vals: Result<Vec<Value>, _> = args
                                 .iter()
-                                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                                .map(|a| {
+                                    evaluate_expr(
+                                        &a.value,
+                                        env,
+                                        functions,
+                                        classes,
+                                        enums,
+                                        impl_methods,
+                                    )
+                                })
                                 .collect();
                             Some(Box::new(Value::Tuple(vals?)))
                         };
@@ -191,7 +369,16 @@ pub(crate) fn evaluate_method_call(
                 // Check if it's a static method on the enum
                 for m in &enum_def.methods {
                     if m.name == method && m.params.first().map_or(true, |p| p.name != "self") {
-                        return exec_function(m, args, env, functions, classes, enums, impl_methods, None);
+                        return exec_function(
+                            m,
+                            args,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                            None,
+                        );
                     }
                 }
 
@@ -200,11 +387,24 @@ pub(crate) fn evaluate_method_call(
                     method, enum_name
                 )));
             } else {
-                return Err(CompileError::Semantic(format!("unknown enum {}", enum_name)));
+                return Err(CompileError::Semantic(format!(
+                    "unknown enum {}",
+                    enum_name
+                )));
             }
         }
         Value::TraitObject { trait_name, inner } => {
-            if let Some(result) = special::handle_trait_object_methods(trait_name, inner, method, args, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = special::handle_trait_object_methods(
+                trait_name,
+                inner,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             } else {
                 return Err(CompileError::Semantic(format!(
@@ -215,11 +415,31 @@ pub(crate) fn evaluate_method_call(
         }
         Value::Object { class, fields } => {
             // Try to find and execute the method
-            if let Some(result) = find_and_exec_method(method, args, class, fields, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = find_and_exec_method(
+                method,
+                args,
+                class,
+                fields,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
             // Try method_missing hook
-            if let Some(result) = try_method_missing(method, args, class, fields, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = try_method_missing(
+                method,
+                args,
+                class,
+                fields,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
             // Collect available methods for typo suggestion
@@ -240,7 +460,16 @@ pub(crate) fn evaluate_method_call(
             }
         }
         Value::Channel(channel) => {
-            if let Some(result) = special::handle_channel_methods(channel, method, args, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = special::handle_channel_methods(
+                channel,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             } else {
                 let available = ["send", "recv", "try_recv"];
@@ -248,7 +477,16 @@ pub(crate) fn evaluate_method_call(
             }
         }
         Value::ThreadPool(pool) => {
-            if let Some(result) = special::handle_threadpool_methods(pool, method, args, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = special::handle_threadpool_methods(
+                pool,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             } else {
                 let available = ["submit"];
@@ -256,14 +494,35 @@ pub(crate) fn evaluate_method_call(
             }
         }
         Value::Constructor { class_name } => {
-            if let Some(result) = special::handle_constructor_methods(class_name, method, args, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = special::handle_constructor_methods(
+                class_name,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             } else {
-                return Err(CompileError::Semantic(format!("unknown class {}", class_name)));
+                return Err(CompileError::Semantic(format!(
+                    "unknown class {}",
+                    class_name
+                )));
             }
         }
         Value::Mock(mock) => {
-            if let Some(result) = special::handle_mock_methods(mock, method, args, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = special::handle_mock_methods(
+                mock,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(result);
             }
             // Mock methods handler handles all cases including fallback
@@ -272,7 +531,9 @@ pub(crate) fn evaluate_method_call(
         _ => {}
     }
 
-    Err(CompileError::Semantic(format!("method call on unsupported type: {method}")))
+    Err(CompileError::Semantic(format!(
+        "method call on unsupported type: {method}"
+    )))
 }
 
 /// Evaluate a method call and return both the result and the potentially modified self.
@@ -287,16 +548,37 @@ pub(crate) fn evaluate_method_call_with_self_update(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<Value>), CompileError> {
-    let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
+    let recv_val =
+        evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
 
     // Only handle Object methods with self mutation
     if let Value::Object { class, fields } = recv_val.clone() {
         // Try to find and execute the method
-        if let Some((result, updated_self)) = special::find_and_exec_method_with_self(method, args, &class, &fields, env, functions, classes, enums, impl_methods)? {
+        if let Some((result, updated_self)) = special::find_and_exec_method_with_self(
+            method,
+            args,
+            &class,
+            &fields,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )? {
             return Ok((result, Some(updated_self)));
         }
         // Try method_missing hook
-        if let Some(result) = try_method_missing(method, args, &class, &fields, env, functions, classes, enums, impl_methods)? {
+        if let Some(result) = try_method_missing(
+            method,
+            args,
+            &class,
+            &fields,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )? {
             // method_missing returns just a result, self is not mutated
             return Ok((result, None));
         }
@@ -310,6 +592,15 @@ pub(crate) fn evaluate_method_call_with_self_update(
     }
 
     // For non-objects, just use regular method call
-    let result = evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)?;
+    let result = evaluate_method_call(
+        receiver,
+        method,
+        args,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )?;
     Ok((result, None))
 }

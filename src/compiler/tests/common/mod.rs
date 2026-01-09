@@ -85,7 +85,10 @@ pub fn assert_inject(module: &hir::HirModule, function_name: &str) {
 }
 
 /// Assert that MIR lowering fails with a message containing the expected text
-pub fn assert_mir_error_contains(result: Result<mir::MirModule, mir::MirLowerError>, expected: &str) {
+pub fn assert_mir_error_contains(
+    result: Result<mir::MirModule, mir::MirLowerError>,
+    expected: &str,
+) {
     match result {
         Ok(_) => panic!("Expected MIR lowering to fail, but it succeeded"),
         Err(e) => {

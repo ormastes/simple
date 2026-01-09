@@ -244,6 +244,7 @@ pub fn check_import_compatibility(
             Effect::Async => None,   // Async is always allowed
             Effect::Verify => None,  // Verification mode marker, no capability
             Effect::Trusted => None, // Trusted boundary marker, no capability
+            Effect::Ghost => None,   // Ghost is compile-time only, no capability
         };
 
         if let Some(cap) = required_cap {
@@ -310,11 +311,8 @@ pub fn load_module_with_imports_validated(
             if let Some(resolved) =
                 resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new(".")))
             {
-                let imported = load_module_with_imports_validated(
-                    &resolved,
-                    visited,
-                    Some(effective_caps),
-                )?;
+                let imported =
+                    load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
 
                 // Validate imported functions against our capabilities
                 if !effective_caps.is_empty() {
@@ -442,7 +440,10 @@ mod tests {
         assert_eq!(StartupAppType::from_str("cli"), Some(StartupAppType::Cli));
         assert_eq!(StartupAppType::from_str("tui"), Some(StartupAppType::Tui));
         assert_eq!(StartupAppType::from_str("gui"), Some(StartupAppType::Gui));
-        assert_eq!(StartupAppType::from_str("service"), Some(StartupAppType::Service));
+        assert_eq!(
+            StartupAppType::from_str("service"),
+            Some(StartupAppType::Service)
+        );
         assert_eq!(StartupAppType::from_str("repl"), Some(StartupAppType::Repl));
         assert_eq!(StartupAppType::from_str("GUI"), Some(StartupAppType::Gui)); // Case insensitive
         assert_eq!(StartupAppType::from_str("invalid"), None);

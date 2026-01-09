@@ -127,16 +127,13 @@ impl CoherenceChecker {
     /// Check if negative bounds are satisfied (feature #1151)
     /// Negative bounds: T: !Clone means T must NOT implement Clone
     /// This allows blanket impls like: impl[T: !Clone] Copy for T
-    fn check_negative_bounds(
-        &self,
-        _impl_block: &ImplBlock,
-    ) -> Result<(), CoherenceError> {
+    fn check_negative_bounds(&self, _impl_block: &ImplBlock) -> Result<(), CoherenceError> {
         // Negative bounds are supported in AST (negative_bounds field in WhereBound)
         // When parser fully supports !Trait syntax, this will validate:
         // 1. Check where_clause for negative_bounds
         // 2. Ensure type doesn't implement excluded traits
         // 3. Prevent conflicts with existing impls that have the excluded trait
-        
+
         // For now, this is a placeholder - negative bounds parse but aren't enforced
         // Full enforcement requires trait resolution which happens later in compilation
         Ok(())
@@ -148,13 +145,13 @@ impl CoherenceChecker {
 
         if let Some(trait_name) = trait_name {
             self.check_orphan_rule(trait_name, &target_type_name, impl_block.span)?;
-            
+
             // Check associated types first for exact same impl
             self.check_associated_types(trait_name, &target_type_name, impl_block)?;
-            
+
             // Then check for blanket conflicts
             self.check_blanket_conflict(trait_name, impl_block)?;
-            
+
             // Finally check for general overlap
             self.check_overlap(trait_name, impl_block)?;
         }
@@ -201,21 +198,28 @@ impl CoherenceChecker {
         impl_block: &ImplBlock,
     ) -> Result<(), CoherenceError> {
         // Check if this impl has #[default] attribute (specialization support #1150)
-        let has_default = impl_block.attributes.iter().any(|attr| attr.name == "default");
-        
+        let has_default = impl_block
+            .attributes
+            .iter()
+            .any(|attr| attr.name == "default");
+
         if let Some(existing_impls) = self.impl_registry.get(trait_name) {
             let new_type_name = self.extract_type_name(&impl_block.target_type);
-            
+
             for existing in existing_impls {
                 let existing_type_name = self.extract_type_name(&existing.target_type);
-                
+
                 // Skip overlap check if either impl is marked with #[default] (specialization)
                 if has_default || existing.is_default {
                     continue;
                 }
-                
-                if self.types_could_unify(&new_type_name, &existing_type_name, 
-                                           &impl_block.generic_params, &existing.generic_params) {
+
+                if self.types_could_unify(
+                    &new_type_name,
+                    &existing_type_name,
+                    &impl_block.generic_params,
+                    &existing.generic_params,
+                ) {
                     return Err(CoherenceError::OverlappingImpl {
                         trait_name: trait_name.to_string(),
                         type1: new_type_name,
@@ -237,10 +241,11 @@ impl CoherenceChecker {
         if let Some(existing_impls) = self.impl_registry.get(trait_name) {
             for existing in existing_impls {
                 let existing_target = self.extract_type_name(&existing.target_type);
-                
+
                 if existing_target == target_type {
                     for assoc_type in &impl_block.associated_types {
-                        if let Some(existing_type) = existing.associated_types.get(&assoc_type.name) {
+                        if let Some(existing_type) = existing.associated_types.get(&assoc_type.name)
+                        {
                             if existing_type != &assoc_type.ty {
                                 return Err(CoherenceError::ConflictingAssociatedType {
                                     trait_name: trait_name.to_string(),
@@ -263,22 +268,29 @@ impl CoherenceChecker {
         impl_block: &ImplBlock,
     ) -> Result<(), CoherenceError> {
         let is_blanket = !impl_block.generic_params.is_empty();
-        
+
         // Check if this impl has #[default] attribute (specialization support #1150)
-        let has_default = impl_block.attributes.iter().any(|attr| attr.name == "default");
-        
+        let has_default = impl_block
+            .attributes
+            .iter()
+            .any(|attr| attr.name == "default");
+
         if let Some(existing_impls) = self.impl_registry.get(trait_name) {
             let new_type = self.extract_type_name(&impl_block.target_type);
-            
+
             for existing in existing_impls {
                 // Skip conflict check if either impl is marked with #[default] (specialization)
                 if has_default || existing.is_default {
                     continue;
                 }
-                
+
                 if is_blanket && !existing.is_blanket {
                     let existing_type = self.extract_type_name(&existing.target_type);
-                    if self.blanket_covers_specific(&new_type, &existing_type, &impl_block.generic_params) {
+                    if self.blanket_covers_specific(
+                        &new_type,
+                        &existing_type,
+                        &impl_block.generic_params,
+                    ) {
                         return Err(CoherenceError::BlanketImplConflict {
                             trait_name: trait_name.to_string(),
                             general: new_type,
@@ -288,7 +300,11 @@ impl CoherenceChecker {
                     }
                 } else if !is_blanket && existing.is_blanket {
                     let existing_type = self.extract_type_name(&existing.target_type);
-                    if self.blanket_covers_specific(&existing_type, &new_type, &existing.generic_params) {
+                    if self.blanket_covers_specific(
+                        &existing_type,
+                        &new_type,
+                        &existing.generic_params,
+                    ) {
                         return Err(CoherenceError::BlanketImplConflict {
                             trait_name: trait_name.to_string(),
                             general: existing_type,
@@ -310,7 +326,10 @@ impl CoherenceChecker {
             }
 
             // Check for #[default] attribute (specialization #1150)
-            let is_default = impl_block.attributes.iter().any(|attr| attr.name == "default");
+            let is_default = impl_block
+                .attributes
+                .iter()
+                .any(|attr| attr.name == "default");
 
             let entry = ImplRegistryEntry {
                 target_type: impl_block.target_type.clone(),
@@ -418,7 +437,7 @@ mod tests {
     fn test_orphan_rule_local_trait() {
         let mut checker = CoherenceChecker::new();
         checker.register_trait("MyTrait".to_string());
-        
+
         let result = checker.check_orphan_rule(
             "MyTrait",
             "String",
@@ -431,7 +450,7 @@ mod tests {
     fn test_orphan_rule_local_type() {
         let mut checker = CoherenceChecker::new();
         checker.register_type("MyType".to_string());
-        
+
         let result = checker.check_orphan_rule(
             "Display",
             "MyType",
@@ -443,15 +462,21 @@ mod tests {
     #[test]
     fn test_orphan_rule_violation() {
         let checker = CoherenceChecker::new();
-        
+
         let result = checker.check_orphan_rule(
             "Display",
             "String",
             simple_parser::token::Span::new(0, 0, 0, 0),
         );
         assert!(result.is_err());
-        
-        if let Err(CoherenceError::OrphanImpl { trait_name, target_type, suggestion, .. }) = result {
+
+        if let Err(CoherenceError::OrphanImpl {
+            trait_name,
+            target_type,
+            suggestion,
+            ..
+        }) = result
+        {
             assert_eq!(trait_name, "Display");
             assert_eq!(target_type, "String");
             // Check that suggestion is provided (#1153)

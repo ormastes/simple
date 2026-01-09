@@ -423,7 +423,8 @@ impl Insert {
         I: IntoIterator,
         I::Item: Into<SqlValue>,
     {
-        self.values.push(values.into_iter().map(|v| v.into()).collect());
+        self.values
+            .push(values.into_iter().map(|v| v.into()).collect());
         self
     }
 
@@ -664,8 +665,7 @@ mod tests {
 
     #[test]
     fn test_left_join() {
-        let query = Query::table("users")
-            .left_join("posts", "posts.user_id = users.id");
+        let query = Query::table("users").left_join("posts", "posts.user_id = users.id");
         let (sql, _) = query.build();
         assert!(sql.contains("LEFT JOIN"));
     }

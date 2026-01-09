@@ -287,13 +287,12 @@ fn test_state_store_clear() {
 // MIR Instructions Additional Coverage (compiler/src/mir/instructions.rs - 0%)
 // =============================================================================
 
-use simple_compiler::mir::{
-    BlockId, VReg, MirInst, ParallelBackend, ContractKind,
-    UnitOverflowBehavior, GpuMemoryScope, GpuAtomicOp,
-    CapturedVar, CaptureMode, MirPattern, MirLiteral,
-    PatternBinding, BindingStep, FStringPart,
-};
 use simple_compiler::hir::TypeId;
+use simple_compiler::mir::{
+    BindingStep, BlockId, CaptureMode, CapturedVar, ContractKind, FStringPart, GpuAtomicOp,
+    GpuMemoryScope, MirInst, MirLiteral, MirPattern, ParallelBackend, PatternBinding,
+    UnitOverflowBehavior, VReg,
+};
 
 #[test]
 fn test_parallel_backend_variants() {
@@ -457,25 +456,38 @@ fn test_fstring_part_variants() {
 
 #[test]
 fn test_mir_inst_gc_alloc() {
-    let inst = MirInst::GcAlloc { dest: VReg(0), ty: TypeId(1) };
+    let inst = MirInst::GcAlloc {
+        dest: VReg(0),
+        ty: TypeId(1),
+    };
     assert!(matches!(inst, MirInst::GcAlloc { .. }));
 }
 
 #[test]
 fn test_mir_inst_wait() {
-    let inst = MirInst::Wait { dest: Some(VReg(1)), target: VReg(0) };
+    let inst = MirInst::Wait {
+        dest: Some(VReg(1)),
+        target: VReg(0),
+    };
     assert!(matches!(inst, MirInst::Wait { .. }));
 }
 
 #[test]
 fn test_mir_inst_local_addr() {
-    let inst = MirInst::LocalAddr { dest: VReg(0), local_index: 5 };
+    let inst = MirInst::LocalAddr {
+        dest: VReg(0),
+        local_index: 5,
+    };
     assert!(matches!(inst, MirInst::LocalAddr { local_index: 5, .. }));
 }
 
 #[test]
 fn test_mir_inst_get_element_ptr() {
-    let inst = MirInst::GetElementPtr { dest: VReg(2), base: VReg(0), index: VReg(1) };
+    let inst = MirInst::GetElementPtr {
+        dest: VReg(2),
+        base: VReg(0),
+        index: VReg(1),
+    };
     assert!(matches!(inst, MirInst::GetElementPtr { .. }));
 }
 

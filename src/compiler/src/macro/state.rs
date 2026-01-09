@@ -141,7 +141,10 @@ pub(crate) fn exit_block_scope() -> Vec<Block> {
 pub(crate) fn queue_tail_injection(block: Block) {
     let current_depth = BLOCK_DEPTH.with(|cell| *cell.borrow());
     if is_macro_trace_enabled() {
-        macro_trace(&format!("  queuing tail injection at depth {}", current_depth));
+        macro_trace(&format!(
+            "  queuing tail injection at depth {}",
+            current_depth
+        ));
     }
     PENDING_TAIL_INJECTIONS.with(|cell| {
         cell.borrow_mut().push((current_depth, block));

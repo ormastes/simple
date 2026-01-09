@@ -18,9 +18,15 @@ mod compiler_builtin_class_tests {
     #[test]
     fn test_builtin_class_from_name() {
         assert_eq!(BuiltinClass::from_name("Range"), Some(BuiltinClass::Range));
-        assert_eq!(BuiltinClass::from_name("__range__"), Some(BuiltinClass::Range));
+        assert_eq!(
+            BuiltinClass::from_name("__range__"),
+            Some(BuiltinClass::Range)
+        );
         assert_eq!(BuiltinClass::from_name("Array"), Some(BuiltinClass::Array));
-        assert_eq!(BuiltinClass::from_name("__array__"), Some(BuiltinClass::Array));
+        assert_eq!(
+            BuiltinClass::from_name("__array__"),
+            Some(BuiltinClass::Array)
+        );
         assert_eq!(BuiltinClass::from_name("Unknown"), None);
     }
 
@@ -69,7 +75,7 @@ mod compiler_builtin_class_tests {
 // Compiler Value Types - Special Enums
 // ============================================================================
 mod compiler_special_enum_tests {
-    use simple_compiler::value::{SpecialEnumType, OptionVariant, ResultVariant};
+    use simple_compiler::value::{OptionVariant, ResultVariant, SpecialEnumType};
 
     #[test]
     fn test_special_enum_type_variants() {
@@ -81,8 +87,14 @@ mod compiler_special_enum_tests {
 
     #[test]
     fn test_special_enum_type_from_name() {
-        assert_eq!(SpecialEnumType::from_name("Option"), Some(SpecialEnumType::Option));
-        assert_eq!(SpecialEnumType::from_name("Result"), Some(SpecialEnumType::Result));
+        assert_eq!(
+            SpecialEnumType::from_name("Option"),
+            Some(SpecialEnumType::Option)
+        );
+        assert_eq!(
+            SpecialEnumType::from_name("Result"),
+            Some(SpecialEnumType::Result)
+        );
         assert_eq!(SpecialEnumType::from_name("Unknown"), None);
     }
 
@@ -117,7 +129,7 @@ mod compiler_special_enum_tests {
 // Loader Cross-Test Types
 // ============================================================================
 mod loader_cross_test_types {
-    use simple_loader::{TargetFixture, TestMatrix, CrossTestResults};
+    use simple_loader::{CrossTestResults, TargetFixture, TestMatrix};
 
     #[test]
     fn test_target_fixture_x86_64_linux() {
@@ -214,9 +226,9 @@ mod loader_cross_test_types {
 // ============================================================================
 mod compiler_value_constants_tests {
     use simple_compiler::value::{
-        BUILTIN_RANGE, BUILTIN_ARRAY, METHOD_NEW, METHOD_SELF, METHOD_MISSING,
-        FUNC_MAIN, ATTR_STRONG, BUILTIN_CHANNEL, BUILTIN_SPAWN, CLASS_RANGE, CLASS_ARRAY,
-        BLOCKING_BUILTINS, ACTOR_BUILTINS, GENERATOR_BUILTINS,
+        ACTOR_BUILTINS, ATTR_STRONG, BLOCKING_BUILTINS, BUILTIN_ARRAY, BUILTIN_CHANNEL,
+        BUILTIN_RANGE, BUILTIN_SPAWN, CLASS_ARRAY, CLASS_RANGE, FUNC_MAIN, GENERATOR_BUILTINS,
+        METHOD_MISSING, METHOD_NEW, METHOD_SELF,
     };
 
     #[test]
@@ -281,7 +293,10 @@ mod loader_load_error_tests {
 
     #[test]
     fn test_load_error_io() {
-        let err = LoadError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "not found"));
+        let err = LoadError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "not found",
+        ));
         let _ = format!("{:?}", err);
     }
 }
@@ -465,7 +480,7 @@ mod loader_loaded_module_tests {
 // Type Checker Additional Tests
 // ============================================================================
 mod type_checker_additional_tests {
-    use simple_type::{Type, TypeScheme, Substitution};
+    use simple_type::{Substitution, Type, TypeScheme};
 
     #[test]
     fn test_type_nil() {

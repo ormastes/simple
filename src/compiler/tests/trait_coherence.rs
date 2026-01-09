@@ -400,12 +400,7 @@ fn test_generic_type_extraction() {
 
     let generic_type = make_generic_type("Vec", vec![make_type("i32")]);
 
-    let impl_block = make_impl_block(
-        Some("Container".to_string()),
-        generic_type,
-        vec![],
-        vec![],
-    );
+    let impl_block = make_impl_block(Some("Container".to_string()), generic_type, vec![], vec![]);
 
     assert!(checker.check_impl(&impl_block).is_ok());
 }
@@ -416,7 +411,7 @@ fn test_specialization_with_default_attribute() {
     let mut checker = CoherenceChecker::new();
     checker.register_trait("Process".to_string());
     checker.register_type("i32".to_string());
-    
+
     // Blanket impl with #[default]
     let default_attr = Attribute {
         span: make_span(),
@@ -424,7 +419,7 @@ fn test_specialization_with_default_attribute() {
         value: None,
         args: None,
     };
-    
+
     let blanket = make_impl_block_with_attrs(
         Some("Process".to_string()),
         make_type("T"),
@@ -433,7 +428,7 @@ fn test_specialization_with_default_attribute() {
         vec![default_attr],
     );
     assert!(checker.check_impl(&blanket).is_ok());
-    
+
     // Specific impl (specializes the default)
     let specific = make_impl_block(
         Some("Process".to_string()),
@@ -441,19 +436,22 @@ fn test_specialization_with_default_attribute() {
         vec![],
         vec![],
     );
-    
+
     // Should succeed - specialization allowed with #[default]
-    assert!(checker.check_impl(&specific).is_ok(), "Specialization should be allowed with #[default] attribute");
+    assert!(
+        checker.check_impl(&specific).is_ok(),
+        "Specialization should be allowed with #[default] attribute"
+    );
 }
 
 #[test]
 fn test_extension_trait_pattern() {
     // Extension traits: local trait + foreign type = ALLOWED
     let mut checker = CoherenceChecker::new();
-    
+
     // Define local extension trait
     checker.register_trait("StringExt".to_string());
-    
+
     // Implement for foreign type String - should be allowed
     let impl_block = make_impl_block(
         Some("StringExt".to_string()),
@@ -461,18 +459,20 @@ fn test_extension_trait_pattern() {
         vec![],
         vec![],
     );
-    
-    assert!(checker.check_impl(&impl_block).is_ok(), 
-        "Extension trait pattern should be allowed: local trait + foreign type");
+
+    assert!(
+        checker.check_impl(&impl_block).is_ok(),
+        "Extension trait pattern should be allowed: local trait + foreign type"
+    );
 }
 
 #[test]
 fn test_extension_trait_with_generics() {
     // Extension trait with generic parameter
     let mut checker = CoherenceChecker::new();
-    
+
     checker.register_trait("SliceExt".to_string());
-    
+
     // impl[T] SliceExt[T] for [T]
     let impl_block = make_impl_block(
         Some("SliceExt".to_string()),
@@ -483,9 +483,11 @@ fn test_extension_trait_with_generics() {
         vec!["T".to_string()],
         vec![],
     );
-    
-    assert!(checker.check_impl(&impl_block).is_ok(),
-        "Generic extension trait should be allowed");
+
+    assert!(
+        checker.check_impl(&impl_block).is_ok(),
+        "Generic extension trait should be allowed"
+    );
 }
 
 #[test]
@@ -495,7 +497,7 @@ fn test_negative_bounds_infrastructure() {
     let mut checker = CoherenceChecker::new();
     checker.register_trait("Clone".to_string());
     checker.register_trait("Process".to_string());
-    
+
     // For now, just verify checker accepts impl with where clause
     // Future: parser will populate negative_bounds in where_clause
     let impl_block = make_impl_block(
@@ -504,8 +506,10 @@ fn test_negative_bounds_infrastructure() {
         vec!["T".to_string()],
         vec![],
     );
-    
+
     // Should succeed - negative bounds infrastructure ready
-    assert!(checker.check_impl(&impl_block).is_ok(),
-        "Negative bounds infrastructure should be ready");
+    assert!(
+        checker.check_impl(&impl_block).is_ok(),
+        "Negative bounds infrastructure should be ready"
+    );
 }

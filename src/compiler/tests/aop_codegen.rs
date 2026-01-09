@@ -1,11 +1,11 @@
 use simple_compiler::codegen::JitCompiler;
 use simple_compiler::hir::TypeId;
+use simple_compiler::mir::CallTarget;
 use simple_compiler::mir::{
     BlockId, LocalKind, MirBlock, MirFunction, MirInst, MirLocal, MirModule, Terminator,
 };
-use simple_compiler::mir::CallTarget;
 use simple_parser::Visibility;
-use simple_runtime::aop::{AopAroundFn, ProceedContext, rt_aop_proceed};
+use simple_runtime::aop::{rt_aop_proceed, AopAroundFn, ProceedContext};
 use simple_runtime::value::RuntimeValue;
 
 extern "C" fn target_sum(argc: u64, argv: *const RuntimeValue) -> RuntimeValue {

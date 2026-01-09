@@ -1,6 +1,6 @@
 // Core instruction compilation helpers: binary operations, builtin I/O, and interpreter calls.
 
-use cranelift_codegen::ir::{types, condcodes::IntCC, InstBuilder};
+use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
@@ -123,7 +123,10 @@ pub(super) fn compile_binop<M: Module>(
         BinOp::FloorDiv => builder.ins().sdiv(lhs, rhs),
         BinOp::MatMul => {
             // Simple Math #1930-#1939: Matrix multiplication requires PyTorch runtime
-            return Err("Matrix multiplication (@) requires PyTorch runtime, use interpreter mode".to_string());
+            return Err(
+                "Matrix multiplication (@) requires PyTorch runtime, use interpreter mode"
+                    .to_string(),
+            );
         }
     };
     Ok(val)

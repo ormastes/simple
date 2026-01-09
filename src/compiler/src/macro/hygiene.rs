@@ -1,5 +1,5 @@
-use simple_parser::ast::*;
 use simple_parser::ast::Argument;
+use simple_parser::ast::*;
 use std::collections::HashMap;
 
 #[derive(Debug, Default)]
@@ -25,7 +25,10 @@ impl MacroHygieneContext {
     }
 
     fn resolve(&self, name: &str) -> Option<String> {
-        self.scopes.iter().rev().find_map(|scope| scope.get(name).cloned())
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
     }
 
     fn bind(&mut self, name: &str, reuse_if_bound: bool) -> String {
@@ -66,10 +69,7 @@ pub(super) fn apply_macro_hygiene_block(
     }
 }
 
-pub(super) fn apply_macro_hygiene_node(
-    node: &Node,
-    ctx: &mut MacroHygieneContext,
-) -> Node {
+pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContext) -> Node {
     match node {
         Node::Let(let_stmt) => {
             let value = let_stmt
@@ -280,10 +280,7 @@ pub(super) fn apply_macro_hygiene_node(
     }
 }
 
-pub(super) fn apply_macro_hygiene_expr(
-    expr: &Expr,
-    ctx: &mut MacroHygieneContext,
-) -> Expr {
+pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContext) -> Expr {
     match expr {
         Expr::Identifier(name) => ctx
             .resolve(name)
@@ -294,7 +291,9 @@ pub(super) fn apply_macro_hygiene_expr(
                 .iter()
                 .map(|part| match part {
                     FStringPart::Literal(text) => FStringPart::Literal(text.clone()),
-                    FStringPart::Expr(expr) => FStringPart::Expr(apply_macro_hygiene_expr(expr, ctx)),
+                    FStringPart::Expr(expr) => {
+                        FStringPart::Expr(apply_macro_hygiene_expr(expr, ctx))
+                    }
                 })
                 .collect(),
         ),
@@ -398,12 +397,18 @@ pub(super) fn apply_macro_hygiene_expr(
                 })
                 .collect(),
         },
-        Expr::Tuple(items) => {
-            Expr::Tuple(items.iter().map(|item| apply_macro_hygiene_expr(item, ctx)).collect())
-        }
-        Expr::Array(items) => {
-            Expr::Array(items.iter().map(|item| apply_macro_hygiene_expr(item, ctx)).collect())
-        }
+        Expr::Tuple(items) => Expr::Tuple(
+            items
+                .iter()
+                .map(|item| apply_macro_hygiene_expr(item, ctx))
+                .collect(),
+        ),
+        Expr::Array(items) => Expr::Array(
+            items
+                .iter()
+                .map(|item| apply_macro_hygiene_expr(item, ctx))
+                .collect(),
+        ),
         Expr::VecLiteral(items) => Expr::VecLiteral(
             items
                 .iter()
@@ -489,19 +494,13 @@ pub(super) fn apply_macro_hygiene_expr(
             name: name.clone(),
             fields: fields
                 .iter()
-                .map(|(field, expr)| {
-                    (
-                        field.clone(),
-                        apply_macro_hygiene_expr(expr, ctx),
-                    )
-                })
+                .map(|(field, expr)| (field.clone(), apply_macro_hygiene_expr(expr, ctx)))
                 .collect(),
         },
         Expr::Spawn(expr) => Expr::Spawn(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::Await(expr) => Expr::Await(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::Yield(expr) => Expr::Yield(
-            expr
-                .as_ref()
+            expr.as_ref()
                 .map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
         ),
         Expr::New { kind, expr } => Expr::New {
@@ -521,7 +520,11 @@ pub(super) fn apply_macro_hygiene_expr(
                 .map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
             bound: *bound,
         },
-        Expr::FunctionalUpdate { target, method, args } => Expr::FunctionalUpdate {
+        Expr::FunctionalUpdate {
+            target,
+            method,
+            args,
+        } => Expr::FunctionalUpdate {
             target: Box::new(apply_macro_hygiene_expr(target, ctx)),
             method: method.clone(),
             args: args

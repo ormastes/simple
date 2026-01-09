@@ -161,7 +161,12 @@ pub extern "C" fn rt_async_set_state(future: RuntimeValue, state: i64) {
 /// Get the context value from a future.
 #[no_mangle]
 pub extern "C" fn rt_async_get_ctx(future: RuntimeValue) -> RuntimeValue {
-    let f = validate_heap_type!(future, HeapObjectType::Future, RuntimeFuture, RuntimeValue::NIL);
+    let f = validate_heap_type!(
+        future,
+        HeapObjectType::Future,
+        RuntimeFuture,
+        RuntimeValue::NIL
+    );
     unsafe { (*f).ctx }
 }
 
@@ -335,7 +340,11 @@ use super::collections::rt_array_new;
 pub extern "C" fn rt_future_is_ready(future: RuntimeValue) -> i64 {
     let fut = validate_heap_type!(future, HeapObjectType::Future, RuntimeFuture, 0);
     unsafe {
-        if (*fut).state == 1 { 1 } else { 0 }
+        if (*fut).state == 1 {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -343,7 +352,12 @@ pub extern "C" fn rt_future_is_ready(future: RuntimeValue) -> i64 {
 /// Returns NIL if the future is not ready.
 #[no_mangle]
 pub extern "C" fn rt_future_get_result(future: RuntimeValue) -> RuntimeValue {
-    let fut = validate_heap_type!(future, HeapObjectType::Future, RuntimeFuture, RuntimeValue::NIL);
+    let fut = validate_heap_type!(
+        future,
+        HeapObjectType::Future,
+        RuntimeFuture,
+        RuntimeValue::NIL
+    );
     unsafe {
         if (*fut).state == 1 {
             (*fut).result

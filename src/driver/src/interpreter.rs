@@ -14,7 +14,7 @@ use simple_loader::{create_executable, Settlement, SettlementConfig};
 use simple_runtime::gc::GcRuntime;
 use simple_runtime::value::{
     rt_capture_stderr_start, rt_capture_stderr_stop, rt_capture_stdout_start,
-    rt_capture_stdout_stop, rt_set_stdin, rt_clear_stdin,
+    rt_capture_stdout_stop, rt_clear_stdin, rt_set_stdin,
 };
 
 use crate::Runner;
@@ -213,11 +213,7 @@ impl Interpreter {
     /// # Returns
     /// * `Ok(RunResult)` - Execution result with exit code and captured output
     /// * `Err(String)` - Error message if compilation or execution failed
-    pub fn run_file(
-        &self,
-        path: &std::path::Path,
-        config: RunConfig,
-    ) -> Result<RunResult, String> {
+    pub fn run_file(&self, path: &std::path::Path, config: RunConfig) -> Result<RunResult, String> {
         // Set up mock stdin if provided
         if !config.stdin.is_empty() {
             rt_set_stdin(&config.stdin);

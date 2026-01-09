@@ -3,14 +3,12 @@ use std::collections::HashMap;
 use simple_parser::ast::{Expr, FStringPart};
 use simple_parser::token::NumericSuffix;
 
-use super::units::{lookup_unit_family, lookup_unit_family_with_si};
 use super::evaluate_expr;
+use super::units::{lookup_unit_family, lookup_unit_family_with_si};
 use crate::error::CompileError;
 use crate::value::{OptionVariant, Value};
 
-use super::super::{
-    ClassDef, Env, Enums, FunctionDef, ImplMethods, MOVED_VARS, MODULE_GLOBALS,
-};
+use super::super::{ClassDef, Enums, Env, FunctionDef, ImplMethods, MODULE_GLOBALS, MOVED_VARS};
 
 pub(super) fn eval_literal_expr(
     expr: &Expr,

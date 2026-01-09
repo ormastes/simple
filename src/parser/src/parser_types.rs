@@ -344,7 +344,10 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a single unit constraint: range, checked, saturate, wrap, default
-    fn parse_unit_constraint(&mut self, constraints: &mut UnitReprConstraints) -> Result<(), ParseError> {
+    fn parse_unit_constraint(
+        &mut self,
+        constraints: &mut UnitReprConstraints,
+    ) -> Result<(), ParseError> {
         match &self.current.kind {
             TokenKind::Identifier(s) => {
                 let s = s.clone();

@@ -204,11 +204,7 @@ fn decode_3d(linear: i64, dims: [i64; 3]) -> [i64; 3] {
 
 /// Execute kernel sequentially (fallback when Rayon is disabled).
 #[cfg(not(feature = "cpu-simd"))]
-fn execute_kernel_parallel(
-    kernel: KernelFn,
-    global_size: [i64; 3],
-    local_size: [i64; 3],
-) {
+fn execute_kernel_parallel(kernel: KernelFn, global_size: [i64; 3], local_size: [i64; 3]) {
     let num_groups = [
         (global_size[0] + local_size[0] - 1) / local_size[0],
         (global_size[1] + local_size[1] - 1) / local_size[1],
@@ -259,11 +255,7 @@ fn execute_kernel_parallel(
 
 /// Execute kernel in parallel using Rayon's work-stealing scheduler.
 #[cfg(feature = "cpu-simd")]
-fn execute_kernel_parallel(
-    kernel: KernelFn,
-    global_size: [i64; 3],
-    local_size: [i64; 3],
-) {
+fn execute_kernel_parallel(kernel: KernelFn, global_size: [i64; 3], local_size: [i64; 3]) {
     let num_groups = [
         (global_size[0] + local_size[0] - 1) / local_size[0],
         (global_size[1] + local_size[1] - 1) / local_size[1],
@@ -287,39 +279,41 @@ fn execute_kernel_parallel(
         };
 
         // Parallel over threads within group
-        (0..threads_per_group as i64).into_par_iter().for_each(|local_linear| {
-            let local_id = decode_3d(local_linear, local_size);
-            let global_id = [
-                group_id[0] * local_size[0] + local_id[0],
-                group_id[1] * local_size[1] + local_id[1],
-                group_id[2] * local_size[2] + local_id[2],
-            ];
+        (0..threads_per_group as i64)
+            .into_par_iter()
+            .for_each(|local_linear| {
+                let local_id = decode_3d(local_linear, local_size);
+                let global_id = [
+                    group_id[0] * local_size[0] + local_id[0],
+                    group_id[1] * local_size[1] + local_id[1],
+                    group_id[2] * local_size[2] + local_id[2],
+                ];
 
-            // Skip out-of-bounds
-            if global_id[0] >= global_size[0]
-                || global_id[1] >= global_size[1]
-                || global_id[2] >= global_size[2]
-            {
-                return;
-            }
+                // Skip out-of-bounds
+                if global_id[0] >= global_size[0]
+                    || global_id[1] >= global_size[1]
+                    || global_id[2] >= global_size[2]
+                {
+                    return;
+                }
 
-            // Set thread-local context
-            set_kernel_context(KernelContext {
-                global_id,
-                local_id,
-                group_id,
-                global_size,
-                local_size,
-                num_groups,
+                // Set thread-local context
+                set_kernel_context(KernelContext {
+                    global_id,
+                    local_id,
+                    group_id,
+                    global_size,
+                    local_size,
+                    num_groups,
+                });
+                set_group_barrier(barrier.clone());
+
+                // Execute kernel
+                kernel();
+
+                // Clear barrier
+                set_group_barrier(None);
             });
-            set_group_barrier(barrier.clone());
-
-            // Execute kernel
-            kernel();
-
-            // Clear barrier
-            set_group_barrier(None);
-        });
     });
 }
 
@@ -337,11 +331,7 @@ fn execute_kernel_parallel(
 /// # Returns
 /// 0 on success
 #[no_mangle]
-pub extern "C" fn rt_par_launch_1d(
-    kernel_ptr: u64,
-    global_size: i64,
-    local_size: i64,
-) -> i32 {
+pub extern "C" fn rt_par_launch_1d(kernel_ptr: u64, global_size: i64, local_size: i64) -> i32 {
     let kernel: KernelFn = unsafe { std::mem::transmute(kernel_ptr) };
     let local = if local_size <= 0 { 256 } else { local_size };
     execute_kernel_parallel(kernel, [global_size, 1, 1], [local, 1, 1]);
@@ -360,8 +350,12 @@ pub extern "C" fn rt_par_launch_1d(
 #[no_mangle]
 pub extern "C" fn rt_par_launch(
     kernel_ptr: u64,
-    gx: i64, gy: i64, gz: i64,
-    lx: i64, ly: i64, lz: i64,
+    gx: i64,
+    gy: i64,
+    gz: i64,
+    lx: i64,
+    ly: i64,
+    lz: i64,
 ) -> i32 {
     let kernel: KernelFn = unsafe { std::mem::transmute(kernel_ptr) };
     let local_size = [

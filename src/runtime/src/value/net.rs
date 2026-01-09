@@ -304,9 +304,18 @@ mod tests {
     fn test_error_conversion() {
         use std::io::{Error, ErrorKind};
 
-        assert_eq!(NetError::from(Error::from(ErrorKind::AddrInUse)), NetError::AddrInUse);
-        assert_eq!(NetError::from(Error::from(ErrorKind::ConnectionRefused)), NetError::ConnectionRefused);
-        assert_eq!(NetError::from(Error::from(ErrorKind::TimedOut)), NetError::TimedOut);
+        assert_eq!(
+            NetError::from(Error::from(ErrorKind::AddrInUse)),
+            NetError::AddrInUse
+        );
+        assert_eq!(
+            NetError::from(Error::from(ErrorKind::ConnectionRefused)),
+            NetError::ConnectionRefused
+        );
+        assert_eq!(
+            NetError::from(Error::from(ErrorKind::TimedOut)),
+            NetError::TimedOut
+        );
     }
 
     #[test]

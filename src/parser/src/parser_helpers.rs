@@ -293,23 +293,23 @@ impl<'a> Parser<'a> {
             TokenKind::Return => "return",
             TokenKind::True => "true",
             TokenKind::False => "false",
-            TokenKind::Crate => "crate",  // Allow "crate" keyword in paths
-            TokenKind::Result => "result",  // Allow "result" keyword in paths
-            TokenKind::To => "to",  // Allow "to" in paths (e.g., to_sdn)
-            TokenKind::NotTo => "not_to",  // Allow "not_to" in paths
-            TokenKind::Context => "context",  // Allow "context" in paths
-            TokenKind::Feature => "feature",  // Allow BDD keywords in paths
+            TokenKind::Crate => "crate", // Allow "crate" keyword in paths
+            TokenKind::Result => "result", // Allow "result" keyword in paths
+            TokenKind::To => "to",       // Allow "to" in paths (e.g., to_sdn)
+            TokenKind::NotTo => "not_to", // Allow "not_to" in paths
+            TokenKind::Context => "context", // Allow "context" in paths
+            TokenKind::Feature => "feature", // Allow BDD keywords in paths
             TokenKind::Scenario => "scenario",
             TokenKind::Given => "given",
             TokenKind::When => "when",
             TokenKind::Then => "then",
-            TokenKind::Old => "old",  // Allow "old" in paths
-            TokenKind::Let => "let",  // Allow "let" in export statements
-            TokenKind::Mock => "mock",  // Allow "mock" in export/path contexts
+            TokenKind::Old => "old",           // Allow "old" in paths
+            TokenKind::Let => "let",           // Allow "let" in export statements
+            TokenKind::Mock => "mock",         // Allow "mock" in export/path contexts
             TokenKind::AndThen => "and_then",  // Allow "and_then" in export statements
-            TokenKind::Examples => "examples",  // Allow "examples" in export statements
-            TokenKind::Outline => "outline",  // Allow "outline" in export statements
-            TokenKind::Common => "common",  // Allow "common" in paths (stdlib directory name)
+            TokenKind::Examples => "examples", // Allow "examples" in export statements
+            TokenKind::Outline => "outline",   // Allow "outline" in export statements
+            TokenKind::Common => "common",     // Allow "common" in paths (stdlib directory name)
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -445,7 +445,9 @@ impl<'a> Parser<'a> {
 
         // Process the macro contract
         let scope = self.current_scope.clone();
-        let _ = self.macro_registry.process_macro_invocation(macro_name, &const_args, &scope);
+        let _ = self
+            .macro_registry
+            .process_macro_invocation(macro_name, &const_args, &scope);
     }
 
     /// Try to evaluate an expression as a compile-time constant.
@@ -473,7 +475,12 @@ impl<'a> Parser<'a> {
     }
 
     /// Evaluate a binary operation on const values
-    fn eval_const_binary_op(&self, left: &ConstValue, op: &BinOp, right: &ConstValue) -> Option<ConstValue> {
+    fn eval_const_binary_op(
+        &self,
+        left: &ConstValue,
+        op: &BinOp,
+        right: &ConstValue,
+    ) -> Option<ConstValue> {
         match (left, right) {
             (ConstValue::Int(l), ConstValue::Int(r)) => match op {
                 BinOp::Add => Some(ConstValue::Int(l + r)),
@@ -568,11 +575,14 @@ impl<'a> Parser<'a> {
     /// Ignores const parameters and returns only type parameter names
     pub(crate) fn parse_generic_params_as_strings(&mut self) -> Result<Vec<String>, ParseError> {
         let params = self.parse_generic_params()?;
-        Ok(params.into_iter().filter_map(|p| {
-            match p {
-                GenericParam::Type(name) => Some(name),
-                GenericParam::Const { .. } => None, // Skip const params for now
-            }
-        }).collect())
+        Ok(params
+            .into_iter()
+            .filter_map(|p| {
+                match p {
+                    GenericParam::Type(name) => Some(name),
+                    GenericParam::Const { .. } => None, // Skip const params for now
+                }
+            })
+            .collect())
     }
 }

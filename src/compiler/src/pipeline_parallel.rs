@@ -473,8 +473,17 @@ mod tests {
         stats.record_stage(PipelineStage::Parse);
         stats.record_stage(PipelineStage::HirLower);
 
-        assert_eq!(*stats.modules_per_stage.get(&PipelineStage::Parse).unwrap(), 2);
-        assert_eq!(*stats.modules_per_stage.get(&PipelineStage::HirLower).unwrap(), 1);
+        assert_eq!(
+            *stats.modules_per_stage.get(&PipelineStage::Parse).unwrap(),
+            2
+        );
+        assert_eq!(
+            *stats
+                .modules_per_stage
+                .get(&PipelineStage::HirLower)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -493,9 +502,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_coordinator() {
-        let coord = PipelineCoordinator::with_config(
-            PipelineConfig::new().with_max_in_flight(2)
-        );
+        let coord = PipelineCoordinator::with_config(PipelineConfig::new().with_max_in_flight(2));
 
         assert!(coord.can_start_module());
         coord.start_module();
@@ -517,7 +524,9 @@ mod tests {
         fn process(&self, input: String, _id: usize, _name: &str) -> Result<i32, String> {
             Ok(input.len() as i32)
         }
-        fn stage(&self) -> PipelineStage { PipelineStage::Parse }
+        fn stage(&self) -> PipelineStage {
+            PipelineStage::Parse
+        }
     }
 
     struct MockHirHandler;
@@ -525,7 +534,9 @@ mod tests {
         fn process(&self, input: i32, _id: usize, _name: &str) -> Result<i32, String> {
             Ok(input * 2)
         }
-        fn stage(&self) -> PipelineStage { PipelineStage::HirLower }
+        fn stage(&self) -> PipelineStage {
+            PipelineStage::HirLower
+        }
     }
 
     struct MockMonoHandler;
@@ -533,7 +544,9 @@ mod tests {
         fn process(&self, input: i32, _id: usize, _name: &str) -> Result<i32, String> {
             Ok(input + 1)
         }
-        fn stage(&self) -> PipelineStage { PipelineStage::Monomorphize }
+        fn stage(&self) -> PipelineStage {
+            PipelineStage::Monomorphize
+        }
     }
 
     struct MockMirHandler;
@@ -541,7 +554,9 @@ mod tests {
         fn process(&self, input: i32, _id: usize, _name: &str) -> Result<i32, String> {
             Ok(input * 3)
         }
-        fn stage(&self) -> PipelineStage { PipelineStage::MirLower }
+        fn stage(&self) -> PipelineStage {
+            PipelineStage::MirLower
+        }
     }
 
     struct MockCodegenHandler;
@@ -549,7 +564,9 @@ mod tests {
         fn process(&self, input: i32, _id: usize, name: &str) -> Result<String, String> {
             Ok(format!("{}: {}", name, input))
         }
-        fn stage(&self) -> PipelineStage { PipelineStage::Codegen }
+        fn stage(&self) -> PipelineStage {
+            PipelineStage::Codegen
+        }
     }
 
     #[test]

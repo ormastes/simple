@@ -30,7 +30,7 @@ impl PtySession {
         let mut cmd = CommandBuilder::new(&binary);
         cmd.arg("--tui");
         cmd.env("TERM", "xterm-256color");
-        cmd.env("TUI_DEBUG", "1");  // Enable debug logging
+        cmd.env("TUI_DEBUG", "1"); // Enable debug logging
 
         let _child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
@@ -56,7 +56,7 @@ impl PtySession {
     }
 
     fn send_ctrl_d(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.writer.write_all(&[4])?;  // Ctrl+D
+        self.writer.write_all(&[4])?; // Ctrl+D
         self.writer.flush()?;
         thread::sleep(Duration::from_millis(100));
         Ok(())
@@ -140,7 +140,10 @@ fn test_tui_indentation_bug_reproduction() -> Result<(), Box<dyn std::error::Err
         println!("   Got: Text merged with previous line");
     } else {
         println!("⚠️  UNKNOWN STATE: Cannot determine where text appeared");
-        println!("   Output: {}", output3.lines().take(5).collect::<Vec<_>>().join("\n"));
+        println!(
+            "   Output: {}",
+            output3.lines().take(5).collect::<Vec<_>>().join("\n")
+        );
     }
     println!();
 

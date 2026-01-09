@@ -1,9 +1,9 @@
 use simple_parser::{self as ast, Node};
 
+use super::super::types::*;
 use super::context::FunctionContext;
 use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
-use super::super::types::*;
 
 impl Lowerer {
     pub(super) fn lower_block(

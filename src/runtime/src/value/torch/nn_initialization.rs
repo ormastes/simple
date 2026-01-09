@@ -112,11 +112,7 @@ pub extern "C" fn rt_torch_xavier_uniform_(tensor_handle: u64, gain: f64) -> i32
             .lock()
             .insert(tensor_handle, Arc::new(TensorWrapper(scaled)));
 
-        tracing::debug!(
-            "rt_torch_xavier_uniform_: {} gain={}",
-            tensor_handle,
-            gain
-        );
+        tracing::debug!("rt_torch_xavier_uniform_: {} gain={}", tensor_handle, gain);
         TorchFfiError::Success as i32
     }
     #[cfg(not(feature = "pytorch"))]

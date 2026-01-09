@@ -113,20 +113,17 @@ impl FunctionEffectInfo {
 
     /// Check if the function requires IO.
     pub fn requires_io(&self) -> bool {
-        self.declared_effects.contains(&Effect::Io)
-            || self.derived_effects.contains(&Effect::Io)
+        self.declared_effects.contains(&Effect::Io) || self.derived_effects.contains(&Effect::Io)
     }
 
     /// Check if the function requires filesystem access.
     pub fn requires_fs(&self) -> bool {
-        self.declared_effects.contains(&Effect::Fs)
-            || self.derived_effects.contains(&Effect::Fs)
+        self.declared_effects.contains(&Effect::Fs) || self.derived_effects.contains(&Effect::Fs)
     }
 
     /// Check if the function requires network access.
     pub fn requires_net(&self) -> bool {
-        self.declared_effects.contains(&Effect::Net)
-            || self.derived_effects.contains(&Effect::Net)
+        self.declared_effects.contains(&Effect::Net) || self.derived_effects.contains(&Effect::Net)
     }
 
     /// Add a derived effect.
@@ -325,7 +322,12 @@ impl EffectCache {
         if self.functions.len() >= self.config.max_function_entries {
             // Simple eviction: remove ~10% of entries
             let to_remove = self.config.max_function_entries / 10;
-            let keys: Vec<_> = self.functions.iter().take(to_remove).map(|e| e.key().clone()).collect();
+            let keys: Vec<_> = self
+                .functions
+                .iter()
+                .take(to_remove)
+                .map(|e| e.key().clone())
+                .collect();
             for key in keys {
                 self.functions.remove(&key);
             }
@@ -335,7 +337,12 @@ impl EffectCache {
     fn maybe_evict_operations(&self) {
         if self.operations.len() >= self.config.max_operation_entries {
             let to_remove = self.config.max_operation_entries / 10;
-            let keys: Vec<_> = self.operations.iter().take(to_remove).map(|e| e.key().clone()).collect();
+            let keys: Vec<_> = self
+                .operations
+                .iter()
+                .take(to_remove)
+                .map(|e| e.key().clone())
+                .collect();
             for key in keys {
                 self.operations.remove(&key);
             }
@@ -375,16 +382,29 @@ impl EffectCache {
 
         // FS operations
         for op in &[
-            "read_file", "write_file", "read_dir", "list_dir", "create_dir",
-            "remove_file", "remove_dir", "rename", "copy", "exists",
+            "read_file",
+            "write_file",
+            "read_dir",
+            "list_dir",
+            "create_dir",
+            "remove_file",
+            "remove_dir",
+            "rename",
+            "copy",
+            "exists",
         ] {
             self.put_operation(op.to_string(), OperationEffectInfo::fs());
         }
 
         // Net operations
         for op in &[
-            "http_get", "http_post", "tcp_connect", "tcp_listen",
-            "udp_bind", "udp_send", "dns_lookup",
+            "http_get",
+            "http_post",
+            "tcp_connect",
+            "tcp_listen",
+            "udp_bind",
+            "udp_send",
+            "dns_lookup",
         ] {
             self.put_operation(op.to_string(), OperationEffectInfo::net());
         }
@@ -623,7 +643,10 @@ mod tests {
     fn test_local_effect_cache() {
         let mut cache = LocalEffectCache::new();
 
-        cache.put_function("local_func".to_string(), FunctionEffectInfo::new(HashSet::new()));
+        cache.put_function(
+            "local_func".to_string(),
+            FunctionEffectInfo::new(HashSet::new()),
+        );
         assert!(cache.get_function("local_func").is_some());
 
         cache.put_operation("local_op".to_string(), OperationEffectInfo::io());

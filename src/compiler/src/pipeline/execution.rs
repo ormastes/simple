@@ -67,10 +67,7 @@ fn link_wasm_object(object_code: &[u8]) -> Result<Vec<u8>, CompileError> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CompileError::Codegen(format!(
-            "wasm-ld failed: {}",
-            stderr
-        )));
+        return Err(CompileError::Codegen(format!("wasm-ld failed: {}", stderr)));
     }
 
     // Read the linked WASM module
@@ -124,13 +121,13 @@ impl CompilerPipeline {
         let module = parser
             .parse()
             .map_err(|e| CompileError::Parse(format!("{e}")))?;
-        
+
         // Emit AST if requested (LLM-friendly #885)
         if let Some(path) = &self.emit_ast {
             crate::ir_export::export_ast(&module, path.as_deref())
                 .map_err(|e| CompileError::Semantic(e))?;
         }
-        
+
         self.compile_module_to_memory(module)
     }
 
@@ -165,8 +162,7 @@ impl CompilerPipeline {
         // If HIR or MIR export is requested, generate them even in interpreter mode (#886-887)
         if self.emit_hir.is_some() || self.emit_mir.is_some() {
             // Type check is required for HIR/MIR lowering
-            type_check(&module.items)
-                .map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
+            type_check(&module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
 
             // Lower to HIR
             let hir_module = crate::hir::lower(&module)
@@ -181,8 +177,12 @@ impl CompilerPipeline {
             // Lower to MIR if requested
             if self.emit_mir.is_some() {
                 let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
-                let mir_module = crate::mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
-                    .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
+                let mir_module = crate::mir::lower_to_mir_with_mode_and_di(
+                    &hir_module,
+                    self.contract_mode,
+                    di_config,
+                )
+                .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
 
                 // Emit MIR if requested
                 if let Some(path) = &self.emit_mir {
@@ -230,13 +230,13 @@ impl CompilerPipeline {
         let ast_module = parser
             .parse()
             .map_err(|e| CompileError::Parse(format!("{e}")))?;
-        
+
         // Emit AST if requested (LLM-friendly #885)
         if let Some(path) = &self.emit_ast {
             crate::ir_export::export_ast(&ast_module, path.as_deref())
                 .map_err(|e| CompileError::Semantic(e))?;
         }
-        
+
         self.compile_module_to_memory_native(ast_module)
     }
 
@@ -428,7 +428,7 @@ impl CompilerPipeline {
         output: &Path,
         options: Option<crate::linker::NativeBinaryOptions>,
     ) -> Result<crate::linker::NativeBinaryResult, CompileError> {
-        use crate::linker::{NativeBinaryBuilder, NativeBinaryOptions, LayoutOptimizer};
+        use crate::linker::{LayoutOptimizer, NativeBinaryBuilder, NativeBinaryOptions};
 
         // Clear previous diagnostics
         self.lint_diagnostics.clear();
@@ -467,9 +467,7 @@ impl CompilerPipeline {
         let mir_module = self.type_check_and_lower(&ast_module)?;
 
         // Get options
-        let options = options.unwrap_or_else(|| {
-            NativeBinaryOptions::default().output(output)
-        });
+        let options = options.unwrap_or_else(|| NativeBinaryOptions::default().output(output));
 
         // Check for main function (not required for shared libraries)
         if !options.shared {
@@ -516,7 +514,9 @@ impl CompilerPipeline {
         }
 
         // Build
-        builder.build().map_err(|e| CompileError::Codegen(format!("{e}")))
+        builder
+            .build()
+            .map_err(|e| CompileError::Codegen(format!("{e}")))
     }
 
     /// Compile a source file to a standalone native binary.
@@ -527,8 +527,9 @@ impl CompilerPipeline {
         output: &Path,
         options: Option<crate::linker::NativeBinaryOptions>,
     ) -> Result<crate::linker::NativeBinaryResult, CompileError> {
-        let source = fs::read_to_string(source_path)
-            .map_err(|e| CompileError::Io(format!("failed to read {}: {}", source_path.display(), e)))?;
+        let source = fs::read_to_string(source_path).map_err(|e| {
+            CompileError::Io(format!("failed to read {}: {}", source_path.display(), e))
+        })?;
         self.compile_to_native_binary(&source, output, options)
     }
 }

@@ -20,8 +20,6 @@
 //! Total: 41 tests organized into 9 focused modules
 
 #[cfg(test)]
-mod helpers;
-#[cfg(test)]
 mod backend_creation;
 #[cfg(test)]
 mod binop;
@@ -31,6 +29,8 @@ mod compilation;
 mod control_flow;
 #[cfg(test)]
 mod function_compilation;
+#[cfg(test)]
+mod helpers;
 #[cfg(test)]
 mod ir_generation;
 #[cfg(test)]

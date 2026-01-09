@@ -95,8 +95,7 @@ impl BridgeValue {
     /// Helper to create a BridgeValue from a Vec of Values with a specific tag
     fn from_vec_with_tag(items: &[Value], tag: u8) -> Self {
         let len = items.len();
-        let mut bridge_items: Vec<BridgeValue> =
-            items.iter().map(BridgeValue::from).collect();
+        let mut bridge_items: Vec<BridgeValue> = items.iter().map(BridgeValue::from).collect();
         let ptr = bridge_items.as_mut_ptr();
         std::mem::forget(bridge_items);
         Self {
@@ -310,7 +309,7 @@ impl From<&Value> for BridgeValue {
                 extended: std::ptr::null_mut(),
             },
             Value::BlockClosure { .. } => BridgeValue {
-                tag: bridge_tags::LAMBDA,  // BlockClosures are lambda-like
+                tag: bridge_tags::LAMBDA, // BlockClosures are lambda-like
                 payload: 0,
                 extended: std::ptr::null_mut(),
             },
@@ -325,18 +324,21 @@ impl From<&Value> for BridgeValue {
                 extended: CString::new(class_name.as_str()).unwrap().into_raw() as *mut u8,
             },
             Value::EnumType { enum_name } => BridgeValue {
-                tag: bridge_tags::ENUM,  // Use ENUM tag for enum types
+                tag: bridge_tags::ENUM, // Use ENUM tag for enum types
                 payload: 0,
                 extended: CString::new(enum_name.as_str()).unwrap().into_raw() as *mut u8,
             },
-            Value::EnumVariantConstructor { enum_name, variant_name } => {
+            Value::EnumVariantConstructor {
+                enum_name,
+                variant_name,
+            } => {
                 let full_name = format!("{}::{}", enum_name, variant_name);
                 BridgeValue {
-                    tag: bridge_tags::ENUM,  // Use ENUM tag for variant constructors
+                    tag: bridge_tags::ENUM, // Use ENUM tag for variant constructors
                     payload: 0,
                     extended: CString::new(full_name).unwrap().into_raw() as *mut u8,
                 }
-            },
+            }
             Value::Actor(_) => BridgeValue {
                 tag: bridge_tags::ACTOR,
                 payload: 0,
@@ -449,8 +451,7 @@ impl BridgeValue {
         if self.extended.is_null() || len == 0 {
             wrapper(vec![])
         } else {
-            let slice =
-                std::slice::from_raw_parts(self.extended as *const BridgeValue, len);
+            let slice = std::slice::from_raw_parts(self.extended as *const BridgeValue, len);
             let items: Vec<Value> = slice.iter().map(|bv| bv.to_value()).collect();
             wrapper(items)
         }

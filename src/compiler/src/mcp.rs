@@ -14,9 +14,7 @@
 //! - **Output:** JSON with single `text` field
 
 use serde::{Deserialize, Serialize};
-use simple_parser::ast::{
-    ClassDef, FunctionDef, Node, Parameter, TraitDef, Type, Visibility,
-};
+use simple_parser::ast::{ClassDef, FunctionDef, Node, Parameter, TraitDef, Type, Visibility};
 use std::collections::BTreeMap;
 
 /// MCP output format
@@ -138,12 +136,7 @@ impl McpGenerator {
         let mut lines = Vec::new();
 
         for node in nodes {
-            self.process_node_with_expansion(
-                node,
-                &mut lines,
-                selector,
-                what,
-            );
+            self.process_node_with_expansion(node, &mut lines, selector, what);
         }
 
         McpOutput {
@@ -160,7 +153,11 @@ impl McpGenerator {
                 mode: "mcp".to_string(),
                 line_numbers: None,
                 show_coverage: if self.show_coverage { Some(true) } else { None },
-                show_block_guides: if self.show_block_guides { Some(true) } else { None },
+                show_block_guides: if self.show_block_guides {
+                    Some(true)
+                } else {
+                    None
+                },
             })
         }
     }
@@ -234,7 +231,11 @@ impl McpGenerator {
             McpMode::Expanded => "F▼",
         };
 
-        let vis = if func.visibility.is_public() { "pub " } else { "" };
+        let vis = if func.visibility.is_public() {
+            "pub "
+        } else {
+            ""
+        };
         let name = &func.name;
 
         match mode {
@@ -251,7 +252,10 @@ impl McpGenerator {
                     .map(|t| format!(" -> {}", self.format_type(t)))
                     .unwrap_or_default();
 
-                lines.push(format!("{}  {}fn {}({}){} {{", mark, vis, name, params, ret));
+                lines.push(format!(
+                    "{}  {}fn {}({}){} {{",
+                    mark, vis, name, params, ret
+                ));
                 lines.push("    # Implementation".to_string());
                 lines.push("    …".to_string());
                 lines.push("}".to_string());
@@ -269,7 +273,11 @@ impl McpGenerator {
             McpMode::Expanded => "C▼",
         };
 
-        let vis = if class.visibility.is_public() { "pub " } else { "" };
+        let vis = if class.visibility.is_public() {
+            "pub "
+        } else {
+            ""
+        };
         let name = &class.name;
 
         match mode {
@@ -429,7 +437,9 @@ impl McpTools {
         selector: &str,
         what: ExpandWhat,
     ) -> Result<String, serde_json::Error> {
-        let output = self.generator.generate_with_expansion(nodes, selector, what);
+        let output = self
+            .generator
+            .generate_with_expansion(nodes, selector, what);
         serde_json::to_string_pretty(&output)
     }
 
@@ -484,16 +494,14 @@ mod tests {
             span: Span::new(0, 0, 0, 0),
             name: name.to_string(),
             visibility: Visibility::Public,
-            params: vec![
-                Parameter {
-                    span: Span::new(0, 0, 0, 0),
-                    name: "name".to_string(),
-                    ty: Some(Type::Simple("String".to_string())),
-                    default: None,
-                    mutability: Mutability::Immutable,
-                    inject: false,
-                },
-            ],
+            params: vec![Parameter {
+                span: Span::new(0, 0, 0, 0),
+                name: "name".to_string(),
+                ty: Some(Type::Simple("String".to_string())),
+                default: None,
+                mutability: Mutability::Immutable,
+                inject: false,
+            }],
             return_type: Some(Type::Simple("bool".to_string())),
             where_clause: vec![],
             body: Block::default(),

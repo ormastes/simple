@@ -3,14 +3,16 @@
 //! Provides a linear transformation: y = xW^T + b
 
 #[cfg(feature = "pytorch")]
-use super::{ModuleState, MODULE_REGISTRY, next_module_handle};
+use super::{next_module_handle, ModuleState, MODULE_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-use super::{TENSOR_REGISTRY, TensorWrapper};
+use super::{TensorWrapper, TENSOR_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-use super::{rt_torch_randn, rt_torch_zeros, rt_torch_free, rt_torch_set_requires_grad,
-            rt_torch_kaiming_uniform_, rt_torch_transpose, rt_torch_matmul, rt_torch_add};
+use super::{
+    rt_torch_add, rt_torch_free, rt_torch_kaiming_uniform_, rt_torch_matmul, rt_torch_randn,
+    rt_torch_set_requires_grad, rt_torch_transpose, rt_torch_zeros,
+};
 
 /// Create a Linear (fully connected) layer
 /// in_features: input size
@@ -58,7 +60,9 @@ pub extern "C" fn rt_torch_linear_new(in_features: i64, out_features: i64, use_b
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(state));
+        MODULE_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(state));
 
         tracing::debug!(
             "rt_torch_linear_new: handle={} in={} out={} use_bias={}",

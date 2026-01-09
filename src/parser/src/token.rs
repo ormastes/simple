@@ -87,7 +87,7 @@ pub enum TokenKind {
     Union, // union (tagged union, alias for enum with data)
     Trait,
     Impl,
-    Mixin,  // mixin (for mixin declarations, Feature #2200)
+    Mixin, // mixin (for mixin declarations, Feature #2200)
     Actor,
     Extends, // extends (class inheritance)
     Pub,
@@ -146,12 +146,12 @@ pub enum TokenKind {
 
     // Contract keywords (LLM-friendly features)
     // New spec syntax (doc/spec/invariant.md)
-    Out,       // out (postcondition block)
-    OutErr,    // out_err (error postcondition block)
-    Where,     // where (refinement type predicate)
+    Out,    // out (postcondition block)
+    OutErr, // out_err (error postcondition block)
+    Where,  // where (refinement type predicate)
     // Legacy syntax (still supported)
-    Requires,  // requires: (precondition) - legacy, use in:
-    Ensures,   // ensures: (postcondition) - legacy, use out(ret):
+    Requires, // requires: (precondition) - legacy, use in:
+    Ensures,  // ensures: (postcondition) - legacy, use out(ret):
     // Shared
     Invariant, // invariant: (routine/class invariant)
     Old,       // old() (previous value in postconditions)
@@ -164,14 +164,14 @@ pub enum TokenKind {
     NotTo, // not_to (negative assertion: expect x not_to eq 5)
 
     // Gherkin-style system test DSL keywords (doc/spec/gherkin_dsl.md)
-    Feature,   // feature Name: (test grouping)
-    Scenario,  // scenario Name: or scenario outline Name:
-    Outline,   // outline (modifier for scenario)
-    Examples,  // examples name: (data table with two-space delimiter)
-    Given,     // given step_pattern: (setup step)
-    When,      // when step_pattern: (action step)
-    Then,      // then step_pattern: (assertion step)
-    AndThen,   // and_then step_pattern: (chained assertion)
+    Feature,  // feature Name: (test grouping)
+    Scenario, // scenario Name: or scenario outline Name:
+    Outline,  // outline (modifier for scenario)
+    Examples, // examples name: (data table with two-space delimiter)
+    Given,    // given step_pattern: (setup step)
+    When,     // when step_pattern: (action step)
+    Then,     // then step_pattern: (assertion step)
+    AndThen,  // and_then step_pattern: (chained assertion)
 
     // Memory management keywords
     HandlePool, // handle_pool (declare a handle pool for a type)
@@ -199,21 +199,21 @@ pub enum TokenKind {
     LtEq,  // <=
     GtEq,  // >=
 
-    Assign,       // =
-    PlusAssign,   // +=
-    MinusAssign,  // -=
-    StarAssign,   // *=
-    SlashAssign,  // /=
-    TildeAssign,  // ~= (suspension assignment for async-by-default)
+    Assign,      // =
+    PlusAssign,  // +=
+    MinusAssign, // -=
+    StarAssign,  // *=
+    SlashAssign, // /=
+    TildeAssign, // ~= (suspension assignment for async-by-default)
 
-    Ampersand,   // &
-    Pipe,        // |
-    DoublePipe,  // ||
-    DoubleAmp,   // &&
-    Caret,       // ^
-    Tilde,       // ~
-    ShiftLeft,   // <<
-    ShiftRight,  // >>
+    Ampersand,  // &
+    Pipe,       // |
+    DoublePipe, // ||
+    DoubleAmp,  // &&
+    Caret,      // ^
+    Tilde,      // ~
+    ShiftLeft,  // <<
+    ShiftRight, // >>
 
     Arrow,    // ->
     FatArrow, // =>

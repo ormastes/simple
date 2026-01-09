@@ -132,7 +132,10 @@ impl ParallelCodegen {
         }
 
         Ok(CompiledModule {
-            name: mir_module.name.clone().unwrap_or_else(|| "unnamed".to_string()),
+            name: mir_module
+                .name
+                .clone()
+                .unwrap_or_else(|| "unnamed".to_string()),
             object_code,
             function_count,
         })
@@ -164,11 +167,11 @@ impl ParallelCodegen {
     }
 
     /// Compile modules in parallel.
-    fn compile_modules_parallel(&self, modules: &[MirModule]) -> Vec<BackendResult<CompiledModule>> {
-        modules
-            .par_iter()
-            .map(|m| self.compile_module(m))
-            .collect()
+    fn compile_modules_parallel(
+        &self,
+        modules: &[MirModule],
+    ) -> Vec<BackendResult<CompiledModule>> {
+        modules.par_iter().map(|m| self.compile_module(m)).collect()
     }
 }
 

@@ -270,15 +270,9 @@ pub enum Expr {
         right: Box<Expr>,
     },
     /// Unary operation
-    Unary {
-        op: UnaryOp,
-        operand: Box<Expr>,
-    },
+    Unary { op: UnaryOp, operand: Box<Expr> },
     /// Field access `expr.field`
-    FieldAccess {
-        receiver: Box<Expr>,
-        field: String,
-    },
+    FieldAccess { receiver: Box<Expr>, field: String },
     /// Index access `expr[index]`
     IndexAccess {
         receiver: Box<Expr>,
@@ -291,10 +285,7 @@ pub enum Expr {
         args: Vec<Expr>,
     },
     /// Function call `func(args)`
-    Call {
-        callee: Box<Expr>,
-        args: Vec<Expr>,
-    },
+    Call { callee: Box<Expr>, args: Vec<Expr> },
     /// Array literal `[a, b, c]`
     Array(Vec<Expr>),
     /// Tuple literal `(a, b, c)`
@@ -371,10 +362,7 @@ pub enum UnaryOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
     /// Variable assignment `name = expr`
-    Assignment {
-        target: String,
-        value: Expr,
-    },
+    Assignment { target: String, value: Expr },
     /// Let binding `let name = expr`
     Let {
         name: String,
@@ -418,10 +406,7 @@ pub enum TypeExpr {
     /// Named type `i32`, `String`, `User`
     Named(String),
     /// Generic type `List[T]`, `Dict[K, V]`
-    Generic {
-        name: String,
-        args: Vec<TypeExpr>,
-    },
+    Generic { name: String, args: Vec<TypeExpr> },
     /// Array type `[T]`
     Array(Box<TypeExpr>),
     /// Tuple type `(T, U, V)`

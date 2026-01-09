@@ -46,9 +46,8 @@ pub fn apply_sandbox(config: &SandboxConfig) -> SandboxResult<()> {
 /// Create a new Job Object.
 fn create_job_object() -> SandboxResult<HANDLE> {
     unsafe {
-        let job = CreateJobObjectW(None, None).map_err(|e| {
-            SandboxError::Config(format!("Failed to create Job Object: {}", e))
-        })?;
+        let job = CreateJobObjectW(None, None)
+            .map_err(|e| SandboxError::Config(format!("Failed to create Job Object: {}", e)))?;
 
         if job.is_invalid() {
             return Err(SandboxError::Config(

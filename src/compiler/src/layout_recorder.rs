@@ -307,9 +307,7 @@ pub fn set_function_size(name: &str, size: u64) {
 
 /// Get the current recording session (for testing)
 pub fn get_recording_session() -> Option<RecordingSession> {
-    RECORDING_SESSION.with(|cell| {
-        cell.borrow().as_ref().cloned()
-    })
+    RECORDING_SESSION.with(|cell| cell.borrow().as_ref().cloned())
 }
 
 /// Export recorded layout data as SDN string

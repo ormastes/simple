@@ -1,8 +1,8 @@
 use super::*;
 use crate::di::parse_di_config;
 use crate::hir::{self, BinOp};
-use crate::mir::{BlockId, ContractKind, MirInst, Terminator};
 use crate::mir::function::MirModule;
+use crate::mir::{BlockId, ContractKind, MirInst, Terminator};
 use simple_parser::Parser;
 
 fn compile_to_mir(source: &str) -> MirLowerResult<MirModule> {
@@ -68,9 +68,10 @@ bindings = [
         .expect("main function");
 
     let has_make_num_call = main_fn.blocks.iter().any(|block| {
-        block.instructions.iter().any(|inst| {
-            matches!(inst, MirInst::Call { target, .. } if target.name() == "make_num")
-        })
+        block
+            .instructions
+            .iter()
+            .any(|inst| matches!(inst, MirInst::Call { target, .. } if target.name() == "make_num"))
     });
     assert!(has_make_num_call, "expected injected call to make_num");
 }
@@ -142,10 +143,13 @@ fn test_lower_function_with_precondition() {
     let entry = func.block(BlockId(0)).unwrap();
 
     // Should have a ContractCheck instruction for the precondition
-    assert!(entry
-        .instructions
-        .iter()
-        .any(|i| matches!(i, MirInst::ContractCheck { kind: ContractKind::Precondition, .. })));
+    assert!(entry.instructions.iter().any(|i| matches!(
+        i,
+        MirInst::ContractCheck {
+            kind: ContractKind::Precondition,
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -160,7 +164,13 @@ fn test_lower_function_with_postcondition() {
     // Check all blocks for postcondition checks
     let has_postcondition_check = func.blocks.iter().any(|block| {
         block.instructions.iter().any(|i| {
-            matches!(i, MirInst::ContractCheck { kind: ContractKind::Postcondition, .. })
+            matches!(
+                i,
+                MirInst::ContractCheck {
+                    kind: ContractKind::Postcondition,
+                    ..
+                }
+            )
         })
     });
     assert!(has_postcondition_check, "Should have postcondition check");
@@ -169,7 +179,8 @@ fn test_lower_function_with_postcondition() {
 #[test]
 fn test_lower_function_with_invariant() {
     // Contract syntax: contracts go INSIDE the function body (after colon)
-    let source = "fn test_invariant(x: i64) -> i64:\n    invariant:\n        x >= 0\n    return x + 1\n";
+    let source =
+        "fn test_invariant(x: i64) -> i64:\n    invariant:\n        x >= 0\n    return x + 1\n";
     let mir = compile_to_mir(source).unwrap();
 
     let func = &mir.functions[0];
@@ -177,12 +188,24 @@ fn test_lower_function_with_invariant() {
     // Should have InvariantEntry and InvariantExit checks
     let has_entry = func.blocks.iter().any(|block| {
         block.instructions.iter().any(|i| {
-            matches!(i, MirInst::ContractCheck { kind: ContractKind::InvariantEntry, .. })
+            matches!(
+                i,
+                MirInst::ContractCheck {
+                    kind: ContractKind::InvariantEntry,
+                    ..
+                }
+            )
         })
     });
     let has_exit = func.blocks.iter().any(|block| {
         block.instructions.iter().any(|i| {
-            matches!(i, MirInst::ContractCheck { kind: ContractKind::InvariantExit, .. })
+            matches!(
+                i,
+                MirInst::ContractCheck {
+                    kind: ContractKind::InvariantExit,
+                    ..
+                }
+            )
         })
     });
     assert!(has_entry, "Should have invariant entry check");
@@ -214,24 +237,36 @@ fn test_contract_mode_off_no_checks() {
         .instructions
         .iter()
         .any(|i| matches!(i, MirInst::ContractCheck { .. }));
-    assert!(!has_contract_check, "ContractMode::Off should not emit contract checks");
+    assert!(
+        !has_contract_check,
+        "ContractMode::Off should not emit contract checks"
+    );
 }
 
 #[test]
 fn test_contract_mode_boundary_public_function() {
     // With ContractMode::Boundary, public functions should have contract checks
-    let source = "pub fn divide(a: i64, b: i64) -> i64:\n    in:\n        b != 0\n    return a / b\n";
+    let source =
+        "pub fn divide(a: i64, b: i64) -> i64:\n    in:\n        b != 0\n    return a / b\n";
     let mir = compile_to_mir_with_mode(source, ContractMode::Boundary).unwrap();
 
     let func = &mir.functions[0];
     let entry = func.block(BlockId(0)).unwrap();
 
     // Should have ContractCheck for public function
-    let has_contract_check = entry
-        .instructions
-        .iter()
-        .any(|i| matches!(i, MirInst::ContractCheck { kind: ContractKind::Precondition, .. }));
-    assert!(has_contract_check, "ContractMode::Boundary should emit checks for public functions");
+    let has_contract_check = entry.instructions.iter().any(|i| {
+        matches!(
+            i,
+            MirInst::ContractCheck {
+                kind: ContractKind::Precondition,
+                ..
+            }
+        )
+    });
+    assert!(
+        has_contract_check,
+        "ContractMode::Boundary should emit checks for public functions"
+    );
 }
 
 #[test]
@@ -248,7 +283,10 @@ fn test_contract_mode_boundary_private_function() {
         .instructions
         .iter()
         .any(|i| matches!(i, MirInst::ContractCheck { .. }));
-    assert!(!has_contract_check, "ContractMode::Boundary should not emit checks for private functions");
+    assert!(
+        !has_contract_check,
+        "ContractMode::Boundary should not emit checks for private functions"
+    );
 }
 
 #[test]
@@ -261,19 +299,33 @@ fn test_contract_mode_all_checks_all_functions() {
     let entry = func.block(BlockId(0)).unwrap();
 
     // Should have ContractCheck for all functions
-    let has_contract_check = entry
-        .instructions
-        .iter()
-        .any(|i| matches!(i, MirInst::ContractCheck { kind: ContractKind::Precondition, .. }));
-    assert!(has_contract_check, "ContractMode::All should emit checks for all functions");
+    let has_contract_check = entry.instructions.iter().any(|i| {
+        matches!(
+            i,
+            MirInst::ContractCheck {
+                kind: ContractKind::Precondition,
+                ..
+            }
+        )
+    });
+    assert!(
+        has_contract_check,
+        "ContractMode::All should emit checks for all functions"
+    );
 }
 
 #[test]
 fn test_contract_mode_from_str() {
     assert_eq!(ContractMode::from_str("off"), Some(ContractMode::Off));
     assert_eq!(ContractMode::from_str("none"), Some(ContractMode::Off));
-    assert_eq!(ContractMode::from_str("boundary"), Some(ContractMode::Boundary));
-    assert_eq!(ContractMode::from_str("public"), Some(ContractMode::Boundary));
+    assert_eq!(
+        ContractMode::from_str("boundary"),
+        Some(ContractMode::Boundary)
+    );
+    assert_eq!(
+        ContractMode::from_str("public"),
+        Some(ContractMode::Boundary)
+    );
     assert_eq!(ContractMode::from_str("all"), Some(ContractMode::All));
     assert_eq!(ContractMode::from_str("on"), Some(ContractMode::All));
     assert_eq!(ContractMode::from_str("test"), Some(ContractMode::Test));
@@ -332,8 +384,10 @@ fn use_pos(x: PosI64) -> i64:
     let hir_module = hir::lower(&ast).expect("hir lower failed");
 
     // Verify the refined type is registered
-    assert!(hir_module.refined_types.contains_key("PosI64"),
-        "Refined type PosI64 should be registered");
+    assert!(
+        hir_module.refined_types.contains_key("PosI64"),
+        "Refined type PosI64 should be registered"
+    );
 
     let refined = hir_module.refined_types.get("PosI64").unwrap();
     assert_eq!(refined.name, "PosI64");
@@ -354,12 +408,16 @@ fn get_user(id: UserId) -> i64:
     let hir_module = hir::lower(&ast).expect("hir lower failed");
 
     // Simple alias should NOT be in refined_types
-    assert!(!hir_module.refined_types.contains_key("UserId"),
-        "Simple type alias should not be in refined_types");
+    assert!(
+        !hir_module.refined_types.contains_key("UserId"),
+        "Simple type alias should not be in refined_types"
+    );
 
     // But the type name should still be registered
-    assert!(hir_module.types.lookup("UserId").is_some(),
-        "Type alias name should be registered");
+    assert!(
+        hir_module.types.lookup("UserId").is_some(),
+        "Type alias name should be registered"
+    );
 }
 
 // =========================================================================
@@ -378,7 +436,10 @@ fn test_pure_function_in_contract_allowed() {
     // Should have is_valid marked as pure
     let is_valid_func = hir_module.functions.iter().find(|f| f.name == "is_valid");
     assert!(is_valid_func.is_some(), "is_valid function should exist");
-    assert!(is_valid_func.unwrap().is_pure, "is_valid should be marked as pure");
+    assert!(
+        is_valid_func.unwrap().is_pure,
+        "is_valid should be marked as pure"
+    );
 }
 
 #[test]
@@ -394,8 +455,11 @@ fn test_impure_function_in_contract_rejected() {
     assert!(result.is_err(), "Should reject impure function in contract");
     let err = result.unwrap_err();
     let err_str = format!("{}", err);
-    assert!(err_str.contains("impure_check") || err_str.contains("Impure"),
-        "Error should mention impure function: {}", err_str);
+    assert!(
+        err_str.contains("impure_check") || err_str.contains("Impure"),
+        "Error should mention impure function: {}",
+        err_str
+    );
 }
 
 #[test]
@@ -408,7 +472,10 @@ fn test_builtin_math_in_contract_allowed() {
     let hir_module = hir::lower(&ast);
 
     // Should succeed because abs is implicitly pure and x >= 0 uses no function call
-    assert!(hir_module.is_ok(), "Comparison operators should be allowed in contracts");
+    assert!(
+        hir_module.is_ok(),
+        "Comparison operators should be allowed in contracts"
+    );
 }
 
 // =========================================================================
@@ -418,22 +485,37 @@ fn test_builtin_math_in_contract_allowed() {
 #[test]
 fn test_snapshot_safe_primitives() {
     // Test that primitive types are snapshot-safe in the type registry
-    use crate::hir::{TypeRegistry, TypeId};
+    use crate::hir::{TypeId, TypeRegistry};
 
     let registry = TypeRegistry::new();
 
     // CTR-060: Primitives should be snapshot-safe
-    assert!(registry.is_snapshot_safe(TypeId::BOOL), "bool should be snapshot-safe");
-    assert!(registry.is_snapshot_safe(TypeId::I64), "i64 should be snapshot-safe");
-    assert!(registry.is_snapshot_safe(TypeId::F64), "f64 should be snapshot-safe");
-    assert!(registry.is_snapshot_safe(TypeId::STRING), "string should be snapshot-safe");
-    assert!(registry.is_snapshot_safe(TypeId::NIL), "nil should be snapshot-safe");
+    assert!(
+        registry.is_snapshot_safe(TypeId::BOOL),
+        "bool should be snapshot-safe"
+    );
+    assert!(
+        registry.is_snapshot_safe(TypeId::I64),
+        "i64 should be snapshot-safe"
+    );
+    assert!(
+        registry.is_snapshot_safe(TypeId::F64),
+        "f64 should be snapshot-safe"
+    );
+    assert!(
+        registry.is_snapshot_safe(TypeId::STRING),
+        "string should be snapshot-safe"
+    );
+    assert!(
+        registry.is_snapshot_safe(TypeId::NIL),
+        "nil should be snapshot-safe"
+    );
 }
 
 #[test]
 fn test_snapshot_safe_struct() {
     // Test that structs with primitive fields are snapshot-safe (CTR-061)
-    use crate::hir::{HirType, TypeRegistry, TypeId};
+    use crate::hir::{HirType, TypeId, TypeRegistry};
 
     let mut registry = TypeRegistry::new();
 
@@ -451,13 +533,16 @@ fn test_snapshot_safe_struct() {
     );
 
     let point_id = registry.lookup("Point").unwrap();
-    assert!(registry.is_snapshot_safe(point_id), "Struct with primitive fields should be snapshot-safe");
+    assert!(
+        registry.is_snapshot_safe(point_id),
+        "Struct with primitive fields should be snapshot-safe"
+    );
 }
 
 #[test]
 fn test_snapshot_unsafe_function_type() {
     // Test that function types are NOT snapshot-safe
-    use crate::hir::{HirType, TypeRegistry, TypeId};
+    use crate::hir::{HirType, TypeId, TypeRegistry};
 
     let mut registry = TypeRegistry::new();
 
@@ -467,7 +552,10 @@ fn test_snapshot_unsafe_function_type() {
         ret: TypeId::I64,
     });
 
-    assert!(!registry.is_snapshot_safe(func_id), "Function types should NOT be snapshot-safe");
+    assert!(
+        !registry.is_snapshot_safe(func_id),
+        "Function types should NOT be snapshot-safe"
+    );
 }
 
 // =========================================================================
@@ -506,19 +594,15 @@ fn test_module_boundary_parameter_invariant() {
 
     // Verify the substitution
     match &substituted.kind {
-        HirExprKind::Binary { left, .. } => {
-            match &left.kind {
-                HirExprKind::FieldAccess { receiver, .. } => {
-                    match &receiver.kind {
-                        HirExprKind::Local(idx) => {
-                            assert_eq!(*idx, 2, "Local 0 should be substituted with 2");
-                        }
-                        _ => panic!("Expected Local after substitution"),
-                    }
+        HirExprKind::Binary { left, .. } => match &left.kind {
+            HirExprKind::FieldAccess { receiver, .. } => match &receiver.kind {
+                HirExprKind::Local(idx) => {
+                    assert_eq!(*idx, 2, "Local 0 should be substituted with 2");
                 }
-                _ => panic!("Expected FieldAccess"),
-            }
-        }
+                _ => panic!("Expected Local after substitution"),
+            },
+            _ => panic!("Expected FieldAccess"),
+        },
         _ => panic!("Expected Binary"),
     }
 }
@@ -562,7 +646,10 @@ fn test_module_boundary_return_invariant() {
                         HirExprKind::ContractResult => {
                             // Success - local 0 was substituted with ContractResult
                         }
-                        _ => panic!("Expected ContractResult after substitution, got {:?}", receiver.kind),
+                        _ => panic!(
+                            "Expected ContractResult after substitution, got {:?}",
+                            receiver.kind
+                        ),
                     }
                 }
                 _ => panic!("Expected FieldAccess"),
@@ -575,7 +662,7 @@ fn test_module_boundary_return_invariant() {
 #[test]
 fn test_get_type_name() {
     // Test TypeRegistry::get_type_name helper for CTR-012
-    use crate::hir::{HirType, TypeRegistry, TypeId};
+    use crate::hir::{HirType, TypeId, TypeRegistry};
 
     let mut registry = TypeRegistry::new();
 
@@ -612,7 +699,7 @@ fn test_get_type_name() {
 #[test]
 fn test_refined_type_const_eval_greater_than() {
     // CTR-022: Test compile-time evaluation of predicates
-    use crate::hir::{HirExpr, HirExprKind, HirRefinedType, BinOp, TypeId};
+    use crate::hir::{BinOp, HirExpr, HirExprKind, HirRefinedType, TypeId};
 
     // Create a refined type: PosI64 = i64 where self > 0
     let refined = HirRefinedType {
@@ -666,7 +753,7 @@ fn test_refined_type_const_eval_greater_than() {
 #[test]
 fn test_refined_type_const_eval_range() {
     // CTR-022: Test range predicates
-    use crate::hir::{HirExpr, HirExprKind, HirRefinedType, BinOp, TypeId};
+    use crate::hir::{BinOp, HirExpr, HirExprKind, HirRefinedType, TypeId};
 
     // Create a refined type: Percentage = i64 where self >= 0 and self <= 100
     // For simplicity, just test >= 0
@@ -712,8 +799,14 @@ fn test_subtype_result_same() {
     let module = HirModule::new();
 
     // Same types should return Same
-    assert_eq!(module.check_subtype(TypeId::I64, TypeId::I64), SubtypeResult::Same);
-    assert_eq!(module.check_subtype(TypeId::BOOL, TypeId::BOOL), SubtypeResult::Same);
+    assert_eq!(
+        module.check_subtype(TypeId::I64, TypeId::I64),
+        SubtypeResult::Same
+    );
+    assert_eq!(
+        module.check_subtype(TypeId::BOOL, TypeId::BOOL),
+        SubtypeResult::Same
+    );
 }
 
 #[test]
@@ -724,8 +817,14 @@ fn test_subtype_result_incompatible() {
     let module = HirModule::new();
 
     // Unrelated types should be incompatible
-    assert_eq!(module.check_subtype(TypeId::I64, TypeId::BOOL), SubtypeResult::Incompatible);
-    assert_eq!(module.check_subtype(TypeId::STRING, TypeId::I64), SubtypeResult::Incompatible);
+    assert_eq!(
+        module.check_subtype(TypeId::I64, TypeId::BOOL),
+        SubtypeResult::Incompatible
+    );
+    assert_eq!(
+        module.check_subtype(TypeId::STRING, TypeId::I64),
+        SubtypeResult::Incompatible
+    );
 }
 
 // =========================================================================
@@ -735,7 +834,7 @@ fn test_subtype_result_incompatible() {
 #[test]
 fn test_snapshot_annotation_makes_type_safe() {
     // CTR-062: Types with #[snapshot] are always snapshot-safe
-    use crate::hir::{HirType, TypeRegistry, TypeId, PointerKind};
+    use crate::hir::{HirType, PointerKind, TypeId, TypeRegistry};
 
     let mut registry = TypeRegistry::new();
 
@@ -756,8 +855,10 @@ fn test_snapshot_annotation_makes_type_safe() {
         },
     );
 
-    assert!(!registry.is_snapshot_safe(unsafe_struct),
-        "Struct with mutable reference should NOT be snapshot-safe without #[snapshot]");
+    assert!(
+        !registry.is_snapshot_safe(unsafe_struct),
+        "Struct with mutable reference should NOT be snapshot-safe without #[snapshot]"
+    );
 
     // Register a struct WITH #[snapshot] that contains a mutable reference
     // This should BE snapshot-safe due to the annotation
@@ -770,14 +871,16 @@ fn test_snapshot_annotation_makes_type_safe() {
         },
     );
 
-    assert!(registry.is_snapshot_safe(safe_struct),
-        "Struct with #[snapshot] should be snapshot-safe even with mutable reference");
+    assert!(
+        registry.is_snapshot_safe(safe_struct),
+        "Struct with #[snapshot] should be snapshot-safe even with mutable reference"
+    );
 }
 
 #[test]
 fn test_snapshot_annotation_on_primitive_struct() {
     // CTR-062: #[snapshot] is redundant but harmless on structs with only primitives
-    use crate::hir::{HirType, TypeRegistry, TypeId};
+    use crate::hir::{HirType, TypeId, TypeRegistry};
 
     let mut registry = TypeRegistry::new();
 
@@ -794,6 +897,8 @@ fn test_snapshot_annotation_on_primitive_struct() {
         },
     );
 
-    assert!(registry.is_snapshot_safe(point_with_snapshot),
-        "Struct with #[snapshot] and primitive fields should be snapshot-safe");
+    assert!(
+        registry.is_snapshot_safe(point_with_snapshot),
+        "Struct with #[snapshot] and primitive fields should be snapshot-safe"
+    );
 }

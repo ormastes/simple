@@ -21,51 +21,48 @@ use super::shared::get_func_block_addr;
 use super::types_util::{type_id_size, type_id_to_cranelift, type_to_cranelift};
 
 // Declare submodules - no more include!
-pub mod helpers;
-pub mod methods;
-pub mod async_ops;
-pub mod result;
-pub mod pattern;
-pub mod collections;
-pub mod core;
-pub mod closures_structs;
-pub mod body;
-pub mod contracts;
-pub mod units;
-pub mod pointers;
-pub mod parallel;
-pub mod enum_union;
-pub mod memory;
 pub mod actors;
+pub mod async_ops;
+pub mod body;
+pub mod closures_structs;
+pub mod collections;
+pub mod contracts;
+pub mod core;
+pub mod enum_union;
+pub mod helpers;
+pub mod memory;
+pub mod methods;
+pub mod parallel;
+pub mod pattern;
+pub mod pointers;
+pub mod result;
 pub mod simd_stubs;
+pub mod units;
 
 // Re-export key functions for backward compatibility
 pub use body::compile_function_body;
 
 // Import compile_* functions from submodules for use in compile_instruction
-use core::{compile_binop, compile_builtin_io_call, compile_interp_call};
-use collections::{
-    compile_array_lit, compile_const_string, compile_dict_lit, compile_fstring_format,
-    compile_index_get, compile_index_set, compile_slice_op, compile_tuple_lit,
-    compile_vec_blend, compile_vec_extract, compile_vec_lit, compile_vec_math,
-    compile_vec_reduction, compile_vec_select, compile_vec_shuffle, compile_vec_with,
-    compile_gpu_atomic, compile_gpu_atomic_cmpxchg,
+use actors::{
+    compile_actor_join, compile_actor_recv, compile_actor_reply, compile_actor_send, compile_await,
+    compile_generator_next,
+};
+use async_ops::{
+    compile_actor_spawn, compile_future_create, compile_generator_create, compile_yield,
 };
 use closures_structs::{
     compile_closure_create, compile_indirect_call, compile_method_call_static,
     compile_method_call_virtual, compile_struct_init,
 };
-use pattern::{compile_enum_unit, compile_enum_with, compile_pattern_bind, compile_pattern_test};
-use async_ops::{compile_actor_spawn, compile_future_create, compile_generator_create, compile_yield};
-use result::{
-    compile_option_none, compile_option_some, compile_result_err, compile_result_ok,
-    compile_try_unwrap,
+use collections::{
+    compile_array_lit, compile_const_string, compile_dict_lit, compile_fstring_format,
+    compile_gpu_atomic, compile_gpu_atomic_cmpxchg, compile_index_get, compile_index_set,
+    compile_slice_op, compile_tuple_lit, compile_vec_blend, compile_vec_extract, compile_vec_lit,
+    compile_vec_math, compile_vec_reduction, compile_vec_select, compile_vec_shuffle,
+    compile_vec_with,
 };
-use methods::compile_builtin_method;
 use contracts::compile_contract_check;
-use units::{compile_unit_bound_check, compile_unit_narrow, compile_unit_saturate, compile_unit_widen};
-use pointers::{compile_pointer_deref, compile_pointer_new, compile_pointer_ref};
-use parallel::{compile_par_filter, compile_par_for_each, compile_par_map, compile_par_reduce};
+use core::{compile_binop, compile_builtin_io_call, compile_interp_call};
 use enum_union::{
     compile_enum_discriminant, compile_enum_payload, compile_union_discriminant,
     compile_union_payload, compile_union_wrap,
@@ -74,14 +71,21 @@ use memory::{
     compile_gc_alloc, compile_get_element_ptr, compile_load, compile_local_addr, compile_store,
     compile_wait,
 };
-use actors::{
-    compile_actor_join, compile_actor_recv, compile_actor_reply, compile_actor_send,
-    compile_await, compile_generator_next,
+use methods::compile_builtin_method;
+use parallel::{compile_par_filter, compile_par_for_each, compile_par_map, compile_par_reduce};
+use pattern::{compile_enum_unit, compile_enum_with, compile_pattern_bind, compile_pattern_test};
+use pointers::{compile_pointer_deref, compile_pointer_new, compile_pointer_ref};
+use result::{
+    compile_option_none, compile_option_some, compile_result_err, compile_result_ok,
+    compile_try_unwrap,
 };
 use simd_stubs::{
     compile_neighbor_load, compile_vec_clamp, compile_vec_fma, compile_vec_gather,
     compile_vec_load, compile_vec_masked_load, compile_vec_masked_store, compile_vec_max_vec,
     compile_vec_min_vec, compile_vec_recip, compile_vec_scatter, compile_vec_store,
+};
+use units::{
+    compile_unit_bound_check, compile_unit_narrow, compile_unit_saturate, compile_unit_widen,
 };
 
 /// Context for instruction compilation, holding all state needed to compile MIR instructions.
@@ -141,11 +145,18 @@ pub fn compile_instruction<M: Module>(
             ctx.vreg_values.insert(*dest, val);
         }
 
-        MirInst::Cast { dest, source, from_ty, to_ty } => {
+        MirInst::Cast {
+            dest,
+            source,
+            from_ty,
+            to_ty,
+        } => {
             let src_val = ctx.vreg_values[source];
             // Determine source and target types
-            let is_from_float = *from_ty == crate::hir::TypeId::F64 || *from_ty == crate::hir::TypeId::F32;
-            let is_to_float = *to_ty == crate::hir::TypeId::F64 || *to_ty == crate::hir::TypeId::F32;
+            let is_from_float =
+                *from_ty == crate::hir::TypeId::F64 || *from_ty == crate::hir::TypeId::F32;
+            let is_to_float =
+                *to_ty == crate::hir::TypeId::F64 || *to_ty == crate::hir::TypeId::F32;
             let is_to_i64 = *to_ty == crate::hir::TypeId::I64;
 
             let val = if is_from_float && !is_to_float {
@@ -591,11 +602,19 @@ pub fn compile_instruction<M: Module>(
             compile_union_discriminant(ctx, builder, *dest, *value)?;
         }
 
-        MirInst::UnionPayload { dest, value, type_index: _ } => {
+        MirInst::UnionPayload {
+            dest,
+            value,
+            type_index: _,
+        } => {
             compile_union_payload(ctx, builder, *dest, *value)?;
         }
 
-        MirInst::UnionWrap { dest, value, type_index } => {
+        MirInst::UnionWrap {
+            dest,
+            value,
+            type_index,
+        } => {
             compile_union_wrap(ctx, builder, *dest, *value, *type_index as u32)?;
         }
 
@@ -670,7 +689,14 @@ pub fn compile_instruction<M: Module>(
             func_name,
             message,
         } => {
-            compile_contract_check(ctx, builder, *condition, *kind, func_name, message.as_deref())?;
+            compile_contract_check(
+                ctx,
+                builder,
+                *condition,
+                *kind,
+                func_name,
+                message.as_deref(),
+            )?;
         }
 
         MirInst::ContractOldCapture { dest, value } => {
@@ -681,21 +707,34 @@ pub fn compile_instruction<M: Module>(
 
         // Coverage instrumentation probes - currently no-ops
         // Will be implemented when runtime coverage collection is added
-        MirInst::DecisionProbe { result, decision_id, file, line, column } => {
-            // TODO: Call rt_decision_probe(decision_id, result)
+        MirInst::DecisionProbe {
+            result,
+            decision_id,
+            file,
+            line,
+            column,
+        } => {
+            // TODO: [codegen][P3] Call rt_decision_probe(decision_id, result)
             // For now, just ensure the result is used to prevent DCE
             let _ = ctx.vreg_values.get(result);
             let _ = (decision_id, file, line, column);
         }
 
-        MirInst::ConditionProbe { decision_id, condition_id, result, file, line, column } => {
-            // TODO: Call rt_condition_probe(decision_id, condition_id, result)
+        MirInst::ConditionProbe {
+            decision_id,
+            condition_id,
+            result,
+            file,
+            line,
+            column,
+        } => {
+            // TODO: [codegen][P3] Call rt_condition_probe(decision_id, condition_id, result)
             let _ = ctx.vreg_values.get(result);
             let _ = (decision_id, condition_id, file, line, column);
         }
 
         MirInst::PathProbe { path_id, block_id } => {
-            // TODO: Call rt_path_probe(path_id, block_id)
+            // TODO: [codegen][P3] Call rt_path_probe(path_id, block_id)
             let _ = (path_id, block_id);
         }
 
@@ -727,7 +766,9 @@ pub fn compile_instruction<M: Module>(
             signed,
             overflow,
         } => {
-            compile_unit_narrow(ctx, builder, *dest, *value, *from_bits, *to_bits, *signed, *overflow)?;
+            compile_unit_narrow(
+                ctx, builder, *dest, *value, *from_bits, *to_bits, *signed, *overflow,
+            )?;
         }
 
         MirInst::UnitSaturate {
@@ -750,7 +791,11 @@ pub fn compile_instruction<M: Module>(
             compile_pointer_ref(ctx, builder, *dest, *kind, *source)?;
         }
 
-        MirInst::PointerDeref { dest, pointer, kind } => {
+        MirInst::PointerDeref {
+            dest,
+            pointer,
+            kind,
+        } => {
             compile_pointer_deref(ctx, builder, *dest, *pointer, *kind)?;
         }
 
@@ -789,28 +834,52 @@ pub fn compile_instruction<M: Module>(
             super::instr_gpu::compile_gpu_mem_fence(ctx, builder, *scope)?;
         }
 
-        MirInst::GpuSharedAlloc { dest, element_type, size } => {
+        MirInst::GpuSharedAlloc {
+            dest,
+            element_type,
+            size,
+        } => {
             super::instr_gpu::compile_gpu_shared_alloc(ctx, builder, *dest, *element_type, *size)?;
         }
 
-        MirInst::NeighborLoad { dest, array, direction } => {
+        MirInst::NeighborLoad {
+            dest,
+            array,
+            direction,
+        } => {
             compile_neighbor_load(ctx, builder, *dest, *array, *direction)?;
         }
 
         // SIMD load/store operations
-        MirInst::VecLoad { dest, array, offset } => {
+        MirInst::VecLoad {
+            dest,
+            array,
+            offset,
+        } => {
             compile_vec_load(ctx, builder, *dest, *array, *offset)?;
         }
 
-        MirInst::VecStore { source, array, offset } => {
+        MirInst::VecStore {
+            source,
+            array,
+            offset,
+        } => {
             compile_vec_store(ctx, builder, *source, *array, *offset)?;
         }
 
-        MirInst::VecGather { dest, array, indices } => {
+        MirInst::VecGather {
+            dest,
+            array,
+            indices,
+        } => {
             compile_vec_gather(ctx, builder, *dest, *array, *indices)?;
         }
 
-        MirInst::VecScatter { source, array, indices } => {
+        MirInst::VecScatter {
+            source,
+            array,
+            indices,
+        } => {
             compile_vec_scatter(ctx, builder, *source, *array, *indices)?;
         }
 
@@ -822,11 +891,22 @@ pub fn compile_instruction<M: Module>(
             compile_vec_recip(ctx, builder, *dest, *source)?;
         }
 
-        MirInst::VecMaskedLoad { dest, array, offset, mask, default } => {
+        MirInst::VecMaskedLoad {
+            dest,
+            array,
+            offset,
+            mask,
+            default,
+        } => {
             compile_vec_masked_load(ctx, builder, *dest, *array, *offset, *mask, *default)?;
         }
 
-        MirInst::VecMaskedStore { source, array, offset, mask } => {
+        MirInst::VecMaskedStore {
+            source,
+            array,
+            offset,
+            mask,
+        } => {
             compile_vec_masked_store(ctx, builder, *source, *array, *offset, *mask)?;
         }
 
@@ -838,24 +918,49 @@ pub fn compile_instruction<M: Module>(
             compile_vec_max_vec(ctx, builder, *dest, *a, *b)?;
         }
 
-        MirInst::VecClamp { dest, source, lo, hi } => {
+        MirInst::VecClamp {
+            dest,
+            source,
+            lo,
+            hi,
+        } => {
             compile_vec_clamp(ctx, builder, *dest, *source, *lo, *hi)?;
         }
 
         // Parallel iterator operations
-        MirInst::ParMap { dest, input, closure, backend } => {
+        MirInst::ParMap {
+            dest,
+            input,
+            closure,
+            backend,
+        } => {
             compile_par_map(ctx, builder, *dest, *input, *closure, *backend)?;
         }
 
-        MirInst::ParReduce { dest, input, initial, closure, backend } => {
+        MirInst::ParReduce {
+            dest,
+            input,
+            initial,
+            closure,
+            backend,
+        } => {
             compile_par_reduce(ctx, builder, *dest, *input, *initial, *closure, *backend)?;
         }
 
-        MirInst::ParFilter { dest, input, predicate, backend } => {
+        MirInst::ParFilter {
+            dest,
+            input,
+            predicate,
+            backend,
+        } => {
             compile_par_filter(ctx, builder, *dest, *input, *predicate, *backend)?;
         }
 
-        MirInst::ParForEach { input, closure, backend } => {
+        MirInst::ParForEach {
+            input,
+            closure,
+            backend,
+        } => {
             compile_par_for_each(ctx, builder, *input, *closure, *backend)?;
         }
     }

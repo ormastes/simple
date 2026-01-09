@@ -6,13 +6,12 @@ use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Pattern};
 use std::collections::HashMap;
 
 use super::super::{
-    evaluate_expr, evaluate_method_call_with_self_update,
-    Enums, ImplMethods, CONST_NAMES,
+    evaluate_expr, evaluate_method_call_with_self_update, Enums, ImplMethods, CONST_NAMES,
 };
 
-use crate::value::{OptionVariant, ResultVariant};
 use super::collections::bind_sequence_pattern;
 use super::method_dispatch::call_method_on_value;
+use crate::value::{OptionVariant, ResultVariant};
 
 pub(crate) fn bind_pattern(pattern: &Pattern, value: &Value, env: &mut Env) -> bool {
     match pattern {
@@ -92,8 +91,17 @@ pub(crate) fn handle_functional_update(
 
 /// Array methods that mutate and should update the binding
 const ARRAY_MUTATING_METHODS: &[&str] = &[
-    "append", "push", "pop", "insert", "remove", "reverse", "concat", "extend",
-    "sort", "sort_desc", "clear",
+    "append",
+    "push",
+    "pop",
+    "insert",
+    "remove",
+    "reverse",
+    "concat",
+    "extend",
+    "sort",
+    "sort_desc",
+    "clear",
 ];
 
 /// Handle method call on object with self-update tracking
@@ -106,13 +114,23 @@ pub(crate) fn handle_method_call_with_self_update(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
-    if let Expr::MethodCall { receiver, method, args } = value_expr {
+    if let Expr::MethodCall {
+        receiver,
+        method,
+        args,
+    } = value_expr
+    {
         // Handle nested method calls like self.advance().unwrap()
         // The receiver itself might be a method call that mutates an object
         if let Expr::MethodCall { .. } = receiver.as_ref() {
             // Recursively handle the inner method call first
             let (inner_result, inner_update) = handle_method_call_with_self_update(
-                receiver, env, functions, classes, enums, impl_methods
+                receiver,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
             )?;
 
             // If there was an update from the inner method call, we need to use
@@ -129,13 +147,27 @@ pub(crate) fn handle_method_call_with_self_update(
             // Evaluate the arguments first
             let mut eval_args = Vec::new();
             for arg in args {
-                let val = evaluate_expr(&arg.value, &working_env, functions, classes, enums, impl_methods)?;
+                let val = evaluate_expr(
+                    &arg.value,
+                    &working_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
                 eval_args.push(val);
             }
 
             // Call the method on the inner_result value
             let outer_result = call_method_on_value(
-                inner_result, method, &eval_args, &working_env, functions, classes, enums, impl_methods
+                inner_result,
+                method,
+                &eval_args,
+                &working_env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
             )?;
 
             // Return the outer result but propagate the inner update
@@ -146,7 +178,14 @@ pub(crate) fn handle_method_call_with_self_update(
             // Handle Object mutations
             if let Some(Value::Object { .. }) = env.get(obj_name) {
                 let (result, updated_self) = evaluate_method_call_with_self_update(
-                    receiver, method, args, env, functions, classes, enums, impl_methods
+                    receiver,
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
                 )?;
                 if let Some(new_self) = updated_self {
                     return Ok((result, Some((obj_name.clone(), new_self))));
@@ -165,17 +204,23 @@ pub(crate) fn handle_method_call_with_self_update(
                         )));
                     }
                     // Evaluate the method call - it returns the new array
-                    let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
+                    let result =
+                        evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
                     if let Value::Array(new_arr) = &result {
                         // Return both the new array as result AND the update for self-mutation
                         let new_array_val = Value::Array(new_arr.clone());
-                        return Ok((new_array_val.clone(), Some((obj_name.clone(), new_array_val))));
+                        return Ok((
+                            new_array_val.clone(),
+                            Some((obj_name.clone(), new_array_val)),
+                        ));
                     }
                 }
             }
             // Handle Dict mutations for mutating methods
             if let Some(Value::Dict(_)) = env.get(obj_name) {
-                let dict_mutating = ["set", "insert", "remove", "delete", "merge", "extend", "clear"];
+                let dict_mutating = [
+                    "set", "insert", "remove", "delete", "merge", "extend", "clear",
+                ];
                 if dict_mutating.contains(&method.as_str()) {
                     let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(obj_name));
                     if is_const {
@@ -184,7 +229,8 @@ pub(crate) fn handle_method_call_with_self_update(
                             method, obj_name
                         )));
                     }
-                    let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
+                    let result =
+                        evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
                     if let Value::Dict(new_dict) = &result {
                         // Return both the new dict as result AND the update for self-mutation
                         let new_dict_val = Value::Dict(new_dict.clone());
@@ -200,12 +246,7 @@ pub(crate) fn handle_method_call_with_self_update(
 
 /// Bind a single pattern element from a let statement
 /// Updates const names set if the binding is immutable
-fn bind_let_pattern_element(
-    pat: &Pattern,
-    val: Value,
-    is_mutable: bool,
-    env: &mut Env,
-) {
+fn bind_let_pattern_element(pat: &Pattern, val: Value, is_mutable: bool, env: &mut Env) {
     match pat {
         Pattern::Identifier(name) => {
             env.insert(name.clone(), val);

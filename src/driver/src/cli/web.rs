@@ -1,8 +1,8 @@
 //! Web compilation commands: build .sui files to HTML + WASM.
 
 use simple_compiler::web_compiler::WebCompiler;
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Options for web build command
@@ -32,26 +32,26 @@ impl Default for WebBuildOptions {
 /// Optimize a WASM binary using wasm-opt if available
 fn optimize_wasm(wasm_path: &Path) -> Result<usize, String> {
     // Check if wasm-opt is available
-    let wasm_opt_available = Command::new("wasm-opt")
-        .arg("--version")
-        .output()
-        .is_ok();
+    let wasm_opt_available = Command::new("wasm-opt").arg("--version").output().is_ok();
 
     if !wasm_opt_available {
-        return Err("wasm-opt not found. Install binaryen for WASM optimization.\n\
+        return Err(
+            "wasm-opt not found. Install binaryen for WASM optimization.\n\
                     Ubuntu/Debian: sudo apt install binaryen\n\
                     macOS: brew install binaryen\n\
-                    Or download from: https://github.com/WebAssembly/binaryen/releases".to_string());
+                    Or download from: https://github.com/WebAssembly/binaryen/releases"
+                .to_string(),
+        );
     }
 
     // Run wasm-opt with optimization level -O3
     let output = Command::new("wasm-opt")
-        .arg("-O3")           // Optimization level 3 (aggressive)
+        .arg("-O3") // Optimization level 3 (aggressive)
         .arg("--strip-debug") // Remove debug info
         .arg("--strip-producers") // Remove producer section
         .arg("-o")
-        .arg(wasm_path)       // Output to same file
-        .arg(wasm_path)       // Input file
+        .arg(wasm_path) // Output to same file
+        .arg(wasm_path) // Input file
         .output()
         .map_err(|e| format!("Failed to run wasm-opt: {}", e))?;
 
@@ -61,8 +61,8 @@ fn optimize_wasm(wasm_path: &Path) -> Result<usize, String> {
     }
 
     // Get optimized file size
-    let metadata = fs::metadata(wasm_path)
-        .map_err(|e| format!("Failed to read optimized WASM: {}", e))?;
+    let metadata =
+        fs::metadata(wasm_path).map_err(|e| format!("Failed to read optimized WASM: {}", e))?;
 
     Ok(metadata.len() as usize)
 }
@@ -111,10 +111,10 @@ pub fn web_serve(
     build_options: WebBuildOptions,
     serve_options: WebServeOptions,
 ) -> i32 {
-    use std::net::TcpListener;
     use std::io::{Read, Write};
-    use std::thread;
+    use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
+    use std::thread;
     use std::time::Duration;
 
     // Initial build
@@ -143,9 +143,7 @@ pub fn web_serve(
         let source_clone = source.clone();
         let build_options_clone = build_options.clone();
         let last_modified = Arc::new(Mutex::new(
-            fs::metadata(&source_clone)
-                .and_then(|m| m.modified())
-                .ok()
+            fs::metadata(&source_clone).and_then(|m| m.modified()).ok(),
         ));
         let last_modified_clone = last_modified.clone();
 
@@ -232,7 +230,8 @@ fn serve_file(stream: &mut std::net::TcpStream, base_dir: &Path, path: &str) {
 
     let file_path = if path.is_empty() || path == "/" {
         // Default to index.html or first .html file
-        base_dir.join("index.html")
+        base_dir
+            .join("index.html")
             .metadata()
             .ok()
             .and_then(|_| Some(base_dir.join("index.html")))
@@ -313,10 +312,7 @@ fn open_browser(url: &str) -> Result<(), String> {
 /// ```
 /// simple web build app.sui -o public/
 /// ```
-pub fn web_build(
-    source: &PathBuf,
-    options: WebBuildOptions,
-) -> i32 {
+pub fn web_build(source: &PathBuf, options: WebBuildOptions) -> i32 {
     use std::time::Instant;
 
     // Read source file
@@ -359,9 +355,7 @@ pub fn web_build(
     }
 
     // Determine base filename from source
-    let base_name = source.file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("app");
+    let base_name = source.file_stem().and_then(|s| s.to_str()).unwrap_or("app");
 
     // Write HTML file (with optional minification)
     let html_path = options.output_dir.join(format!("{}.html", base_name));
@@ -375,8 +369,10 @@ pub fn web_build(
         } else {
             0.0
         };
-        println!("✓ Minified HTML: {} bytes → {} bytes ({:.1}% reduction)",
-            original_len, new_len, percent);
+        println!(
+            "✓ Minified HTML: {} bytes → {} bytes ({:.1}% reduction)",
+            original_len, new_len, percent
+        );
         minified
     } else {
         result.template_html.clone()
@@ -390,7 +386,9 @@ pub fn web_build(
 
     // Write WASM binary if client code exists
     if !result.client_binary.is_empty() {
-        let wasm_path = options.output_dir.join(format!("{}.wasm", options.module_name));
+        let wasm_path = options
+            .output_dir
+            .join(format!("{}.wasm", options.module_name));
 
         // Write initial WASM binary
         if let Err(e) = fs::write(&wasm_path, &result.client_binary) {
@@ -412,8 +410,10 @@ pub fn web_build(
                     } else {
                         0.0
                     };
-                    println!("✓ Optimized WASM: {} bytes → {} bytes ({:.1}% reduction)",
-                        original_size, new_size, percent);
+                    println!(
+                        "✓ Optimized WASM: {} bytes → {} bytes ({:.1}% reduction)",
+                        original_size, new_size, percent
+                    );
                 }
                 Err(e) => {
                     eprintln!("warning: WASM optimization failed: {}", e);
@@ -425,7 +425,9 @@ pub fn web_build(
         println!("✓ Generated {} ({} bytes)", wasm_path.display(), final_size);
 
         // Write manifest JSON
-        let manifest_path = options.output_dir.join(format!("{}.manifest.json", options.module_name));
+        let manifest_path = options
+            .output_dir
+            .join(format!("{}.manifest.json", options.module_name));
         match result.hydration_manifest.to_json() {
             Ok(json) => {
                 if let Err(e) = fs::write(&manifest_path, json) {
@@ -441,7 +443,9 @@ pub fn web_build(
         }
 
         // Write hydration script as separate file (optional)
-        let hydration_path = options.output_dir.join(format!("{}.hydration.js", options.module_name));
+        let hydration_path = options
+            .output_dir
+            .join(format!("{}.hydration.js", options.module_name));
         if let Err(e) = fs::write(&hydration_path, &result.hydration_script) {
             eprintln!("warning: failed to write hydration script: {}", e);
             // Continue - this is optional
@@ -452,16 +456,19 @@ pub fn web_build(
         // Print summary
         println!("\n📦 Web application built successfully!");
         println!("   HTML:     {}", html_path.display());
-        println!("   WASM:     {}/{}.wasm ({} KB)",
+        println!(
+            "   WASM:     {}/{}.wasm ({} KB)",
             options.output_dir.display(),
             options.module_name,
             result.client_binary.len() / 1024
         );
-        println!("   Manifest: {}/{}.manifest.json",
+        println!(
+            "   Manifest: {}/{}.manifest.json",
             options.output_dir.display(),
             options.module_name
         );
-        println!("\n🚀 To serve: cd {} && python3 -m http.server 8000",
+        println!(
+            "\n🚀 To serve: cd {} && python3 -m http.server 8000",
             options.output_dir.display()
         );
     } else {
@@ -576,13 +583,17 @@ dom.getElementById("btn").addEventListener("click", increment)
 "#;
 
     let app_sui_path = project_dir.join("app.sui");
-    if let Err(e) = fs::write(&app_sui_path, example_sui.replace("{{ project_name }}", project_name)) {
+    if let Err(e) = fs::write(
+        &app_sui_path,
+        example_sui.replace("{{ project_name }}", project_name),
+    ) {
         eprintln!("error: failed to write app.sui: {}", e);
         return 1;
     }
 
     // Create README
-    let readme = format!(r#"# {}
+    let readme = format!(
+        r#"# {}
 
 A Simple language web application.
 
@@ -610,7 +621,9 @@ Then open http://localhost:8000/app.html
 
 - Simple Web Framework: https://docs.simple-lang.dev/web
 - .sui File Format: https://docs.simple-lang.dev/sui
-"#, project_name);
+"#,
+        project_name
+    );
 
     // Ensure project directory exists before writing additional files
     if let Err(e) = fs::create_dir_all(&project_dir) {
@@ -676,7 +689,10 @@ mod tests {
         let project_path = temp.path().join(project_name);
         assert_eq!(result, 0, "web_init should return 0");
         assert!(project_path.exists(), "Project directory should exist");
-        assert!(project_path.join("app.sui").exists(), "app.sui should exist");
+        assert!(
+            project_path.join("app.sui").exists(),
+            "app.sui should exist"
+        );
         // README and .gitignore are optional (warnings on failure)
         // Don't assert on them to avoid test flakiness
     }

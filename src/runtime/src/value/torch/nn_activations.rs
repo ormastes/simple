@@ -252,11 +252,7 @@ pub extern "C" fn rt_torch_softplus(tensor_handle: u64, beta: f64, threshold: f6
 
         // Manual implementation: if x * beta > threshold: x else: log(1 + exp(beta * x)) / beta
         let scaled = &tensor.0 * beta;
-        let threshold_tensor = Tensor::full(
-            &[1],
-            threshold,
-            (tch::Kind::Float, tensor.0.device()),
-        );
+        let threshold_tensor = Tensor::full(&[1], threshold, (tch::Kind::Float, tensor.0.device()));
         let condition = scaled.greater_tensor(&threshold_tensor); // x * beta > threshold
 
         // For x * beta > threshold: use x directly (linear region)

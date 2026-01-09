@@ -57,9 +57,10 @@ impl<'a> Analyzer<'a> {
     pub fn new(root: &'a Path, layers: &'a HashMap<String, Layer>) -> Self {
         // Pattern to match Simple language use statements
         // Matches: use module.path, use module.path.*, use crate.module
-        let use_pattern =
-            Regex::new(r"(?m)^\s*use\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)(?:\.\*)?")
-                .expect("Invalid regex pattern");
+        let use_pattern = Regex::new(
+            r"(?m)^\s*use\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)(?:\.\*)?",
+        )
+        .expect("Invalid regex pattern");
 
         Self {
             root,
@@ -194,7 +195,10 @@ mod tests {
         let dir = create_test_project();
 
         let mut layers = HashMap::new();
-        layers.insert("ui".to_string(), Layer::new("ui", vec!["src/ui/**".to_string()]));
+        layers.insert(
+            "ui".to_string(),
+            Layer::new("ui", vec!["src/ui/**".to_string()]),
+        );
         layers.insert(
             "services".to_string(),
             Layer::new("services", vec!["src/services/**".to_string()]),
@@ -212,8 +216,9 @@ mod tests {
     #[test]
     fn test_use_pattern_extraction() {
         let use_pattern = Regex::new(
-            r"(?m)^\s*use\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)(?:\.\*)?"
-        ).unwrap();
+            r"(?m)^\s*use\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)(?:\.\*)?",
+        )
+        .unwrap();
 
         let content = r#"
 use crate.core.option

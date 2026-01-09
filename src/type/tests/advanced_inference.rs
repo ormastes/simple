@@ -8,7 +8,7 @@
 //! - Union types and subtyping
 
 use simple_parser::Parser;
-use simple_type::{check, Type, TypeChecker, Substitution, lean_infer, LeanExpr, LeanTy};
+use simple_type::{check, lean_infer, LeanExpr, LeanTy, Substitution, Type, TypeChecker};
 
 fn parse_items(src: &str) -> Vec<simple_parser::ast::Node> {
     let mut parser = Parser::new(src);
@@ -40,10 +40,7 @@ fn lean_infer_string_literal() {
 
 #[test]
 fn lean_infer_addition() {
-    let expr = LeanExpr::Add(
-        Box::new(LeanExpr::LitNat(1)),
-        Box::new(LeanExpr::LitNat(2)),
-    );
+    let expr = LeanExpr::Add(Box::new(LeanExpr::LitNat(1)), Box::new(LeanExpr::LitNat(2)));
     assert_eq!(lean_infer(&expr), Some(LeanTy::Nat));
 }
 
@@ -140,10 +137,7 @@ fn lean_infer_generic_type() {
     let expr = LeanExpr::Generic("Option".to_string(), vec![LeanExpr::LitNat(42)]);
     assert_eq!(
         lean_infer(&expr),
-        Some(LeanTy::Generic(
-            "Option".to_string(),
-            vec![LeanTy::Nat]
-        ))
+        Some(LeanTy::Generic("Option".to_string(), vec![LeanTy::Nat]))
     );
 }
 
@@ -167,16 +161,14 @@ fn lean_infer_nested_generics() {
 
 #[test]
 fn infers_nested_if_expressions() {
-    let items = parse_items(
-        "let x = if true: if false: 1 else: 2 else: 3\nmain = x"
-    );
+    let items = parse_items("let x = if true: if false: 1 else: 2 else: 3\nmain = x");
     check(&items).expect("type check ok");
 }
 
 #[test]
 fn infers_higher_order_function() {
     let items = parse_items(
-        "fn apply(f, x):\n    return f(x)\nfn inc(x):\n    return x + 1\nmain = apply(inc, 5)"
+        "fn apply(f, x):\n    return f(x)\nfn inc(x):\n    return x + 1\nmain = apply(inc, 5)",
     );
     check(&items).expect("type check ok");
 }
@@ -184,7 +176,7 @@ fn infers_higher_order_function() {
 #[test]
 fn infers_closure_capture() {
     let items = parse_items(
-        "fn outer():\n    let x = 10\n    let f = \\y: x + y\n    return f(5)\nmain = outer()"
+        "fn outer():\n    let x = 10\n    let f = \\y: x + y\n    return f(5)\nmain = outer()",
     );
     check(&items).expect("type check ok");
 }
@@ -200,7 +192,7 @@ fn infers_mutual_recursion() {
 #[test]
 fn infers_complex_array_operations() {
     let items = parse_items(
-        "let arr = [[1, 2], [3, 4], [5, 6]]\nlet first = arr[0]\nlet elem = first[1]\nmain = elem"
+        "let arr = [[1, 2], [3, 4], [5, 6]]\nlet first = arr[0]\nlet elem = first[1]\nmain = elem",
     );
     check(&items).expect("type check ok");
 }
@@ -215,9 +207,7 @@ fn infers_mixed_collection_types() {
 
 #[test]
 fn infers_optional_chaining() {
-    let items = parse_items(
-        "let x: i64? = 42\nlet y = if x == nil: 0 else: x\nmain = y"
-    );
+    let items = parse_items("let x: i64? = 42\nlet y = if x == nil: 0 else: x\nmain = y");
     check(&items).expect("type check ok");
 }
 
@@ -231,9 +221,7 @@ fn infers_match_with_multiple_patterns() {
 
 #[test]
 fn infers_generic_struct() {
-    let items = parse_items(
-        "struct Box[T]:\n    value: T\nlet b = Box { value: 42 }\nmain = 0"
-    );
+    let items = parse_items("struct Box[T]:\n    value: T\nlet b = Box { value: 42 }\nmain = 0");
     check(&items).expect("type check ok");
 }
 
@@ -258,63 +246,50 @@ fn catches_undefined_function() {
 
 #[test]
 fn catches_wrong_number_of_arguments() {
-    let items = parse_items(
-        "fn add(a, b):\n    return a + b\nmain = add(1)"
-    );
+    let items = parse_items("fn add(a, b):\n    return a + b\nmain = add(1)");
     // This may pass or fail depending on implementation
     let _ = check(&items);
 }
 
 #[test]
 fn catches_return_type_mismatch() {
-    let items = parse_items(
-        "fn get_string() -> str:\n    return 42\nmain = 0"
-    );
+    let items = parse_items("fn get_string() -> str:\n    return 42\nmain = 0");
     // Type checker should catch this
     let _ = check(&items);
 }
 
 #[test]
 fn catches_field_access_on_non_struct() {
-    let items = parse_items(
-        "let x = 42\nlet y = x.field\nmain = 0"
-    );
+    let items = parse_items("let x = 42\nlet y = x.field\nmain = 0");
     // Should fail - integers don't have fields
     let _ = check(&items);
 }
 
 #[test]
 fn catches_index_on_non_indexable() {
-    let items = parse_items(
-        "let x = 42\nlet y = x[0]\nmain = 0"
-    );
+    let items = parse_items("let x = 42\nlet y = x[0]\nmain = 0");
     // May pass or fail - depends on type checking strictness
     let _ = check(&items);
 }
 
 #[test]
 fn catches_duplicate_field_in_struct() {
-    let items = parse_items(
-        "struct Point:\n    x: i64\n    x: i64\nmain = 0"
-    );
+    let items = parse_items("struct Point:\n    x: i64\n    x: i64\nmain = 0");
     // Parser or type checker should catch this
     let _ = check(&items);
 }
 
 #[test]
 fn catches_missing_struct_field() {
-    let items = parse_items(
-        "struct Point:\n    x: i64\n    y: i64\nlet p = Point { x: 1 }\nmain = 0"
-    );
+    let items =
+        parse_items("struct Point:\n    x: i64\n    y: i64\nlet p = Point { x: 1 }\nmain = 0");
     // Should fail - missing field y
     let _ = check(&items);
 }
 
 #[test]
 fn catches_extra_struct_field() {
-    let items = parse_items(
-        "struct Point:\n    x: i64\nlet p = Point { x: 1, y: 2 }\nmain = 0"
-    );
+    let items = parse_items("struct Point:\n    x: i64\nlet p = Point { x: 1, y: 2 }\nmain = 0");
     // Should fail - extra field y
     let _ = check(&items);
 }
@@ -402,9 +377,7 @@ fn test_numeric_operations() {
 
 #[test]
 fn test_string_operations() {
-    let items = parse_items(
-        "let s1 = \"hello\"\nlet s2 = \"world\"\nlet s3 = s1.len()\nmain = s3"
-    );
+    let items = parse_items("let s1 = \"hello\"\nlet s2 = \"world\"\nlet s3 = s1.len()\nmain = s3");
     check(&items).expect("type check ok");
 }
 

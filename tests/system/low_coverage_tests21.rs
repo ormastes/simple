@@ -226,7 +226,7 @@ mod compiler_value_variant_extended_tests {
 // Loader SMF More Types
 // ============================================================================
 mod loader_smf_more_tests {
-    use simple_loader::smf::{SmfHeader, SmfSection, SmfSymbol, SmfRelocation};
+    use simple_loader::smf::{SmfHeader, SmfRelocation, SmfSection, SmfSymbol};
 
     #[test]
     fn test_smf_header_size() {
@@ -253,7 +253,7 @@ mod loader_smf_more_tests {
 // Compiler HIR More Types
 // ============================================================================
 mod compiler_hir_more_tests {
-    use simple_compiler::hir::{HirType, HirFunction, HirModule};
+    use simple_compiler::hir::{HirFunction, HirModule, HirType};
 
     #[test]
     fn test_hir_type_size() {

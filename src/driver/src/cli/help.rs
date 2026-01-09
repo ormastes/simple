@@ -28,6 +28,15 @@ pub fn print_help() {
     eprintln!("  simple test --json          Shorthand for --format json");
     eprintln!("  simple test --doc           Shorthand for --format doc");
     eprintln!("  simple test --watch         Watch and auto-rerun on changes");
+    eprintln!("  simple test --seq-diagram   Generate sequence diagrams from tests");
+    eprintln!("  simple test --class-diagram Generate class diagrams from tests");
+    eprintln!("  simple test --arch-diagram  Generate architecture diagrams from tests");
+    eprintln!("  simple test --diagram-all   Generate all diagram types");
+    eprintln!();
+    eprintln!("Diagram Generation:");
+    eprintln!("  simple diagram -A -n my_test      Generate all diagrams");
+    eprintln!("  simple diagram -s --include \"*Service\"   Sequence with filter");
+    eprintln!("  simple diagram --help             Show diagram options");
     eprintln!();
     eprintln!("Code Quality:");
     eprintln!("  simple lint [path]          Run linter on file or directory");
@@ -124,7 +133,9 @@ pub fn print_help() {
     eprintln!();
     eprintln!("Deterministic Builds (#911) & Replay Logs (#912):");
     eprintln!("  --deterministic              Enable deterministic build mode");
-    eprintln!("  --build-timestamp=<ISO8601>  Override build timestamp (e.g., 2025-01-15T10:00:00Z)");
+    eprintln!(
+        "  --build-timestamp=<ISO8601>  Override build timestamp (e.g., 2025-01-15T10:00:00Z)"
+    );
     eprintln!("  --log=<file.json>            Save build log for replay and debugging");
     eprintln!();
     eprintln!("Target Architectures:");

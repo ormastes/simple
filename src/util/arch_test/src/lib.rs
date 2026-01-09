@@ -26,16 +26,16 @@
 //! assert!(result.is_ok());
 //! ```
 
-mod rules;
-mod layer;
 mod analyzer;
 mod error;
+mod layer;
+mod rules;
 mod visualize;
 
-pub use rules::*;
-pub use layer::*;
 pub use analyzer::*;
 pub use error::*;
+pub use layer::*;
+pub use rules::*;
 pub use visualize::*;
 
 use simple_dependency_tracker::graph::ImportGraph;
@@ -209,17 +209,20 @@ mod tests {
         fs::write(
             dir.path().join("src/ui/view.spl"),
             "use services.user_service\nfn render(): ...",
-        ).unwrap();
+        )
+        .unwrap();
 
         fs::write(
             dir.path().join("src/services/user_service.spl"),
             "use repos.user_repo\nfn get_user(): ...",
-        ).unwrap();
+        )
+        .unwrap();
 
         fs::write(
             dir.path().join("src/repos/user_repo.spl"),
             "fn find_user(): ...",
-        ).unwrap();
+        )
+        .unwrap();
 
         dir
     }

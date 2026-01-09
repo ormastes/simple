@@ -2,8 +2,8 @@
 //!
 //! Extracts minimal context for LLM consumption (#890-893)
 
-use simple_compiler::context_pack::ContextPack;
 use simple_compiler::api_surface::ApiSurface;
+use simple_compiler::context_pack::ContextPack;
 use simple_parser::Parser;
 use std::env;
 use std::fs;
@@ -101,7 +101,7 @@ fn main() {
     };
 
     // Create API surface (simplified - just for context extraction)
-    // TODO: API surface analysis (currently disabled - needs proper initialization)
+    // TODO: [compiler][P3] API surface analysis (currently disabled - needs proper initialization)
     use std::collections::BTreeMap;
     let api_surface = ApiSurface {
         module: String::new(),
@@ -121,7 +121,10 @@ fn main() {
         eprintln!("Context Statistics:");
         eprintln!("  Full module symbols: {}", full_count);
         eprintln!("  Extracted symbols:   {}", context.symbol_count);
-        eprintln!("  Reduction:           {:.1}%", context.token_savings(full_count));
+        eprintln!(
+            "  Reduction:           {:.1}%",
+            context.token_savings(full_count)
+        );
         eprintln!();
     }
 

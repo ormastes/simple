@@ -17,7 +17,8 @@ impl Weaver {
         let mut result = WeavingResult::default();
 
         // Track which advice rules were used
-        let mut used_advice_rules: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut used_advice_rules: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // Group join points by block for efficient insertion
         let mut insertions: HashMap<BlockId, Vec<(usize, Vec<MatchedAdvice>)>> = HashMap::new();
@@ -129,9 +130,7 @@ impl Weaver {
         // Insert Before advices before the join point instruction
         for (i, advice) in before_advices.iter().enumerate() {
             let call_inst = self.create_advice_call(&advice.advice_function, Vec::new());
-            block
-                .instructions
-                .insert(instruction_index + i, call_inst);
+            block.instructions.insert(instruction_index + i, call_inst);
             inserted += 1;
         }
 
@@ -148,9 +147,7 @@ impl Weaver {
 
         for (i, advice) in after_success_advices.iter().enumerate() {
             let call_inst = self.create_advice_call(&advice.advice_function, Vec::new());
-            block
-                .instructions
-                .insert(after_index + i, call_inst);
+            block.instructions.insert(after_index + i, call_inst);
             inserted += 1;
         }
 
@@ -167,9 +164,7 @@ impl Weaver {
 
             for (i, advice) in after_error_advices.iter().enumerate() {
                 let call_inst = self.create_advice_call(&advice.advice_function, Vec::new());
-                block
-                    .instructions
-                    .insert(error_index + i, call_inst);
+                block.instructions.insert(error_index + i, call_inst);
                 inserted += 1;
             }
         }

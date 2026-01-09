@@ -131,7 +131,7 @@ mod compiler_mir_effect_tests {
 // Loader Settlement Slot Types
 // ============================================================================
 mod loader_settlement_slot_tests {
-    use simple_loader::settlement::{SlotRange, SlotAllocator};
+    use simple_loader::settlement::{SlotAllocator, SlotRange};
 
     #[test]
     fn test_slot_range_size() {
@@ -148,7 +148,7 @@ mod loader_settlement_slot_tests {
 // Compiler Pointer Value Types
 // ============================================================================
 mod compiler_pointer_value_tests {
-    use simple_compiler::value::{ManualUniqueValue, ManualSharedValue, ManualWeakValue};
+    use simple_compiler::value::{ManualSharedValue, ManualUniqueValue, ManualWeakValue};
 
     #[test]
     fn test_manual_unique_value_size() {
@@ -170,7 +170,7 @@ mod compiler_pointer_value_tests {
 // Compiler Async Value Types
 // ============================================================================
 mod compiler_async_value_tests {
-    use simple_compiler::value::{FutureValue, GeneratorValue, ChannelValue};
+    use simple_compiler::value::{ChannelValue, FutureValue, GeneratorValue};
 
     #[test]
     fn test_future_value_size() {
@@ -204,7 +204,7 @@ mod compiler_thread_pool_value_tests {
 // Compiler Borrow Value Types
 // ============================================================================
 mod compiler_borrow_value_tests {
-    use simple_compiler::value::{BorrowValue, BorrowMutValue};
+    use simple_compiler::value::{BorrowMutValue, BorrowValue};
 
     #[test]
     fn test_borrow_value_size() {
@@ -274,7 +274,7 @@ mod loader_table_index_tests {
 // Compiler Lint Extended Types
 // ============================================================================
 mod compiler_lint_more_tests {
-    use simple_compiler::lint::{LintLevel, LintConfig};
+    use simple_compiler::lint::{LintConfig, LintLevel};
 
     #[test]
     fn test_lint_level_size() {

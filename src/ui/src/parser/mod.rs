@@ -3,19 +3,19 @@
 //! Parses `.sui` template files into an AST.
 
 pub mod ast;
-mod parser_expr;
-mod error;
-mod parser;
-mod directive;
-mod declarations;
-mod blocks;
-mod nodes;
-mod elements;
 mod attributes;
+mod blocks;
 mod control;
+mod declarations;
+mod directive;
+mod elements;
+mod error;
+mod helpers;
+mod nodes;
+mod parser;
+mod parser_expr;
 mod statements;
 mod types;
-mod helpers;
 
 #[cfg(test)]
 mod tests;

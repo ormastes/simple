@@ -4,7 +4,11 @@ use simple_loader::ModuleLoader;
 /// Common compilation and execution helper
 fn compile_with_method<F>(src: &str, compile_fn: F) -> i32
 where
-    F: FnOnce(&mut CompilerPipeline, &std::path::Path, &std::path::Path) -> Result<(), simple_compiler::CompileError>,
+    F: FnOnce(
+        &mut CompilerPipeline,
+        &std::path::Path,
+        &std::path::Path,
+    ) -> Result<(), simple_compiler::CompileError>,
 {
     let dir = tempfile::tempdir().unwrap();
     let src_path = dir.path().join("main.simple");
@@ -156,7 +160,6 @@ fn compile_boolean_true() {
 fn compile_boolean_false() {
     assert_eq!(compile_and_run("main = if false: 0 else: 42"), 42);
 }
-
 
 // =============================================================================
 // Native compilation tests (HIR → MIR → Cranelift)

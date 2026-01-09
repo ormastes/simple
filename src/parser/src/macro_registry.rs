@@ -28,10 +28,7 @@ pub enum IntroducedSymbol {
         source_macro: String,
     },
     /// A type alias introduced by a macro
-    TypeAlias {
-        name: String,
-        source_macro: String,
-    },
+    TypeAlias { name: String, source_macro: String },
     /// A variable (let/const) introduced by a macro
     Variable {
         name: String,
@@ -280,9 +277,7 @@ impl MacroRegistry {
                 let start = self.eval_const_expr(&range.start, ctx)?;
                 let end = self.eval_const_expr(&range.end, ctx)?;
 
-                let start_val = start
-                    .as_i64()
-                    .ok_or("For loop start must be an integer")?;
+                let start_val = start.as_i64().ok_or("For loop start must be an integer")?;
                 let end_val = end.as_i64().ok_or("For loop end must be an integer")?;
 
                 // Unroll the loop
@@ -461,7 +456,10 @@ impl MacroRegistry {
                 BinOp::LtEq => Ok(ConstValue::Bool(l <= r)),
                 BinOp::Gt => Ok(ConstValue::Bool(l > r)),
                 BinOp::GtEq => Ok(ConstValue::Bool(l >= r)),
-                _ => Err(format!("Unsupported binary operator for integers: {:?}", op)),
+                _ => Err(format!(
+                    "Unsupported binary operator for integers: {:?}",
+                    op
+                )),
             },
             (ConstValue::Str(l), ConstValue::Str(r)) => match op {
                 BinOp::Add => Ok(ConstValue::Str(format!("{}{}", l, r))),
@@ -474,7 +472,10 @@ impl MacroRegistry {
                 BinOp::Or => Ok(ConstValue::Bool(*l || *r)),
                 BinOp::Eq => Ok(ConstValue::Bool(l == r)),
                 BinOp::NotEq => Ok(ConstValue::Bool(l != r)),
-                _ => Err(format!("Unsupported binary operator for booleans: {:?}", op)),
+                _ => Err(format!(
+                    "Unsupported binary operator for booleans: {:?}",
+                    op
+                )),
             },
             _ => Err(format!(
                 "Type mismatch in binary operation: {:?} {:?} {:?}",

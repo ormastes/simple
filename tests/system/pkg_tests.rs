@@ -3,9 +3,9 @@
 //! Tests for simple_pkg crate: Manifest, LockFile, Version, VersionReq, Dependency
 
 use simple_pkg::{
-    Manifest, LockFile, Version, VersionReq,
     lock::{LockedPackage, PackageSource},
     manifest::Dependency,
+    LockFile, Manifest, Version, VersionReq,
 };
 
 // ============================================================================
@@ -340,7 +340,9 @@ fn test_pkg_lockfile_dependency_graph() {
     lock.add_package(LockedPackage {
         name: "a".to_string(),
         version: "1.0.0".to_string(),
-        source: PackageSource::Path { path: "../a".to_string() },
+        source: PackageSource::Path {
+            path: "../a".to_string(),
+        },
         checksum: None,
         dependencies: vec!["b".to_string(), "c".to_string()],
     });
@@ -368,7 +370,12 @@ fn test_pkg_locked_package_from_path() {
 
 #[test]
 fn test_pkg_locked_package_from_git() {
-    let pkg = LockedPackage::from_git("mylib", "1.0.0", "https://github.com/user/repo", Some("abc123"));
+    let pkg = LockedPackage::from_git(
+        "mylib",
+        "1.0.0",
+        "https://github.com/user/repo",
+        Some("abc123"),
+    );
     assert_eq!(pkg.name, "mylib");
     assert_eq!(pkg.version, "1.0.0");
     assert!(pkg.is_git());

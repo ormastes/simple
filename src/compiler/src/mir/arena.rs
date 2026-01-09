@@ -4,8 +4,8 @@
 //! All MIR nodes within a module are allocated from the same arena, enabling
 //! bulk deallocation when the module is dropped.
 
-use typed_arena::Arena;
 use std::cell::RefCell;
+use typed_arena::Arena;
 
 use super::blocks::MirBlock;
 use super::function::{MirFunction, MirLocal, MirModule};
@@ -63,8 +63,13 @@ pub struct MirArenaStats {
 impl MirArenaStats {
     /// Get total number of allocations.
     pub fn total(&self) -> usize {
-        self.instructions + self.blocks + self.functions + self.modules
-            + self.locals + self.patterns + self.literals
+        self.instructions
+            + self.blocks
+            + self.functions
+            + self.modules
+            + self.locals
+            + self.patterns
+            + self.literals
     }
 }
 
@@ -215,18 +220,19 @@ pub fn clear_mir_thread_arena() {
 
 /// Get thread-local MIR arena stats.
 pub fn mir_thread_arena_stats() -> Option<MirArenaStats> {
-    THREAD_ARENA.with(|arena| {
-        arena.borrow().as_ref().map(|a| a.stats())
-    })
+    THREAD_ARENA.with(|arena| arena.borrow().as_ref().map(|a| a.stats()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::instructions::VReg;
+    use super::*;
 
     fn make_test_inst() -> MirInst {
-        MirInst::ConstInt { dest: VReg(0), value: 42 }
+        MirInst::ConstInt {
+            dest: VReg(0),
+            value: 42,
+        }
     }
 
     #[test]
@@ -236,8 +242,20 @@ mod tests {
         let inst1 = arena.alloc_inst(make_test_inst());
         let inst2 = arena.alloc_inst(make_test_inst());
 
-        assert!(matches!(inst1, MirInst::ConstInt { dest: VReg(0), value: 42 }));
-        assert!(matches!(inst2, MirInst::ConstInt { dest: VReg(0), value: 42 }));
+        assert!(matches!(
+            inst1,
+            MirInst::ConstInt {
+                dest: VReg(0),
+                value: 42
+            }
+        ));
+        assert!(matches!(
+            inst2,
+            MirInst::ConstInt {
+                dest: VReg(0),
+                value: 42
+            }
+        ));
 
         let stats = arena.stats();
         assert_eq!(stats.instructions, 2);

@@ -3,9 +3,9 @@
 
 #![cfg(feature = "monoio-net")]
 
-use crate::value::RuntimeValue;
-use crate::monoio_runtime::{runtime_value_to_string, copy_to_buffer, extract_buffer_bytes};
+use crate::monoio_runtime::{copy_to_buffer, extract_buffer_bytes, runtime_value_to_string};
 use crate::monoio_thread::{send_request, IoRequest, IoResponse};
+use crate::value::RuntimeValue;
 
 /// Create a TCP listener bound to the specified address
 /// Feature #1745: TCP server implementation
@@ -28,7 +28,11 @@ pub extern "C" fn monoio_tcp_listen(addr: RuntimeValue) -> RuntimeValue {
 
     match response {
         IoResponse::Success { id } => {
-            tracing::info!("monoio_tcp_listen: Bound to {} with handle {}", addr_str, id);
+            tracing::info!(
+                "monoio_tcp_listen: Bound to {} with handle {}",
+                addr_str,
+                id
+            );
             RuntimeValue::from_int(id)
         }
         IoResponse::Error { code, message } => {
@@ -91,7 +95,11 @@ pub extern "C" fn monoio_tcp_connect(addr: RuntimeValue) -> RuntimeValue {
 
     match response {
         IoResponse::Success { id } => {
-            tracing::info!("monoio_tcp_connect: Connected to {} with handle {}", addr_str, id);
+            tracing::info!(
+                "monoio_tcp_connect: Connected to {} with handle {}",
+                addr_str,
+                id
+            );
             RuntimeValue::from_int(id)
         }
         IoResponse::Error { code, message } => {
@@ -136,7 +144,11 @@ pub extern "C" fn monoio_tcp_read(
                 return RuntimeValue::from_int(-1);
             }
 
-            tracing::debug!("monoio_tcp_read: Read {} bytes, copied {} to buffer", len, copied);
+            tracing::debug!(
+                "monoio_tcp_read: Read {} bytes, copied {} to buffer",
+                len,
+                copied
+            );
             RuntimeValue::from_int(len as i64)
         }
         IoResponse::Error { code, message } => {
@@ -175,12 +187,17 @@ pub extern "C" fn monoio_tcp_write(
             bytes
         }
         None => {
-            tracing::error!("monoio_tcp_write: Invalid buffer (not a RuntimeArray or RuntimeString)");
+            tracing::error!(
+                "monoio_tcp_write: Invalid buffer (not a RuntimeArray or RuntimeString)"
+            );
             return RuntimeValue::from_int(-1);
         }
     };
 
-    tracing::debug!("monoio_tcp_write: Extracted {} bytes from buffer", data.len());
+    tracing::debug!(
+        "monoio_tcp_write: Extracted {} bytes from buffer",
+        data.len()
+    );
 
     // Send request to runtime thread
     let response = send_request(IoRequest::TcpWrite {
@@ -227,7 +244,11 @@ pub extern "C" fn monoio_tcp_shutdown(stream_handle: RuntimeValue, how: i64) -> 
 
     match response {
         IoResponse::Success { .. } => {
-            tracing::debug!("monoio_tcp_shutdown: Shutdown stream {} with mode {}", stream_id, how);
+            tracing::debug!(
+                "monoio_tcp_shutdown: Shutdown stream {} with mode {}",
+                stream_id,
+                how
+            );
             RuntimeValue::from_int(1)
         }
         IoResponse::Error { code, message } => {
@@ -351,7 +372,10 @@ pub extern "C" fn monoio_tcp_peer_addr(stream_handle: RuntimeValue) -> RuntimeVa
 
 /// Set TCP_NODELAY option
 #[no_mangle]
-pub extern "C" fn monoio_tcp_set_nodelay(stream_handle: RuntimeValue, nodelay: bool) -> RuntimeValue {
+pub extern "C" fn monoio_tcp_set_nodelay(
+    stream_handle: RuntimeValue,
+    nodelay: bool,
+) -> RuntimeValue {
     let stream_id = stream_handle.as_int();
 
     // Send request to runtime thread
@@ -363,7 +387,11 @@ pub extern "C" fn monoio_tcp_set_nodelay(stream_handle: RuntimeValue, nodelay: b
 
     match response {
         IoResponse::Success { .. } => {
-            tracing::debug!("monoio_tcp_set_nodelay: Set nodelay={} for stream {}", nodelay, stream_id);
+            tracing::debug!(
+                "monoio_tcp_set_nodelay: Set nodelay={} for stream {}",
+                nodelay,
+                stream_id
+            );
             RuntimeValue::from_int(1)
         }
         IoResponse::Error { code, message } => {
@@ -381,11 +409,7 @@ pub extern "C" fn monoio_tcp_set_nodelay(stream_handle: RuntimeValue, nodelay: b
 #[no_mangle]
 pub extern "C" fn monoio_tcp_set_keepalive(stream_handle: RuntimeValue, secs: i64) -> RuntimeValue {
     let stream_id = stream_handle.as_int();
-    let secs_opt = if secs > 0 {
-        Some(secs as u32)
-    } else {
-        None
-    };
+    let secs_opt = if secs > 0 { Some(secs as u32) } else { None };
 
     // Send request to runtime thread
     let response = send_request(IoRequest::TcpSetKeepalive {
@@ -396,7 +420,11 @@ pub extern "C" fn monoio_tcp_set_keepalive(stream_handle: RuntimeValue, secs: i6
 
     match response {
         IoResponse::Success { .. } => {
-            tracing::debug!("monoio_tcp_set_keepalive: Set keepalive={:?} for stream {}", secs_opt, stream_id);
+            tracing::debug!(
+                "monoio_tcp_set_keepalive: Set keepalive={:?} for stream {}",
+                secs_opt,
+                stream_id
+            );
             RuntimeValue::from_int(1)
         }
         IoResponse::Error { code, message } => {

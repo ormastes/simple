@@ -521,10 +521,7 @@ mod type_checker_extended_tests {
 
     #[test]
     fn test_infer_deterministic_add() {
-        let expr = LeanExpr::Add(
-            Box::new(LeanExpr::LitNat(1)),
-            Box::new(LeanExpr::LitNat(2)),
-        );
+        let expr = LeanExpr::Add(Box::new(LeanExpr::LitNat(1)), Box::new(LeanExpr::LitNat(2)));
         assert!(infer_deterministic(&expr));
     }
 

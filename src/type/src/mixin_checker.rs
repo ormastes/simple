@@ -95,7 +95,7 @@ impl TypeChecker {
                 }
             }
 
-            // TODO: Add class/struct own fields when they're registered
+            // TODO: [type][P3] Add class/struct own fields when they're registered
             all_fields
         } else {
             Vec::new()

@@ -67,7 +67,8 @@ fn cast_to_i8(val: Value) -> Result<Value, CompileError> {
         Value::Float(f) => Ok(Value::Int(f as i8 as i64)),
         Value::Bool(b) => Ok(Value::Int(if b { 1 } else { 0 })),
         _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to i8", val.type_name()
+            "cannot cast {} to i8",
+            val.type_name()
         ))),
     }
 }
@@ -78,7 +79,8 @@ fn cast_to_i16(val: Value) -> Result<Value, CompileError> {
         Value::Float(f) => Ok(Value::Int(f as i16 as i64)),
         Value::Bool(b) => Ok(Value::Int(if b { 1 } else { 0 })),
         _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to i16", val.type_name()
+            "cannot cast {} to i16",
+            val.type_name()
         ))),
     }
 }
@@ -89,7 +91,8 @@ fn cast_to_i32(val: Value) -> Result<Value, CompileError> {
         Value::Float(f) => Ok(Value::Int(f as i32 as i64)),
         Value::Bool(b) => Ok(Value::Int(if b { 1 } else { 0 })),
         _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to i32", val.type_name()
+            "cannot cast {} to i32",
+            val.type_name()
         ))),
     }
 }
@@ -100,7 +103,8 @@ fn cast_to_i64(val: Value) -> Result<Value, CompileError> {
         Value::Float(f) => Ok(Value::Int(f as i64)),
         Value::Bool(b) => Ok(Value::Int(if b { 1 } else { 0 })),
         _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to i64", val.type_name()
+            "cannot cast {} to i64",
+            val.type_name()
         ))),
     }
 }
@@ -111,7 +115,8 @@ fn cast_to_u8(val: Value) -> Result<Value, CompileError> {
         Value::Float(f) => Ok(Value::Int(f as u8 as i64)),
         Value::Bool(b) => Ok(Value::Int(if b { 1 } else { 0 })),
         _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to u8", val.type_name()
+            "cannot cast {} to u8",
+            val.type_name()
         ))),
     }
 }
@@ -122,7 +127,8 @@ fn cast_to_u16(val: Value) -> Result<Value, CompileError> {
         Value::Float(f) => Ok(Value::Int(f as u16 as i64)),
         Value::Bool(b) => Ok(Value::Int(if b { 1 } else { 0 })),
         _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to u16", val.type_name()
+            "cannot cast {} to u16",
+            val.type_name()
         ))),
     }
 }
@@ -133,7 +139,8 @@ fn cast_to_u32(val: Value) -> Result<Value, CompileError> {
         Value::Float(f) => Ok(Value::Int(f as u32 as i64)),
         Value::Bool(b) => Ok(Value::Int(if b { 1 } else { 0 })),
         _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to u32", val.type_name()
+            "cannot cast {} to u32",
+            val.type_name()
         ))),
     }
 }
@@ -144,7 +151,8 @@ fn cast_to_u64(val: Value) -> Result<Value, CompileError> {
         Value::Float(f) => Ok(Value::Int(f as u64 as i64)),
         Value::Bool(b) => Ok(Value::Int(if b { 1 } else { 0 })),
         _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to u64", val.type_name()
+            "cannot cast {} to u64",
+            val.type_name()
         ))),
     }
 }
@@ -155,7 +163,8 @@ fn cast_to_f32(val: Value) -> Result<Value, CompileError> {
         Value::Float(f) => Ok(Value::Float(f as f32 as f64)),
         Value::Bool(b) => Ok(Value::Float(if b { 1.0 } else { 0.0 })),
         _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to f32", val.type_name()
+            "cannot cast {} to f32",
+            val.type_name()
         ))),
     }
 }
@@ -166,7 +175,8 @@ fn cast_to_f64(val: Value) -> Result<Value, CompileError> {
         Value::Float(f) => Ok(Value::Float(f)),
         Value::Bool(b) => Ok(Value::Float(if b { 1.0 } else { 0.0 })),
         _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to f64", val.type_name()
+            "cannot cast {} to f64",
+            val.type_name()
         ))),
     }
 }
@@ -179,7 +189,8 @@ fn cast_to_bool(val: Value) -> Result<Value, CompileError> {
         Value::Str(s) => Ok(Value::Bool(!s.is_empty())),
         Value::Nil => Ok(Value::Bool(false)),
         _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to bool", val.type_name()
+            "cannot cast {} to bool",
+            val.type_name()
         ))),
     }
 }
@@ -193,7 +204,8 @@ fn cast_to_string(val: Value) -> Result<Value, CompileError> {
         Value::Symbol(s) => Ok(Value::Str(s)),
         Value::Nil => Ok(Value::Str("nil".to_string())),
         _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to String", val.type_name()
+            "cannot cast {} to String",
+            val.type_name()
         ))),
     }
 }

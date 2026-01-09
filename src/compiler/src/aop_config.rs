@@ -53,24 +53,20 @@ pub fn parse_aop_config(toml: &toml::Value) -> Result<Option<AopConfig>, String>
 
     let mut around = Vec::new();
     for (idx, rule_val) in around_values.iter().enumerate() {
-        let rule = rule_val.as_table().ok_or_else(|| {
-            format!("aspects.runtime.around[{}] must be a table", idx)
-        })?;
+        let rule = rule_val
+            .as_table()
+            .ok_or_else(|| format!("aspects.runtime.around[{}] must be a table", idx))?;
 
         let predicate_raw = rule
             .get("on")
             .or_else(|| rule.get("predicate"))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                format!("aspects.runtime.around[{}] missing 'on' predicate", idx)
-            })?;
+            .ok_or_else(|| format!("aspects.runtime.around[{}] missing 'on' predicate", idx))?;
         let advice = rule
             .get("use")
             .or_else(|| rule.get("advice"))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                format!("aspects.runtime.around[{}] missing 'use' advice", idx)
-            })?;
+            .ok_or_else(|| format!("aspects.runtime.around[{}] missing 'use' advice", idx))?;
 
         let priority = rule
             .get("priority")
@@ -79,7 +75,8 @@ pub fn parse_aop_config(toml: &toml::Value) -> Result<Option<AopConfig>, String>
 
         let predicate = predicate_parser::parse_predicate(predicate_raw)?;
         // Validate that the predicate is legal for weaving context
-        predicate.validate(PredicateContext::Weaving)
+        predicate
+            .validate(PredicateContext::Weaving)
             .map_err(|e| format!("invalid predicate for AOP weaving: {}", e))?;
         around.push(AopAroundRule {
             predicate,

@@ -7,8 +7,8 @@ use crate::error::CompileError;
 use crate::value::Value;
 
 use super::super::{
-    comprehension_iterate, create_range_object, normalize_index, slice_collection, ClassDef, Env,
-    Enums, FunctionDef, ImplMethods,
+    comprehension_iterate, create_range_object, normalize_index, slice_collection, ClassDef, Enums,
+    Env, FunctionDef, ImplMethods,
 };
 
 pub(super) fn eval_collection_expr(
@@ -135,7 +135,14 @@ pub(super) fn eval_collection_expr(
                         }
                     }
                 } else {
-                    arr.push(evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
+                    arr.push(evaluate_expr(
+                        item,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?);
                 }
             }
             Ok(Some(Value::Array(arr)))
@@ -143,26 +150,40 @@ pub(super) fn eval_collection_expr(
         Expr::Tuple(items) => {
             let mut tup = Vec::new();
             for item in items {
-                tup.push(evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
+                tup.push(evaluate_expr(
+                    item,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?);
             }
             Ok(Some(Value::Tuple(tup)))
         }
         Expr::Index { receiver, index } => {
-            let recv_val =
-                evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
-                    .deref_pointer();
+            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
+                .deref_pointer();
             let idx_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
 
             // Check if idx_val is a range object for slicing
             if let Value::Object { class, fields } = &idx_val {
                 if class == crate::value::BUILTIN_RANGE {
                     // Extract range bounds
-                    let start =
-                        fields.get("start").and_then(|v| v.as_int().ok()).unwrap_or(0);
+                    let start = fields
+                        .get("start")
+                        .and_then(|v| v.as_int().ok())
+                        .unwrap_or(0);
                     let end = fields.get("end").and_then(|v| v.as_int().ok());
                     let inclusive = fields
                         .get("inclusive")
-                        .and_then(|v| if let Value::Bool(b) = v { Some(*b) } else { None })
+                        .and_then(|v| {
+                            if let Value::Bool(b) = v {
+                                Some(*b)
+                            } else {
+                                None
+                            }
+                        })
                         .unwrap_or(false);
 
                     return Ok(Some(match recv_val {
@@ -283,9 +304,8 @@ pub(super) fn eval_collection_expr(
             Ok(Some(result?))
         }
         Expr::TupleIndex { receiver, index } => {
-            let recv_val =
-                evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
-                    .deref_pointer();
+            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
+                .deref_pointer();
             let result = match recv_val {
                 Value::Tuple(tup) => tup.get(*index).cloned().ok_or_else(|| {
                     CompileError::Semantic(format!("tuple index out of bounds: {index}"))
@@ -302,8 +322,7 @@ pub(super) fn eval_collection_expr(
             iterable,
             condition,
         } => {
-            let iter_val =
-                evaluate_expr(iterable, env, functions, classes, enums, impl_methods)?;
+            let iter_val = evaluate_expr(iterable, env, functions, classes, enums, impl_methods)?;
             let envs = comprehension_iterate(
                 &iter_val,
                 pattern,
@@ -317,8 +336,14 @@ pub(super) fn eval_collection_expr(
 
             let mut result = Vec::new();
             for mut inner_env in envs {
-                let val =
-                    evaluate_expr(expr, &mut inner_env, functions, classes, enums, impl_methods)?;
+                let val = evaluate_expr(
+                    expr,
+                    &mut inner_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
                 result.push(val);
             }
             Ok(Some(Value::Array(result)))
@@ -330,8 +355,7 @@ pub(super) fn eval_collection_expr(
             iterable,
             condition,
         } => {
-            let iter_val =
-                evaluate_expr(iterable, env, functions, classes, enums, impl_methods)?;
+            let iter_val = evaluate_expr(iterable, env, functions, classes, enums, impl_methods)?;
             let envs = comprehension_iterate(
                 &iter_val,
                 pattern,
@@ -359,19 +383,19 @@ pub(super) fn eval_collection_expr(
             }
             Ok(Some(Value::Dict(result)))
         }
-        Expr::Slice { receiver, start, end, step } => {
-            let recv_val =
-                evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
-                    .deref_pointer();
+        Expr::Slice {
+            receiver,
+            start,
+            end,
+            step,
+        } => {
+            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
+                .deref_pointer();
             let len = match &recv_val {
                 Value::Array(arr) => arr.len() as i64,
                 Value::Str(s) => s.len() as i64,
                 Value::Tuple(t) => t.len() as i64,
-                _ => {
-                    return Err(CompileError::Semantic(
-                        "slice on non-sliceable type".into(),
-                    ))
-                }
+                _ => return Err(CompileError::Semantic("slice on non-sliceable type".into())),
             };
 
             // Parse start, end, step with Python-style semantics
@@ -396,9 +420,7 @@ pub(super) fn eval_collection_expr(
             };
 
             if step_val == 0 {
-                return Err(CompileError::Semantic(
-                    "slice step cannot be zero".into(),
-                ));
+                return Err(CompileError::Semantic("slice step cannot be zero".into()));
             }
 
             let result = match recv_val {
@@ -419,15 +441,25 @@ pub(super) fn eval_collection_expr(
         }
         Expr::Spread(inner) => {
             // Spread is handled by Array/Dict evaluation, but standalone should work too
-            Ok(Some(
-                evaluate_expr(inner, env, functions, classes, enums, impl_methods)?,
-            ))
+            Ok(Some(evaluate_expr(
+                inner,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?))
         }
         Expr::DictSpread(inner) => {
             // DictSpread is handled by Dict evaluation
-            Ok(Some(
-                evaluate_expr(inner, env, functions, classes, enums, impl_methods)?,
-            ))
+            Ok(Some(evaluate_expr(
+                inner,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?))
         }
         _ => Ok(None),
     }

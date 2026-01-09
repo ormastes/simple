@@ -209,8 +209,8 @@ impl Effect {
             Effect::Wait => AsyncEffect::Wait,
             // These are non-blocking, so they map to Compute or Io
             Effect::GcAlloc => AsyncEffect::Compute,
-            Effect::Net => AsyncEffect::Io,    // Network is I/O
-            Effect::Fs => AsyncEffect::Io,     // Filesystem is I/O
+            Effect::Net => AsyncEffect::Io,         // Network is I/O
+            Effect::Fs => AsyncEffect::Io,          // Filesystem is I/O
             Effect::Unsafe => AsyncEffect::Compute, // Unsafe is computation
         }
     }
@@ -228,6 +228,7 @@ impl Effect {
             // Verification effects are compile-time only, no runtime effect
             AstEffect::Verify => Effect::Compute,
             AstEffect::Trusted => Effect::Compute,
+            AstEffect::Ghost => Effect::Compute, // Ghost is compile-time only
         }
     }
 
@@ -446,9 +447,9 @@ impl BuiltinFunc {
             | BuiltinFunc::ListDir
             | BuiltinFunc::CreateDir => Effect::Fs,
 
-            BuiltinFunc::UnsafePtr
-            | BuiltinFunc::UnsafeDeref
-            | BuiltinFunc::UnsafeCast => Effect::Unsafe,
+            BuiltinFunc::UnsafePtr | BuiltinFunc::UnsafeDeref | BuiltinFunc::UnsafeCast => {
+                Effect::Unsafe
+            }
         }
     }
 
@@ -631,9 +632,7 @@ impl CallTarget {
             "read_file" | "write_file" | "open_file" | "delete_file" | "list_dir"
             | "create_dir" => CallTarget::Fs(name.to_string()),
             // Unsafe functions
-            "unsafe_ptr" | "unsafe_deref" | "unsafe_cast" => {
-                CallTarget::Unsafe(name.to_string())
-            }
+            "unsafe_ptr" | "unsafe_deref" | "unsafe_cast" => CallTarget::Unsafe(name.to_string()),
             // Pure functions (default)
             _ => CallTarget::Pure(name.to_string()),
         }

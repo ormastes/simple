@@ -2,7 +2,6 @@
 ///
 /// This module orchestrates MIR function compilation to LLVM IR by dispatching
 /// instructions to specialized helper methods organized by category.
-
 use super::LlvmBackend;
 use crate::error::CompileError;
 use crate::mir::MirFunction;
@@ -23,10 +22,8 @@ mod objects;
 
 /// Type alias for vreg map
 #[cfg(feature = "llvm")]
-type VRegMap = std::collections::HashMap<
-    crate::mir::VReg,
-    inkwell::values::BasicValueEnum<'static>,
->;
+type VRegMap =
+    std::collections::HashMap<crate::mir::VReg, inkwell::values::BasicValueEnum<'static>>;
 
 /// Fallback VRegMap when LLVM is not enabled
 #[cfg(not(feature = "llvm"))]
@@ -99,11 +96,9 @@ impl LlvmBackend {
             // Create allocas for parameters (index 0..param_count)
             for (i, param) in func.params.iter().enumerate() {
                 let param_ty = self.llvm_type(&param.ty)?;
-                let alloca = builder
-                    .build_alloca(param_ty, &param.name)
-                    .map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build param alloca: {}", e))
-                    })?;
+                let alloca = builder.build_alloca(param_ty, &param.name).map_err(|e| {
+                    CompileError::Semantic(format!("Failed to build param alloca: {}", e))
+                })?;
                 local_allocas.insert(i, alloca);
             }
 
@@ -111,11 +106,9 @@ impl LlvmBackend {
             let param_count = func.params.len();
             for (i, local) in func.locals.iter().enumerate() {
                 let local_ty = self.llvm_type(&local.ty)?;
-                let alloca = builder
-                    .build_alloca(local_ty, &local.name)
-                    .map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build local alloca: {}", e))
-                    })?;
+                let alloca = builder.build_alloca(local_ty, &local.name).map_err(|e| {
+                    CompileError::Semantic(format!("Failed to build local alloca: {}", e))
+                })?;
                 local_allocas.insert(param_count + i, alloca);
             }
 
@@ -123,11 +116,9 @@ impl LlvmBackend {
             for (i, _param) in func.params.iter().enumerate() {
                 if let Some(llvm_param) = function.get_nth_param(i as u32) {
                     if let Some(&alloca) = local_allocas.get(&i) {
-                        builder
-                            .build_store(alloca, llvm_param)
-                            .map_err(|e| {
-                                CompileError::Semantic(format!("Failed to store param: {}", e))
-                            })?;
+                        builder.build_store(alloca, llvm_param).map_err(|e| {
+                            CompileError::Semantic(format!("Failed to store param: {}", e))
+                        })?;
                     }
                 }
             }
@@ -169,10 +160,7 @@ impl LlvmBackend {
         &self,
         inst: &crate::mir::MirInst,
         vreg_map: &mut VRegMap,
-        local_allocas: &std::collections::HashMap<
-            usize,
-            inkwell::values::PointerValue<'static>,
-        >,
+        local_allocas: &std::collections::HashMap<usize, inkwell::values::PointerValue<'static>>,
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
@@ -319,13 +307,7 @@ impl LlvmBackend {
                 self.compile_interp_call(*dest, func_name, args, vreg_map, builder, module)?;
             }
             MirInst::InterpEval { dest, expr_index } => {
-                self.compile_interp_eval(
-                    *dest,
-                    *expr_index as usize,
-                    vreg_map,
-                    builder,
-                    module,
-                )?;
+                self.compile_interp_eval(*dest, *expr_index as usize, vreg_map, builder, module)?;
             }
 
             // Objects
@@ -429,7 +411,12 @@ impl LlvmBackend {
             MirInst::GpuMemFence { scope } => {
                 self.compile_gpu_mem_fence(*scope, builder, module)?;
             }
-            MirInst::GpuAtomic { dest, op, ptr, value } => {
+            MirInst::GpuAtomic {
+                dest,
+                op,
+                ptr,
+                value,
+            } => {
                 let ptr_val = self.get_vreg(ptr, vreg_map)?;
                 let value_val = self.get_vreg(value, vreg_map)?;
                 let result = self.compile_gpu_atomic(*op, ptr_val, value_val, builder, module)?;

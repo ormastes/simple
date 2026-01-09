@@ -7,14 +7,16 @@
 //! - Adaptive pooling
 
 #[cfg(feature = "pytorch")]
-use super::{ModuleState, MODULE_REGISTRY, next_module_handle};
+use super::{next_module_handle, ModuleState, MODULE_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-use super::{TENSOR_REGISTRY, TensorWrapper, next_handle};
+use super::{next_handle, TensorWrapper, TENSOR_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-use super::{rt_torch_randn, rt_torch_zeros, rt_torch_free, rt_torch_set_requires_grad,
-            rt_torch_kaiming_uniform_};
+use super::{
+    rt_torch_free, rt_torch_kaiming_uniform_, rt_torch_randn, rt_torch_set_requires_grad,
+    rt_torch_zeros,
+};
 
 #[cfg(feature = "pytorch")]
 use tch::Kind as TchKind;
@@ -34,8 +36,7 @@ pub extern "C" fn rt_torch_conv2d_new(
 ) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        if in_channels <= 0 || out_channels <= 0 || kernel_size <= 0 || stride <= 0 || padding < 0
-        {
+        if in_channels <= 0 || out_channels <= 0 || kernel_size <= 0 || stride <= 0 || padding < 0 {
             return 0;
         }
 
@@ -70,7 +71,9 @@ pub extern "C" fn rt_torch_conv2d_new(
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(state));
+        MODULE_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(state));
 
         tracing::debug!(
             "rt_torch_conv2d_new: handle={} in_ch={} out_ch={} kernel={} stride={} padding={}",
@@ -124,8 +127,8 @@ pub extern "C" fn rt_torch_conv2d_forward(module_handle: u64, input_handle: u64)
                     bias_tensor.as_ref().map(|b| &b.0),
                     &[stride.0, stride.1],
                     &[padding.0, padding.1],
-                    &[1, 1],  // dilation
-                    1,         // groups
+                    &[1, 1], // dilation
+                    1,       // groups
                 );
 
                 let handle = next_handle();
@@ -264,7 +267,9 @@ pub extern "C" fn rt_torch_global_avg_pool2d(input_handle: u64) -> u64 {
         let result = input.0.mean_dim(Some(&[2i64, 3][..]), true, TchKind::Float);
 
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, std::sync::Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(TensorWrapper(result)));
 
         tracing::debug!(
             "rt_torch_global_avg_pool2d: input={} -> {}",
@@ -298,7 +303,9 @@ pub extern "C" fn rt_torch_global_max_pool2d(input_handle: u64) -> u64 {
         let result = max_h.max_dim(3, true).0;
 
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, std::sync::Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(TensorWrapper(result)));
 
         tracing::debug!(
             "rt_torch_global_max_pool2d: input={} -> {}",
@@ -338,7 +345,9 @@ pub extern "C" fn rt_torch_adaptive_avg_pool2d(
         let result = input.0.adaptive_avg_pool2d(&[output_h, output_w]);
 
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, std::sync::Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(TensorWrapper(result)));
 
         tracing::debug!(
             "rt_torch_adaptive_avg_pool2d: input={} size=[{},{}] -> {}",
@@ -381,7 +390,9 @@ pub extern "C" fn rt_torch_adaptive_max_pool2d(
         let (result, _indices) = input.0.adaptive_max_pool2d(&[output_h, output_w]);
 
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, std::sync::Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(TensorWrapper(result)));
 
         tracing::debug!(
             "rt_torch_adaptive_max_pool2d: input={} size=[{},{}] -> {}",

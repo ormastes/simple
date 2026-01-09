@@ -4,8 +4,8 @@
 
 use crate::ast::{BoundsAtom, BoundsBlock, BoundsCase, BoundsKind, BoundsPattern};
 use crate::error::ParseError;
-use crate::token::{Span, TokenKind};
 use crate::parser_impl::core::Parser;
+use crate::token::{Span, TokenKind};
 
 impl Parser<'_> {
     /// Parse optional bounds: block after @simd function body
@@ -32,7 +32,12 @@ impl Parser<'_> {
         }
 
         Ok(Some(BoundsBlock {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             cases,
         }))
     }
@@ -45,7 +50,12 @@ impl Parser<'_> {
         let body = self.parse_block()?;
 
         Ok(BoundsCase {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             pattern,
             body,
         })
@@ -112,7 +122,7 @@ impl Parser<'_> {
         let start_span = self.current.span;
 
         self.expect(&TokenKind::Underscore)?; // _
-        self.expect(&TokenKind::Dot)?;         // .
+        self.expect(&TokenKind::Dot)?; // .
 
         // Parse variable name
         let variable = if let TokenKind::Identifier(name) = &self.current.kind {
@@ -145,7 +155,12 @@ impl Parser<'_> {
         };
 
         Ok(BoundsPattern::Atom(BoundsAtom {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             variable,
             kind,
         }))

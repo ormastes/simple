@@ -79,15 +79,29 @@ pub extern "C" fn rt_torch_where(cond_handle: u64, a_handle: u64, b_handle: u64)
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
-        let Some(cond) = registry.get(&cond_handle).cloned() else { return 0; };
-        let Some(a) = registry.get(&a_handle).cloned() else { return 0; };
-        let Some(b) = registry.get(&b_handle).cloned() else { return 0; };
+        let Some(cond) = registry.get(&cond_handle).cloned() else {
+            return 0;
+        };
+        let Some(a) = registry.get(&a_handle).cloned() else {
+            return 0;
+        };
+        let Some(b) = registry.get(&b_handle).cloned() else {
+            return 0;
+        };
         drop(registry);
 
         let result = cond.0.where_self(&a.0, &b.0);
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!("rt_torch_where: cond={} ? {} : {} -> handle={}", cond_handle, a_handle, b_handle, handle);
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!(
+            "rt_torch_where: cond={} ? {} : {} -> handle={}",
+            cond_handle,
+            a_handle,
+            b_handle,
+            handle
+        );
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -104,8 +118,12 @@ pub extern "C" fn rt_torch_allclose(a_handle: u64, b_handle: u64, rtol: f64, ato
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
-        let Some(a) = registry.get(&a_handle).cloned() else { return 0; };
-        let Some(b) = registry.get(&b_handle).cloned() else { return 0; };
+        let Some(a) = registry.get(&a_handle).cloned() else {
+            return 0;
+        };
+        let Some(b) = registry.get(&b_handle).cloned() else {
+            return 0;
+        };
         drop(registry);
 
         // allclose: |a - b| <= atol + rtol * |b|
@@ -113,8 +131,19 @@ pub extern "C" fn rt_torch_allclose(a_handle: u64, b_handle: u64, rtol: f64, ato
         let threshold = atol + rtol * b.0.abs();
         let all_close = diff.le_tensor(&threshold).all().int64_value(&[]) != 0;
 
-        tracing::debug!("rt_torch_allclose: {} ≈ {} (rtol={}, atol={}) -> {}", a_handle, b_handle, rtol, atol, all_close);
-        if all_close { 1 } else { 0 }
+        tracing::debug!(
+            "rt_torch_allclose: {} ≈ {} (rtol={}, atol={}) -> {}",
+            a_handle,
+            b_handle,
+            rtol,
+            atol,
+            all_close
+        );
+        if all_close {
+            1
+        } else {
+            0
+        }
     }
     #[cfg(not(feature = "pytorch"))]
     {

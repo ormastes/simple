@@ -46,7 +46,9 @@ bindings = [
 "#
     .parse()
     .expect("parse di toml");
-    let di_config = parse_di_config(&di_toml).expect("di config").expect("di config present");
+    let di_config = parse_di_config(&di_toml)
+        .expect("di config")
+        .expect("di config present");
 
     let aop_toml: toml::Value = r#"
 [aspects.runtime]
@@ -57,9 +59,12 @@ around = [
 "#
     .parse()
     .expect("parse aop toml");
-    let aop_config = parse_aop_config(&aop_toml).expect("aop config").expect("aop config present");
+    let aop_config = parse_aop_config(&aop_toml)
+        .expect("aop config")
+        .expect("aop config present");
 
-    let result = evaluate_module_with_di_and_aop(&module.items, Some(&di_config), Some(&aop_config))
-        .expect("eval module");
+    let result =
+        evaluate_module_with_di_and_aop(&module.items, Some(&di_config), Some(&aop_config))
+            .expect("eval module");
     assert_eq!(result, 1);
 }

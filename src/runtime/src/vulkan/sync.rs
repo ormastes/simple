@@ -1,7 +1,7 @@
 //! Vulkan synchronization primitives (Fences, Semaphores)
 
-use super::error::{VulkanError, VulkanResult};
 use super::device::VulkanDevice;
+use super::error::{VulkanError, VulkanResult};
 use ash::vk;
 use std::sync::Arc;
 
@@ -23,7 +23,9 @@ impl Fence {
         let create_info = vk::FenceCreateInfo::default().flags(flags);
 
         let fence = unsafe {
-            device.handle().create_fence(&create_info, None)
+            device
+                .handle()
+                .create_fence(&create_info, None)
                 .map_err(|e| VulkanError::SyncError(format!("Create fence: {:?}", e)))?
         };
 
@@ -38,7 +40,8 @@ impl Fence {
     /// Wait for the fence to be signaled
     pub fn wait(&self, timeout_ns: u64) -> VulkanResult<()> {
         unsafe {
-            self.device.handle()
+            self.device
+                .handle()
                 .wait_for_fences(&[self.fence], true, timeout_ns)
                 .map_err(|e| VulkanError::SyncError(format!("Wait fence: {:?}", e)))?;
         }
@@ -48,7 +51,8 @@ impl Fence {
     /// Reset the fence to unsignaled state
     pub fn reset(&self) -> VulkanResult<()> {
         unsafe {
-            self.device.handle()
+            self.device
+                .handle()
                 .reset_fences(&[self.fence])
                 .map_err(|e| VulkanError::SyncError(format!("Reset fence: {:?}", e)))?;
         }
@@ -58,7 +62,9 @@ impl Fence {
     /// Check if the fence is signaled (non-blocking)
     pub fn is_signaled(&self) -> VulkanResult<bool> {
         unsafe {
-            self.device.handle().get_fence_status(self.fence)
+            self.device
+                .handle()
+                .get_fence_status(self.fence)
                 .map_err(|e| VulkanError::SyncError(format!("Get fence status: {:?}", e)))
         }
     }
@@ -84,7 +90,9 @@ impl Semaphore {
         let create_info = vk::SemaphoreCreateInfo::default();
 
         let semaphore = unsafe {
-            device.handle().create_semaphore(&create_info, None)
+            device
+                .handle()
+                .create_semaphore(&create_info, None)
                 .map_err(|e| VulkanError::SyncError(format!("Create semaphore: {:?}", e)))?
         };
 
@@ -132,7 +140,9 @@ impl SemaphorePool {
             // Create new semaphore
             let create_info = vk::SemaphoreCreateInfo::default();
             unsafe {
-                self.device.handle().create_semaphore(&create_info, None)
+                self.device
+                    .handle()
+                    .create_semaphore(&create_info, None)
                     .map_err(|e| VulkanError::SyncError(format!("Create semaphore: {:?}", e)))?
             }
         };

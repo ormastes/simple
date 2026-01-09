@@ -1,7 +1,7 @@
 //! Vulkan render pass management
 
-use super::error::{VulkanError, VulkanResult};
 use super::device::VulkanDevice;
+use super::error::{VulkanError, VulkanResult};
 use ash::vk;
 use std::sync::Arc;
 
@@ -19,7 +19,10 @@ impl RenderPass {
     /// - Single color attachment
     /// - Clear on load, store on store
     /// - Layout transition: UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC
-    pub fn new_simple(device: Arc<VulkanDevice>, color_format: vk::Format) -> VulkanResult<Arc<Self>> {
+    pub fn new_simple(
+        device: Arc<VulkanDevice>,
+        color_format: vk::Format,
+    ) -> VulkanResult<Arc<Self>> {
         // Color attachment description
         let color_attachment = vk::AttachmentDescription::default()
             .format(color_format)
@@ -65,8 +68,15 @@ impl RenderPass {
             .dependencies(&dependencies);
 
         let render_pass = unsafe {
-            device.handle().create_render_pass(&create_info, None)
-                .map_err(|e| VulkanError::PipelineCreationFailed(format!("Failed to create render pass: {:?}", e)))?
+            device
+                .handle()
+                .create_render_pass(&create_info, None)
+                .map_err(|e| {
+                    VulkanError::PipelineCreationFailed(format!(
+                        "Failed to create render pass: {:?}",
+                        e
+                    ))
+                })?
         };
 
         tracing::info!("Render pass created with format {:?}", color_format);
@@ -158,8 +168,15 @@ impl RenderPass {
             .dependencies(&dependencies);
 
         let render_pass = unsafe {
-            device.handle().create_render_pass(&create_info, None)
-                .map_err(|e| VulkanError::PipelineCreationFailed(format!("Failed to create render pass: {:?}", e)))?
+            device
+                .handle()
+                .create_render_pass(&create_info, None)
+                .map_err(|e| {
+                    VulkanError::PipelineCreationFailed(format!(
+                        "Failed to create render pass: {:?}",
+                        e
+                    ))
+                })?
         };
 
         tracing::info!(
@@ -189,7 +206,9 @@ impl RenderPass {
 impl Drop for RenderPass {
     fn drop(&mut self) {
         unsafe {
-            self.device.handle().destroy_render_pass(self.render_pass, None);
+            self.device
+                .handle()
+                .destroy_render_pass(self.render_pass, None);
         }
         tracing::info!("Render pass destroyed");
     }
@@ -211,11 +230,8 @@ mod tests {
     #[ignore] // Requires Vulkan drivers
     fn test_render_pass_with_depth() {
         let device = VulkanDevice::new_default().unwrap();
-        let render_pass = RenderPass::new_with_depth(
-            device,
-            vk::Format::B8G8R8A8_SRGB,
-            vk::Format::D32_SFLOAT,
-        );
+        let render_pass =
+            RenderPass::new_with_depth(device, vk::Format::B8G8R8A8_SRGB, vk::Format::D32_SFLOAT);
         assert!(render_pass.is_ok());
     }
 
@@ -255,7 +271,10 @@ mod tests {
             .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE);
 
         assert_eq!(attachment.stencil_load_op, vk::AttachmentLoadOp::DONT_CARE);
-        assert_eq!(attachment.stencil_store_op, vk::AttachmentStoreOp::DONT_CARE);
+        assert_eq!(
+            attachment.stencil_store_op,
+            vk::AttachmentStoreOp::DONT_CARE
+        );
     }
 
     #[test]
@@ -276,14 +295,16 @@ mod tests {
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
-        assert_eq!(attachment.final_layout, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        assert_eq!(
+            attachment.final_layout,
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        );
     }
 
     #[test]
     fn test_sample_count_no_msaa() {
         // No MSAA by default
-        let attachment = vk::AttachmentDescription::default()
-            .samples(vk::SampleCountFlags::TYPE_1);
+        let attachment = vk::AttachmentDescription::default().samples(vk::SampleCountFlags::TYPE_1);
 
         assert_eq!(attachment.samples, vk::SampleCountFlags::TYPE_1);
     }
@@ -296,7 +317,10 @@ mod tests {
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
 
         assert_eq!(attachment_ref.attachment, 0);
-        assert_eq!(attachment_ref.layout, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        assert_eq!(
+            attachment_ref.layout,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+        );
     }
 
     #[test]
@@ -307,14 +331,17 @@ mod tests {
             .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
         assert_eq!(attachment_ref.attachment, 1);
-        assert_eq!(attachment_ref.layout, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        assert_eq!(
+            attachment_ref.layout,
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        );
     }
 
     #[test]
     fn test_graphics_pipeline_bind_point() {
         // Subpass uses graphics pipeline
-        let subpass = vk::SubpassDescription::default()
-            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS);
+        let subpass =
+            vk::SubpassDescription::default().pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS);
 
         assert_eq!(subpass.pipeline_bind_point, vk::PipelineBindPoint::GRAPHICS);
     }
@@ -337,8 +364,12 @@ mod tests {
             .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
             .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT);
 
-        assert!(dependency.src_stage_mask.contains(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT));
-        assert!(dependency.dst_stage_mask.contains(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT));
+        assert!(dependency
+            .src_stage_mask
+            .contains(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT));
+        assert!(dependency
+            .dst_stage_mask
+            .contains(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT));
     }
 
     #[test]

@@ -390,8 +390,8 @@ pub unsafe extern "C" fn simple_contract_check(
     }
 
     // Contract violated - create violation object and panic
-    let violation_kind = ContractViolationKind::from_i64(kind)
-        .unwrap_or(ContractViolationKind::Pre);
+    let violation_kind =
+        ContractViolationKind::from_i64(kind).unwrap_or(ContractViolationKind::Pre);
 
     let func_name = if func_name_ptr.is_null() || func_name_len <= 0 {
         "<unknown>"
@@ -445,8 +445,8 @@ pub unsafe extern "C" fn simple_contract_check_msg(
     }
 
     // Contract violated - create violation object and panic
-    let violation_kind = ContractViolationKind::from_i64(kind)
-        .unwrap_or(ContractViolationKind::Pre);
+    let violation_kind =
+        ContractViolationKind::from_i64(kind).unwrap_or(ContractViolationKind::Pre);
 
     let func_name = if func_name_ptr.is_null() || func_name_len <= 0 {
         "<unknown>"

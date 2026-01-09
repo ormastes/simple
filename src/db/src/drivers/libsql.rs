@@ -13,9 +13,9 @@ use crate::row::{Row, Rows};
 use crate::transaction::{Transaction, TransactionExecutor};
 use crate::types::SqlValue;
 
-use libsql::{Database, Connection as LibsqlConn, Value as LibsqlValue};
-use std::sync::Arc;
+use libsql::{Connection as LibsqlConn, Database, Value as LibsqlValue};
 use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// libSQL connection.
 pub struct LibsqlConnection {
@@ -42,9 +42,9 @@ impl LibsqlConnection {
     pub fn open_local(path: &str) -> DbResult<Self> {
         let runtime = Self::create_runtime()?;
         let (db, conn) = runtime.block_on(async {
-            let db = Database::open(path)
-                .map_err(|e| DbError::connection_failed(e.to_string()))?;
-            let conn = db.connect()
+            let db = Database::open(path).map_err(|e| DbError::connection_failed(e.to_string()))?;
+            let conn = db
+                .connect()
                 .map_err(|e| DbError::connection_failed(e.to_string()))?;
             Ok::<_, DbError>((db, conn))
         })?;
@@ -62,7 +62,8 @@ impl LibsqlConnection {
         let (db, conn) = runtime.block_on(async {
             let db = Database::open(":memory:")
                 .map_err(|e| DbError::connection_failed(e.to_string()))?;
-            let conn = db.connect()
+            let conn = db
+                .connect()
                 .map_err(|e| DbError::connection_failed(e.to_string()))?;
             Ok::<_, DbError>((db, conn))
         })?;
@@ -80,7 +81,8 @@ impl LibsqlConnection {
         let (db, conn) = runtime.block_on(async {
             let db = Database::open_remote(url, auth_token)
                 .map_err(|e| DbError::connection_failed(e.to_string()))?;
-            let conn = db.connect()
+            let conn = db
+                .connect()
                 .map_err(|e| DbError::connection_failed(e.to_string()))?;
             Ok::<_, DbError>((db, conn))
         })?;
@@ -99,7 +101,8 @@ impl LibsqlConnection {
             let db = Database::open_with_remote_sync(path, url, auth_token, None)
                 .await
                 .map_err(|e| DbError::connection_failed(e.to_string()))?;
-            let conn = db.connect()
+            let conn = db
+                .connect()
                 .map_err(|e| DbError::connection_failed(e.to_string()))?;
             Ok::<_, DbError>((db, conn))
         })?;
@@ -117,7 +120,8 @@ impl LibsqlConnection {
 
         // Use block_on for async operations
         let result = self.runtime.block_on(async {
-            let mut rows = conn.query(sql, libsql_params)
+            let mut rows = conn
+                .query(sql, libsql_params)
                 .await
                 .map_err(|e| DbError::query_failed(e.to_string()))?;
 
@@ -126,7 +130,11 @@ impl LibsqlConnection {
 
             // Get column names
             let columns: Vec<String> = (0..column_count)
-                .map(|i| rows.column_name(i as i32).map(|s| s.to_string()).unwrap_or_default())
+                .map(|i| {
+                    rows.column_name(i as i32)
+                        .map(|s| s.to_string())
+                        .unwrap_or_default()
+                })
                 .collect();
 
             // Collect all rows
@@ -154,10 +162,7 @@ impl LibsqlConnection {
         })?;
 
         let (rows_vec, columns) = result;
-        Ok(Rows::new(
-            Box::new(rows_vec.into_iter()),
-            columns,
-        ))
+        Ok(Rows::new(Box::new(rows_vec.into_iter()), columns))
     }
 
     /// Internal execute implementation.

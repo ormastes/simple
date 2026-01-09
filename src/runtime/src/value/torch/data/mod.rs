@@ -21,12 +21,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 // Re-export submodules
-pub mod dataset;
 pub mod dataloader;
+pub mod dataset;
 
 // Re-export public types and functions
-pub use dataset::*;
 pub use dataloader::*;
+pub use dataset::*;
 
 // ============================================================================
 // Registries

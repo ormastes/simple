@@ -5,10 +5,7 @@ use crate::value::{Env, FutureValue, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Pattern};
 use std::collections::HashMap;
 
-use super::super::{
-    evaluate_expr, exec_block, exec_function,
-    Control, Enums, ImplMethods,
-};
+use super::super::{evaluate_expr, exec_block, exec_function, Control, Enums, ImplMethods};
 use super::collections::iter_to_vec;
 use super::patterns::bind_pattern;
 
@@ -37,7 +34,11 @@ pub(crate) fn slice_collection<T: Clone>(items: &[T], start: i64, end: i64, step
     } else {
         // Negative step: go backwards
         let mut result = Vec::new();
-        let actual_start = if start == 0 { len - 1 } else { start.min(len - 1) };
+        let actual_start = if start == 0 {
+            len - 1
+        } else {
+            start.min(len - 1)
+        };
         let actual_end = if end == len { -1 } else { end };
         let mut i = actual_start;
         while i > actual_end && i >= 0 {
@@ -52,7 +53,9 @@ pub(crate) fn slice_collection<T: Clone>(items: &[T], start: i64, end: i64, step
 
 /// Convert a Control result to a Value result for function return.
 /// This is used by multiple interpreter modules to handle function return values.
-pub(crate) fn control_to_value(result: Result<Control, CompileError>) -> Result<Value, CompileError> {
+pub(crate) fn control_to_value(
+    result: Result<Control, CompileError>,
+) -> Result<Value, CompileError> {
     match result {
         Ok(Control::Return(v)) => Ok(v),
         Ok(Control::Next) => Ok(Value::Nil),
@@ -172,26 +175,48 @@ fn execute_callable_with_arg(
     ctx: &mut ClonedContext,
 ) -> Result<Value, String> {
     match callable {
-        Value::Function { ref def, ref captured_env, .. } => {
+        Value::Function {
+            ref def,
+            ref captured_env,
+            ..
+        } => {
             // Use base_env if provided (spawn_isolated), otherwise use captured_env (pool.submit)
             let mut local_env = base_env.cloned().unwrap_or_else(|| captured_env.clone());
             if let Some(first_param) = def.params.first() {
                 local_env.insert(first_param.name.clone(), arg);
             }
-            match exec_block(&def.body, &mut local_env, &mut ctx.functions, &mut ctx.classes, &ctx.enums, &ctx.impl_methods) {
+            match exec_block(
+                &def.body,
+                &mut local_env,
+                &mut ctx.functions,
+                &mut ctx.classes,
+                &ctx.enums,
+                &ctx.impl_methods,
+            ) {
                 Ok(Control::Return(v)) => Ok(v),
                 Ok(_) => Ok(Value::Nil),
                 Err(e) => Err(format!("{:?}", e)),
             }
         }
-        Value::Lambda { ref params, ref body, ref env } => {
+        Value::Lambda {
+            ref params,
+            ref body,
+            ref env,
+        } => {
             // For lambdas, always use the captured env (they are closures)
             let mut local_env = env.clone();
             if let Some(first_param) = params.first() {
                 local_env.insert(first_param.clone(), arg);
             }
-            evaluate_expr(&body, &local_env, &mut ctx.functions, &mut ctx.classes, &ctx.enums, &ctx.impl_methods)
-                .map_err(|e| format!("{:?}", e))
+            evaluate_expr(
+                &body,
+                &local_env,
+                &mut ctx.functions,
+                &mut ctx.classes,
+                &ctx.enums,
+                &ctx.impl_methods,
+            )
+            .map_err(|e| format!("{:?}", e))
         }
         _ => Err("expected a function or lambda".into()),
     }
@@ -242,7 +267,14 @@ pub(crate) fn spawn_future_with_expr(
     let env_clone = env.clone();
     let mut ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
     FutureValue::new(move || {
-        evaluate_expr(&expr, &env_clone, &mut ctx.functions, &mut ctx.classes, &ctx.enums, &ctx.impl_methods)
-            .map_err(|e| format!("{:?}", e))
+        evaluate_expr(
+            &expr,
+            &env_clone,
+            &mut ctx.functions,
+            &mut ctx.classes,
+            &ctx.enums,
+            &ctx.impl_methods,
+        )
+        .map_err(|e| format!("{:?}", e))
     })
 }

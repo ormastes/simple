@@ -3,8 +3,8 @@
 use simple_common::target::Target;
 
 use super::core::CompilerPipeline;
-use crate::codegen::{backend_trait::NativeBackend, BackendKind, Codegen};
 use crate::codegen::llvm::LlvmBackend;
+use crate::codegen::{backend_trait::NativeBackend, BackendKind, Codegen};
 use crate::mir;
 use crate::CompileError;
 
@@ -20,7 +20,7 @@ impl CompilerPipeline {
             ));
         }
 
-        // TODO: Re-enable coverage when module is complete
+        // TODO: [compiler][P3] Re-enable coverage when module is complete
         // let coverage_enabled = crate::coverage::is_coverage_enabled();
 
         match BackendKind::for_target(&target) {
@@ -32,10 +32,10 @@ impl CompilerPipeline {
                     .map_err(|e| CompileError::Codegen(format!("{e}")))
             }
             BackendKind::Llvm => {
-                let backend = LlvmBackend::new(target)
-                    .map_err(|e| CompileError::Codegen(format!("{e}")))?;
+                let backend =
+                    LlvmBackend::new(target).map_err(|e| CompileError::Codegen(format!("{e}")))?;
                 backend
-                    .with_coverage(false)  // TODO: Use coverage_enabled when module is complete
+                    .with_coverage(false) // TODO: [compiler][P3] Use coverage_enabled when module is complete
                     .compile(mir_module)
                     .map_err(|e| CompileError::Codegen(format!("{e}")))
             }

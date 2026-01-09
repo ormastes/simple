@@ -16,7 +16,10 @@ use std::ptr;
 fn test_vk_available() {
     let available = rt_vk_available();
     // Result depends on system, just verify it returns 0 or 1
-    assert!(available == 0 || available == 1, "rt_vk_available should return 0 or 1");
+    assert!(
+        available == 0 || available == 1,
+        "rt_vk_available should return 0 or 1"
+    );
     println!("Vulkan available: {}", available == 1);
 }
 
@@ -77,7 +80,11 @@ fn test_device_sync() {
 
     // Sync on idle device (should succeed)
     let result = rt_vk_device_sync(device);
-    assert_eq!(result, VulkanFfiError::Success as i32, "Device sync should succeed");
+    assert_eq!(
+        result,
+        VulkanFfiError::Success as i32,
+        "Device sync should succeed"
+    );
 
     rt_vk_device_free(device);
 }
@@ -330,17 +337,10 @@ fn test_kernel_compile_minimal() {
         0x00010038, // OpFunctionEnd
     ];
 
-    let spirv_bytes: Vec<u8> = spirv
-        .iter()
-        .flat_map(|&word| word.to_le_bytes())
-        .collect();
+    let spirv_bytes: Vec<u8> = spirv.iter().flat_map(|&word| word.to_le_bytes()).collect();
 
     // Note: This may fail if SPIR-V is invalid, but tests FFI layer
-    let kernel = rt_vk_kernel_compile(
-        device,
-        spirv_bytes.as_ptr(),
-        spirv_bytes.len() as u64,
-    );
+    let kernel = rt_vk_kernel_compile(device, spirv_bytes.as_ptr(), spirv_bytes.len() as u64);
 
     if kernel != 0 {
         rt_vk_kernel_free(kernel);
@@ -377,10 +377,7 @@ fn test_kernel_compile_zero_size() {
     assert_ne!(device, 0);
 
     let spirv = vec![0x07230203u32]; // Just magic number
-    let spirv_bytes: Vec<u8> = spirv
-        .iter()
-        .flat_map(|&word| word.to_le_bytes())
-        .collect();
+    let spirv_bytes: Vec<u8> = spirv.iter().flat_map(|&word| word.to_le_bytes()).collect();
 
     // Compile with zero size should fail
     let kernel = rt_vk_kernel_compile(device, spirv_bytes.as_ptr(), 0);
@@ -456,8 +453,12 @@ fn test_kernel_launch_invalid_kernel() {
         0, // Invalid kernel
         buffers.as_ptr(),
         buffers.len() as u64,
-        1, 1, 1, // Global size
-        1, 1, 1, // Local size (workgroup)
+        1,
+        1,
+        1, // Global size
+        1,
+        1,
+        1, // Local size (workgroup)
     );
 
     assert_eq!(

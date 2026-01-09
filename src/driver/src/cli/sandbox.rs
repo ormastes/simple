@@ -68,10 +68,16 @@ pub fn parse_sandbox_config(args: &[String]) -> Option<SandboxConfig> {
         } else if arg == "--no-network" {
             config = config.with_no_network();
         } else if arg == "--network-allow" && i + 1 < args.len() {
-            let domains: Vec<String> = args[i + 1].split(',').map(|s| s.trim().to_string()).collect();
+            let domains: Vec<String> = args[i + 1]
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
             config = config.with_network_allowlist(domains);
         } else if arg == "--network-block" && i + 1 < args.len() {
-            let domains: Vec<String> = args[i + 1].split(',').map(|s| s.trim().to_string()).collect();
+            let domains: Vec<String> = args[i + 1]
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
             config = config.with_network_blocklist(domains);
         } else if arg == "--read-only" && i + 1 < args.len() {
             let paths: Vec<PathBuf> = args[i + 1]
@@ -81,10 +87,7 @@ pub fn parse_sandbox_config(args: &[String]) -> Option<SandboxConfig> {
             config = config.with_read_paths(paths);
         } else if arg == "--read-write" && i + 1 < args.len() {
             let read_write: Vec<&str> = args[i + 1].split(',').collect();
-            let paths: Vec<PathBuf> = read_write
-                .iter()
-                .map(|s| PathBuf::from(s.trim()))
-                .collect();
+            let paths: Vec<PathBuf> = read_write.iter().map(|s| PathBuf::from(s.trim())).collect();
             // For --read-write, set both read and write paths to the same set
             config = config.with_restricted_paths(paths.clone(), paths);
         }
@@ -95,6 +98,5 @@ pub fn parse_sandbox_config(args: &[String]) -> Option<SandboxConfig> {
 
 /// Apply sandbox configuration to the current process
 pub fn apply_sandbox(config: &SandboxConfig) -> Result<(), String> {
-    simple_runtime::apply_sandbox(config)
-        .map_err(|e| format!("Failed to apply sandbox: {}", e))
+    simple_runtime::apply_sandbox(config).map_err(|e| format!("Failed to apply sandbox: {}", e))
 }

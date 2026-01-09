@@ -99,13 +99,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vec_all", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_vec_any", &[I64], &[I8]),
     // Lane access operations (SIMD)
-    RuntimeFuncSpec::new("rt_vec_extract", &[I64, I64], &[I64]),  // (vector, index) -> element
+    RuntimeFuncSpec::new("rt_vec_extract", &[I64, I64], &[I64]), // (vector, index) -> element
     RuntimeFuncSpec::new("rt_vec_with", &[I64, I64, I64], &[I64]), // (vector, index, value) -> new_vector
     // Element-wise math operations (SIMD)
-    RuntimeFuncSpec::new("rt_vec_sqrt", &[I64], &[I64]),  // (vector) -> vector with sqrt applied
-    RuntimeFuncSpec::new("rt_vec_abs", &[I64], &[I64]),   // (vector) -> vector with abs applied
+    RuntimeFuncSpec::new("rt_vec_sqrt", &[I64], &[I64]), // (vector) -> vector with sqrt applied
+    RuntimeFuncSpec::new("rt_vec_abs", &[I64], &[I64]),  // (vector) -> vector with abs applied
     RuntimeFuncSpec::new("rt_vec_floor", &[I64], &[I64]), // (vector) -> vector with floor applied
-    RuntimeFuncSpec::new("rt_vec_ceil", &[I64], &[I64]),  // (vector) -> vector with ceil applied
+    RuntimeFuncSpec::new("rt_vec_ceil", &[I64], &[I64]), // (vector) -> vector with ceil applied
     RuntimeFuncSpec::new("rt_vec_round", &[I64], &[I64]), // (vector) -> vector with round applied
     RuntimeFuncSpec::new("rt_vec_shuffle", &[I64, I64], &[I64]), // (vector, indices) -> shuffled vector
     RuntimeFuncSpec::new("rt_vec_blend", &[I64, I64, I64], &[I64]), // (vec1, vec2, indices) -> blended vector
@@ -157,36 +157,36 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // Unique pointer operations (GC-collaborative manual memory)
     // =========================================================================
-    RuntimeFuncSpec::new("rt_unique_new", &[I64], &[I64]),        // value -> unique ptr
-    RuntimeFuncSpec::new("rt_unique_get", &[I64], &[I64]),        // unique -> value
-    RuntimeFuncSpec::new("rt_unique_set", &[I64, I64], &[I64]),   // unique, new_value -> success
-    RuntimeFuncSpec::new("rt_unique_free", &[I64], &[]),          // unique -> ()
+    RuntimeFuncSpec::new("rt_unique_new", &[I64], &[I64]), // value -> unique ptr
+    RuntimeFuncSpec::new("rt_unique_get", &[I64], &[I64]), // unique -> value
+    RuntimeFuncSpec::new("rt_unique_set", &[I64, I64], &[I64]), // unique, new_value -> success
+    RuntimeFuncSpec::new("rt_unique_free", &[I64], &[]),   // unique -> ()
     RuntimeFuncSpec::new("rt_unique_needs_trace", &[I64], &[I64]), // unique -> bool
     // =========================================================================
     // Shared pointer operations (reference-counted, GC-collaborative)
     // =========================================================================
-    RuntimeFuncSpec::new("rt_shared_new", &[I64], &[I64]),        // value -> shared ptr
-    RuntimeFuncSpec::new("rt_shared_get", &[I64], &[I64]),        // shared -> value
-    RuntimeFuncSpec::new("rt_shared_clone", &[I64], &[I64]),      // shared -> shared (inc refcount)
-    RuntimeFuncSpec::new("rt_shared_ref_count", &[I64], &[I64]),  // shared -> count
-    RuntimeFuncSpec::new("rt_shared_release", &[I64], &[I64]),    // shared -> freed?
+    RuntimeFuncSpec::new("rt_shared_new", &[I64], &[I64]), // value -> shared ptr
+    RuntimeFuncSpec::new("rt_shared_get", &[I64], &[I64]), // shared -> value
+    RuntimeFuncSpec::new("rt_shared_clone", &[I64], &[I64]), // shared -> shared (inc refcount)
+    RuntimeFuncSpec::new("rt_shared_ref_count", &[I64], &[I64]), // shared -> count
+    RuntimeFuncSpec::new("rt_shared_release", &[I64], &[I64]), // shared -> freed?
     RuntimeFuncSpec::new("rt_shared_needs_trace", &[I64], &[I64]), // shared -> bool
-    RuntimeFuncSpec::new("rt_shared_downgrade", &[I64], &[I64]),  // shared -> weak
+    RuntimeFuncSpec::new("rt_shared_downgrade", &[I64], &[I64]), // shared -> weak
     // =========================================================================
     // Weak pointer operations (non-owning reference to shared)
     // =========================================================================
-    RuntimeFuncSpec::new("rt_weak_new", &[I64, I64], &[I64]),     // shared_value, addr -> weak
-    RuntimeFuncSpec::new("rt_weak_upgrade", &[I64], &[I64]),      // weak -> shared or NIL
-    RuntimeFuncSpec::new("rt_weak_is_valid", &[I64], &[I64]),     // weak -> bool
-    RuntimeFuncSpec::new("rt_weak_free", &[I64], &[]),            // weak -> ()
+    RuntimeFuncSpec::new("rt_weak_new", &[I64, I64], &[I64]), // shared_value, addr -> weak
+    RuntimeFuncSpec::new("rt_weak_upgrade", &[I64], &[I64]),  // weak -> shared or NIL
+    RuntimeFuncSpec::new("rt_weak_is_valid", &[I64], &[I64]), // weak -> bool
+    RuntimeFuncSpec::new("rt_weak_free", &[I64], &[]),        // weak -> ()
     // =========================================================================
     // Handle pointer operations (pool-allocated, index-based)
     // =========================================================================
-    RuntimeFuncSpec::new("rt_handle_new", &[I64], &[I64]),        // value -> handle
-    RuntimeFuncSpec::new("rt_handle_get", &[I64], &[I64]),        // handle -> value
-    RuntimeFuncSpec::new("rt_handle_set", &[I64, I64], &[I64]),   // handle, new_value -> success
-    RuntimeFuncSpec::new("rt_handle_free", &[I64], &[]),          // handle -> ()
-    RuntimeFuncSpec::new("rt_handle_is_valid", &[I64], &[I64]),   // handle -> bool
+    RuntimeFuncSpec::new("rt_handle_new", &[I64], &[I64]), // value -> handle
+    RuntimeFuncSpec::new("rt_handle_get", &[I64], &[I64]), // handle -> value
+    RuntimeFuncSpec::new("rt_handle_set", &[I64, I64], &[I64]), // handle, new_value -> success
+    RuntimeFuncSpec::new("rt_handle_free", &[I64], &[]),   // handle -> ()
+    RuntimeFuncSpec::new("rt_handle_is_valid", &[I64], &[I64]), // handle -> bool
     // =========================================================================
     // Raw memory allocation (zero-cost struct support)
     // =========================================================================
@@ -283,10 +283,18 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // simple_contract_check(condition: i64, kind: i64, func_name_ptr: i64, func_name_len: i64)
     RuntimeFuncSpec::new("simple_contract_check", &[I64, I64, I64, I64], &[]),
     // simple_contract_check_msg(condition: i64, kind: i64, func_name_ptr: i64, func_name_len: i64, msg_ptr: i64, msg_len: i64)
-    RuntimeFuncSpec::new("simple_contract_check_msg", &[I64, I64, I64, I64, I64, I64], &[]),
+    RuntimeFuncSpec::new(
+        "simple_contract_check_msg",
+        &[I64, I64, I64, I64, I64, I64],
+        &[],
+    ),
     // Contract violation object functions (CTR-050-054)
     // rt_contract_violation_new(kind: i64, func_name_ptr: i64, func_name_len: i64, msg_ptr: i64, msg_len: i64) -> RuntimeValue
-    RuntimeFuncSpec::new("rt_contract_violation_new", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_contract_violation_new",
+        &[I64, I64, I64, I64, I64],
+        &[I64],
+    ),
     // rt_contract_violation_kind(violation: RuntimeValue) -> i64
     RuntimeFuncSpec::new("rt_contract_violation_kind", &[I64], &[I64]),
     // rt_contract_violation_func_name(violation: RuntimeValue) -> RuntimeValue (string)
@@ -323,65 +331,73 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // GPU work item identification
     // =========================================================================
-    RuntimeFuncSpec::new("rt_gpu_global_id", &[I32], &[I64]),   // dim -> id
-    RuntimeFuncSpec::new("rt_gpu_local_id", &[I32], &[I64]),    // dim -> id
-    RuntimeFuncSpec::new("rt_gpu_group_id", &[I32], &[I64]),    // dim -> id
+    RuntimeFuncSpec::new("rt_gpu_global_id", &[I32], &[I64]), // dim -> id
+    RuntimeFuncSpec::new("rt_gpu_local_id", &[I32], &[I64]),  // dim -> id
+    RuntimeFuncSpec::new("rt_gpu_group_id", &[I32], &[I64]),  // dim -> id
     RuntimeFuncSpec::new("rt_gpu_global_size", &[I32], &[I64]), // dim -> size
-    RuntimeFuncSpec::new("rt_gpu_local_size", &[I32], &[I64]),  // dim -> size
-    RuntimeFuncSpec::new("rt_gpu_num_groups", &[I32], &[I64]),  // dim -> count
+    RuntimeFuncSpec::new("rt_gpu_local_size", &[I32], &[I64]), // dim -> size
+    RuntimeFuncSpec::new("rt_gpu_num_groups", &[I32], &[I64]), // dim -> count
     // =========================================================================
     // GPU synchronization
     // =========================================================================
-    RuntimeFuncSpec::new("rt_gpu_barrier", &[], &[]),           // () -> ()
-    RuntimeFuncSpec::new("rt_gpu_mem_fence", &[I32], &[]),      // scope -> ()
+    RuntimeFuncSpec::new("rt_gpu_barrier", &[], &[]), // () -> ()
+    RuntimeFuncSpec::new("rt_gpu_mem_fence", &[I32], &[]), // scope -> ()
     // =========================================================================
     // GPU atomic operations (i64)
     // =========================================================================
-    RuntimeFuncSpec::new("rt_gpu_atomic_add_i64", &[I64, I64], &[I64]),      // ptr, value -> old
-    RuntimeFuncSpec::new("rt_gpu_atomic_sub_i64", &[I64, I64], &[I64]),      // ptr, value -> old
-    RuntimeFuncSpec::new("rt_gpu_atomic_xchg_i64", &[I64, I64], &[I64]),     // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_add_i64", &[I64, I64], &[I64]), // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_sub_i64", &[I64, I64], &[I64]), // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_xchg_i64", &[I64, I64], &[I64]), // ptr, value -> old
     RuntimeFuncSpec::new("rt_gpu_atomic_cmpxchg_i64", &[I64, I64, I64], &[I64]), // ptr, expected, new -> old
-    RuntimeFuncSpec::new("rt_gpu_atomic_min_i64", &[I64, I64], &[I64]),      // ptr, value -> old
-    RuntimeFuncSpec::new("rt_gpu_atomic_max_i64", &[I64, I64], &[I64]),      // ptr, value -> old
-    RuntimeFuncSpec::new("rt_gpu_atomic_and_i64", &[I64, I64], &[I64]),      // ptr, value -> old
-    RuntimeFuncSpec::new("rt_gpu_atomic_or_i64", &[I64, I64], &[I64]),       // ptr, value -> old
-    RuntimeFuncSpec::new("rt_gpu_atomic_xor_i64", &[I64, I64], &[I64]),      // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_min_i64", &[I64, I64], &[I64]), // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_max_i64", &[I64, I64], &[I64]), // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_and_i64", &[I64, I64], &[I64]), // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_or_i64", &[I64, I64], &[I64]),  // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_xor_i64", &[I64, I64], &[I64]), // ptr, value -> old
     // =========================================================================
     // GPU atomic operations (u32)
     // =========================================================================
-    RuntimeFuncSpec::new("rt_gpu_atomic_add_u32", &[I64, I32], &[I32]),      // ptr, value -> old
-    RuntimeFuncSpec::new("rt_gpu_atomic_sub_u32", &[I64, I32], &[I32]),      // ptr, value -> old
-    RuntimeFuncSpec::new("rt_gpu_atomic_xchg_u32", &[I64, I32], &[I32]),     // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_add_u32", &[I64, I32], &[I32]), // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_sub_u32", &[I64, I32], &[I32]), // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_xchg_u32", &[I64, I32], &[I32]), // ptr, value -> old
     RuntimeFuncSpec::new("rt_gpu_atomic_cmpxchg_u32", &[I64, I32, I32], &[I32]), // ptr, expected, new -> old
-    RuntimeFuncSpec::new("rt_gpu_atomic_min_u32", &[I64, I32], &[I32]),      // ptr, value -> old
-    RuntimeFuncSpec::new("rt_gpu_atomic_max_u32", &[I64, I32], &[I32]),      // ptr, value -> old
-    RuntimeFuncSpec::new("rt_gpu_atomic_and_u32", &[I64, I32], &[I32]),      // ptr, value -> old
-    RuntimeFuncSpec::new("rt_gpu_atomic_or_u32", &[I64, I32], &[I32]),       // ptr, value -> old
-    RuntimeFuncSpec::new("rt_gpu_atomic_xor_u32", &[I64, I32], &[I32]),      // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_min_u32", &[I64, I32], &[I32]), // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_max_u32", &[I64, I32], &[I32]), // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_and_u32", &[I64, I32], &[I32]), // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_or_u32", &[I64, I32], &[I32]),  // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_xor_u32", &[I64, I32], &[I32]), // ptr, value -> old
     // =========================================================================
     // GPU shared memory
     // =========================================================================
-    RuntimeFuncSpec::new("rt_gpu_shared_alloc", &[I64], &[I64]),  // size -> ptr
-    RuntimeFuncSpec::new("rt_gpu_shared_reset", &[], &[]),        // () -> ()
+    RuntimeFuncSpec::new("rt_gpu_shared_alloc", &[I64], &[I64]), // size -> ptr
+    RuntimeFuncSpec::new("rt_gpu_shared_reset", &[], &[]),       // () -> ()
     // =========================================================================
     // GPU kernel launch
     // =========================================================================
-    RuntimeFuncSpec::new("rt_gpu_launch", &[I64, I32, I32, I32, I32, I32, I32], &[I32]), // kernel, gx,gy,gz, lx,ly,lz -> status
+    RuntimeFuncSpec::new(
+        "rt_gpu_launch",
+        &[I64, I32, I32, I32, I32, I32, I32],
+        &[I32],
+    ), // kernel, gx,gy,gz, lx,ly,lz -> status
     RuntimeFuncSpec::new("rt_gpu_launch_1d", &[I64, I32, I32], &[I32]), // kernel, global, local -> status
     // =========================================================================
     // Vulkan GPU backend operations
     // =========================================================================
-    RuntimeFuncSpec::new("rt_vk_available", &[], &[I32]),                  // () -> available (1=yes, 0=no)
-    RuntimeFuncSpec::new("rt_vk_device_create", &[], &[I64]),              // () -> device_handle
-    RuntimeFuncSpec::new("rt_vk_device_free", &[I64], &[I32]),             // device_handle -> status
-    RuntimeFuncSpec::new("rt_vk_device_sync", &[I64], &[I32]),             // device_handle -> status
-    RuntimeFuncSpec::new("rt_vk_buffer_alloc", &[I64, I64], &[I64]),       // device_handle, size -> buffer_handle
-    RuntimeFuncSpec::new("rt_vk_buffer_free", &[I64], &[I32]),             // buffer_handle -> status
+    RuntimeFuncSpec::new("rt_vk_available", &[], &[I32]), // () -> available (1=yes, 0=no)
+    RuntimeFuncSpec::new("rt_vk_device_create", &[], &[I64]), // () -> device_handle
+    RuntimeFuncSpec::new("rt_vk_device_free", &[I64], &[I32]), // device_handle -> status
+    RuntimeFuncSpec::new("rt_vk_device_sync", &[I64], &[I32]), // device_handle -> status
+    RuntimeFuncSpec::new("rt_vk_buffer_alloc", &[I64, I64], &[I64]), // device_handle, size -> buffer_handle
+    RuntimeFuncSpec::new("rt_vk_buffer_free", &[I64], &[I32]),       // buffer_handle -> status
     RuntimeFuncSpec::new("rt_vk_buffer_upload", &[I64, I64, I64], &[I32]), // buffer_handle, data_ptr, size -> status
     RuntimeFuncSpec::new("rt_vk_buffer_download", &[I64, I64, I64], &[I32]), // buffer_handle, data_ptr, size -> status
     RuntimeFuncSpec::new("rt_vk_kernel_compile", &[I64, I64, I64], &[I64]), // device_handle, spirv_ptr, spirv_len -> pipeline_handle
-    RuntimeFuncSpec::new("rt_vk_kernel_free", &[I64], &[I32]),             // pipeline_handle -> status
-    RuntimeFuncSpec::new("rt_vk_kernel_launch", &[I64, I64, I64, I32, I32, I32, I32, I32, I32], &[I32]), // pipeline, buffers_ptr, count, gx,gy,gz, lx,ly,lz -> status
+    RuntimeFuncSpec::new("rt_vk_kernel_free", &[I64], &[I32]), // pipeline_handle -> status
+    RuntimeFuncSpec::new(
+        "rt_vk_kernel_launch",
+        &[I64, I64, I64, I32, I32, I32, I32, I32, I32],
+        &[I32],
+    ), // pipeline, buffers_ptr, count, gx,gy,gz, lx,ly,lz -> status
     RuntimeFuncSpec::new("rt_vk_kernel_launch_1d", &[I64, I64, I64, I32], &[I32]), // pipeline, buffers_ptr, count, global_size -> status
     // =========================================================================
     // Parallel iterator operations (#415)
@@ -404,7 +420,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // native_tcp_connect(addr_ptr: i64, addr_len: i64) -> (handle: i64, local_addr_ptr: i64, error_code: i64)
     RuntimeFuncSpec::new("native_tcp_connect", &[I64, I64], &[I64, I64, I64]),
     // native_tcp_connect_timeout(addr_ptr: i64, addr_len: i64, timeout_ns: i64) -> (handle: i64, local_addr_ptr: i64, error_code: i64)
-    RuntimeFuncSpec::new("native_tcp_connect_timeout", &[I64, I64, I64], &[I64, I64, I64]),
+    RuntimeFuncSpec::new(
+        "native_tcp_connect_timeout",
+        &[I64, I64, I64],
+        &[I64, I64, I64],
+    ),
     // native_tcp_read(handle: i64, buf_ptr: i64, buf_len: i64) -> (bytes_read: i64, error_code: i64)
     RuntimeFuncSpec::new("native_tcp_read", &[I64, I64, I64], &[I64, I64]),
     // native_tcp_write(handle: i64, data_ptr: i64, data_len: i64) -> (bytes_written: i64, error_code: i64)
@@ -441,7 +461,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // native_udp_recv(handle: i64, buf_ptr: i64, buf_len: i64) -> (bytes_recv: i64, error_code: i64)
     RuntimeFuncSpec::new("native_udp_recv", &[I64, I64, I64], &[I64, I64]),
     // native_udp_send_to(handle: i64, data_ptr: i64, data_len: i64, addr_ptr: i64, addr_len: i64) -> (bytes_sent: i64, error_code: i64)
-    RuntimeFuncSpec::new("native_udp_send_to", &[I64, I64, I64, I64, I64], &[I64, I64]),
+    RuntimeFuncSpec::new(
+        "native_udp_send_to",
+        &[I64, I64, I64, I64, I64],
+        &[I64, I64],
+    ),
     // native_udp_send(handle: i64, data_ptr: i64, data_len: i64) -> (bytes_sent: i64, error_code: i64)
     RuntimeFuncSpec::new("native_udp_send", &[I64, I64, I64], &[I64, I64]),
     // native_udp_peek_from(handle: i64, buf_ptr: i64, buf_len: i64) -> (bytes_peeked: i64, peer_addr_ptr: i64, error_code: i64)
@@ -487,7 +511,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // rt_coverage_decision_probe(decision_id: u32, result: bool, file: *const i8, line: u32, column: u32) -> ()
     RuntimeFuncSpec::new("rt_coverage_decision_probe", &[I32, I8, I64, I32, I32], &[]),
     // rt_coverage_condition_probe(decision_id: u32, condition_id: u32, result: bool, file: *const i8, line: u32, column: u32) -> ()
-    RuntimeFuncSpec::new("rt_coverage_condition_probe", &[I32, I32, I8, I64, I32, I32], &[]),
+    RuntimeFuncSpec::new(
+        "rt_coverage_condition_probe",
+        &[I32, I32, I8, I64, I32, I32],
+        &[],
+    ),
     // rt_coverage_path_probe(path_id: u32, block_id: u32) -> ()
     RuntimeFuncSpec::new("rt_coverage_path_probe", &[I32, I32], &[]),
     // rt_coverage_path_finalize(path_id: u32) -> ()

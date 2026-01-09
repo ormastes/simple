@@ -10,8 +10,8 @@ use std::sync::Arc;
 /// Buffer usage flags
 #[derive(Debug, Clone, Copy)]
 pub struct BufferUsage {
-    pub storage: bool,     // Storage buffer (compute shaders)
-    pub uniform: bool,     // Uniform buffer
+    pub storage: bool, // Storage buffer (compute shaders)
+    pub uniform: bool, // Uniform buffer
     pub transfer_src: bool,
     pub transfer_dst: bool,
 }
@@ -67,24 +67,20 @@ pub struct VulkanBuffer {
 
 impl VulkanBuffer {
     /// Create a new device-local buffer
-    pub fn new(
-        device: Arc<VulkanDevice>,
-        size: u64,
-        usage: BufferUsage,
-    ) -> VulkanResult<Self> {
+    pub fn new(device: Arc<VulkanDevice>, size: u64, usage: BufferUsage) -> VulkanResult<Self> {
         let buffer_info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(usage.to_vk_usage())
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let buffer = unsafe {
-            device.handle().create_buffer(&buffer_info, None)
+            device
+                .handle()
+                .create_buffer(&buffer_info, None)
                 .map_err(|e| VulkanError::BufferError(format!("Create: {:?}", e)))?
         };
 
-        let requirements = unsafe {
-            device.handle().get_buffer_memory_requirements(buffer)
-        };
+        let requirements = unsafe { device.handle().get_buffer_memory_requirements(buffer) };
 
         let allocation = device.allocator().lock().allocate(&AllocationCreateDesc {
             name: "device_buffer",
@@ -95,12 +91,10 @@ impl VulkanBuffer {
         })?;
 
         unsafe {
-            device.handle().bind_buffer_memory(
-                buffer,
-                allocation.memory(),
-                allocation.offset(),
-            )
-            .map_err(|e| VulkanError::BufferError(format!("Bind: {:?}", e)))?;
+            device
+                .handle()
+                .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
+                .map_err(|e| VulkanError::BufferError(format!("Bind: {:?}", e)))?;
         }
 
         Ok(Self {
@@ -148,16 +142,12 @@ impl VulkanBuffer {
     fn copy_from_staging(&self, staging: &StagingBuffer, size: u64) -> VulkanResult<()> {
         let cmd = self.device.begin_transfer_command()?;
 
-        let region = vk::BufferCopy::default()
-            .size(size);
+        let region = vk::BufferCopy::default().size(size);
 
         unsafe {
-            self.device.handle().cmd_copy_buffer(
-                cmd,
-                staging.handle(),
-                self.buffer,
-                &[region],
-            );
+            self.device
+                .handle()
+                .cmd_copy_buffer(cmd, staging.handle(), self.buffer, &[region]);
         }
 
         self.device.submit_transfer_command(cmd)?;
@@ -167,16 +157,12 @@ impl VulkanBuffer {
     fn copy_to_staging(&self, staging: &StagingBuffer, size: u64) -> VulkanResult<()> {
         let cmd = self.device.begin_transfer_command()?;
 
-        let region = vk::BufferCopy::default()
-            .size(size);
+        let region = vk::BufferCopy::default().size(size);
 
         unsafe {
-            self.device.handle().cmd_copy_buffer(
-                cmd,
-                self.buffer,
-                staging.handle(),
-                &[region],
-            );
+            self.device
+                .handle()
+                .cmd_copy_buffer(cmd, self.buffer, staging.handle(), &[region]);
         }
 
         self.device.submit_transfer_command(cmd)?;
@@ -190,7 +176,10 @@ impl Drop for VulkanBuffer {
             self.device.handle().destroy_buffer(self.buffer, None);
         }
         if let Some(allocation) = self.allocation.take() {
-            self.device.allocator().lock().free(allocation)
+            self.device
+                .allocator()
+                .lock()
+                .free(allocation)
                 .unwrap_or_else(|e| tracing::error!("Failed to free buffer allocation: {:?}", e));
         }
     }
@@ -212,13 +201,13 @@ impl StagingBuffer {
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let buffer = unsafe {
-            device.handle().create_buffer(&buffer_info, None)
+            device
+                .handle()
+                .create_buffer(&buffer_info, None)
                 .map_err(|e| VulkanError::BufferError(format!("Create staging: {:?}", e)))?
         };
 
-        let requirements = unsafe {
-            device.handle().get_buffer_memory_requirements(buffer)
-        };
+        let requirements = unsafe { device.handle().get_buffer_memory_requirements(buffer) };
 
         let allocation = device.allocator().lock().allocate(&AllocationCreateDesc {
             name: "staging_buffer",
@@ -229,12 +218,10 @@ impl StagingBuffer {
         })?;
 
         unsafe {
-            device.handle().bind_buffer_memory(
-                buffer,
-                allocation.memory(),
-                allocation.offset(),
-            )
-            .map_err(|e| VulkanError::BufferError(format!("Bind staging: {:?}", e)))?;
+            device
+                .handle()
+                .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
+                .map_err(|e| VulkanError::BufferError(format!("Bind staging: {:?}", e)))?;
         }
 
         Ok(Self {
@@ -257,7 +244,7 @@ impl StagingBuffer {
                     std::ptr::copy_nonoverlapping(
                         data.as_ptr(),
                         ptr.as_ptr() as *mut u8,
-                        data.len()
+                        data.len(),
                     );
                 }
                 Ok(())
@@ -278,7 +265,7 @@ impl StagingBuffer {
                     std::ptr::copy_nonoverlapping(
                         ptr.as_ptr() as *const u8,
                         data.as_mut_ptr(),
-                        size
+                        size,
                     );
                 }
                 Ok(data)
@@ -297,7 +284,10 @@ impl Drop for StagingBuffer {
             self.device.handle().destroy_buffer(self.buffer, None);
         }
         if let Some(allocation) = self.allocation.take() {
-            self.device.allocator().lock().free(allocation)
+            self.device
+                .allocator()
+                .lock()
+                .free(allocation)
                 .unwrap_or_else(|e| tracing::error!("Failed to free staging allocation: {:?}", e));
         }
     }

@@ -19,8 +19,8 @@ pub(super) fn parse_and_lower(source: &str) -> LowerResult<HirModule> {
 }
 
 // Test modules organized by functionality
-mod simd_intrinsics;
-mod simd_vectors;
-mod simd_swizzle;
-mod simd_memory;
 mod gpu_ops;
+mod simd_intrinsics;
+mod simd_memory;
+mod simd_swizzle;
+mod simd_vectors;

@@ -37,13 +37,9 @@ pub enum JoinPointKind {
         signature: String,
     },
     /// Decision point (if/match condition)
-    Decision {
-        location: String,
-    },
+    Decision { location: String },
     /// Condition evaluation
-    Condition {
-        location: String,
-    },
+    Condition { location: String },
     /// Error handling point (Result::Err, TryUnwrap)
     Error {
         location: String,

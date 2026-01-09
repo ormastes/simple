@@ -82,7 +82,9 @@ pub extern "C" fn rt_db_open(url: *const c_char) -> u64 {
     match Database::open(url) {
         Ok(db) => {
             let handle_id = next_handle_id();
-            DB_HANDLES.lock().insert(handle_id, Box::new(DbHandle { db }));
+            DB_HANDLES
+                .lock()
+                .insert(handle_id, Box::new(DbHandle { db }));
             handle_id
         }
         Err(e) => {
@@ -105,7 +107,7 @@ pub extern "C" fn rt_db_close(handle: u64) {
 pub extern "C" fn rt_db_query(
     handle: u64,
     sql: *const c_char,
-    params: *const u64,  // Array of SqlValue handles
+    params: *const u64, // Array of SqlValue handles
     param_count: usize,
 ) -> u64 {
     let sql = unsafe {
@@ -132,16 +134,17 @@ pub extern "C" fn rt_db_query(
     match db_handle.db.query(sql, &params) {
         Ok(rows) => {
             let columns = rows.columns().to_vec();
-            let row_vec: Vec<Row> = rows
-                .filter_map(|r| r.ok())
-                .collect();
+            let row_vec: Vec<Row> = rows.filter_map(|r| r.ok()).collect();
 
             let handle_id = next_handle_id();
-            RESULT_HANDLES.lock().insert(handle_id, Box::new(ResultHandle {
-                rows: row_vec,
-                columns,
-                current_row: 0,
-            }));
+            RESULT_HANDLES.lock().insert(
+                handle_id,
+                Box::new(ResultHandle {
+                    rows: row_vec,
+                    columns,
+                    current_row: 0,
+                }),
+            );
             handle_id
         }
         Err(e) => {
@@ -249,7 +252,9 @@ pub extern "C" fn rt_db_pool_new(
     match Pool::new(url, config) {
         Ok(pool) => {
             let handle_id = next_handle_id();
-            POOL_HANDLES.lock().insert(handle_id, Box::new(PoolHandle { pool }));
+            POOL_HANDLES
+                .lock()
+                .insert(handle_id, Box::new(PoolHandle { pool }));
             handle_id
         }
         Err(e) => {
@@ -279,7 +284,9 @@ pub extern "C" fn rt_db_pool_acquire(pool_handle: u64) -> u64 {
     match Database::open(&url) {
         Ok(db) => {
             let handle_id = next_handle_id();
-            DB_HANDLES.lock().insert(handle_id, Box::new(DbHandle { db }));
+            DB_HANDLES
+                .lock()
+                .insert(handle_id, Box::new(DbHandle { db }));
             handle_id
         }
         Err(e) => {
@@ -347,17 +354,13 @@ pub extern "C" fn rt_db_result_column_count(result_handle: u64) -> usize {
 pub extern "C" fn rt_db_result_column_name(result_handle: u64, index: usize) -> *const c_char {
     let result_handles = RESULT_HANDLES.lock();
     match result_handles.get(&result_handle) {
-        Some(h) => {
-            match h.columns.get(index) {
-                Some(name) => {
-                    match CString::new(name.as_str()) {
-                        Ok(s) => s.into_raw() as *const c_char,
-                        Err(_) => ptr::null(),
-                    }
-                }
-                None => ptr::null(),
-            }
-        }
+        Some(h) => match h.columns.get(index) {
+            Some(name) => match CString::new(name.as_str()) {
+                Ok(s) => s.into_raw() as *const c_char,
+                Err(_) => ptr::null(),
+            },
+            None => ptr::null(),
+        },
         None => ptr::null(),
     }
 }
@@ -432,12 +435,10 @@ pub extern "C" fn rt_db_result_get_string(result_handle: u64, column: usize) -> 
             }
             let row = &h.rows[h.current_row - 1];
             match row.get::<String>(column) {
-                Ok(s) => {
-                    match CString::new(s) {
-                        Ok(cs) => cs.into_raw(),
-                        Err(_) => ptr::null_mut(),
-                    }
-                }
+                Ok(s) => match CString::new(s) {
+                    Ok(cs) => cs.into_raw(),
+                    Err(_) => ptr::null_mut(),
+                },
                 Err(_) => ptr::null_mut(),
             }
         }
@@ -555,9 +556,7 @@ fn build_params(params: *const u64, param_count: usize) -> Vec<SqlValue> {
         return vec![];
     }
 
-    let param_handles: &[u64] = unsafe {
-        std::slice::from_raw_parts(params, param_count)
-    };
+    let param_handles: &[u64] = unsafe { std::slice::from_raw_parts(params, param_count) };
 
     let values = SQL_VALUES.lock();
     param_handles
@@ -575,7 +574,8 @@ thread_local! {
 }
 
 fn store_last_error(error: DbError) {
-    let msg = CString::new(error.to_string()).unwrap_or_else(|_| CString::new("unknown error").unwrap());
+    let msg =
+        CString::new(error.to_string()).unwrap_or_else(|_| CString::new("unknown error").unwrap());
     LAST_ERROR.with(|e| {
         *e.borrow_mut() = Some(msg);
     });
@@ -585,11 +585,9 @@ fn store_last_error(error: DbError) {
 /// Returns null if no error. Caller must NOT free the returned string.
 #[no_mangle]
 pub extern "C" fn rt_db_last_error() -> *const c_char {
-    LAST_ERROR.with(|e| {
-        match e.borrow().as_ref() {
-            Some(s) => s.as_ptr(),
-            None => ptr::null(),
-        }
+    LAST_ERROR.with(|e| match e.borrow().as_ref() {
+        Some(s) => s.as_ptr(),
+        None => ptr::null(),
     })
 }
 

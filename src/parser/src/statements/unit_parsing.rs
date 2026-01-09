@@ -4,8 +4,8 @@
 
 use crate::ast::UnitVariant;
 use crate::error::ParseError;
-use crate::token::TokenKind;
 use crate::parser_impl::core::Parser;
+use crate::token::TokenKind;
 
 impl<'a> Parser<'a> {
     /// Helper to parse a number (float or int) as f64.

@@ -42,8 +42,8 @@ pub use cache::{
 };
 pub use engine::Monomorphizer;
 pub use parallel::{
-    monomorphize_modules_parallel, MonoStats, ParallelMonoConfig, ParallelMonomorphizer,
-    ParallelMonoTable,
+    monomorphize_modules_parallel, MonoStats, ParallelMonoConfig, ParallelMonoTable,
+    ParallelMonomorphizer,
 };
 pub use rewriter::monomorphize_module;
 pub use table::MonomorphizationTable;

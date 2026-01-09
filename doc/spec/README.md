@@ -95,12 +95,13 @@ These specs remain as architectural reference documentation. Test cases have bee
 
 ---
 
-## Testing & Quality (6 specs)
+## Testing & Quality (7 specs)
 
 | Spec | Status | Feature IDs | Description |
 |------|--------|-------------|-------------|
 | [BDD Framework](testing/testing_bdd_framework.md) | ✅ | #302 | BDD testing, matchers, Gherkin |
 | [Doctest](testing/sdoctest.md) | ✅ | #303 | Documentation testing |
+| [Doctest README](doctest_readme.md) | ✅ | #303 | README.md-based doctest discovery |
 | [Mock Framework](testing/mock.md) | ✅ | - | Test doubles and mocking |
 | [Property Testing](testing/property_testing.md) | 📝 | - | Property-based testing |
 | [Snapshot Testing](testing/snapshot_testing.md) | 📝 | - | Snapshot regression testing |
@@ -197,7 +198,7 @@ macro.md → metaprogramming.md → invariant.md
 
 **Testing:**
 ```
-testing/testing_bdd_framework.md → testing/sdoctest.md → testing/mock.md
+testing/testing_bdd_framework.md → testing/sdoctest.md → doctest_readme.md → testing/mock.md
 ```
 
 **GPU Programming:**
@@ -382,14 +383,14 @@ gpu_simd/README.md → gpu_simd/gpu.md → gpu_simd/kernels.md
 
 - **Core Language:** 9 specs
 - **Advanced Features:** 10 specs
-- **Testing & Quality:** 6 specs
+- **Testing & Quality:** 7 specs
 - **Tooling & Development:** 5 specs
 - **Parser Implementation:** 8 specs
 - **GPU & Graphics:** 13 specs
 - **UI & Interfaces:** 3 specs
 - **Data Formats:** 1 spec
 
-**Total:** 55 specification documents
+**Total:** 56 specification documents
 
 ---
 

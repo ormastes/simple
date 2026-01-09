@@ -44,7 +44,9 @@ impl std::fmt::Display for GhostErasureError {
 ///
 /// This is a post-MIR-lowering pass that removes all ghost variables
 /// and related instructions before code generation.
-pub fn erase_ghost_from_module(module: &mut MirModule) -> (GhostErasureStats, Vec<GhostErasureError>) {
+pub fn erase_ghost_from_module(
+    module: &mut MirModule,
+) -> (GhostErasureStats, Vec<GhostErasureError>) {
     let mut stats = GhostErasureStats::default();
     let mut errors = Vec::new();
 
@@ -63,7 +65,9 @@ pub fn erase_ghost_from_module(module: &mut MirModule) -> (GhostErasureStats, Ve
 }
 
 /// Erase ghost variables from a single MIR function.
-fn erase_ghost_from_function(func: &mut MirFunction) -> (GhostErasureStats, Vec<GhostErasureError>) {
+fn erase_ghost_from_function(
+    func: &mut MirFunction,
+) -> (GhostErasureStats, Vec<GhostErasureError>) {
     let mut stats = GhostErasureStats::default();
     let errors = Vec::new();
 

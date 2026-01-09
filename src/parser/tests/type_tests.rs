@@ -1,7 +1,7 @@
+use pretty_assertions::assert_eq;
 use simple_parser::ast::*;
 use simple_parser::error::ParseError;
 use simple_parser::Parser;
-use pretty_assertions::assert_eq;
 
 fn parse(source: &str) -> Result<Module, ParseError> {
     let mut parser = Parser::new(source);

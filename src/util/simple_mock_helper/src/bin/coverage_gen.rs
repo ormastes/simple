@@ -144,15 +144,24 @@ fn main() -> anyhow::Result<()> {
                     print_coverage_summary(&merged);
                 }
                 _ => {
-                    anyhow::bail!("Unknown report type: {}. Use: system, service, integration, merged, all", report_type);
+                    anyhow::bail!(
+                        "Unknown report type: {}. Use: system, service, integration, merged, all",
+                        report_type
+                    );
                 }
             }
 
             Ok(())
         }
 
-        Commands::Check { coverage, threshold } => {
-            println!("Checking coverage in {:?} against {:.1}% threshold", coverage, threshold);
+        Commands::Check {
+            coverage,
+            threshold,
+        } => {
+            println!(
+                "Checking coverage in {:?} against {:.1}% threshold",
+                coverage, threshold
+            );
 
             let json = std::fs::read_to_string(&coverage)?;
             let report: ExtendedCoverageReport = serde_json::from_str(&json)?;
@@ -162,22 +171,28 @@ fn main() -> anyhow::Result<()> {
 
             let percent = match report.coverage_type {
                 CoverageType::System => report.summary.method_coverage_percent,
-                CoverageType::Service => {
-                    report.summary.interface_coverage_percent
-                        .min(report.summary.external_lib_coverage_percent)
-                }
-                CoverageType::Integration => {
-                    report.summary.function_coverage_percent
-                        .min(report.summary.neighbor_coverage_percent)
-                }
+                CoverageType::Service => report
+                    .summary
+                    .interface_coverage_percent
+                    .min(report.summary.external_lib_coverage_percent),
+                CoverageType::Integration => report
+                    .summary
+                    .function_coverage_percent
+                    .min(report.summary.neighbor_coverage_percent),
                 CoverageType::Merged => report.summary.line_coverage_percent,
             };
 
             if report.meets_threshold(threshold) {
-                println!("PASS: Coverage {:.1}% meets threshold {:.1}%", percent, threshold);
+                println!(
+                    "PASS: Coverage {:.1}% meets threshold {:.1}%",
+                    percent, threshold
+                );
                 Ok(())
             } else {
-                println!("FAIL: Coverage {:.1}% below threshold {:.1}%", percent, threshold);
+                println!(
+                    "FAIL: Coverage {:.1}% below threshold {:.1}%",
+                    percent, threshold
+                );
                 std::process::exit(1);
             }
         }

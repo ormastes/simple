@@ -64,7 +64,10 @@ fn print_summary_json(result: &TestRunResult) {
     for (i, file) in result.files.iter().enumerate() {
         let comma = if i < result.files.len() - 1 { "," } else { "" };
         let error_str = match &file.error {
-            Some(e) => format!("\"{}\"", e.as_str().replace('\"', "\\\"").replace('\n', "\\n")),
+            Some(e) => format!(
+                "\"{}\"",
+                e.as_str().replace('\"', "\\\"").replace('\n', "\\n")
+            ),
             None => "null".to_string(),
         };
         println!("    {{");
@@ -178,7 +181,7 @@ pub fn generate_documentation(result: &TestRunResult) -> Result<(), Box<dyn std:
     // For now, generate simple documentation files directly
     generate_html_doc(&docs_dir, result)?;
     generate_markdown_doc(&docs_dir, result)?;
-    
+
     // Generate BDD-style documentation from sspec files
     generate_sspec_documentation(result, &docs_dir)?;
 
@@ -192,7 +195,7 @@ fn generate_sspec_documentation(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use super::sspec_docgen;
     use std::path::PathBuf;
-    
+
     // Find all sspec files from test results
     let sspec_files: Vec<PathBuf> = result
         .files
@@ -205,15 +208,15 @@ fn generate_sspec_documentation(
                 .unwrap_or(false)
         })
         .collect();
-    
+
     if sspec_files.is_empty() {
         return Ok(());
     }
-    
+
     // Generate documentation in docs/spec/
     let spec_dir = docs_dir.join("spec");
     sspec_docgen::generate_sspec_docs(&sspec_files, &spec_dir)?;
-    
+
     Ok(())
 }
 

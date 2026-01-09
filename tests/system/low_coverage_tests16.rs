@@ -118,7 +118,7 @@ mod driver_jj_tests {
 // Compiler Async Value Types
 // ============================================================================
 mod compiler_async_value_tests {
-    use simple_compiler::{FutureValue, GeneratorValue, ChannelValue, ThreadPoolValue};
+    use simple_compiler::{ChannelValue, FutureValue, GeneratorValue, ThreadPoolValue};
 
     #[test]
     fn test_future_value_size() {
@@ -145,7 +145,9 @@ mod compiler_async_value_tests {
 // Compiler Manual Pointer Value Types
 // ============================================================================
 mod compiler_manual_value_tests {
-    use simple_compiler::{ManualHandleValue, ManualSharedValue, ManualUniqueValue, ManualWeakValue};
+    use simple_compiler::{
+        ManualHandleValue, ManualSharedValue, ManualUniqueValue, ManualWeakValue,
+    };
 
     #[test]
     fn test_manual_handle_value_size() {
@@ -172,7 +174,7 @@ mod compiler_manual_value_tests {
 // Compiler Borrow Value Types
 // ============================================================================
 mod compiler_borrow_value_tests {
-    use simple_compiler::{BorrowValue, BorrowMutValue};
+    use simple_compiler::{BorrowMutValue, BorrowValue};
 
     #[test]
     fn test_borrow_value_size() {
@@ -217,15 +219,11 @@ mod loader_settlement_extended_tests {
 // Loader SMF Extended
 // ============================================================================
 mod loader_smf_extended_tests {
-    use simple_loader::smf::{SmfHeader, Arch, Platform};
+    use simple_loader::smf::{Arch, Platform, SmfHeader};
 
     #[test]
     fn test_arch_variants() {
-        let archs = [
-            Arch::X86_64,
-            Arch::Aarch64,
-            Arch::Riscv64,
-        ];
+        let archs = [Arch::X86_64, Arch::Aarch64, Arch::Riscv64];
         for a in archs {
             let _ = format!("{:?}", a);
         }
@@ -233,11 +231,7 @@ mod loader_smf_extended_tests {
 
     #[test]
     fn test_platform_variants() {
-        let platforms = [
-            Platform::Linux,
-            Platform::Windows,
-            Platform::MacOS,
-        ];
+        let platforms = [Platform::Linux, Platform::Windows, Platform::MacOS];
         for p in platforms {
             let _ = format!("{:?}", p);
         }
@@ -369,8 +363,8 @@ mod loader_cross_test_extended_tests {
     #[test]
     fn test_test_matrix_with_target() {
         use simple_common::{Target, TargetArch, TargetOS};
-        let matrix = TestMatrix::new()
-            .with_target(Target::new(TargetArch::Riscv64, TargetOS::Linux));
+        let matrix =
+            TestMatrix::new().with_target(Target::new(TargetArch::Riscv64, TargetOS::Linux));
         let targets = matrix.targets();
         assert!(targets.len() >= 3);
     }

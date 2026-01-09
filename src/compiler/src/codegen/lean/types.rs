@@ -5,7 +5,7 @@
 //! - Simple enums → Lean `inductive`
 //! - Primitive types → Lean builtins (Int, Bool, String)
 
-use crate::hir::{HirType, TypeId, TypeRegistry, Signedness};
+use crate::hir::{HirType, Signedness, TypeId, TypeRegistry};
 use crate::CompileError;
 
 /// A Lean type representation
@@ -57,7 +57,8 @@ impl LeanType {
             LeanType::Inductive { name, .. } => name.clone(),
             LeanType::Mixin { name, .. } => name.clone(),
             LeanType::Function { params, result } => {
-                let params_str = params.iter()
+                let params_str = params
+                    .iter()
                     .map(|p| p.to_lean())
                     .collect::<Vec<_>>()
                     .join(" → ");
@@ -66,7 +67,8 @@ impl LeanType {
             LeanType::Optional(inner) => format!("Option {}", inner.to_lean()),
             LeanType::List(inner) => format!("List {}", inner.to_lean()),
             LeanType::Tuple(types) => {
-                let types_str = types.iter()
+                let types_str = types
+                    .iter()
                     .map(|t| t.to_lean())
                     .collect::<Vec<_>>()
                     .join(" × ");
@@ -78,7 +80,11 @@ impl LeanType {
     /// Emit structure definition
     pub fn emit_structure(&self) -> Option<String> {
         match self {
-            LeanType::Structure { name, fields, deriving } => {
+            LeanType::Structure {
+                name,
+                fields,
+                deriving,
+            } => {
                 let mut out = format!("structure {} where\n", name);
                 for (field_name, field_type) in fields {
                     out.push_str(&format!("  {} : {}\n", field_name, field_type.to_lean()));
@@ -95,53 +101,70 @@ impl LeanType {
     /// Emit mixin definition
     pub fn emit_mixin(&self) -> Option<String> {
         match self {
-            LeanType::Mixin { name, fields, methods, type_params } => {
+            LeanType::Mixin {
+                name,
+                fields,
+                methods,
+                type_params,
+            } => {
                 let mut out = String::new();
-                
+
                 // Generate type parameter list
                 let params = if type_params.is_empty() {
                     String::new()
                 } else {
-                    format!(" {}", type_params.iter()
-                        .map(|p| format!("({} : Type)", p))
-                        .collect::<Vec<_>>()
-                        .join(" "))
+                    format!(
+                        " {}",
+                        type_params
+                            .iter()
+                            .map(|p| format!("({} : Type)", p))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
                 };
-                
+
                 out.push_str(&format!("/-- Mixin: {} --/\n", name));
                 out.push_str(&format!("structure {}{} where\n", name, params));
-                
+
                 // Emit fields
                 for (field_name, field_type) in fields {
                     out.push_str(&format!("  {} : {}\n", field_name, field_type.to_lean()));
                 }
-                
+
                 // Emit method signatures as function fields
                 for (method_name, method_type) in methods {
                     out.push_str(&format!("  {} : {}\n", method_name, method_type.to_lean()));
                 }
-                
+
                 out.push_str("deriving Repr\n");
                 Some(out)
             }
             _ => None,
         }
     }
-    
+
     /// Emit inductive definition
     pub fn emit_inductive(&self) -> Option<String> {
         match self {
-            LeanType::Inductive { name, variants, deriving } => {
+            LeanType::Inductive {
+                name,
+                variants,
+                deriving,
+            } => {
                 let mut out = format!("inductive {} where\n", name);
                 for (variant_name, variant_types) in variants {
                     if variant_types.is_empty() {
                         out.push_str(&format!("  | {} : {}\n", variant_name, name));
                     } else {
-                        let types_str = variant_types.iter()
+                        let types_str = variant_types
+                            .iter()
                             .map(|t| t.to_lean())
                             .collect::<Vec<_>>()
                             .join(" → ");
-                        out.push_str(&format!("  | {} : {} → {}\n", variant_name, types_str, name));
+                        out.push_str(&format!(
+                            "  | {} : {} → {}\n",
+                            variant_name, types_str, name
+                        ));
                     }
                 }
                 if !deriving.is_empty() {
@@ -167,10 +190,10 @@ impl<'a> TypeTranslator<'a> {
 
     /// Translate a Simple type to Lean
     pub fn translate(&self, type_id: TypeId) -> Result<LeanType, CompileError> {
-        let ty = self.registry.get(type_id)
-            .ok_or_else(|| CompileError::Semantic(format!(
-                "Unknown type ID: {:?}", type_id
-            )))?;
+        let ty = self
+            .registry
+            .get(type_id)
+            .ok_or_else(|| CompileError::Semantic(format!("Unknown type ID: {:?}", type_id)))?;
 
         self.translate_hir_type(ty)
     }
@@ -188,16 +211,13 @@ impl<'a> TypeTranslator<'a> {
                     Ok(LeanType::Primitive("Nat".to_string()))
                 }
             }
-            HirType::Float { .. } => {
-                Ok(LeanType::Primitive("Float".to_string()))
-            }
+            HirType::Float { .. } => Ok(LeanType::Primitive("Float".to_string())),
             HirType::String => Ok(LeanType::Primitive("String".to_string())),
             HirType::Nil => Ok(LeanType::Primitive("Unit".to_string())),
             HirType::Struct { name, fields, .. } => {
-                let lean_fields: Result<Vec<_>, _> = fields.iter()
-                    .map(|(n, tid)| {
-                        self.translate(*tid).map(|t| (n.clone(), t))
-                    })
+                let lean_fields: Result<Vec<_>, _> = fields
+                    .iter()
+                    .map(|(n, tid)| self.translate(*tid).map(|t| (n.clone(), t)))
                     .collect();
                 Ok(LeanType::Structure {
                     name: self.to_lean_name(name),
@@ -206,12 +226,12 @@ impl<'a> TypeTranslator<'a> {
                 })
             }
             HirType::Enum { name, variants } => {
-                let lean_variants: Result<Vec<_>, _> = variants.iter()
+                let lean_variants: Result<Vec<_>, _> = variants
+                    .iter()
                     .map(|(n, types_opt)| {
                         if let Some(types) = types_opt {
-                            let lean_types: Result<Vec<_>, _> = types.iter()
-                                .map(|tid| self.translate(*tid))
-                                .collect();
+                            let lean_types: Result<Vec<_>, _> =
+                                types.iter().map(|tid| self.translate(*tid)).collect();
                             lean_types.map(|t| (self.to_lean_name(n), t))
                         } else {
                             Ok((self.to_lean_name(n), vec![]))
@@ -224,7 +244,13 @@ impl<'a> TypeTranslator<'a> {
                     deriving: vec!["Repr".to_string(), "DecidableEq".to_string()],
                 })
             }
-            HirType::Mixin { name, type_params, fields, methods, .. } => {
+            HirType::Mixin {
+                name,
+                type_params,
+                fields,
+                methods,
+                ..
+            } => {
                 let lean_fields: Result<Vec<_>, _> = fields
                     .iter()
                     .map(|(n, tid)| self.translate(*tid).map(|t| (n.clone(), t)))
@@ -232,10 +258,8 @@ impl<'a> TypeTranslator<'a> {
                 let lean_methods: Result<Vec<_>, _> = methods
                     .iter()
                     .map(|m| {
-                        let params: Result<Vec<_>, _> = m.params
-                            .iter()
-                            .map(|tid| self.translate(*tid))
-                            .collect();
+                        let params: Result<Vec<_>, _> =
+                            m.params.iter().map(|tid| self.translate(*tid)).collect();
                         let ret = self.translate(m.ret)?;
                         params.map(|p| {
                             (
@@ -260,15 +284,13 @@ impl<'a> TypeTranslator<'a> {
                 Ok(LeanType::List(Box::new(inner)))
             }
             HirType::Tuple(elements) => {
-                let lean_elements: Result<Vec<_>, _> = elements.iter()
-                    .map(|tid| self.translate(*tid))
-                    .collect();
+                let lean_elements: Result<Vec<_>, _> =
+                    elements.iter().map(|tid| self.translate(*tid)).collect();
                 Ok(LeanType::Tuple(lean_elements?))
             }
             HirType::Function { params, ret } => {
-                let lean_params: Result<Vec<_>, _> = params.iter()
-                    .map(|tid| self.translate(*tid))
-                    .collect();
+                let lean_params: Result<Vec<_>, _> =
+                    params.iter().map(|tid| self.translate(*tid)).collect();
                 let lean_ret = self.translate(*ret)?;
                 Ok(LeanType::Function {
                     params: lean_params?,
@@ -295,15 +317,17 @@ impl<'a> TypeTranslator<'a> {
                     // For binary unions, use Either
                     let left = self.translate(variants[0])?;
                     let right = self.translate(variants[1])?;
-                    Ok(LeanType::Named(format!("Sum {} {}", left.to_lean(), right.to_lean())))
+                    Ok(LeanType::Named(format!(
+                        "Sum {} {}",
+                        left.to_lean(),
+                        right.to_lean()
+                    )))
                 } else {
                     // For n-ary unions, generate an inductive
                     Ok(LeanType::Primitive("Unit".to_string())) // Placeholder
                 }
             }
-            HirType::Unknown => {
-                Ok(LeanType::Primitive("Unit".to_string()))
-            }
+            HirType::Unknown => Ok(LeanType::Primitive("Unit".to_string())),
         }
     }
 
@@ -311,10 +335,9 @@ impl<'a> TypeTranslator<'a> {
     pub fn translate_type_def(&self, name: &str, ty: &HirType) -> Result<LeanType, CompileError> {
         match ty {
             HirType::Struct { fields, .. } => {
-                let lean_fields: Result<Vec<_>, _> = fields.iter()
-                    .map(|(n, tid)| {
-                        self.translate(*tid).map(|t| (n.clone(), t))
-                    })
+                let lean_fields: Result<Vec<_>, _> = fields
+                    .iter()
+                    .map(|(n, tid)| self.translate(*tid).map(|t| (n.clone(), t)))
                     .collect();
                 Ok(LeanType::Structure {
                     name: self.to_lean_name(name),
@@ -323,12 +346,12 @@ impl<'a> TypeTranslator<'a> {
                 })
             }
             HirType::Enum { variants, .. } => {
-                let lean_variants: Result<Vec<_>, _> = variants.iter()
+                let lean_variants: Result<Vec<_>, _> = variants
+                    .iter()
                     .map(|(n, types_opt)| {
                         if let Some(types) = types_opt {
-                            let lean_types: Result<Vec<_>, _> = types.iter()
-                                .map(|tid| self.translate(*tid))
-                                .collect();
+                            let lean_types: Result<Vec<_>, _> =
+                                types.iter().map(|tid| self.translate(*tid)).collect();
                             lean_types.map(|t| (self.to_lean_name(n), t))
                         } else {
                             Ok((self.to_lean_name(n), vec![]))
@@ -369,16 +392,20 @@ mod tests {
         let registry = TypeRegistry::new();
         let translator = TypeTranslator::new(&registry);
 
-        let lean_int = translator.translate_hir_type(&HirType::Int {
-            bits: 64,
-            signedness: Signedness::Signed
-        }).unwrap();
+        let lean_int = translator
+            .translate_hir_type(&HirType::Int {
+                bits: 64,
+                signedness: Signedness::Signed,
+            })
+            .unwrap();
         assert_eq!(lean_int.to_lean(), "Int");
 
-        let lean_nat = translator.translate_hir_type(&HirType::Int {
-            bits: 64,
-            signedness: Signedness::Unsigned
-        }).unwrap();
+        let lean_nat = translator
+            .translate_hir_type(&HirType::Int {
+                bits: 64,
+                signedness: Signedness::Unsigned,
+            })
+            .unwrap();
         assert_eq!(lean_nat.to_lean(), "Nat");
 
         let lean_bool = translator.translate_hir_type(&HirType::Bool).unwrap();

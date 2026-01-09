@@ -1,8 +1,8 @@
 //! Contract and invariant AST nodes (preconditions, postconditions, invariants, refinement types)
 
-use crate::token::Span;
 use super::super::enums::*;
 use super::core::*;
+use crate::token::Span;
 
 //==============================================================================
 // Contract Blocks (LLM-friendly feature #400)

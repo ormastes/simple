@@ -125,10 +125,7 @@ impl SymbolTable {
                 .push(i);
         }
 
-        trace!(
-            unique_hashes = hash_table.len(),
-            "Symbol hash table built"
-        );
+        trace!(unique_hashes = hash_table.len(), "Symbol hash table built");
 
         Self {
             symbols,

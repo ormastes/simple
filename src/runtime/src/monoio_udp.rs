@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 /// Wraps monoio::net::UdpSocket
 #[derive(Debug)]
 pub struct MonoioUdpSocket {
-    // TODO: Store actual monoio::net::UdpSocket when runtime integration is complete
+    // TODO: [runtime][P3] Store actual monoio::net::UdpSocket when runtime integration is complete
     // For now, store local address
     local_addr: SocketAddr,
     // In full implementation, this would be Arc<monoio::net::UdpSocket>
@@ -35,7 +35,7 @@ lazy_static::lazy_static! {
 /// RuntimeValue containing socket handle (index), or negative value on error
 #[no_mangle]
 pub extern "C" fn monoio_udp_bind(addr: RuntimeValue) -> RuntimeValue {
-    // TODO: Extract string from RuntimeValue and parse SocketAddr
+    // TODO: [runtime][P2] Extract string from RuntimeValue and parse SocketAddr
     // For now, return stub value
 
     tracing::warn!("monoio_udp_bind: stub implementation");
@@ -66,7 +66,7 @@ pub extern "C" fn monoio_udp_send_to(
     buffer: RuntimeValue,
     addr: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: Get socket from handle and send data
+    // TODO: [runtime][P1] Get socket from handle and send data
     // For now, return stub value
 
     tracing::warn!("monoio_udp_send_to: stub implementation");
@@ -99,7 +99,7 @@ pub extern "C" fn monoio_udp_recv_from(
     buffer: RuntimeValue,
     max_len: i64,
 ) -> RuntimeValue {
-    // TODO: Get socket from handle and receive data
+    // TODO: [runtime][P1] Get socket from handle and receive data
     // For now, return nil
 
     tracing::warn!("monoio_udp_recv_from: stub implementation");
@@ -134,7 +134,7 @@ pub extern "C" fn monoio_udp_connect(
     socket_handle: RuntimeValue,
     addr: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: Get socket from handle and connect
+    // TODO: [runtime][P1] Get socket from handle and connect
     // For now, return stub value
 
     tracing::warn!("monoio_udp_connect: stub implementation");
@@ -163,7 +163,7 @@ pub extern "C" fn monoio_udp_send(
     socket_handle: RuntimeValue,
     buffer: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: Get socket from handle and send data to connected peer
+    // TODO: [runtime][P1] Get socket from handle and send data to connected peer
     // For now, return stub value
 
     tracing::warn!("monoio_udp_send: stub implementation");
@@ -195,7 +195,7 @@ pub extern "C" fn monoio_udp_recv(
     buffer: RuntimeValue,
     max_len: i64,
 ) -> RuntimeValue {
-    // TODO: Get socket from handle and receive data from connected peer
+    // TODO: [runtime][P1] Get socket from handle and receive data from connected peer
     // For now, return stub value
 
     tracing::warn!("monoio_udp_recv: stub implementation");
@@ -222,7 +222,7 @@ pub extern "C" fn monoio_udp_recv(
 /// RuntimeValue containing 1 on success, or negative value on error
 #[no_mangle]
 pub extern "C" fn monoio_udp_close(socket_handle: RuntimeValue) -> RuntimeValue {
-    // TODO: Get socket from handle and close
+    // TODO: [runtime][P1] Get socket from handle and close
     // For now, return stub value
 
     tracing::warn!("monoio_udp_close: stub implementation");
@@ -246,7 +246,7 @@ pub extern "C" fn monoio_udp_close(socket_handle: RuntimeValue) -> RuntimeValue 
 /// RuntimeValue containing address string, or nil on error
 #[no_mangle]
 pub extern "C" fn monoio_udp_local_addr(socket_handle: RuntimeValue) -> RuntimeValue {
-    // TODO: Get socket from handle and return local address
+    // TODO: [runtime][P1] Get socket from handle and return local address
     // For now, return nil
 
     tracing::warn!("monoio_udp_local_addr: stub implementation");
@@ -275,7 +275,7 @@ pub extern "C" fn monoio_udp_set_broadcast(
     socket_handle: RuntimeValue,
     broadcast: i64,
 ) -> RuntimeValue {
-    // TODO: Get socket from handle and set option
+    // TODO: [runtime][P1] Get socket from handle and set option
     // For now, return stub value
 
     tracing::warn!("monoio_udp_set_broadcast: stub implementation");
@@ -303,7 +303,7 @@ pub extern "C" fn monoio_udp_set_multicast_ttl(
     socket_handle: RuntimeValue,
     ttl: i64,
 ) -> RuntimeValue {
-    // TODO: Get socket from handle and set option
+    // TODO: [runtime][P1] Get socket from handle and set option
     // For now, return stub value
 
     tracing::warn!("monoio_udp_set_multicast_ttl: stub implementation");
@@ -333,7 +333,7 @@ pub extern "C" fn monoio_udp_join_multicast(
     multicast_addr: RuntimeValue,
     interface_addr: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: Get socket from handle and join multicast group
+    // TODO: [runtime][P1] Get socket from handle and join multicast group
     // For now, return stub value
 
     tracing::warn!("monoio_udp_join_multicast: stub implementation");
@@ -365,7 +365,7 @@ pub extern "C" fn monoio_udp_leave_multicast(
     multicast_addr: RuntimeValue,
     interface_addr: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: Get socket from handle and leave multicast group
+    // TODO: [runtime][P1] Get socket from handle and leave multicast group
     // For now, return stub value
 
     tracing::warn!("monoio_udp_leave_multicast: stub implementation");

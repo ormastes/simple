@@ -4,10 +4,10 @@
 
 #![cfg(feature = "vulkan")]
 
+use simple_common::target::{Target, TargetArch, TargetOS};
 use simple_compiler::codegen::backend_trait::{BackendKind, NativeBackend};
 use simple_compiler::codegen::vulkan::VulkanBackend;
 use simple_compiler::mir::MirModule;
-use simple_common::target::{Target, TargetArch, TargetOS};
 
 // =============================================================================
 // Backend Selection Tests
@@ -77,7 +77,10 @@ fn test_vulkan_backend_creation() {
         }
         Err(e) => {
             // If creation fails, it should be due to Vulkan unavailability
-            println!("Vulkan backend creation failed (expected if no drivers): {:?}", e);
+            println!(
+                "Vulkan backend creation failed (expected if no drivers): {:?}",
+                e
+            );
         }
     }
 }
@@ -197,8 +200,8 @@ fn test_spirv_magic_number() {
 
 #[test]
 fn test_spirv_validation_with_spirv_val() {
-    use std::process::{Command, Stdio};
     use std::io::Write;
+    use std::process::{Command, Stdio};
 
     let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
     let mut backend = match VulkanBackend::new(target) {
@@ -224,7 +227,8 @@ fn test_spirv_validation_with_spirv_val() {
 
     // Try to run spirv-val
     let mut child = match Command::new("spirv-val")
-        .arg("--target-env").arg("vulkan1.1")
+        .arg("--target-env")
+        .arg("vulkan1.1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -239,10 +243,14 @@ fn test_spirv_validation_with_spirv_val() {
 
     // Write SPIR-V to stdin
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(&spirv).expect("Failed to write to spirv-val");
+        stdin
+            .write_all(&spirv)
+            .expect("Failed to write to spirv-val");
     }
 
-    let output = child.wait_with_output().expect("Failed to wait for spirv-val");
+    let output = child
+        .wait_with_output()
+        .expect("Failed to wait for spirv-val");
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -272,4 +280,3 @@ fn test_for_gpu_kernel_consistency() {
     let backend2 = BackendKind::for_gpu_kernel(&target);
     assert_eq!(backend1, backend2, "Backend selection should be consistent");
 }
-

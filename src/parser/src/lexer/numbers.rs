@@ -59,9 +59,7 @@ impl<'a> super::Lexer<'a> {
                     TokenKind::Integer(n)
                 }
             }
-            Err(_) => {
-                TokenKind::Error(format!("Invalid {} number: {}", radix_name, num_str))
-            }
+            Err(_) => TokenKind::Error(format!("Invalid {} number: {}", radix_name, num_str)),
         }
     }
 
@@ -262,5 +260,4 @@ impl<'a> super::Lexer<'a> {
 
         result
     }
-
 }

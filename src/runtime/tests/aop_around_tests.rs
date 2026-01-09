@@ -53,7 +53,7 @@ extern "C" fn advice_double_proceed(
 fn around_chain_applies_outermost_first() {
     let args = vec![RuntimeValue::from_int(1), RuntimeValue::from_int(2)];
     let advices = vec![advice_add_one as _, advice_mul_two as _];
-    
+
     // Test with small stack-safe operations
     let result = rt_aop_invoke_around(
         target_sum,

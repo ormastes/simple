@@ -9,7 +9,7 @@
 //! - V-INHERIT-xxx: Verification inheritance violations
 //! - M-INTRO-xxx: Macro introduction contract violations
 
-use simple_common::diagnostic::{Diagnostic, Span, Severity};
+use simple_common::diagnostic::{Diagnostic, Severity, Span};
 
 /// Verification error codes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,110 +119,94 @@ impl VerificationErrorCode {
     /// Get the default message for this error
     pub fn message(&self) -> &'static str {
         match self {
-            Self::AopNonGhostTargetsVerified =>
-                "non-ghost aspect targets verified join point",
-            Self::AopWildcardInVerified =>
-                "verified pointcut uses wildcard pattern",
-            Self::AopIntroducesRuntime =>
-                "aspect introduces runtime member in verified context",
+            Self::AopNonGhostTargetsVerified => "non-ghost aspect targets verified join point",
+            Self::AopWildcardInVerified => "verified pointcut uses wildcard pattern",
+            Self::AopIntroducesRuntime => "aspect introduces runtime member in verified context",
 
-            Self::MacroUndeclaredIntroduction =>
-                "macro introduces symbols not declared in `introduces:` clause",
-            Self::MacroIntroducesPub =>
-                "macro introduces public item in verified context",
-            Self::MacroIntroducesGlobal =>
-                "macro introduces global variable in verified context",
-            Self::MacroIntroducesRuntime =>
-                "macro introduces runtime code in verified context",
-            Self::MacroAopViolation =>
-                "macro-generated aspect violates verification rules",
+            Self::MacroUndeclaredIntroduction => {
+                "macro introduces symbols not declared in `introduces:` clause"
+            }
+            Self::MacroIntroducesPub => "macro introduces public item in verified context",
+            Self::MacroIntroducesGlobal => "macro introduces global variable in verified context",
+            Self::MacroIntroducesRuntime => "macro introduces runtime code in verified context",
+            Self::MacroAopViolation => "macro-generated aspect violates verification rules",
 
-            Self::MissingTermination =>
-                "recursive function missing `decreases:` clause",
-            Self::InvalidTermination =>
-                "termination argument is not well-founded",
+            Self::MissingTermination => "recursive function missing `decreases:` clause",
+            Self::InvalidTermination => "termination argument is not well-founded",
 
-            Self::UnsafeInVerified =>
-                "unsafe operation in verified context",
-            Self::RawPointerInVerified =>
-                "raw pointer operation in verified context",
-            Self::FfiInVerified =>
-                "FFI call in verified context",
+            Self::UnsafeInVerified => "unsafe operation in verified context",
+            Self::RawPointerInVerified => "raw pointer operation in verified context",
+            Self::FfiInVerified => "FFI call in verified context",
 
-            Self::MissingTrustedBoundary =>
-                "verified code depends on unverified code without @trusted boundary",
-            Self::CircularVerifiedDep =>
-                "circular dependency in verification context",
+            Self::MissingTrustedBoundary => {
+                "verified code depends on unverified code without @trusted boundary"
+            }
+            Self::CircularVerifiedDep => "circular dependency in verification context",
 
-            Self::VerifiedInheritanceOptOut =>
-                "opt-out from verified parent requires explicit @unsafe",
-            Self::VerifiedExtendsUnverified =>
-                "verified class cannot extend unverified class",
+            Self::VerifiedInheritanceOptOut => {
+                "opt-out from verified parent requires explicit @unsafe"
+            }
+            Self::VerifiedExtendsUnverified => "verified class cannot extend unverified class",
 
-            Self::IoInVerified =>
-                "IO effect not allowed in verified context",
-            Self::ReflectionInVerified =>
-                "reflection not allowed in verified context",
+            Self::IoInVerified => "IO effect not allowed in verified context",
+            Self::ReflectionInVerified => "reflection not allowed in verified context",
 
-            Self::GhostAccessesNonGhost =>
-                "ghost code cannot access non-ghost state",
-            Self::ContractHasSideEffects =>
-                "contract expression must be pure (no side effects)",
+            Self::GhostAccessesNonGhost => "ghost code cannot access non-ghost state",
+            Self::ContractHasSideEffects => "contract expression must be pure (no side effects)",
         }
     }
 
     /// Get the help text for this error
     pub fn help(&self) -> &'static str {
         match self {
-            Self::AopNonGhostTargetsVerified =>
-                "mark the aspect with `ghost` to allow it in verified context",
-            Self::AopWildcardInVerified =>
-                "use explicit pointcuts instead of wildcards for verified code",
-            Self::AopIntroducesRuntime =>
-                "only ghost introductions are allowed in verified context",
+            Self::AopNonGhostTargetsVerified => {
+                "mark the aspect with `ghost` to allow it in verified context"
+            }
+            Self::AopWildcardInVerified => {
+                "use explicit pointcuts instead of wildcards for verified code"
+            }
+            Self::AopIntroducesRuntime => {
+                "only ghost introductions are allowed in verified context"
+            }
 
-            Self::MacroUndeclaredIntroduction =>
-                "add all introduced symbols to the `introduces:` clause",
-            Self::MacroIntroducesPub =>
-                "macros in verified context can only introduce private items",
-            Self::MacroIntroducesGlobal =>
-                "use local variables instead of global state",
-            Self::MacroIntroducesRuntime =>
-                "macros in verified context can only introduce ghost code",
-            Self::MacroAopViolation =>
-                "ensure macro-generated aspects are marked ghost",
+            Self::MacroUndeclaredIntroduction => {
+                "add all introduced symbols to the `introduces:` clause"
+            }
+            Self::MacroIntroducesPub => {
+                "macros in verified context can only introduce private items"
+            }
+            Self::MacroIntroducesGlobal => "use local variables instead of global state",
+            Self::MacroIntroducesRuntime => {
+                "macros in verified context can only introduce ghost code"
+            }
+            Self::MacroAopViolation => "ensure macro-generated aspects are marked ghost",
 
-            Self::MissingTermination =>
-                "add `decreases: <expr>` to prove termination",
-            Self::InvalidTermination =>
-                "ensure the decreases expression decreases on each recursive call",
+            Self::MissingTermination => "add `decreases: <expr>` to prove termination",
+            Self::InvalidTermination => {
+                "ensure the decreases expression decreases on each recursive call"
+            }
 
-            Self::UnsafeInVerified =>
-                "remove unsafe operations or move to @trusted function",
-            Self::RawPointerInVerified =>
-                "use references instead of raw pointers",
-            Self::FfiInVerified =>
-                "wrap FFI calls in @trusted functions",
+            Self::UnsafeInVerified => "remove unsafe operations or move to @trusted function",
+            Self::RawPointerInVerified => "use references instead of raw pointers",
+            Self::FfiInVerified => "wrap FFI calls in @trusted functions",
 
-            Self::MissingTrustedBoundary =>
-                "add @trusted annotation to the dependency or verify the dependency",
-            Self::CircularVerifiedDep =>
-                "break the circular dependency using @trusted annotations",
+            Self::MissingTrustedBoundary => {
+                "add @trusted annotation to the dependency or verify the dependency"
+            }
+            Self::CircularVerifiedDep => "break the circular dependency using @trusted annotations",
 
-            Self::VerifiedInheritanceOptOut =>
-                "add @unsafe to explicitly opt out of verification",
-            Self::VerifiedExtendsUnverified =>
-                "verify the parent class or use composition instead",
+            Self::VerifiedInheritanceOptOut => "add @unsafe to explicitly opt out of verification",
+            Self::VerifiedExtendsUnverified => "verify the parent class or use composition instead",
 
-            Self::IoInVerified =>
-                "move IO operations to @trusted functions",
-            Self::ReflectionInVerified =>
-                "use explicit types instead of reflection",
+            Self::IoInVerified => "move IO operations to @trusted functions",
+            Self::ReflectionInVerified => "use explicit types instead of reflection",
 
-            Self::GhostAccessesNonGhost =>
-                "only access ghost variables and parameters in ghost code",
-            Self::ContractHasSideEffects =>
-                "ensure contract expressions only read state, don't modify it",
+            Self::GhostAccessesNonGhost => {
+                "only access ghost variables and parameters in ghost code"
+            }
+            Self::ContractHasSideEffects => {
+                "ensure contract expressions only read state, don't modify it"
+            }
         }
     }
 
@@ -321,8 +305,13 @@ impl VerificationDiagnostics {
     }
 
     /// Report an error
-    pub fn error(&mut self, code: VerificationErrorCode, span: Span) -> &mut VerificationDiagnostic {
-        self.diagnostics.push(VerificationDiagnostic::new(code, span));
+    pub fn error(
+        &mut self,
+        code: VerificationErrorCode,
+        span: Span,
+    ) -> &mut VerificationDiagnostic {
+        self.diagnostics
+            .push(VerificationDiagnostic::new(code, span));
         self.diagnostics.last_mut().unwrap()
     }
 
@@ -358,21 +347,30 @@ mod tests {
 
     #[test]
     fn test_error_codes() {
-        assert_eq!(VerificationErrorCode::AopNonGhostTargetsVerified.code(), "V-AOP-001");
-        assert_eq!(VerificationErrorCode::MacroUndeclaredIntroduction.code(), "M-INTRO-001");
-        assert_eq!(VerificationErrorCode::MissingTermination.code(), "V-TERM-001");
-        assert_eq!(VerificationErrorCode::UnsafeInVerified.code(), "V-UNSAFE-001");
+        assert_eq!(
+            VerificationErrorCode::AopNonGhostTargetsVerified.code(),
+            "V-AOP-001"
+        );
+        assert_eq!(
+            VerificationErrorCode::MacroUndeclaredIntroduction.code(),
+            "M-INTRO-001"
+        );
+        assert_eq!(
+            VerificationErrorCode::MissingTermination.code(),
+            "V-TERM-001"
+        );
+        assert_eq!(
+            VerificationErrorCode::UnsafeInVerified.code(),
+            "V-UNSAFE-001"
+        );
     }
 
     #[test]
     fn test_diagnostic_creation() {
         let span = Span::new(10, 20, 5, 3);
-        let diag = VerificationDiagnostic::new(
-            VerificationErrorCode::MissingTermination,
-            span
-        )
-        .with_item("factorial")
-        .with_file("math.spl");
+        let diag = VerificationDiagnostic::new(VerificationErrorCode::MissingTermination, span)
+            .with_item("factorial")
+            .with_file("math.spl");
 
         let common = diag.to_diagnostic();
         assert!(common.message.contains("factorial"));

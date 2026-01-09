@@ -94,17 +94,16 @@ pub fn discover_files(root: &Path) -> Result<HashSet<PathBuf>, CompileError> {
     let mut to_scan = vec![root.to_path_buf()];
 
     while let Some(path) = to_scan.pop() {
-        let canonical = path
-            .canonicalize()
-            .unwrap_or_else(|_| path.clone());
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
 
         if !files.insert(canonical.clone()) {
             continue; // Already visited
         }
 
         // Quick scan for imports
-        let source = fs::read_to_string(&canonical)
-            .map_err(|e| CompileError::Io(format!("Failed to read {}: {}", canonical.display(), e)))?;
+        let source = fs::read_to_string(&canonical).map_err(|e| {
+            CompileError::Io(format!("Failed to read {}: {}", canonical.display(), e))
+        })?;
 
         // Extract imports with a lightweight scan
         let imports = extract_imports_quick(&source, canonical.parent().unwrap_or(Path::new(".")));
@@ -157,12 +156,7 @@ fn extract_use_path(line: &str, base_dir: &Path) -> Option<PathBuf> {
     // - use crate.foo.bar
 
     // Remove trailing .* or .{...} for module path
-    let module_path = rest
-        .split(".*")
-        .next()?
-        .split(".{")
-        .next()?
-        .trim();
+    let module_path = rest.split(".*").next()?.split(".{").next()?.trim();
 
     // Split into segments
     let segments: Vec<&str> = module_path
@@ -332,7 +326,10 @@ pub fn flatten_module_with_cache(
     }
 
     let parsed = cache.get(&canonical).ok_or_else(|| {
-        CompileError::Io(format!("Module not found in cache: {}", canonical.display()))
+        CompileError::Io(format!(
+            "Module not found in cache: {}",
+            canonical.display()
+        ))
     })?;
 
     let mut items = Vec::new();
@@ -447,9 +444,7 @@ mod tests {
 
     #[test]
     fn test_parallel_config() {
-        let config = ParallelConfig::new()
-            .with_threads(4)
-            .with_mmap();
+        let config = ParallelConfig::new().with_threads(4).with_mmap();
 
         assert_eq!(config.num_threads, Some(4));
         assert!(config.use_mmap);
@@ -458,11 +453,7 @@ mod tests {
     #[test]
     fn test_discover_single_file() {
         let temp_dir = TempDir::new().unwrap();
-        let main_path = create_test_file(
-            temp_dir.path(),
-            "main.spl",
-            "main = 42",
-        );
+        let main_path = create_test_file(temp_dir.path(), "main.spl", "main = 42");
 
         let files = discover_files(&main_path).unwrap();
         assert_eq!(files.len(), 1);
@@ -481,11 +472,8 @@ mod tests {
         );
 
         // Create main file that imports helper
-        let main_path = create_test_file(
-            temp_dir.path(),
-            "main.spl",
-            "use helper\nmain = add(1, 2)",
-        );
+        let main_path =
+            create_test_file(temp_dir.path(), "main.spl", "use helper\nmain = add(1, 2)");
 
         let files = discover_files(&main_path).unwrap();
         assert_eq!(files.len(), 2);
@@ -494,11 +482,7 @@ mod tests {
     #[test]
     fn test_parse_files_parallel_single() {
         let temp_dir = TempDir::new().unwrap();
-        let main_path = create_test_file(
-            temp_dir.path(),
-            "main.spl",
-            "main = 42",
-        );
+        let main_path = create_test_file(temp_dir.path(), "main.spl", "main = 42");
 
         let files = vec![main_path.canonicalize().unwrap()];
         let cache = parse_files_parallel(&files);
@@ -543,18 +527,11 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Valid file
-        let valid = create_test_file(
-            temp_dir.path(),
-            "valid.spl",
-            "main = 42",
-        );
+        let valid = create_test_file(temp_dir.path(), "valid.spl", "main = 42");
 
         // Invalid file (syntax error)
-        let invalid = create_test_file(
-            temp_dir.path(),
-            "invalid.spl",
-            "fn foo(\n    broken syntax",
-        );
+        let invalid =
+            create_test_file(temp_dir.path(), "invalid.spl", "fn foo(\n    broken syntax");
 
         let files = vec![
             valid.canonicalize().unwrap(),
@@ -570,11 +547,7 @@ mod tests {
     #[test]
     fn test_load_module_parallel() {
         let temp_dir = TempDir::new().unwrap();
-        let main_path = create_test_file(
-            temp_dir.path(),
-            "main.spl",
-            "main = 42",
-        );
+        let main_path = create_test_file(temp_dir.path(), "main.spl", "main = 42");
 
         let module = load_module_parallel(&main_path).unwrap();
         assert!(!module.items.is_empty());
@@ -592,11 +565,7 @@ mod tests {
         );
 
         // Create main file that imports helper
-        let main_path = create_test_file(
-            temp_dir.path(),
-            "main.spl",
-            "use helper\nmain = 0",
-        );
+        let main_path = create_test_file(temp_dir.path(), "main.spl", "use helper\nmain = 0");
 
         let module = load_module_parallel(&main_path).unwrap();
 

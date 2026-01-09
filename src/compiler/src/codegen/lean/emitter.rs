@@ -7,10 +7,10 @@
 //! - Theorem statements
 //! - Pretty printing with proper indentation
 
-use super::types::LeanType;
+use super::contracts::{LeanClassInvariant, LeanTheorem};
 use super::functions::LeanFunction;
-use super::contracts::{LeanTheorem, LeanClassInvariant};
-use super::traits::{LeanClass, LeanInstance, LeanBinding};
+use super::traits::{LeanBinding, LeanClass, LeanInstance};
+use super::types::LeanType;
 
 /// A complete Lean module
 #[derive(Debug, Clone)]
@@ -66,7 +66,10 @@ impl LeanEmitter {
 
     /// Emit module header with imports
     pub fn emit_header(&mut self, module_name: &str) {
-        self.output.push_str(&format!("/-\n  Generated from Simple language\n  Module: {}\n-/\n\n", module_name));
+        self.output.push_str(&format!(
+            "/-\n  Generated from Simple language\n  Module: {}\n-/\n\n",
+            module_name
+        ));
 
         // Standard imports for verified code
         self.output.push_str("import Mathlib.Tactic\n");
@@ -74,7 +77,8 @@ impl LeanEmitter {
         self.output.push_str("import Mathlib.Data.Nat.Basic\n");
         self.output.push_str("\n");
 
-        self.output.push_str(&format!("namespace {}\n\n", module_name));
+        self.output
+            .push_str(&format!("namespace {}\n\n", module_name));
     }
 
     /// Emit a type definition
@@ -310,9 +314,9 @@ impl Default for LeanEmitter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::types::LeanType;
     use super::super::expressions::{LeanExpr, LeanLit};
+    use super::super::types::LeanType;
+    use super::*;
 
     #[test]
     fn test_emit_header() {
@@ -357,11 +361,14 @@ mod tests {
                 ("Red".to_string(), vec![]),
                 ("Green".to_string(), vec![]),
                 ("Blue".to_string(), vec![]),
-                ("Rgb".to_string(), vec![
-                    LeanType::Primitive("Nat".to_string()),
-                    LeanType::Primitive("Nat".to_string()),
-                    LeanType::Primitive("Nat".to_string()),
-                ]),
+                (
+                    "Rgb".to_string(),
+                    vec![
+                        LeanType::Primitive("Nat".to_string()),
+                        LeanType::Primitive("Nat".to_string()),
+                        LeanType::Primitive("Nat".to_string()),
+                    ],
+                ),
             ],
             deriving: vec!["Repr".to_string(), "DecidableEq".to_string()],
         };
@@ -408,30 +415,24 @@ mod tests {
         let module = LeanModule {
             name: "Math".to_string(),
             imports: vec![],
-            types: vec![
-                LeanType::Structure {
-                    name: "Vector2".to_string(),
-                    fields: vec![
-                        ("x".to_string(), LeanType::Primitive("Float".to_string())),
-                        ("y".to_string(), LeanType::Primitive("Float".to_string())),
-                    ],
-                    deriving: vec!["Repr".to_string()],
-                },
-            ],
-            functions: vec![
-                LeanFunction {
-                    name: "magnitude".to_string(),
-                    type_params: vec![],
-                    params: vec![
-                        ("v".to_string(), LeanType::Named("Vector2".to_string())),
-                    ],
-                    return_type: LeanType::Primitive("Float".to_string()),
-                    body: Some(LeanExpr::Sorry),
-                    is_partial: false,
-                    doc: Some("Calculate vector magnitude".to_string()),
-                    termination_by: None,
-                },
-            ],
+            types: vec![LeanType::Structure {
+                name: "Vector2".to_string(),
+                fields: vec![
+                    ("x".to_string(), LeanType::Primitive("Float".to_string())),
+                    ("y".to_string(), LeanType::Primitive("Float".to_string())),
+                ],
+                deriving: vec!["Repr".to_string()],
+            }],
+            functions: vec![LeanFunction {
+                name: "magnitude".to_string(),
+                type_params: vec![],
+                params: vec![("v".to_string(), LeanType::Named("Vector2".to_string()))],
+                return_type: LeanType::Primitive("Float".to_string()),
+                body: Some(LeanExpr::Sorry),
+                is_partial: false,
+                doc: Some("Calculate vector magnitude".to_string()),
+                termination_by: None,
+            }],
             theorems: vec![],
             invariants: vec![],
             classes: vec![],

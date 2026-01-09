@@ -18,7 +18,9 @@ pub fn compile_gpu_global_id<M: Module>(
     dest: VReg,
     dim: u8,
 ) -> InstrResult<()> {
-    let func_id = ctx.runtime_funcs.get("rt_gpu_global_id")
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_gpu_global_id")
         .ok_or_else(|| "rt_gpu_global_id not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 
@@ -36,7 +38,9 @@ pub fn compile_gpu_local_id<M: Module>(
     dest: VReg,
     dim: u8,
 ) -> InstrResult<()> {
-    let func_id = ctx.runtime_funcs.get("rt_gpu_local_id")
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_gpu_local_id")
         .ok_or_else(|| "rt_gpu_local_id not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 
@@ -54,7 +58,9 @@ pub fn compile_gpu_group_id<M: Module>(
     dest: VReg,
     dim: u8,
 ) -> InstrResult<()> {
-    let func_id = ctx.runtime_funcs.get("rt_gpu_group_id")
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_gpu_group_id")
         .ok_or_else(|| "rt_gpu_group_id not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 
@@ -72,7 +78,9 @@ pub fn compile_gpu_global_size<M: Module>(
     dest: VReg,
     dim: u8,
 ) -> InstrResult<()> {
-    let func_id = ctx.runtime_funcs.get("rt_gpu_global_size")
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_gpu_global_size")
         .ok_or_else(|| "rt_gpu_global_size not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 
@@ -90,7 +98,9 @@ pub fn compile_gpu_local_size<M: Module>(
     dest: VReg,
     dim: u8,
 ) -> InstrResult<()> {
-    let func_id = ctx.runtime_funcs.get("rt_gpu_local_size")
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_gpu_local_size")
         .ok_or_else(|| "rt_gpu_local_size not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 
@@ -108,7 +118,9 @@ pub fn compile_gpu_num_groups<M: Module>(
     dest: VReg,
     dim: u8,
 ) -> InstrResult<()> {
-    let func_id = ctx.runtime_funcs.get("rt_gpu_num_groups")
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_gpu_num_groups")
         .ok_or_else(|| "rt_gpu_num_groups not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 
@@ -124,7 +136,9 @@ pub fn compile_gpu_barrier<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
 ) -> InstrResult<()> {
-    let func_id = ctx.runtime_funcs.get("rt_gpu_barrier")
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_gpu_barrier")
         .ok_or_else(|| "rt_gpu_barrier not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
     builder.ins().call(func_ref, &[]);
@@ -137,7 +151,9 @@ pub fn compile_gpu_mem_fence<M: Module>(
     builder: &mut FunctionBuilder,
     scope: GpuMemoryScope,
 ) -> InstrResult<()> {
-    let func_id = ctx.runtime_funcs.get("rt_gpu_mem_fence")
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_gpu_mem_fence")
         .ok_or_else(|| "rt_gpu_mem_fence not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 
@@ -160,9 +176,13 @@ pub fn compile_gpu_atomic<M: Module>(
     ptr: VReg,
     value: VReg,
 ) -> InstrResult<()> {
-    let ptr_val = ctx.vreg_values.get(&ptr)
+    let ptr_val = ctx
+        .vreg_values
+        .get(&ptr)
         .ok_or_else(|| format!("ptr vreg {:?} not found", ptr))?;
-    let value_val = ctx.vreg_values.get(&value)
+    let value_val = ctx
+        .vreg_values
+        .get(&value)
         .ok_or_else(|| format!("value vreg {:?} not found", value))?;
 
     // Determine function name based on operation
@@ -178,7 +198,9 @@ pub fn compile_gpu_atomic<M: Module>(
         GpuAtomicOp::Xor => "rt_gpu_atomic_xor_i64",
     };
 
-    let func_id = ctx.runtime_funcs.get(func_name)
+    let func_id = ctx
+        .runtime_funcs
+        .get(func_name)
         .ok_or_else(|| format!("{} not found", func_name))?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 
@@ -197,7 +219,9 @@ pub fn compile_gpu_shared_alloc<M: Module>(
     _element_type: crate::hir::TypeId,
     size: u32,
 ) -> InstrResult<()> {
-    let func_id = ctx.runtime_funcs.get("rt_gpu_shared_alloc")
+    let func_id = ctx
+        .runtime_funcs
+        .get("rt_gpu_shared_alloc")
         .ok_or_else(|| "rt_gpu_shared_alloc not found".to_string())?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 

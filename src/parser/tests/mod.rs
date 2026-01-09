@@ -19,12 +19,12 @@ pub(crate) fn parse_err(src: &str) {
 }
 
 // Test modules
-mod statements;
 mod control_flow;
-mod functions;
 mod data_structures;
-mod traits;
-mod types;
-mod expressions;
 mod edge_cases;
 mod enum_advanced;
+mod expressions;
+mod functions;
+mod statements;
+mod traits;
+mod types;

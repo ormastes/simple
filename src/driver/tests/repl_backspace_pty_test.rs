@@ -130,16 +130,16 @@ fn test_repl_backspace_deletes_indent() {
     // Spawn REPL
     let mut cmd = CommandBuilder::new(&binary);
     cmd.env("TERM", "xterm-256color"); // Enable ANSI sequences
-    let mut child = pair
-        .slave
-        .spawn_command(cmd)
-        .expect("Failed to spawn REPL");
+    let mut child = pair.slave.spawn_command(cmd).expect("Failed to spawn REPL");
 
     // Drop slave to prevent deadlock
     drop(pair.slave);
 
     // Get I/O handles
-    let mut reader = pair.master.try_clone_reader().expect("Failed to clone reader");
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .expect("Failed to clone reader");
     let mut writer = pair.master.take_writer().expect("Failed to get writer");
 
     // Wait for REPL to start

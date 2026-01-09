@@ -208,10 +208,11 @@ impl ModuleLoader {
                     if let Some(ref data_mem) = data_mem {
                         let section_size = section.size as usize;
                         let virtual_size = section.virtual_size as usize;
-                        let end_offset = data_offset.checked_add(virtual_size).ok_or_else(|| {
-                            error!(data_offset, virtual_size, "Data offset overflow");
-                            LoadError::InvalidFormat("Data section offset overflow".to_string())
-                        })?;
+                        let end_offset =
+                            data_offset.checked_add(virtual_size).ok_or_else(|| {
+                                error!(data_offset, virtual_size, "Data offset overflow");
+                                LoadError::InvalidFormat("Data section offset overflow".to_string())
+                            })?;
 
                         if end_offset > data_size {
                             error!(
@@ -261,10 +262,11 @@ impl ModuleLoader {
                 SectionType::Bss => {
                     if let Some(ref data_mem) = data_mem {
                         let virtual_size = section.virtual_size as usize;
-                        let end_offset = data_offset.checked_add(virtual_size).ok_or_else(|| {
-                            error!(data_offset, virtual_size, "BSS offset overflow");
-                            LoadError::InvalidFormat("BSS section offset overflow".to_string())
-                        })?;
+                        let end_offset =
+                            data_offset.checked_add(virtual_size).ok_or_else(|| {
+                                error!(data_offset, virtual_size, "BSS offset overflow");
+                                LoadError::InvalidFormat("BSS section offset overflow".to_string())
+                            })?;
 
                         if end_offset > data_size {
                             error!(
@@ -307,7 +309,10 @@ impl ModuleLoader {
             error!(error = %e, "Failed to read symbol table");
             e
         })?;
-        trace!(symbols = symbols.symbols.len(), "Symbol table read successfully");
+        trace!(
+            symbols = symbols.symbols.len(),
+            "Symbol table read successfully"
+        );
 
         // Read relocations
         debug!("Reading relocations");
@@ -328,7 +333,8 @@ impl ModuleLoader {
             &symbols,
             code_mem.as_ptr() as usize,
             &resolver,
-        ).map_err(|e| {
+        )
+        .map_err(|e| {
             error!(error = %e, "Failed to apply relocations");
             LoadError::RelocationFailed(e)
         })?;
@@ -345,10 +351,12 @@ impl ModuleLoader {
 
         if let Some(ref data_mem) = data_mem {
             debug!("Setting memory protection for data section (READ_WRITE)");
-            self.allocator.protect(data_mem, Protection::READ_WRITE).map_err(|e| {
-                error!(error = %e, "Failed to set data memory protection");
-                e
-            })?;
+            self.allocator
+                .protect(data_mem, Protection::READ_WRITE)
+                .map_err(|e| {
+                    error!(error = %e, "Failed to set data memory protection");
+                    e
+                })?;
         }
 
         let module_path = path.unwrap_or_else(|| PathBuf::from("<memory>"));
@@ -511,7 +519,10 @@ impl ModuleLoader {
             error!(error = %e, "Failed to read string table");
             LoadError::Io(e)
         })?;
-        trace!(string_table_size = string_table.len(), "String table read complete");
+        trace!(
+            string_table_size = string_table.len(),
+            "String table read complete"
+        );
 
         Ok(SymbolTable::new(symbols, string_table))
     }
@@ -565,7 +576,10 @@ impl ModuleLoader {
             }
         }
 
-        trace!(total_relocations = relocs.len(), "Finished reading relocations");
+        trace!(
+            total_relocations = relocs.len(),
+            "Finished reading relocations"
+        );
         Ok(relocs)
     }
 }

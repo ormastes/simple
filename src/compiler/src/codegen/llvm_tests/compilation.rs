@@ -20,7 +20,10 @@ fn test_compile_simple_function() {
     // Create a simple function: fn answer() -> i64 { return 42; }
     let mut func = MirFunction::new("answer".to_string(), T::I64, Visibility::Public);
     let v0 = VReg(0);
-    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v0, value: 42 });
+    func.blocks[0].instructions.push(MirInst::ConstInt {
+        dest: v0,
+        value: 42,
+    });
     func.blocks[0].terminator = Terminator::Return(Some(v0));
 
     backend.compile_function(&func).unwrap();
@@ -49,7 +52,9 @@ fn test_emit_object_code() {
 
     let mut func = MirFunction::new("main".to_string(), T::I64, Visibility::Public);
     let v0 = VReg(0);
-    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v0, value: 0 });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::ConstInt { dest: v0, value: 0 });
     func.blocks[0].terminator = Terminator::Return(Some(v0));
     mir_module.functions.push(func);
 
@@ -95,7 +100,9 @@ fn test_compile_multiple_functions() {
     // First function: fn one() -> i64 { return 1; }
     let mut func1 = MirFunction::new("one".to_string(), T::I64, Visibility::Public);
     let v0 = VReg(0);
-    func1.blocks[0].instructions.push(MirInst::ConstInt { dest: v0, value: 1 });
+    func1.blocks[0]
+        .instructions
+        .push(MirInst::ConstInt { dest: v0, value: 1 });
     func1.blocks[0].terminator = Terminator::Return(Some(v0));
     backend.compile_function(&func1).unwrap();
 
@@ -165,7 +172,10 @@ fn test_native_backend_trait() {
 
     let mut func = MirFunction::new("test".to_string(), T::I64, Visibility::Public);
     let v0 = VReg(0);
-    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v0, value: 123 });
+    func.blocks[0].instructions.push(MirInst::ConstInt {
+        dest: v0,
+        value: 123,
+    });
     func.blocks[0].terminator = Terminator::Return(Some(v0));
     mir_module.functions.push(func);
 

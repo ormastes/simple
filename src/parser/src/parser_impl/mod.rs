@@ -16,14 +16,14 @@
 //! - `definitions` - Type definition parsing (struct, class, enum, union, trait)
 //! - `attributes` - Attribute and decorator parsing
 
-pub(crate) mod core;
-mod doc_comments;
-mod items;
-mod functions;
-mod definitions;
 mod attributes;
+pub(crate) mod core;
+mod definitions;
+mod doc_comments;
+mod functions;
+mod items;
 
 // Re-export the Parser struct, ParserMode, DebugMode, and constants
-pub use core::{Parser, ParserMode, DebugMode, MAX_LOOP_ITERATIONS};
+pub use core::{DebugMode, Parser, ParserMode, MAX_LOOP_ITERATIONS};
 
 // Integration tests moved to tests/ directory - no longer using #[path] include

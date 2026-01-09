@@ -1,16 +1,16 @@
 // Complete MIR function body compilation.
 
-use std::collections::HashMap;
-use cranelift_codegen::ir::{types, condcodes::IntCC, InstBuilder};
+use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::Module;
+use std::collections::HashMap;
 
 use crate::hir::TypeId;
 use crate::mir::{BlockId, MirFunction, MirInst, Terminator, VReg};
 
-use super::{InstrContext, InstrResult, compile_instruction};
-use super::async_ops::compile_yield;
 use super::super::types_util::type_to_cranelift;
+use super::async_ops::compile_yield;
+use super::{compile_instruction, InstrContext, InstrResult};
 
 /// Compile a complete MIR function body.
 /// This is shared between AOT (cranelift.rs) and JIT (jit.rs) backends.
@@ -189,7 +189,8 @@ pub fn compile_function_body<M: Module>(
     if let Some(states) = &async_states {
         if !skip_entry_terminator {
             let async_param = builder.block_params(entry_block)[0];
-            let get_state_id = runtime_funcs.get("rt_async_get_state")
+            let get_state_id = runtime_funcs
+                .get("rt_async_get_state")
                 .or_else(|| runtime_funcs.get("rt_future_get_state"))
                 .copied();
 
@@ -199,12 +200,12 @@ pub fn compile_function_body<M: Module>(
                 let state_val = builder.inst_results(call)[0];
 
                 let mut dispatch_blocks = Vec::new();
-                if let Some(entry_target) = func
-                    .block(func.entry_block)
-                    .and_then(|b| match b.terminator {
-                        Terminator::Jump(t) => Some(t),
-                        _ => None,
-                    })
+                if let Some(entry_target) =
+                    func.block(func.entry_block)
+                        .and_then(|b| match b.terminator {
+                            Terminator::Jump(t) => Some(t),
+                            _ => None,
+                        })
                 {
                     let target_block = *blocks.get(&entry_target).unwrap();
                     let mut targets = Vec::new();
@@ -285,7 +286,8 @@ pub fn compile_function_body<M: Module>(
         if let Some(resume_map) = async_resume_map.as_ref() {
             if let Some(state) = resume_map.get(&mir_block.id) {
                 let async_param = builder.block_params(entry_block)[0];
-                let get_ctx_id = runtime_funcs.get("rt_async_get_ctx")
+                let get_ctx_id = runtime_funcs
+                    .get("rt_async_get_ctx")
                     .or_else(|| runtime_funcs.get("rt_future_get_ctx"))
                     .copied();
                 if let Some(get_ctx_id) = get_ctx_id {

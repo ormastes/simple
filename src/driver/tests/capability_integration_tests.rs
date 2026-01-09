@@ -17,7 +17,10 @@ fn test_actor_message_passing_pattern() {
     let lowerer = Lowerer::new();
     let result = lowerer.lower_module(&module);
 
-    assert!(result.is_ok(), "Actor message passing should work with iso T");
+    assert!(
+        result.is_ok(),
+        "Actor message passing should work with iso T"
+    );
 }
 
 #[test]
@@ -32,7 +35,10 @@ fn test_lock_based_concurrent_modification() {
     let lowerer = Lowerer::new();
     let result = lowerer.lower_module(&module);
 
-    assert!(result.is_ok(), "Lock-based concurrent modification should work");
+    assert!(
+        result.is_ok(),
+        "Lock-based concurrent modification should work"
+    );
 }
 
 #[test]
@@ -45,14 +51,21 @@ fn test_mixed_mode_functions() {
     let module = parser.parse().expect("should parse actor");
     use simple_compiler::hir::Lowerer;
     let lowerer = Lowerer::new();
-    assert!(lowerer.lower_module(&module).is_ok(), "Actor mode should work");
+    assert!(
+        lowerer.lower_module(&module).is_ok(),
+        "Actor mode should work"
+    );
 
     // Lock_base mode function with mut
-    let source2 = "#[concurrency_mode(lock_base)]\nfn modify(data: mut i64) -> i64:\n    return data";
+    let source2 =
+        "#[concurrency_mode(lock_base)]\nfn modify(data: mut i64) -> i64:\n    return data";
     let mut parser2 = Parser::new(source2);
     let module2 = parser2.parse().expect("should parse lock_base");
     let lowerer2 = Lowerer::new();
-    assert!(lowerer2.lower_module(&module2).is_ok(), "Lock_base mode should work");
+    assert!(
+        lowerer2.lower_module(&module2).is_ok(),
+        "Lock_base mode should work"
+    );
 }
 
 #[test]
@@ -67,13 +80,17 @@ fn test_builder_pattern_with_mut() {
     let lowerer = Lowerer::new();
     let result = lowerer.lower_module(&module);
 
-    assert!(result.is_ok(), "Builder pattern with mut T should work in lock_base");
+    assert!(
+        result.is_ok(),
+        "Builder pattern with mut T should work in lock_base"
+    );
 }
 
 #[test]
 fn test_capability_with_array() {
     // Capabilities should work with array types
-    let source = "#[concurrency_mode(lock_base)]\nfn process_array(data: mut [i64]) -> i64:\n    return 0";
+    let source =
+        "#[concurrency_mode(lock_base)]\nfn process_array(data: mut [i64]) -> i64:\n    return 0";
 
     let mut parser = Parser::new(source);
     let module = parser.parse().expect("should parse");
@@ -99,7 +116,10 @@ fn test_unsafe_mode_escape_hatch() {
     let lowerer = Lowerer::new();
     let result = lowerer.lower_module(&module);
 
-    assert!(result.is_ok(), "Unsafe mode should allow manual synchronization");
+    assert!(
+        result.is_ok(),
+        "Unsafe mode should allow manual synchronization"
+    );
 }
 
 #[test]
@@ -134,5 +154,8 @@ fn test_const_and_mut_parameters() {
     let lowerer = Lowerer::new();
     let result = lowerer.lower_module(&module);
 
-    assert!(result.is_ok(), "Mix of mut and const parameters should work");
+    assert!(
+        result.is_ok(),
+        "Mix of mut and const parameters should work"
+    );
 }

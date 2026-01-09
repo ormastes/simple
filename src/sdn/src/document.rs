@@ -26,7 +26,7 @@ impl SdnDocument {
     /// Parse source into an editable document.
     pub fn parse(source: &str) -> Result<Self> {
         let root = parse(source)?;
-        let spans = HashMap::new(); // TODO: populate during parse
+        let spans = HashMap::new(); // TODO: [sdn][P2] populate during parse
         Ok(Self {
             source: source.to_string(),
             root,
@@ -86,11 +86,9 @@ impl SdnDocument {
         let parent_path = parts[..parts.len() - 1].join(".");
         let key = parts.last().unwrap();
 
-        if let Some(parent) = self.root.get_path_mut(&parent_path) {
-            if let SdnValue::Dict(ref mut dict) = parent {
-                dict.insert(key.to_string(), value);
-                return Ok(());
-            }
+        if let Some(SdnValue::Dict(ref mut dict)) = self.root.get_path_mut(&parent_path) {
+            dict.insert(key.to_string(), value);
+            return Ok(());
         }
 
         Err(SdnError::PathNotFound {
@@ -125,11 +123,9 @@ impl SdnDocument {
         let parent_path = parts[..parts.len() - 1].join(".");
         let key = parts.last().unwrap();
 
-        if let Some(parent) = self.root.get_path_mut(&parent_path) {
-            if let SdnValue::Dict(ref mut dict) = parent {
-                if dict.shift_remove(*key).is_some() {
-                    return Ok(());
-                }
+        if let Some(SdnValue::Dict(ref mut dict)) = self.root.get_path_mut(&parent_path) {
+            if dict.shift_remove(*key).is_some() {
+                return Ok(());
             }
         }
 
@@ -319,7 +315,9 @@ fn render_json(value: &SdnValue) -> String {
                         let pairs: Vec<String> = fields
                             .iter()
                             .zip(row.iter())
-                            .map(|(k, v)| format!("\"{}\": {}", escape_json_string(k), render_json(v)))
+                            .map(|(k, v)| {
+                                format!("\"{}\": {}", escape_json_string(k), render_json(v))
+                            })
                             .collect();
                         format!("{{{}}}", pairs.join(", "))
                     } else {

@@ -37,10 +37,10 @@
 //! let results = output.download(1024)?;
 //! ```
 
+pub mod buffer;
+pub mod device;
 pub mod error;
 pub mod instance;
-pub mod device;
-pub mod buffer;
 pub mod pipeline;
 pub mod sync;
 
@@ -66,15 +66,15 @@ pub mod descriptor;
 pub mod graphics_pipeline;
 
 // Re-export main types
+pub use buffer::{BufferUsage, StagingBuffer, VulkanBuffer};
+pub use device::VulkanDevice;
 pub use error::{VulkanError, VulkanResult};
 pub use instance::{VulkanInstance, VulkanPhysicalDevice};
-pub use device::VulkanDevice;
-pub use buffer::{VulkanBuffer, StagingBuffer, BufferUsage};
 pub use pipeline::ComputePipeline;
 pub use sync::{Fence, Semaphore, SemaphorePool};
 
 #[cfg(feature = "vulkan")]
-pub use window::{WindowManager, WindowEvent, WindowHandle, FullscreenMode};
+pub use window::{FullscreenMode, WindowEvent, WindowHandle, WindowManager};
 
 #[cfg(feature = "vulkan")]
 pub use surface::Surface;
@@ -89,10 +89,10 @@ pub use render_pass::RenderPass;
 pub use framebuffer::Framebuffer;
 
 #[cfg(feature = "vulkan")]
-pub use descriptor::{DescriptorSetLayout, DescriptorPool, DescriptorSet};
+pub use descriptor::{DescriptorPool, DescriptorSet, DescriptorSetLayout};
 
 #[cfg(feature = "vulkan")]
-pub use graphics_pipeline::{ShaderModule, GraphicsPipeline};
+pub use graphics_pipeline::{GraphicsPipeline, ShaderModule};
 
 /// Check if Vulkan is available on this system
 pub fn is_available() -> bool {

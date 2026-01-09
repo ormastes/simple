@@ -21,10 +21,10 @@ use super::registry::*;
 #[cfg(feature = "pytorch")]
 fn dtype_from_code(code: i32) -> Option<TchKind> {
     match code {
-        0 => Some(TchKind::Float),   // f32
-        1 => Some(TchKind::Double),  // f64
-        2 => Some(TchKind::Int),     // i32
-        3 => Some(TchKind::Int64),   // i64
+        0 => Some(TchKind::Float),  // f32
+        1 => Some(TchKind::Double), // f64
+        2 => Some(TchKind::Int),    // i32
+        3 => Some(TchKind::Int64),  // i64
         _ => None,
     }
 }
@@ -97,12 +97,7 @@ pub extern "C" fn rt_torch_cuda_device_count() -> i32 {
 /// - Handle (>0) on success
 /// - 0 on failure
 #[no_mangle]
-pub extern "C" fn rt_torch_zeros(
-    shape_ptr: *const i64,
-    ndim: i32,
-    dtype: i32,
-    device: i32,
-) -> u64 {
+pub extern "C" fn rt_torch_zeros(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         // Validate parameters
@@ -127,11 +122,16 @@ pub extern "C" fn rt_torch_zeros(
 
         // Register and return handle
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(tensor)));
 
         tracing::debug!(
             "rt_torch_zeros: created handle={}, shape={:?}, dtype={}, device={}",
-            handle, shape, dtype, device
+            handle,
+            shape,
+            dtype,
+            device
         );
 
         handle
@@ -145,12 +145,7 @@ pub extern "C" fn rt_torch_zeros(
 
 /// Create ones tensor
 #[no_mangle]
-pub extern "C" fn rt_torch_ones(
-    shape_ptr: *const i64,
-    ndim: i32,
-    dtype: i32,
-    device: i32,
-) -> u64 {
+pub extern "C" fn rt_torch_ones(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         if shape_ptr.is_null() || ndim <= 0 {
@@ -158,12 +153,18 @@ pub extern "C" fn rt_torch_ones(
         }
 
         let shape = unsafe { std::slice::from_raw_parts(shape_ptr, ndim as usize) };
-        let Some(kind) = dtype_from_code(dtype) else { return 0; };
-        let Some(dev) = device_from_code(device) else { return 0; };
+        let Some(kind) = dtype_from_code(dtype) else {
+            return 0;
+        };
+        let Some(dev) = device_from_code(device) else {
+            return 0;
+        };
 
         let tensor = Tensor::ones(shape, (kind, dev));
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(tensor)));
 
         handle
     }
@@ -176,12 +177,7 @@ pub extern "C" fn rt_torch_ones(
 
 /// Create random normal tensor (mean=0, std=1)
 #[no_mangle]
-pub extern "C" fn rt_torch_randn(
-    shape_ptr: *const i64,
-    ndim: i32,
-    dtype: i32,
-    device: i32,
-) -> u64 {
+pub extern "C" fn rt_torch_randn(shape_ptr: *const i64, ndim: i32, dtype: i32, device: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         if shape_ptr.is_null() || ndim <= 0 {
@@ -189,12 +185,18 @@ pub extern "C" fn rt_torch_randn(
         }
 
         let shape = unsafe { std::slice::from_raw_parts(shape_ptr, ndim as usize) };
-        let Some(kind) = dtype_from_code(dtype) else { return 0; };
-        let Some(dev) = device_from_code(device) else { return 0; };
+        let Some(kind) = dtype_from_code(dtype) else {
+            return 0;
+        };
+        let Some(dev) = device_from_code(device) else {
+            return 0;
+        };
 
         let tensor = Tensor::randn(shape, (kind, dev));
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(tensor)));
 
         handle
     }
@@ -207,25 +209,25 @@ pub extern "C" fn rt_torch_randn(
 
 /// Create arange tensor: [start, start+step, start+2*step, ..., end)
 #[no_mangle]
-pub extern "C" fn rt_torch_arange(
-    start: i64,
-    end: i64,
-    step: i64,
-    dtype: i32,
-    device: i32,
-) -> u64 {
+pub extern "C" fn rt_torch_arange(start: i64, end: i64, step: i64, dtype: i32, device: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         if step == 0 {
             return 0;
         }
 
-        let Some(kind) = dtype_from_code(dtype) else { return 0; };
-        let Some(dev) = device_from_code(device) else { return 0; };
+        let Some(kind) = dtype_from_code(dtype) else {
+            return 0;
+        };
+        let Some(dev) = device_from_code(device) else {
+            return 0;
+        };
 
         let tensor = Tensor::arange_start_step(start, end, step, (kind, dev));
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(tensor)));
 
         handle
     }
@@ -276,7 +278,8 @@ pub extern "C" fn rt_torch_tensor(
         }
 
         // Read shape
-        let shape: Vec<i64> = unsafe { std::slice::from_raw_parts(shape_ptr, shape_len as usize) }.to_vec();
+        let shape: Vec<i64> =
+            unsafe { std::slice::from_raw_parts(shape_ptr, shape_len as usize) }.to_vec();
 
         // Verify shape matches data length
         let expected_len: i64 = shape.iter().product();
@@ -302,7 +305,11 @@ pub extern "C" fn rt_torch_tensor(
 
         // Create tensor from data
         let data_slice = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
-        let tensor = match Tensor::of_slice(data_slice).to_kind(dtype).to_device(device).reshape(&shape) {
+        let tensor = match Tensor::of_slice(data_slice)
+            .to_kind(dtype)
+            .to_device(device)
+            .reshape(&shape)
+        {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!("rt_torch_tensor: failed to create tensor: {}", e);
@@ -312,7 +319,9 @@ pub extern "C" fn rt_torch_tensor(
 
         // Register and return handle
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(tensor)));
         tracing::debug!(
             "rt_torch_tensor: created tensor with shape {:?}, dtype={}, device={}, handle={}",
             shape,
@@ -324,7 +333,14 @@ pub extern "C" fn rt_torch_tensor(
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        let _ = (data_ptr, data_len, shape_ptr, shape_len, dtype_code, device_code);
+        let _ = (
+            data_ptr,
+            data_len,
+            shape_ptr,
+            shape_len,
+            dtype_code,
+            device_code,
+        );
         0
     }
 }
@@ -345,7 +361,9 @@ pub extern "C" fn rt_torch_clone(tensor_handle: u64) -> u64 {
         drop(registry);
 
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(cloned)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(cloned)));
 
         handle
     }

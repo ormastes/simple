@@ -6,7 +6,7 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Env;
-use simple_parser::ast::{FunctionDef, ClassDef, MacroDef, MacroIntroSpec, MacroContractItem};
+use simple_parser::ast::{ClassDef, FunctionDef, MacroContractItem, MacroDef, MacroIntroSpec};
 use std::collections::{HashMap, HashSet};
 
 /// Symbol scope extracted from the current compilation context
@@ -53,7 +53,7 @@ pub fn extract_symbol_scope(
         functions: functions.keys().cloned().collect(),
         classes: classes.keys().cloned().collect(),
         variables: env.keys().cloned().collect(),
-        types: HashSet::new(), // TODO: Extract from type registry
+        types: HashSet::new(), // TODO: [compiler][P3] Extract from type registry
     }
 }
 
@@ -199,7 +199,7 @@ pub fn validate_intro_type_annotations(spec: &MacroIntroSpec) -> Result<(), Comp
         MacroIntroSpec::Decl(decl) => {
             // Parser already enforces type annotations for let/const stubs
             // This is a defensive check
-            use simple_parser::ast::{MacroIntroKind, MacroDeclStub};
+            use simple_parser::ast::{MacroDeclStub, MacroIntroKind};
 
             if matches!(decl.kind, MacroIntroKind::Let | MacroIntroKind::Const) {
                 if let MacroDeclStub::Var(var_stub) = &decl.stub {
@@ -270,7 +270,7 @@ fn validate_intro_spec_recursive(
     existing_symbols: &SymbolScope,
     introduced_symbols: &mut HashSet<String>,
 ) -> Result<(), CompileError> {
-    use simple_parser::ast::{MacroIntroKind, MacroDeclStub};
+    use simple_parser::ast::{MacroDeclStub, MacroIntroKind};
 
     match spec {
         MacroIntroSpec::Decl(decl) => {

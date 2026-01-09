@@ -3,13 +3,13 @@
 //! Normalizes activations across the batch dimension for improved training stability.
 
 #[cfg(feature = "pytorch")]
-use super::{ModuleState, MODULE_REGISTRY, next_module_handle};
+use super::{next_module_handle, ModuleState, MODULE_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-use super::{TENSOR_REGISTRY, TensorWrapper, next_handle};
+use super::{next_handle, TensorWrapper, TENSOR_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-use super::{rt_torch_zeros, rt_torch_ones};
+use super::{rt_torch_ones, rt_torch_zeros};
 
 /// Create a BatchNorm2d layer
 /// num_features: number of channels (C dimension)
@@ -69,7 +69,9 @@ pub extern "C" fn rt_torch_batchnorm2d_new(
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(module));
+        MODULE_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(module));
 
         tracing::debug!(
             "rt_torch_batchnorm2d_new: num_features={} eps={} momentum={} affine={} -> {}",
@@ -138,10 +140,10 @@ pub extern "C" fn rt_torch_batchnorm2d_forward(
                     Some(&b.0),
                     Some(&rm.0),
                     Some(&rv.0),
-                    training != 0,  // training mode
+                    training != 0, // training mode
                     *momentum,
                     *eps,
-                    false,  // cudnn_enabled
+                    false, // cudnn_enabled
                 );
 
                 let handle = next_handle();

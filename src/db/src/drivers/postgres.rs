@@ -15,7 +15,7 @@ use crate::types::SqlValue;
 
 use parking_lot::Mutex;
 use std::sync::Arc;
-use tokio_postgres::{Client, NoTls, types::ToSql as PgToSql, types::Type as PgType};
+use tokio_postgres::{types::ToSql as PgToSql, types::Type as PgType, Client, NoTls};
 
 /// PostgreSQL connection.
 pub struct PostgresConnection {

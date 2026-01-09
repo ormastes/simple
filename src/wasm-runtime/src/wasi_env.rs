@@ -127,7 +127,10 @@ use std::sync::Arc as StdArc;
 impl WasiConfig {
     /// Create a Wasmer WASI environment from this configuration
     /// Returns the environment and pipes for capturing output
-    pub fn build_wasi_env(&self, store: &mut wasmer::Store) -> WasmResult<(WasiFunctionEnv, StdArc<Mutex<CapturingPipes>>)> {
+    pub fn build_wasi_env(
+        &self,
+        store: &mut wasmer::Store,
+    ) -> WasmResult<(WasiFunctionEnv, StdArc<Mutex<CapturingPipes>>)> {
         use wasmer_wasi::{Pipe, WasiState};
 
         // Create pipes for stdio
@@ -178,9 +181,9 @@ impl WasiConfig {
         wasi_state.stderr(Box::new(stderr_clone));
 
         // Finalize WASI environment
-        let wasi_env = wasi_state
-            .finalize(store)
-            .map_err(|e| WasmError::WasiError(format!("Failed to create WASI environment: {}", e)))?;
+        let wasi_env = wasi_state.finalize(store).map_err(|e| {
+            WasmError::WasiError(format!("Failed to create WASI environment: {}", e))
+        })?;
 
         Ok((wasi_env, pipes))
     }

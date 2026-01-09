@@ -18,10 +18,7 @@ pub enum DbError {
 
     /// Type conversion error
     #[error("type mismatch: expected {expected}, got {got}")]
-    TypeMismatch {
-        expected: String,
-        got: String,
-    },
+    TypeMismatch { expected: String, got: String },
 
     /// Column not found
     #[error("column not found: {0}")]

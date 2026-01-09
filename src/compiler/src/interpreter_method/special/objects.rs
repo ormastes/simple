@@ -3,11 +3,13 @@
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
 use crate::error::CompileError;
-use crate::interpreter::{exec_block_fn, evaluate_expr, find_and_exec_method, Control, Enums, ImplMethods};
-use crate::value::{Value, Env, SpecialEnumType, OptionVariant, ResultVariant};
-use simple_parser::ast::{Argument, FunctionDef, ClassDef};
-use std::collections::{HashMap, HashSet};
+use crate::interpreter::{
+    evaluate_expr, exec_block_fn, find_and_exec_method, Control, Enums, ImplMethods,
+};
+use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
+use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 
 // Import IN_NEW_METHOD from interpreter_call module
 use crate::interpreter::IN_NEW_METHOD;
@@ -26,9 +28,7 @@ pub fn handle_trait_object_methods(
     use crate::interpreter::INTERFACE_BINDINGS;
 
     // Check if there's an interface binding for static polymorphism
-    let bound_impl = INTERFACE_BINDINGS.with(|bindings| {
-        bindings.borrow().get(trait_name).cloned()
-    });
+    let bound_impl = INTERFACE_BINDINGS.with(|bindings| bindings.borrow().get(trait_name).cloned());
 
     // Extract the inner value's class/type
     if let Value::Object { class, fields } = inner.as_ref() {
@@ -40,13 +40,33 @@ pub fn handle_trait_object_methods(
                 // Fall back to normal dynamic dispatch
             }
             // Static dispatch: method lookup on the bound implementation type
-            if let Some(result) = find_and_exec_method(method, args, bound_type, fields, env, functions, classes, enums, impl_methods)? {
+            if let Some(result) = find_and_exec_method(
+                method,
+                args,
+                bound_type,
+                fields,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
                 return Ok(Some(result));
             }
         }
 
         // Dynamic dispatch: method lookup on the actual inner object type
-        if let Some(result) = find_and_exec_method(method, args, class, fields, env, functions, classes, enums, impl_methods)? {
+        if let Some(result) = find_and_exec_method(
+            method,
+            args,
+            class,
+            fields,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )? {
             return Ok(Some(result));
         }
         return Err(CompileError::Semantic(format!(
@@ -96,7 +116,14 @@ pub fn handle_constructor_methods(
             for param in &method_def.params {
                 if !local_env.contains_key(&param.name) {
                     if let Some(default_expr) = &param.default {
-                        let default_val = evaluate_expr(default_expr, &empty_env, functions, classes, enums, impl_methods)?;
+                        let default_val = evaluate_expr(
+                            default_expr,
+                            &empty_env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?;
                         local_env.insert(param.name.clone(), default_val);
                     }
                 }
@@ -110,7 +137,14 @@ pub fn handle_constructor_methods(
             }
 
             // Use exec_block_fn to properly capture implicit returns
-            let result = match exec_block_fn(&method_def.body, &mut local_env, functions, classes, enums, impl_methods) {
+            let result = match exec_block_fn(
+                &method_def.body,
+                &mut local_env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            ) {
                 Ok((Control::Return(v), _)) => Ok(Some(v)),
                 Ok((_, Some(implicit_val))) => Ok(Some(implicit_val)), // Implicit return from last expression
                 Ok((_, None)) => Ok(Some(Value::Nil)),

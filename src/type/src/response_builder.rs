@@ -226,9 +226,7 @@ mod tests {
 
     #[test]
     fn test_basic_response() {
-        let response = Response::ok()
-            .body_string("Hello, World!")
-            .build();
+        let response = Response::ok().body_string("Hello, World!").build();
 
         assert_eq!(response.status, StatusCode::Ok);
         assert_eq!(response.body, b"Hello, World!");
@@ -242,7 +240,10 @@ mod tests {
             .build();
 
         assert_eq!(response.status, StatusCode::Ok);
-        assert_eq!(response.headers.get("Content-Type").unwrap(), "application/json");
+        assert_eq!(
+            response.headers.get("Content-Type").unwrap(),
+            "application/json"
+        );
         assert_eq!(response.body, br#"{"message": "success"}"#);
     }
 
@@ -267,9 +268,7 @@ mod tests {
 
     #[test]
     fn test_redirect() {
-        let response = Response::new()
-            .redirect("/new-location")
-            .build();
+        let response = Response::new().redirect("/new-location").build();
 
         assert_eq!(response.status, StatusCode::Found);
         assert_eq!(response.headers.get("Location").unwrap(), "/new-location");
@@ -277,9 +276,7 @@ mod tests {
 
     #[test]
     fn test_permanent_redirect() {
-        let response = Response::new()
-            .redirect_permanent("/moved")
-            .build();
+        let response = Response::new().redirect_permanent("/moved").build();
 
         assert_eq!(response.status, StatusCode::MovedPermanently);
         assert_eq!(response.headers.get("Location").unwrap(), "/moved");
@@ -299,40 +296,52 @@ mod tests {
     #[test]
     fn test_content_types() {
         let html = Response::ok().html().build();
-        assert_eq!(html.headers.get("Content-Type").unwrap(), "text/html; charset=utf-8");
+        assert_eq!(
+            html.headers.get("Content-Type").unwrap(),
+            "text/html; charset=utf-8"
+        );
 
         let json = Response::ok().json().build();
-        assert_eq!(json.headers.get("Content-Type").unwrap(), "application/json");
+        assert_eq!(
+            json.headers.get("Content-Type").unwrap(),
+            "application/json"
+        );
 
         let text = Response::ok().text().build();
-        assert_eq!(text.headers.get("Content-Type").unwrap(), "text/plain; charset=utf-8");
+        assert_eq!(
+            text.headers.get("Content-Type").unwrap(),
+            "text/plain; charset=utf-8"
+        );
     }
 
     #[test]
     fn test_cors() {
-        let response = Response::ok()
-            .cors("https://example.com")
-            .build();
+        let response = Response::ok().cors("https://example.com").build();
 
-        assert_eq!(response.headers.get("Access-Control-Allow-Origin").unwrap(), "https://example.com");
+        assert_eq!(
+            response.headers.get("Access-Control-Allow-Origin").unwrap(),
+            "https://example.com"
+        );
     }
 
     #[test]
     fn test_no_cache() {
-        let response = Response::ok()
-            .no_cache()
-            .build();
+        let response = Response::ok().no_cache().build();
 
-        assert_eq!(response.headers.get("Cache-Control").unwrap(), "no-cache, no-store, must-revalidate");
+        assert_eq!(
+            response.headers.get("Cache-Control").unwrap(),
+            "no-cache, no-store, must-revalidate"
+        );
     }
 
     #[test]
     fn test_cookie() {
-        let response = Response::ok()
-            .cookie("session_id", "abc123")
-            .build();
+        let response = Response::ok().cookie("session_id", "abc123").build();
 
-        assert_eq!(response.headers.get("Set-Cookie").unwrap(), "session_id=abc123");
+        assert_eq!(
+            response.headers.get("Set-Cookie").unwrap(),
+            "session_id=abc123"
+        );
     }
 
     #[test]
@@ -345,9 +354,15 @@ mod tests {
             .build();
 
         assert_eq!(response.status, StatusCode::Created);
-        assert_eq!(response.headers.get("Content-Type").unwrap(), "application/json");
+        assert_eq!(
+            response.headers.get("Content-Type").unwrap(),
+            "application/json"
+        );
         assert_eq!(response.headers.get("X-Created-By").unwrap(), "test");
-        assert_eq!(response.headers.get("Access-Control-Allow-Origin").unwrap(), "*");
+        assert_eq!(
+            response.headers.get("Access-Control-Allow-Origin").unwrap(),
+            "*"
+        );
         assert_eq!(response.body, br#"{"id": 123}"#);
     }
 }

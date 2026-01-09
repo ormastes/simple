@@ -22,10 +22,7 @@ use super::{MirFunction, MirInst, MirModule};
 ///
 /// # Returns
 /// The transformed module
-pub fn apply_hybrid_transform(
-    module: &mut MirModule,
-    non_compilable_functions: &HashSet<String>,
-) {
+pub fn apply_hybrid_transform(module: &mut MirModule, non_compilable_functions: &HashSet<String>) {
     for func in &mut module.functions {
         transform_function(func, non_compilable_functions);
     }
@@ -158,10 +155,13 @@ mod tests {
 
     #[test]
     fn test_transform_replaces_non_compilable_calls() {
-        let mut func = make_test_function("test", vec![
-            make_call(0, "compilable_fn"),
-            make_call(1, "non_compilable_fn"),
-        ]);
+        let mut func = make_test_function(
+            "test",
+            vec![
+                make_call(0, "compilable_fn"),
+                make_call(1, "non_compilable_fn"),
+            ],
+        );
 
         let mut non_compilable = HashSet::new();
         non_compilable.insert("non_compilable_fn".to_string());

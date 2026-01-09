@@ -1,7 +1,7 @@
 //! Tests for decorator helper methods on FunctionDef
 //! Tests @property_test, @snapshot_test, and @test decorators
 
-use simple_parser::{Parser, Module, Node, Expr};
+use simple_parser::{Expr, Module, Node, Parser};
 
 /// Helper to parse code and extract the first function
 fn parse_and_get_function(input: &str) -> simple_parser::ast::FunctionDef {
@@ -26,25 +26,30 @@ fn parse_and_get_all_functions(input: &str) -> Vec<simple_parser::ast::FunctionD
     assert!(result.is_ok(), "Parse failed: {:?}", result.err());
 
     let module = result.unwrap();
-    module.items.iter().filter_map(|item| {
-        if let Node::Function(func) = item {
-            Some(func.clone())
-        } else {
-            None
-        }
-    }).collect()
+    module
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Node::Function(func) = item {
+                Some(func.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Helper to check if decorator with name exists
 fn has_decorator_named(func: &simple_parser::ast::FunctionDef, name: &str) -> bool {
-    func.decorators.iter().any(|d| {
-        matches!(&d.name, Expr::Identifier(n) if n == name)
-    })
+    func.decorators
+        .iter()
+        .any(|d| matches!(&d.name, Expr::Identifier(n) if n == name))
 }
 
 /// Helper to check if argument with name exists
 fn has_arg_named(args: &[simple_parser::ast::Argument], name: &str) -> bool {
-    args.iter().any(|arg| arg.name.as_ref().map_or(false, |n| n == name))
+    args.iter()
+        .any(|arg| arg.name.as_ref().map_or(false, |n| n == name))
 }
 
 #[test]
@@ -144,7 +149,10 @@ fn test_expensive_property(x: i64):
     let func = parse_and_get_function(input);
     assert!(func.is_property_test());
     assert_eq!(func.decorators.len(), 2);
-    assert!(has_decorator_named(&func, "property_test"), "Should have @property_test");
+    assert!(
+        has_decorator_named(&func, "property_test"),
+        "Should have @property_test"
+    );
     assert!(has_decorator_named(&func, "slow"), "Should have @slow");
 }
 
@@ -173,7 +181,10 @@ fn test_idempotent(x: String):
 
     let func = parse_and_get_function(input);
     assert!(func.is_property_test());
-    assert!(func.property_test_config().is_none(), "Should have no config params");
+    assert!(
+        func.property_test_config().is_none(),
+        "Should have no config params"
+    );
 }
 
 #[test]

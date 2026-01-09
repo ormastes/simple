@@ -10,8 +10,8 @@
 
 use crate::ast::*;
 use crate::error::ParseError;
-use crate::token::{Span, TokenKind};
 use crate::parser_impl::core::Parser;
+use crate::token::{Span, TokenKind};
 
 impl<'a> Parser<'a> {
     pub(crate) fn parse_if(&mut self) -> Result<Node, ParseError> {
@@ -48,7 +48,7 @@ impl<'a> Parser<'a> {
                 // Check if there's another 'else if' or final 'else'
                 if self.check(&TokenKind::Else) {
                     self.advance(); // consume 'else'
-                    // Loop will check if there's another 'if'
+                                    // Loop will check if there's another 'if'
                 } else {
                     // No more else/elif, done
                     break;
@@ -175,9 +175,22 @@ impl<'a> Parser<'a> {
             if let Type::Simple(type_name) = target_type {
                 // Check if it looks like a variable name (lowercase first char) rather than a type
                 let first_char = type_name.chars().next().unwrap_or('A');
-                let is_primitive = matches!(type_name.as_str(),
-                    "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" |
-                    "f32" | "f64" | "bool" | "str" | "nil" | "char");
+                let is_primitive = matches!(
+                    type_name.as_str(),
+                    "i8" | "i16"
+                        | "i32"
+                        | "i64"
+                        | "u8"
+                        | "u16"
+                        | "u32"
+                        | "u64"
+                        | "f32"
+                        | "f64"
+                        | "bool"
+                        | "str"
+                        | "nil"
+                        | "char"
+                );
                 if first_char.is_lowercase() && !is_primitive {
                     alias_from_cast = Some(type_name);
                     resource = *expr;

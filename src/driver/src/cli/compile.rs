@@ -216,8 +216,16 @@ pub fn list_linkers() -> i32 {
 
     // Check each linker's availability
     let linkers = [
-        (NativeLinker::Mold, "mold", "Modern, fastest linker (Linux only, ~4x faster than lld)"),
-        (NativeLinker::Lld, "lld", "LLVM's linker (cross-platform, fast)"),
+        (
+            NativeLinker::Mold,
+            "mold",
+            "Modern, fastest linker (Linux only, ~4x faster than lld)",
+        ),
+        (
+            NativeLinker::Lld,
+            "lld",
+            "LLVM's linker (cross-platform, fast)",
+        ),
         (NativeLinker::Ld, "ld", "GNU ld (traditional fallback)"),
     ];
 

@@ -1,5 +1,4 @@
 /// LLVM instruction compilation - binary ops, unary ops, terminators, coverage
-
 use super::LlvmBackend;
 use crate::error::CompileError;
 
@@ -38,11 +37,9 @@ impl LlvmBackend {
                     BinOp::Mul => builder
                         .build_int_mul(l, r, "mul")
                         .map_err(|e| CompileError::Semantic(format!("build_int_mul: {}", e)))?,
-                    BinOp::Div => builder
-                        .build_int_signed_div(l, r, "div")
-                        .map_err(|e| {
-                            CompileError::Semantic(format!("build_int_signed_div: {}", e))
-                        })?,
+                    BinOp::Div => builder.build_int_signed_div(l, r, "div").map_err(|e| {
+                        CompileError::Semantic(format!("build_int_signed_div: {}", e))
+                    })?,
                     BinOp::Eq => builder
                         .build_int_compare(IntPredicate::EQ, l, r, "eq")
                         .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
@@ -61,9 +58,9 @@ impl LlvmBackend {
                     BinOp::GtEq => builder
                         .build_int_compare(IntPredicate::SGE, l, r, "ge")
                         .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
-                    BinOp::Mod => builder
-                        .build_int_signed_rem(l, r, "mod")
-                        .map_err(|e| CompileError::Semantic(format!("build_int_signed_rem: {}", e)))?,
+                    BinOp::Mod => builder.build_int_signed_rem(l, r, "mod").map_err(|e| {
+                        CompileError::Semantic(format!("build_int_signed_rem: {}", e))
+                    })?,
                     BinOp::And => builder
                         .build_and(l, r, "and")
                         .map_err(|e| CompileError::Semantic(format!("build_and: {}", e)))?,
@@ -277,7 +274,9 @@ impl LlvmBackend {
         let i64_type = self.context.i64_type();
         let current = builder
             .build_load(i64_type, counter_global.as_pointer_value(), "cov_load")
-            .map_err(|e| CompileError::Semantic(format!("Failed to load coverage counter: {}", e)))?;
+            .map_err(|e| {
+                CompileError::Semantic(format!("Failed to load coverage counter: {}", e))
+            })?;
 
         // Increment
         if let inkwell::values::BasicValueEnum::IntValue(current_int) = current {

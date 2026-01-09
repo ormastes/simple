@@ -300,7 +300,12 @@ impl SemanticDiffer {
         }
     }
 
-    fn diff_functions(&self, name: &str, old: &FunctionDef, new: &FunctionDef) -> Vec<SemanticChange> {
+    fn diff_functions(
+        &self,
+        name: &str,
+        old: &FunctionDef,
+        new: &FunctionDef,
+    ) -> Vec<SemanticChange> {
         let mut changes = Vec::new();
 
         // Check visibility change
@@ -614,7 +619,10 @@ impl SemanticDiffer {
         let mut output = String::new();
 
         output.push_str(&format!("Semantic Diff: {}\n", diff.module_path));
-        output.push_str(&format!("Total changes: {}\n\n", diff.summary.total_changes));
+        output.push_str(&format!(
+            "Total changes: {}\n\n",
+            diff.summary.total_changes
+        ));
 
         if diff.changes.is_empty() {
             output.push_str("No semantic changes detected.\n");
@@ -644,22 +652,40 @@ impl SemanticDiffer {
         // Summary
         output.push_str("Summary:\n");
         if diff.summary.functions_added > 0 {
-            output.push_str(&format!("  Functions added: {}\n", diff.summary.functions_added));
+            output.push_str(&format!(
+                "  Functions added: {}\n",
+                diff.summary.functions_added
+            ));
         }
         if diff.summary.functions_removed > 0 {
-            output.push_str(&format!("  Functions removed: {}\n", diff.summary.functions_removed));
+            output.push_str(&format!(
+                "  Functions removed: {}\n",
+                diff.summary.functions_removed
+            ));
         }
         if diff.summary.functions_modified > 0 {
-            output.push_str(&format!("  Functions modified: {}\n", diff.summary.functions_modified));
+            output.push_str(&format!(
+                "  Functions modified: {}\n",
+                diff.summary.functions_modified
+            ));
         }
         if diff.summary.classes_added > 0 {
-            output.push_str(&format!("  Classes added: {}\n", diff.summary.classes_added));
+            output.push_str(&format!(
+                "  Classes added: {}\n",
+                diff.summary.classes_added
+            ));
         }
         if diff.summary.classes_removed > 0 {
-            output.push_str(&format!("  Classes removed: {}\n", diff.summary.classes_removed));
+            output.push_str(&format!(
+                "  Classes removed: {}\n",
+                diff.summary.classes_removed
+            ));
         }
         if diff.summary.classes_modified > 0 {
-            output.push_str(&format!("  Classes modified: {}\n", diff.summary.classes_modified));
+            output.push_str(&format!(
+                "  Classes modified: {}\n",
+                diff.summary.classes_modified
+            ));
         }
 
         output
@@ -678,10 +704,7 @@ mod tests {
     use simple_parser::token::Span;
 
     fn make_module(items: Vec<Node>) -> AstModule {
-        AstModule {
-            name: None,
-            items,
-        }
+        AstModule { name: None, items }
     }
 
     fn make_function(name: &str, params: usize, ret_type: Option<Type>) -> Node {

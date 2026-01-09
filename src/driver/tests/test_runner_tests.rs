@@ -409,10 +409,7 @@ mod test_runner {
         for (i, file) in result.files.iter().enumerate() {
             let comma = if i < result.files.len() - 1 { "," } else { "" };
             let error_str = match &file.error {
-                Some(e) => format!(
-                    "\"{}\"",
-                    e.replace('\"', "\\\"").replace('\n', "\\n")
-                ),
+                Some(e) => format!("\"{}\"", e.replace('\"', "\\\"").replace('\n', "\\n")),
                 None => "null".to_string(),
             };
             output.push_str("    {\n");
@@ -465,7 +462,10 @@ mod test_runner {
                 "✓"
             };
 
-            output.push_str(&format!("  {} {} ({}ms)\n", status, file_name, file.duration_ms));
+            output.push_str(&format!(
+                "  {} {} ({}ms)\n",
+                status, file_name, file.duration_ms
+            ));
 
             if let Some(ref err) = file.error {
                 for line in err.lines().take(3) {

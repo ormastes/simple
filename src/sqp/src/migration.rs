@@ -19,24 +19,13 @@ pub enum Direction {
 #[derive(Debug, Clone)]
 pub enum Operation {
     /// Create a new table.
-    CreateTable {
-        name: String,
-        columns: Vec<Column>,
-    },
+    CreateTable { name: String, columns: Vec<Column> },
     /// Drop a table.
-    DropTable {
-        name: String,
-    },
+    DropTable { name: String },
     /// Add a column to a table.
-    AddColumn {
-        table: String,
-        column: Column,
-    },
+    AddColumn { table: String, column: Column },
     /// Drop a column from a table.
-    DropColumn {
-        table: String,
-        column: String,
-    },
+    DropColumn { table: String, column: String },
     /// Rename a column.
     RenameColumn {
         table: String,
@@ -58,10 +47,7 @@ pub enum Operation {
         unique: bool,
     },
     /// Drop an index.
-    DropIndex {
-        name: String,
-        table: String,
-    },
+    DropIndex { name: String, table: String },
     /// Add a foreign key.
     AddForeignKey {
         name: String,
@@ -72,10 +58,7 @@ pub enum Operation {
         on_delete: Option<String>,
     },
     /// Remove a foreign key.
-    RemoveForeignKey {
-        name: String,
-        table: String,
-    },
+    RemoveForeignKey { name: String, table: String },
     /// Execute raw SQL.
     RawSql(String),
 }
@@ -256,11 +239,7 @@ impl Migration {
     }
 
     /// Create table helper.
-    pub fn create_table(
-        mut self,
-        name: impl Into<String>,
-        columns: Vec<Column>,
-    ) -> Self {
+    pub fn create_table(mut self, name: impl Into<String>, columns: Vec<Column>) -> Self {
         let name = name.into();
         self.up.push(Operation::CreateTable {
             name: name.clone(),
@@ -277,11 +256,7 @@ impl Migration {
     }
 
     /// Add column helper.
-    pub fn add_column(
-        mut self,
-        table: impl Into<String>,
-        column: Column,
-    ) -> Self {
+    pub fn add_column(mut self, table: impl Into<String>, column: Column) -> Self {
         let table = table.into();
         let col_name = column.name.clone();
         self.up.push(Operation::AddColumn {
@@ -322,7 +297,11 @@ impl Migration {
 
     /// Generate down SQL.
     pub fn down_sql(&self, dialect: &str) -> Vec<String> {
-        self.down.iter().rev().map(|op| op.to_sql(dialect)).collect()
+        self.down
+            .iter()
+            .rev()
+            .map(|op| op.to_sql(dialect))
+            .collect()
     }
 }
 
@@ -361,8 +340,7 @@ impl Migrator {
 
     /// Register a migration.
     pub fn register(&mut self, migration: Migration) {
-        self.migrations
-            .insert(migration.version.clone(), migration);
+        self.migrations.insert(migration.version.clone(), migration);
     }
 
     /// Set applied migrations (loaded from database).
@@ -450,7 +428,9 @@ mod tests {
         let op = Operation::CreateTable {
             name: "users".to_string(),
             columns: vec![
-                Column::new("id", ColumnType::Integer).primary_key().auto_increment(),
+                Column::new("id", ColumnType::Integer)
+                    .primary_key()
+                    .auto_increment(),
                 Column::new("name", ColumnType::Text).not_null(),
             ],
         };
@@ -466,7 +446,9 @@ mod tests {
         let migration = Migration::new("001_create_users").create_table(
             "users",
             vec![
-                Column::new("id", ColumnType::Integer).primary_key().auto_increment(),
+                Column::new("id", ColumnType::Integer)
+                    .primary_key()
+                    .auto_increment(),
                 Column::new("name", ColumnType::Text).not_null(),
             ],
         );

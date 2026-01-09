@@ -1,7 +1,7 @@
+use pretty_assertions::assert_eq;
 use simple_parser::ast::*;
 use simple_parser::error::ParseError;
 use simple_parser::Parser;
-use pretty_assertions::assert_eq;
 
 fn parse(source: &str) -> Result<Module, ParseError> {
     let mut parser = Parser::new(source);
@@ -485,7 +485,10 @@ fn calculate_tax(amount: i64) -> i64:
 "#;
     let module = parse(src).unwrap();
     if let Node::Function(func) = &module.items[0] {
-        assert!(func.is_generated(), "Function should be marked as generated");
+        assert!(
+            func.is_generated(),
+            "Function should be marked as generated"
+        );
         assert_eq!(func.name, "calculate_tax");
 
         let metadata = func.generated_by_metadata();
@@ -572,8 +575,14 @@ fn manual_function(x: i64) -> i64:
 "#;
     let module = parse(src).unwrap();
     if let Node::Function(func) = &module.items[0] {
-        assert!(!func.is_generated(), "Function should not be marked as generated");
-        assert!(func.generated_by_metadata().is_none(), "Should have no provenance metadata");
+        assert!(
+            !func.is_generated(),
+            "Function should not be marked as generated"
+        );
+        assert!(
+            func.generated_by_metadata().is_none(),
+            "Should have no provenance metadata"
+        );
     } else {
         panic!("Expected function definition");
     }

@@ -19,16 +19,16 @@ pub enum TokenKind {
     Table, // table
 
     // Operators and punctuation
-    Colon,     // :
-    Equals,    // =
-    Pipe,      // |
-    Comma,     // ,
-    LBrace,    // {
-    RBrace,    // }
-    LBracket,  // [
-    RBracket,  // ]
-    LParen,    // (
-    RParen,    // )
+    Colon,    // :
+    Equals,   // =
+    Pipe,     // |
+    Comma,    // ,
+    LBrace,   // {
+    RBrace,   // }
+    LBracket, // [
+    RBracket, // ]
+    LParen,   // (
+    RParen,   // )
 
     // Whitespace-significant
     Newline,
@@ -229,9 +229,7 @@ impl<'a> Lexer<'a> {
             '"' => self.scan_string('"'),
 
             // Numbers or negative numbers
-            '-' if self.peek().map_or(false, |c| c.is_ascii_digit()) => {
-                self.scan_number(ch)
-            }
+            '-' if self.peek().is_some_and(|c| c.is_ascii_digit()) => self.scan_number(ch),
 
             // Numbers
             c if c.is_ascii_digit() => self.scan_number(c),
@@ -413,9 +411,9 @@ impl<'a> Lexer<'a> {
                 }
                 '.' if !has_dot && !has_exp => {
                     // Check if next char is a digit
-                    let chars_clone = self.source[self.current_pos..].chars();
-                    let next_next = chars_clone.skip(1).next();
-                    if next_next.map_or(false, |c| c.is_ascii_digit()) {
+                    let mut chars_clone = self.source[self.current_pos..].chars();
+                    let next_next = chars_clone.nth(1);
+                    if next_next.is_some_and(|c| c.is_ascii_digit()) {
                         self.advance();
                         value.push('.');
                         has_dot = true;
@@ -457,7 +455,10 @@ impl<'a> Lexer<'a> {
         value.push(first);
 
         while let Some(ch) = self.peek() {
-            if ch.is_alphanumeric() || ch == '_' || ch == '/' || ch == '.' || ch == '-' {
+            // Allow common path/URL characters in bare identifiers
+            // This includes # for URL anchors (e.g., file.md#section)
+            if ch.is_alphanumeric() || ch == '_' || ch == '/' || ch == '.' || ch == '-' || ch == '#'
+            {
                 self.advance();
                 value.push(ch);
             } else {
@@ -498,12 +499,15 @@ mod tests {
 
     #[test]
     fn test_simple_values() {
-        assert_eq!(lex("name: Alice"), vec![
-            TokenKind::Identifier("name".into()),
-            TokenKind::Colon,
-            TokenKind::Identifier("Alice".into()),
-            TokenKind::Eof,
-        ]);
+        assert_eq!(
+            lex("name: Alice"),
+            vec![
+                TokenKind::Identifier("name".into()),
+                TokenKind::Colon,
+                TokenKind::Identifier("Alice".into()),
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]
@@ -511,7 +515,10 @@ mod tests {
         assert_eq!(lex("42"), vec![TokenKind::Integer(42), TokenKind::Eof]);
         assert_eq!(lex("-17"), vec![TokenKind::Integer(-17), TokenKind::Eof]);
         assert_eq!(lex("3.14"), vec![TokenKind::Float(3.14), TokenKind::Eof]);
-        assert_eq!(lex("1_000_000"), vec![TokenKind::Integer(1000000), TokenKind::Eof]);
+        assert_eq!(
+            lex("1_000_000"),
+            vec![TokenKind::Integer(1000000), TokenKind::Eof]
+        );
     }
 
     #[test]

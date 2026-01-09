@@ -57,13 +57,17 @@ pub fn serialize_manifest(manifest: &HydrationManifest) -> String {
     let mut json = String::from("{");
     json.push_str(&format!("\"version\":{},", manifest.version));
     json.push_str("\"state\":{");
-    let state_entries: Vec<_> = manifest.state.iter()
+    let state_entries: Vec<_> = manifest
+        .state
+        .iter()
         .map(|(k, v)| format!("\"{}\":\"{}\"", k, v))
         .collect();
     json.push_str(&state_entries.join(","));
     json.push_str("},");
     json.push_str("\"nodeMap\":{");
-    let node_entries: Vec<_> = manifest.node_map.iter()
+    let node_entries: Vec<_> = manifest
+        .node_map
+        .iter()
         .map(|(k, v)| format!("\"{}\":\"{}\"", k.0, v))
         .collect();
     json.push_str(&node_entries.join(","));
@@ -73,6 +77,6 @@ pub fn serialize_manifest(manifest: &HydrationManifest) -> String {
 
 /// Deserialize manifest from JSON
 pub fn deserialize_manifest(_json: &str) -> Option<HydrationManifest> {
-    // TODO: Implement proper JSON parsing
+    // TODO: [ui][P1] Implement proper JSON parsing
     Some(HydrationManifest::new())
 }

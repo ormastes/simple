@@ -185,7 +185,6 @@ pub struct Settlement {
 unsafe impl Send for Settlement {}
 unsafe impl Sync for Settlement {}
 
-
 include!("container_impl.rs");
 
 impl Drop for Settlement {
@@ -218,7 +217,6 @@ impl Drop for Settlement {
         }
     }
 }
-
 
 #[cfg(test)]
 #[path = "container_tests.rs"]

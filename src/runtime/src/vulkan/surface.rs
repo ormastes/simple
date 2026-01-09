@@ -15,7 +15,8 @@ pub struct Surface {
 impl Surface {
     /// Create a surface wrapper (takes ownership of existing surface)
     pub fn from_handle(instance: Arc<VulkanInstance>, surface: vk::SurfaceKHR) -> Self {
-        let surface_loader = ash::khr::surface::Instance::new(instance.entry(), instance.instance());
+        let surface_loader =
+            ash::khr::surface::Instance::new(instance.entry(), instance.instance());
 
         Self {
             instance,
@@ -37,7 +38,12 @@ impl Surface {
         unsafe {
             self.surface_loader
                 .get_physical_device_surface_capabilities(physical_device.handle, self.surface)
-                .map_err(|e| VulkanError::SurfaceError(format!("Failed to get surface capabilities: {:?}", e)))
+                .map_err(|e| {
+                    VulkanError::SurfaceError(format!(
+                        "Failed to get surface capabilities: {:?}",
+                        e
+                    ))
+                })
         }
     }
 
@@ -49,7 +55,9 @@ impl Surface {
         unsafe {
             self.surface_loader
                 .get_physical_device_surface_formats(physical_device.handle, self.surface)
-                .map_err(|e| VulkanError::SurfaceError(format!("Failed to get surface formats: {:?}", e)))
+                .map_err(|e| {
+                    VulkanError::SurfaceError(format!("Failed to get surface formats: {:?}", e))
+                })
         }
     }
 
@@ -61,7 +69,9 @@ impl Surface {
         unsafe {
             self.surface_loader
                 .get_physical_device_surface_present_modes(physical_device.handle, self.surface)
-                .map_err(|e| VulkanError::SurfaceError(format!("Failed to get present modes: {:?}", e)))
+                .map_err(|e| {
+                    VulkanError::SurfaceError(format!("Failed to get present modes: {:?}", e))
+                })
         }
     }
 
@@ -78,7 +88,12 @@ impl Surface {
                     queue_family_index,
                     self.surface,
                 )
-                .map_err(|e| VulkanError::SurfaceError(format!("Failed to check queue family support: {:?}", e)))
+                .map_err(|e| {
+                    VulkanError::SurfaceError(format!(
+                        "Failed to check queue family support: {:?}",
+                        e
+                    ))
+                })
         }
     }
 
@@ -98,7 +113,9 @@ impl Surface {
         let formats = self.get_formats(physical_device)?;
 
         if formats.is_empty() {
-            return Err(VulkanError::SurfaceError("No surface formats available".to_string()));
+            return Err(VulkanError::SurfaceError(
+                "No surface formats available".to_string(),
+            ));
         }
 
         // If HDR is preferred, try to find an HDR format
@@ -129,9 +146,10 @@ impl Surface {
         }
 
         // Try any format with SRGB_NONLINEAR
-        if let Some(format) = formats.iter().find(|f| {
-            f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-        }) {
+        if let Some(format) = formats
+            .iter()
+            .find(|f| f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
+        {
             tracing::info!("Selected format with SRGB_NONLINEAR: {:?}", format.format);
             return Ok(*format);
         }
@@ -146,22 +164,39 @@ impl Surface {
         // HDR10 formats (Rec. 2020 with ST2084 PQ or HLG transfer)
         const HDR_FORMATS: &[(vk::Format, vk::ColorSpaceKHR)] = &[
             // HDR10 ST2084 (most common)
-            (vk::Format::A2B10G10R10_UNORM_PACK32, vk::ColorSpaceKHR::HDR10_ST2084_EXT),
-            (vk::Format::A2R10G10B10_UNORM_PACK32, vk::ColorSpaceKHR::HDR10_ST2084_EXT),
-
+            (
+                vk::Format::A2B10G10R10_UNORM_PACK32,
+                vk::ColorSpaceKHR::HDR10_ST2084_EXT,
+            ),
+            (
+                vk::Format::A2R10G10B10_UNORM_PACK32,
+                vk::ColorSpaceKHR::HDR10_ST2084_EXT,
+            ),
             // HDR10 HLG
-            (vk::Format::A2B10G10R10_UNORM_PACK32, vk::ColorSpaceKHR::HDR10_HLG_EXT),
-            (vk::Format::A2R10G10B10_UNORM_PACK32, vk::ColorSpaceKHR::HDR10_HLG_EXT),
-
+            (
+                vk::Format::A2B10G10R10_UNORM_PACK32,
+                vk::ColorSpaceKHR::HDR10_HLG_EXT,
+            ),
+            (
+                vk::Format::A2R10G10B10_UNORM_PACK32,
+                vk::ColorSpaceKHR::HDR10_HLG_EXT,
+            ),
             // Extended sRGB (scRGB - linear with extended range)
-            (vk::Format::R16G16B16A16_SFLOAT, vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT),
-            (vk::Format::R16G16B16A16_SFLOAT, vk::ColorSpaceKHR::EXTENDED_SRGB_NONLINEAR_EXT),
+            (
+                vk::Format::R16G16B16A16_SFLOAT,
+                vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT,
+            ),
+            (
+                vk::Format::R16G16B16A16_SFLOAT,
+                vk::ColorSpaceKHR::EXTENDED_SRGB_NONLINEAR_EXT,
+            ),
         ];
 
         for (format, color_space) in HDR_FORMATS {
-            if let Some(found) = formats.iter().find(|f| {
-                f.format == *format && f.color_space == *color_space
-            }) {
+            if let Some(found) = formats
+                .iter()
+                .find(|f| f.format == *format && f.color_space == *color_space)
+            {
                 return Some(*found);
             }
         }
@@ -190,7 +225,9 @@ impl Surface {
         let modes = self.get_present_modes(physical_device)?;
 
         if modes.is_empty() {
-            return Err(VulkanError::SurfaceError("No present modes available".to_string()));
+            return Err(VulkanError::SurfaceError(
+                "No present modes available".to_string(),
+            ));
         }
 
         // If no vsync is preferred, try IMMEDIATE first
@@ -278,9 +315,18 @@ mod tests {
     #[test]
     fn test_select_extent() {
         let caps = vk::SurfaceCapabilitiesKHR {
-            min_image_extent: vk::Extent2D { width: 1, height: 1 },
-            max_image_extent: vk::Extent2D { width: 4096, height: 4096 },
-            current_extent: vk::Extent2D { width: u32::MAX, height: u32::MAX },
+            min_image_extent: vk::Extent2D {
+                width: 1,
+                height: 1,
+            },
+            max_image_extent: vk::Extent2D {
+                width: 4096,
+                height: 4096,
+            },
+            current_extent: vk::Extent2D {
+                width: u32::MAX,
+                height: u32::MAX,
+            },
             ..Default::default()
         };
 
@@ -336,12 +382,10 @@ mod tests {
 
     #[test]
     fn test_hdr_format_not_found() {
-        let formats = vec![
-            vk::SurfaceFormatKHR {
-                format: vk::Format::B8G8R8A8_SRGB,
-                color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
-            },
-        ];
+        let formats = vec![vk::SurfaceFormatKHR {
+            format: vk::Format::B8G8R8A8_SRGB,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        }];
 
         let hdr = Surface::find_hdr_format(&formats);
         assert!(hdr.is_none());
@@ -350,9 +394,18 @@ mod tests {
     #[test]
     fn test_select_extent_with_defined_extent() {
         let caps = vk::SurfaceCapabilitiesKHR {
-            min_image_extent: vk::Extent2D { width: 1, height: 1 },
-            max_image_extent: vk::Extent2D { width: 4096, height: 4096 },
-            current_extent: vk::Extent2D { width: 1920, height: 1080 },
+            min_image_extent: vk::Extent2D {
+                width: 1,
+                height: 1,
+            },
+            max_image_extent: vk::Extent2D {
+                width: 4096,
+                height: 4096,
+            },
+            current_extent: vk::Extent2D {
+                width: 1920,
+                height: 1080,
+            },
             ..Default::default()
         };
 
@@ -365,35 +418,53 @@ mod tests {
     #[test]
     fn test_select_extent_clamping_min() {
         let caps = vk::SurfaceCapabilitiesKHR {
-            min_image_extent: vk::Extent2D { width: 800, height: 600 },
-            max_image_extent: vk::Extent2D { width: 4096, height: 4096 },
-            current_extent: vk::Extent2D { width: u32::MAX, height: u32::MAX },
+            min_image_extent: vk::Extent2D {
+                width: 800,
+                height: 600,
+            },
+            max_image_extent: vk::Extent2D {
+                width: 4096,
+                height: 4096,
+            },
+            current_extent: vk::Extent2D {
+                width: u32::MAX,
+                height: u32::MAX,
+            },
             ..Default::default()
         };
 
         let extent = Surface::select_extent(&caps, 640, 480);
-        assert_eq!(extent.width, 800);  // Clamped to min
-        assert_eq!(extent.height, 600);  // Clamped to min
+        assert_eq!(extent.width, 800); // Clamped to min
+        assert_eq!(extent.height, 600); // Clamped to min
     }
 
     #[test]
     fn test_select_image_count_no_max() {
         let caps = vk::SurfaceCapabilitiesKHR {
             min_image_count: 2,
-            max_image_count: 0,  // 0 means no limit
+            max_image_count: 0, // 0 means no limit
             ..Default::default()
         };
 
         let count = Surface::select_image_count(&caps);
-        assert_eq!(count, 3);  // min + 1
+        assert_eq!(count, 3); // min + 1
     }
 
     #[test]
     fn test_extent_boundary_values() {
         let caps = vk::SurfaceCapabilitiesKHR {
-            min_image_extent: vk::Extent2D { width: 100, height: 100 },
-            max_image_extent: vk::Extent2D { width: 1000, height: 1000 },
-            current_extent: vk::Extent2D { width: u32::MAX, height: u32::MAX },
+            min_image_extent: vk::Extent2D {
+                width: 100,
+                height: 100,
+            },
+            max_image_extent: vk::Extent2D {
+                width: 1000,
+                height: 1000,
+            },
+            current_extent: vk::Extent2D {
+                width: u32::MAX,
+                height: u32::MAX,
+            },
             ..Default::default()
         };
 
@@ -415,12 +486,10 @@ mod tests {
 
     #[test]
     fn test_hdr_hlg_format_detection() {
-        let formats = vec![
-            vk::SurfaceFormatKHR {
-                format: vk::Format::A2B10G10R10_UNORM_PACK32,
-                color_space: vk::ColorSpaceKHR::HDR10_HLG_EXT,
-            },
-        ];
+        let formats = vec![vk::SurfaceFormatKHR {
+            format: vk::Format::A2B10G10R10_UNORM_PACK32,
+            color_space: vk::ColorSpaceKHR::HDR10_HLG_EXT,
+        }];
 
         let hdr = Surface::find_hdr_format(&formats);
         assert!(hdr.is_some());
@@ -429,12 +498,10 @@ mod tests {
 
     #[test]
     fn test_hdr_scrgb_format_detection() {
-        let formats = vec![
-            vk::SurfaceFormatKHR {
-                format: vk::Format::R16G16B16A16_SFLOAT,
-                color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT,
-            },
-        ];
+        let formats = vec![vk::SurfaceFormatKHR {
+            format: vk::Format::R16G16B16A16_SFLOAT,
+            color_space: vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT,
+        }];
 
         let hdr = Surface::find_hdr_format(&formats);
         assert!(hdr.is_some());

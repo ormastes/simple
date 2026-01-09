@@ -69,14 +69,12 @@ pub use error::{WasmError, WasmResult};
 pub use runner::WasmRunner;
 
 #[cfg(feature = "wasm")]
-pub use wasi_env::{WasiConfig, CapturingPipes};
+pub use wasi_env::{CapturingPipes, WasiConfig};
 
 #[cfg(feature = "wasm")]
-pub use bridge::{to_wasm_value, from_wasm_value};
+pub use bridge::{from_wasm_value, to_wasm_value};
 
 #[cfg(feature = "wasm")]
 pub use cache::ModuleCache;
 
-pub use browser_mock::{
-    BrowserMock, BrowserVerify, ConsoleMethod, DomElement, FetchResponse,
-};
+pub use browser_mock::{BrowserMock, BrowserVerify, ConsoleMethod, DomElement, FetchResponse};

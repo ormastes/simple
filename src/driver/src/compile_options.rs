@@ -128,7 +128,9 @@ impl CompileOptions {
 
     /// Get the coverage output path (default: coverage.sdn).
     pub fn coverage_output_path(&self) -> PathBuf {
-        self.coverage_output.clone().unwrap_or_else(|| PathBuf::from("coverage.sdn"))
+        self.coverage_output
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("coverage.sdn"))
     }
 
     /// Enable AST emission to stdout.
@@ -189,11 +191,11 @@ impl CompileOptions {
     /// Get the number of threads to use for parallel compilation.
     /// Returns the configured number or all available cores.
     pub fn thread_count(&self) -> usize {
-        self.parallel_threads
-            .map(|n| n.get())
-            .unwrap_or_else(|| std::thread::available_parallelism()
+        self.parallel_threads.map(|n| n.get()).unwrap_or_else(|| {
+            std::thread::available_parallelism()
                 .map(|n| n.get())
-                .unwrap_or(1))
+                .unwrap_or(1)
+        })
     }
 
     /// Parse compile options from CLI arguments.
@@ -316,11 +318,7 @@ impl CompileProfiler {
         }
 
         eprintln!("─────────────────────────────────────────────");
-        eprintln!(
-            "  {:<20} {:>8.2}ms",
-            "Total",
-            total.as_secs_f64() * 1000.0
-        );
+        eprintln!("  {:<20} {:>8.2}ms", "Total", total.as_secs_f64() * 1000.0);
         eprintln!();
     }
 }
@@ -468,7 +466,10 @@ mod tests {
         let args = vec!["--build-timestamp=2025-01-15T10:00:00Z".to_string()];
         let opts = CompileOptions::from_args(&args);
         assert!(opts.deterministic);
-        assert_eq!(opts.build_timestamp, Some("2025-01-15T10:00:00Z".to_string()));
+        assert_eq!(
+            opts.build_timestamp,
+            Some("2025-01-15T10:00:00Z".to_string())
+        );
     }
 
     #[test]
@@ -481,7 +482,10 @@ mod tests {
     fn test_with_build_timestamp() {
         let opts = CompileOptions::new().with_build_timestamp("2025-01-15T10:00:00Z".to_string());
         assert!(opts.deterministic);
-        assert_eq!(opts.build_timestamp, Some("2025-01-15T10:00:00Z".to_string()));
+        assert_eq!(
+            opts.build_timestamp,
+            Some("2025-01-15T10:00:00Z".to_string())
+        );
     }
 
     #[test]

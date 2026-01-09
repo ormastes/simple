@@ -49,9 +49,7 @@ impl LlvmBackend {
                 .map_err(|e| CompileError::Semantic(format!("Failed to build store: {}", e)))?;
             Ok(())
         } else {
-            Err(CompileError::Semantic(
-                "Store requires pointer".to_string(),
-            ))
+            Err(CompileError::Semantic("Store requires pointer".to_string()))
         }
     }
 

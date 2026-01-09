@@ -1,8 +1,9 @@
 //! Tests for generator functionality
 
-use super::{rt_generator_new, rt_generator_next, rt_generator_get_state,
-            rt_generator_set_state, rt_generator_load_slot, rt_generator_store_slot,
-            rt_generator_get_ctx, rt_generator_mark_done};
+use super::{
+    rt_generator_get_ctx, rt_generator_get_state, rt_generator_load_slot, rt_generator_mark_done,
+    rt_generator_new, rt_generator_next, rt_generator_set_state, rt_generator_store_slot,
+};
 use crate::value::RuntimeValue;
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -11,7 +12,7 @@ static GENERATOR_COUNTER: AtomicI32 = AtomicI32::new(0);
 
 // Test helper: Simple generator that yields sequential values
 extern "C" fn simple_yielder(gen: RuntimeValue) -> RuntimeValue {
-    use super::{rt_generator_get_state, rt_generator_set_state, rt_generator_mark_done};
+    use super::{rt_generator_get_state, rt_generator_mark_done, rt_generator_set_state};
 
     let state = rt_generator_get_state(gen);
 
@@ -41,8 +42,10 @@ extern "C" fn simple_yielder(gen: RuntimeValue) -> RuntimeValue {
 
 // Test helper: Generator that uses slot storage
 extern "C" fn slot_based_generator(gen: RuntimeValue) -> RuntimeValue {
-    use super::{rt_generator_get_state, rt_generator_set_state,
-                rt_generator_load_slot, rt_generator_store_slot, rt_generator_mark_done};
+    use super::{
+        rt_generator_get_state, rt_generator_load_slot, rt_generator_mark_done,
+        rt_generator_set_state, rt_generator_store_slot,
+    };
 
     let state = rt_generator_get_state(gen);
 
@@ -70,8 +73,10 @@ extern "C" fn slot_based_generator(gen: RuntimeValue) -> RuntimeValue {
 
 // Test helper: Generator that uses context
 extern "C" fn context_based_generator(gen: RuntimeValue) -> RuntimeValue {
-    use super::{rt_generator_get_state, rt_generator_set_state,
-                rt_generator_get_ctx, rt_generator_mark_done};
+    use super::{
+        rt_generator_get_ctx, rt_generator_get_state, rt_generator_mark_done,
+        rt_generator_set_state,
+    };
 
     let state = rt_generator_get_state(gen);
     let ctx = rt_generator_get_ctx(gen);
@@ -96,8 +101,8 @@ extern "C" fn counting_generator(_gen: RuntimeValue) -> RuntimeValue {
 fn test_generator_new() {
     let gen = rt_generator_new(
         simple_yielder as u64,
-        10,  // 10 slots
-        RuntimeValue::NIL
+        10, // 10 slots
+        RuntimeValue::NIL,
     );
 
     assert!(gen.is_heap());
@@ -106,11 +111,7 @@ fn test_generator_new() {
 
 #[test]
 fn test_generator_simple_yield_sequence() {
-    let gen = rt_generator_new(
-        simple_yielder as u64,
-        0,
-        RuntimeValue::NIL
-    );
+    let gen = rt_generator_new(simple_yielder as u64, 0, RuntimeValue::NIL);
 
     // First next: state 0 -> 1, yield 10
     let val1 = rt_generator_next(gen);
@@ -136,8 +137,8 @@ fn test_generator_simple_yield_sequence() {
 fn test_generator_slot_storage() {
     let gen = rt_generator_new(
         slot_based_generator as u64,
-        10,  // Need slots for storage
-        RuntimeValue::NIL
+        10, // Need slots for storage
+        RuntimeValue::NIL,
     );
 
     // First yield: initialize counter to 0
@@ -165,7 +166,7 @@ fn test_generator_context() {
     let gen = rt_generator_new(
         context_based_generator as u64,
         0,
-        RuntimeValue::from_int(100)
+        RuntimeValue::from_int(100),
     );
 
     // Verify context is accessible
@@ -190,11 +191,7 @@ fn test_generator_context() {
 
 #[test]
 fn test_generator_state_manipulation() {
-    let gen = rt_generator_new(
-        simple_yielder as u64,
-        0,
-        RuntimeValue::NIL
-    );
+    let gen = rt_generator_new(simple_yielder as u64, 0, RuntimeValue::NIL);
 
     // Initial state is 0
     assert_eq!(rt_generator_get_state(gen), 0);
@@ -212,8 +209,8 @@ fn test_generator_state_manipulation() {
 fn test_generator_slot_operations() {
     let gen = rt_generator_new(
         simple_yielder as u64,
-        5,  // 5 slots
-        RuntimeValue::NIL
+        5, // 5 slots
+        RuntimeValue::NIL,
     );
 
     // Store values in different slots
@@ -239,8 +236,8 @@ fn test_generator_slot_operations() {
 fn test_generator_slot_auto_resize() {
     let gen = rt_generator_new(
         simple_yielder as u64,
-        2,  // Start with only 2 slots
-        RuntimeValue::NIL
+        2, // Start with only 2 slots
+        RuntimeValue::NIL,
     );
 
     // Store beyond initial capacity (should auto-resize)
@@ -253,11 +250,7 @@ fn test_generator_slot_auto_resize() {
 
 #[test]
 fn test_generator_mark_done() {
-    let gen = rt_generator_new(
-        simple_yielder as u64,
-        0,
-        RuntimeValue::NIL
-    );
+    let gen = rt_generator_new(simple_yielder as u64, 0, RuntimeValue::NIL);
 
     // Generator starts not done
     let val1 = rt_generator_next(gen);
@@ -274,9 +267,9 @@ fn test_generator_mark_done() {
 #[test]
 fn test_generator_nil_body_func() {
     let gen = rt_generator_new(
-        0,  // Null function pointer
+        0, // Null function pointer
         0,
-        RuntimeValue::NIL
+        RuntimeValue::NIL,
     );
 
     // Should return NIL when body_func is null
@@ -303,11 +296,7 @@ fn test_generator_invalid_value() {
 
 #[test]
 fn test_generator_negative_slot_index() {
-    let gen = rt_generator_new(
-        simple_yielder as u64,
-        10,
-        RuntimeValue::NIL
-    );
+    let gen = rt_generator_new(simple_yielder as u64, 10, RuntimeValue::NIL);
 
     // Negative index should be ignored
     rt_generator_store_slot(gen, -5, RuntimeValue::from_int(100));
@@ -320,11 +309,7 @@ fn test_generator_execution_count() {
     // Reset counter
     GENERATOR_COUNTER.store(0, Ordering::SeqCst);
 
-    let gen = rt_generator_new(
-        counting_generator as u64,
-        0,
-        RuntimeValue::NIL
-    );
+    let gen = rt_generator_new(counting_generator as u64, 0, RuntimeValue::NIL);
 
     // Each next() should increment the counter
     let val0 = rt_generator_next(gen);

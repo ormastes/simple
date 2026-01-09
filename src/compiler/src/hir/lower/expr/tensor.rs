@@ -253,7 +253,7 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         // For now, we'll convert flat mode to dense representation
-        // TODO: Future optimization - use torch.sparse_coo_tensor for large sparse tensors
+        // TODO: [compiler][P2] Future optimization - use torch.sparse_coo_tensor for large sparse tensors
 
         // Get default value or use 0
         let default_expr = if let Some(def) = default {
@@ -268,7 +268,8 @@ impl Lowerer {
         // For now, create a simple error - full sparse tensor support will be added later
         // This allows the code to compile while we implement the feature incrementally
         Err(LowerError::Unsupported(
-            "Sparse tensor (flat mode) not yet fully implemented. Use slice mode for now.".to_string()
+            "Sparse tensor (flat mode) not yet fully implemented. Use slice mode for now."
+                .to_string(),
         ))
     }
 

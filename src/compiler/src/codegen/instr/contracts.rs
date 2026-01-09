@@ -6,8 +6,8 @@ use cranelift_module::Module;
 
 use crate::mir::{ContractKind, VReg};
 
-use super::{InstrContext, InstrResult};
 use super::helpers::create_string_constant;
+use super::{InstrContext, InstrResult};
 
 /// Compile a contract check instruction.
 /// This checks the condition and calls a runtime function to panic if it fails.
@@ -42,7 +42,9 @@ pub(super) fn compile_contract_check<M: Module>(
         let cond_i64 = builder.ins().uextend(types::I64, cond);
         let kind_iconst = builder.ins().iconst(types::I64, kind_val);
 
-        builder.ins().call(func_ref, &[cond_i64, kind_iconst, name_ptr, name_len]);
+        builder
+            .ins()
+            .call(func_ref, &[cond_i64, kind_iconst, name_ptr, name_len]);
     } else {
         // Fallback: generate inline check with trap on failure
         // Create a conditional branch that traps if the condition is false
@@ -50,12 +52,16 @@ pub(super) fn compile_contract_check<M: Module>(
         let continue_block = builder.create_block();
 
         // Branch based on condition
-        builder.ins().brif(cond, continue_block, &[], trap_block, &[]);
+        builder
+            .ins()
+            .brif(cond, continue_block, &[], trap_block, &[]);
 
         // Trap block - triggers a panic
         builder.switch_to_block(trap_block);
         builder.seal_block(trap_block);
-        builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(kind_val as u8));
+        builder
+            .ins()
+            .trap(cranelift_codegen::ir::TrapCode::unwrap_user(kind_val as u8));
 
         // Continue block - normal execution
         builder.switch_to_block(continue_block);

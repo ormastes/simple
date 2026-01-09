@@ -1,8 +1,8 @@
 //! WASM module runner and execution engine
 
+use crate::cache::ModuleCache;
 use crate::error::{WasmError, WasmResult};
 use crate::wasi_env::WasiConfig;
-use crate::cache::ModuleCache;
 use simple_runtime::RuntimeValue;
 
 use std::path::Path;
@@ -102,7 +102,8 @@ impl WasmRunner {
         // Create WASI environment if needed, or use empty imports
         let (mut wasi_env_opt, pipes, mut import_object) = if needs_wasi {
             let (wasi_env, pipes) = self.config.build_wasi_env(&mut self.store)?;
-            let imports = wasi_env.import_object(&mut self.store, module)
+            let imports = wasi_env
+                .import_object(&mut self.store, module)
                 .map_err(|e| WasmError::WasiError(e.to_string()))?;
             (Some(wasi_env), Some(pipes), imports)
         } else {
@@ -125,10 +126,12 @@ impl WasmRunner {
             if namespace == "env" {
                 match import.ty() {
                     ExternType::Memory(mem_type) => {
-                        let memory = Memory::new(&mut self.store, *mem_type)
-                            .map_err(|e| WasmError::InstantiationFailed(
-                                format!("Failed to create memory {}: {}", name, e)
-                            ))?;
+                        let memory = Memory::new(&mut self.store, *mem_type).map_err(|e| {
+                            WasmError::InstantiationFailed(format!(
+                                "Failed to create memory {}: {}",
+                                name, e
+                            ))
+                        })?;
                         import_object.define(namespace, name, memory);
                     }
                     ExternType::Global(glob_type) => {
@@ -136,8 +139,8 @@ impl WasmRunner {
                         let is_mutable = glob_type.mutability.is_mutable();
                         let value = match (name, is_mutable) {
                             ("__stack_pointer", true) => WasmerValue::I32(65536), // Stack at 64KB
-                            ("__heap_base", false) => WasmerValue::I32(32768), // Heap at 32KB
-                            ("__data_end", false) => WasmerValue::I32(1024), // Data at 1KB
+                            ("__heap_base", false) => WasmerValue::I32(32768),    // Heap at 32KB
+                            ("__data_end", false) => WasmerValue::I32(1024),      // Data at 1KB
                             ("__table_base", false) => WasmerValue::I32(0),
                             ("__memory_base", false) => WasmerValue::I32(0),
                             _ => WasmerValue::I32(0), // Default for unknown globals
@@ -165,7 +168,8 @@ impl WasmRunner {
 
         // Initialize WASI with the instance (required for memory access) if WASI is used
         if let Some(ref mut wasi_env) = wasi_env_opt {
-            wasi_env.initialize(&mut self.store, &instance)
+            wasi_env
+                .initialize(&mut self.store, &instance)
                 .map_err(|e| WasmError::WasiError(format!("Failed to initialize WASI: {}", e)))?;
         }
 

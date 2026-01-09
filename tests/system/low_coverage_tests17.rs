@@ -5,7 +5,7 @@
 // Loader SMF Section Types
 // ============================================================================
 mod loader_smf_section_tests {
-    use simple_loader::smf::{SmfSection, SectionType};
+    use simple_loader::smf::{SectionType, SmfSection};
 
     #[test]
     fn test_section_type_code() {
@@ -59,7 +59,7 @@ mod loader_smf_symbol_tests {
 // Loader SMF Relocation Types
 // ============================================================================
 mod loader_smf_reloc_tests {
-    use simple_loader::smf::{SmfRelocation, RelocationType};
+    use simple_loader::smf::{RelocationType, SmfRelocation};
 
     #[test]
     fn test_relocation_type_none() {
@@ -160,12 +160,15 @@ mod compiler_mir_more_tests {
 // Compiler HIR Extended Types
 // ============================================================================
 mod compiler_hir_extended_tests {
-    use simple_compiler::hir::{HirType, TypeId, Signedness};
+    use simple_compiler::hir::{HirType, Signedness, TypeId};
 
     #[test]
     fn test_hir_type_int() {
         // HirType::Int has bits and signedness fields
-        let ty = HirType::Int { bits: 64, signedness: Signedness::Signed };
+        let ty = HirType::Int {
+            bits: 64,
+            signedness: Signedness::Signed,
+        };
         let _ = format!("{:?}", ty);
     }
 
@@ -361,7 +364,7 @@ mod parser_span_extended_tests {
 // Parser Lexer Types Extended
 // ============================================================================
 mod parser_lexer_extended_tests {
-    use simple_parser::{Lexer, Token, TokenKind, Span};
+    use simple_parser::{Lexer, Span, Token, TokenKind};
 
     #[test]
     fn test_lexer_tokenize() {
@@ -411,7 +414,7 @@ mod compiler_pipeline_tests {
 // Loader Module Types
 // ============================================================================
 mod loader_module_extended_tests {
-    use simple_loader::{ModuleLoader, ModuleRegistry, LoadedModule};
+    use simple_loader::{LoadedModule, ModuleLoader, ModuleRegistry};
 
     #[test]
     fn test_module_loader_size() {
@@ -436,9 +439,9 @@ mod loader_module_extended_tests {
 // ============================================================================
 mod parser_ast_size_tests {
     use simple_parser::{
-        ActorDef, ClassDef, EnumDef, StructDef, TraitDef, FunctionDef, ImplBlock,
-        IfStmt, ForStmt, WhileStmt, MatchStmt, LetStmt, Argument, Decorator,
-        Attribute, Expr, Pattern, Field, EnumVariant,
+        ActorDef, Argument, Attribute, ClassDef, Decorator, EnumDef, EnumVariant, Expr, Field,
+        ForStmt, FunctionDef, IfStmt, ImplBlock, LetStmt, MatchStmt, Pattern, StructDef, TraitDef,
+        WhileStmt,
     };
 
     #[test]
@@ -542,7 +545,7 @@ mod parser_ast_size_tests {
 // ============================================================================
 mod runtime_value_extended_tests {
     use simple_runtime::value::RuntimeValue;
-    use simple_runtime::{RuntimeArray, RuntimeTuple, RuntimeString, RuntimeObject};
+    use simple_runtime::{RuntimeArray, RuntimeObject, RuntimeString, RuntimeTuple};
 
     #[test]
     fn test_runtime_value_size() {
@@ -574,7 +577,7 @@ mod runtime_value_extended_tests {
 // Compiler Value Extended Types
 // ============================================================================
 mod compiler_value_more_tests {
-    use simple_compiler::value::{Value, Env};
+    use simple_compiler::value::{Env, Value};
 
     #[test]
     fn test_value_nil() {
@@ -628,7 +631,7 @@ mod dep_tracker_more_tests {
 // Driver Extended Types
 // ============================================================================
 mod driver_more_tests {
-    use simple_driver::{Runner, RunResult};
+    use simple_driver::{RunResult, Runner};
 
     #[test]
     fn test_runner_new() {
@@ -646,7 +649,7 @@ mod driver_more_tests {
 // Common Extended Types
 // ============================================================================
 mod common_more_tests {
-    use simple_common::{Target, PointerSize};
+    use simple_common::{PointerSize, Target};
 
     #[test]
     fn test_target_size() {
@@ -664,7 +667,7 @@ mod common_more_tests {
 // Type Checker Extended Types
 // ============================================================================
 mod type_checker_more_tests {
-    use simple_type::{Type, Substitution};
+    use simple_type::{Substitution, Type};
 
     #[test]
     fn test_type_int() {

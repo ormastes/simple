@@ -42,9 +42,10 @@ fn test_if_control() {
         .expect("Expected If control node");
 
     // Find span element in then branch
-    let has_span_in_then = if_node.then_branch.iter().any(|n| {
-        matches!(n, TemplateNode::Element(el) if el.tag == "span")
-    });
+    let has_span_in_then = if_node
+        .then_branch
+        .iter()
+        .any(|n| matches!(n, TemplateNode::Element(el) if el.tag == "span"));
     assert!(has_span_in_then, "Expected span in then branch");
     assert!(if_node.else_branch.is_some());
 }

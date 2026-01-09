@@ -1,7 +1,7 @@
 //! Vulkan framebuffer management
 
-use super::error::{VulkanError, VulkanResult};
 use super::device::VulkanDevice;
+use super::error::{VulkanError, VulkanResult};
 use super::render_pass::RenderPass;
 use super::swapchain::VulkanSwapchain;
 use ash::vk;
@@ -34,8 +34,15 @@ impl Framebuffer {
             .layers(1);
 
         let framebuffer = unsafe {
-            device.handle().create_framebuffer(&create_info, None)
-                .map_err(|e| VulkanError::PipelineCreationFailed(format!("Failed to create framebuffer: {:?}", e)))?
+            device
+                .handle()
+                .create_framebuffer(&create_info, None)
+                .map_err(|e| {
+                    VulkanError::PipelineCreationFailed(format!(
+                        "Failed to create framebuffer: {:?}",
+                        e
+                    ))
+                })?
         };
 
         Ok(Arc::new(Self {
@@ -88,7 +95,9 @@ impl Framebuffer {
 impl Drop for Framebuffer {
     fn drop(&mut self) {
         unsafe {
-            self.device.handle().destroy_framebuffer(self.framebuffer, None);
+            self.device
+                .handle()
+                .destroy_framebuffer(self.framebuffer, None);
         }
         tracing::trace!("Framebuffer destroyed");
     }

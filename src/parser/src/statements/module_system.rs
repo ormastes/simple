@@ -9,8 +9,8 @@
 
 use crate::ast::*;
 use crate::error::ParseError;
-use crate::token::{Span, TokenKind};
 use crate::parser_impl::core::Parser;
+use crate::token::{Span, TokenKind};
 
 impl<'a> Parser<'a> {
     /// Parse a module path: crate.sys.http.router
@@ -166,7 +166,11 @@ impl<'a> Parser<'a> {
     }
 
     /// Common body for use/import statements
-    pub(super) fn parse_use_or_import_body(&mut self, start_span: Span, is_type_only: bool) -> Result<Node, ParseError> {
+    pub(super) fn parse_use_or_import_body(
+        &mut self,
+        start_span: Span,
+        is_type_only: bool,
+    ) -> Result<Node, ParseError> {
         let (path, target) = self.parse_use_path_and_target()?;
         Ok(Node::UseStmt(UseStmt {
             span: Span::new(

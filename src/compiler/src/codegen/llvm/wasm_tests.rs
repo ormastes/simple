@@ -119,7 +119,6 @@ mod tests {
         assert!(LlvmBackend::supports_target(&target));
     }
 
-
     /// Test that Target struct correctly stores WASM runtime
     #[test]
     #[cfg(feature = "wasm")]
@@ -160,7 +159,10 @@ mod tests {
         let ir = backend.get_ir().unwrap();
 
         // Check for key WASI function declarations
-        assert!(ir.contains("declare"), "IR should contain function declarations");
+        assert!(
+            ir.contains("declare"),
+            "IR should contain function declarations"
+        );
         assert!(ir.contains("fd_write"), "IR should declare fd_write");
         assert!(ir.contains("fd_read"), "IR should declare fd_read");
         assert!(ir.contains("environ_get"), "IR should declare environ_get");

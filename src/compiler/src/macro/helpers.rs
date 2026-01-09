@@ -4,12 +4,12 @@
 //! - Building constant bindings for macro parameters
 //! - Converting evaluated values to their string representations
 
+use simple_parser::ast::{ClassDef, FunctionDef, MacroArg, MacroDef};
 use std::collections::HashMap;
-use simple_parser::ast::{MacroDef, MacroArg, ClassDef, FunctionDef};
 
 use crate::error::CompileError;
-use crate::value::{Value, Env};
-use crate::interpreter::{Enums, ImplMethods, evaluate_expr};
+use crate::interpreter::{evaluate_expr, Enums, ImplMethods};
+use crate::value::{Env, Value};
 
 /// Build constant bindings for macro parameters.
 ///
