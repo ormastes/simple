@@ -1,5 +1,11 @@
 # Type Inference Specification
 
+> **⚠️ MIGRATED:** This specification has been migrated to an executable test file:  
+> **→** `tests/specs/type_inference_spec.spl`  
+> **Date:** 2026-01-09  
+> 
+> This file is kept for reference but may become outdated. The _spec.spl file is the source of truth.
+
 **Feature ID:** #13
 **Status:** Partial Implementation (Hindley-Milner scaffold working)
 **Difficulty:** 4

@@ -1,5 +1,11 @@
 # Sandboxing & Isolation
 
+> **⚠️ MIGRATED:** This specification has been migrated to an executable test file:  
+> **→** `tests/specs/sandboxing_spec.spl`  
+> **Date:** 2026-01-09  
+> 
+> This file is kept for reference but may become outdated. The _spec.spl file is the source of truth.
+
 **Status:** ✅ Runtime Complete (#916-919), 📋 Environment Planned (#920-923)
 **Feature IDs:** #916-923
 **Last Updated:** 2025-12-28

@@ -1,5 +1,11 @@
 # Simple Language Syntax Specification
 
+> **⚠️ MIGRATED:** This specification has been migrated to an executable test file:  
+> **→** `tests/specs/syntax_spec.spl`  
+> **Date:** 2026-01-09  
+> 
+> This file is kept for reference but may become outdated. The _spec.spl file is the source of truth.
+
 **Status:** Stable
 **Feature IDs:** #10-19
 **Last Updated:** 2025-12-28

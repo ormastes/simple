@@ -1,5 +1,11 @@
 # Suspension Operator (`~`) Specification
 
+> **⚠️ MIGRATED:** This specification has been migrated to an executable test file:  
+> **→** `tests/specs/suspension_operator_spec.spl`  
+> **Date:** 2026-01-09  
+> 
+> This file is kept for reference but may become outdated. The _spec.spl file is the source of truth.
+
 **Status:** Draft
 **Feature IDs:** #270-275
 **Last Updated:** 2026-01-05
