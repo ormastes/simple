@@ -19,14 +19,6 @@ pub fn compile_file(
     let runner = Runner::new();
     let out_path = output.unwrap_or_else(|| source.with_extension("smf"));
 
-    let source_content = match std::fs::read_to_string(source) {
-        Ok(content) => content,
-        Err(e) => {
-            eprintln!("error: cannot read {}: {}", source.display(), e);
-            return 1;
-        }
-    };
-
     // Start timing and create build event
     let start_time = Instant::now();
     let mut build_state = BuildState::new();
@@ -35,12 +27,21 @@ pub fn compile_file(
         files: vec![source.display().to_string()],
     });
 
-    // Use target-specific compilation if target is specified
+    // Use file-based compilation (enables module resolution for imports)
     let result = if let Some(target) = target {
         println!("Cross-compiling for target: {}", target);
+        // For cross-compilation, we still need to read the source content
+        let source_content = match std::fs::read_to_string(source) {
+            Ok(content) => content,
+            Err(e) => {
+                eprintln!("error: cannot read {}: {}", source.display(), e);
+                return 1;
+            }
+        };
         runner.compile_to_smf_for_target(&source_content, &out_path, target)
     } else {
-        runner.compile_to_smf_with_options(&source_content, &out_path, &options)
+        // Use file-based compilation which enables import resolution
+        runner.compile_file_to_smf_with_options(source, &out_path, &options)
     };
 
     let duration_ms = start_time.elapsed().as_millis() as u64;

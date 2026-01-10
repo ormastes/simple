@@ -200,12 +200,20 @@ impl Lowerer {
             }
         }
 
-        // Fourth pass: lower import statements for dependency tracking
+        // Fourth pass: lower import statements for dependency tracking AND load types
         for item in &ast_module.items {
             if let Node::UseStmt(use_stmt) = item {
                 let import =
                     self.lower_import(&use_stmt.path, &use_stmt.target, use_stmt.is_type_only);
                 self.module.imports.push(import);
+
+                // NEW: Load types from imported module into globals symbol table
+                // This enables compile-time type checking for imports
+                // Errors are logged but don't fail compilation (graceful degradation)
+                if let Err(e) = self.load_imported_types(&use_stmt.path, &use_stmt.target) {
+                    eprintln!("Warning: failed to load types from {:?}: {}", use_stmt.path, e);
+                    // Continue compilation - types may be defined later or in current module
+                }
             }
         }
 

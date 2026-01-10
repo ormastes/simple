@@ -48,6 +48,10 @@ pub enum LowerError {
     /// Capability error (aliasing, conversion, mode compatibility)
     #[error("Capability error: {0}")]
     Capability(#[from] super::super::capability::CapabilityError),
+
+    /// Module resolution error (cannot find or load imported module)
+    #[error("Module resolution error: {0}")]
+    ModuleResolution(String),
 }
 
 pub type LowerResult<T> = Result<T, LowerError>;

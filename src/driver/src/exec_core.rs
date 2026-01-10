@@ -180,6 +180,32 @@ impl ExecCore {
             .map_err(|e| format!("compile failed: {e}"))
     }
 
+    /// Compile a source file to SMF with compile options (LLM-friendly #885-887)
+    pub fn compile_file_with_options(
+        &self,
+        path: &Path,
+        out: &Path,
+        options: &crate::CompileOptions,
+    ) -> Result<(), String> {
+        let mut compiler =
+            CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
+
+        // Apply options (flatten nested Option)
+        if let Some(emit_ast) = &options.emit_ast {
+            compiler.set_emit_ast(emit_ast.clone());
+        }
+        if let Some(emit_hir) = &options.emit_hir {
+            compiler.set_emit_hir(emit_hir.clone());
+        }
+        if let Some(emit_mir) = &options.emit_mir {
+            compiler.set_emit_mir(emit_mir.clone());
+        }
+
+        compiler
+            .compile(path, out)
+            .map_err(|e| format!("compile failed: {e}"))
+    }
+
     // =========================================================================
     // Loading methods
     // =========================================================================

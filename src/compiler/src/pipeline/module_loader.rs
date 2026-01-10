@@ -285,6 +285,7 @@ pub fn load_module_with_imports_validated(
     visited: &mut HashSet<PathBuf>,
     importing_capabilities: Option<&[Capability]>,
 ) -> Result<Module, CompileError> {
+    eprintln!("DEBUG: load_module_with_imports_validated called for {:?}", path);
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if !visited.insert(path.clone()) {
         return Ok(Module {
@@ -308,9 +309,11 @@ pub fn load_module_with_imports_validated(
     let mut items = Vec::new();
     for item in module.items {
         if let Node::UseStmt(use_stmt) = &item {
+            eprintln!("DEBUG load_module_with_imports: Processing import {:?}", use_stmt.path);
             if let Some(resolved) =
                 resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new(".")))
             {
+                eprintln!("DEBUG: Resolved to {:?}, will load and flatten", resolved);
                 let imported =
                     load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
 
@@ -346,6 +349,12 @@ pub fn load_module_with_imports_validated(
 /// Resolve a simple `use` path to a sibling `.spl` file.
 /// Also checks stdlib location if sibling resolution fails.
 fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
+    // FORCE VISIBLE OUTPUT
+    println!("RESOLVE_USE_TO_PATH CALLED: {:?}", use_stmt.path);
+    eprintln!("RESOLVE_USE_TO_PATH CALLED: {:?}", use_stmt.path);
+
+    eprintln!("DEBUG resolve_use_to_path: path={:?}, target={:?}, base={:?}",
+              use_stmt.path, use_stmt.target, base);
     let mut parts: Vec<String> = use_stmt
         .path
         .segments
@@ -354,22 +363,19 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
         .cloned()
         .collect();
 
-    // Handle different import targets
+    // For symbol-specific imports (Single, Aliased, Group), we want to resolve
+    // to the MODULE file (not to a per-symbol file). The path segments already
+    // contain the module path. Only for Glob do we use the path as-is.
     match &use_stmt.target {
-        ImportTarget::Single(name) => {
-            parts.push(name.clone());
-        }
-        ImportTarget::Aliased { name, .. } => {
-            parts.push(name.clone());
+        ImportTarget::Single(_) | ImportTarget::Aliased { .. } | ImportTarget::Group(_) => {
+            // Symbol-specific import: resolve to the module file
+            // e.g., `import test_import_a.{SimpleError}` -> resolve to test_import_a.spl
+            // The parts already contain just the module path (test_import_a)
         }
         ImportTarget::Glob => {
             // For glob imports like `use ui.element.*`, the path segments
             // already contain the module path, we just resolve it as-is
             // (the last segment is the module file)
-        }
-        ImportTarget::Group(_) => {
-            // Group imports need special handling - for now, skip them
-            return None;
         }
     }
 
@@ -379,9 +385,13 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
         resolved = resolved.join(part);
     }
     resolved.set_extension("spl");
+    eprintln!("DEBUG: Trying to resolve import to: {:?}", resolved);
     if resolved.exists() {
+        eprintln!("DEBUG: Found module file: {:?}", resolved);
         return Some(resolved);
     }
+    eprintln!("DEBUG: Module file not found at: {:?}", resolved);
+    eprintln!("DEBUG: ========== ABOUT TO TRY __init__.spl ==========");
 
     // Try __init__.spl in directory (Python-style package imports)
     let mut init_resolved = base.to_path_buf();
@@ -394,11 +404,23 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
         return Some(init_resolved);
     }
 
+    eprintln!("DEBUG: Relative resolution failed, will try stdlib for {:?}", parts);
+
     // If not found, try stdlib location
-    // Detect stdlib by walking up directory tree
+    // First check if we're already inside std_lib/src
+    eprintln!("DEBUG: Trying stdlib resolution, base = {:?}", base);
     let mut current = base.to_path_buf();
-    for _ in 0..5 {
-        let stdlib_candidate = current.join("simple/std_lib/src");
+    for i in 0..5 {
+        // Check if current path ends with std_lib/src - if so, use it directly
+        let stdlib_candidate = if current.ends_with("std_lib/src") {
+            eprintln!("DEBUG: Current path is stdlib root: {:?}", current);
+            current.clone()
+        } else {
+            current.join("simple/std_lib/src")
+        };
+
+        eprintln!("DEBUG: Stdlib candidate #{}: {:?} (exists: {})", i, stdlib_candidate, stdlib_candidate.exists());
+
         if stdlib_candidate.exists() {
             // Try resolving from stdlib
             let mut stdlib_path = stdlib_candidate.clone();
@@ -406,7 +428,9 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
                 stdlib_path = stdlib_path.join(part);
             }
             stdlib_path.set_extension("spl");
+            eprintln!("DEBUG: Trying stdlib path: {:?} (exists: {})", stdlib_path, stdlib_path.exists());
             if stdlib_path.exists() {
+                eprintln!("DEBUG: Found in stdlib: {:?}", stdlib_path);
                 return Some(stdlib_path);
             }
 
