@@ -18,6 +18,123 @@ pub enum BufferUsage:
     TransferSrc     # Source for transfer
     TransferDst     # Destination for transfer
 
+impl BufferUsage:
+    pub fn to_string(self) -> String:
+        """Convert buffer usage to string.
+
+        Returns:
+            String representation
+
+        Example:
+            let usage = BufferUsage::Vertex
+            assert(usage.to_string() == "vertex")
+        """
+        match self:
+            case Vertex: return "vertex"
+            case Index: return "index"
+            case Uniform: return "uniform"
+            case Storage: return "storage"
+            case TransferSrc: return "transfer_src"
+            case TransferDst: return "transfer_dst"
+
+    pub fn description(self) -> String:
+        """Get detailed description of buffer usage.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            let usage = BufferUsage::Uniform
+            assert(usage.description().contains("Uniform buffer"))
+        """
+        match self:
+            case Vertex: return "Vertex buffer - stores vertex attributes (position, normal, color, etc.)"
+            case Index: return "Index buffer - stores vertex indices for indexed drawing"
+            case Uniform: return "Uniform buffer (UBO) - stores shader uniform data"
+            case Storage: return "Storage buffer (SSBO) - stores large read/write data for compute shaders"
+            case TransferSrc: return "Transfer source - buffer used as source for copy operations"
+            case TransferDst: return "Transfer destination - buffer used as destination for copy operations"
+
+    pub fn is_graphics_buffer(self) -> bool:
+        """Check if this is a graphics pipeline buffer.
+
+        Returns:
+            True if used in graphics pipeline
+
+        Example:
+            assert(BufferUsage::Vertex.is_graphics_buffer())
+            assert(not BufferUsage::TransferSrc.is_graphics_buffer())
+        """
+        match self:
+            case Vertex: return true
+            case Index: return true
+            case Uniform: return true
+            case _: return false
+
+    pub fn is_compute_buffer(self) -> bool:
+        """Check if this is typically used for compute.
+
+        Returns:
+            True if commonly used in compute pipelines
+
+        Example:
+            assert(BufferUsage::Storage.is_compute_buffer())
+            assert(not BufferUsage::Vertex.is_compute_buffer())
+        """
+        match self:
+            case Storage: return true
+            case Uniform: return true
+            case _: return false
+
+    pub fn is_transfer_buffer(self) -> bool:
+        """Check if this is a transfer operation buffer.
+
+        Returns:
+            True if used for transfers
+
+        Example:
+            assert(BufferUsage::TransferSrc.is_transfer_buffer())
+            assert(not BufferUsage::Vertex.is_transfer_buffer())
+        """
+        match self:
+            case TransferSrc: return true
+            case TransferDst: return true
+            case _: return false
+
+    pub fn requires_host_visible(self) -> bool:
+        """Check if usage typically requires host-visible memory.
+
+        Returns:
+            True if should be CPU-accessible
+
+        Example:
+            assert(BufferUsage::Uniform.requires_host_visible())
+            assert(not BufferUsage::Vertex.requires_host_visible())
+        """
+        match self:
+            case Uniform: return true
+            case TransferSrc: return true
+            case _: return false
+
+    pub fn to_vk_flags(self) -> VkBufferUsageFlags:
+        """Convert to Vulkan buffer usage flags.
+
+        Returns:
+            Vulkan buffer usage bit flags
+
+        Example:
+            let usage = BufferUsage::Vertex
+            let flags = usage.to_vk_flags()
+            assert(flags == VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
+        """
+        match self:
+            case Vertex: return VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+            case Index: return VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+            case Uniform: return VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+            case Storage: return VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+            case TransferSrc: return VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+            case TransferDst: return VK_BUFFER_USAGE_TRANSFER_DST_BIT
+
 # =============================================================================
 # Vertex Buffer - GPU-side vertex data storage
 # =============================================================================
@@ -72,6 +189,83 @@ impl VertexBuffer:
     # Cleanup
     pub async fn destroy(&self):
         await vulkan_destroy_buffer_async(self.device, self.buffer, self.memory)
+
+    pub fn get_size(self) -> u64:
+        """Get buffer size in bytes.
+
+        Returns:
+            Size in bytes
+
+        Example:
+            let vb = VertexBuffer::new(&device, &vertices)?
+            let size = vb.get_size()
+        """
+        self.size
+
+    pub fn get_vertex_count(self) -> u32:
+        """Get number of vertices in buffer.
+
+        Returns:
+            Vertex count
+
+        Example:
+            let vb = VertexBuffer::new(&device, &vertices)?
+            assert(vb.get_vertex_count() == vertices.len() as u32)
+        """
+        self.vertex_count
+
+    pub fn is_empty(self) -> bool:
+        """Check if buffer is empty.
+
+        Returns:
+            True if no vertices
+
+        Example:
+            let vb = VertexBuffer::new(&device, &empty_array)?
+            assert(vb.is_empty())
+        """
+        self.vertex_count == 0
+
+    pub fn bytes_per_vertex(self) -> u64:
+        """Calculate bytes per vertex.
+
+        Returns:
+            Average bytes per vertex
+
+        Example:
+            let vb = VertexBuffer::new(&device, &vertices)?
+            let bpv = vb.bytes_per_vertex()
+        """
+        if self.vertex_count == 0:
+            return 0
+        self.size / (self.vertex_count as u64)
+
+    pub fn is_large(self) -> bool:
+        """Check if this is a large buffer (>1MB).
+
+        Returns:
+            True if buffer exceeds 1MB
+
+        Example:
+            let vb = VertexBuffer::new(&device, &large_mesh)?
+            if vb.is_large():
+                print("Large vertex buffer allocated")
+        """
+        self.size > 1024 * 1024
+
+    pub fn summary(self) -> String:
+        """Get vertex buffer summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            let vb = VertexBuffer::new(&device, &vertices)?
+            print(vb.summary())
+        """
+        let kb = self.size / 1024
+        let bpv = self.bytes_per_vertex()
+        return "VertexBuffer: {self.vertex_count} vertices, {kb} KB ({bpv} bytes/vertex)"
 
 # =============================================================================
 # Index Buffer - GPU-side index data storage
@@ -138,6 +332,133 @@ impl IndexBuffer:
     pub async fn destroy(&self):
         await vulkan_destroy_buffer_async(self.device, self.buffer, self.memory)
 
+    pub fn get_size(self) -> u64:
+        """Get buffer size in bytes.
+
+        Returns:
+            Size in bytes
+
+        Example:
+            let ib = IndexBuffer::new_u16(&device, &indices)?
+            let size = ib.get_size()
+        """
+        self.size
+
+    pub fn get_index_count(self) -> u32:
+        """Get number of indices in buffer.
+
+        Returns:
+            Index count
+
+        Example:
+            let ib = IndexBuffer::new_u32(&device, &indices)?
+            assert(ib.get_index_count() == indices.len() as u32)
+        """
+        self.index_count
+
+    pub fn get_index_type(self) -> VkIndexType:
+        """Get index type (u16 or u32).
+
+        Returns:
+            Vulkan index type
+
+        Example:
+            let ib = IndexBuffer::new_u16(&device, &indices)?
+            assert(ib.get_index_type() == VK_INDEX_TYPE_UINT16)
+        """
+        self.index_type
+
+    pub fn is_empty(self) -> bool:
+        """Check if buffer is empty.
+
+        Returns:
+            True if no indices
+
+        Example:
+            let ib = IndexBuffer::new_u16(&device, &empty)?
+            assert(ib.is_empty())
+        """
+        self.index_count == 0
+
+    pub fn is_u16(self) -> bool:
+        """Check if using 16-bit indices.
+
+        Returns:
+            True if using u16 indices
+
+        Example:
+            let ib = IndexBuffer::new_u16(&device, &indices)?
+            assert(ib.is_u16())
+        """
+        self.index_type == VK_INDEX_TYPE_UINT16
+
+    pub fn is_u32(self) -> bool:
+        """Check if using 32-bit indices.
+
+        Returns:
+            True if using u32 indices
+
+        Example:
+            let ib = IndexBuffer::new_u32(&device, &indices)?
+            assert(ib.is_u32())
+        """
+        self.index_type == VK_INDEX_TYPE_UINT32
+
+    pub fn bytes_per_index(self) -> u64:
+        """Get bytes per index.
+
+        Returns:
+            2 for u16, 4 for u32
+
+        Example:
+            let ib = IndexBuffer::new_u16(&device, &indices)?
+            assert(ib.bytes_per_index() == 2)
+        """
+        if self.index_type == VK_INDEX_TYPE_UINT16:
+            return 2
+        else:
+            return 4
+
+    pub fn triangle_count(self) -> u32:
+        """Calculate number of triangles.
+
+        Returns:
+            Number of triangles (indices / 3)
+
+        Example:
+            let ib = IndexBuffer::new_u16(&device, &indices)?
+            let tris = ib.triangle_count()
+        """
+        self.index_count / 3
+
+    pub fn is_large(self) -> bool:
+        """Check if this is a large buffer (>1MB).
+
+        Returns:
+            True if buffer exceeds 1MB
+
+        Example:
+            let ib = IndexBuffer::new_u32(&device, &large_mesh)?
+            if ib.is_large():
+                print("Large index buffer allocated")
+        """
+        self.size > 1024 * 1024
+
+    pub fn summary(self) -> String:
+        """Get index buffer summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            let ib = IndexBuffer::new_u16(&device, &indices)?
+            print(ib.summary())
+        """
+        let kb = self.size / 1024
+        let index_type = if self.is_u16(): "u16" else: "u32"
+        let tris = self.triangle_count()
+        return "IndexBuffer: {self.index_count} {index_type} indices, {kb} KB ({tris} triangles)"
+
 # =============================================================================
 # Uniform Buffer - GPU-side uniform data (UBO)
 # =============================================================================
@@ -187,6 +508,84 @@ impl UniformBuffer[T]:
             vulkan_unmap_memory(self.device, self.memory)
             self.mapped_ptr = None
         await vulkan_destroy_buffer_async(self.device, self.buffer, self.memory)
+
+    pub fn get_size(self) -> u64:
+        """Get buffer size in bytes.
+
+        Returns:
+            Size in bytes
+
+        Example:
+            let ub = UniformBuffer::new(&device, &mvp_matrix)?
+            let size = ub.get_size()
+        """
+        self.size
+
+    pub fn is_mapped(self) -> bool:
+        """Check if buffer is currently mapped.
+
+        Returns:
+            True if mapped to CPU memory
+
+        Example:
+            let ub = UniformBuffer::new(&device, &data)?
+            assert(ub.is_mapped())
+        """
+        match self.mapped_ptr:
+            case Some(_): true
+            case None: false
+
+    pub fn can_update(self) -> bool:
+        """Check if buffer can be updated.
+
+        Returns:
+            True if mapped and ready for updates
+
+        Example:
+            let mut ub = UniformBuffer::new(&device, &data)?
+            if ub.can_update():
+                ub.update(&new_data)
+        """
+        self.is_mapped()
+
+    pub fn is_small(self) -> bool:
+        """Check if this is a small uniform buffer (<256 bytes).
+
+        Returns:
+            True if size is small
+
+        Example:
+            let ub = UniformBuffer::new(&device, &small_struct)?
+            if ub.is_small():
+                print("Small UBO, good for push constants")
+        """
+        self.size < 256
+
+    pub fn is_large(self) -> bool:
+        """Check if this is a large uniform buffer (>16KB).
+
+        Returns:
+            True if exceeds typical UBO size
+
+        Example:
+            let ub = UniformBuffer::new(&device, &large_struct)?
+            if ub.is_large():
+                print("Warning: Large UBO, consider using SSBO")
+        """
+        self.size > 16 * 1024
+
+    pub fn summary(self) -> String:
+        """Get uniform buffer summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            let ub = UniformBuffer::new(&device, &data)?
+            print(ub.summary())
+        """
+        let mapped = if self.is_mapped(): "mapped" else: "unmapped"
+        return "UniformBuffer: {self.size} bytes ({mapped})"
 
 # =============================================================================
 # Storage Buffer - GPU-side storage buffer (SSBO)
@@ -270,6 +669,109 @@ impl StorageBuffer[T]:
     pub async fn destroy(&self):
         await vulkan_destroy_buffer_async(self.device, self.buffer, self.memory)
 
+    pub fn get_size(self) -> u64:
+        """Get buffer size in bytes.
+
+        Returns:
+            Size in bytes
+
+        Example:
+            let sb = StorageBuffer::new(&device, &data)?
+            let size = sb.get_size()
+        """
+        self.size
+
+    pub fn get_element_count(self) -> u32:
+        """Get number of elements in buffer.
+
+        Returns:
+            Element count
+
+        Example:
+            let sb = StorageBuffer::new(&device, &data)?
+            assert(sb.get_element_count() == data.len() as u32)
+        """
+        self.element_count
+
+    pub fn is_empty(self) -> bool:
+        """Check if buffer is empty.
+
+        Returns:
+            True if no elements
+
+        Example:
+            let sb = StorageBuffer::new(&device, &empty)?
+            assert(sb.is_empty())
+        """
+        self.element_count == 0
+
+    pub fn bytes_per_element(self) -> u64:
+        """Calculate bytes per element.
+
+        Returns:
+            Average bytes per element
+
+        Example:
+            let sb = StorageBuffer::new(&device, &data)?
+            let bpe = sb.bytes_per_element()
+        """
+        if self.element_count == 0:
+            return 0
+        self.size / (self.element_count as u64)
+
+    pub fn is_large(self) -> bool:
+        """Check if this is a large buffer (>1MB).
+
+        Returns:
+            True if buffer exceeds 1MB
+
+        Example:
+            let sb = StorageBuffer::new(&device, &big_data)?
+            if sb.is_large():
+                print("Large storage buffer allocated")
+        """
+        self.size > 1024 * 1024
+
+    pub fn is_small(self) -> bool:
+        """Check if this is a small buffer (<64KB).
+
+        Returns:
+            True if size is small
+
+        Example:
+            let sb = StorageBuffer::new(&device, &small_data)?
+            if sb.is_small():
+                print("Consider using UBO for small data")
+        """
+        self.size < 64 * 1024
+
+    pub fn can_download(self) -> bool:
+        """Check if buffer can be downloaded.
+
+        Returns:
+            True (storage buffers support download)
+
+        Example:
+            let sb = StorageBuffer::new(&device, &data)?
+            if sb.can_download():
+                let result = sb.download()?
+        """
+        true
+
+    pub fn summary(self) -> String:
+        """Get storage buffer summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            let sb = StorageBuffer::new(&device, &data)?
+            print(sb.summary())
+        """
+        let kb = self.size / 1024
+        let bpe = self.bytes_per_element()
+        return "StorageBuffer: {self.element_count} elements, {kb} KB ({bpe} bytes/element)"
+
 # =============================================================================
 # FFI Declarations
 # =============================================================================
@@ -321,3 +823,52 @@ pub type VkIndexType = u32
 pub struct VkBufferMemory:
     buffer: VkBuffer
     memory: VkDeviceMemory
+
+impl VkBufferMemory:
+    pub fn get_buffer(self) -> VkBuffer:
+        """Get the Vulkan buffer handle.
+
+        Returns:
+            VkBuffer handle
+
+        Example:
+            let buf_mem = vulkan_create_buffer(...)?
+            let buffer = buf_mem.get_buffer()
+        """
+        self.buffer
+
+    pub fn get_memory(self) -> VkDeviceMemory:
+        """Get the Vulkan device memory handle.
+
+        Returns:
+            VkDeviceMemory handle
+
+        Example:
+            let buf_mem = vulkan_create_buffer(...)?
+            let memory = buf_mem.get_memory()
+        """
+        self.memory
+
+    pub fn is_valid(self) -> bool:
+        """Check if both handles are valid (non-zero).
+
+        Returns:
+            True if buffer and memory are valid
+
+        Example:
+            let buf_mem = vulkan_create_buffer(...)?
+            assert(buf_mem.is_valid())
+        """
+        self.buffer != 0 and self.memory != 0
+
+    pub fn summary(self) -> String:
+        """Get buffer memory summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            let buf_mem = vulkan_create_buffer(...)?
+            print(buf_mem.summary())
+        """
+        return "VkBufferMemory: buffer={self.buffer}, memory={self.memory}"
