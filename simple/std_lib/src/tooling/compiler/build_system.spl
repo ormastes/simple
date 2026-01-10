@@ -51,12 +51,125 @@ pub class BuildConfig:
             verbose: false
         }
 
+    pub fn with_mode(self, mode: CompilationMode): BuildConfig =
+        """Set compilation mode (fluent API).
+
+        Args:
+            mode: Compilation mode
+
+        Returns:
+            Modified config
+        """
+        self.mode = mode
+        self
+
+    pub fn with_parallel(self, enabled: bool): BuildConfig =
+        """Set parallel compilation (fluent API).
+
+        Args:
+            enabled: True to enable
+
+        Returns:
+            Modified config
+        """
+        self.parallel = enabled
+        self
+
+    pub fn with_workers(self, count: i32): BuildConfig =
+        """Set worker count (fluent API).
+
+        Args:
+            count: Number of workers
+
+        Returns:
+            Modified config
+        """
+        self.workers = count
+        self
+
+    pub fn with_optimization(self, level: OptimizationLevel): BuildConfig =
+        """Set optimization level (fluent API).
+
+        Args:
+            level: Optimization level
+
+        Returns:
+            Modified config
+        """
+        self.optimization = level
+        self
+
+    pub fn is_release(self): bool =
+        """Check if this is a release build.
+
+        Returns:
+            True if release mode
+        """
+        match self.mode:
+            CompilationMode::Release: true
+            _: false
+
 # Optimization level
 pub enum OptimizationLevel:
     None
     Speed
     Size
     Balanced
+
+    pub fn to_string(self): String =
+        """Convert optimization level to string.
+
+        Returns:
+            Level name
+
+        Example:
+            OptimizationLevel::Speed.to_string()  # → "speed"
+        """
+        match self:
+            OptimizationLevel::None: "none"
+            OptimizationLevel::Speed: "speed"
+            OptimizationLevel::Size: "size"
+            OptimizationLevel::Balanced: "balanced"
+
+    pub fn description(self): String =
+        """Get optimization description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            OptimizationLevel::Size.description()
+            # → "Optimize for binary size"
+        """
+        match self:
+            OptimizationLevel::None:
+                "No optimizations (fastest builds)"
+            OptimizationLevel::Speed:
+                "Optimize for execution speed"
+            OptimizationLevel::Size:
+                "Optimize for binary size"
+            OptimizationLevel::Balanced:
+                "Balance speed and size"
+
+    pub fn get_compiler_flags(self): List[String] =
+        """Get compiler flags for this optimization level.
+
+        Returns:
+            Compiler flags
+
+        Example:
+            OptimizationLevel::Speed.get_compiler_flags()
+            # → ["-O3", "-march=native"]
+        """
+        match self:
+            OptimizationLevel::None:
+                ["-O0"]
+            OptimizationLevel::Speed:
+                ["-O3", "-march=native"]
+            OptimizationLevel::Size:
+                ["-Os", "-flto"]
+            OptimizationLevel::Balanced:
+                ["-O2"]
 
 # Build result
 pub class BuildResult:
@@ -98,6 +211,74 @@ pub class BuildResult:
             "✓ Build succeeded: {self.artifacts.len()} artifacts in {self.duration_ms}ms"
         else:
             "✗ Build failed: {self.errors.len()} errors, {self.warnings.len()} warnings"
+
+    pub fn total_files(self): i32 =
+        """Get total files processed.
+
+        Returns:
+            Total files (built + skipped)
+        """
+        self.files_built + self.files_skipped
+
+    pub fn duration_seconds(self): f64 =
+        """Get build duration in seconds.
+
+        Returns:
+            Duration in seconds
+        """
+        (self.duration_ms as f64) / 1000.0
+
+    pub fn artifact_count(self): i32 =
+        """Get artifact count.
+
+        Returns:
+            Number of artifacts
+        """
+        self.artifacts.len()
+
+    pub fn error_count(self): i32 =
+        """Get error count.
+
+        Returns:
+            Number of errors
+        """
+        self.errors.len()
+
+    pub fn warning_count(self): i32 =
+        """Get warning count.
+
+        Returns:
+            Number of warnings
+        """
+        self.warnings.len()
+
+    pub fn has_warnings(self): bool =
+        """Check if build has warnings.
+
+        Returns:
+            True if warnings present
+        """
+        self.warnings.len() > 0
+
+    pub fn get_artifacts_by_type(self, artifact_type: ArtifactType): List[Artifact] =
+        """Get artifacts of specific type.
+
+        Args:
+            artifact_type: Type to filter by
+
+        Returns:
+            Filtered artifacts
+
+        Example:
+            let executables = result.get_artifacts_by_type(ArtifactType::Executable)
+            for exe in executables:
+                print("Built: {exe.path}")
+        """
+        let filtered: List[Artifact] = []
+        for artifact in self.artifacts:
+            if artifact.artifact_type == artifact_type:
+                filtered.append(artifact)
+        filtered
 
 # Build system orchestrator
 pub class BuildSystem:
@@ -374,3 +555,85 @@ pub class BuildSystem:
             print("Cleaning build artifacts...")
 
         Ok(())
+
+    pub fn get_build_dir(self): String =
+        """Get build output directory.
+
+        Returns:
+            Build directory path
+        """
+        self.project.get_build_dir()
+
+    pub fn is_incremental_enabled(self): bool =
+        """Check if incremental compilation is enabled.
+
+        Returns:
+            True if incremental
+        """
+        self.config.incremental
+
+    pub fn is_parallel_enabled(self): bool =
+        """Check if parallel compilation is enabled.
+
+        Returns:
+            True if parallel
+        """
+        self.config.parallel
+
+    pub fn get_language_count(self): i32 =
+        """Get number of languages in project.
+
+        Returns:
+            Language count
+        """
+        self.project.languages.len()
+
+    pub fn has_language(self, language: Language): bool =
+        """Check if project uses specific language.
+
+        Args:
+            language: Language to check
+
+        Returns:
+            True if language is used
+
+        Example:
+            if build.has_language(Language::Rust):
+                print("Project uses Rust")
+        """
+        for lang_config in self.project.languages:
+            if lang_config.language == language:
+                return true
+        false
+
+    pub fn get_configuration_summary(self): String =
+        """Get build configuration summary.
+
+        Returns:
+            Human-readable configuration
+
+        Example:
+            print(build.get_configuration_summary())
+            # → "Release build (parallel, incremental, 4 workers, size optimization)"
+        """
+        let mut parts: List[String] = []
+
+        # Mode
+        parts.append(match self.config.mode:
+            CompilationMode::Debug: "Debug"
+            CompilationMode::Release: "Release"
+            CompilationMode::Profile: "Profile"
+        )
+
+        parts.append("build")
+
+        # Flags
+        if self.config.parallel:
+            parts.append("parallel")
+        if self.config.incremental:
+            parts.append("incremental")
+
+        parts.append("{self.config.workers} workers")
+        parts.append("{self.config.optimization.to_string()} optimization")
+
+        parts.join(", ")
