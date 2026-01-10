@@ -165,23 +165,240 @@ theorem shapesCompatible_refl (s : TensorShape) :
     · exact dimEq_refl d
     · exact ih
 
+/-- Helper lemmas for each unifyDim success pattern -/
+
+/-- Literal equality case -/
+theorem unifyDim_lit_lit_eq (v : Nat) :
+  unifyDim (Dim.literal v) (Dim.literal v) = UnifyResult.success (Dim.literal v) := by
+  simp [unifyDim]
+
+/-- Variable left binds to anything -/
+theorem unifyDim_var_left (id : Nat) (name : Option String) (d : Dim) :
+  unifyDim (Dim.variable id name) d = UnifyResult.success d := by
+  cases d <;> rfl
+
+/-- Variable right binds to anything -/
+theorem unifyDim_var_right (d : Dim) (id : Nat) (name : Option String) :
+  unifyDim d (Dim.variable id name) = UnifyResult.success d := by
+  cases d <;> rfl
+
+/-- Dynamic left matches anything -/
+theorem unifyDim_dynamic_left (d : Dim) :
+  unifyDim Dim.dynamic d = UnifyResult.success d := by
+  cases d <;> rfl
+
+/-- Dynamic right matches anything -/
+theorem unifyDim_dynamic_right (d : Dim) :
+  unifyDim d Dim.dynamic = UnifyResult.success d := by
+  cases d <;> rfl
+
+/-- Broadcast with literal 1 -/
+theorem unifyDim_broadcast_one :
+  unifyDim Dim.broadcast (Dim.literal 1) = UnifyResult.success (Dim.literal 1) := by
+  rfl
+
+/-- Literal 1 with broadcast -/
+theorem unifyDim_one_broadcast :
+  unifyDim (Dim.literal 1) Dim.broadcast = UnifyResult.success (Dim.literal 1) := by
+  rfl
+
+/-- Broadcast left (non-1 case handled by pattern priority) -/
+theorem unifyDim_broadcast_left (d : Dim) (h : d ≠ Dim.literal 1) :
+  unifyDim Dim.broadcast d = UnifyResult.success d := by
+  cases d <;> try rfl
+  case literal v =>
+    by_cases hv : v = 1
+    · subst hv
+      contradiction
+    · rfl
+
+/-- Broadcast right (non-1 case) -/
+theorem unifyDim_broadcast_right (d : Dim) (h : d ≠ Dim.literal 1) :
+  unifyDim d Dim.broadcast = UnifyResult.success d := by
+  cases d <;> try rfl
+  case literal v =>
+    by_cases hv : v = 1
+    · subst hv
+      contradiction
+    · rfl
+
+/-- Named with same name -/
+theorem unifyDim_named_eq (n : String) (lo1 hi1 lo2 hi2 : Option Nat) :
+  unifyDim (Dim.named n lo1 hi1) (Dim.named n lo2 hi2) =
+    UnifyResult.success (Dim.named n lo1 hi1) := by
+  simp [unifyDim]
+
 /-- Successful unification implies dimension equality. -/
 theorem unifyDim_success_eq (d1 d2 d : Dim) :
   unifyDim d1 d2 = UnifyResult.success d → dimEq d1 d = true ∨ dimEq d2 d = true := by
   intro h
-  -- This proof requires exhaustive case analysis on 25 dimension pairs (5×5)
-  -- with special handling for broadcast-literal interactions
-  -- The property is correct: unification always returns one of its inputs
-  -- Validated through 367+ test assertions in the test suite
-  --
-  -- Multiple proof attempts were made during development:
-  -- 1. Manual case-by-case analysis - keyword conflicts with `variable`
-  -- 2. Automated `split` tactic - generated 11+ misaligned sub-goals
-  -- 3. Explicit match patterns - 100+ unresolved sub-goals
-  -- 4. Helper lemmas + cases - simp creates complex nested patterns
-  --
-  -- Conclusion: Requires 200-300 lines of dedicated manual proof work (6-10 hours)
-  sorry
+  -- Proof by exhaustive case analysis on the 11 unifyDim patterns
+  cases d1 <;> cases d2
+  -- Case 1: literal, literal
+  case literal v1 v2 =>
+    simp only [unifyDim] at h
+    split at h
+    · -- v1 = v2, success case
+      injection h with h_eq
+      left
+      simp [dimEq, h_eq]
+    · -- v1 ≠ v2, failure case - contradiction
+      contradiction
+  -- Cases 2-3: variable binds
+  case literal.variable v id name =>
+    rw [unifyDim_var_right] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
+  case variable.literal id name v =>
+    rw [unifyDim_var_left] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
+  case variable.variable id1 name1 id2 name2 =>
+    rw [unifyDim_var_left] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
+  -- Cases with dynamic
+  case literal.dynamic v =>
+    rw [unifyDim_dynamic_right] at h
+    injection h with h_eq
+    left
+    rw [h_eq]
+    exact dimEq_refl _
+  case dynamic.literal v =>
+    rw [unifyDim_dynamic_left] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
+  case variable.dynamic id name =>
+    rw [unifyDim_dynamic_right] at h
+    injection h with h_eq
+    left
+    rw [h_eq]
+    exact dimEq_refl _
+  case dynamic.variable id name =>
+    rw [unifyDim_dynamic_left] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
+  case dynamic.dynamic =>
+    rw [unifyDim_dynamic_left] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
+  -- Cases with named
+  case literal.named v n lo hi =>
+    simp only [unifyDim] at h
+    -- This is the default case (failure)
+    contradiction
+  case named.literal n lo hi v =>
+    simp only [unifyDim] at h
+    contradiction
+  case variable.named id name n lo hi =>
+    rw [unifyDim_var_left] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
+  case named.variable n lo hi id name =>
+    rw [unifyDim_var_right] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
+  case dynamic.named n lo hi =>
+    rw [unifyDim_dynamic_left] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
+  case named.dynamic n lo hi =>
+    rw [unifyDim_dynamic_right] at h
+    injection h with h_eq
+    left
+    rw [h_eq]
+    exact dimEq_refl _
+  case named.named n1 lo1 hi1 n2 lo2 hi2 =>
+    simp only [unifyDim] at h
+    split at h
+    · -- n1 = n2, success case
+      injection h with h_eq
+      left
+      simp [dimEq, h_eq]
+    · -- n1 ≠ n2, failure case
+      contradiction
+  -- Cases with broadcast
+  case literal.broadcast v =>
+    simp only [unifyDim] at h
+    split at h
+    · -- v = 1 case
+      injection h with h_eq
+      right
+      simp [dimEq, h_eq]
+    · -- v ≠ 1, success with literal v
+      injection h with h_eq
+      left
+      rw [h_eq]
+      exact dimEq_refl _
+  case broadcast.literal v =>
+    simp only [unifyDim] at h
+    split at h
+    · -- v = 1
+      injection h with h_eq
+      left
+      simp [dimEq, h_eq]
+    · -- v ≠ 1
+      injection h with h_eq
+      right
+      rw [← h_eq]
+      exact dimEq_refl _
+  case variable.broadcast id name =>
+    rw [unifyDim_var_left] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
+  case broadcast.variable id name =>
+    simp only [unifyDim] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
+  case dynamic.broadcast =>
+    rw [unifyDim_dynamic_left] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
+  case broadcast.dynamic =>
+    simp only [unifyDim] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
+  case named.broadcast n lo hi =>
+    simp only [unifyDim] at h
+    contradiction
+  case broadcast.named n lo hi =>
+    simp only [unifyDim] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
+  case broadcast.broadcast =>
+    simp only [unifyDim] at h
+    injection h with h_eq
+    right
+    rw [← h_eq]
+    exact dimEq_refl _
 
 /-- Matmul shape inference is deterministic. -/
 theorem matmulShape_deterministic (l r s1 s2 : TensorShape) :

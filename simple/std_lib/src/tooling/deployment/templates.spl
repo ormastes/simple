@@ -2,6 +2,8 @@
 # Generate deployment configurations from templates
 
 use core.result.{Result, Ok, Err}
+use host.async_nogc_mut.io.fs
+use host.common.io.types.FilePath
 
 # Template variable
 pub class TemplateVar:
@@ -266,7 +268,7 @@ spec:
 
         Ok(())
 
-    fn docker_compose_template(self, services: List[String], networks: List[String>): String =
+    fn docker_compose_template(self, services: List[String], networks: List[String]): String =
         """Get Docker Compose template.
 
         Args:
@@ -276,8 +278,32 @@ spec:
         Returns:
             docker-compose.yml content
         """
-        # TODO: [stdlib][P3] Generate docker-compose.yml with services
-        "version: '3.8'\nservices:\n  # TODO\n"
+        let mut compose = "version: '3.8'\n\nservices:\n"
+
+        # Generate service definitions
+        for service in services:
+            compose += "  {service}:\n"
+            compose += "    build: ./{service}\n"
+            compose += "    image: {service}:latest\n"
+            compose += "    container_name: {service}\n"
+            compose += "    restart: unless-stopped\n"
+
+            # Add network connections
+            if networks.len() > 0:
+                compose += "    networks:\n"
+                for network in networks:
+                    compose += "      - {network}\n"
+
+            compose += "\n"
+
+        # Generate network definitions
+        if networks.len() > 0:
+            compose += "networks:\n"
+            for network in networks:
+                compose += "  {network}:\n"
+                compose += "    driver: bridge\n"
+
+        compose
 
     pub fn generate_systemd(
         self,
@@ -343,6 +369,13 @@ WantedBy=multi-user.target
             path: File path
             content: File content
         """
-        # TODO: [stdlib][P3] Write to file
         if self.verbose:
             print("Writing {path}")
+
+        # Write to file using fs module
+        match fs.write_text_sync(path as FilePath, &content):
+            Ok(_):
+                if self.verbose:
+                    print("  ✓ {path} ({content.len()} bytes)")
+            Err(e):
+                print("  ✗ Error writing {path}: {e}")
