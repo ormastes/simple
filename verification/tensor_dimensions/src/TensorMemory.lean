@@ -173,10 +173,25 @@ theorem tensor_memory_bounds_valid (shape : TensorShape) (elemSize : Nat) :
     tensorMemoryBytes shape elemSize = some (minMem, maxMem) →
     minMem ≤ maxMem := by
   intro minMem maxMem h
-  -- This follows from min_le_max_elements:
-  -- tensorMemoryBytes computes minMem = minElems * elemSize, maxMem = maxElems * elemSize
-  -- where minElems ≤ maxElems (by min_le_max_elements)
-  -- Therefore minMem ≤ maxMem
-  sorry  -- Complex proof involving match expression decomposition
+  unfold tensorMemoryBytes at h
+  -- Match decomposition
+  cases h_min : minElements shape
+  · -- minElements = none, contradicts h
+    simp [h_min] at h
+  · -- minElements = some minElems
+    cases h_max : maxElements shape
+    · -- maxElements = none, contradicts h
+      simp [h_min, h_max] at h
+    · -- maxElements = some maxElems
+      rename_i minElems maxElems
+      simp [h_min, h_max] at h
+      -- h is now: minElems * elemSize = minMem ∧ maxElems * elemSize = maxMem
+      obtain ⟨h_minMem, h_maxMem⟩ := h
+      -- h_minMem: minElems * elemSize = minMem
+      -- h_maxMem: maxElems * elemSize = maxMem
+      rw [← h_minMem, ← h_maxMem]
+      -- Need to show: minElems * elemSize ≤ maxElems * elemSize
+      have bounds := min_le_max_elements shape minElems maxElems h_min h_max
+      exact Nat.mul_le_mul_right elemSize bounds
 
 end TensorMemory

@@ -2,6 +2,8 @@
 # Find all tests in a multi-language project
 
 use tooling.core.project.{Language, ProjectContext}
+use host.async_nogc_mut.io.fs
+use host.common.io.types.{FileType, DirPath, FilePath}
 
 # Test suite information
 pub class TestSuite:
@@ -207,13 +209,76 @@ pub class TestDiscovery:
         """Find files matching glob patterns.
 
         Args:
-            patterns: Glob patterns
+            patterns: Glob patterns (simplified - supports *.ext and name_*.ext)
 
         Returns:
             Matching file paths
         """
-        # TODO: [stdlib][P1] Implement recursive glob search
-        []
+        let results: List[String] = []
+        for pattern in patterns:
+            self.find_files_by_pattern(self.root, pattern, results)
+        results
+
+    fn find_files_by_pattern(self, dir: String, pattern: String, results: List[String]):
+        """Recursively find files matching pattern."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    let name = entry.name() as String
+                    let path = entry.path() as String
+
+                    match entry.file_type():
+                        FileType::File:
+                            # Check if file matches pattern
+                            if self.matches_pattern(name, pattern):
+                                results.append(path)
+                        FileType::Directory:
+                            # Skip common exclude patterns
+                            if not self.should_skip_dir(name):
+                                self.find_files_by_pattern(path, pattern, results)
+                        _:
+                            pass
+            Err(_):
+                # Ignore errors
+                pass
+
+    fn matches_pattern(self, name: String, pattern: String): bool =
+        """Check if name matches simplified glob pattern.
+
+        Supports:
+        - *.ext (ends with .ext)
+        - prefix_*.ext (starts with prefix_, ends with .ext)
+        - *_suffix.ext (ends with _suffix.ext)
+        """
+        if pattern.starts_with("*"):
+            # Pattern: *.ext or *_suffix.ext
+            let suffix = pattern[1:]  # Remove leading *
+            name.ends_with(suffix)
+        elif pattern.ends_with("*"):
+            # Pattern: prefix_*
+            let prefix = pattern[0:pattern.len()-1]
+            name.starts_with(prefix)
+        elif pattern.contains("*"):
+            # Pattern: prefix_*.ext
+            let star_idx = pattern.find("*")
+            let prefix = pattern[0:star_idx]
+            let suffix = pattern[star_idx+1:]
+            name.starts_with(prefix) and name.ends_with(suffix)
+        else:
+            # Exact match
+            name == pattern
+
+    fn should_skip_dir(self, name: String): bool =
+        """Check if directory should be skipped during test discovery."""
+        name == "node_modules" or
+        name == "target" or
+        name == "__pycache__" or
+        name == ".git" or
+        name == ".venv" or
+        name == "venv" or
+        name == "build" or
+        name == "dist" or
+        name.starts_with(".")
 
     fn find_files_named(self, name: String): List[String] =
         """Find files with exact name.
@@ -224,5 +289,26 @@ pub class TestDiscovery:
         Returns:
             Matching file paths
         """
-        # TODO: [stdlib][P1] Implement recursive file search
-        []
+        let results: List[String] = []
+        self.find_files_named_recursive(self.root, name, results)
+        results
+
+    fn find_files_named_recursive(self, dir: String, name: String, results: List[String]):
+        """Recursively find files with exact name."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    let entry_name = entry.name() as String
+                    let path = entry.path() as String
+
+                    # If this is the file we're looking for, add its path
+                    if entry_name == name:
+                        results.append(path)
+
+                    # Recursively search subdirectories
+                    if entry.file_type() == FileType::Directory:
+                        if not self.should_skip_dir(entry_name):
+                            self.find_files_named_recursive(path, name, results)
+            Err(_):
+                # Ignore errors
+                pass

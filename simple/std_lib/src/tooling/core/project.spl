@@ -2,7 +2,8 @@
 # Detects language roots, reads config files, manages project structure
 
 use host.async_nogc_mut.io.fs
-use core.json
+use host.common.io.types.{FileType, DirEntry, FilePath, DirPath}
+use sdn.{SdnDocument, SdnValue}
 use core.result.{Result, Ok, Err}
 
 # Project language type
@@ -46,18 +47,223 @@ pub class ProjectConfig:
         }
 
     pub fn load_from_file(path: String): Result[ProjectConfig, String] =
-        """Load project config from simple.toml.
+        """Load project config from simple.sdn.
 
         Args:
-            path: Path to simple.toml
+            path: Path to simple.sdn file
 
         Returns:
             Loaded configuration or error
+
+        Example simple.sdn format:
+            name: my-project
+            version: 1.0.0
+
+            languages:
+              - language: Simple
+                root: .
+                source_dirs: [src, lib]
+
+              - language: Rust
+                root: ./backend
+                source_dirs: [src]
+                exclude_patterns: [target]
+
+            build_dir: target
+            test_dir: tests
+            deploy_dir: dist
         """
-        # TODO: [stdlib][P1] Implement TOML parsing when available
-        # For now, return default config
-        let config = ProjectConfig.new(".")
-        Ok(config)
+        # Try to read the file
+        match fs.read_text_sync(path as FilePath):
+            Ok(content):
+                # Parse SDN
+                match SdnDocument.parse(content):
+                    Ok(doc):
+                        # Extract configuration from SDN document
+                        let config = self.parse_sdn_config(doc, path)
+                        Ok(config)
+                    Err(err):
+                        Err("Failed to parse SDN config: " + err.to_string())
+            Err(_):
+                # File doesn't exist, return default
+                let config = ProjectConfig.new(".")
+                Ok(config)
+
+    fn parse_sdn_config(doc: SdnDocument, path: String): ProjectConfig =
+        """Parse SDN document into project configuration.
+
+        Args:
+            doc: Parsed SDN document
+            path: Original file path for root extraction
+
+        Returns:
+            Project configuration
+        """
+        let root_path = self.get_parent_dir_static(path)
+        let mut config = ProjectConfig.new(root_path)
+
+        # Extract name
+        match doc.get("name"):
+            some(SdnValue::String(name)):
+                config.name = name
+            _:
+                pass
+
+        # Extract version
+        match doc.get("version"):
+            some(SdnValue::String(version)):
+                config.version = version
+            _:
+                pass
+
+        # Extract build_dir
+        match doc.get("build_dir"):
+            some(SdnValue::String(dir)):
+                config.build_dir = dir
+            _:
+                pass
+
+        # Extract test_dir
+        match doc.get("test_dir"):
+            some(SdnValue::String(dir)):
+                config.test_dir = dir
+            _:
+                pass
+
+        # Extract deploy_dir
+        match doc.get("deploy_dir"):
+            some(SdnValue::String(dir)):
+                config.deploy_dir = dir
+            _:
+                pass
+
+        # Extract language configurations
+        match doc.get("languages"):
+            some(SdnValue::Array(langs)):
+                for lang_val in langs:
+                    match self.parse_language_config(lang_val):
+                        some(lang_config):
+                            config.languages.append(lang_config)
+                        none:
+                            pass
+            _:
+                pass
+
+        config
+
+    fn parse_language_config(value: SdnValue): LanguageConfig? =
+        """Parse language configuration from SDN value.
+
+        Args:
+            value: SDN value representing language config
+
+        Returns:
+            Language configuration if valid
+        """
+        match value:
+            SdnValue::Dict(dict):
+                # Get language type
+                let lang_type = match dict.get("language"):
+                    some(SdnValue::String(lang_str)):
+                        self.parse_language_string(lang_str)
+                    _:
+                        return none
+
+                # Get root path
+                let root = match dict.get("root"):
+                    some(SdnValue::String(r)):
+                        r
+                    _:
+                        "."
+
+                # Create config
+                let mut config = LanguageConfig.new(lang_type, root)
+
+                # Get source directories
+                match dict.get("source_dirs"):
+                    some(SdnValue::Array(dirs)):
+                        config.source_dirs = []
+                        for dir_val in dirs:
+                            match dir_val:
+                                SdnValue::String(dir):
+                                    config.source_dirs.append(dir)
+                                _:
+                                    pass
+                    _:
+                        pass
+
+                # Get exclude patterns
+                match dict.get("exclude_patterns"):
+                    some(SdnValue::Array(patterns)):
+                        config.exclude_patterns = []
+                        for pat_val in patterns:
+                            match pat_val:
+                                SdnValue::String(pat):
+                                    config.exclude_patterns.append(pat)
+                                _:
+                                    pass
+                    _:
+                        pass
+
+                # Get compiler flags
+                match dict.get("compiler_flags"):
+                    some(SdnValue::Array(flags)):
+                        config.compiler_flags = []
+                        for flag_val in flags:
+                            match flag_val:
+                                SdnValue::String(flag):
+                                    config.compiler_flags.append(flag)
+                                _:
+                                    pass
+                    _:
+                        pass
+
+                # Get test command
+                match dict.get("test_command"):
+                    some(SdnValue::String(cmd)):
+                        config.test_command = cmd
+                    _:
+                        pass
+
+                some(config)
+            _:
+                none
+
+    fn parse_language_string(lang_str: String): Language =
+        """Parse language string to Language enum.
+
+        Args:
+            lang_str: Language name
+
+        Returns:
+            Language enum value
+        """
+        match lang_str:
+            "Simple": Language::Simple
+            "Rust": Language::Rust
+            "Python": Language::Python
+            "JavaScript": Language::JavaScript
+            "TypeScript": Language::TypeScript
+            "Go": Language::Go
+            "C": Language::C
+            "Cpp": Language::Cpp
+            "C++": Language::Cpp
+            _: Language::Simple  # Default
+
+    fn get_parent_dir_static(path: String): String =
+        """Get parent directory from path (static method).
+
+        Args:
+            path: File path
+
+        Returns:
+            Parent directory
+        """
+        let last_slash = path.rfind("/")
+        if last_slash >= 0:
+            path[0:last_slash]
+        else:
+            "."
 
     pub fn add_language(self, lang_config: LanguageConfig):
         """Add language configuration.
@@ -168,9 +374,9 @@ pub class ProjectDetector:
         """Check if directory contains Simple project.
 
         Returns:
-            True if simple.toml or .spl files exist
+            True if simple.sdn or .spl files exist
         """
-        self.file_exists("simple.toml") or self.has_files_with_extension(".spl")
+        self.file_exists("simple.sdn") or self.has_files_with_extension(".spl")
 
     pub fn find_cargo_projects(self): List[String] =
         """Find all Rust/Cargo projects.
@@ -222,32 +428,112 @@ pub class ProjectDetector:
         """
         self.file_exists_in(root, "tsconfig.json")
 
-    # Helper methods (simplified - full implementation would use fs module)
+    # Helper methods - File system operations
 
     fn file_exists(self, name: String): bool =
         """Check if file exists in project root."""
-        # TODO: [stdlib][P3] Use fs module when available
-        false
+        let path = self.root + "/" + name
+        fs.exists_sync(path as FilePath)
 
     fn file_exists_in(self, dir: String, name: String): bool =
         """Check if file exists in directory."""
-        # TODO: [stdlib][P3] Use fs module
-        false
+        let path = dir + "/" + name
+        fs.exists_sync(path as FilePath)
 
     fn has_files_with_extension(self, ext: String): bool =
         """Check if any files with extension exist."""
-        # TODO: [stdlib][P3] Use fs module
-        false
+        # Recursively search for files with extension
+        self.scan_for_extension(self.root, ext)
+
+    fn scan_for_extension(self, dir: String, ext: String): bool =
+        """Recursively scan directory for files with extension."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    let name = entry.name() as String
+
+                    # Check if file has the extension
+                    if name.ends_with(ext):
+                        return true
+
+                    # Recursively search subdirectories
+                    if entry.file_type() == FileType::Directory:
+                        let subdir_path = entry.path() as String
+                        if self.scan_for_extension(subdir_path, ext):
+                            return true
+
+                false
+            Err(_):
+                false
 
     fn find_files_named(self, name: String): List[String] =
         """Find all files with given name recursively."""
-        # TODO: [stdlib][P3] Use fs module for recursive search
-        []
+        let results: List[String] = []
+        self.find_files_named_recursive(self.root, name, results)
+        results
+
+    fn find_files_named_recursive(
+        self,
+        dir: String,
+        name: String,
+        results: List[String]
+    ):
+        """Recursively find files with given name."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    let entry_name = entry.name() as String
+
+                    # If this is the file we're looking for, extract its directory
+                    if entry_name == name:
+                        let file_path = entry.path() as String
+                        # Get the directory containing this file
+                        let dir_path = self.get_parent_dir(file_path)
+                        results.append(dir_path)
+
+                    # Recursively search subdirectories
+                    if entry.file_type() == FileType::Directory:
+                        let subdir = entry.path() as String
+                        # Skip common exclude patterns
+                        if not self.should_skip_dir(entry_name):
+                            self.find_files_named_recursive(subdir, name, results)
+            Err(_):
+                # Ignore errors (permission denied, etc.)
+                pass
+
+    fn should_skip_dir(self, name: String): bool =
+        """Check if directory should be skipped."""
+        name == "node_modules" or
+        name == "target" or
+        name == "__pycache__" or
+        name == ".git" or
+        name == ".venv" or
+        name == "venv" or
+        name.starts_with(".")
+
+    fn get_parent_dir(self, path: String): String =
+        """Get parent directory from path."""
+        # Find last slash
+        let last_slash = path.rfind("/")
+        if last_slash >= 0:
+            path[0:last_slash]
+        else:
+            "."
 
     fn deduplicate_paths(self, paths: List[String]): List[String] =
         """Remove duplicate paths."""
-        # TODO: [stdlib][P1] Implement deduplication
-        paths
+        let unique: List[String] = []
+        for path in paths:
+            if not self.contains_path(unique, path):
+                unique.append(path)
+        unique
+
+    fn contains_path(self, paths: List[String], target: String): bool =
+        """Check if path is in list."""
+        for path in paths:
+            if path == target:
+                return true
+        false
 
 # Project context - unified view of multi-language project
 pub class ProjectContext:
@@ -282,10 +568,10 @@ pub class ProjectContext:
         }
 
     pub fn from_config_file(path: String): Result[ProjectContext, String] =
-        """Load project from simple.toml.
+        """Load project from simple.sdn.
 
         Args:
-            path: Path to simple.toml
+            path: Path to simple.sdn config file
 
         Returns:
             Project context or error
@@ -349,5 +635,67 @@ pub class ProjectContext:
         Returns:
             List of source file paths
         """
-        # TODO: [stdlib][P1] Implement recursive file discovery with exclusion patterns
-        []
+        # Get language configuration
+        match self.config.get_language_config(language):
+            some(lang_config):
+                let files: List[String] = []
+                # Scan each source directory
+                for src_dir in lang_config.source_dirs:
+                    let full_path = lang_config.root + "/" + src_dir
+                    let ext = self.get_extension_for_language(language)
+                    self.collect_files_with_extension(full_path, ext, lang_config.exclude_patterns, files)
+                files
+            none:
+                []
+
+    fn get_extension_for_language(self, language: Language): String =
+        """Get file extension for language."""
+        match language:
+            Language::Simple: ".spl"
+            Language::Rust: ".rs"
+            Language::Python: ".py"
+            Language::JavaScript: ".js"
+            Language::TypeScript: ".ts"
+            Language::Go: ".go"
+            Language::C: ".c"
+            Language::Cpp: ".cpp"
+
+    fn collect_files_with_extension(
+        self,
+        dir: String,
+        ext: String,
+        exclude_patterns: List[String],
+        results: List[String]
+    ):
+        """Recursively collect files with given extension."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    let name = entry.name() as String
+                    let path = entry.path() as String
+
+                    # Skip excluded directories
+                    if self.is_excluded(name, exclude_patterns):
+                        continue
+
+                    match entry.file_type():
+                        FileType::File:
+                            # Add file if it matches extension
+                            if name.ends_with(ext):
+                                results.append(path)
+                        FileType::Directory:
+                            # Recursively scan subdirectories
+                            self.collect_files_with_extension(path, ext, exclude_patterns, results)
+                        _:
+                            # Skip symlinks and other types
+                            pass
+            Err(_):
+                # Ignore errors
+                pass
+
+    fn is_excluded(self, name: String, patterns: List[String]): bool =
+        """Check if name matches any exclusion pattern."""
+        for pattern in patterns:
+            if name == pattern or name.starts_with(pattern):
+                return true
+        false
