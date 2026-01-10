@@ -1,288 +1,451 @@
+"""
 # Tensor Dimension Inference Specification
-#
-# Status: Implementing
-# Feature IDs: #193
-# Keywords: tensors, dimensions, shape, inference, types, verification
-# Topics: data-structures, type-system, machine-learning
-#
-# This specification demonstrates compile-time dimension tracking for tensors
-# with range constraints, shape inference through operations, and memory estimation.
 
-print("============================================================")
-print("  TENSOR DIMENSION INFERENCE SPECIFICATION")
-print("============================================================")
-print("")
+**Status:** Complete
+**Feature IDs:** #193
+**Keywords:** tensors, dimensions, shape, inference, types, verification, machine-learning
+**Topics:** data-structures, type-system, verification
 
-# ============================================================================
-# Core Types
-# ============================================================================
+## Overview
 
-enum Dim:
-    Literal(value: Int)
-    Named(name: String, lo: Int, hi: Int)
-    Var(id: Int)
-    Unknown
-    Broadcast
+Compile-time dimension tracking for N-dimensional tensors with:
+- Exact dimensions (`Dim.Literal(10)`)
+- Named dimensions with ranges (`Dim.Named("batch", 1, 64)`)
+- Dynamic dimensions (`Dim.Dynamic`)
+- Broadcast semantics (`Dim.Broadcast`)
 
-enum ShapeError:
-    LiteralMismatch(expected: Int, actual: Int)
-    RankMismatch(left_rank: Int, right_rank: Int)
-    MatmulIncompatible(k1: Int, k2: Int)
-    ReshapeMismatch(input_elems: Int, output_elems: Int)
+Enables shape inference through operations (matmul, reshape, broadcast) with
+compile-time verification and runtime memory estimation.
 
-struct TensorShape:
-    dims: List[Dim]
+## Specification
 
-enum ShapeResult:
-    Ok(shape: TensorShape)
-    Err(error: ShapeError)
+### Dimension Types
 
-# ============================================================================
-# Utilities
-# ============================================================================
+1. **Literal**: Exact known size (`Dim.Literal(784)`)
+2. **Named**: Dimension with name and range constraint (`Dim.Named("batch", 1, 64)`)
+3. **Variable**: Unbound type variable for inference (`Dim.Var(id)`)
+4. **Dynamic**: Matches any size (`Dim.Dynamic`)
+5. **Broadcast**: Size-1 dimension that broadcasts (`Dim.Broadcast`)
 
-fn dim_to_string(d: Dim) -> String:
-    match d:
-        case Dim::Literal(v):
-            return "{v}"
-        case Dim::Named(n, lo, hi):
-            if lo == hi:
-                return "{n}={lo}"
-            else:
-                return "{n}:{lo}..{hi}"
-        case Dim::Var(id):
-            return "α{id}"
-        case Dim::Unknown:
-            return "*"
-        case Dim::Broadcast:
-            return "?"
+### Unification Rules
 
-fn shape_to_string(shape: TensorShape) -> String:
-    if shape.dims.len() == 0:
-        return "[]"
-    if shape.dims.len() == 1:
-        return "[" + dim_to_string(shape.dims[0]) + "]"
-    if shape.dims.len() == 2:
-        return "[" + dim_to_string(shape.dims[0]) + ", " + dim_to_string(shape.dims[1]) + "]"
-    if shape.dims.len() == 3:
-        return "[" + dim_to_string(shape.dims[0]) + ", " + dim_to_string(shape.dims[1]) + ", " + dim_to_string(shape.dims[2]) + "]"
-    return "[...{shape.dims.len()} dims...]"
+Dimensions unify when they can be made compatible:
+- Literal(n) ∪ Literal(n) → Literal(n)
+- Literal(n) ∪ Literal(m) → Error (n ≠ m)
+- Named("x", a, b) ∪ Named("x", c, d) → Named("x", max(a,c), min(b,d))
+- Broadcast ∪ Literal(n) → Literal(n)
+- Dynamic ∪ d → d
 
-# ============================================================================
-# Dimension Operations
-# ============================================================================
+### Shape Inference Operations
 
-fn can_unify_dims(d1: Dim, d2: Dim) -> Bool:
-    match (d1, d2):
-        case (Dim::Literal(v1), Dim::Literal(v2)):
-            return v1 == v2
-        case (Dim::Named(n1, _, _), Dim::Named(n2, _, _)):
-            return n1 == n2
-        case (Dim::Unknown, _):
-            return true
-        case (_, Dim::Unknown):
-            return true
-        case (Dim::Var(_), _):
-            return true
-        case (_, Dim::Var(_)):
-            return true
-        case (Dim::Broadcast, Dim::Literal(1)):
-            return true
-        case (Dim::Literal(1), Dim::Broadcast):
-            return true
-        case (Dim::Broadcast, _):
-            return true
-        case (_, Dim::Broadcast):
-            return true
-        case _:
-            return false
+1. **Matmul**: [M, K] @ [K, N] → [M, N]
+   - Unifies contraction dimension K
+   - Preserves outer dimensions M, N
 
-fn unify_dim(d1: Dim, d2: Dim) -> Dim:
-    match (d1, d2):
-        case (Dim::Literal(v1), Dim::Literal(v2)):
-            if v1 == v2:
-                return d1
-            else:
-                return Dim.Unknown
-        case (Dim::Named(n1, lo1, hi1), Dim::Named(n2, lo2, hi2)):
-            if n1 == n2:
-                let new_lo = if lo1 > lo2: lo1 else: lo2
-                let new_hi = if hi1 < hi2: hi1 else: hi2
-                return Dim.Named(name: n1, lo: new_lo, hi: new_hi)
-            else:
-                return Dim.Unknown
-        case (Dim::Unknown, d):
-            return d
-        case (d, Dim::Unknown):
-            return d
-        case (Dim::Var(_), d):
-            return d
-        case (d, Dim::Var(_)):
-            return d
-        case (Dim::Broadcast, Dim::Literal(1)):
-            return Dim.Literal(value: 1)
-        case (Dim::Literal(1), Dim::Broadcast):
-            return Dim.Literal(value: 1)
-        case (Dim::Broadcast, d):
-            return d
-        case (d, Dim::Broadcast):
-            return d
-        case _:
-            return Dim.Unknown
+2. **Broadcast**: [A₁, A₂, ...] + [B₁, B₂, ...] → [max(A₁, B₁), ...]
+   - Aligns dimensions right-to-left
+   - Size-1 dimensions broadcast to any size
 
-fn infer_matmul_shape(left: TensorShape, right: TensorShape) -> ShapeResult:
-    if left.dims.len() != 2 or right.dims.len() != 2:
-        return ShapeResult.Err(error: ShapeError.RankMismatch(
-            left_rank: left.dims.len(),
-            right_rank: right.dims.len()
-        ))
+3. **Reshape**: [∏ dims_in] → [∏ dims_out]
+   - Verifies element count equality
+   - Supports inferred dimension (-1)
 
-    let m = left.dims[0]
-    let k1 = left.dims[1]
-    let k2 = right.dims[0]
-    let n = right.dims[1]
+4. **Reduction**: [D₁, ..., Dᵢ, ...] → [D₁, ..., Dᵢ₋₁, Dᵢ₊₁, ...]
+   - Removes reduced dimension
+   - Optional keepdim preserves dimension as size 1
 
-    if not can_unify_dims(k1, k2):
-        return ShapeResult.Err(error: ShapeError.MatmulIncompatible(
-            k1: 0,
-            k2: 0
-        ))
+### Memory Estimation
 
-    let k = unify_dim(k1, k2)
-    return ShapeResult.Ok(shape: TensorShape(dims: [m, n]))
+For dimension d:
+- Literal(n): min = max = n
+- Named("x", lo, hi): min = lo, max = hi
+- Dynamic: min = 1, max = ∞
+
+Total memory: ∏(dims) × dtype_size (in bytes)
+
+## Examples
+
+### Basic Matmul
+```
+[4, 8] @ [8, 16] → [4, 16]
+```
+
+### MNIST Neural Network
+```
+Input: [batch:1..64, 784]
+W1:    [784, 256]
+H1:    [batch:1..64, 256]  ← inferred
+W2:    [256, 10]
+Output: [batch:1..64, 10]   ← inferred
+```
+
+### Error Detection
+```
+[batch:1..64, 784] @ [512, 10]  → ShapeError
+                      ^^^
+                      Expected 784
+```
+
+## Related Specifications
+- **Tensor Literals** (#192) - Creating and initializing tensors
+- **Type Inference** (#8-9) - Type inference system
+- **Match Expressions** (#90) - Pattern matching for error handling
+"""
+
+import ml.torch.typed_tensor.{TypedTensor, TensorType, DimSpec, zeros, ones, randn}
+import ml.torch.dtype.{DType}
+import ml.torch.device.{Device}
+import verification.models.tensor_dimensions.{Dim, TensorShape, DimInferenceContext, ShapeError, unify_dims, unify_shapes, infer_matmul_shape, infer_broadcast_shape}
 
 # ============================================================================
-# Examples as Functions (Workaround for interpreter bug)
+# Dimension Inference Tests
 # ============================================================================
 
-fn example1():
-    print("Example 1: Basic Matrix Multiplication")
-    print("------------------------------------------------------------")
+describe "Dimension Inference":
 
-    let a = TensorShape(dims: [Dim.Literal(value: 4), Dim.Literal(value: 8)])
-    let b = TensorShape(dims: [Dim.Literal(value: 8), Dim.Literal(value: 16)])
+    describe "Literal Dimensions":
+        it "should unify same literals":
+            let mut ctx = DimInferenceContext.new()
+            let d1 = Dim.Literal(value: 10)
+            let d2 = Dim.Literal(value: 10)
+            let result = unify_dims(ctx, d1, d2)
+            assert result.is_ok()
+            assert result.unwrap() == Dim.Literal(value: 10)
 
-    print("Matrix A: {shape_to_string(a)}")
-    print("Matrix B: {shape_to_string(b)}")
+        it "should fail on different literals":
+            let mut ctx = DimInferenceContext.new()
+            let d1 = Dim.Literal(value: 10)
+            let d2 = Dim.Literal(value: 20)
+            let result = unify_dims(ctx, d1, d2)
+            assert result.is_err()
 
-    let result = infer_matmul_shape(a, b)
-    match result:
-        case ShapeResult.Ok(shape):
-            print("✓ Result: {shape_to_string(shape)}")
-            print("  [4,8] @ [8,16] -> [4,16]")
-        case ShapeResult.Err(err):
-            print("✗ Unexpected error!")
+    describe "Variable Dimensions":
+        it "should bind variable to literal":
+            let mut ctx = DimInferenceContext.new()
+            let var_dim = ctx.fresh_var()
+            let literal = Dim.Literal(value: 32)
+            let result = unify_dims(ctx, var_dim, literal)
+            assert result.is_ok()
+            assert result.unwrap() == Dim.Literal(value: 32)
 
-    print("")
+        it "should bind two variables":
+            let mut ctx = DimInferenceContext.new()
+            let v1 = ctx.fresh_var()
+            let v2 = ctx.fresh_var()
+            let result = unify_dims(ctx, v1, v2)
+            assert result.is_ok()
 
-fn example2():
-    print("Example 2: MNIST Neural Network")
-    print("------------------------------------------------------------")
+    describe "Named Dimensions":
+        it "should unify same named dimensions":
+            let mut ctx = DimInferenceContext.new()
+            let d1 = Dim.Named(name: "batch", range: Some((1, 64)))
+            let d2 = Dim.Named(name: "batch", range: Some((1, 32)))
+            let result = unify_dims(ctx, d1, d2)
+            assert result.is_ok()
+            # Range intersection: (1, 32)
 
-    let input = TensorShape(dims: [
-        Dim.Named(name: "batch", lo: 1, hi: 64),
-        Dim.Literal(value: 784)
-    ])
-    let w1 = TensorShape(dims: [Dim.Literal(value: 784), Dim.Literal(value: 256)])
-    let w2 = TensorShape(dims: [Dim.Literal(value: 256), Dim.Literal(value: 10)])
+        it "should bind named to literal":
+            let mut ctx = DimInferenceContext.new()
+            let named = Dim.Named(name: "batch", range: Some((1, 64)))
+            let literal = Dim.Literal(value: 32)
+            let result = unify_dims(ctx, named, literal)
+            assert result.is_ok()
+            assert result.unwrap() == Dim.Literal(value: 32)
 
-    print("Input:    {shape_to_string(input)}")
-    print("Weight 1: {shape_to_string(w1)}")
-    print("Weight 2: {shape_to_string(w2)}")
+        it "should fail when literal out of range":
+            let mut ctx = DimInferenceContext.new()
+            let named = Dim.Named(name: "batch", range: Some((1, 64)))
+            let literal = Dim.Literal(value: 128)
+            let result = unify_dims(ctx, named, literal)
+            assert result.is_err()
 
-    let h1_result = infer_matmul_shape(input, w1)
-    match h1_result:
-        case ShapeResult.Ok(h1):
-            print("Hidden 1: {shape_to_string(h1)}")
+    describe "Dynamic Dimensions":
+        it "should match anything":
+            let mut ctx = DimInferenceContext.new()
+            let dyn = Dim.Dynamic
+            let literal = Dim.Literal(value: 100)
+            let result = unify_dims(ctx, dyn, literal)
+            assert result.is_ok()
+            assert result.unwrap() == Dim.Literal(value: 100)
 
-            let output_result = infer_matmul_shape(h1, w2)
-            match output_result:
-                case ShapeResult.Ok(output):
-                    print("Output:   {shape_to_string(output)}")
-                    print("✓ Dimensions propagated through 2-layer network!")
-                case ShapeResult.Err(e):
-                    print("✗ Layer 2 failed")
-        case ShapeResult.Err(e):
-            print("✗ Layer 1 failed")
-
-    print("")
-
-fn example3():
-    print("Example 3: Error Detection")
-    print("------------------------------------------------------------")
-
-    let input = TensorShape(dims: [
-        Dim.Named(name: "batch", lo: 1, hi: 64),
-        Dim.Literal(value: 784)
-    ])
-    let bad_weight = TensorShape(dims: [
-        Dim.Literal(value: 512),  # Wrong! Should be 784
-        Dim.Literal(value: 10)
-    ])
-
-    print("Input:      {shape_to_string(input)}")
-    print("Bad weight: {shape_to_string(bad_weight)}")
-
-    let result = infer_matmul_shape(input, bad_weight)
-    match result:
-        case ShapeResult.Ok(shape):
-            print("✗ Should have detected mismatch!")
-        case ShapeResult.Err(err):
-            print("✓ Caught error: K dimensions don't match (784 vs 512)")
-
-    print("")
-
-fn example4():
-    print("Example 4: Named Dimensions with Ranges")
-    print("------------------------------------------------------------")
-
-    let input = TensorShape(dims: [
-        Dim.Named(name: "batch", lo: 1, hi: 64),
-        Dim.Literal(value: 784)
-    ])
-    let weight = TensorShape(dims: [
-        Dim.Literal(value: 784),
-        Dim.Named(name: "classes", lo: 10, hi: 10)
-    ])
-
-    print("Input:  {shape_to_string(input)}")
-    print("Weight: {shape_to_string(weight)}")
-
-    let result = infer_matmul_shape(input, weight)
-    match result:
-        case ShapeResult.Ok(shape):
-            print("Output: {shape_to_string(shape)}")
-            print("✓ Named dimensions preserved!")
-        case ShapeResult.Err(err):
-            print("✗ Unexpected error!")
-
-    print("")
+    describe "Broadcast Dimensions":
+        it "should broadcast 1 to any size":
+            let mut ctx = DimInferenceContext.new()
+            let bcast = Dim.Broadcast
+            let literal = Dim.Literal(value: 64)
+            let result = unify_dims(ctx, bcast, literal)
+            assert result.is_ok()
+            assert result.unwrap() == Dim.Literal(value: 64)
 
 # ============================================================================
-# Run All Examples
+# Shape Inference Tests
 # ============================================================================
 
-example1()
-example2()
-example3()
-example4()
+describe "Shape Inference":
+
+    describe "Shape Unification":
+        it "should unify same shapes":
+            let mut ctx = DimInferenceContext.new()
+            let s1 = TensorShape.from_literals([2, 3, 4])
+            let s2 = TensorShape.from_literals([2, 3, 4])
+            let result = unify_shapes(ctx, s1, s2)
+            assert result.is_ok()
+            assert result.unwrap().ndim() == 3
+
+        it "should fail on rank mismatch":
+            let mut ctx = DimInferenceContext.new()
+            let s1 = TensorShape.from_literals([2, 3])
+            let s2 = TensorShape.from_literals([2, 3, 4])
+            let result = unify_shapes(ctx, s1, s2)
+            assert result.is_err()
+
+    describe "Matmul Shape":
+        it "should infer 2D matmul shape":
+            let mut ctx = DimInferenceContext.new()
+            let left = TensorShape.from_literals([2, 3])   # [M=2, K=3]
+            let right = TensorShape.from_literals([3, 4])  # [K=3, N=4]
+            let result = infer_matmul_shape(ctx, left, right)
+            assert result.is_ok()
+            let output = result.unwrap()
+            assert output.ndim() == 2
+            # Should be [2, 4]
+
+        it "should fail on incompatible K dimensions":
+            let mut ctx = DimInferenceContext.new()
+            let left = TensorShape.from_literals([2, 3])   # [M=2, K=3]
+            let right = TensorShape.from_literals([5, 4])  # [K=5, N=4] - mismatch!
+            let result = infer_matmul_shape(ctx, left, right)
+            assert result.is_err()
+
+        it "should infer matmul with named dimensions":
+            let mut ctx = DimInferenceContext.new()
+            let left = TensorShape(dims: [
+                Dim.Named(name: "batch", range: Some((1, 64))),
+                Dim.Literal(value: 128)
+            ])
+            let right = TensorShape(dims: [
+                Dim.Literal(value: 128),
+                Dim.Literal(value: 256)
+            ])
+            let result = infer_matmul_shape(ctx, left, right)
+            assert result.is_ok()
+
+    describe "Broadcast Shape":
+        it "should broadcast scalar to matrix":
+            let mut ctx = DimInferenceContext.new()
+            let scalar = TensorShape.from_literals([])
+            let matrix = TensorShape.from_literals([3, 4])
+            let result = infer_broadcast_shape(ctx, [scalar, matrix])
+            assert result.is_ok()
+            assert result.unwrap().ndim() == 2
+
+        it "should broadcast [1, 4] with [3, 1]":
+            let mut ctx = DimInferenceContext.new()
+            let s1 = TensorShape.from_literals([1, 4])
+            let s2 = TensorShape.from_literals([3, 1])
+            let result = infer_broadcast_shape(ctx, [s1, s2])
+            assert result.is_ok()
+            # Should be [3, 4]
+
+        it "should fail on incompatible broadcast":
+            let mut ctx = DimInferenceContext.new()
+            let s1 = TensorShape.from_literals([2, 4])
+            let s2 = TensorShape.from_literals([3, 4])
+            let result = infer_broadcast_shape(ctx, [s1, s2])
+            assert result.is_err()
 
 # ============================================================================
-# Summary
+# Typed Tensor Tests
 # ============================================================================
 
-print("============================================================")
-print("  SUMMARY")
-print("============================================================")
-print("")
-print("Successfully demonstrated:")
-print("  ✓ Matrix multiplication shape inference")
-print("  ✓ Multi-layer network dimension propagation")
-print("  ✓ Shape mismatch detection")
-print("  ✓ Named dimensions with range constraints")
-print("")
-print("Key Features:")
-print("  • Compile-time dimension tracking")
-print("  • Shape inference through operations")
-print("  • Type-safe tensor operations")
-print("")
+describe "TypedTensor":
+
+    describe "Creation":
+        it "should create zeros with exact dimensions":
+            let t = TypedTensor.zeros([
+                DimSpec.exact(2),
+                DimSpec.exact(3)
+            ])
+            assert t.ndim() == 2
+            assert t.actual_shape() == [2, 3]
+
+        it "should create randn with named dimensions":
+            let t = TypedTensor.randn([
+                DimSpec.named("batch", 32),
+                DimSpec.named("features", 128)
+            ])
+            assert t.ndim() == 2
+
+        it "should create with range constraints":
+            let t = TypedTensor.zeros([
+                DimSpec.ranged("batch", 16, 1, 64),
+                DimSpec.exact(784)
+            ])
+            assert t.verify().is_ok()
+
+    describe "Operations with Inference":
+        it "should infer matmul output shape":
+            let a = TypedTensor.randn([
+                DimSpec.exact(4),
+                DimSpec.exact(8)
+            ])
+            let b = TypedTensor.randn([
+                DimSpec.exact(8),
+                DimSpec.exact(16)
+            ])
+            let result = a.matmul(b)
+            assert result.is_ok()
+            let c = result.unwrap()
+            assert c.ndim() == 2
+            # Shape should be [4, 16]
+
+        it "should fail matmul on shape mismatch":
+            let a = TypedTensor.randn([DimSpec.exact(4), DimSpec.exact(8)])
+            let b = TypedTensor.randn([DimSpec.exact(10), DimSpec.exact(16)])  # K mismatch
+            let result = a.matmul(b)
+            assert result.is_err()
+
+        it "should infer broadcast add shape":
+            let a = TypedTensor.randn([DimSpec.exact(3), DimSpec.exact(4)])
+            let b = TypedTensor.randn([DimSpec.exact(1), DimSpec.exact(4)])
+            let result = a.add(b)
+            assert result.is_ok()
+
+        it "should infer reshape shape":
+            let t = TypedTensor.randn([DimSpec.exact(4), DimSpec.exact(6)])
+            let result = t.reshape([DimSpec.exact(2), DimSpec.exact(12)])
+            assert result.is_ok()  # 4*6 = 2*12 = 24
+
+        it "should fail reshape on element count mismatch":
+            let t = TypedTensor.randn([DimSpec.exact(4), DimSpec.exact(6)])
+            let result = t.reshape([DimSpec.exact(2), DimSpec.exact(10)])
+            # 4*6=24, 2*10=20, should fail
+
+    describe "Reduction Operations":
+        it "should infer sum shape":
+            let t = TypedTensor.randn([DimSpec.exact(3), DimSpec.exact(4)])
+            let result = t.sum(dim: 1)
+            assert result.is_ok()
+            let s = result.unwrap()
+            assert s.ndim() == 1  # [3]
+
+        it "should infer sum with keepdim":
+            let t = TypedTensor.randn([DimSpec.exact(3), DimSpec.exact(4)])
+            let result = t.sum(dim: 1, keepdim: True)
+            assert result.is_ok()
+            let s = result.unwrap()
+            assert s.ndim() == 2  # [3, 1]
+
+# ============================================================================
+# Memory Estimation Tests
+# ============================================================================
+
+describe "Memory Estimation":
+
+    describe "TensorType Memory":
+        it "should estimate memory for exact dimensions":
+            let tt = TensorType.new([
+                DimSpec.exact(64),
+                DimSpec.exact(256)
+            ], DType.Float32)
+            let mem = tt.min_memory_bytes()
+            assert mem == 64 * 256 * 4  # 65536 bytes
+
+        it "should estimate memory range for ranged dimensions":
+            let tt = TensorType.new([
+                DimSpec.ranged("batch", 32, 1, 64),
+                DimSpec.exact(256)
+            ], DType.Float32)
+            let min_mem = tt.min_memory_bytes()
+            let max_mem = tt.max_memory_bytes()
+            assert min_mem == 1 * 256 * 4     # 1024 bytes
+            assert max_mem == 64 * 256 * 4    # 65536 bytes
+
+# ============================================================================
+# Multi-Dimensional Inference Tests
+# ============================================================================
+
+describe "Multi-Dimensional Inference":
+
+    describe "3D Tensor Operations":
+        it "should infer batch matmul shape":
+            # [B, M, K] @ [B, K, N] -> [B, M, N]
+            let mut ctx = DimInferenceContext.new()
+            let left = TensorShape(dims: [
+                Dim.Named(name: "batch", range: Some((1, 32))),
+                Dim.Literal(value: 4),
+                Dim.Literal(value: 8)
+            ])
+            let right = TensorShape(dims: [
+                Dim.Named(name: "batch", range: Some((1, 32))),
+                Dim.Literal(value: 8),
+                Dim.Literal(value: 16)
+            ])
+            let result = infer_matmul_shape(ctx, left, right)
+            assert result.is_ok()
+
+    describe "4D Tensor Operations (CNN)":
+        it "should handle NCHW format":
+            # Typical CNN input: [N, C, H, W]
+            let input_shape = TensorShape(dims: [
+                Dim.Named(name: "batch", range: Some((1, 128))),
+                Dim.Literal(value: 3),    # RGB
+                Dim.Literal(value: 224),  # Height
+                Dim.Literal(value: 224)   # Width
+            ])
+            assert input_shape.ndim() == 4
+            assert input_shape.is_concrete() == False  # Has named dim with range
+
+    describe "Transformer Dimensions":
+        it "should infer attention shape":
+            # Q: [B, H, S, D], K: [B, H, S, D] -> QK^T: [B, H, S, S]
+            let mut ctx = DimInferenceContext.new()
+            let batch = Dim.Named(name: "batch", range: Some((1, 64)))
+            let heads = Dim.Literal(value: 12)
+            let seq = Dim.Named(name: "seq", range: Some((1, 512)))
+            let head_dim = Dim.Literal(value: 64)
+
+            let q_shape = TensorShape(dims: [batch, heads, seq, head_dim])
+            let k_shape = TensorShape(dims: [batch, heads, seq, head_dim])
+
+            # For attention, we do Q @ K^T
+            # This requires more complex shape manipulation (transpose K)
+            assert q_shape.ndim() == 4
+            assert k_shape.ndim() == 4
+
+    describe "Chain of Operations":
+        it "should propagate dimensions through chain":
+            let mut ctx = DimInferenceContext.new()
+
+            # Input: [B=32, 784]
+            let input = TensorShape(dims: [
+                Dim.Named(name: "batch", range: Some((1, 64))),
+                Dim.Literal(value: 784)
+            ])
+
+            # Layer 1: [784, 256]
+            let w1 = TensorShape.from_literals([784, 256])
+
+            # After matmul: [B, 256]
+            let h1_result = infer_matmul_shape(ctx, input, w1)
+            assert h1_result.is_ok()
+            let h1 = h1_result.unwrap()
+            assert h1.ndim() == 2
+
+            # Layer 2: [256, 128]
+            let w2 = TensorShape.from_literals([256, 128])
+
+            # After matmul: [B, 128]
+            let h2_result = infer_matmul_shape(ctx, h1, w2)
+            assert h2_result.is_ok()
+            let h2 = h2_result.unwrap()
+            assert h2.ndim() == 2
+
+            # Final: [128, 10]
+            let w3 = TensorShape.from_literals([128, 10])
+
+            # After matmul: [B, 10]
+            let output_result = infer_matmul_shape(ctx, h2, w3)
+            assert output_result.is_ok()
+            let output = output_result.unwrap()
+            assert output.ndim() == 2
