@@ -34,6 +34,37 @@ pub enum DependencyType:
     Resource     # Resource file dependency
     Test         # Test dependency
 
+    pub fn to_string(self): String =
+        """Convert dependency type to string.
+
+        Returns:
+            Type name
+
+        Example:
+            DependencyType::Import.to_string()  # → "import"
+        """
+        match self:
+            DependencyType::Import: "import"
+            DependencyType::FFI: "ffi"
+            DependencyType::Resource: "resource"
+            DependencyType::Test: "test"
+
+    pub fn is_code_dependency(self): bool =
+        """Check if this is a code dependency.
+
+        Returns:
+            True if Import or FFI
+
+        Example:
+            DependencyType::Import.is_code_dependency()  # → true
+            DependencyType::Resource.is_code_dependency()  # → false
+        """
+        match self:
+            DependencyType::Import: true
+            DependencyType::FFI: true
+            DependencyType::Resource: false
+            DependencyType::Test: false
+
 # Dependency graph
 pub class DependencyGraph:
     pub edges: List[Dependency]
@@ -45,6 +76,90 @@ pub class DependencyGraph:
             edges: [],
             nodes: {}
         }
+
+    pub fn node_count(self): i32 =
+        """Get number of nodes in graph.
+
+        Returns:
+            Node count
+        """
+        self.nodes.len()
+
+    pub fn edge_count(self): i32 =
+        """Get number of edges in graph.
+
+        Returns:
+            Edge count
+        """
+        self.edges.len()
+
+    pub fn is_empty(self): bool =
+        """Check if graph is empty.
+
+        Returns:
+            True if no nodes
+        """
+        self.nodes.len() == 0
+
+    pub fn get_statistics(self): DependencyStatistics =
+        """Get graph statistics.
+
+        Returns:
+            Dependency statistics
+
+        Example:
+            let stats = graph.get_statistics()
+            print("Nodes: {stats.total_nodes}")
+            print("Edges: {stats.total_edges}")
+            print("Avg dependencies: {stats.avg_dependencies_per_node:.1f}")
+        """
+        let stats = DependencyStatistics.new()
+        stats.total_nodes = self.node_count()
+        stats.total_edges = self.edge_count()
+
+        if stats.total_nodes > 0:
+            stats.avg_dependencies_per_node = (stats.total_edges as f64) / (stats.total_nodes as f64)
+
+        # Find max dependencies
+        for (_, node) in self.nodes.items():
+            let dep_count = node.dependencies.len()
+            if dep_count > stats.max_dependencies:
+                stats.max_dependencies = dep_count
+                stats.most_dependent_file = node.file
+
+        stats
+
+    pub fn get_root_nodes(self): List[String] =
+        """Get root nodes (files with no dependencies).
+
+        Returns:
+            List of root node file paths
+
+        Example:
+            let roots = graph.get_root_nodes()
+            # → ["main.spl", "cli.spl"]
+        """
+        let roots: List[String] = []
+        for (file, node) in self.nodes.items():
+            if node.dependencies.len() == 0:
+                roots.append(file)
+        roots
+
+    pub fn get_leaf_nodes(self): List[String] =
+        """Get leaf nodes (files with no dependents).
+
+        Returns:
+            List of leaf node file paths
+
+        Example:
+            let leaves = graph.get_leaf_nodes()
+            # → ["utils.spl", "constants.spl"]
+        """
+        let leaves: List[String] = []
+        for (file, node) in self.nodes.items():
+            if node.dependents.len() == 0:
+                leaves.append(file)
+        leaves
 
     pub fn add_node(self, file: String, language: Language):
         """Add node to graph.
@@ -452,3 +567,33 @@ pub class DependencyTracker:
 
         output += "}\n"
         output
+
+# Dependency graph statistics
+pub class DependencyStatistics:
+    pub total_nodes: i32
+    pub total_edges: i32
+    pub avg_dependencies_per_node: f64
+    pub max_dependencies: i32
+    pub most_dependent_file: String
+
+    pub fn new(): DependencyStatistics =
+        """Create dependency statistics."""
+        DependencyStatistics {
+            total_nodes: 0,
+            total_edges: 0,
+            avg_dependencies_per_node: 0.0,
+            max_dependencies: 0,
+            most_dependent_file: ""
+        }
+
+    pub fn summary(self): String =
+        """Get statistics summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            print(stats.summary())
+            # → "50 files, 120 dependencies, avg 2.4 deps/file"
+        """
+        "{self.total_nodes} files, {self.total_edges} dependencies, avg {self.avg_dependencies_per_node:.1f} deps/file"
