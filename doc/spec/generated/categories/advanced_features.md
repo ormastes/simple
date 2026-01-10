@@ -7,7 +7,7 @@
 ### 1. [Capability-Based Effects Specification](../capability_effects.md)
 - **Status:** 📋 Planned
 - **Tests:** 14 test cases
-- **Feature IDs:** **Keywords:**
+- **Feature IDs:** #880-884
 
 #### Test Cases
 - Examples: 2 tests

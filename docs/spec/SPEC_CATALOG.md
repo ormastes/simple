@@ -55,9 +55,13 @@
 ### Integration Specifications
 
 - **[Console Framework](integration/console/console_basic_spec.spl)** - 0 tests
+- **[Call Flow Profiling](integration/diagram/call_flow_profiling_spec.spl)** - 1 tests
+- **[Diagram Generation](integration/diagram/diagram_gen_spec.spl)** - 9 tests
+- **[Diagram Integration](integration/diagram/diagram_integration_spec.spl)** - 11 tests
 - **[Doctest Discovery](integration/doctest/discovery_spec.spl)** - 1 tests
 - **[Macro Integration](integration/macros/macro_integration_spec.spl)** - 0 tests
 - **[Simple Math: @ matrix multiplication operator](integration/ml/simple_math_integration_spec.spl)** - 0 tests
+- **[Screenshot FFI](integration/screenshot/screenshot_ffi_spec.spl)** - 11 tests
 - **[Ratatui Backend FFI](integration/ui/tui/ratatui_backend_spec.spl)** - 0 tests
 - **[Vulkan Window Management](integration/ui/vulkan_window_spec.spl)** - 31 tests
 

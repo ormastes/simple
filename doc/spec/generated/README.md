@@ -1,6 +1,6 @@
 # Simple Language Specifications - Index
 
-**Generated:** 2026-01-09 06:15:42
+**Generated:** 2026-01-10 04:47:40
 **Total Specs:** 16
 **Total Tests:** 292
 
@@ -19,9 +19,11 @@
 ## Advanced Features {#advanced-features}
 
 ### [Capability-Based Effects Specification](capability_effects.md)
-**Status:** 📋 Planned | **Tests:** 14 | **Feature IDs:** **Keywords:**
+**Status:** 📋 Planned | **Tests:** 14 | **Feature IDs:** #880-884
 
 Capability-based effect system that prevents LLMs from silently adding I/O or stateful behavior to pure code. Explicit effect markers (`@pure`, `@io`,...
+
+**Key Symbols:** Effect, Capability, Pure, IO, Net, FS, EffectChecker
 
 
 ### [- Test Specification](macro.md)
@@ -44,6 +46,8 @@ This file contains executable test cases extracted from metaprogramming.md.
 **Status:** Draft | **Tests:** 31 | **Feature IDs:** #276-285
 
 This document specifies Simple's async-default execution model where functions are async by default and sync is explicit.
+
+**Key Symbols:** Promise, Suspension, ExecutionMode, AsyncContext, Future
 
 
 ### [Simple Language Concurrency - Test Specification](concurrency.md)
@@ -84,6 +88,8 @@ This file contains executable test cases extracted from modules.md.
 **Status:** Stable | **Tests:** 21 | **Feature IDs:** #10-19
 
 Comprehensive specification of Simple's syntax, execution modes, and lexical structure.
+
+**Key Symbols:** Token, Operator, ExecutionMode, Parser, Lexer
 
 
 ### [Simple Language Traits and Implementations - Test Specification](traits.md)
@@ -136,6 +142,8 @@ Simple uses a Hindley-Milner-style type inference system that automatically dedu
 **Status:** Stable | **Tests:** 13 | **Feature IDs:** #20-29
 
 Complete specification of Simple's type system, including primitives, composites, generics, and mutability rules.
+
+**Key Symbols:** Type, TypeVar, Mutability, Generic
 
 
 ---
