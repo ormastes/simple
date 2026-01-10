@@ -2,8 +2,10 @@
 # Only recompile changed files and their dependencies
 
 use host.async_nogc_mut.io.fs
+use host.common.io.types.FilePath
 use core.result.{Result, Ok, Err}
 use tooling.core.project.Language
+use sdn.{SdnDocument, SdnValue, to_sdn}
 
 # File change tracking entry
 pub class FileEntry:
@@ -71,22 +73,204 @@ pub class IncrementalCache:
             Loaded cache or empty if file doesn't exist
 
         Example:
-            let cache = IncrementalCache.load(".build_cache")
+            let cache = IncrementalCache.load(".build_cache.sdn")
             if cache.is_empty():
                 print("No previous build cache found")
         """
-        # TODO: [stdlib][P1] Implement cache serialization/deserialization
-        # For now, return empty cache
-        IncrementalCache.new(cache_path)
+        # Try to load from SDN file
+        match fs.read_text_sync(cache_path as FilePath):
+            Ok(content):
+                match SdnDocument.parse(content):
+                    Ok(doc):
+                        # Parse cache from SDN
+                        self.parse_cache_from_sdn(doc, cache_path)
+                    Err(_):
+                        # Parse error, return empty cache
+                        IncrementalCache.new(cache_path)
+            Err(_):
+                # File doesn't exist, return empty cache
+                IncrementalCache.new(cache_path)
+
+    fn parse_cache_from_sdn(doc: SdnDocument, cache_path: String): IncrementalCache =
+        """Parse cache from SDN document.
+
+        Args:
+            doc: Parsed SDN document
+            cache_path: Cache file path
+
+        Returns:
+            Loaded cache
+        """
+        let mut cache = IncrementalCache.new(cache_path)
+
+        # Parse entries
+        match doc.get("entries"):
+            some(SdnValue::Dict(entries_dict)):
+                for (path, entry_val) in entries_dict.items():
+                    match self.parse_file_entry(path, entry_val):
+                        some(entry):
+                            cache.entries[path] = entry
+                        none:
+                            pass
+            _:
+                pass
+
+        # Parse dependencies
+        match doc.get("dependencies"):
+            some(SdnValue::Dict(deps_dict)):
+                for (file, deps_val) in deps_dict.items():
+                    match deps_val:
+                        SdnValue::Array(deps_arr):
+                            let deps_list: List[String] = []
+                            for dep_val in deps_arr:
+                                match dep_val:
+                                    SdnValue::String(dep):
+                                        deps_list.append(dep)
+                                    _:
+                                        pass
+                            cache.dependencies[file] = deps_list
+                        _:
+                            pass
+            _:
+                pass
+
+        cache
+
+    fn parse_file_entry(path: String, value: SdnValue): FileEntry? =
+        """Parse file entry from SDN value.
+
+        Args:
+            path: File path
+            value: SDN value
+
+        Returns:
+            Parsed file entry
+        """
+        match value:
+            SdnValue::Dict(dict):
+                # Get mtime
+                let mtime = match dict.get("mtime"):
+                    some(SdnValue::Int(mt)):
+                        mt
+                    _:
+                        0
+
+                # Get hash
+                let hash = match dict.get("hash"):
+                    some(SdnValue::String(h)):
+                        h
+                    _:
+                        ""
+
+                # Get language
+                let language = match dict.get("language"):
+                    some(SdnValue::String(lang_str)):
+                        self.parse_language(lang_str)
+                    _:
+                        Language::Simple
+
+                some(FileEntry {
+                    path: path,
+                    mtime: mtime,
+                    hash: hash,
+                    language: language
+                })
+            _:
+                none
+
+    fn parse_language(lang_str: String): Language =
+        """Parse language from string.
+
+        Args:
+            lang_str: Language name
+
+        Returns:
+            Language enum
+        """
+        match lang_str:
+            "Simple": Language::Simple
+            "Rust": Language::Rust
+            "Python": Language::Python
+            "JavaScript": Language::JavaScript
+            "TypeScript": Language::TypeScript
+            "Go": Language::Go
+            "C": Language::C
+            "Cpp": Language::Cpp
+            _: Language::Simple
 
     pub fn save(self): Result[(), String] =
         """Save cache to disk.
 
         Returns:
             Ok if successful, Err with error message
+
+        SDN Format:
+            entries:
+              src/main.spl:
+                mtime: 1704744000
+                hash: abc123
+                language: Simple
+
+            dependencies:
+              src/main.spl: [src/lib.spl, src/util.spl]
+              src/lib.spl: [src/core.spl]
         """
-        # TODO: [stdlib][P3] Serialize cache to JSON/SDN and write to file
-        Ok(())
+        # Build SDN structure
+        let mut sdn_entries: Dict[String, SdnValue] = {}
+        let mut sdn_deps: Dict[String, SdnValue] = {}
+
+        # Serialize entries
+        for (path, entry) in self.entries.items():
+            let entry_dict: Dict[String, SdnValue] = {}
+            entry_dict["mtime"] = SdnValue::Int(entry.mtime)
+            entry_dict["hash"] = SdnValue::String(entry.hash)
+            entry_dict["language"] = SdnValue::String(self.language_to_string(entry.language))
+
+            sdn_entries[path] = SdnValue::Dict(entry_dict)
+
+        # Serialize dependencies
+        for (file, deps) in self.dependencies.items():
+            let deps_array: List[SdnValue] = []
+            for dep in deps:
+                deps_array.append(SdnValue::String(dep))
+
+            sdn_deps[file] = SdnValue::Array(deps_array)
+
+        # Build root document
+        let root_dict: Dict[String, SdnValue] = {}
+        root_dict["entries"] = SdnValue::Dict(sdn_entries)
+        root_dict["dependencies"] = SdnValue::Dict(sdn_deps)
+
+        let root_value = SdnValue::Dict(root_dict)
+
+        # Serialize to SDN text
+        let sdn_text = to_sdn(root_value)
+
+        # Write to file
+        match fs.write_text_sync(self.cache_path as FilePath, &sdn_text):
+            Ok(_):
+                Ok(())
+            Err(err):
+                Err("Failed to write cache: " + err.to_string())
+
+    fn language_to_string(self, language: Language): String =
+        """Convert language enum to string.
+
+        Args:
+            language: Language enum
+
+        Returns:
+            Language name
+        """
+        match language:
+            Language::Simple: "Simple"
+            Language::Rust: "Rust"
+            Language::Python: "Python"
+            Language::JavaScript: "JavaScript"
+            Language::TypeScript: "TypeScript"
+            Language::Go: "Go"
+            Language::C: "C"
+            Language::Cpp: "Cpp"
 
     pub fn add_file(self, path: String, language: Language):
         """Add file to cache.

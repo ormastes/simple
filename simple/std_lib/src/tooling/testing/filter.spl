@@ -210,23 +210,122 @@ pub class TestFilter:
 
         Returns:
             True if matches
+
+        Supports:
+        - Exact match: "app_test"
+        - Wildcard: "*_test", "test_*", "*integration*"
+        - Substring: "user" matches "user_test.spl"
         """
-        # TODO: [stdlib][P1] Implement regex matching
-        # For now, simple substring match
-        suite.path.contains(pattern)
+        # Simple wildcard matching
+        if pattern.contains("*"):
+            return self.matches_wildcard(suite.path, pattern)
+        else:
+            # Substring match
+            return suite.path.contains(pattern)
+
+    fn matches_wildcard(self, text: String, pattern: String): bool =
+        """Check if text matches wildcard pattern.
+
+        Args:
+            text: Text to match
+            pattern: Wildcard pattern (* matches anything)
+
+        Returns:
+            True if matches
+
+        Examples:
+        - "*_test" matches "app_test", "user_test"
+        - "test_*" matches "test_app", "test_user"
+        - "*integration*" matches "app_integration_test"
+        """
+        if pattern == "*":
+            return true
+
+        if pattern.starts_with("*") and pattern.ends_with("*"):
+            # *substring*
+            let substr = pattern[1:pattern.len()-1]
+            return text.contains(substr)
+        elif pattern.starts_with("*"):
+            # *suffix
+            let suffix = pattern[1:]
+            return text.ends_with(suffix)
+        elif pattern.ends_with("*"):
+            # prefix*
+            let prefix = pattern[0:pattern.len()-1]
+            return text.starts_with(prefix)
+        else:
+            # No wildcards, exact match
+            return text == pattern
 
     fn matches_file_pattern(self, suite: TestSuite, pattern: String): bool =
         """Check if suite matches file pattern.
 
         Args:
             suite: Test suite
+            pattern: Glob pattern (simplified)
+
+        Returns:
+            True if matches
+
+        Supports:
+        - *.spl - Files ending with .spl
+        - test_*.py - Files starting with test_ and ending with .py
+        - **/*_spec.spl - Any _spec.spl file in any directory
+        """
+        # Extract filename from path
+        let filename = self.get_filename(suite.path)
+
+        # Match against pattern
+        if pattern.starts_with("**/"):
+            # Recursive pattern - match filename only
+            let file_pattern = pattern[3:]
+            return self.matches_glob_pattern(filename, file_pattern)
+        else:
+            # Direct pattern
+            return self.matches_glob_pattern(filename, pattern)
+
+    fn get_filename(self, path: String): String =
+        """Extract filename from path.
+
+        Args:
+            path: File path
+
+        Returns:
+            Filename
+        """
+        let last_slash = path.rfind("/")
+        if last_slash >= 0:
+            path[last_slash+1:]
+        else:
+            path
+
+    fn matches_glob_pattern(self, name: String, pattern: String): bool =
+        """Check if name matches glob pattern.
+
+        Args:
+            name: Filename
             pattern: Glob pattern
 
         Returns:
             True if matches
         """
-        # TODO: [stdlib][P1] Implement glob matching
-        suite.path.contains(pattern)
+        if pattern.starts_with("*"):
+            # Pattern: *.ext or *_suffix.ext
+            let suffix = pattern[1:]
+            name.ends_with(suffix)
+        elif pattern.ends_with("*"):
+            # Pattern: prefix_*
+            let prefix = pattern[0:pattern.len()-1]
+            name.starts_with(prefix)
+        elif pattern.contains("*"):
+            # Pattern: prefix_*.ext
+            let star_idx = pattern.find("*")
+            let prefix = pattern[0:star_idx]
+            let suffix = pattern[star_idx+1:]
+            name.starts_with(prefix) and name.ends_with(suffix)
+        else:
+            # Exact match
+            name == pattern
 
 # Smart test selection - select tests based on code changes
 pub class SmartTestSelector:
@@ -302,6 +401,17 @@ pub class SmartTestSelector:
 
         Returns:
             Unique list
+
+        Algorithm:
+        - Uses dict as set for O(n) deduplication
+        - Preserves first occurrence order
         """
-        # TODO: [stdlib][P1] Implement deduplication
-        list
+        let unique: List[String] = []
+        let seen: Dict[String, bool] = {}
+
+        for item in list:
+            if not seen.contains_key(item):
+                seen[item] = true
+                unique.append(item)
+
+        unique

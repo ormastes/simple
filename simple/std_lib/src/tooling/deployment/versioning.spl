@@ -43,6 +43,12 @@ pub class SemVer:
         Returns:
             Parsed version or error
 
+        Supports:
+        - Basic: "1.2.3"
+        - Prerelease: "1.2.3-beta.1", "1.2.3-alpha"
+        - Build metadata: "1.2.3+20240110"
+        - Combined: "1.2.3-beta.1+build.123"
+
         Example:
             match SemVer.parse("1.2.3"):
                 Ok(v):
@@ -50,9 +56,106 @@ pub class SemVer:
                 Err(e):
                     print("Parse error: {e}")
         """
-        # TODO: [stdlib][P1] Implement version parsing
-        # Format: MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]
-        Ok(SemVer.new(0, 0, 0))
+        # Clean version string
+        let trimmed = version_str.trim()
+
+        # Extract build metadata (after '+')
+        let (core_and_pre, build_meta) = self.split_on_plus(trimmed)
+
+        # Extract prerelease (after '-')
+        let (core, prerelease) = self.split_on_dash(core_and_pre)
+
+        # Parse core version (MAJOR.MINOR.PATCH)
+        let parts = core.split(".")
+        if parts.len() != 3:
+            return Err("Invalid version format: expected MAJOR.MINOR.PATCH, got '" + core + "'")
+
+        # Parse major
+        let major = self.parse_int(parts[0])?
+
+        # Parse minor
+        let minor = self.parse_int(parts[1])?
+
+        # Parse patch
+        let patch = self.parse_int(parts[2])?
+
+        # Build version
+        let mut version = SemVer.new(major, minor, patch)
+        version.prerelease = prerelease
+        version.build_metadata = build_meta
+
+        Ok(version)
+
+    fn split_on_plus(self, text: String): (String, String) =
+        """Split on '+' for build metadata.
+
+        Args:
+            text: Version string
+
+        Returns:
+            (core_and_prerelease, build_metadata)
+        """
+        let plus_idx = text.find("+")
+        if plus_idx >= 0:
+            let before = text[0:plus_idx]
+            let after = text[plus_idx+1:]
+            (before, after)
+        else:
+            (text, "")
+
+    fn split_on_dash(self, text: String): (String, String) =
+        """Split on '-' for prerelease.
+
+        Args:
+            text: Version string
+
+        Returns:
+            (core, prerelease)
+        """
+        let dash_idx = text.find("-")
+        if dash_idx >= 0:
+            let before = text[0:dash_idx]
+            let after = text[dash_idx+1:]
+            (before, after)
+        else:
+            (text, "")
+
+    fn parse_int(self, s: String): Result[i32, String] =
+        """Parse integer from string.
+
+        Args:
+            s: String to parse
+
+        Returns:
+            Parsed integer or error
+        """
+        # Simple integer parsing
+        let trimmed = s.trim()
+        if trimmed.is_empty():
+            return Err("Empty string cannot be parsed as integer")
+
+        let mut result = 0
+        let mut negative = false
+        let mut start_idx = 0
+
+        # Check for negative sign
+        if trimmed[0] == '-':
+            negative = true
+            start_idx = 1
+
+        # Parse digits
+        for i in start_idx..trimmed.len():
+            let ch = trimmed[i]
+            if ch >= '0' and ch <= '9':
+                let digit = (ch as i32) - ('0' as i32)
+                result = result * 10 + digit
+            else:
+                return Err("Invalid character in number: '" + ch + "'")
+
+        if negative:
+            result = -result
+
+        Ok(result)
 
     pub fn to_string(self): String =
         """Convert to string.
