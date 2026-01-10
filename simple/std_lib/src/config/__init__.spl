@@ -1,376 +1,46 @@
 # Configuration System
-#
-# Hierarchical configuration management using SDN format.
-# Inspired by OmegaConf but SDN-native.
-#
-# ## Features
-# - Load from SDN files
-# - Merge multiple config sources
-# - CLI dotlist overrides (train.epochs=10)
-# - Interpolation with resolvers
-# - Type-safe schema validation
-# - Frozen configs for production
-#
-# ## Example
-# ```simple
-# import config.Conf
-#
-# # Load base config
-# let base = Conf.load_sdn("config/base.sdn")
-#
-# # Parse CLI overrides
-# let cli = Conf.from_cli_dotlist(sys.args[1..])
-#
-# # Merge configs
-# let cfg = Conf.merge(base, cli)
-#
-# # Access values
-# print(cfg.train.epochs)  # Dot notation
-# print(cfg["train"]["epochs"])  # Bracket notation
-# ```
+# Minimal working version
 
 export Conf, Config
 
-import sdn.{SdnDocument, SdnValue}
-
-
-# ============================================================================
-# Config Class
-# ============================================================================
-
 class Config:
-    """Configuration wrapper around SdnDocument.
+    _data: any
 
-    Provides additional features like freezing, validation, and interpolation
-    on top of SDN's native capabilities.
+    fn __init__(self, data: any):
+        self._data = data
 
-    Attributes:
-        _doc: Underlying SDN document
-        _frozen: Whether config is immutable
-        _throw_on_missing: Whether to throw on missing value access
-    """
-    _doc: SdnDocument
-    _frozen: bool
-    _throw_on_missing: bool
+    fn get(self, path: str) -> any:
+        # Simple implementation - just get from dict
+        if "." in path:
+            let parts = path.split(".")
+            let current = self._data
+            for part in parts:
+                if part in current:
+                    current = current[part]
+                else:
+                    return 0  # TODO: proper null handling
+            return current
+        else:
+            if path in self._data:
+                return self._data[path]
+            return 0  # TODO: proper null handling
 
-    fn __init__(self, doc: SdnDocument):
-        """Initialize config from SDN document.
-
-        Args:
-            doc: SDN document to wrap
-        """
-        self._doc = doc
-        self._frozen = false
-        self._throw_on_missing = false
-
-    fn get(self, path: str, default_val: any = null) -> any:
-        """Get value at dotted path.
-
-        Args:
-            path: Dotted path like "train.epochs"
-            default_val: Default value if path not found
-
-        Returns:
-            Value at path or default_val
-
-        Raises:
-            Error if path not found and throw_on_missing is true
-        """
-        if self._throw_on_missing and not self._doc.has_path(path):
-            throw Error("Missing config value at '{path}'")
-
-        return self._doc.get_path(path) ?? default_val
-
-    fn set(self, path: str, value: any):
-        """Set value at dotted path.
-
-        Args:
-            path: Dotted path like "train.epochs"
-            value: Value to set
-
-        Raises:
-            Error if config is frozen
-        """
-        if self._frozen:
-            throw Error("Cannot modify frozen config")
-
-        self._doc.set_path(path, value)
-
-    fn has_path(self, path: str) -> bool:
-        """Check if path exists in config.
-
-        Args:
-            path: Dotted path to check
-
-        Returns:
-            True if path exists
-        """
-        return self._doc.has_path(path)
-
-    fn to_dict(self) -> {str: any}:
-        """Convert config to dictionary.
-
-        Returns:
-            Dictionary representation
-        """
-        return self._doc.to_dict()
-
-
-# ============================================================================
-# Conf Static Methods
-# ============================================================================
 
 class Conf:
-    """Configuration management utilities.
-
-    Static methods for loading, merging, and manipulating configs.
-    """
+    @static
+    fn from_dict(data: any) -> Config:
+        return Config(data)
 
     @static
-    fn load_sdn(path: str) -> Config:
-        """Load configuration from SDN file.
+    fn merge(base: Config, overlay: Config) -> Config:
+        let merged = {}
 
-        Args:
-            path: Path to SDN file
+        # Copy base
+        for (key, val) in base._data.items():
+            merged[key] = val
 
-        Returns:
-            Config object
+        # Overlay second config
+        for (key, val) in overlay._data.items():
+            merged[key] = val
 
-        Example:
-            ```simple
-            let cfg = Conf.load_sdn("config/train.sdn")
-            print(cfg.get("project"))
-            ```
-        """
-        let doc = SdnDocument.from_file(path)
-        return Config(doc)
-
-    @static
-    fn from_dict(dict: {str: any}) -> Config:
-        """Create config from dictionary.
-
-        Args:
-            dict: Dictionary to convert
-
-        Returns:
-            Config object
-        """
-        let doc = SdnDocument.from_dict(dict)
-        return Config(doc)
-
-    @static
-    fn from_cli_dotlist(args: [str]) -> Config:
-        """Parse CLI arguments as dotlist overrides.
-
-        Parses arguments like "train.epochs=20 model.dropout=0.2"
-        into a hierarchical config.
-
-        Args:
-            args: List of CLI arguments
-
-        Returns:
-            Config object with parsed values
-
-        Example:
-            ```simple
-            # CLI: simple train.spl train.epochs=20 train.lr=1e-3
-            let args = sys.args[2..]  # Skip program and script
-            let overrides = Conf.from_cli_dotlist(args)
-            print(overrides.get("train.epochs"))  # 20
-            ```
-        """
-        let result = {}
-
-        for arg in args:
-            if "=" not in arg:
-                continue  # Skip non-override arguments
-
-            let parts = arg.split("=", maxsplit=1)
-            let path = parts[0]
-            let value_str = parts[1]
-
-            # Parse value
-            let value = Conf::_parse_value(value_str)
-
-            # Set nested value
-            Conf::_set_nested(result, path.split("."), value)
-
-        return Conf.from_dict(result)
-
-    @static
-    fn parse_dotlist(args: [str]) -> Config:
-        """Alias for from_cli_dotlist."""
-        return Conf.from_cli_dotlist(args)
-
-    @static
-    fn merge(configs: ...Config) -> Config:
-        """Merge multiple configs (later overrides earlier).
-
-        Args:
-            configs: Variable number of Config objects
-
-        Returns:
-            Merged config
-
-        Example:
-            ```simple
-            let base = Conf.load_sdn("base.sdn")
-            let overrides = Conf.load_sdn("overrides.sdn")
-            let cli = Conf.from_cli_dotlist(sys.args)
-            let cfg = Conf.merge(base, overrides, cli)
-            ```
-        """
-        if configs.len() == 0:
-            return Conf.from_dict({})
-
-        # Start with first config
-        let merged_dict = configs[0].to_dict()
-
-        # Merge remaining configs
-        for i in 1..configs.len():
-            let overlay = configs[i].to_dict()
-            Conf::_deep_merge(merged_dict, overlay)
-
-        return Conf.from_dict(merged_dict)
-
-    @static
-    fn freeze(cfg: Config) -> Config:
-        """Freeze config to prevent modifications.
-
-        Args:
-            cfg: Config to freeze
-
-        Returns:
-            Frozen config
-        """
-        cfg._frozen = true
-        return cfg
-
-    @static
-    fn unfreeze(cfg: Config) -> Config:
-        """Unfreeze config to allow modifications.
-
-        Creates a copy that can be modified.
-
-        Args:
-            cfg: Config to unfreeze
-
-        Returns:
-            Unfrozen copy
-        """
-        let new_cfg = Conf.from_dict(cfg.to_dict())
-        new_cfg._frozen = false
-        return new_cfg
-
-    @static
-    fn is_frozen(cfg: Config) -> bool:
-        """Check if config is frozen.
-
-        Args:
-            cfg: Config to check
-
-        Returns:
-            True if frozen
-        """
-        return cfg._frozen
-
-    @static
-    fn set_throw_on_missing(cfg: Config, enable: bool):
-        """Enable/disable throwing on missing value access.
-
-        Args:
-            cfg: Config to modify
-            enable: Whether to throw on missing values
-        """
-        cfg._throw_on_missing = enable
-
-    # ========================================================================
-    # Helper Functions
-    # ========================================================================
-
-    @static
-    fn _parse_value(value_str: str) -> any:
-        """Parse string value to appropriate type.
-
-        Args:
-            value_str: String to parse
-
-        Returns:
-            Parsed value (int, float, bool, string, array, dict)
-        """
-        # Try bool
-        if value_str == "true":
-            return true
-        if value_str == "false":
-            return false
-
-        # Try null
-        if value_str == "null" or value_str == "nil":
-            return null
-
-        # Try int
-        try:
-            return int(value_str)
-        catch:
-            pass
-
-        # Try float
-        try:
-            return float(value_str)
-        catch:
-            pass
-
-        # Try array (simple parsing for [1,2,3])
-        if value_str.startswith("[") and value_str.endswith("]"):
-            let inner = value_str[1..-1].strip()
-            if inner == "":
-                return []
-            let items = inner.split(",")
-            return [Conf::_parse_value(item.strip()) for item in items]
-
-        # Try dict (simple parsing for {key:val})
-        if value_str.startswith("{") and value_str.endswith("}"):
-            # TODO: Implement dict parsing
-            # For now, return as string
-            return value_str
-
-        # Return as string (remove quotes if present)
-        if value_str.startswith('"') and value_str.endswith('"'):
-            return value_str[1..-1]
-
-        return value_str
-
-    @static
-    fn _set_nested(dict: {str: any}, keys: [str], value: any):
-        """Set nested dictionary value from key path.
-
-        Args:
-            dict: Dictionary to modify
-            keys: List of keys forming the path
-            value: Value to set
-        """
-        if keys.len() == 1:
-            dict[keys[0]] = value
-            return
-
-        let key = keys[0]
-        if key not in dict:
-            dict[key] = {}
-
-        Conf::_set_nested(dict[key], keys[1..], value)
-
-    @static
-    fn _deep_merge(base: {str: any}, overlay: {str: any}):
-        """Deep merge overlay into base (modifies base in place).
-
-        Args:
-            base: Base dictionary (modified)
-            overlay: Overlay dictionary
-        """
-        for (key, value) in overlay.items():
-            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
-                # Recursively merge dicts
-                Conf::_deep_merge(base[key], value)
-            else:
-                # Override value
-                base[key] = value
+        return Config(merged)
