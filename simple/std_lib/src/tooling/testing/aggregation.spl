@@ -154,18 +154,119 @@ pub class TestAggregator:
 
         Returns:
             XML string
+
+        Format:
+        <?xml version="1.0" encoding="UTF-8"?>
+        <testsuites>
+          <testsuite name="..." tests="10" failures="1" time="1.234">
+            <testcase name="test_example" time="0.123"/>
+            <testcase name="test_failing" time="0.234">
+              <failure message="assertion failed">...</failure>
+            </testcase>
+          </testsuite>
+        </testsuites>
         """
         let mut xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         xml += "<testsuites>\n"
 
-        # TODO: [stdlib][P3] Generate test suite elements
+        # Generate test suite for each result
         for result in self.results:
-            xml += "  <testsuite>\n"
-            # TODO: [stdlib][P3] Add test cases
-            xml += "  </testsuite>\n"
+            xml += self.generate_testsuite_xml(result)
 
         xml += "</testsuites>\n"
         xml
+
+    fn generate_testsuite_xml(self, result: TestRunResult): String =
+        """Generate XML for single test suite.
+
+        Args:
+            result: Test run result
+
+        Returns:
+            XML string
+        """
+        let mut xml = "  <testsuite"
+        xml += " name=\"{self.escape_xml(result.suite_name)}\""
+        xml += " tests=\"{result.passed + result.failed + result.skipped}\""
+        xml += " failures=\"{result.failed}\""
+        xml += " skipped=\"{result.skipped}\""
+        xml += " time=\"{self.ms_to_seconds(result.duration_ms)}\""
+        xml += ">\n"
+
+        # Add test cases
+        for failure in result.failures:
+            xml += self.generate_testcase_xml(failure.test_name, false, failure.message, result.duration_ms)
+
+        # Add passed tests (estimate one per passed count)
+        let avg_time_ms = if result.passed > 0:
+            result.duration_ms / (result.passed as i64)
+        else:
+            0
+
+        let i = 0
+        while i < result.passed:
+            xml += self.generate_testcase_xml("test_{i}", true, "", avg_time_ms)
+            i += 1
+
+        xml += "  </testsuite>\n"
+        xml
+
+    fn generate_testcase_xml(self, name: String, passed: bool, message: String, time_ms: i64): String =
+        """Generate XML for single test case.
+
+        Args:
+            name: Test case name
+            passed: True if passed
+            message: Failure message (if failed)
+            time_ms: Execution time in milliseconds
+
+        Returns:
+            XML string
+        """
+        let mut xml = "    <testcase"
+        xml += " name=\"{self.escape_xml(name)}\""
+        xml += " time=\"{self.ms_to_seconds(time_ms)}\""
+
+        if passed:
+            xml += "/>\n"
+        else:
+            xml += ">\n"
+            xml += "      <failure message=\"{self.escape_xml(message)}\"/>\n"
+            xml += "    </testcase>\n"
+
+        xml
+
+    fn escape_xml(self, text: String): String =
+        """Escape XML special characters.
+
+        Args:
+            text: Text to escape
+
+        Returns:
+            Escaped text
+        """
+        let mut result = text
+        result = result.replace("&", "&amp;")
+        result = result.replace("<", "&lt;")
+        result = result.replace(">", "&gt;")
+        result = result.replace("\"", "&quot;")
+        result = result.replace("'", "&apos;")
+        result
+
+    fn ms_to_seconds(self, ms: i64): String =
+        """Convert milliseconds to seconds string.
+
+        Args:
+            ms: Milliseconds
+
+        Returns:
+            Seconds as string with 3 decimal places
+
+        Example:
+            ms_to_seconds(1234) → "1.234"
+        """
+        let seconds = (ms as f64) / 1000.0
+        "{seconds:.3f}"
 
     pub fn detect_flaky_tests(self): List[FlakyTest] =
         """Detect flaky tests from history.

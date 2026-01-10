@@ -80,6 +80,31 @@ pub class Bundle:
         """
         self.entries.len()
 
+    pub fn set_compression(self, level: CompressionLevel):
+        """Set compression level.
+
+        Args:
+            level: Compression level
+        """
+        self.compression = level
+
+    pub fn estimate_size(self, uncompressed_mb: f64): f64 =
+        """Estimate compressed bundle size.
+
+        Args:
+            uncompressed_mb: Uncompressed size in MB
+
+        Returns:
+            Estimated compressed size in MB
+
+        Example:
+            bundle.set_compression(CompressionLevel::Maximum)
+            let size = bundle.estimate_size(100.0)
+            # → ~30MB (with maximum compression)
+        """
+        let ratio = self.compression.get_estimated_ratio()
+        uncompressed_mb * ratio
+
 # Compression level
 pub enum CompressionLevel:
     None
@@ -87,9 +112,41 @@ pub enum CompressionLevel:
     Default
     Maximum
 
+    pub fn to_flag(self): String =
+        """Convert compression level to tar flag.
+
+        Returns:
+            Compression flag
+
+        Example:
+            CompressionLevel::Maximum.to_flag()  # → "-9"
+        """
+        match self:
+            CompressionLevel::None: ""
+            CompressionLevel::Fast: "-1"
+            CompressionLevel::Default: "-6"
+            CompressionLevel::Maximum: "-9"
+
+    pub fn get_estimated_ratio(self): f64 =
+        """Get estimated compression ratio.
+
+        Returns:
+            Compression ratio (0.0-1.0)
+
+        Example:
+            CompressionLevel::Maximum.get_estimated_ratio()
+            # → 0.3 (30% of original size)
+        """
+        match self:
+            CompressionLevel::None: 1.0
+            CompressionLevel::Fast: 0.7
+            CompressionLevel::Default: 0.5
+            CompressionLevel::Maximum: 0.3
+
 # Bundler
 pub class Bundler:
     pub verbose: bool
+    pub entries: List[BundleEntry]
 
     pub fn new(): Bundler =
         """Create bundler.
@@ -109,7 +166,8 @@ pub class Bundler:
             print("Bundle contains {bundle.file_count()} files")
         """
         Bundler {
-            verbose: false
+            verbose: false,
+            entries: []
         }
 
     pub fn set_verbose(self, enabled: bool):
@@ -125,6 +183,9 @@ pub class Bundler:
         if self.verbose:
             print("Adding binary: {binary_path}")
 
+        let entry = BundleEntry.new(binary_path, EntryType::Binary)
+        self.entries.append(entry)
+
     pub fn add_library(self, lib_path: String):
         """Add library to bundle.
 
@@ -133,6 +194,9 @@ pub class Bundler:
         """
         if self.verbose:
             print("Adding library: {lib_path}")
+
+        let entry = BundleEntry.new(lib_path, EntryType::Library)
+        self.entries.append(entry)
 
     pub fn add_scripts(self, script_path: String):
         """Add scripts to bundle.
@@ -143,6 +207,9 @@ pub class Bundler:
         if self.verbose:
             print("Adding scripts: {script_path}")
 
+        let entry = BundleEntry.new(script_path, EntryType::Script)
+        self.entries.append(entry)
+
     pub fn add_config(self, config_path: String):
         """Add configuration to bundle.
 
@@ -152,6 +219,9 @@ pub class Bundler:
         if self.verbose:
             print("Adding config: {config_path}")
 
+        let entry = BundleEntry.new(config_path, EntryType::Config)
+        self.entries.append(entry)
+
     pub fn add_resources(self, resource_path: String):
         """Add resource files to bundle.
 
@@ -160,6 +230,9 @@ pub class Bundler:
         """
         if self.verbose:
             print("Adding resources: {resource_path}")
+
+        let entry = BundleEntry.new(resource_path, EntryType::Resource)
+        self.entries.append(entry)
 
     pub fn create_bundle(self, output_path: String): Bundle =
         """Create bundle from added entries.
@@ -178,11 +251,54 @@ pub class Bundler:
 
         if self.verbose:
             print("Creating bundle: {output_path}")
+            print("  Including {self.entries.len()} entries")
 
-        # TODO: [stdlib][P3] Collect all added files
+        # Add all collected entries
+        for entry in self.entries:
+            bundle.add_entry(entry)
+
         # TODO: [stdlib][P3] Create archive
 
         bundle
+
+    pub fn get_entry_count(self): i32 =
+        """Get count of entries to be bundled.
+
+        Returns:
+            Number of entries
+        """
+        self.entries.len()
+
+    pub fn list_entries(self): List[String] =
+        """List all entry paths.
+
+        Returns:
+            List of entry paths
+        """
+        let paths: List[String] = []
+        for entry in self.entries:
+            paths.append(entry.path)
+        paths
+
+    pub fn get_entries_by_type(self, entry_type: EntryType): List[BundleEntry] =
+        """Get entries of specific type.
+
+        Args:
+            entry_type: Entry type to filter by
+
+        Returns:
+            Filtered entries
+
+        Example:
+            let binaries = bundler.get_entries_by_type(EntryType::Binary)
+            for binary in binaries:
+                print("Binary: {binary.path}")
+        """
+        let filtered: List[BundleEntry] = []
+        for entry in self.entries:
+            if entry.entry_type == entry_type:
+                filtered.append(entry)
+        filtered
 
     pub fn bundle_dependencies(self, binary_path: String): List[String] =
         """Find and bundle shared library dependencies.

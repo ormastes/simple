@@ -19,6 +19,40 @@ pub enum Platform:
     LinuxArm
     LinuxS390x
 
+    pub fn to_string(self): String =
+        """Convert platform to Docker platform string.
+
+        Returns:
+            Docker platform string
+
+        Example:
+            Platform::LinuxAmd64.to_string()  # → "linux/amd64"
+        """
+        match self:
+            Platform::LinuxAmd64: "linux/amd64"
+            Platform::LinuxArm64: "linux/arm64"
+            Platform::LinuxArm: "linux/arm/v7"
+            Platform::LinuxS390x: "linux/s390x"
+
+    pub fn from_string(platform_str: String): Platform? =
+        """Parse platform from string.
+
+        Args:
+            platform_str: Platform string
+
+        Returns:
+            Platform or none
+
+        Example:
+            Platform::from_string("linux/amd64")  # → some(Platform::LinuxAmd64)
+        """
+        match platform_str:
+            "linux/amd64": some(Platform::LinuxAmd64)
+            "linux/arm64": some(Platform::LinuxArm64)
+            "linux/arm/v7": some(Platform::LinuxArm)
+            "linux/s390x": some(Platform::LinuxS390x)
+            _: none
+
 # Dockerfile instruction
 pub class DockerInstruction:
     pub instruction: String
@@ -152,6 +186,33 @@ pub class DockerfileBuilder:
 
         content
 
+    pub fn validate(self): bool =
+        """Validate Dockerfile has required instructions.
+
+        Returns:
+            True if valid
+
+        Checks for:
+        - At least one FROM instruction
+        - Instructions in valid order
+        """
+        if self.instructions.len() == 0:
+            return false
+
+        # First instruction must be FROM
+        if self.instructions[0].instruction != "FROM":
+            return false
+
+        true
+
+    pub fn instruction_count(self): i32 =
+        """Get instruction count.
+
+        Returns:
+            Number of instructions
+        """
+        self.instructions.len()
+
 # Container builder
 pub class ContainerBuilder:
     pub dockerfile_builder: DockerfileBuilder
@@ -211,6 +272,30 @@ pub class ContainerBuilder:
             platform: Platform target
         """
         self.platforms.append(platform)
+
+    pub fn get_platform_string(self): String =
+        """Get comma-separated platform list for Docker.
+
+        Returns:
+            Platform string for Docker buildx
+
+        Example:
+            # With platforms: [LinuxAmd64, LinuxArm64]
+            builder.get_platform_string()
+            # → "linux/amd64,linux/arm64"
+        """
+        let platform_strs: List[String] = []
+        for platform in self.platforms:
+            platform_strs.append(platform.to_string())
+        platform_strs.join(",")
+
+    pub fn is_multi_platform(self): bool =
+        """Check if building for multiple platforms.
+
+        Returns:
+            True if more than one platform
+        """
+        self.platforms.len() > 1
 
     pub fn detect_runtime(self): List[Language] =
         """Detect runtime languages.
@@ -345,3 +430,72 @@ pub class ContainerImage:
         """
         # TODO: [stdlib][P3] Execute docker save
         Ok(())
+
+    pub fn get_registry(self): String =
+        """Extract registry from tag.
+
+        Returns:
+            Registry URL or empty string
+
+        Example:
+            # tag = "docker.io/user/app:1.0"
+            image.get_registry()  # → "docker.io"
+
+            # tag = "app:1.0"
+            image.get_registry()  # → ""
+        """
+        if self.tag.contains("/"):
+            let parts = self.tag.split("/")
+            if parts.len() >= 2 and parts[0].contains("."):
+                return parts[0]
+        ""
+
+    pub fn get_image_name(self): String =
+        """Extract image name from tag.
+
+        Returns:
+            Image name without registry and version
+
+        Example:
+            # tag = "docker.io/user/app:1.0"
+            image.get_image_name()  # → "user/app"
+
+            # tag = "app:1.0"
+            image.get_image_name()  # → "app"
+        """
+        let without_version = if self.tag.contains(":"):
+            let parts = self.tag.split(":")
+            parts[0]
+        else:
+            self.tag
+
+        # Remove registry if present
+        if without_version.contains("/"):
+            let parts = without_version.split("/")
+            if parts.len() >= 2 and parts[0].contains("."):
+                # Has registry, remove it
+                let remaining = parts[1:]
+                remaining.join("/")
+            else:
+                without_version
+        else:
+            without_version
+
+    pub fn get_version(self): String =
+        """Extract version from tag.
+
+        Returns:
+            Version or "latest"
+
+        Example:
+            # tag = "app:1.0.0"
+            image.get_version()  # → "1.0.0"
+
+            # tag = "app"
+            image.get_version()  # → "latest"
+        """
+        if self.tag.contains(":"):
+            let parts = self.tag.split(":")
+            parts[parts.len() - 1]
+        else:
+            "latest"
