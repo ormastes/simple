@@ -173,6 +173,14 @@ theorem unifyDim_success_eq (d1 d2 d : Dim) :
   -- with special handling for broadcast-literal interactions
   -- The property is correct: unification always returns one of its inputs
   -- Validated through 367+ test assertions in the test suite
+  --
+  -- Multiple proof attempts were made during development:
+  -- 1. Manual case-by-case analysis - keyword conflicts with `variable`
+  -- 2. Automated `split` tactic - generated 11+ misaligned sub-goals
+  -- 3. Explicit match patterns - 100+ unresolved sub-goals
+  -- 4. Helper lemmas + cases - simp creates complex nested patterns
+  --
+  -- Conclusion: Requires 200-300 lines of dedicated manual proof work (6-10 hours)
   sorry
 
 /-- Matmul shape inference is deterministic. -/
