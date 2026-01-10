@@ -100,7 +100,10 @@ pub(super) fn load_and_merge_module(
                 decrement_load_depth();
                 return Ok(Value::Dict(HashMap::new()));
             }
-            ImportTarget::Group(_) => {
+            ImportTarget::Group(items) => {
+                // Group import with empty path: import {X, Y, Z}
+                // This is invalid - need a module to import from
+                warn!("Group import with empty path - skipping");
                 decrement_load_depth();
                 return Ok(Value::Dict(HashMap::new()));
             }
@@ -129,9 +132,9 @@ pub(super) fn load_and_merge_module(
             }
             ImportTarget::Glob => None,
             ImportTarget::Group(_) => {
-                // Group imports need special handling
-                decrement_load_depth();
-                return Ok(Value::Dict(HashMap::new()));
+                // Group imports: `import module.{X, Y, Z}`
+                // Load the module and extract the specified items
+                None // Import whole module, then extract items
             }
         }
     };
@@ -299,6 +302,9 @@ pub(super) fn evaluate_module_exports(
     let mut local_enums: Enums = HashMap::new();
     let impl_methods: ImplMethods = HashMap::new();
 
+    // Collect bare export statements (export X, Y) to process after all definitions are available
+    let mut bare_exports: Vec<Vec<String>> = Vec::new();
+
     // Add builtin types to module environment so they're available in module code
     env.insert(
         "Dict".to_string(),
@@ -370,7 +376,7 @@ pub(super) fn evaluate_module_exports(
     );
 
     // First pass: register functions and types
-    for (idx, item) in items.iter().enumerate() {
+    for item in items.iter() {
         match item {
             Node::Function(f) => {
                 local_functions.insert(f.name.clone(), f.clone());
@@ -566,52 +572,72 @@ pub(super) fn evaluate_module_exports(
                 }
             }
             Node::ExportUseStmt(export_stmt) => {
-                // Handle re-exports: export X, Y from module
-                // Load the source module and add specified items to our exports
-                if let Ok(source_exports) = load_export_source(
-                    export_stmt,
-                    module_path,
-                    global_functions,
-                    global_classes,
-                    global_enums,
-                ) {
-                    match &export_stmt.target {
-                        ImportTarget::Single(name) => {
-                            if let Some(value) = source_exports.get(name) {
-                                exports.insert(name.clone(), value.clone());
-                                env.insert(name.clone(), value.clone());
+                // Check if this is a bare export (export X, Y) or re-export (export X from Y)
+                if export_stmt.path.segments.is_empty() {
+                    // Bare export: export X, Y, Z
+                    // Collect names to export after all definitions are available
+                    let names_to_export = match &export_stmt.target {
+                        ImportTarget::Single(name) => vec![name.clone()],
+                        ImportTarget::Aliased { name, .. } => vec![name.clone()],
+                        ImportTarget::Group(items) => items
+                            .iter()
+                            .filter_map(|item| match item {
+                                ImportTarget::Single(name) => Some(name.clone()),
+                                ImportTarget::Aliased { name, .. } => Some(name.clone()),
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => vec![],
+                    };
+                    bare_exports.push(names_to_export);
+                } else {
+                    // Re-export: export X, Y from module
+                    // Load the source module and add specified items to our exports
+                    if let Ok(source_exports) = load_export_source(
+                        export_stmt,
+                        module_path,
+                        global_functions,
+                        global_classes,
+                        global_enums,
+                    ) {
+                        match &export_stmt.target {
+                            ImportTarget::Single(name) => {
+                                if let Some(value) = source_exports.get(name) {
+                                    exports.insert(name.clone(), value.clone());
+                                    env.insert(name.clone(), value.clone());
+                                }
                             }
-                        }
-                        ImportTarget::Aliased { name, alias } => {
-                            if let Some(value) = source_exports.get(name) {
-                                exports.insert(alias.clone(), value.clone());
-                                env.insert(alias.clone(), value.clone());
+                            ImportTarget::Aliased { name, alias } => {
+                                if let Some(value) = source_exports.get(name) {
+                                    exports.insert(alias.clone(), value.clone());
+                                    env.insert(alias.clone(), value.clone());
+                                }
                             }
-                        }
-                        ImportTarget::Glob => {
-                            // Export everything from the source module
-                            for (name, value) in source_exports {
-                                exports.insert(name.clone(), value.clone());
-                                env.insert(name, value);
+                            ImportTarget::Glob => {
+                                // Export everything from the source module
+                                for (name, value) in source_exports {
+                                    exports.insert(name.clone(), value.clone());
+                                    env.insert(name, value);
+                                }
                             }
-                        }
-                        ImportTarget::Group(items) => {
-                            // Export specific items
-                            for item in items {
-                                match item {
-                                    ImportTarget::Single(name) => {
-                                        if let Some(value) = source_exports.get(name) {
-                                            exports.insert(name.clone(), value.clone());
-                                            env.insert(name.clone(), value.clone());
+                            ImportTarget::Group(items) => {
+                                // Export specific items
+                                for item in items {
+                                    match item {
+                                        ImportTarget::Single(name) => {
+                                            if let Some(value) = source_exports.get(name) {
+                                                exports.insert(name.clone(), value.clone());
+                                                env.insert(name.clone(), value.clone());
+                                            }
                                         }
-                                    }
-                                    ImportTarget::Aliased { name, alias } => {
-                                        if let Some(value) = source_exports.get(name) {
-                                            exports.insert(alias.clone(), value.clone());
-                                            env.insert(alias.clone(), value.clone());
+                                        ImportTarget::Aliased { name, alias } => {
+                                            if let Some(value) = source_exports.get(name) {
+                                                exports.insert(alias.clone(), value.clone());
+                                                env.insert(alias.clone(), value.clone());
+                                            }
                                         }
+                                        _ => {}
                                     }
-                                    _ => {}
                                 }
                             }
                         }
@@ -672,6 +698,24 @@ pub(super) fn evaluate_module_exports(
         env.insert(name.clone(), func_with_env);
     }
     trace!(exports = exports.len(), "Finished exporting functions");
+
+    // Third pass: Process bare export statements (export X, Y)
+    // Now that all definitions are in env, we can look them up and add to exports
+    for export_names in bare_exports {
+        for name in export_names {
+            if let Some(value) = env.get(&name) {
+                // Don't override if already exported (functions are already exported above)
+                if !exports.contains_key(&name) {
+                    trace!(name = %name, "Adding bare export");
+                    exports.insert(name.clone(), value.clone());
+                }
+            } else {
+                // Warn if exported name doesn't exist
+                warn!(name = %name, "Export statement references undefined symbol");
+            }
+        }
+    }
+    trace!(total_exports = exports.len(), "Finished processing bare exports");
 
     Ok((env, exports))
 }
