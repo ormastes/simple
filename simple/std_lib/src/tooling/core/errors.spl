@@ -3,6 +3,7 @@
 
 use tooling.core.project.Language
 use tooling.compiler.interface.{CompilationError, ErrorSeverity}
+use sdn.{SdnValue, to_sdn}
 
 # Error output format
 pub enum ErrorFormat:
@@ -264,22 +265,135 @@ pub class ErrorAggregator:
         output
 
     fn format_json(self): String =
-        """Format errors as JSON array.
+        """Format errors as JSON array (using SDN).
 
         Returns:
-            JSON string
+            JSON-compatible string
+
+        Format:
+            [
+              {
+                "file": "app.spl",
+                "line": 10,
+                "column": 5,
+                "severity": "error",
+                "message": "Type mismatch",
+                "language": "Simple"
+              }
+            ]
         """
-        # TODO: [stdlib][P1] Implement JSON serialization
-        "[]"
+        # Build SDN array of error objects
+        let mut errors_array: List[SdnValue] = []
+
+        for error in self.get_all():
+            let mut error_dict: Dict[String, SdnValue] = {}
+
+            error_dict["file"] = SdnValue::String(error.file)
+            error_dict["line"] = SdnValue::Int(error.line as i64)
+            error_dict["column"] = SdnValue::Int(error.column as i64)
+            error_dict["severity"] = SdnValue::String(self.severity_to_string(error.severity))
+            error_dict["message"] = SdnValue::String(error.message)
+            error_dict["language"] = SdnValue::String(self.language_to_string(error.language))
+
+            errors_array.append(SdnValue::Dict(error_dict))
+
+        # Serialize to SDN (which is JSON-compatible for arrays)
+        let sdn_array = SdnValue::Array(errors_array)
+        to_sdn(sdn_array)
+
+    fn severity_to_string(self, severity: ErrorSeverity): String =
+        """Convert severity to string.
+
+        Args:
+            severity: Error severity
+
+        Returns:
+            Severity string
+        """
+        match severity:
+            ErrorSeverity::Error: "error"
+            ErrorSeverity::Warning: "warning"
+            ErrorSeverity::Info: "info"
+
+    fn language_to_string(self, language: Language): String =
+        """Convert language to string.
+
+        Args:
+            language: Language enum
+
+        Returns:
+            Language name
+        """
+        match language:
+            Language::Simple: "Simple"
+            Language::Rust: "Rust"
+            Language::Python: "Python"
+            Language::JavaScript: "JavaScript"
+            Language::TypeScript: "TypeScript"
+            Language::Go: "Go"
+            Language::C: "C"
+            Language::Cpp: "Cpp"
 
     fn format_xml(self): String =
         """Format errors as JUnit XML.
 
         Returns:
             XML string for CI systems
+
+        Format:
+            <testsuites>
+              <testsuite name="compilation" tests="1" errors="3" failures="0">
+                <testcase name="build" classname="compilation">
+                  <error message="Type mismatch" type="error">
+                    app.spl:10:5: Type mismatch
+                  </error>
+                </testcase>
+              </testsuite>
+            </testsuites>
         """
-        # TODO: [stdlib][P1] Implement XML generation
-        "<testsuites></testsuites>"
+        let total_errors = self.errors.len()
+        let total_warnings = self.warnings.len()
+
+        let mut xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        xml += "<testsuites>\n"
+        xml += "  <testsuite name=\"compilation\" tests=\"1\" "
+        xml += "errors=\"{total_errors}\" failures=\"{total_warnings}\" skipped=\"0\">\n"
+        xml += "    <testcase name=\"build\" classname=\"compilation\">\n"
+
+        # Add errors
+        for error in self.errors:
+            xml += "      <error message=\"{self.escape_xml(error.message)}\" type=\"error\">\n"
+            xml += "        {self.escape_xml(error.file)}:{error.line}:{error.column}: {self.escape_xml(error.message)}\n"
+            xml += "      </error>\n"
+
+        # Add warnings as failures
+        for warning in self.warnings:
+            xml += "      <failure message=\"{self.escape_xml(warning.message)}\" type=\"warning\">\n"
+            xml += "        {self.escape_xml(warning.file)}:{warning.line}:{warning.column}: {self.escape_xml(warning.message)}\n"
+            xml += "      </failure>\n"
+
+        xml += "    </testcase>\n"
+        xml += "  </testsuite>\n"
+        xml += "</testsuites>\n"
+
+        xml
+
+    fn escape_xml(self, text: String): String =
+        """Escape XML special characters.
+
+        Args:
+            text: Text to escape
+
+        Returns:
+            Escaped text
+        """
+        let mut result = text
+        result = result.replace("&", "&amp;")
+        result = result.replace("<", "&lt;")
+        result = result.replace(">", "&gt;")
+        result = result.replace("\"", "&quot;")
+        result = result.replace("'", "&apos;")
+        result
 
     fn format_vscode(self): String =
         """Format errors for VS Code problem matcher.
@@ -349,10 +463,75 @@ pub class ErrorAggregator:
 
         Returns:
             Parsed error or none
+
+        Format: file.py:line: severity: message
+        Example: app.py:10: error: Type mismatch
         """
-        # TODO: [stdlib][P1] Implement regex parsing
-        # Format: file:line: severity: message
-        none
+        # Find first colon (after filename)
+        let first_colon = line.find(":")
+        if first_colon < 0:
+            return none
+
+        let file = line[0:first_colon].trim()
+
+        # Find second colon (after line number)
+        let rest = line[first_colon+1:]
+        let second_colon = rest.find(":")
+        if second_colon < 0:
+            return none
+
+        let line_str = rest[0:second_colon].trim()
+        let line_num = self.parse_int_safe(line_str)
+
+        # Find third colon (after severity)
+        let rest2 = rest[second_colon+1:]
+        let third_colon = rest2.find(":")
+        if third_colon < 0:
+            return none
+
+        let severity_str = rest2[0:third_colon].trim()
+        let message = rest2[third_colon+1:].trim()
+
+        # Parse severity
+        let severity = match severity_str:
+            "error": ErrorSeverity::Error
+            "warning": ErrorSeverity::Warning
+            "note": ErrorSeverity::Info
+            "info": ErrorSeverity::Info
+            _: ErrorSeverity::Error
+
+        some(CompilationError {
+            file: file,
+            line: line_num,
+            column: 0,  # mypy doesn't always provide column
+            message: message,
+            severity: severity,
+            language: Language::Python
+        })
+
+    fn parse_int_safe(self, s: String): i32 =
+        """Parse integer safely, returning 0 on error.
+
+        Args:
+            s: String to parse
+
+        Returns:
+            Parsed integer or 0
+        """
+        let trimmed = s.trim()
+        if trimmed.is_empty():
+            return 0
+
+        let mut result = 0
+        for i in 0..trimmed.len():
+            let ch = trimmed[i]
+            if ch >= '0' and ch <= '9':
+                let digit = (ch as i32) - ('0' as i32)
+                result = result * 10 + digit
+            else:
+                return 0  # Non-digit found
+
+        result
 
     fn parse_eslint_json(self, json_output: String): List[CompilationError] =
         """Parse ESLint JSON output.
