@@ -2,10 +2,14 @@
 -- This file is generated from Simple verification model
 -- See: simple/std_lib/src/verification/regenerate/tensor_dimensions.spl
 
-namespace TensorDimensions
+/-!
+# Tensor Dimension Inference - Formal Verification
 
-/-- Tensor dimension inference and verification.
-    Provides compile-time dimension tracking with range constraints. -/
+Tensor dimension inference and verification with compile-time dimension tracking
+and range constraints.
+-/
+
+namespace TensorDimensions
 
 -- ========================================================================
 -- Dimension Type
@@ -64,7 +68,7 @@ def shapesCompatible : TensorShape → TensorShape → Bool
 -- ========================================================================
 
 /-- Get concrete value from dimension if literal. -/
-def getDimValue : Dim → Option ℕ
+def getDimValue : Dim → Option Nat
   | Dim.literal v => some v
   | _ => none
 
@@ -73,7 +77,7 @@ def getDimValue : Dim → Option ℕ
 -- ========================================================================
 
 /-- Check if dimension satisfies range constraint. -/
-def dimInRange (d : Dim) (lo hi : ℕ) : Prop :=
+def dimInRange (d : Dim) (lo hi : Nat) : Prop :=
   match getDimValue d with
   | some v => lo ≤ v ∧ v ≤ hi
   | none => True  -- Dynamic dims always satisfy
@@ -174,7 +178,7 @@ theorem matmulShape_deterministic (l r s1 s2 : TensorShape) :
 -- ========================================================================
 
 /-- Product of dimensions helper. -/
-def dimProduct : TensorShape → Option ℕ
+def dimProduct : TensorShape → Option Nat
   | [] => some 1
   | d :: ds =>
     match getDimValue d, dimProduct ds with
@@ -182,11 +186,11 @@ def dimProduct : TensorShape → Option ℕ
     | _, _ => none
 
 /-- Minimum memory for shape (in elements). -/
-def minElements : TensorShape → Option ℕ :=
+def minElements : TensorShape → Option Nat :=
   dimProduct
 
 /-- Maximum memory for shape (using range upper bounds). -/
-def maxElementsAux : List Dim → Option ℕ
+def maxElementsAux : List Dim → Option Nat
   | [] => some 1
   | d :: ds =>
     match d, maxElementsAux ds with
@@ -194,7 +198,7 @@ def maxElementsAux : List Dim → Option ℕ
     | Dim.named _ _ (some hi), some p => some (hi * p)
     | _, _ => none
 
-def maxElements : TensorShape → Option ℕ := maxElementsAux
+def maxElements : TensorShape → Option Nat := maxElementsAux
 
 /-- Min elements ≤ max elements when both exist. -/
 theorem min_le_max_elements (s : TensorShape) :

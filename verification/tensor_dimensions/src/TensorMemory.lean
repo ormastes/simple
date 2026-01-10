@@ -16,8 +16,8 @@ open TensorDimensions
 
 /-- Memory bound with minimum and maximum bytes -/
 structure MemoryBound where
-  minBytes : ℕ
-  maxBytes : ℕ
+  minBytes : Nat
+  maxBytes : Nat
   valid : minBytes ≤ maxBytes
 
 -- ========================================================================
@@ -26,8 +26,8 @@ structure MemoryBound where
 
 /-- Available memory on a device (GPU/CPU) -/
 structure DeviceMemory where
-  totalBytes : ℕ
-  availableBytes : ℕ
+  totalBytes : Nat
+  availableBytes : Nat
   valid : availableBytes ≤ totalBytes
 
 -- ========================================================================
@@ -46,12 +46,12 @@ structure TrainingMemory where
 -- ========================================================================
 
 /-- Total maximum memory across all components -/
-def TrainingMemory.totalMax (tm : TrainingMemory) : ℕ :=
+def TrainingMemory.totalMax (tm : TrainingMemory) : Nat :=
   tm.parameters.maxBytes + tm.gradients.maxBytes +
   tm.optimizerState.maxBytes + tm.activations.maxBytes
 
 /-- Total minimum memory across all components -/
-def TrainingMemory.totalMin (tm : TrainingMemory) : ℕ :=
+def TrainingMemory.totalMin (tm : TrainingMemory) : Nat :=
   tm.parameters.minBytes + tm.gradients.minBytes +
   tm.optimizerState.minBytes + tm.activations.minBytes
 
@@ -71,7 +71,7 @@ def TrainingMemory.totalMin (tm : TrainingMemory) : ℕ :=
 theorem training_fits_if_max_fits
     (tm : TrainingMemory)
     (device : DeviceMemory)
-    (actual : ℕ) :
+    (actual : Nat) :
   tm.totalMax ≤ device.availableBytes →
   tm.totalMin ≤ actual →
   actual ≤ tm.totalMax →
@@ -159,13 +159,13 @@ theorem mnist_fits_in_4mb :
 -- ========================================================================
 
 /-- Compute memory from tensor shape and element size -/
-def tensorMemoryBytes (shape : TensorShape) (elemSize : ℕ) : Option (ℕ × ℕ) :=
+def tensorMemoryBytes (shape : TensorShape) (elemSize : Nat) : Option (Nat × Nat) :=
   match minElements shape, maxElements shape with
   | some minElems, some maxElems => some (minElems * elemSize, maxElems * elemSize)
   | _, _ => none
 
 /-- If we can compute memory bounds, min ≤ max -/
-theorem tensor_memory_bounds_valid (shape : TensorShape) (elemSize : ℕ) :
+theorem tensor_memory_bounds_valid (shape : TensorShape) (elemSize : Nat) :
   ∀ minMem maxMem,
     tensorMemoryBytes shape elemSize = some (minMem, maxMem) →
     minMem ≤ maxMem := by
