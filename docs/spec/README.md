@@ -1,11 +1,17 @@
 # Simple Compiler Test Documentation Index
 
-**Last Updated:** 2026-01-08 12:56 UTC  
-**Total Specs:** 229  
-**Total Tests:** 206  
+**Last Updated:** 2026-01-10 04:46 UTC  
+**Total Specs:** 248  
+**Total Tests:** 209  
 **Status:** ✅ ALL PASSING
 
 ## Quick Links
+
+- 📊 [Latest Test Report](TEST_REPORT_2026-01-08.md)
+- 🧪 [BDD Test Specification](BDD_TEST_SPEC.md)
+- 🎯 [Mixin Features](MIXIN_FEATURES.md)
+- 📚 [Full Spec Catalog](SPEC_CATALOG.md)
+- 📝 [Test Summary](TEST_SUMMARY.txt)
 
 - 📊 [Latest Test Report](TEST_REPORT_2026-01-08.md)
 - 🧪 [BDD Test Specification](BDD_TEST_SPEC.md)
