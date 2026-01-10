@@ -2,7 +2,7 @@
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
 > **Source:** `simple/std_lib/test/spec/tensor_dimensions_spec.spl`
-> **Generated:** 2026-01-10 04:47:29
+> **Generated:** 2026-01-10 06:24:30
 >
 > To update this file, edit the source _spec.spl file and run:
 > ```bash
