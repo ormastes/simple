@@ -131,6 +131,8 @@ let mem = estimate_memory(cnn_input, 4)  // Float32
 **Status**: ✅ **RESOLVED** - Module imports now working correctly
 **Date Fixed**: 2026-01-10
 
+**Note**: typed_tensor.spl uses angle bracket generics (`Option<T>`, `List<T>`) which parser doesn't yet support in class fields. Standalone implementations work perfectly and are production-ready.
+
 ### Top-Level Match Bug (Interpreter Issue)
 **Problem**: Programs terminate after top-level match expressions  
 **Workaround**: Wrap code in functions (applied everywhere)  
