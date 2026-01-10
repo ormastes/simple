@@ -88,9 +88,9 @@ fn test_value_int_methods() {
 #[test]
 fn test_value_float_methods() {
     use simple_compiler::Value;
-    let val = Value::Float(3.14);
+    let val = Value::Float(3.15);
     assert!(val.as_float().is_ok());
-    assert!((val.as_float().unwrap() - 3.14).abs() < 0.001);
+    assert!((val.as_float().unwrap() - 3.15).abs() < 0.001);
 }
 
 #[test]

@@ -351,7 +351,7 @@ mod lexer_tests {
 
     #[test]
     fn test_lexer_tokenize_float() {
-        let mut lexer = Lexer::new("3.14");
+        let mut lexer = Lexer::new("3.15");
         let tokens = lexer.tokenize();
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Float(_))));
     }
@@ -513,7 +513,7 @@ mod lexer_tests {
 
     #[test]
     fn test_lexer_tokenize_numeric_suffix() {
-        let mut lexer = Lexer::new("42i64 3.14f32");
+        let mut lexer = Lexer::new("42i64 3.15f32");
         let tokens = lexer.tokenize();
         assert!(tokens.len() >= 2);
     }

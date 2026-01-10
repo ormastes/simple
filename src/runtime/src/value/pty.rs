@@ -1,12 +1,10 @@
 //! PTY (Pseudo-Terminal) FFI functions for console I/O testing
 
 use crate::value::RuntimeValue;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, RawFd};
 
 #[cfg(unix)]
 use nix::pty::openpty;
-#[cfg(unix)]
-use std::os::unix::io::OwnedFd;
 
 /// Open a new pseudo-terminal pair
 /// Returns: [master_fd, slave_fd]

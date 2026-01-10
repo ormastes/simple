@@ -366,7 +366,7 @@ pub enum Expr {
     Integer(i64),
     Float(f64),
     TypedInteger(i64, NumericSuffix), // 42i32, 100_km
-    TypedFloat(f64, NumericSuffix),   // 3.14f32, 100.0_m
+    TypedFloat(f64, NumericSuffix),   // 3.15f32, 100.0_m
     String(String),
     TypedString(String, String), // "127.0.0.1"_ip - string with unit suffix
     FString(Vec<FStringPart>),   // f"hello {name}!" interpolated strings

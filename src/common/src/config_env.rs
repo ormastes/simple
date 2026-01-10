@@ -33,8 +33,7 @@ impl ConfigEnv {
         let mut iter = args.iter().peekable();
 
         while let Some(arg) = iter.next() {
-            if arg.starts_with("--") {
-                let key_value = &arg[2..];
+            if let Some(key_value) = arg.strip_prefix("--") {
                 if let Some(eq_pos) = key_value.find('=') {
                     // --key=value format
                     let key = &key_value[..eq_pos];
@@ -90,8 +89,7 @@ impl ConfigEnv {
     pub fn from_env_with_prefix(prefix: &str) -> Self {
         let mut config = Self::new();
         for (key, value) in env::vars() {
-            if key.starts_with(prefix) {
-                let stripped_key = &key[prefix.len()..];
+            if let Some(stripped_key) = key.strip_prefix(prefix) {
                 config.set(stripped_key, &value);
             }
         }

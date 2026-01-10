@@ -49,6 +49,12 @@ pub struct GcRuntime {
     log: Option<LogSink>,
 }
 
+impl Default for GcRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GcRuntime {
     /// Create a GC runtime with default options and no logging.
     pub fn new() -> Self {
@@ -146,7 +152,7 @@ use std::cell::RefCell;
 
 thread_local! {
     /// Registry of unique pointer addresses that contain GC-traceable values
-    static UNIQUE_ROOTS: RefCell<Vec<*mut u8>> = RefCell::new(Vec::new());
+    static UNIQUE_ROOTS: RefCell<Vec<*mut u8>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Register a unique pointer as a GC root.
@@ -186,7 +192,7 @@ pub fn unique_root_count() -> usize {
 
 thread_local! {
     /// Registry of shared pointer addresses that contain GC-traceable values
-    static SHARED_ROOTS: RefCell<Vec<*mut u8>> = RefCell::new(Vec::new());
+    static SHARED_ROOTS: RefCell<Vec<*mut u8>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Register a shared pointer as a GC root.

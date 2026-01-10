@@ -347,7 +347,7 @@ fn test_mir_inst_const_int() {
 fn test_mir_inst_const_float() {
     let inst = MirInst::ConstFloat {
         dest: VReg(0),
-        value: 3.14,
+        value: 3.15,
     };
     assert!(matches!(inst, MirInst::ConstFloat { .. }));
 }

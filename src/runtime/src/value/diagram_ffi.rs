@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use parking_lot::RwLock;
@@ -130,7 +130,10 @@ pub extern "C" fn rt_diagram_clear() {
 /// # Safety
 /// `test_file` and `test_name` must be valid C strings
 #[no_mangle]
-pub unsafe extern "C" fn rt_diagram_set_context(test_file: *const c_char, test_name: *const c_char) {
+pub unsafe extern "C" fn rt_diagram_set_context(
+    test_file: *const c_char,
+    test_name: *const c_char,
+) {
     if !test_file.is_null() {
         if let Ok(s) = CStr::from_ptr(test_file).to_str() {
             *get_test_file().write() = s.to_string();
@@ -199,7 +202,10 @@ pub unsafe extern "C" fn rt_diagram_trace_method(
     let class_str = if class_name.is_null() {
         None
     } else {
-        CStr::from_ptr(class_name).to_str().ok().map(|s| s.to_string())
+        CStr::from_ptr(class_name)
+            .to_str()
+            .ok()
+            .map(|s| s.to_string())
     };
 
     let method_str = if method_name.is_null() {
@@ -242,7 +248,10 @@ pub unsafe extern "C" fn rt_diagram_trace_method_with_args(
     let class_str = if class_name.is_null() {
         None
     } else {
-        CStr::from_ptr(class_name).to_str().ok().map(|s| s.to_string())
+        CStr::from_ptr(class_name)
+            .to_str()
+            .ok()
+            .map(|s| s.to_string())
     };
 
     let method_str = if method_name.is_null() {
@@ -453,9 +462,16 @@ fn generate_sequence_mermaid(events: &[CallEvent]) -> String {
                     } else {
                         event.arguments.join(", ")
                     };
-                    output.push_str(&format!("    {}->>{}:{}{}\n",
-                        caller, cls, event.callee,
-                        if args.is_empty() { String::new() } else { format!("({})", args) }
+                    output.push_str(&format!(
+                        "    {}->>{}:{}{}\n",
+                        caller,
+                        cls,
+                        event.callee,
+                        if args.is_empty() {
+                            String::new()
+                        } else {
+                            format!("({})", args)
+                        }
                     ));
                     stack.push(cls.clone());
                 }
@@ -482,7 +498,8 @@ fn generate_class_mermaid(events: &[CallEvent]) -> String {
     let mut output = String::from("classDiagram\n");
 
     // Extract classes and methods
-    let mut classes: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut classes: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
 
     for event in events {
         if let Some(cls) = &event.callee_class {
@@ -536,7 +553,11 @@ fn generate_arch_mermaid(events: &[CallEvent], arch_entities: &[String]) -> Stri
         if entity.contains('.') {
             let parts: Vec<&str> = entity.split('.').collect();
             let short_name = parts.last().copied().unwrap_or(entity.as_str());
-            output.push_str(&format!("    {}[{}]\n", entity.replace('.', "_"), short_name));
+            output.push_str(&format!(
+                "    {}[{}]\n",
+                entity.replace('.', "_"),
+                short_name
+            ));
         } else {
             output.push_str(&format!("    {}\n", entity));
         }
@@ -758,7 +779,9 @@ mod tests {
         assert!(mermaid.contains("participant Auth"));
         assert!(mermaid.contains("participant Database"));
 
-        unsafe { rt_diagram_free_string(mermaid_ptr); }
+        unsafe {
+            rt_diagram_free_string(mermaid_ptr);
+        }
         rt_diagram_disable();
         rt_diagram_clear();
     }

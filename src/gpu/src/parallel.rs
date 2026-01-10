@@ -91,16 +91,16 @@ impl WorkGroupExecutor {
 
         // Calculate number of work groups
         let num_groups = [
-            (global_size[0] + local_size[0] - 1) / local_size[0],
-            (global_size[1] + local_size[1] - 1) / local_size[1],
-            (global_size[2] + local_size[2] - 1) / local_size[2],
+            global_size[0].div_ceil(local_size[0]),
+            global_size[1].div_ceil(local_size[1]),
+            global_size[2].div_ceil(local_size[2]),
         ];
 
         let total_groups = num_groups[0] as usize * num_groups[1] as usize * num_groups[2] as usize;
 
         // Distribute work groups across threads
         let kernel = Arc::new(kernel);
-        let chunk_size = (total_groups + self.config.num_threads - 1) / self.config.num_threads;
+        let chunk_size = total_groups.div_ceil(self.config.num_threads);
 
         thread::scope(|s| {
             for thread_id in 0..self.config.num_threads {
@@ -112,9 +112,6 @@ impl WorkGroupExecutor {
                 }
 
                 let kernel = Arc::clone(&kernel);
-                let local_size = local_size;
-                let global_size = global_size;
-                let num_groups = num_groups;
 
                 s.spawn(move || {
                     for group_linear in start_group..end_group {
@@ -281,7 +278,7 @@ where
         .map(|p| p.get())
         .unwrap_or(4);
 
-    let chunk_size = (data.len() + num_threads - 1) / num_threads;
+    let chunk_size = data.len().div_ceil(num_threads);
     let results: Arc<Mutex<Vec<T>>> = Arc::new(Mutex::new(Vec::with_capacity(num_threads)));
 
     thread::scope(|s| {

@@ -30,18 +30,13 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 /// Execution mode for futures
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AsyncMode {
     /// Futures execute in background thread pool (default, like JavaScript)
+    #[default]
     Threaded,
     /// Futures are queued and must be polled manually (for embedded systems)
     Manual,
-}
-
-impl Default for AsyncMode {
-    fn default() -> Self {
-        AsyncMode::Threaded
-    }
 }
 
 /// Task wrapper for the executor

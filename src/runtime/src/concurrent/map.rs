@@ -183,7 +183,7 @@ impl TraceConcurrent for ConcurrentMap {
     }
 }
 
-/// FFI functions for ConcurrentMap (callable from compiled code)
+// FFI functions for ConcurrentMap (callable from compiled code)
 
 /// Create a new concurrent map
 #[no_mangle]

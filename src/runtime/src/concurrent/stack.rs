@@ -124,7 +124,7 @@ impl TraceConcurrent for ConcurrentStack {
     }
 }
 
-/// FFI functions for ConcurrentStack (callable from compiled code)
+// FFI functions for ConcurrentStack (callable from compiled code)
 
 /// Create a new concurrent stack
 #[no_mangle]

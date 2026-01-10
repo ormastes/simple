@@ -365,7 +365,7 @@ fn detect_bank_conflict(
         // Extract stride if possible
         let stride = extract_stride(line);
 
-        if stride > 0 && stride % config.num_banks == 0 {
+        if stride > 0 && stride.is_multiple_of(config.num_banks) {
             return Some(BankConflict {
                 location,
                 num_banks: config.num_banks,

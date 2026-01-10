@@ -88,7 +88,7 @@ fn test_lexer_string_literals() {
 /// Test lexer with numbers
 #[test]
 fn test_lexer_numbers() {
-    let source = "42 3.14 -100 0 1_000_000";
+    let source = "42 3.15 -100 0 1_000_000";
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
     assert!(tokens.len() >= 5, "Should tokenize all numbers");

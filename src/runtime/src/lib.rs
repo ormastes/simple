@@ -1,3 +1,12 @@
+// Allow warnings for incomplete features and FFI code
+#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::fn_to_numeric_cast)]
+#![allow(clippy::fn_to_numeric_cast_with_truncation)]
+#![allow(improper_ctypes_definitions)]
+#![allow(dead_code)]
+
 pub mod aop;
 pub mod concurrency;
 pub mod concurrent;

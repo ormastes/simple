@@ -451,18 +451,18 @@ impl Target {
 
         // Detect WASM runtime from triple
         let wasm_runtime = if matches!(arch, TargetArch::Wasm32 | TargetArch::Wasm64) {
-            parts.get(1).and_then(|s| match s.to_lowercase().as_str() {
-                "wasi" => Some(WasmRuntime::Wasi),
+            parts.get(1).map(|s| match s.to_lowercase().as_str() {
+                "wasi" => WasmRuntime::Wasi,
                 "unknown" => {
                     // Check third part for "emscripten"
-                    Some(parts.get(2).map_or(WasmRuntime::Standalone, |p| {
+                    parts.get(2).map_or(WasmRuntime::Standalone, |p| {
                         match p.to_lowercase().as_str() {
                             "emscripten" => WasmRuntime::Emscripten,
                             _ => WasmRuntime::Standalone,
                         }
-                    }))
+                    })
                 }
-                _ => Some(WasmRuntime::Standalone),
+                _ => WasmRuntime::Standalone,
             })
         } else {
             None

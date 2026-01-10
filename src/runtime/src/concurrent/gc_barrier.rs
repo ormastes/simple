@@ -152,7 +152,7 @@ pub trait TraceConcurrent {
     fn approximate_len(&self) -> usize;
 }
 
-/// FFI functions for write barrier control (callable from compiled code)
+// FFI functions for write barrier control (callable from compiled code)
 
 /// Start a GC collection cycle
 #[no_mangle]

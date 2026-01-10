@@ -50,7 +50,7 @@ fn scan_dir_recursive(dir: &Path, api: &mut ScannedApi) -> anyhow::Result<()> {
 
         if path.is_dir() {
             scan_dir_recursive(&path, api)?;
-        } else if path.extension().map_or(false, |ext| ext == "rs") {
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
             scan_rust_file(&path, api)?;
         }
     }

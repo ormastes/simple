@@ -21,7 +21,7 @@ mod compiler_value_tests {
 
     #[test]
     fn test_value_float() {
-        let v = Value::Float(3.14);
+        let v = Value::Float(3.15);
         let _ = format!("{:?}", v);
     }
 
@@ -282,10 +282,10 @@ mod runtime_value_ffi_tests {
 
     #[test]
     fn test_value_float_ffi() {
-        let v = rt_value_float(3.14);
+        let v = rt_value_float(3.15);
         assert!(rt_value_is_float(v));
         let f = rt_value_as_float(v);
-        assert!((f - 3.14).abs() < 0.001);
+        assert!((f - 3.15).abs() < 0.001);
     }
 
     #[test]
@@ -471,7 +471,7 @@ mod runtime_types_tests {
 
     #[test]
     fn test_runtime_value_float() {
-        let v = RuntimeValue::from_float(3.14);
+        let v = RuntimeValue::from_float(3.15);
         assert!(v.is_float());
     }
 

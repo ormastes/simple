@@ -129,7 +129,7 @@ fn infers_string_literal() {
 
 #[test]
 fn infers_float_literal() {
-    let items = parse_items("let f = 3.14\nmain = 0");
+    let items = parse_items("let f = 3.15\nmain = 0");
     check(&items).expect("type check ok");
 }
 

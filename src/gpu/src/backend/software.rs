@@ -111,6 +111,7 @@ impl Backend for SoftwareBackend {
         Ok(())
     }
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn memcpy(
         &self,
         dst: *mut u8,

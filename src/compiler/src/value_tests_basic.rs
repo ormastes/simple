@@ -102,7 +102,7 @@
     // ==========================================================================
     #[test]
     fn test_value_as_float_from_float() {
-        assert_eq!(Value::Float(3.14).as_float().unwrap(), 3.14);
+        assert_eq!(Value::Float(3.15).as_float().unwrap(), 3.15);
     }
 
     #[test]
@@ -131,7 +131,7 @@
 
     #[test]
     fn test_value_to_key_string_float() {
-        assert_eq!(Value::Float(3.14).to_key_string(), "3.14");
+        assert_eq!(Value::Float(3.15).to_key_string(), "3.15");
     }
 
     #[test]
@@ -251,7 +251,7 @@
 
     #[test]
     fn test_value_to_display_string_float() {
-        assert_eq!(Value::Float(3.14).to_display_string(), "3.14");
+        assert_eq!(Value::Float(3.15).to_display_string(), "3.15");
     }
 
     #[test]
@@ -316,11 +316,11 @@
 
     #[test]
     fn test_value_matches_type_float() {
-        assert!(Value::Float(3.14).matches_type("f64"));
-        assert!(Value::Float(3.14).matches_type("f32"));
-        assert!(Value::Float(3.14).matches_type("float"));
-        assert!(Value::Float(3.14).matches_type("Float"));
-        assert!(!Value::Float(3.14).matches_type("int"));
+        assert!(Value::Float(3.15).matches_type("f64"));
+        assert!(Value::Float(3.15).matches_type("f32"));
+        assert!(Value::Float(3.15).matches_type("float"));
+        assert!(Value::Float(3.15).matches_type("Float"));
+        assert!(!Value::Float(3.15).matches_type("int"));
     }
 
     #[test]
@@ -405,7 +405,7 @@
 
     #[test]
     fn test_value_clone_float() {
-        let v = Value::Float(3.14);
+        let v = Value::Float(3.15);
         assert_eq!(v.clone(), v);
     }
 

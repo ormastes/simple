@@ -210,8 +210,8 @@ mod tests {
 
     #[test]
     fn test_runtime_value_float() {
-        let value = RuntimeValue::from_float(3.14);
-        assert!((value.as_float() - 3.14).abs() < 0.0001);
+        let value = RuntimeValue::from_float(3.15);
+        assert!((value.as_float() - 3.15).abs() < 0.0001);
     }
 
     #[test]
@@ -240,10 +240,10 @@ mod tests {
     #[test]
     #[cfg(feature = "wasm")]
     fn test_to_wasm_value_float() {
-        let value = RuntimeValue::from_float(3.14);
+        let value = RuntimeValue::from_float(3.15);
         let wasm = to_wasm_value(value).unwrap();
         match wasm {
-            WasmValue::F64(v) => assert!((v - 3.14).abs() < 0.0001),
+            WasmValue::F64(v) => assert!((v - 3.15).abs() < 0.0001),
             _ => panic!("Expected F64"),
         }
     }
@@ -337,8 +337,8 @@ mod tests {
     #[test]
     #[cfg(feature = "wasm")]
     fn test_to_f64() {
-        let float_val = RuntimeValue::from_float(3.14159);
-        assert!((to_f64(float_val).unwrap() - 3.14159).abs() < 0.00001);
+        let float_val = RuntimeValue::from_float(3.15159);
+        assert!((to_f64(float_val).unwrap() - 3.15159).abs() < 0.00001);
 
         // Integer to float conversion
         let int_val = RuntimeValue::from_int(42);

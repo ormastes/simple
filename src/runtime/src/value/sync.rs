@@ -318,7 +318,6 @@ include!("sync_barrier.rs");
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
 
     #[test]
     fn test_atomic_basic() {

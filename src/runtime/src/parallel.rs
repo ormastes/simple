@@ -63,8 +63,8 @@ pub struct KernelContext {
 // Thread-local kernel context
 thread_local! {
     static KERNEL_CTX: RefCell<KernelContext> = RefCell::new(KernelContext::default());
-    static GROUP_BARRIER: RefCell<Option<Arc<Barrier>>> = RefCell::new(None);
-    static SHARED_MEMORY: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static GROUP_BARRIER: RefCell<Option<Arc<Barrier>>> = const { RefCell::new(None) };
+    static SHARED_MEMORY: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Set the kernel context for current thread.

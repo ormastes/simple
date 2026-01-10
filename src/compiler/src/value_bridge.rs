@@ -637,17 +637,17 @@ mod tests {
 
     #[test]
     fn test_bridge_value_float() {
-        let bv = BridgeValue::float(3.14);
+        let bv = BridgeValue::float(3.15);
         assert_eq!(bv.tag, bridge_tags::FLOAT);
-        assert!((bv.as_float() - 3.14).abs() < 1e-10);
+        assert!((bv.as_float() - 3.15).abs() < 1e-10);
     }
 
     #[test]
     fn test_bridge_value_bool() {
         let bv_true = BridgeValue::bool(true);
         let bv_false = BridgeValue::bool(false);
-        assert_eq!(bv_true.as_bool(), true);
-        assert_eq!(bv_false.as_bool(), false);
+        assert!(bv_true.as_bool());
+        assert!(!bv_false.as_bool());
     }
 
     #[test]
@@ -674,10 +674,10 @@ mod tests {
 
     #[test]
     fn test_value_to_bridge_float() {
-        let v = Value::Float(3.14);
+        let v = Value::Float(3.15);
         let bv = BridgeValue::from(&v);
         assert_eq!(bv.tag, bridge_tags::FLOAT);
-        assert!((bv.as_float() - 3.14).abs() < 1e-10);
+        assert!((bv.as_float() - 3.15).abs() < 1e-10);
     }
 
     #[test]
@@ -710,10 +710,10 @@ mod tests {
 
     #[test]
     fn test_bridge_to_value_float() {
-        let bv = BridgeValue::float(3.14);
+        let bv = BridgeValue::float(3.15);
         let v = unsafe { bv.to_value() };
         if let Value::Float(f) = v {
-            assert!((f - 3.14).abs() < 1e-10);
+            assert!((f - 3.15).abs() < 1e-10);
         } else {
             panic!("Expected Float");
         }

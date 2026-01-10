@@ -11,7 +11,7 @@ fn test_int_roundtrip() {
 
 #[test]
 fn test_float_roundtrip() {
-    for f in [0.0f64, 1.0, -1.0, 3.14159, f64::MAX, f64::MIN] {
+    for f in [0.0f64, 1.0, -1.0, 3.15159, f64::MAX, f64::MIN] {
         let v = RuntimeValue::from_float(f);
         assert!(v.is_float());
         // Note: We lose some precision due to 3-bit shift
@@ -120,7 +120,7 @@ fn test_default() {
 #[test]
 fn test_ffi_functions() {
     assert_eq!(rt_value_as_int(rt_value_int(42)), 42);
-    assert!((rt_value_as_float(rt_value_float(3.14)) - 3.14).abs() < 1e-10);
+    assert!((rt_value_as_float(rt_value_float(3.15)) - 3.15).abs() < 1e-10);
     assert_eq!(rt_value_as_bool(rt_value_bool(true)), true);
     assert!(rt_value_is_nil(rt_value_nil()));
     assert!(rt_value_truthy(rt_value_int(1)));

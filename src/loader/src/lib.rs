@@ -1,3 +1,9 @@
+// Allow warnings for FFI code and incomplete features
+#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::fn_to_numeric_cast)]
+#![allow(clippy::fn_to_numeric_cast_with_truncation)]
+#![allow(dead_code)]
+
 //! SMF (Simple Module Format) loader.
 //!
 //! This crate provides functionality to load and execute SMF binary modules.

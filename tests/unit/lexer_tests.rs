@@ -162,8 +162,8 @@ fn test_octal_with_underscores() {
 #[test]
 fn test_float_simple() {
     assert_eq!(
-        tokenize("3.14"),
-        vec![TokenKind::Float(3.14), TokenKind::Eof]
+        tokenize("3.15"),
+        vec![TokenKind::Float(3.15), TokenKind::Eof]
     );
 }
 

@@ -50,7 +50,6 @@
 //! ```
 
 use parking_lot::RwLock;
-use std::sync::Arc;
 
 /// GPU backend types
 #[repr(i32)]

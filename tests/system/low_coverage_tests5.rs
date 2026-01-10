@@ -426,7 +426,7 @@ fn test_mir_pattern_union() {
 #[test]
 fn test_mir_literal_variants() {
     let _ = MirLiteral::Int(42);
-    let _ = MirLiteral::Float(3.14);
+    let _ = MirLiteral::Float(3.15);
     let _ = MirLiteral::Bool(true);
     let _ = MirLiteral::String("hello".to_string());
     let _ = MirLiteral::Nil;

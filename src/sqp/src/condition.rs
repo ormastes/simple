@@ -226,7 +226,7 @@ impl Condition {
     }
 
     /// Create a NOT condition.
-    pub fn not(condition: Condition) -> Self {
+    pub fn negate(condition: Condition) -> Self {
         Condition::Not(Box::new(condition))
     }
 
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn test_not_condition() {
-        let cond = Condition::not(Condition::eq("deleted", true));
+        let cond = Condition::negate(Condition::eq("deleted", true));
         let (sql, _) = cond.build(Dialect::Sqlite);
         assert_eq!(sql, "NOT (deleted = ?)");
     }

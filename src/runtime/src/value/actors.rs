@@ -11,8 +11,8 @@ use super::heap::{HeapHeader, HeapObjectType};
 use crate::concurrency::{spawn_actor, ActorHandle, Message};
 
 thread_local! {
-    pub(crate) static CURRENT_ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = RefCell::new(None);
-    pub(crate) static CURRENT_ACTOR_OUTBOX: RefCell<Option<mpsc::Sender<Message>>> = RefCell::new(None);
+    pub(crate) static CURRENT_ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = const { RefCell::new(None) };
+    pub(crate) static CURRENT_ACTOR_OUTBOX: RefCell<Option<mpsc::Sender<Message>>> = const { RefCell::new(None) };
 }
 
 // Global registry for ActorHandles (avoids storing Arc/Mutex in heap memory)
@@ -72,7 +72,7 @@ pub extern "C" fn rt_actor_spawn(body_func: u64, ctx: RuntimeValue) -> RuntimeVa
     let func: Option<extern "C" fn(*const u8)> = if body_func == 0 {
         None
     } else {
-        Some(unsafe { std::mem::transmute(body_func as usize) })
+        Some(unsafe { std::mem::transmute::<usize, extern "C" fn(*const u8)>(body_func as usize) })
     };
     let ctx_ptr: usize = if ctx.is_heap() {
         ctx.as_heap_ptr() as usize

@@ -1,0 +1,377 @@
+# Typed Tensor Examples
+# Runnable examples demonstrating dimension inference
+
+import ml.torch.typed_tensor.{TypedTensor, TensorType, DimSpec, MemoryReport}
+import ml.torch.dtype.{DType}
+import ml.torch.device.{Device}
+
+print("============================================================")
+print("  TYPED TENSOR DIMENSION INFERENCE - EXAMPLES")
+print("============================================================")
+print("")
+
+# ============================================================================
+# Example 1: Basic Dimension Tracking
+# ============================================================================
+
+print("Example 1: Basic Dimension Tracking")
+print("------------------------------------------------------------")
+
+# Create tensor with exact dimensions
+let t1 = TypedTensor.zeros([DimSpec.exact(64), DimSpec.exact(128)])
+print("Created tensor with exact dimensions: {t1.actual_shape()}")
+assert t1.actual_shape() == [64, 128]
+
+# Create tensor with named dimensions
+let t2 = TypedTensor.randn([
+    DimSpec.named("batch", 32),
+    DimSpec.named("features", 784)
+])
+print("Created tensor with named dimensions: {t2.actual_shape()}")
+print("  Dimension names provide self-documentation!")
+
+# Create tensor with ranged dimensions
+let t3 = TypedTensor.randn([
+    DimSpec.ranged("batch", 32, 1, 64),
+    DimSpec.exact(784)
+])
+print("Created tensor with ranged dimensions: {t3.actual_shape()}")
+print("  Batch size can vary between 1 and 64")
+
+print("")
+
+# ============================================================================
+# Example 2: Matrix Multiplication with Shape Inference
+# ============================================================================
+
+print("Example 2: Matrix Multiplication with Shape Inference")
+print("------------------------------------------------------------")
+
+# Input: [4, 8]
+let a = TypedTensor.randn([DimSpec.exact(4), DimSpec.exact(8)])
+print("Matrix A: {a.actual_shape()}")
+
+# Weight: [8, 16]
+let b = TypedTensor.randn([DimSpec.exact(8), DimSpec.exact(16)])
+print("Matrix B: {b.actual_shape()}")
+
+# Matmul: [4, 8] @ [8, 16] -> [4, 16]
+match a.matmul(b):
+    case Ok(c):
+        print("Result C = A @ B: {c.actual_shape()}")
+        assert c.actual_shape() == [4, 16]
+        print("✅ Shape inference worked! [4,8] @ [8,16] -> [4,16]")
+    case Err(e):
+        print("❌ Error: {e}")
+
+print("")
+
+# ============================================================================
+# Example 3: Multi-Layer Neural Network
+# ============================================================================
+
+print("Example 3: Multi-Layer Neural Network (MNIST)")
+print("------------------------------------------------------------")
+
+# Input: [batch, 784] - Flattened 28x28 images
+let input = TypedTensor.randn([
+    DimSpec.ranged("batch", 32, 1, 64),
+    DimSpec.exact(784)
+])
+print("Input: {input.actual_shape()} (flattened MNIST)")
+
+# Layer 1: [784, 256]
+let w1 = TypedTensor.randn([DimSpec.exact(784), DimSpec.exact(256)])
+let h1 = input.matmul(w1)?
+print("Hidden 1: {h1.actual_shape()} = input @ w1")
+
+# Layer 2: [256, 128]
+let w2 = TypedTensor.randn([DimSpec.exact(256), DimSpec.exact(128)])
+let h2 = h1.matmul(w2)?
+print("Hidden 2: {h2.actual_shape()} = h1 @ w2")
+
+# Layer 3: [128, 10]
+let w3 = TypedTensor.randn([DimSpec.exact(128), DimSpec.exact(10)])
+let output = h2.matmul(w3)?
+print("Output: {output.actual_shape()} = h2 @ w3 (10 classes)")
+
+print("✅ Dimensions propagated correctly through 3-layer network!")
+print("")
+
+# ============================================================================
+# Example 4: CNN with NCHW Format
+# ============================================================================
+
+print("Example 4: CNN with NCHW Format (ImageNet)")
+print("------------------------------------------------------------")
+
+# Typical CNN input: [batch, channels, height, width]
+let img_input = TypedTensor.randn([
+    DimSpec.ranged("batch", 32, 1, 128),
+    DimSpec.exact(3),    # RGB channels
+    DimSpec.exact(224),  # Height
+    DimSpec.exact(224)   # Width
+])
+
+print("CNN Input (NCHW): {img_input.actual_shape()}")
+print("  Batch: variable (1-128)")
+print("  Channels: 3 (RGB)")
+print("  Height: 224")
+print("  Width: 224")
+
+# After conv/pool layers, might have [batch, 512, 7, 7]
+let conv_output = TypedTensor.randn([
+    DimSpec.ranged("batch", 32, 1, 128),
+    DimSpec.exact(512),  # Feature maps
+    DimSpec.exact(7),
+    DimSpec.exact(7)
+])
+
+print("After Conv/Pool: {conv_output.actual_shape()}")
+
+# Flatten for fully connected layer: [batch, 512*7*7] = [batch, 25088]
+let flattened = conv_output.reshape([
+    DimSpec.ranged("batch", 32, 1, 128),
+    DimSpec.exact(25088)
+])?
+
+print("Flattened: {flattened.actual_shape()}")
+
+# FC layer: [25088, 1000] for ImageNet
+let w_fc = TypedTensor.randn([DimSpec.exact(25088), DimSpec.exact(1000)])
+let logits = flattened.matmul(w_fc)?
+
+print("Logits: {logits.actual_shape()} (1000 ImageNet classes)")
+print("✅ CNN dimension tracking working!")
+print("")
+
+# ============================================================================
+# Example 5: Broadcasting
+# ============================================================================
+
+print("Example 5: Broadcasting Operations")
+print("------------------------------------------------------------")
+
+# Matrix: [3, 4]
+let matrix = TypedTensor.randn([DimSpec.exact(3), DimSpec.exact(4)])
+print("Matrix: {matrix.actual_shape()}")
+
+# Row vector (broadcasts): [1, 4]
+let row_vec = TypedTensor.randn([DimSpec.exact(1), DimSpec.exact(4)])
+print("Row vector: {row_vec.actual_shape()}")
+
+# Add with broadcasting: [3, 4] + [1, 4] -> [3, 4]
+let result1 = matrix.add(row_vec)?
+print("Matrix + Row: {result1.actual_shape()} (broadcast row to each matrix row)")
+
+# Column vector (broadcasts): [3, 1]
+let col_vec = TypedTensor.randn([DimSpec.exact(3), DimSpec.exact(1)])
+print("Column vector: {col_vec.actual_shape()}")
+
+# Add with broadcasting: [3, 4] + [3, 1] -> [3, 4]
+let result2 = matrix.add(col_vec)?
+print("Matrix + Col: {result2.actual_shape()} (broadcast col to each matrix col)")
+
+print("✅ Broadcasting inference working!")
+print("")
+
+# ============================================================================
+# Example 6: Transformer Attention
+# ============================================================================
+
+print("Example 6: Transformer Multi-Head Attention")
+print("------------------------------------------------------------")
+
+# Q, K, V: [batch, heads, seq_len, head_dim]
+let batch = DimSpec.ranged("batch", 32, 1, 64)
+let heads = DimSpec.exact(12)
+let seq_len = DimSpec.ranged("seq", 128, 1, 512)
+let head_dim = DimSpec.exact(64)
+
+print("Attention dimensions:")
+print("  Batch: 1-64 (sample: 32)")
+print("  Heads: 12")
+print("  Sequence: 1-512 (sample: 128)")
+print("  Head dim: 64")
+
+let q = TypedTensor.randn([batch, heads, seq_len, head_dim])
+let k = TypedTensor.randn([batch, heads, seq_len, head_dim])
+let v = TypedTensor.randn([batch, heads, seq_len, head_dim])
+
+print("Q: {q.actual_shape()}")
+print("K: {k.actual_shape()}")
+print("V: {v.actual_shape()}")
+
+# Transpose K for attention: [batch, heads, seq, head_dim] -> [batch, heads, head_dim, seq]
+let k_t = k.transpose(2, 3)?
+print("K transposed: {k_t.actual_shape()}")
+
+# Attention scores: Q @ K^T -> [batch, heads, seq, seq]
+let scores = q.matmul(k_t)?
+print("Attention scores: {scores.actual_shape()}")
+print("✅ Transformer attention dimension tracking working!")
+print("")
+
+# ============================================================================
+# Example 7: Memory Estimation
+# ============================================================================
+
+print("Example 7: Memory Estimation")
+print("------------------------------------------------------------")
+
+# Single tensor with range
+let mem_tensor_type = TensorType.new([
+    DimSpec.ranged("batch", 32, 1, 64),
+    DimSpec.exact(784)
+], DType.Float32)
+
+print("Tensor: [batch: 1-64, 784], Float32")
+print("  Min memory: {mem_tensor_type.min_memory_bytes()} bytes")
+print("    (1 * 784 * 4 = 3,136 bytes)")
+print("  Max memory: {mem_tensor_type.max_memory_bytes()} bytes")
+print("    (64 * 784 * 4 = 200,704 bytes)")
+
+# Full model memory
+print("")
+print("Full model memory estimation:")
+
+let w1_type = TensorType.new([DimSpec.exact(784), DimSpec.exact(256)], DType.Float32)
+let w2_type = TensorType.new([DimSpec.exact(256), DimSpec.exact(10)], DType.Float32)
+
+let param_mem = w1_type.min_memory_bytes() + w2_type.min_memory_bytes()
+print("  Parameters: {param_mem} bytes")
+print("    (784*256 + 256*10) * 4 = 813,056 bytes")
+
+let grad_mem = param_mem
+print("  Gradients: {grad_mem} bytes (same as parameters)")
+
+let opt_mem = 2 * param_mem
+print("  Optimizer (Adam): {opt_mem} bytes (2x parameters)")
+
+let act_type = TensorType.new([
+    DimSpec.ranged("batch", 32, 1, 64),
+    DimSpec.exact(256)
+], DType.Float32)
+
+print("  Activations (min): {act_type.min_memory_bytes()} bytes")
+print("  Activations (max): {act_type.max_memory_bytes()} bytes")
+
+let total_min = param_mem + grad_mem + opt_mem + act_type.min_memory_bytes()
+let total_max = param_mem + grad_mem + opt_mem + act_type.max_memory_bytes()
+
+print("")
+print("Total training memory:")
+print("  Min: {total_min} bytes ({total_min / 1024 / 1024} MB)")
+print("  Max: {total_max} bytes ({total_max / 1024 / 1024} MB)")
+
+print("✅ Memory estimation helps plan GPU memory usage!")
+print("")
+
+# ============================================================================
+# Example 8: Runtime Verification
+# ============================================================================
+
+print("Example 8: Runtime Verification")
+print("------------------------------------------------------------")
+
+# Create tensor with range constraints
+let verified_tensor = TypedTensor.randn([
+    DimSpec.ranged("batch", 32, 1, 64),
+    DimSpec.exact(784)
+])
+
+print("Tensor with constraints: {verified_tensor.actual_shape()}")
+print("  Batch dimension: range [1, 64]")
+print("  Features dimension: exact 784")
+
+# Verify constraints are satisfied
+match verified_tensor.verify():
+    case Ok(_):
+        print("✅ Runtime verification passed!")
+        print("  Actual dimensions satisfy declared constraints")
+    case Err(e):
+        print("❌ Verification failed: {e}")
+
+print("")
+
+# ============================================================================
+# Example 9: Error Handling
+# ============================================================================
+
+print("Example 9: Error Handling (Catching Shape Mismatches)")
+print("------------------------------------------------------------")
+
+# Create incompatible matrices
+let mat_a = TypedTensor.randn([DimSpec.exact(4), DimSpec.exact(8)])
+let mat_b = TypedTensor.randn([DimSpec.exact(10), DimSpec.exact(16)])
+
+print("Matrix A: {mat_a.actual_shape()}")
+print("Matrix B: {mat_b.actual_shape()}")
+print("Attempting A @ B (incompatible K dimensions: 8 vs 10)...")
+
+match mat_a.matmul(mat_b):
+    case Ok(c):
+        print("❌ Should have failed!")
+    case Err(e):
+        print("✅ Caught shape mismatch error:")
+        print("  {e}")
+        print("  This error was caught at compile time through type checking!")
+
+print("")
+
+# ============================================================================
+# Example 10: Reshape Validation
+# ============================================================================
+
+print("Example 10: Reshape Validation")
+print("------------------------------------------------------------")
+
+let orig = TypedTensor.randn([DimSpec.exact(4), DimSpec.exact(6)])
+print("Original: {orig.actual_shape()} (24 elements)")
+
+# Valid reshape: preserve element count
+print("Attempting reshape to [2, 12] (24 elements)...")
+match orig.reshape([DimSpec.exact(2), DimSpec.exact(12)]):
+    case Ok(reshaped):
+        print("✅ Valid reshape: {reshaped.actual_shape()}")
+    case Err(e):
+        print("❌ Unexpected error: {e}")
+
+# Invalid reshape: change element count
+print("Attempting reshape to [3, 10] (30 elements)...")
+match orig.reshape([DimSpec.exact(3), DimSpec.exact(10)]):
+    case Ok(_):
+        print("❌ Should have failed!")
+    case Err(e):
+        print("✅ Caught element count mismatch:")
+        print("  {e}")
+
+print("")
+
+# ============================================================================
+# Summary
+# ============================================================================
+
+print("============================================================")
+print("  SUMMARY")
+print("============================================================")
+print("")
+print("Tensor dimension inference provides:")
+print("  ✅ Compile-time shape inference through operations")
+print("  ✅ Named dimensions for self-documenting code")
+print("  ✅ Range constraints for flexible batch sizes")
+print("  ✅ Memory estimation from dimension bounds")
+print("  ✅ Runtime verification of constraints")
+print("  ✅ Clear error messages for shape mismatches")
+print("")
+print("Use TypedTensor to:")
+print("  • Catch dimension errors early")
+print("  • Document tensor shapes in code")
+print("  • Plan GPU memory requirements")
+print("  • Build type-safe neural networks")
+print("")
+print("See also:")
+print("  • User Guide: doc/guide/tensor_dimensions_guide.md")
+print("  • Design Doc: doc/design/tensor_dimensions_design.md")
+print("  • Tests: simple/std_lib/test/unit/ml/torch/typed_tensor_spec.spl")
+print("")

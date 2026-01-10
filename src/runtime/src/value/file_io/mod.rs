@@ -46,7 +46,7 @@ pub use process::{
 // Re-export async file functions
 pub use async_file::{
     async_yield, native_async_file_create, native_async_file_get_state, native_async_file_is_ready,
-    native_async_file_start_loading, native_async_file_wait, FileLoadState,
+    native_async_file_start_loading, native_async_file_wait,
 };
 
 // Re-export low-level syscall wrappers

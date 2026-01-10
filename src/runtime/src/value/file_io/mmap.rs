@@ -21,7 +21,6 @@ pub extern "C" fn native_mmap_create_shared(handle: i64, size: u64) -> RuntimeVa
     #[cfg(target_family = "unix")]
     {
         use libc::{mmap, MAP_SHARED, PROT_READ};
-        use std::os::unix::io::AsRawFd;
 
         let fd = handle as std::os::unix::io::RawFd;
         let len = size as usize;
@@ -74,7 +73,6 @@ pub extern "C" fn native_mmap_create(handle: i64, size: u64) -> RuntimeValue {
     #[cfg(target_family = "unix")]
     {
         use libc::{mmap, MAP_PRIVATE, PROT_READ};
-        use std::os::unix::io::AsRawFd;
 
         let fd = handle as std::os::unix::io::RawFd;
         let len = size as usize;
@@ -158,8 +156,6 @@ pub extern "C" fn native_mmap_unmap(ptr: i64, size: u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_mmap_lifecycle() {
         // This would require actual file for testing

@@ -182,20 +182,20 @@ fn test_mir_float_const() {
 
     let backend = create_test_backend("float_test");
 
-    // fn test() -> f64 { return 3.14; }
+    // fn test() -> f64 { return 3.15; }
     let mut func = MirFunction::new("test".to_string(), T::F64, Visibility::Public);
 
     let v0 = VReg(0);
     func.blocks[0].instructions.push(MirInst::ConstFloat {
         dest: v0,
-        value: 3.14,
+        value: 3.15,
     });
     func.blocks[0].terminator = Terminator::Return(Some(v0));
 
     backend.compile_function(&func).unwrap();
 
     let ir = backend.get_ir().unwrap();
-    assert!(ir.contains("3.14"));
+    assert!(ir.contains("3.15"));
     assert!(ir.contains("ret double"));
 
     backend.verify().unwrap();

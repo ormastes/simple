@@ -23,10 +23,10 @@ mod runtime_extended_tests {
 
     #[test]
     fn test_runtime_value_float() {
-        let v = rt_value_float(3.14);
+        let v = rt_value_float(3.15);
         assert!(rt_value_is_float(v));
         let f = rt_value_as_float(v);
-        assert!((f - 3.14).abs() < 0.01);
+        assert!((f - 3.15).abs() < 0.01);
     }
 
     #[test]

@@ -100,7 +100,7 @@ extern "C" fn counting_generator(_gen: RuntimeValue) -> RuntimeValue {
 #[test]
 fn test_generator_new() {
     let gen = rt_generator_new(
-        simple_yielder as u64,
+        simple_yielder as *const () as u64,
         10, // 10 slots
         RuntimeValue::NIL,
     );
@@ -111,7 +111,7 @@ fn test_generator_new() {
 
 #[test]
 fn test_generator_simple_yield_sequence() {
-    let gen = rt_generator_new(simple_yielder as u64, 0, RuntimeValue::NIL);
+    let gen = rt_generator_new(simple_yielder as *const () as u64, 0, RuntimeValue::NIL);
 
     // First next: state 0 -> 1, yield 10
     let val1 = rt_generator_next(gen);
@@ -136,7 +136,7 @@ fn test_generator_simple_yield_sequence() {
 #[test]
 fn test_generator_slot_storage() {
     let gen = rt_generator_new(
-        slot_based_generator as u64,
+        slot_based_generator as *const () as u64,
         10, // Need slots for storage
         RuntimeValue::NIL,
     );
@@ -164,7 +164,7 @@ fn test_generator_slot_storage() {
 fn test_generator_context() {
     // Create generator with context value 100
     let gen = rt_generator_new(
-        context_based_generator as u64,
+        context_based_generator as *const () as u64,
         0,
         RuntimeValue::from_int(100),
     );
@@ -191,7 +191,7 @@ fn test_generator_context() {
 
 #[test]
 fn test_generator_state_manipulation() {
-    let gen = rt_generator_new(simple_yielder as u64, 0, RuntimeValue::NIL);
+    let gen = rt_generator_new(simple_yielder as *const () as u64, 0, RuntimeValue::NIL);
 
     // Initial state is 0
     assert_eq!(rt_generator_get_state(gen), 0);
@@ -208,7 +208,7 @@ fn test_generator_state_manipulation() {
 #[test]
 fn test_generator_slot_operations() {
     let gen = rt_generator_new(
-        simple_yielder as u64,
+        simple_yielder as *const () as u64,
         5, // 5 slots
         RuntimeValue::NIL,
     );
@@ -235,7 +235,7 @@ fn test_generator_slot_operations() {
 #[test]
 fn test_generator_slot_auto_resize() {
     let gen = rt_generator_new(
-        simple_yielder as u64,
+        simple_yielder as *const () as u64,
         2, // Start with only 2 slots
         RuntimeValue::NIL,
     );
@@ -250,7 +250,7 @@ fn test_generator_slot_auto_resize() {
 
 #[test]
 fn test_generator_mark_done() {
-    let gen = rt_generator_new(simple_yielder as u64, 0, RuntimeValue::NIL);
+    let gen = rt_generator_new(simple_yielder as *const () as u64, 0, RuntimeValue::NIL);
 
     // Generator starts not done
     let val1 = rt_generator_next(gen);
@@ -296,7 +296,7 @@ fn test_generator_invalid_value() {
 
 #[test]
 fn test_generator_negative_slot_index() {
-    let gen = rt_generator_new(simple_yielder as u64, 10, RuntimeValue::NIL);
+    let gen = rt_generator_new(simple_yielder as *const () as u64, 10, RuntimeValue::NIL);
 
     // Negative index should be ignored
     rt_generator_store_slot(gen, -5, RuntimeValue::from_int(100));
@@ -309,7 +309,7 @@ fn test_generator_execution_count() {
     // Reset counter
     GENERATOR_COUNTER.store(0, Ordering::SeqCst);
 
-    let gen = rt_generator_new(counting_generator as u64, 0, RuntimeValue::NIL);
+    let gen = rt_generator_new(counting_generator as *const () as u64, 0, RuntimeValue::NIL);
 
     // Each next() should increment the counter
     let val0 = rt_generator_next(gen);
