@@ -36,15 +36,12 @@ impl Lowerer {
         module_path: &ModulePath,
         target: &ImportTarget,
     ) -> LowerResult<()> {
-        eprintln!("DEBUG: load_imported_types called for {:?}", module_path);
-
         // Only proceed if we have a module resolver
         let (resolver, current_file) = match (&self.module_resolver, &self.current_file) {
             (Some(r), Some(f)) => (r, f),
             _ => {
                 // No module resolver available - skip type loading
                 // This maintains backward compatibility with existing code
-                eprintln!("DEBUG: No module resolver available - skipping type loading");
                 return Ok(());
             }
         };
