@@ -18,11 +18,94 @@ pub class WorkerPoolConfig:
             timeout_seconds: 300
         }
 
+    pub fn with_workers(self, count: i32): WorkerPoolConfig =
+        """Set worker count.
+
+        Args:
+            count: Number of workers
+
+        Returns:
+            Modified config
+        """
+        self.workers = count
+        self
+
+    pub fn with_isolation(self, level: IsolationLevel): WorkerPoolConfig =
+        """Set isolation level.
+
+        Args:
+            level: Isolation level
+
+        Returns:
+            Modified config
+        """
+        self.isolation = level
+        self
+
+    pub fn with_timeout(self, seconds: i32): WorkerPoolConfig =
+        """Set timeout.
+
+        Args:
+            seconds: Timeout in seconds
+
+        Returns:
+            Modified config
+        """
+        self.timeout_seconds = seconds
+        self
+
 # Isolation level for parallel execution
 pub enum IsolationLevel:
     Thread      # Thread-based parallelism (shared memory)
     Process     # Process-based parallelism (full isolation)
     Actor       # Actor-based parallelism
+
+    pub fn to_string(self): String =
+        """Convert isolation level to string.
+
+        Returns:
+            Level name
+
+        Example:
+            IsolationLevel::Process.to_string()  # → "process"
+        """
+        match self:
+            IsolationLevel::Thread: "thread"
+            IsolationLevel::Process: "process"
+            IsolationLevel::Actor: "actor"
+
+    pub fn description(self): String =
+        """Get isolation level description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            IsolationLevel::Process.description()
+            # → "Process-based parallelism with full isolation"
+        """
+        match self:
+            IsolationLevel::Thread:
+                "Thread-based parallelism with shared memory"
+            IsolationLevel::Process:
+                "Process-based parallelism with full isolation"
+            IsolationLevel::Actor:
+                "Actor-based parallelism with message passing"
+
+    pub fn is_isolated(self): bool =
+        """Check if isolation provides memory isolation.
+
+        Returns:
+            True if memory is isolated between workers
+
+        Example:
+            IsolationLevel::Thread.is_isolated()  # → false (shared memory)
+            IsolationLevel::Process.is_isolated()  # → true (separate memory)
+        """
+        match self:
+            IsolationLevel::Thread: false
+            IsolationLevel::Process: true
+            IsolationLevel::Actor: true
 
 # Work item for parallel execution
 pub class WorkItem:
@@ -46,12 +129,83 @@ pub class WorkItem:
             status: WorkStatus::Pending
         }
 
+    pub fn is_pending(self): bool =
+        """Check if work item is pending.
+
+        Returns:
+            True if pending
+        """
+        match self.status:
+            WorkStatus::Pending: true
+            _: false
+
+    pub fn is_running(self): bool =
+        """Check if work item is running.
+
+        Returns:
+            True if running
+        """
+        match self.status:
+            WorkStatus::Running: true
+            _: false
+
+    pub fn is_done(self): bool =
+        """Check if work item is done.
+
+        Returns:
+            True if completed or failed
+        """
+        self.status.is_done()
+
+    pub fn mark_running(self):
+        """Mark work item as running."""
+        self.status = WorkStatus::Running
+
+    pub fn mark_completed(self):
+        """Mark work item as completed."""
+        self.status = WorkStatus::Completed
+
+    pub fn mark_failed(self):
+        """Mark work item as failed."""
+        self.status = WorkStatus::Failed
+
 # Work item status
 pub enum WorkStatus:
     Pending
     Running
     Completed
     Failed
+
+    pub fn to_string(self): String =
+        """Convert work status to string.
+
+        Returns:
+            Status name
+
+        Example:
+            WorkStatus::Running.to_string()  # → "running"
+        """
+        match self:
+            WorkStatus::Pending: "pending"
+            WorkStatus::Running: "running"
+            WorkStatus::Completed: "completed"
+            WorkStatus::Failed: "failed"
+
+    pub fn is_done(self): bool =
+        """Check if work item is done (completed or failed).
+
+        Returns:
+            True if done
+
+        Example:
+            WorkStatus::Completed.is_done()  # → true
+            WorkStatus::Running.is_done()  # → false
+        """
+        match self:
+            WorkStatus::Pending: false
+            WorkStatus::Running: false
+            WorkStatus::Completed: true
+            WorkStatus::Failed: true
 
 # Parallel test executor
 pub class ParallelExecutor:
@@ -287,3 +441,35 @@ pub class ParallelExecutor:
         let speedup = 1.0 / ((1.0 - parallel_fraction) + (parallel_fraction / workers))
 
         speedup
+
+    pub fn get_worker_count(self): i32 =
+        """Get number of workers.
+
+        Returns:
+            Worker count
+        """
+        self.config.workers
+
+    pub fn get_optimal_workers(cores: i32, suite_count: i32): i32 =
+        """Calculate optimal worker count.
+
+        Args:
+            cores: CPU core count
+            suite_count: Number of test suites
+
+        Returns:
+            Optimal worker count
+
+        Example:
+            # 8 cores, 100 test suites
+            ParallelExecutor::get_optimal_workers(8, 100)
+            # → 8 (use all cores)
+
+            # 8 cores, 3 test suites
+            ParallelExecutor::get_optimal_workers(8, 3)
+            # → 3 (no benefit from more workers)
+        """
+        if suite_count < cores:
+            suite_count
+        else:
+            cores
