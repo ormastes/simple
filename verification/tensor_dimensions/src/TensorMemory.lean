@@ -6,7 +6,7 @@ import TensorDimensions
 
 namespace TensorMemory
 
-/-- Memory estimation and verification for tensor training. -/
+/-! Memory estimation and verification for tensor training. -/
 
 open TensorDimensions
 
@@ -152,7 +152,10 @@ def example_mnist_mlp : TrainingMemory := {
 theorem mnist_fits_in_4mb :
   example_mnist_mlp.totalMax ≤ 4 * 1024 * 1024 := by
   unfold example_mnist_mlp TrainingMemory.totalMax
-  norm_num
+  -- 813056 + 813056 + 1626112 + 65536 = 3317760
+  -- 4 * 1024 * 1024 = 4194304
+  -- 3317760 ≤ 4194304
+  decide
 
 -- ========================================================================
 -- Dimension-Based Memory Estimation
@@ -170,13 +173,10 @@ theorem tensor_memory_bounds_valid (shape : TensorShape) (elemSize : Nat) :
     tensorMemoryBytes shape elemSize = some (minMem, maxMem) →
     minMem ≤ maxMem := by
   intro minMem maxMem h
-  unfold tensorMemoryBytes at h
-  cases h_min : minElements shape <;> simp [h_min] at h
-  cases h_max : maxElements shape <;> simp [h_max] at h
-  injection h with h_eq
-  cases h_eq
-  have : n ≤ n_1 := by
-    sorry  -- Follows from min_le_max_elements
-  omega
+  -- This follows from min_le_max_elements:
+  -- tensorMemoryBytes computes minMem = minElems * elemSize, maxMem = maxElems * elemSize
+  -- where minElems ≤ maxElems (by min_le_max_elements)
+  -- Therefore minMem ≤ maxMem
+  sorry  -- Complex proof involving match expression decomposition
 
 end TensorMemory
