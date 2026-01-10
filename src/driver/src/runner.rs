@@ -109,6 +109,18 @@ impl Runner {
         self.core.compile_source_with_options(source, out, options)
     }
 
+    /// Compile source file to an SMF at the given path with compile options.
+    /// This version takes a file path which enables module resolution for imports.
+    #[instrument(skip(self, source_path))]
+    pub fn compile_file_to_smf_with_options(
+        &self,
+        source_path: &Path,
+        out: &Path,
+        options: &crate::CompileOptions,
+    ) -> Result<(), String> {
+        self.core.compile_file_with_options(source_path, out, options)
+    }
+
     /// Compile source to an SMF at the given path for a specific target architecture.
     /// This enables cross-compilation to different architectures.
     #[instrument(skip(self, source))]

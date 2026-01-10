@@ -88,7 +88,7 @@ impl CompilerPipeline {
     #[instrument(skip(self, source_path, out))]
     pub fn compile(&mut self, source_path: &Path, out: &Path) -> Result<(), CompileError> {
         let module = load_module_with_imports(source_path, &mut HashSet::new())?;
-        let smf_bytes = self.compile_module_to_memory(module)?;
+        let smf_bytes = self.compile_module_to_memory_with_context(module, Some(source_path))?;
         fs::write(out, smf_bytes).map_err(|e| CompileError::Io(format!("{e}")))
     }
 
@@ -135,6 +135,14 @@ impl CompilerPipeline {
         &mut self,
         module: simple_parser::ast::Module,
     ) -> Result<Vec<u8>, CompileError> {
+        self.compile_module_to_memory_with_context(module, None)
+    }
+
+    pub(super) fn compile_module_to_memory_with_context(
+        &mut self,
+        module: simple_parser::ast::Module,
+        source_file: Option<&Path>,
+    ) -> Result<Vec<u8>, CompileError> {
         // Clear previous lint diagnostics
         self.lint_diagnostics.clear();
 
@@ -164,9 +172,13 @@ impl CompilerPipeline {
             // Type check is required for HIR/MIR lowering
             type_check(&module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
 
-            // Lower to HIR
-            let hir_module = crate::hir::lower(&module)
-                .map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
+            // Lower to HIR (with module resolution support if source file is available)
+            let hir_module = if let Some(source_path) = source_file {
+                crate::hir::lower_with_context(&module, source_path)
+            } else {
+                crate::hir::lower(&module)
+            }
+            .map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
 
             // Emit HIR if requested
             if let Some(path) = &self.emit_hir {
@@ -212,7 +224,7 @@ impl CompilerPipeline {
     #[instrument(skip(self, source_path, out))]
     pub fn compile_native(&mut self, source_path: &Path, out: &Path) -> Result<(), CompileError> {
         let module = load_module_with_imports(source_path, &mut HashSet::new())?;
-        let smf_bytes = self.compile_module_to_memory_native(module)?;
+        let smf_bytes = self.compile_module_to_memory_native_with_context(module, Some(source_path))?;
         fs::write(out, smf_bytes).map_err(|e| CompileError::Io(format!("{e}")))
     }
 
@@ -243,6 +255,14 @@ impl CompilerPipeline {
     pub(super) fn compile_module_to_memory_native(
         &mut self,
         ast_module: simple_parser::ast::Module,
+    ) -> Result<Vec<u8>, CompileError> {
+        self.compile_module_to_memory_native_with_context(ast_module, None)
+    }
+
+    pub(super) fn compile_module_to_memory_native_with_context(
+        &mut self,
+        ast_module: simple_parser::ast::Module,
+        source_file: Option<&Path>,
     ) -> Result<Vec<u8>, CompileError> {
         // Clear previous lint diagnostics
         self.lint_diagnostics.clear();
@@ -282,8 +302,12 @@ impl CompilerPipeline {
             .map(|(name, _)| name.clone())
             .collect();
 
-        // 5-7. Type check and lower to MIR
-        let mut mir_module = self.type_check_and_lower(&ast_module)?;
+        // 5-7. Type check and lower to MIR (with module resolution if source file available)
+        let mut mir_module = if let Some(source_path) = source_file {
+            self.type_check_and_lower_with_context(&ast_module, source_path)?
+        } else {
+            self.type_check_and_lower(&ast_module)?
+        };
 
         // Check if we have a main function. If not, fall back to interpreter mode.
         // This handles cases like `main = 42` which are module-level constants,
