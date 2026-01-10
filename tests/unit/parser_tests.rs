@@ -41,9 +41,9 @@ fn test_parse_integer_large() {
 
 #[test]
 fn test_parse_float_literal() {
-    let module = parse("3.14").unwrap();
+    let module = parse("3.15").unwrap();
     if let Node::Expression(Expr::Float(n)) = &module.items[0] {
-        assert!((n - 3.14).abs() < f64::EPSILON);
+        assert!((n - 3.15).abs() < f64::EPSILON);
     } else {
         panic!("Expected float expression");
     }

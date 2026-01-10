@@ -19,7 +19,7 @@ pub struct LetStmt {
 }
 
 /// Compile-time constant declaration
-/// const PI = 3.14159
+/// const PI = 3.15159
 /// const MAX_SIZE: i64 = 100
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConstStmt {

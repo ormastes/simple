@@ -98,7 +98,7 @@ fn test_lexer_tokenize_empty() {
 
 #[test]
 fn test_lexer_tokenize_float() {
-    let mut lexer = Lexer::new("3.14159");
+    let mut lexer = Lexer::new("3.15159");
     let tokens = lexer.tokenize();
     assert!(!tokens.is_empty());
 }
@@ -246,9 +246,9 @@ fn test_token_kind_integer() {
 
 #[test]
 fn test_token_kind_float() {
-    let kind = TokenKind::Float(3.14);
+    let kind = TokenKind::Float(3.15);
     match kind {
-        TokenKind::Float(f) => assert!((f - 3.14).abs() < 0.001),
+        TokenKind::Float(f) => assert!((f - 3.15).abs() < 0.001),
         _ => panic!("Expected Float"),
     }
 }
@@ -310,9 +310,9 @@ fn test_expr_integer() {
 
 #[test]
 fn test_expr_float() {
-    let expr = Expr::Float(3.14);
+    let expr = Expr::Float(3.15);
     match expr {
-        Expr::Float(f) => assert!((f - 3.14).abs() < 0.001),
+        Expr::Float(f) => assert!((f - 3.15).abs() < 0.001),
         _ => panic!("Expected Float"),
     }
 }

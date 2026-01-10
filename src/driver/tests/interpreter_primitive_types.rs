@@ -392,7 +392,7 @@ main = a + b
 fn interpreter_float_suffix_f64() {
     // Float with type suffix - just verify it parses and evaluates
     let code = r#"
-let x = 3.14f64
+let x = 3.15f64
 main = 1
 "#;
     let result = run_code(code, &[], "").unwrap();

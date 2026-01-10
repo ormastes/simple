@@ -183,7 +183,7 @@ fn test_hir_expr_construction_integration() {
 
     // Float literal
     let float_expr = HirExpr {
-        kind: HirExprKind::Float(3.14),
+        kind: HirExprKind::Float(3.15),
         ty: TypeId::F64,
     };
     assert_eq!(float_expr.ty, TypeId::F64);

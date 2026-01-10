@@ -546,7 +546,9 @@ pub struct MemoryPool<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> {
     free_mask: u64, // Bitmap of free blocks (max 64 blocks)
 }
 
-impl<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> Default for MemoryPool<BLOCK_SIZE, BLOCK_COUNT> {
+impl<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> Default
+    for MemoryPool<BLOCK_SIZE, BLOCK_COUNT>
+{
     fn default() -> Self {
         Self::new()
     }

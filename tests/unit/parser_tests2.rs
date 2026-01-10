@@ -27,7 +27,7 @@ fn test_parse_let_tuple_pattern() {
 
 #[test]
 fn test_parse_const() {
-    let module = parse("const PI = 3.14").unwrap();
+    let module = parse("const PI = 3.15").unwrap();
     if let Node::Const(stmt) = &module.items[0] {
         assert_eq!(stmt.name, "PI");
     } else {
@@ -37,7 +37,7 @@ fn test_parse_const() {
 
 #[test]
 fn test_parse_const_with_type() {
-    let module = parse("const PI: f64 = 3.14").unwrap();
+    let module = parse("const PI: f64 = 3.15").unwrap();
     if let Node::Const(stmt) = &module.items[0] {
         assert!(stmt.ty.is_some());
     } else {

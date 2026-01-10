@@ -46,8 +46,8 @@ fn test_octal_literals() {
 #[test]
 fn test_float_literals() {
     assert_eq!(
-        tokenize("3.14"),
-        vec![TokenKind::Float(3.14), TokenKind::Eof]
+        tokenize("3.15"),
+        vec![TokenKind::Float(3.15), TokenKind::Eof]
     );
     assert_eq!(
         tokenize("1.0e10"),

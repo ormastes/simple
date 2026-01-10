@@ -72,8 +72,8 @@ pub fn sum_f32(data: &[f32]) -> f32 {
     let mut result = sum.sum();
 
     // Handle remainder
-    for i in (chunks * 4)..data.len() {
-        result += data[i];
+    for item in data.iter().skip(chunks * 4) {
+        result += item;
     }
 
     result
@@ -106,8 +106,8 @@ fn reduce_f32_helper(
     let mut result = simd_reduce(acc);
 
     // Handle remainder
-    for i in (chunks * 4)..data.len() {
-        result = scalar_reduce(result, data[i]);
+    for item in data.iter().skip(chunks * 4) {
+        result = scalar_reduce(result, *item);
     }
 
     Some(result)
@@ -130,8 +130,8 @@ pub fn scale_f32(data: &mut [f32], factor: f32) {
 
     // Handle remainder
     let remainder_start = (data.len() / 4) * 4;
-    for i in remainder_start..data.len() {
-        data[i] *= factor;
+    for item in data.iter_mut().skip(remainder_start) {
+        *item *= factor;
     }
 }
 
@@ -141,8 +141,8 @@ pub fn add_scalar_f32(data: &mut [f32], value: f32) {
     process_f32_array(data, |v| v + value_vec);
 
     let remainder_start = (data.len() / 4) * 4;
-    for i in remainder_start..data.len() {
-        data[i] += value;
+    for item in data.iter_mut().skip(remainder_start) {
+        *item += value;
     }
 }
 
@@ -220,8 +220,8 @@ pub fn count_greater_than_f32(data: &[f32], threshold: f32) -> usize {
     }
 
     // Handle remainder
-    for i in (chunks * 4)..data.len() {
-        if data[i] > threshold {
+    for item in data.iter().skip(chunks * 4) {
+        if *item > threshold {
             count += 1;
         }
     }
@@ -237,8 +237,8 @@ pub fn clamp_f32(data: &mut [f32], min_val: f32, max_val: f32) {
     process_f32_array(data, |v| v.max(min_vec).min(max_vec));
 
     let remainder_start = (data.len() / 4) * 4;
-    for i in remainder_start..data.len() {
-        data[i] = data[i].max(min_val).min(max_val);
+    for item in data.iter_mut().skip(remainder_start) {
+        *item = item.max(min_val).min(max_val);
     }
 }
 
@@ -265,8 +265,8 @@ pub fn normalize_f32(data: &mut [f32]) {
         variance_sum += sq.sum();
     }
 
-    for i in (chunks * 4)..data.len() {
-        variance_sum += data[i] * data[i];
+    for item in data.iter().skip(chunks * 4) {
+        variance_sum += item * item;
     }
 
     let std_dev = (variance_sum / data.len() as f32).sqrt();

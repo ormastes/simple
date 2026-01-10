@@ -401,8 +401,8 @@ impl Add for F32x8 {
     #[inline]
     fn add(self, rhs: Self) -> Self::Output {
         let mut result = [0.0f32; 8];
-        for i in 0..8 {
-            result[i] = self.0[i] + rhs.0[i];
+        for (i, (a, b)) in self.0.iter().zip(rhs.0.iter()).enumerate() {
+            result[i] = a + b;
         }
         F32x8(result)
     }
@@ -414,8 +414,8 @@ impl Sub for F32x8 {
     #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
         let mut result = [0.0f32; 8];
-        for i in 0..8 {
-            result[i] = self.0[i] - rhs.0[i];
+        for (i, (a, b)) in self.0.iter().zip(rhs.0.iter()).enumerate() {
+            result[i] = a - b;
         }
         F32x8(result)
     }
@@ -427,8 +427,8 @@ impl Mul for F32x8 {
     #[inline]
     fn mul(self, rhs: Self) -> Self::Output {
         let mut result = [0.0f32; 8];
-        for i in 0..8 {
-            result[i] = self.0[i] * rhs.0[i];
+        for (i, (a, b)) in self.0.iter().zip(rhs.0.iter()).enumerate() {
+            result[i] = a * b;
         }
         F32x8(result)
     }
@@ -440,8 +440,8 @@ impl Div for F32x8 {
     #[inline]
     fn div(self, rhs: Self) -> Self::Output {
         let mut result = [0.0f32; 8];
-        for i in 0..8 {
-            result[i] = self.0[i] / rhs.0[i];
+        for (i, (a, b)) in self.0.iter().zip(rhs.0.iter()).enumerate() {
+            result[i] = a / b;
         }
         F32x8(result)
     }

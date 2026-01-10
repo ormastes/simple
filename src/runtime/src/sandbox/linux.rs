@@ -9,7 +9,6 @@ use super::{limits, FilesystemMode, NetworkMode, SandboxConfig, SandboxError, Sa
 use nix::unistd::{Gid, Uid};
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
 
 /// Apply sandbox configuration to the current process (Linux).
 ///

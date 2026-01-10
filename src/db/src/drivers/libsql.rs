@@ -131,7 +131,7 @@ impl LibsqlConnection {
             // Get column names
             let columns: Vec<String> = (0..column_count)
                 .map(|i| {
-                    rows.column_name(i as i32)
+                    rows.column_name(i)
                         .map(|s| s.to_string())
                         .unwrap_or_default()
                 })
@@ -144,7 +144,7 @@ impl LibsqlConnection {
                     Ok(Some(row)) => {
                         let values: Vec<SqlValue> = (0..column_count)
                             .map(|i| {
-                                let value = row.get_value(i as i32).unwrap_or(LibsqlValue::Null);
+                                let value = row.get_value(i).unwrap_or(LibsqlValue::Null);
                                 from_libsql_value(value)
                             })
                             .collect();

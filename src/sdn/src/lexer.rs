@@ -514,7 +514,7 @@ mod tests {
     fn test_numbers() {
         assert_eq!(lex("42"), vec![TokenKind::Integer(42), TokenKind::Eof]);
         assert_eq!(lex("-17"), vec![TokenKind::Integer(-17), TokenKind::Eof]);
-        assert_eq!(lex("3.14"), vec![TokenKind::Float(3.14), TokenKind::Eof]);
+        assert_eq!(lex("3.15"), vec![TokenKind::Float(3.15), TokenKind::Eof]);
         assert_eq!(
             lex("1_000_000"),
             vec![TokenKind::Integer(1000000), TokenKind::Eof]

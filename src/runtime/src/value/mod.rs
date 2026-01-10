@@ -26,7 +26,6 @@ mod contracts;
 mod core;
 pub mod diagram_ffi;
 mod dict;
-pub mod screenshot_ffi;
 mod doctest_io;
 mod ffi;
 mod file_io;
@@ -41,6 +40,7 @@ mod process;
 mod pty;
 #[cfg(feature = "ratatui-tui")]
 pub mod ratatui_tui;
+pub mod screenshot_ffi;
 mod sync;
 pub mod tags;
 #[cfg(feature = "pytorch")]

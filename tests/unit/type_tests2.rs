@@ -130,7 +130,7 @@ fn test_infer_integer() {
 #[test]
 fn test_infer_float() {
     let mut tc = TypeChecker::new();
-    let expr = simple_parser::ast::Expr::Float(3.14);
+    let expr = simple_parser::ast::Expr::Float(3.15);
     let result = tc.infer_expr(&expr);
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), Type::Float);
@@ -409,7 +409,7 @@ fn test_check_impl() {
 
 #[test]
 fn test_check_const() {
-    let source = "const PI = 3.14";
+    let source = "const PI = 3.15";
     let mut parser = Parser::new(source);
     let module = parser.parse().unwrap();
     let result = check(&module.items);

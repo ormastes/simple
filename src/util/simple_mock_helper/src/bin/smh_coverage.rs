@@ -7,7 +7,7 @@
 //!   report   - Show full coverage report
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -105,7 +105,7 @@ fn main() -> Result<()> {
 }
 
 /// Scan source and generate YAML
-fn cmd_scan(source: &PathBuf, output: &PathBuf) -> Result<()> {
+fn cmd_scan(source: &Path, output: &Path) -> Result<()> {
     println!("Scanning source directory: {}", source.display());
 
     let api = scan_directory(source)?;
@@ -128,8 +128,8 @@ fn cmd_scan(source: &PathBuf, output: &PathBuf) -> Result<()> {
 
 /// Load coverage data and API, returning both with touched functions map
 fn load_coverage_data(
-    coverage_json: &PathBuf,
-    source: &PathBuf,
+    coverage_json: &Path,
+    source: &Path,
 ) -> Result<(ScannedApi, HashMap<String, u64>)> {
     let cov = load_llvm_cov_export(coverage_json)
         .with_context(|| format!("Failed to load coverage JSON: {}", coverage_json.display()))?;
@@ -186,11 +186,7 @@ fn is_class_touched(type_name: &str, methods: &[String], touched: &HashMap<Strin
 // =============================================================================
 
 /// Show class/struct touch coverage for System Tests
-fn cmd_class_coverage(
-    coverage_json: &PathBuf,
-    source: &PathBuf,
-    filter: Option<&str>,
-) -> Result<()> {
+fn cmd_class_coverage(coverage_json: &Path, source: &Path, filter: Option<&str>) -> Result<()> {
     let (api, touched) = load_coverage_data(coverage_json, source)?;
 
     print_header("SYSTEM TEST - Class/Struct Touch Coverage");
@@ -231,11 +227,7 @@ fn cmd_class_coverage(
 }
 
 /// Show public function touch coverage for Integration Tests
-fn cmd_func_coverage(
-    coverage_json: &PathBuf,
-    source: &PathBuf,
-    filter: Option<&str>,
-) -> Result<()> {
+fn cmd_func_coverage(coverage_json: &Path, source: &Path, filter: Option<&str>) -> Result<()> {
     let (api, touched) = load_coverage_data(coverage_json, source)?;
 
     print_header("INTEGRATION TEST - Public Function Touch Coverage");

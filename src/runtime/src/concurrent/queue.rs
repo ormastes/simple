@@ -132,7 +132,7 @@ impl TraceConcurrent for ConcurrentQueue {
     }
 }
 
-/// FFI functions for ConcurrentQueue (callable from compiled code)
+// FFI functions for ConcurrentQueue (callable from compiled code)
 
 /// Create a new concurrent queue
 #[no_mangle]

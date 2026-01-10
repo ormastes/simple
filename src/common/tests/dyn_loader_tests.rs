@@ -18,11 +18,9 @@ impl DynModule for MockModule {
     }
 
     fn entry_fn<F: Copy>(&self) -> Option<F> {
-        if self.has_main {
-            None // Would return actual function pointer in real impl
-        } else {
-            None
-        }
+        // Would return actual function pointer in real impl if has_main
+        let _ = self.has_main;
+        None
     }
 }
 

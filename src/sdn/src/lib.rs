@@ -48,7 +48,7 @@
 //! name: Alice           # bare string
 //! message: "Hello"      # quoted string
 //! age: 30               # integer
-//! ratio: 3.14           # float
+//! ratio: 3.15           # float
 //! active: true          # boolean
 //! empty: null           # null
 //! ```

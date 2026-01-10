@@ -877,8 +877,8 @@ fn generate_test_diagrams(
     _results: &[TestFileResult],
     quiet: bool,
 ) -> Option<Vec<PathBuf>> {
-    use std::fs;
     use simple_runtime::value::diagram_ffi;
+    use std::fs;
 
     // Get events from global profiler
     let profiler = global_profiler();
@@ -940,7 +940,10 @@ fn generate_test_diagrams(
     };
 
     if !quiet && has_ffi_events {
-        println!("Using {} events from interpreter call tracing", ffi_events.len());
+        println!(
+            "Using {} events from interpreter call tracing",
+            ffi_events.len()
+        );
     }
 
     // Setup output directory

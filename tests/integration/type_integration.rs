@@ -814,7 +814,7 @@ fn test_infer_pure_string() {
 fn test_infer_pure_unsupported() {
     use simple_parser::ast::Expr;
     // Float is not in the Lean model
-    let expr = Expr::Float(3.14);
+    let expr = Expr::Float(3.15);
     let ty = infer_pure(&expr);
     assert!(ty.is_none());
 }

@@ -32,7 +32,7 @@ fn test_span_equality() {
 #[test]
 fn test_token_kind_literals() {
     let _ = TokenKind::Integer(42);
-    let _ = TokenKind::Float(3.14);
+    let _ = TokenKind::Float(3.15);
     let _ = TokenKind::String("hello".to_string());
     let _ = TokenKind::Bool(true);
     let _ = TokenKind::Nil;

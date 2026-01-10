@@ -147,8 +147,8 @@ impl<'a> Parser<'a> {
             (Vec::new(), Vec::new())
         };
 
-        let where_clause = self.parse_where_clause()?;
-        let (fields, methods, invariant, _macro_invocations, _mixins, doc_comment) =
+        let _where_clause = self.parse_where_clause()?;
+        let (fields, methods, _invariant, _macro_invocations, _mixins, doc_comment) =
             self.parse_class_body()?;
 
         // Parse required methods (methods without bodies)

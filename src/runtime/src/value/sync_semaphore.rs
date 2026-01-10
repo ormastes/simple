@@ -10,7 +10,7 @@
 pub struct RuntimeSemaphore {
     pub header: HeapHeader,
     /// The semaphore state (count, mutex, condvar)
-    pub inner: *mut SemaphoreInner,
+    inner: *mut SemaphoreInner,
     /// Semaphore ID
     pub sem_id: u64,
 }

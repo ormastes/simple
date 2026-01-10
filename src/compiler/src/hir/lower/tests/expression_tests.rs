@@ -5,7 +5,7 @@ use super::parse_and_lower;
 #[test]
 fn test_lower_literals() {
     let module = parse_and_lower(
-        "fn test() -> i64:\n    let a: i64 = 42\n    let b: f64 = 3.14\n    let c: bool = true\n    return a\n"
+        "fn test() -> i64:\n    let a: i64 = 42\n    let b: f64 = 3.15\n    let c: bool = true\n    return a\n"
     ).unwrap();
 
     let func = &module.functions[0];
@@ -102,7 +102,7 @@ fn test_lower_bool_literal() {
 
 #[test]
 fn test_lower_float_literal() {
-    let module = parse_and_lower("fn test() -> f64:\n    return 3.14\n").unwrap();
+    let module = parse_and_lower("fn test() -> f64:\n    return 3.15\n").unwrap();
 
     let func = &module.functions[0];
     assert_eq!(func.return_type, TypeId::F64);

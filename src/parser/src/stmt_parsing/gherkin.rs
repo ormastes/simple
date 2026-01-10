@@ -18,7 +18,7 @@ impl<'a> Parser<'a> {
     /// Parse an examples table: `examples name:`
     /// Transforms to: `examples("name", [[row1...], [row2...], ...])`
     pub(crate) fn parse_examples(&mut self) -> Result<Node, ParseError> {
-        let start_span = self.current.span;
+        let _start_span = self.current.span;
         self.expect(&TokenKind::Examples)?;
 
         // Parse name (can be identifier or string)
@@ -29,7 +29,7 @@ impl<'a> Parser<'a> {
         let block = self.parse_block()?;
 
         // Extract rows as array of arrays
-        let rows_expr = self.block_to_array_expr(&block, start_span);
+        let rows_expr = self.block_to_array_expr(&block, _start_span);
 
         // Generate: examples("name", [[...], [...]])
         let call_expr = Expr::Call {
@@ -52,7 +52,7 @@ impl<'a> Parser<'a> {
     /// Parse a feature definition: `feature Name:`
     /// Transforms to: `feature("Name", do_block)`
     pub(crate) fn parse_feature(&mut self) -> Result<Node, ParseError> {
-        let start_span = self.current.span;
+        let _start_span = self.current.span;
         self.expect(&TokenKind::Feature)?;
 
         let name = self.parse_gherkin_description()?;
@@ -82,7 +82,7 @@ impl<'a> Parser<'a> {
     /// Parse a scenario: `scenario Name:` or `scenario outline Name:`
     /// Transforms to: `scenario("Name", do_block)` or `scenario_outline("Name", do_block)`
     pub(crate) fn parse_scenario(&mut self) -> Result<Node, ParseError> {
-        let start_span = self.current.span;
+        let _start_span = self.current.span;
         self.expect(&TokenKind::Scenario)?;
 
         // Check for `outline` modifier
@@ -120,7 +120,7 @@ impl<'a> Parser<'a> {
     /// Parse step keywords at top level: `given/when/then/and_then pattern:`
     /// Transforms to: `given("pattern", do_block)`
     pub(crate) fn parse_step_ref_as_node(&mut self) -> Result<Node, ParseError> {
-        let start_span = self.current.span;
+        let _start_span = self.current.span;
 
         // Determine function name from keyword
         let fn_name = match &self.current.kind {
@@ -337,7 +337,7 @@ impl<'a> Parser<'a> {
 
     /// Convert a block's statements to an array expression
     /// Each statement becomes an element in the array
-    fn block_to_array_expr(&self, block: &Block, span: Span) -> Expr {
+    fn block_to_array_expr(&self, block: &Block, _span: Span) -> Expr {
         let elements: Vec<Expr> = block
             .statements
             .iter()
@@ -356,10 +356,9 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::ast::{Argument, Expr, Module, Node};
+    use crate::ast::{Expr, Module, Node};
     use crate::error::ParseError;
     use crate::parser_impl::core::Parser;
-    use crate::TokenKind;
 
     fn parse_source(src: &str) -> Result<Module, ParseError> {
         let mut parser = Parser::new(src);

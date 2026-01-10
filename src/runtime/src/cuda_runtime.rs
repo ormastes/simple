@@ -1,3 +1,6 @@
+// Allow dead code for incomplete CUDA feature
+#![allow(dead_code)]
+
 //! CUDA runtime wrapper for GPU kernel execution.
 //!
 //! This module provides a safe wrapper around the CUDA Driver API for:
@@ -33,8 +36,12 @@
 //! ```
 
 use std::collections::HashMap;
+#[cfg(feature = "cuda")]
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_uint, c_void};
+#[cfg(feature = "cuda")]
+use std::os::raw::c_char;
+use std::os::raw::{c_int, c_uint, c_void};
+#[cfg(feature = "cuda")]
 use std::ptr;
 use std::sync::Once;
 
@@ -161,6 +168,7 @@ mod cuda_stubs {
 }
 
 #[cfg(not(feature = "cuda"))]
+#[allow(unused_imports)]
 use cuda_stubs::*;
 
 /// CUDA runtime initialization
@@ -498,7 +506,7 @@ impl CudaKernel {
         shared_mem: u32,
         args: &mut [*mut c_void],
     ) -> CudaResult<()> {
-        let grid_dim = ((global_size + local_size - 1) / local_size, 1, 1);
+        let grid_dim = (global_size.div_ceil(local_size), 1, 1);
         let block_dim = (local_size, 1, 1);
         self.launch(grid_dim, block_dim, shared_mem, args)
     }

@@ -391,7 +391,7 @@ mod tests {
         assert!(SdnValue::Null.is_null());
         assert!(SdnValue::Bool(true).is_bool());
         assert!(SdnValue::Int(42).is_int());
-        assert!(SdnValue::Float(3.14).is_float());
+        assert!(SdnValue::Float(3.15).is_float());
         assert!(SdnValue::String("hello".into()).is_string());
         assert!(SdnValue::Array(vec![]).is_array());
         assert!(SdnValue::Dict(IndexMap::new()).is_dict());
@@ -401,7 +401,7 @@ mod tests {
     fn test_as_methods() {
         assert_eq!(SdnValue::Bool(true).as_bool(), Some(true));
         assert_eq!(SdnValue::Int(42).as_i64(), Some(42));
-        assert_eq!(SdnValue::Float(3.14).as_f64(), Some(3.14));
+        assert_eq!(SdnValue::Float(3.15).as_f64(), Some(3.15));
         assert_eq!(SdnValue::Int(42).as_f64(), Some(42.0));
         assert_eq!(SdnValue::String("hello".into()).as_str(), Some("hello"));
     }

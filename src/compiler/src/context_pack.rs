@@ -499,8 +499,8 @@ pub fn main():
         let analyzer = SymbolUsageAnalyzer::new();
         let usage = analyzer.analyze(&nodes, "main");
 
-        // Should track types used in binary operations
-        assert!(usage.used_types.contains("i64") || usage.used_functions.len() >= 0);
+        // Basic check - just verify analysis completed without error
+        let _ = &usage;
     }
 
     #[test]
@@ -535,8 +535,8 @@ pub fn main():
         let analyzer = SymbolUsageAnalyzer::new();
         let usage = analyzer.analyze(&nodes, "main");
 
-        // Basic check - should not crash
-        assert!(usage.used_functions.len() >= 0);
+        // Basic check - should not crash (just verify analysis completed)
+        let _ = &usage;
     }
 
     #[test]

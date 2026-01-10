@@ -457,7 +457,7 @@ impl<'a> Parser<'a> {
             Expr::Integer(n) => Some(ConstValue::Int(*n)),
             Expr::String(s) => Some(ConstValue::Str(s.clone())),
             Expr::Bool(b) => Some(ConstValue::Bool(*b)),
-            Expr::Identifier(name) => {
+            Expr::Identifier(_name) => {
                 // Could look up in a const environment if we had one
                 None
             }

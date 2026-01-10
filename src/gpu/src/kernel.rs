@@ -230,7 +230,7 @@ impl CompiledKernel {
 }
 
 /// GPU kernel attribute for parsing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GpuAttribute {
     /// Work group size override.
     pub work_group_size: Option<[u32; 3]>,
@@ -238,16 +238,6 @@ pub struct GpuAttribute {
     pub fast_math: bool,
     /// Required features.
     pub requires: Vec<String>,
-}
-
-impl Default for GpuAttribute {
-    fn default() -> Self {
-        GpuAttribute {
-            work_group_size: None,
-            fast_math: false,
-            requires: Vec::new(),
-        }
-    }
 }
 
 #[cfg(test)]

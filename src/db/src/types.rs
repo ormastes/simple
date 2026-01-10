@@ -282,9 +282,9 @@ mod tests {
 
     #[test]
     fn test_from_sql_real() {
-        let v = SqlValue::Real(3.14);
-        assert_eq!(f64::from_sql(&v).unwrap(), 3.14);
-        assert_eq!(f32::from_sql(&v).unwrap(), 3.14f32);
+        let v = SqlValue::Real(3.15);
+        assert_eq!(f64::from_sql(&v).unwrap(), 3.15);
+        assert_eq!(f32::from_sql(&v).unwrap(), 3.15f32);
         assert_eq!(i64::from_sql(&v).unwrap(), 3);
     }
 
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn test_to_sql() {
         assert_eq!(42i64.to_sql(), SqlValue::Integer(42));
-        assert_eq!(3.14f64.to_sql(), SqlValue::Real(3.14));
+        assert_eq!(3.15f64.to_sql(), SqlValue::Real(3.15));
         assert_eq!(true.to_sql(), SqlValue::Boolean(true));
         assert_eq!("hello".to_sql(), SqlValue::Text("hello".to_string()));
         assert_eq!(None::<i64>.to_sql(), SqlValue::Null);

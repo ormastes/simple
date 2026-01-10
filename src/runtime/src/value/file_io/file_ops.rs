@@ -10,7 +10,7 @@
 
 use super::super::RuntimeValue;
 use std::fs::File;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{FromRawFd, RawFd};
 
 #[cfg(target_family = "unix")]
 use std::os::unix::io::IntoRawFd;
@@ -108,7 +108,7 @@ pub extern "C" fn native_fs_open(path: RuntimeValue, mode: i64) -> RuntimeValue 
 /// # Returns
 /// Number of bytes read
 #[no_mangle]
-pub extern "C" fn native_file_read(handle: i64, buf: RuntimeValue) -> RuntimeValue {
+pub extern "C" fn native_file_read(handle: i64, _buf: RuntimeValue) -> RuntimeValue {
     #[cfg(target_family = "unix")]
     {
         use std::io::Read;
@@ -148,7 +148,7 @@ pub extern "C" fn native_file_read(handle: i64, buf: RuntimeValue) -> RuntimeVal
 /// # Returns
 /// Number of bytes written
 #[no_mangle]
-pub extern "C" fn native_file_write(handle: i64, data: RuntimeValue) -> RuntimeValue {
+pub extern "C" fn native_file_write(handle: i64, _data: RuntimeValue) -> RuntimeValue {
     #[cfg(target_family = "unix")]
     {
         use std::io::Write;

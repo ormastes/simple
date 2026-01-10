@@ -394,10 +394,10 @@ pub struct EnumDef {
     pub doc_comment: Option<DocComment>,
 }
 
-/// Standalone unit type definition
-/// Single-base: `unit UserId: i64 as uid`
-/// Multi-base:  `unit IpAddr: str | u32 as ip` (accepts string or numeric literals)
-/// Creates a newtype wrapper with literal suffix support
+// Standalone unit type definition
+// Single-base: `unit UserId: i64 as uid`
+// Multi-base:  `unit IpAddr: str | u32 as ip` (accepts string or numeric literals)
+// Creates a newtype wrapper with literal suffix support
 // Unit type definitions (extracted to nodes_units.rs)
 include!("../nodes_units.rs");
 

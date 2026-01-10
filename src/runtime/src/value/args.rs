@@ -107,8 +107,8 @@ pub extern "C" fn rt_set_args(argc: i32, argv: *const *const u8) {
 /// let args = vec!["program".to_string(), "arg1".to_string()];
 /// rt_set_args_vec(&args);
 /// ```
-pub fn rt_set_args_vec(args: &Vec<String>) {
-    *PROGRAM_ARGS.lock() = args.clone();
+pub fn rt_set_args_vec(args: &[String]) {
+    *PROGRAM_ARGS.lock() = args.to_vec();
     tracing::debug!(arg_count = args.len(), "Program arguments set from Vec");
 }
 

@@ -7,7 +7,6 @@
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
@@ -332,10 +331,7 @@ fn generate_screenshot_path(
         .replace(".spl", "");
 
     // Clean up test name
-    let safe_name = test_name
-        .replace(' ', "_")
-        .replace('/', "_")
-        .to_lowercase();
+    let safe_name = test_name.replace(' ', "_").replace('/', "_").to_lowercase();
 
     let suffix = match capture_type {
         CaptureType::Before => "before",

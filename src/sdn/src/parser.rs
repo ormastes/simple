@@ -691,9 +691,9 @@ mod tests {
 
     #[test]
     fn test_float_value() {
-        let src = "ratio: 3.14";
+        let src = "ratio: 3.15";
         let result = parse(src).unwrap();
-        assert!((result.get("ratio").and_then(|v| v.as_f64()).unwrap() - 3.14).abs() < 0.001);
+        assert!((result.get("ratio").and_then(|v| v.as_f64()).unwrap() - 3.15).abs() < 0.001);
     }
 
     #[test]

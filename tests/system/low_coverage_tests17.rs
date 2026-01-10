@@ -599,7 +599,7 @@ mod compiler_value_more_tests {
 
     #[test]
     fn test_value_float() {
-        let v = Value::Float(3.14);
+        let v = Value::Float(3.15);
         let _ = format!("{:?}", v);
     }
 

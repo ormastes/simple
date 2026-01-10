@@ -363,8 +363,8 @@ mod tests {
         // Not initialized, try_get returns None
         assert!(lazy.try_get().is_none());
 
-        // Initialize
-        let _ = lazy.get_or_init(|| 42);
+        // Initialize - drop the guard explicitly to avoid clippy warning
+        drop(lazy.get_or_init(|| 42));
 
         // Now try_get succeeds
         assert!(lazy.try_get().is_some());

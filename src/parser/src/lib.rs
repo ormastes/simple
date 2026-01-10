@@ -1,3 +1,7 @@
+// Allow warnings for incomplete features
+#![allow(dead_code)]
+#![allow(clippy::large_enum_variant)]
+
 pub mod arena;
 pub mod ast;
 pub mod diagnostic;
@@ -17,7 +21,7 @@ mod expressions;
 mod parser_helpers;
 mod parser_patterns;
 mod parser_types;
-mod statements;
+mod stmt_parsing;
 mod types_def;
 
 pub use arena::*;

@@ -641,7 +641,7 @@ fn test_value_variants_integration() {
     assert!(int_val.truthy());
 
     // Float
-    let float_val = Value::Float(3.14);
+    let float_val = Value::Float(3.15);
     assert!(float_val.truthy());
 
     // Bool

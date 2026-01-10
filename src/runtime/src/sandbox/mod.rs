@@ -34,7 +34,7 @@ use std::time::Duration;
 /// Sandbox configuration for runtime execution.
 ///
 /// Provides resource limits, network controls, and filesystem restrictions.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SandboxConfig {
     /// Resource limits
     pub limits: ResourceLimits,
@@ -45,7 +45,7 @@ pub struct SandboxConfig {
 }
 
 /// Resource limits for sandboxed execution (#916).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResourceLimits {
     /// Maximum CPU time (seconds), None = unlimited
     pub cpu_time: Option<Duration>,
@@ -105,27 +105,6 @@ pub enum FilesystemMode {
     Restricted,
     /// Virtual overlay (copy-on-write)
     Overlay,
-}
-
-impl Default for SandboxConfig {
-    fn default() -> Self {
-        Self {
-            limits: ResourceLimits::default(),
-            network: NetworkIsolation::default(),
-            filesystem: FilesystemIsolation::default(),
-        }
-    }
-}
-
-impl Default for ResourceLimits {
-    fn default() -> Self {
-        Self {
-            cpu_time: None,
-            memory: None,
-            file_descriptors: None,
-            threads: None,
-        }
-    }
 }
 
 impl Default for NetworkIsolation {

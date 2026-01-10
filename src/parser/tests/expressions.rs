@@ -22,7 +22,7 @@ fn parse_chained_method_calls() {
 #[test]
 fn parse_literals() {
     parse_ok("let x = 42");
-    parse_ok("let x = 3.14");
+    parse_ok("let x = 3.15");
     parse_ok("let x = true");
     parse_ok("let x = false");
     parse_ok("let x = nil");

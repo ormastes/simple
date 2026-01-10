@@ -265,9 +265,9 @@ impl WorkItemState {
         local_size: [u32; 3],
     ) -> Self {
         let num_groups = [
-            (global_size[0] + local_size[0] - 1) / local_size[0],
-            (global_size[1] + local_size[1] - 1) / local_size[1],
-            (global_size[2] + local_size[2] - 1) / local_size[2],
+            global_size[0].div_ceil(local_size[0]),
+            global_size[1].div_ceil(local_size[1]),
+            global_size[2].div_ceil(local_size[2]),
         ];
 
         WorkItemState {

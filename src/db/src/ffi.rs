@@ -2,6 +2,9 @@
 //!
 //! These functions are called from compiled Simple code to interact with databases.
 //! All functions use `rt_db_*` prefix for consistency with other runtime FFI.
+//!
+//! Note: FFI functions check for null pointers before dereferencing, making them safe.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use crate::connection::Database;
 use crate::error::DbError;
@@ -570,7 +573,7 @@ fn build_params(params: *const u64, param_count: usize) -> Vec<SqlValue> {
 // ============================================================================
 
 thread_local! {
-    static LAST_ERROR: std::cell::RefCell<Option<CString>> = std::cell::RefCell::new(None);
+    static LAST_ERROR: std::cell::RefCell<Option<CString>> = const { std::cell::RefCell::new(None) };
 }
 
 fn store_last_error(error: DbError) {
@@ -629,7 +632,7 @@ mod tests {
         let int_handle = rt_db_value_int(42);
         assert!(int_handle > 0);
 
-        let float_handle = rt_db_value_float(3.14);
+        let float_handle = rt_db_value_float(3.15);
         assert!(float_handle > 0);
 
         let bool_handle = rt_db_value_bool(true);
@@ -640,7 +643,7 @@ mod tests {
             let values = SQL_VALUES.lock();
             assert_eq!(values.get(&null_handle), Some(&SqlValue::Null));
             assert_eq!(values.get(&int_handle), Some(&SqlValue::Integer(42)));
-            assert_eq!(values.get(&float_handle), Some(&SqlValue::Real(3.14)));
+            assert_eq!(values.get(&float_handle), Some(&SqlValue::Real(3.15)));
             assert_eq!(values.get(&bool_handle), Some(&SqlValue::Boolean(true)));
         }
 
