@@ -4,6 +4,9 @@
 use tooling.core.project.{Language, ProjectContext}
 use tooling.testing.runner.TestRunResult
 use core.result.{Result, Ok, Err}
+use sdn.{SdnValue, to_sdn}
+use host.async_nogc_mut.io.fs
+use host.common.io.types.FilePath
 
 # Coverage data for a file
 pub class FileCoverage:
@@ -238,20 +241,63 @@ pub class CoverageReporter:
 
         Ok(())
 
-    pub fn generate_json(self, output_file: String): Result[(), String] =
+    pub fn generate_json(self, report: CoverageReport, output_file: String): Result[(), String] =
         """Generate JSON coverage report.
 
         Args:
+            report: Coverage report to export
             output_file: Output file path
 
         Returns:
             Ok if successful
+
+        Format:
+        {
+          "total_coverage": 75.5,
+          "files": [
+            {
+              "file": "src/main.spl",
+              "total_lines": 100,
+              "covered_lines": 75,
+              "line_coverage": 75.0
+            }
+          ]
+        }
         """
-        # TODO: [stdlib][P3] Generate JSON report
         if self.verbose:
             print("Generating JSON report: {output_file}")
 
-        Ok(())
+        # Build SDN structure
+        let mut files_array: List[SdnValue] = []
+
+        for (file_path, file_cov) in report.files.items():
+            let mut file_dict: Dict[String, SdnValue] = {}
+            file_dict["file"] = SdnValue::String(file_path)
+            file_dict["total_lines"] = SdnValue::Int(file_cov.total_lines as i64)
+            file_dict["covered_lines"] = SdnValue::Int(file_cov.covered_lines as i64)
+            file_dict["line_coverage"] = SdnValue::Float(file_cov.line_coverage())
+            file_dict["total_branches"] = SdnValue::Int(file_cov.total_branches as i64)
+            file_dict["covered_branches"] = SdnValue::Int(file_cov.covered_branches as i64)
+            file_dict["branch_coverage"] = SdnValue::Float(file_cov.branch_coverage())
+
+            files_array.append(SdnValue::Dict(file_dict))
+
+        # Build root
+        let mut root_dict: Dict[String, SdnValue] = {}
+        root_dict["total_coverage"] = SdnValue::Float(report.total_coverage)
+        root_dict["files"] = SdnValue::Array(files_array)
+
+        let root_value = SdnValue::Dict(root_dict)
+        let json_text = to_sdn(root_value)
+
+        # Write to file
+        match fs.write_text_sync(output_file as FilePath, &json_text):
+            Ok(_):
+                if self.verbose:
+                    print("  ✓ Written {output_file}")
+                Ok(())
+            Err(e):
+                Err("Failed to write coverage JSON: {e}")
 
     pub fn check_threshold(self, report: CoverageReport, threshold: f64): Result[(), String] =
         """Check if coverage meets threshold.
