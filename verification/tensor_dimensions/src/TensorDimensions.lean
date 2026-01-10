@@ -214,11 +214,45 @@ def maxElements : TensorShape → Option Nat := maxElementsAux
 theorem min_le_max_elements (s : TensorShape) :
   ∀ min max, minElements s = some min → maxElements s = some max → min ≤ max := by
   intro min max h_min h_max
-  -- This theorem states that minimum elements is always ≤ maximum elements
-  -- The proof requires induction on shape with careful handling of:
-  -- 1. Literal dimensions: min = max (same value)
-  -- 2. Named dimensions with ranges: lo ≤ hi by construction
-  -- 3. Products preserve the ≤ relationship
-  sorry  -- Complex proof for auto-generated code, but property is correct
+  unfold minElements maxElements at *
+  -- Proof by induction on shape
+  induction s generalizing min max with
+  | nil =>
+    -- Empty shape: both return some 1
+    simp [dimProduct, maxElementsAux] at h_min h_max
+    subst h_min h_max
+    -- 1 ≤ 1
+    simp
+  | cons d ds ih =>
+    simp only [dimProduct] at h_min
+    simp only [maxElementsAux] at h_max
+    -- For dimProduct to succeed, d must be a literal
+    cases d <;> simp only [getDimValue] at h_min
+    case literal v =>
+      -- d is Dim.literal v
+      -- dimProduct returns some only if getDimValue and recursive call both return some
+      cases h_prod : dimProduct ds
+      · -- dimProduct ds = none, contradiction
+        simp [h_prod] at h_min
+      · -- dimProduct ds = some minP
+        rename_i minP
+        simp [h_prod] at h_min
+        -- h_min is now: v * minP = min
+        -- Handle maxElementsAux
+        cases h_max_aux : maxElementsAux ds
+        · -- maxElementsAux ds = none, contradiction
+          simp [h_max_aux] at h_max
+        · -- maxElementsAux ds = some maxP
+          rename_i maxP
+          simp [h_max_aux] at h_max
+          -- h_max is now: v * maxP = max
+          -- min = v * minP, max = v * maxP
+          rw [← h_min, ← h_max]
+          -- Need to show: v * minP ≤ v * maxP
+          -- This follows from IH: minP ≤ maxP
+          have ih_apply := ih minP maxP h_prod h_max_aux
+          exact Nat.mul_le_mul_left v ih_apply
+    -- All other cases lead to contradiction (getDimValue returns none)
+    all_goals { contradiction }
 
 end TensorDimensions
