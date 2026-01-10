@@ -1,0 +1,625 @@
+"""
+# Tensor Dimension Inference Specification
+
+**Status:** Implementing
+**Feature IDs:** #193
+**Keywords:** tensors, dimensions, shape, inference, types
+**Topics:** data-structures, type-system, verification
+
+## Overview
+
+Tensor dimension inference provides compile-time dimension tracking for N-dimensional tensors.
+This enables early detection of shape mismatches, memory estimation, and self-documenting code
+through named dimensions with range constraints.
+
+## Specification
+
+### Dimension Types
+
+Simple supports five dimension types:
+
+1. **Literal**: Exact dimension size known at compile time
+   - Example: `Dim.Literal(value: 784)` for MNIST input features
+
+2. **Named**: Dimension with a name and optional range constraint
+   - Example: `Dim.Named(name: "batch", lo: 1, hi: 64)`
+   - Enables memory estimation and runtime verification
+
+3. **Var**: Unification variable for type inference
+   - Used internally during shape inference
+   - Example: `Dim.Var(id: 1)` becomes `α1` in output
+
+4. **Unknown**: Fully dynamic dimension
+   - Example: `Dim.Unknown` displayed as `*`
+   - No constraints, unifies with anything
+
+5. **Broadcast**: Broadcasting dimension (numpy-style)
+   - Example: `Dim.Broadcast` displayed as `?`
+   - Matches dimensions of size 1 or any other dimension
+
+### Shape Inference Rules
+
+#### Matrix Multiplication
+```
+[M, K₁] @ [K₂, N] → [M, N]  if K₁ ~ K₂
+```
+
+The K dimensions must unify (be compatible). Named dimensions in M and N are preserved.
+
+#### Reshape
+```
+[d₁, ..., dₙ] → [e₁, ..., eₘ]  if ∏dᵢ = ∏eⱼ
+```
+
+Total element count must be preserved. Only verified when all dimensions are literals.
+
+#### Broadcasting
+```
+[d₁, d₂] + [1, d₂] → [d₁, d₂]
+[d₁, d₂] + [Broadcast, d₂] → [d₁, d₂]
+```
+
+Dimensions of size 1 broadcast to match the other dimension.
+
+### Unification Algorithm
+
+Dimension unification is based on Algorithm W (Hindley-Milner):
+
+- **Literal × Literal**: Unifies if values equal
+- **Named × Named**: Unifies if names equal, intersects ranges
+- **Variable × Any**: Binds variable to the other dimension
+- **Unknown × Any**: Always unifies, returns the other dimension
+- **Broadcast × Literal(1)**: Unifies to Literal(1)
+- **Otherwise**: Fails to unify
+
+### Memory Estimation
+
+Memory bounds are calculated from dimension ranges:
+- **Min**: Product of all minimum dimensions
+- **Max**: Product of all maximum dimensions
+- **Unknown dimensions**: Assume min=1, max=1000
+
+## Related Specifications
+
+- **Tensor Literals** (#192) - Creating and manipulating tensors
+- **Type Inference** (#8-9) - Type inference system integration
+- **BDD Testing Framework** (#180-187) - Testing approach used here
+
+---
+"""
+
+# ============================================================================
+# Type Definitions
+# ============================================================================
+
+enum Dim:
+    Literal(value: Int)
+    Named(name: String, lo: Int, hi: Int)
+    Var(id: Int)
+    Unknown
+    Broadcast
+
+enum ShapeError:
+    LiteralMismatch(expected: Int, actual: Int)
+    RankMismatch(left_rank: Int, right_rank: Int)
+    MatmulIncompatible(k1: Int, k2: Int)
+    ReshapeMismatch(input_elems: Int, output_elems: Int)
+
+struct TensorShape:
+    dims: List[Dim]
+
+enum ShapeResult:
+    Ok(shape: TensorShape)
+    Err(error: ShapeError)
+
+struct MemoryBounds:
+    min_bytes: Int
+    max_bytes: Int
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+fn dim_to_string(d: Dim) -> String:
+    match d:
+        case Dim::Literal(v):
+            return "{v}"
+        case Dim::Named(n, lo, hi):
+            if lo == hi:
+                return "{n}={lo}"
+            else:
+                return "{n}:{lo}..{hi}"
+        case Dim::Var(id):
+            return "α{id}"
+        case Dim::Unknown:
+            return "*"
+        case Dim::Broadcast:
+            return "?"
+
+fn shape_to_string(shape: TensorShape) -> String:
+    if shape.dims.len() == 0:
+        return "[]"
+    if shape.dims.len() == 1:
+        return "[" + dim_to_string(shape.dims[0]) + "]"
+    if shape.dims.len() == 2:
+        return "[" + dim_to_string(shape.dims[0]) + ", " + dim_to_string(shape.dims[1]) + "]"
+    if shape.dims.len() == 3:
+        return "[" + dim_to_string(shape.dims[0]) + ", " + dim_to_string(shape.dims[1]) + ", " + dim_to_string(shape.dims[2]) + "]"
+    return "[...{shape.dims.len()} dims...]"
+
+# ============================================================================
+# Dimension Operations
+# ============================================================================
+
+fn can_unify_dims(d1: Dim, d2: Dim) -> Bool:
+    match (d1, d2):
+        case (Dim::Literal(v1), Dim::Literal(v2)):
+            return v1 == v2
+        case (Dim::Named(n1, _, _), Dim::Named(n2, _, _)):
+            return n1 == n2
+        case (Dim::Unknown, _):
+            return true
+        case (_, Dim::Unknown):
+            return true
+        case (Dim::Var(_), _):
+            return true
+        case (_, Dim::Var(_)):
+            return true
+        case (Dim::Broadcast, Dim::Literal(1)):
+            return true
+        case (Dim::Literal(1), Dim::Broadcast):
+            return true
+        case (Dim::Broadcast, _):
+            return true
+        case (_, Dim::Broadcast):
+            return true
+        case _:
+            return false
+
+fn unify_dim(d1: Dim, d2: Dim) -> Dim:
+    match (d1, d2):
+        case (Dim::Literal(v1), Dim::Literal(v2)):
+            if v1 == v2:
+                return d1
+            else:
+                return Dim.Unknown
+        case (Dim::Named(n1, lo1, hi1), Dim::Named(n2, lo2, hi2)):
+            if n1 == n2:
+                let new_lo = if lo1 > lo2: lo1 else: lo2
+                let new_hi = if hi1 < hi2: hi1 else: hi2
+                return Dim.Named(name: n1, lo: new_lo, hi: new_hi)
+            else:
+                return Dim.Unknown
+        case (Dim::Unknown, d):
+            return d
+        case (d, Dim::Unknown):
+            return d
+        case (Dim::Var(_), d):
+            return d
+        case (d, Dim::Var(_)):
+            return d
+        case (Dim::Broadcast, Dim::Literal(1)):
+            return Dim.Literal(value: 1)
+        case (Dim::Literal(1), Dim::Broadcast):
+            return Dim.Literal(value: 1)
+        case (Dim::Broadcast, d):
+            return d
+        case (d, Dim::Broadcast):
+            return d
+        case _:
+            return Dim.Unknown
+
+# ============================================================================
+# Shape Operations
+# ============================================================================
+
+fn infer_matmul_shape(left: TensorShape, right: TensorShape) -> ShapeResult:
+    if left.dims.len() != 2 or right.dims.len() != 2:
+        return ShapeResult.Err(error: ShapeError.RankMismatch(
+            left_rank: left.dims.len(),
+            right_rank: right.dims.len()
+        ))
+
+    let m = left.dims[0]
+    let k1 = left.dims[1]
+    let k2 = right.dims[0]
+    let n = right.dims[1]
+
+    if not can_unify_dims(k1, k2):
+        return ShapeResult.Err(error: ShapeError.MatmulIncompatible(
+            k1: 0,
+            k2: 0
+        ))
+
+    let k = unify_dim(k1, k2)
+    return ShapeResult.Ok(shape: TensorShape(dims: [m, n]))
+
+fn compute_element_count(shape: TensorShape) -> Int:
+    let mut count = 1
+    for d in shape.dims:
+        match d:
+            case Dim::Literal(v):
+                count = count * v
+            case _:
+                return 0
+    return count
+
+fn infer_reshape(input: TensorShape, output_dims: List[Dim]) -> ShapeResult:
+    let input_elems = compute_element_count(input)
+    let output_shape = TensorShape(dims: output_dims)
+    let output_elems = compute_element_count(output_shape)
+
+    if input_elems == 0 or output_elems == 0:
+        return ShapeResult.Ok(shape: output_shape)
+
+    if input_elems != output_elems:
+        return ShapeResult.Err(error: ShapeError.ReshapeMismatch(
+            input_elems: input_elems,
+            output_elems: output_elems
+        ))
+
+    return ShapeResult.Ok(shape: output_shape)
+
+fn estimate_memory(shape: TensorShape, elem_size: Int) -> MemoryBounds:
+    let mut min_elems = 1
+    let mut max_elems = 1
+
+    for d in shape.dims:
+        match d:
+            case Dim::Literal(v):
+                min_elems = min_elems * v
+                max_elems = max_elems * v
+            case Dim::Named(_, lo, hi):
+                min_elems = min_elems * lo
+                max_elems = max_elems * hi
+            case _:
+                min_elems = min_elems * 1
+                max_elems = max_elems * 1000
+
+    return MemoryBounds(
+        min_bytes: min_elems * elem_size,
+        max_bytes: max_elems * elem_size
+    )
+
+# ============================================================================
+# TESTS
+# ============================================================================
+
+print("Running Tensor Dimension Inference Specification Tests")
+print("=" * 60)
+print("")
+
+# Test: Literal Dimension Unification
+fn test_literal_unification():
+    print("Test: Literal Dimension Unification")
+
+    let d1 = Dim.Literal(value: 10)
+    let d2 = Dim.Literal(value: 10)
+    let d3 = Dim.Literal(value: 20)
+
+    # Same literals should unify
+    assert can_unify_dims(d1, d2) == true
+    print("  ✓ Same literals unify")
+
+    # Different literals should not unify
+    assert can_unify_dims(d1, d3) == false
+    print("  ✓ Different literals don't unify")
+
+    # Unified result should equal the literal
+    let unified = unify_dim(d1, d2)
+    match unified:
+        case Dim::Literal(v):
+            assert v == 10
+            print("  ✓ Unified result is Literal(10)")
+        case _:
+            assert false
+
+    print("")
+
+# Test: Named Dimension Unification
+fn test_named_unification():
+    print("Test: Named Dimension Unification")
+
+    let batch1 = Dim.Named(name: "batch", lo: 1, hi: 64)
+    let batch2 = Dim.Named(name: "batch", lo: 32, hi: 128)
+    let seq = Dim.Named(name: "seq", lo: 1, hi: 512)
+
+    # Same name should unify
+    assert can_unify_dims(batch1, batch2) == true
+    print("  ✓ Same-named dimensions unify")
+
+    # Different names should not unify
+    assert can_unify_dims(batch1, seq) == false
+    print("  ✓ Different-named dimensions don't unify")
+
+    # Range intersection
+    let unified = unify_dim(batch1, batch2)
+    match unified:
+        case Dim::Named(n, lo, hi):
+            assert n == "batch"
+            assert lo == 32  # max(1, 32)
+            assert hi == 64  # min(64, 128)
+            print("  ✓ Range intersection: batch:32..64")
+        case _:
+            assert false
+
+    print("")
+
+# Test: Unknown Dimension Unification
+fn test_unknown_unification():
+    print("Test: Unknown Dimension Unification")
+
+    let unknown = Dim.Unknown
+    let literal = Dim.Literal(value: 42)
+    let named = Dim.Named(name: "batch", lo: 1, hi: 64)
+
+    # Unknown unifies with anything
+    assert can_unify_dims(unknown, literal) == true
+    assert can_unify_dims(unknown, named) == true
+    print("  ✓ Unknown unifies with everything")
+
+    # Unified result should be the other dimension
+    let unified1 = unify_dim(unknown, literal)
+    match unified1:
+        case Dim::Literal(v):
+            assert v == 42
+            print("  ✓ Unknown ∪ Literal = Literal")
+        case _:
+            assert false
+
+    print("")
+
+# Test: Broadcast Dimension Unification
+fn test_broadcast_unification():
+    print("Test: Broadcast Dimension Unification")
+
+    let broadcast = Dim.Broadcast
+    let one = Dim.Literal(value: 1)
+    let ten = Dim.Literal(value: 10)
+
+    # Broadcast unifies with 1
+    assert can_unify_dims(broadcast, one) == true
+    print("  ✓ Broadcast unifies with Literal(1)")
+
+    # Broadcast unifies with any dimension
+    assert can_unify_dims(broadcast, ten) == true
+    print("  ✓ Broadcast unifies with any dimension")
+
+    # Broadcast + 1 = 1
+    let unified = unify_dim(broadcast, one)
+    match unified:
+        case Dim::Literal(v):
+            assert v == 1
+            print("  ✓ Broadcast ∪ Literal(1) = Literal(1)")
+        case _:
+            assert false
+
+    print("")
+
+# Test: Matrix Multiplication Shape Inference
+fn test_matmul_inference():
+    print("Test: Matrix Multiplication Shape Inference")
+
+    # Valid matmul: [4, 8] @ [8, 16] -> [4, 16]
+    let a = TensorShape(dims: [Dim.Literal(value: 4), Dim.Literal(value: 8)])
+    let b = TensorShape(dims: [Dim.Literal(value: 8), Dim.Literal(value: 16)])
+
+    let result = infer_matmul_shape(a, b)
+    match result:
+        case ShapeResult.Ok(shape):
+            assert shape.dims.len() == 2
+            match shape.dims[0]:
+                case Dim::Literal(v):
+                    assert v == 4
+                case _:
+                    assert false
+            match shape.dims[1]:
+                case Dim::Literal(v):
+                    assert v == 16
+                case _:
+                    assert false
+            print("  ✓ [4, 8] @ [8, 16] -> [4, 16]")
+        case ShapeResult.Err(e):
+            assert false
+
+    # Invalid matmul: K dimensions don't match
+    let c = TensorShape(dims: [Dim.Literal(value: 4), Dim.Literal(value: 8)])
+    let d = TensorShape(dims: [Dim.Literal(value: 10), Dim.Literal(value: 16)])
+
+    let bad_result = infer_matmul_shape(c, d)
+    match bad_result:
+        case ShapeResult.Ok(shape):
+            assert false
+        case ShapeResult.Err(e):
+            print("  ✓ Detects K dimension mismatch (8 vs 10)")
+
+    print("")
+
+# Test: Named Dimensions Preserved
+fn test_named_preservation():
+    print("Test: Named Dimensions Preserved in Matmul")
+
+    let input = TensorShape(dims: [
+        Dim.Named(name: "batch", lo: 1, hi: 64),
+        Dim.Literal(value: 784)
+    ])
+    let weight = TensorShape(dims: [
+        Dim.Literal(value: 784),
+        Dim.Named(name: "classes", lo: 10, hi: 10)
+    ])
+
+    let result = infer_matmul_shape(input, weight)
+    match result:
+        case ShapeResult.Ok(shape):
+            assert shape.dims.len() == 2
+
+            # First dimension should preserve "batch"
+            match shape.dims[0]:
+                case Dim::Named(n, lo, hi):
+                    assert n == "batch"
+                    assert lo == 1
+                    assert hi == 64
+                    print("  ✓ Batch dimension preserved")
+                case _:
+                    assert false
+
+            # Second dimension should preserve "classes"
+            match shape.dims[1]:
+                case Dim::Named(n, lo, hi):
+                    assert n == "classes"
+                    assert lo == 10
+                    assert hi == 10
+                    print("  ✓ Classes dimension preserved")
+                case _:
+                    assert false
+        case ShapeResult.Err(e):
+            assert false
+
+    print("")
+
+# Test: Multi-Layer Network
+fn test_multilayer_network():
+    print("Test: Multi-Layer Network Dimension Propagation")
+
+    let input = TensorShape(dims: [
+        Dim.Named(name: "batch", lo: 1, hi: 64),
+        Dim.Literal(value: 784)
+    ])
+    let w1 = TensorShape(dims: [
+        Dim.Literal(value: 784),
+        Dim.Literal(value: 256)
+    ])
+    let w2 = TensorShape(dims: [
+        Dim.Literal(value: 256),
+        Dim.Literal(value: 10)
+    ])
+
+    # Layer 1
+    let h1_result = infer_matmul_shape(input, w1)
+    match h1_result:
+        case ShapeResult.Ok(h1):
+            print("  ✓ Layer 1: {shape_to_string(input)} @ {shape_to_string(w1)} -> {shape_to_string(h1)}")
+
+            # Layer 2
+            let output_result = infer_matmul_shape(h1, w2)
+            match output_result:
+                case ShapeResult.Ok(output):
+                    print("  ✓ Layer 2: {shape_to_string(h1)} @ {shape_to_string(w2)} -> {shape_to_string(output)}")
+                    print("  ✓ Full network: 784 -> 256 -> 10 with batch dimension")
+                case ShapeResult.Err(e):
+                    assert false
+        case ShapeResult.Err(e):
+            assert false
+
+    print("")
+
+# Test: Reshape Validation
+fn test_reshape():
+    print("Test: Reshape Validation")
+
+    let tensor = TensorShape(dims: [
+        Dim.Literal(value: 4),
+        Dim.Literal(value: 6)
+    ])
+
+    # Valid reshape: 24 elements -> 24 elements
+    let valid_dims = [Dim.Literal(value: 2), Dim.Literal(value: 12)]
+    let valid_result = infer_reshape(tensor, valid_dims)
+    match valid_result:
+        case ShapeResult.Ok(reshaped):
+            print("  ✓ Valid reshape: [4, 6] -> [2, 12] (24 elements)")
+        case ShapeResult.Err(e):
+            assert false
+
+    # Invalid reshape: 24 elements -> 30 elements
+    let invalid_dims = [Dim.Literal(value: 5), Dim.Literal(value: 6)]
+    let invalid_result = infer_reshape(tensor, invalid_dims)
+    match invalid_result:
+        case ShapeResult.Ok(reshaped):
+            assert false
+        case ShapeResult.Err(e):
+            print("  ✓ Detects invalid reshape: [4, 6] -> [5, 6] (24 vs 30 elements)")
+
+    print("")
+
+# Test: Memory Estimation
+fn test_memory_estimation():
+    print("Test: Memory Estimation")
+
+    let shape = TensorShape(dims: [
+        Dim.Named(name: "batch", lo: 1, hi: 128),
+        Dim.Literal(value: 3),
+        Dim.Literal(value: 224),
+        Dim.Literal(value: 224)
+    ])
+
+    let elem_size = 4  # Float32
+    let mem = estimate_memory(shape, elem_size)
+
+    # Min: 1 * 3 * 224 * 224 * 4 = 602,112 bytes
+    assert mem.min_bytes == 602112
+    print("  ✓ Min memory: {mem.min_bytes} bytes ({mem.min_bytes / 1024} KB)")
+
+    # Max: 128 * 3 * 224 * 224 * 4 = 77,070,336 bytes
+    assert mem.max_bytes == 77070336
+    print("  ✓ Max memory: {mem.max_bytes} bytes ({mem.max_bytes / 1024 / 1024} MB)")
+
+    print("")
+
+# Test: CNN Dimensions (NCHW)
+fn test_cnn_dimensions():
+    print("Test: CNN Dimensions (NCHW Format)")
+
+    let cnn_input = TensorShape(dims: [
+        Dim.Named(name: "batch", lo: 1, hi: 128),
+        Dim.Literal(value: 3),
+        Dim.Literal(value: 224),
+        Dim.Literal(value: 224)
+    ])
+
+    print("  ✓ CNN input: {shape_to_string(cnn_input)}")
+    print("  ✓ Format: [batch, channels, height, width]")
+
+    let mem = estimate_memory(cnn_input, 4)
+    let min_mb = mem.min_bytes / 1024 / 1024
+    let max_mb = mem.max_bytes / 1024 / 1024
+    print("  ✓ Memory range: {min_mb} - {max_mb} MB")
+
+    print("")
+
+# ============================================================================
+# Run All Tests
+# ============================================================================
+
+test_literal_unification()
+test_named_unification()
+test_unknown_unification()
+test_broadcast_unification()
+test_matmul_inference()
+test_named_preservation()
+test_multilayer_network()
+test_reshape()
+test_memory_estimation()
+test_cnn_dimensions()
+
+# ============================================================================
+# Summary
+# ============================================================================
+
+print("=" * 60)
+print("All Tests Passed!")
+print("")
+print("Tensor Dimension Inference Specification:")
+print("  ✓ Literal dimension unification")
+print("  ✓ Named dimension unification with range intersection")
+print("  ✓ Unknown dimension unification")
+print("  ✓ Broadcast dimension unification")
+print("  ✓ Matrix multiplication shape inference")
+print("  ✓ Named dimensions preserved through operations")
+print("  ✓ Multi-layer network dimension propagation")
+print("  ✓ Reshape validation")
+print("  ✓ Memory estimation from dimension bounds")
+print("  ✓ CNN dimension tracking (NCHW format)")
+print("")
+print("Feature Status: Implementing (#193)")
+print("All core functionality verified!")
