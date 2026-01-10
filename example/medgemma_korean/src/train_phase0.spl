@@ -1,0 +1,296 @@
+# Phase 0: Plain Text Training (Korean Fluency)
+#
+# Goal: Learn Korean language patterns from plain text
+#
+# Training:
+#   Input: Base model (google/medgemma-4b-it)
+#   LoRA: Add LoRA_0 (includes embeddings for Korean tokens)
+#   Output: models/phase0/lora_0
+#
+# This is the foundation phase - learns Korean fluency.
+
+import config
+import ml.tracking as Track
+import ml.engine.{Engine, Events, Loss}
+import lora_utils.{LoRAConfig, add_lora, save_lora}
+
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+fn load_config() -> any:
+    """Load Phase 0 configuration."""
+    let base_cfg = config.from_file("example/medgemma_korean/config/base.sdn")
+    let phase_cfg = config.from_file("example/medgemma_korean/config/phase0.sdn")
+    return config.merge(base_cfg, phase_cfg)
+
+
+# ============================================================================
+# Data Loading
+# ============================================================================
+
+fn load_plain_text_data(cfg: any) -> [any]:
+    """Load Korean plain text data.
+
+    Args:
+        cfg: Configuration
+
+    Returns:
+        List of text samples
+    """
+    let data_path = cfg.get("data.path")
+    let max_samples = cfg.get("training.max_samples")
+
+    print(f"Loading plain text data from: {data_path}")
+
+    # TODO: Implement actual data loading
+    # let samples = []
+    # let file = fs.open(f"{data_path}/train.txt", mode="r")
+    # for line in file.readlines():
+    #     samples.append({"text": line.strip()})
+    #     if samples.len() >= max_samples:
+    #         break
+    # file.close()
+
+    # Mock data for example
+    let samples = [
+        {"text": "한국어로 된 의료 텍스트입니다."},
+        {"text": "환자의 증상을 확인합니다."},
+        {"text": "진단 결과를 분석합니다."}
+    ]
+
+    print(f"Loaded {samples.len()} samples")
+    return samples
+
+
+# ============================================================================
+# Model Setup
+# ============================================================================
+
+fn setup_model(cfg: any) -> any:
+    """Load base model and add LoRA_0.
+
+    Args:
+        cfg: Configuration
+
+    Returns:
+        Model with LoRA_0 adapter
+    """
+    print("=" * 70)
+    print("PHASE 0: PLAIN TEXT TRAINING")
+    print("=" * 70)
+
+    # Load base model
+    let model_name = cfg.get("model.name")
+    print(f"Loading base model: {model_name}")
+
+    # TODO: Implement with PyTorch
+    # let model = AutoModelForCausalLM.from_pretrained(
+    #     model_name,
+    #     load_in_8bit=true,
+    #     device_map="auto"
+    # )
+    let model = model_name  # Mock for example
+
+    print(f"✓ Base model loaded")
+
+    # Create LoRA config
+    let lora_config = LoRAConfig(
+        r=cfg.get("model.lora_r"),
+        alpha=cfg.get("model.lora_alpha"),
+        dropout=cfg.get("model.lora_dropout"),
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        use_rslora=cfg.get("model.use_rslora")
+    )
+
+    # Add LoRA_0 (includes embeddings for Korean tokens)
+    print("Adding LoRA_0 adapter (includes embeddings)...")
+    model = add_lora(model, lora_config)
+
+    print("=" * 70)
+    return model
+
+
+# ============================================================================
+# Training
+# ============================================================================
+
+fn train_step(engine: Engine, batch: any) -> {str: any}:
+    """Training step for one batch.
+
+    Args:
+        engine: Training engine
+        batch: Batch of data
+
+    Returns:
+        Dict with loss value
+    """
+    # TODO: Implement actual training step
+    # let model = engine.model
+    # let optimizer = engine.optimizer
+    #
+    # optimizer.zero_grad()
+    #
+    # # Forward pass
+    # let outputs = model(batch["input_ids"], labels=batch["labels"])
+    # let loss = outputs.loss
+    #
+    # # Backward pass
+    # loss.backward()
+    # optimizer.step()
+    #
+    # return {"loss": loss.item()}
+
+    # Mock for example
+    return {"loss": 0.5}
+
+
+fn train_phase0(cfg: any, model: any, data: [any]):
+    """Train Phase 0: Plain text.
+
+    Args:
+        cfg: Configuration
+        model: Model with LoRA_0
+        data: Training data
+    """
+    print("\nStarting training...")
+
+    # Initialize tracking
+    Track.set_mode(cfg.get("tracking.mode"))
+    let run = Track.run(
+        project=cfg.get("project"),
+        name="phase0-plain-text",
+        config=config.to_dict(cfg),
+        tags=cfg.get("tags")
+    )
+
+    print(f"Run ID: {run.id}")
+    print(f"Run directory: {run.dir}")
+
+    # Create training engine
+    let trainer = Engine(train_step)
+
+    # Add metrics
+    let loss_metric = Loss()
+    trainer.add_metric(loss_metric, "loss")
+
+    # Event: Log every 100 iterations
+    @trainer.on(Events.ITERATION_COMPLETED_EVERY(100))
+    fn log_iteration(engine: Engine):
+        print(f"Step {engine.state.iteration}: loss={engine.state.output['loss']:.4f}")
+
+        run.log({
+            "train/loss": engine.state.output["loss"],
+            "step": engine.state.iteration
+        }, step=engine.state.iteration)
+
+    # Event: Log epoch metrics
+    @trainer.on(Events.EPOCH_COMPLETED)
+    fn log_epoch(engine: Engine):
+        let epoch = engine.state.epoch + 1
+        let avg_loss = engine.state.metrics["loss"]
+
+        print(f"\nEpoch {epoch}/{engine.state.max_epochs}")
+        print(f"  Average loss: {avg_loss:.4f}")
+
+        run.log({
+            "train/epoch_loss": avg_loss,
+            "epoch": epoch
+        }, step=epoch)
+
+    # Event: Save checkpoints every 5 epochs
+    @trainer.on(Events.EPOCH_COMPLETED_EVERY(5))
+    fn save_checkpoint(engine: Engine):
+        let epoch = engine.state.epoch + 1
+        let checkpoint_path = f"{cfg.get('output.lora_path')}_epoch{epoch}"
+
+        print(f"Saving checkpoint to: {checkpoint_path}")
+        save_lora(model, checkpoint_path)
+
+    # Event: Early stopping
+    @trainer.on(Events.EPOCH_COMPLETED)
+    fn early_stop(engine: Engine):
+        if engine.state.metrics["loss"] < 0.01:
+            print("Loss target reached! Stopping early.")
+            engine.terminate()
+
+    # Event: Training complete
+    @trainer.on(Events.COMPLETED)
+    fn on_complete(engine: Engine):
+        print("\n" + "=" * 70)
+        print("TRAINING COMPLETE")
+        print("=" * 70)
+        print(f"Total iterations: {engine.state.iteration}")
+        print(f"Final loss: {engine.state.metrics['loss']:.4f}")
+
+        # Save final LoRA
+        let output_path = cfg.get("output.lora_path")
+        print(f"\nSaving final LoRA_0 to: {output_path}")
+        save_lora(model, output_path)
+
+        # Save as artifact
+        let artifact = Track.Artifact(
+            name="lora_0",
+            type="model",
+            description="Phase 0 LoRA adapter (Korean fluency)",
+            metadata={"phase": 0, "final_loss": engine.state.metrics["loss"]}
+        )
+        artifact.add_file(output_path, name="lora_0")
+        run.log_artifact(artifact, aliases=["latest", "phase0"])
+
+        print("✓ LoRA_0 saved")
+
+    # Run training
+    let max_epochs = cfg.get("training.epochs")
+    print(f"\nTraining for {max_epochs} epochs...")
+
+    trainer.run(data, max_epochs=max_epochs)
+
+    # Finish run
+    run.finish()
+    print(f"\nExperiment saved to: {run.dir}")
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+fn main():
+    """Main entry point for Phase 0 training."""
+    print("\n")
+    print("╔" + "=" * 68 + "╗")
+    print("║" + " " * 15 + "PHASE 0: PLAIN TEXT TRAINING" + " " * 24 + "║")
+    print("╚" + "=" * 68 + "╝")
+    print()
+
+    # Load configuration
+    let cfg = load_config()
+    print(f"Project: {cfg.get('project')}")
+    print(f"Model: {cfg.get('model.name')}")
+    print(f"Device: {cfg.get('training.device')}")
+    print(f"Epochs: {cfg.get('training.epochs')}")
+    print()
+
+    # Load data
+    let train_data = load_plain_text_data(cfg)
+
+    # Setup model
+    let model = setup_model(cfg)
+
+    # Train
+    train_phase0(cfg, model, train_data)
+
+    print("\n" + "=" * 70)
+    print("PHASE 0 COMPLETE")
+    print("=" * 70)
+    print(f"Output: {cfg.get('output.lora_path')}")
+    print()
+    print("Next step: Run Phase 1 (medical dictionary)")
+    print("  ./target/release/simple example/medgemma_korean/src/train_phase1.spl")
+    print()
+
+
+# Run main
+main()
