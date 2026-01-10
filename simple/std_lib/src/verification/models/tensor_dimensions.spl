@@ -297,17 +297,24 @@ fn unify_dims(ctx: mut DimInferenceContext, d1: Dim, d2: Dim) -> Result<Dim, Sha
         case (Dim.Named(n1, r1), Dim.Named(n2, r2)):
             if n1 == n2:
                 # Merge ranges (intersection)
-                match (r1, r2):
-                    case (Some((lo1, hi1)), Some((lo2, hi2))):
-                        let lo = max(lo1, lo2)
-                        let hi = min(hi1, hi2)
-                        if lo <= hi:
-                            Ok(Dim.Named(name: n1, range: Some((lo, hi))))
-                        else:
-                            Err(ShapeError.InferenceError(message: "Range intersection empty"))
-                    case (Some(r), None): Ok(Dim.Named(name: n1, range: Some(r)))
-                    case (None, Some(r)): Ok(Dim.Named(name: n1, range: Some(r)))
-                    case (None, None): Ok(d1_applied)
+                match r1:
+                    case Some((lo1, hi1)):
+                        match r2:
+                            case Some((lo2, hi2)):
+                                let lo = max(lo1, lo2)
+                                let hi = min(hi1, hi2)
+                                if lo <= hi:
+                                    Ok(Dim.Named(name: n1, range: Some((lo, hi))))
+                                else:
+                                    Err(ShapeError.InferenceError(message: "Range intersection empty"))
+                            case None:
+                                Ok(Dim.Named(name: n1, range: Some((lo1, hi1))))
+                    case None:
+                        match r2:
+                            case Some((lo2, hi2)):
+                                Ok(Dim.Named(name: n1, range: Some((lo2, hi2))))
+                            case None:
+                                Ok(Dim.Named(name: n1, range: None))
             else:
                 # Different names - add equality constraint
                 ctx.env.add_constraint(DimConstraint.Equal(d1: d1_applied, d2: d2_applied))
@@ -321,7 +328,7 @@ fn unify_dims(ctx: mut DimInferenceContext, d1: Dim, d2: Dim) -> Result<Dim, Sha
                     if v < lo or v > hi:
                         return Err(ShapeError.DimOutOfRange(dim_idx: 0, value: v, min: lo, max: hi))
                 case None:
-                    pass
+                    ()
             ctx.env.bind_named(n, Dim.Literal(value: v))
             Ok(Dim.Literal(value: v))
 
@@ -332,7 +339,7 @@ fn unify_dims(ctx: mut DimInferenceContext, d1: Dim, d2: Dim) -> Result<Dim, Sha
                     if v < lo or v > hi:
                         return Err(ShapeError.DimOutOfRange(dim_idx: 0, value: v, min: lo, max: hi))
                 case None:
-                    pass
+                    ()
             ctx.env.bind_named(n, Dim.Literal(value: v))
             Ok(Dim.Literal(value: v))
 
@@ -362,11 +369,11 @@ fn unify_shapes(ctx: mut DimInferenceContext, s1: TensorShape, s2: TensorShape) 
             case Ok(unified):
                 result_dims.push(unified)
             case Err(e):
-                return Err(match e:
+                match e:
                     case ShapeError.DimMismatch(_, exp, act):
-                        ShapeError.DimMismatch(dim_idx: i, expected: exp, actual: act)
-                    case _: e
-                )
+                        return Err(ShapeError.DimMismatch(dim_idx: i, expected: exp, actual: act))
+                    case _:
+                        return Err(e)
 
     Ok(TensorShape(dims: result_dims))
 
@@ -389,7 +396,7 @@ fn infer_matmul_shape(ctx: mut DimInferenceContext, left: TensorShape, right: Te
         case Err(_):
             return Err(ShapeError.MatmulShapeMismatch(left: left, right: right))
         case Ok(_):
-            pass
+            ()
 
     # Output shape: [..., M, N]
     let m = left.get(-2).unwrap()
@@ -400,13 +407,14 @@ fn infer_matmul_shape(ctx: mut DimInferenceContext, left: TensorShape, right: Te
     let right_batch = right.dims[0..right.ndim()-2]
 
     # Broadcast batch dimensions
-    let batch = if left_batch.len() == 0:
-        right_batch
+    let batch: List<Dim>
+    if left_batch.len() == 0:
+        batch = right_batch
     else if right_batch.len() == 0:
-        left_batch
+        batch = left_batch
     else:
         # Simple case: same batch dims
-        left_batch
+        batch = left_batch
 
     let mut result_dims = batch.to_list()
     result_dims.push(m)
@@ -426,15 +434,15 @@ fn infer_broadcast_shape(ctx: mut DimInferenceContext, shapes: List<TensorShape>
     let max_rank = shapes.map(|s| s.ndim()).max().unwrap_or(0)
 
     # Pad shapes to max rank (from the right)
-    let padded: List<List<Dim>> = shapes.map(|s| {
+    let mut padded: List<List<Dim> > = []
+    for s in shapes:
         let pad_count = max_rank - s.ndim()
         let mut dims: List<Dim> = []
         for _ in 0..pad_count:
             dims.push(Dim.Literal(value: 1))
         for d in s.dims:
             dims.push(d)
-        dims
-    })
+        padded.push(dims)
 
     # Broadcast each dimension
     let mut result_dims: List<Dim> = []
@@ -556,13 +564,13 @@ fn verify_shape_at_runtime(actual: List<Int>, declared: TensorShape) -> Result<(
                                 max: hi
                             ))
                     case None:
-                        pass  # No constraint
+                        ()  # No constraint
             case Dim.Dynamic:
-                pass  # Always valid
+                ()  # Always valid
             case Dim.Broadcast:
-                pass  # Always valid
+                ()  # Always valid
             case Dim.Var(_):
-                pass  # Should be bound by inference
+                ()  # Should be bound by inference
 
     Ok(())
 
@@ -580,7 +588,13 @@ fn estimate_tensor_memory(shape: TensorShape, element_bytes: Int) -> (Int, Int):
 
 # Helper functions
 fn max(a: Int, b: Int) -> Int:
-    if a > b: a else: b
+    if a > b:
+        a
+    else:
+        b
 
 fn min(a: Int, b: Int) -> Int:
-    if a < b: a else: b
+    if a < b:
+        a
+    else:
+        b

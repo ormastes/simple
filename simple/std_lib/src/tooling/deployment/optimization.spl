@@ -11,6 +11,56 @@ pub enum OptimizationTechnique:
     DeadCodeElim       # Remove unused code
     LinkTimeOpt        # Link-time optimization
 
+    pub fn to_string(self): String =
+        """Convert technique to string.
+
+        Returns:
+            Technique name
+
+        Example:
+            OptimizationTechnique::StripSymbols.to_string()
+            # → "strip_symbols"
+        """
+        match self:
+            OptimizationTechnique::StripSymbols: "strip_symbols"
+            OptimizationTechnique::StripDebugInfo: "strip_debug_info"
+            OptimizationTechnique::Compress: "compress"
+            OptimizationTechnique::DeadCodeElim: "dead_code_elim"
+            OptimizationTechnique::LinkTimeOpt: "link_time_opt"
+
+    pub fn description(self): String =
+        """Get technique description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            OptimizationTechnique::Compress.description()
+            # → "Compress binary with UPX"
+        """
+        match self:
+            OptimizationTechnique::StripSymbols: "Remove debug symbols"
+            OptimizationTechnique::StripDebugInfo: "Remove debug information"
+            OptimizationTechnique::Compress: "Compress binary with UPX"
+            OptimizationTechnique::DeadCodeElim: "Remove unused code"
+            OptimizationTechnique::LinkTimeOpt: "Link-time optimization"
+
+    pub fn is_aggressive(self): bool =
+        """Check if technique is aggressive/risky.
+
+        Returns:
+            True for risky techniques
+
+        Example:
+            OptimizationTechnique::Compress.is_aggressive()  # → true
+        """
+        match self:
+            OptimizationTechnique::StripSymbols: false
+            OptimizationTechnique::StripDebugInfo: false
+            OptimizationTechnique::Compress: true
+            OptimizationTechnique::DeadCodeElim: true
+            OptimizationTechnique::LinkTimeOpt: false
+
 # Optimization level
 pub enum OptLevel:
     None
@@ -48,6 +98,49 @@ pub enum OptLevel:
             OptLevel::Minimal: "minimal"
             OptLevel::Moderate: "moderate"
             OptLevel::Aggressive: "aggressive"
+
+    pub fn description(self): String =
+        """Get optimization level description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            OptLevel::Aggressive.description()
+            # → "All optimizations + compression"
+        """
+        match self:
+            OptLevel::None: "No optimization"
+            OptLevel::Minimal: "Strip symbols only"
+            OptLevel::Moderate: "Strip + minor optimizations"
+            OptLevel::Aggressive: "All optimizations + compression"
+
+    pub fn includes_compression(self): bool =
+        """Check if level includes compression.
+
+        Returns:
+            True if compression is applied
+
+        Example:
+            OptLevel::Aggressive.includes_compression()  # → true
+        """
+        match self:
+            OptLevel::None: false
+            OptLevel::Minimal: false
+            OptLevel::Moderate: false
+            OptLevel::Aggressive: true
+
+    pub fn includes_stripping(self): bool =
+        """Check if level includes symbol stripping.
+
+        Returns:
+            True if stripping is applied
+        """
+        match self:
+            OptLevel::None: false
+            OptLevel::Minimal: true
+            OptLevel::Moderate: true
+            OptLevel::Aggressive: true
 
 # Optimization result
 pub class OptimizationResult:
@@ -129,6 +222,64 @@ pub class OptimizationResult:
         """
         self.optimized_size_bytes < self.original_size_bytes
 
+    pub fn is_significant(self): bool =
+        """Check if reduction is significant (>10%).
+
+        Returns:
+            True if reduction exceeds 10%
+
+        Example:
+            if result.is_significant():
+                print("Significant size reduction achieved!")
+        """
+        self.reduction_percent() >= 10.0
+
+    pub fn get_techniques_count(self): i32 =
+        """Get number of techniques applied.
+
+        Returns:
+            Number of optimization techniques used
+
+        Example:
+            result.get_techniques_count()  # → 3
+        """
+        self.techniques_applied.len()
+
+    pub fn has_technique(self, technique: OptimizationTechnique): bool =
+        """Check if specific technique was applied.
+
+        Args:
+            technique: Technique to check
+
+        Returns:
+            True if technique was used
+
+        Example:
+            if result.has_technique(OptimizationTechnique::Compress):
+                print("Binary was compressed")
+        """
+        for t in self.techniques_applied:
+            if t == technique:
+                return true
+        false
+
+    pub fn used_compression(self): bool =
+        """Check if compression was applied.
+
+        Returns:
+            True if binary was compressed
+        """
+        self.has_technique(OptimizationTechnique::Compress)
+
+    pub fn used_stripping(self): bool =
+        """Check if symbol stripping was applied.
+
+        Returns:
+            True if symbols were stripped
+        """
+        self.has_technique(OptimizationTechnique::StripSymbols) or
+        self.has_technique(OptimizationTechnique::StripDebugInfo)
+
 # Binary optimizer
 pub class BinaryOptimizer:
     pub verbose: bool
@@ -158,6 +309,29 @@ pub class BinaryOptimizer:
     pub fn set_verbose(self, enabled: bool):
         """Enable verbose logging."""
         self.verbose = enabled
+
+    pub fn is_verbose(self): bool =
+        """Check if verbose logging is enabled.
+
+        Returns:
+            True if verbose mode is on
+        """
+        self.verbose
+
+    pub fn with_verbose(self, enabled: bool): BinaryOptimizer =
+        """Set verbose logging (fluent API).
+
+        Args:
+            enabled: Verbose flag
+
+        Returns:
+            Self for chaining
+
+        Example:
+            let optimizer = BinaryOptimizer.new().with_verbose(true)
+        """
+        self.verbose = enabled
+        self
 
     pub fn optimize(
         self,
@@ -323,6 +497,54 @@ pub class BinaryAnalysis:
             sections: []
         }
 
+    pub fn get_section_count(self): i32 =
+        """Get number of sections.
+
+        Returns:
+            Section count
+
+        Example:
+            analysis.get_section_count()  # → 5
+        """
+        self.sections.len()
+
+    pub fn has_sections(self): bool =
+        """Check if analysis has sections.
+
+        Returns:
+            True if sections exist
+        """
+        self.sections.len() > 0
+
+    pub fn find_section(self, name: String): BinarySection? =
+        """Find section by name.
+
+        Args:
+            name: Section name
+
+        Returns:
+            Section if found
+
+        Example:
+            let text_section = analysis.find_section(".text")
+        """
+        for section in self.sections:
+            if section.name == name:
+                return Some(section)
+        None
+
+    pub fn summary(self): String =
+        """Get analysis summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            analysis.summary()
+            # → "Binary: app (10.5 MB, 5 sections)"
+        """
+        "Binary: {self.binary_path} ({self.total_size_mb:.1f} MB, {self.get_section_count()} sections)"
+
 # Binary section
 pub class BinarySection:
     pub name: String
@@ -344,3 +566,53 @@ pub class BinarySection:
             size_kb: size_kb,
             section_type: name
         }
+
+    pub fn is_code(self): bool =
+        """Check if this is a code section.
+
+        Returns:
+            True if .text section
+
+        Example:
+            section.is_code()  # → true for .text
+        """
+        self.name == ".text" or self.section_type == ".text"
+
+    pub fn is_data(self): bool =
+        """Check if this is a data section.
+
+        Returns:
+            True if .data or .bss section
+        """
+        self.name == ".data" or self.name == ".bss" or
+        self.section_type == ".data" or self.section_type == ".bss"
+
+    pub fn is_readonly(self): bool =
+        """Check if this is a read-only section.
+
+        Returns:
+            True if .rodata section
+        """
+        self.name == ".rodata" or self.section_type == ".rodata"
+
+    pub fn size_mb(self): f64 =
+        """Get size in megabytes.
+
+        Returns:
+            Size in MB
+
+        Example:
+            section.size_mb()  # → 1.5
+        """
+        self.size_kb / 1024.0
+
+    pub fn summary(self): String =
+        """Get section summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            section.summary()  # → ".text: 1024.0 KB"
+        """
+        "{self.name}: {self.size_kb} KB"

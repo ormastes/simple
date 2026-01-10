@@ -9,20 +9,8 @@ export TypedTensor, TensorType, DimSpec, MemoryReport
 
 import device.{Device, device_code}
 import dtype.{DType, dtype_code}
-import tensor_ffi.{
-    rt_torch_zeros, rt_torch_ones, rt_torch_randn,
-    rt_torch_free, rt_torch_clone,
-    rt_torch_shape, rt_torch_numel, rt_torch_dtype,
-    rt_torch_add, rt_torch_sub, rt_torch_mul, rt_torch_div, rt_torch_matmul,
-    rt_torch_reshape, rt_torch_transpose,
-    rt_torch_sum, rt_torch_mean
-}
-import verification.models.tensor_dimensions.{
-    Dim, DimVar, TensorShape, ShapeEnv, DimInferenceContext,
-    ShapeError, unify_dims, unify_shapes, infer_matmul_shape,
-    infer_broadcast_shape, verify_reshape, verify_shape_at_runtime,
-    estimate_tensor_memory
-}
+import tensor_ffi.{rt_torch_zeros, rt_torch_ones, rt_torch_randn, rt_torch_free, rt_torch_clone, rt_torch_shape, rt_torch_numel, rt_torch_dtype, rt_torch_add, rt_torch_sub, rt_torch_mul, rt_torch_div, rt_torch_matmul, rt_torch_reshape, rt_torch_transpose, rt_torch_sum, rt_torch_mean}
+import verification.models.tensor_dimensions.{Dim, DimVar, TensorShape, ShapeEnv, DimInferenceContext, ShapeError, unify_dims, unify_shapes, infer_matmul_shape, infer_broadcast_shape, verify_reshape, verify_shape_at_runtime, estimate_tensor_memory}
 
 # ============================================================================
 # Dimension Specification
@@ -121,12 +109,16 @@ class TensorType:
         max
 
     fn sample_memory_bytes(self) -> Int:
-        let sample_elems = self.shape.dims.map(|d| {
+        let mut sample_dims: List<Int> = []
+        for d in self.shape.dims:
             match d:
-                case Dim.Literal(v): v
-                case Dim.Named(_, _): 1  # Use 1 as default
-                case _: 1
-        }).product()
+                case Dim.Literal(v):
+                    sample_dims.push(v)
+                case Dim.Named(_, _):
+                    sample_dims.push(1)  # Use 1 as default
+                case _:
+                    sample_dims.push(1)
+        let sample_elems = sample_dims.product()
         sample_elems * self.element_size()
 
 # ============================================================================
@@ -148,7 +140,8 @@ class TypedTensor:
 
     fn __del__(self):
         if self.handle != 0:
-            @rt_torch_free(self.handle)
+            let _ = rt_torch_free(self.handle)
+            ()
 
     # ------------------------------------------------------------------------
     # Properties
@@ -168,8 +161,8 @@ class TypedTensor:
 
     # Get actual runtime shape
     fn actual_shape(self) -> List<Int>:
-        let mut buf = [0i64; 8]
-        let ndim = @rt_torch_shape(self.handle, buf.data_ptr(), 8)
+        let mut buf: List<i64> = [0, 0, 0, 0, 0, 0, 0, 0]
+        let ndim = rt_torch_shape(self.handle, buf.data_ptr(), 8)
         buf[0..ndim].to_list()
 
     # ------------------------------------------------------------------------
@@ -188,7 +181,7 @@ class TypedTensor:
     fn zeros(dims: List<DimSpec>, dtype: DType = DType.Float32, device: Device = Device.CPU) -> TypedTensor:
         """Create typed tensor filled with zeros."""
         let shape_list = dims.map(|d| d.sample as i64)
-        let handle = @rt_torch_zeros(
+        let handle = rt_torch_zeros(
             shape_list.data_ptr(),
             shape_list.len() as i32,
             dtype_code(dtype),
@@ -204,7 +197,7 @@ class TypedTensor:
     fn ones(dims: List<DimSpec>, dtype: DType = DType.Float32, device: Device = Device.CPU) -> TypedTensor:
         """Create typed tensor filled with ones."""
         let shape_list = dims.map(|d| d.sample as i64)
-        let handle = @rt_torch_ones(
+        let handle = rt_torch_ones(
             shape_list.data_ptr(),
             shape_list.len() as i32,
             dtype_code(dtype),
@@ -220,7 +213,7 @@ class TypedTensor:
     fn randn(dims: List<DimSpec>, dtype: DType = DType.Float32, device: Device = Device.CPU) -> TypedTensor:
         """Create typed tensor with random normal values."""
         let shape_list = dims.map(|d| d.sample as i64)
-        let handle = @rt_torch_randn(
+        let handle = rt_torch_randn(
             shape_list.data_ptr(),
             shape_list.len() as i32,
             dtype_code(dtype),
@@ -244,7 +237,7 @@ class TypedTensor:
         let result_shape = infer_broadcast_shape(ctx, [self.shape(), other.shape()])?
 
         # Perform operation
-        let handle = @rt_torch_add(self.handle, other.handle)
+        let handle = rt_torch_add(self.handle, other.handle)
         if handle == 0:
             return Err(ShapeError.InferenceError(message: "Add operation failed"))
 
@@ -256,7 +249,7 @@ class TypedTensor:
         let mut ctx = DimInferenceContext.new()
         let result_shape = infer_broadcast_shape(ctx, [self.shape(), other.shape()])?
 
-        let handle = @rt_torch_sub(self.handle, other.handle)
+        let handle = rt_torch_sub(self.handle, other.handle)
         if handle == 0:
             return Err(ShapeError.InferenceError(message: "Sub operation failed"))
 
@@ -268,7 +261,7 @@ class TypedTensor:
         let mut ctx = DimInferenceContext.new()
         let result_shape = infer_broadcast_shape(ctx, [self.shape(), other.shape()])?
 
-        let handle = @rt_torch_mul(self.handle, other.handle)
+        let handle = rt_torch_mul(self.handle, other.handle)
         if handle == 0:
             return Err(ShapeError.InferenceError(message: "Mul operation failed"))
 
@@ -280,7 +273,7 @@ class TypedTensor:
         let mut ctx = DimInferenceContext.new()
         let result_shape = infer_broadcast_shape(ctx, [self.shape(), other.shape()])?
 
-        let handle = @rt_torch_div(self.handle, other.handle)
+        let handle = rt_torch_div(self.handle, other.handle)
         if handle == 0:
             return Err(ShapeError.InferenceError(message: "Div operation failed"))
 
@@ -303,7 +296,7 @@ class TypedTensor:
         let result_shape = infer_matmul_shape(ctx, self.shape(), other.shape())?
 
         # Perform operation
-        let handle = @rt_torch_matmul(self.handle, other.handle)
+        let handle = rt_torch_matmul(self.handle, other.handle)
         if handle == 0:
             return Err(ShapeError.MatmulShapeMismatch(left: self.shape(), right: other.shape()))
 
@@ -324,7 +317,7 @@ class TypedTensor:
 
         # Perform operation
         let shape_list = new_dims.map(|d| d.sample as i64)
-        let handle = @rt_torch_reshape(
+        let handle = rt_torch_reshape(
             self.handle,
             shape_list.data_ptr(),
             shape_list.len() as i32
@@ -339,7 +332,7 @@ class TypedTensor:
         """Transpose two dimensions."""
         let result_shape = infer_transpose_shape(self.shape(), dim0, dim1)?
 
-        let handle = @rt_torch_transpose(self.handle, dim0 as i64, dim1 as i64)
+        let handle = rt_torch_transpose(self.handle, dim0 as i64, dim1 as i64)
         if handle == 0:
             return Err(ShapeError.InferenceError(message: "Transpose failed"))
 
@@ -352,13 +345,14 @@ class TypedTensor:
 
     fn sum(self, dim: Int = -1, keepdim: Bool = False) -> Result<TypedTensor, ShapeError>:
         """Sum along dimension."""
-        let result_shape = if dim == -1 and not keepdim:
+        let result_shape: TensorShape
+        if dim == -1 and not keepdim:
             # Full reduction to scalar
-            TensorShape(dims: [])
+            result_shape = TensorShape(dims: [])
         else:
-            infer_reduction_shape(self.shape(), dim, keepdim)?
+            result_shape = infer_reduction_shape(self.shape(), dim, keepdim)?
 
-        let handle = @rt_torch_sum(self.handle, dim as i32, keepdim as i32)
+        let handle = rt_torch_sum(self.handle, dim as i32, keepdim as i32)
         if handle == 0:
             return Err(ShapeError.InferenceError(message: "Sum failed"))
 
@@ -367,12 +361,13 @@ class TypedTensor:
 
     fn mean(self, dim: Int = -1, keepdim: Bool = False) -> Result<TypedTensor, ShapeError>:
         """Mean along dimension."""
-        let result_shape = if dim == -1 and not keepdim:
-            TensorShape(dims: [])
+        let result_shape: TensorShape
+        if dim == -1 and not keepdim:
+            result_shape = TensorShape(dims: [])
         else:
-            infer_reduction_shape(self.shape(), dim, keepdim)?
+            result_shape = infer_reduction_shape(self.shape(), dim, keepdim)?
 
-        let handle = @rt_torch_mean(self.handle, dim as i32, keepdim as i32)
+        let handle = rt_torch_mean(self.handle, dim as i32, keepdim as i32)
         if handle == 0:
             return Err(ShapeError.InferenceError(message: "Mean failed"))
 
