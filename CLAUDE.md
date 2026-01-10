@@ -16,6 +16,7 @@ For detailed guidance, invoke with `/skill-name`:
 | `debug` | Debugging interpreter/codegen, tracing, GC logging |
 | `stdlib` | Writing stdlib modules, variants, capabilities |
 | `todo` | TODO/FIXME comment format |
+| `doc` | Documentation writing: specs (SSpec), research, design, guides |
 
 Skills located in `.claude/skills/`.
 
@@ -56,7 +57,9 @@ Skills located in `.claude/skills/`.
 **Bug Reports:** `simple/bug_report.md`
 **Improvement Requests:** `simple/improve_request.md`
 **Job Reports:** `doc/report/` (completion reports, session summaries)
-**Feature Specs:** `doc/features/feature.md` - **read before implementing!**
+**Feature Specs:** `simple/std_lib/test/features/` - **Executable SSpec tests (see `/doc` skill)**
+**Research:** `doc/research/` (investigation, design exploration)
+**Guides:** `doc/guide/` (user-facing tutorials)
 
 ---
 
