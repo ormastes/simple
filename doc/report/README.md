@@ -1620,3 +1620,33 @@ When completing a significant task:
 4. Reference from CLAUDE.md if relevant for AI agents
 - [Code Duplication Analysis (2025-12-28)](CODE_DUPLICATION_ANALYSIS_2025-12-28.md) - Comprehensive duplication analysis for Rust and Simple code
 - [Duplication Reduction (2025-12-28)](DUPLICATION_REDUCTION_2025-12-28.md) - Refactored interpreter_macro module, reduced duplication by 85%
+
+## 2026-01-11: Bug Investigation Session
+
+### Summary
+
+Task: Comprehensive bug investigation and stdlib improvements
+- **3 bugs** investigated with thorough testing
+- **1 bug** verified as FIXED, **2 bugs** clarified with accurate root cause
+- **160+ helper methods** added across 12 batches
+- **16 FFI functions** for atomic operations
+- **BDD framework blocker** identified (try/catch not implemented)
+
+### Report
+
+[BUG_INVESTIGATION_SESSION_2026-01-11.md](BUG_INVESTIGATION_SESSION_2026-01-11.md)
+- Nested Method Mutations bug - FIXED (verified with comprehensive tests)
+- Method Chaining bug - Clarified as interpreter limitation, not mutation bug
+- Enum Method Match bug - Verified with two-issue root cause analysis
+- 160+ helper methods added to stdlib (Batches 72-83)
+- Atomic operations FFI (16 functions for AtomicBool and AtomicInt)
+- 17 test files created for bug verification
+- BDD framework investigation (blocked by missing try/catch syntax)
+
+**Key Findings:**
+- Bug report accuracy improved with thorough testing
+- Workarounds documented for all issues
+- Bug count: 31 fixed (↑1), 3 open (↓1)
+- Simple uses Result-based error handling (no try/catch)
+
+**Status:** 62 commits, comprehensive documentation, all findings verified with test evidence
