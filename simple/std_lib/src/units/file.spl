@@ -24,6 +24,59 @@ enum PathError:
     EmptyPath
     InvalidDriveLetter
 
+impl PathError:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn to_string(self) -> String:
+        """Convert error to string."""
+        match self:
+            case InvalidPath: return "InvalidPath"
+            case InvalidCharacter: return "InvalidCharacter"
+            case PathTooLong: return "PathTooLong"
+            case EmptyPath: return "EmptyPath"
+            case InvalidDriveLetter: return "InvalidDriveLetter"
+
+    fn description(self) -> String:
+        """Get detailed error description."""
+        match self:
+            case InvalidPath: return "Invalid file path format"
+            case InvalidCharacter: return "Path contains invalid characters"
+            case PathTooLong: return "Path exceeds maximum length"
+            case EmptyPath: return "Path cannot be empty"
+            case InvalidDriveLetter: return "Invalid Windows drive letter"
+
+    fn is_invalid_path(self) -> bool:
+        """Check if this is InvalidPath error."""
+        match self:
+            case InvalidPath: true
+            case _: false
+
+    fn is_invalid_character(self) -> bool:
+        """Check if this is InvalidCharacter error."""
+        match self:
+            case InvalidCharacter: true
+            case _: false
+
+    fn is_path_too_long(self) -> bool:
+        """Check if this is PathTooLong error."""
+        match self:
+            case PathTooLong: true
+            case _: false
+
+    fn is_empty_path(self) -> bool:
+        """Check if this is EmptyPath error."""
+        match self:
+            case EmptyPath: true
+            case _: false
+
+    fn is_invalid_drive_letter(self) -> bool:
+        """Check if this is InvalidDriveLetter error."""
+        match self:
+            case InvalidDriveLetter: true
+            case _: false
+
 # FilePath implementation
 impl FilePath:
     # Construction
@@ -154,6 +207,59 @@ impl FilePath:
         # Return mingw style (C:/path)
         return self as str
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_empty(self) -> bool:
+        """Check if path is empty."""
+        return (self as str).is_empty()
+
+    fn is_relative(self) -> bool:
+        """Check if path is relative (not absolute)."""
+        return not self.is_absolute()
+
+    fn has_drive(self) -> bool:
+        """Check if path has a Windows drive letter."""
+        return self.drive().is_some()
+
+    fn has_extension(self) -> bool:
+        """Check if path has a file extension."""
+        return self.extension().is_some()
+
+    fn has_parent(self) -> bool:
+        """Check if path has a parent directory."""
+        return self.parent().is_some()
+
+    fn is_windows_style(self) -> bool:
+        """Check if path uses Windows drive letter (C:/ style)."""
+        return self.has_drive()
+
+    fn is_unix_style(self) -> bool:
+        """Check if path is Unix-style (starts with / and no drive)."""
+        let s = self as str
+        return s.starts_with("/") and not self.has_drive()
+
+    fn component_count(self) -> Int:
+        """Count path components (separated by /)."""
+        let s = self as str
+        if s.is_empty():
+            return 0
+        return s.split("/").len()
+
+    fn ends_with_separator(self) -> bool:
+        """Check if path ends with a separator (/)."""
+        return (self as str).ends_with("/")
+
+    fn summary(self) -> String:
+        """Get summary of file path."""
+        let s = self as str
+        let abs = if self.is_absolute(): "absolute" else: "relative"
+        let ext = match self.extension():
+            case Some(e): "." + (e as str)
+            case None: "no ext"
+        return "FilePath: {s} ({abs}, {ext})"
+
 # DirPath implementation
 impl DirPath:
     fn from_str(s: str) -> Result[DirPath, PathError]:
@@ -171,6 +277,41 @@ impl DirPath:
     fn to_file_path(self) -> FilePath:
         return (self as str)_file
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_empty(self) -> bool:
+        """Check if directory path is empty."""
+        return (self as str).is_empty()
+
+    fn is_root(self) -> bool:
+        """Check if this is a root directory (/ or C:/)."""
+        let s = self as str
+        if s == "/":
+            return true
+        # Windows root: C:/
+        if s.len() == 3 and s.char_at(1) == ':' and s.char_at(2) == '/':
+            return true
+        return false
+
+    fn ends_with_separator(self) -> bool:
+        """Check if directory path ends with separator."""
+        return (self as str).ends_with("/")
+
+    fn component_count(self) -> Int:
+        """Count directory components."""
+        let s = self as str
+        if s.is_empty():
+            return 0
+        return s.split("/").len()
+
+    fn summary(self) -> String:
+        """Get summary of directory path."""
+        let s = self as str
+        let root = if self.is_root(): "root" else: "subdir"
+        return "DirPath: {s} ({root})"
+
 # FileName implementation
 impl FileName:
     fn from_str(s: str) -> Result[FileName, PathError]:
@@ -183,6 +324,35 @@ impl FileName:
     fn with_extension(self, ext: FileExt) -> FileName:
         return ((self as str) + "." + (ext as str))_filename
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_empty(self) -> bool:
+        """Check if file name is empty."""
+        return (self as str).is_empty()
+
+    fn has_extension(self) -> bool:
+        """Check if file name has an extension."""
+        return (self as str).contains(".")
+
+    fn is_hidden(self) -> bool:
+        """Check if file name starts with . (Unix hidden file)."""
+        let s = self as str
+        return s.starts_with(".") and s.len() > 1
+
+    fn is_valid(self) -> bool:
+        """Check if file name is valid (no path separators)."""
+        let s = self as str
+        return not s.contains("/") and not s.contains("\\") and not s.is_empty()
+
+    fn summary(self) -> String:
+        """Get summary of file name."""
+        let s = self as str
+        let hidden = if self.is_hidden(): "hidden" else: "visible"
+        let ext = if self.has_extension(): "with ext" else: "no ext"
+        return "FileName: {s} ({hidden}, {ext})"
+
 # FileExt implementation
 impl FileExt:
     fn from_str(s: str) -> Result[FileExt, PathError]:
@@ -191,6 +361,39 @@ impl FileExt:
         if s.contains("."):
             return Err(PathError::InvalidCharacter)
         return Ok(s_ext)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_empty(self) -> bool:
+        """Check if extension is empty."""
+        return (self as str).is_empty()
+
+    fn is_valid(self) -> bool:
+        """Check if extension is valid (no dots or path separators)."""
+        let s = self as str
+        return not s.contains(".") and not s.contains("/") and not s.contains("\\") and not s.is_empty()
+
+    fn is_common_text(self) -> bool:
+        """Check if this is a common text file extension."""
+        let s = (self as str).to_lower()
+        return s == "txt" or s == "md" or s == "rst" or s == "log" or s == "csv"
+
+    fn is_common_code(self) -> bool:
+        """Check if this is a common code file extension."""
+        let s = (self as str).to_lower()
+        return s == "spl" or s == "rs" or s == "py" or s == "js" or s == "c" or s == "cpp" or s == "h" or s == "hpp"
+
+    fn is_common_archive(self) -> bool:
+        """Check if this is a common archive extension."""
+        let s = (self as str).to_lower()
+        return s == "zip" or s == "tar" or s == "gz" or s == "bz2" or s == "xz" or s == "7z"
+
+    fn summary(self) -> String:
+        """Get summary of file extension."""
+        let s = self as str
+        return "FileExt: .{s}"
 
 # FileMode implementation (Unix permissions)
 impl FileMode:
@@ -211,3 +414,96 @@ impl FileMode:
 
     fn is_executable(self) -> bool:
         return ((self as u32) & 0o100) != 0
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_read_only(self) -> bool:
+        """Check if mode is read-only (not writable)."""
+        return not self.is_writable()
+
+    fn is_owner_readable(self) -> bool:
+        """Check if owner has read permission."""
+        return ((self as u32) & 0o400) != 0
+
+    fn is_owner_writable(self) -> bool:
+        """Check if owner has write permission."""
+        return ((self as u32) & 0o200) != 0
+
+    fn is_owner_executable(self) -> bool:
+        """Check if owner has execute permission."""
+        return ((self as u32) & 0o100) != 0
+
+    fn is_group_readable(self) -> bool:
+        """Check if group has read permission."""
+        return ((self as u32) & 0o040) != 0
+
+    fn is_group_writable(self) -> bool:
+        """Check if group has write permission."""
+        return ((self as u32) & 0o020) != 0
+
+    fn is_group_executable(self) -> bool:
+        """Check if group has execute permission."""
+        return ((self as u32) & 0o010) != 0
+
+    fn is_other_readable(self) -> bool:
+        """Check if others have read permission."""
+        return ((self as u32) & 0o004) != 0
+
+    fn is_other_writable(self) -> bool:
+        """Check if others have write permission."""
+        return ((self as u32) & 0o002) != 0
+
+    fn is_other_executable(self) -> bool:
+        """Check if others have execute permission."""
+        return ((self as u32) & 0o001) != 0
+
+    fn to_octal_string(self) -> String:
+        """Convert mode to octal string (e.g., '0755')."""
+        let mode = self as u32
+        return "0{mode:o}"
+
+    fn summary(self) -> String:
+        """Get summary of file mode."""
+        let r = if self.is_readable(): "r" else: "-"
+        let w = if self.is_writable(): "w" else: "-"
+        let x = if self.is_executable(): "x" else: "-"
+        return "FileMode: {self.to_octal_string()} ({r}{w}{x})"
+
+# DriveLetter implementation
+impl DriveLetter:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn from_char(c: char) -> Result[DriveLetter, PathError]:
+        """Create drive letter from character (A-Z, case-insensitive)."""
+        if (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z'):
+            return Ok(c.to_upper()_drive)
+        return Err(PathError::InvalidDriveLetter)
+
+    fn is_valid(self) -> bool:
+        """Check if drive letter is valid (A-Z)."""
+        let s = self as str
+        if s.len() != 1:
+            return false
+        let c = s.char_at(0)
+        return c >= 'A' and c <= 'Z'
+
+    fn to_upper(self) -> DriveLetter:
+        """Convert drive letter to uppercase."""
+        return (self as str).to_upper()_drive
+
+    fn to_lower(self) -> DriveLetter:
+        """Convert drive letter to lowercase."""
+        return (self as str).to_lower()_drive
+
+    fn to_char(self) -> char:
+        """Get drive letter as character."""
+        return (self as str).char_at(0)
+
+    fn summary(self) -> String:
+        """Get summary of drive letter."""
+        let s = self as str
+        return "DriveLetter: {s}:"
