@@ -3,7 +3,9 @@
 use super::collections::RuntimeString;
 use super::core::RuntimeValue;
 use super::heap::{HeapHeader, HeapObjectType};
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 
 // ============================================================================
 // Value creation FFI functions
@@ -2106,7 +2108,6 @@ pub unsafe extern "C" fn rt_process_execute(
     }
 }
 
-
 // ============================================================================
 // File/Directory Search FFI Functions
 // ============================================================================
@@ -2123,49 +2124,49 @@ pub unsafe extern "C" fn rt_file_find(
 ) -> RuntimeValue {
     use std::fs;
     use std::path::Path;
-    
+
     // Helper to check if filename matches simple glob pattern
     fn matches_pattern(filename: &str, pattern: &str) -> bool {
         // Handle simple patterns: "*", "*.ext", "prefix*", "*suffix"
         if pattern == "*" {
             return true;
         }
-        
+
         if let Some(ext) = pattern.strip_prefix("*.") {
             return filename.ends_with(&format!(".{}", ext));
         }
-        
+
         if let Some(prefix) = pattern.strip_suffix('*') {
             return filename.starts_with(prefix);
         }
-        
+
         if let Some(suffix) = pattern.strip_prefix('*') {
             return filename.ends_with(suffix);
         }
-        
+
         // Exact match
         filename == pattern
     }
-    
+
     if dir_ptr.is_null() || pattern_ptr.is_null() {
         return super::collections::rt_array_new(0);
     }
-    
+
     let dir_bytes = std::slice::from_raw_parts(dir_ptr, dir_len as usize);
     let dir_str = match std::str::from_utf8(dir_bytes) {
         Ok(s) => s,
         Err(_) => return super::collections::rt_array_new(0),
     };
-    
+
     let pattern_bytes = std::slice::from_raw_parts(pattern_ptr, pattern_len as usize);
     let pattern_str = match std::str::from_utf8(pattern_bytes) {
         Ok(s) => s,
         Err(_) => return super::collections::rt_array_new(0),
     };
-    
+
     let dir_path = Path::new(dir_str);
     let mut results = Vec::new();
-    
+
     // Non-recursive: just list immediate directory entries
     if !recursive {
         if let Ok(entries) = fs::read_dir(dir_path) {
@@ -2185,7 +2186,7 @@ pub unsafe extern "C" fn rt_file_find(
             if let Ok(entries) = fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    
+
                     if path.is_file() {
                         if let Some(filename) = entry.file_name().to_str() {
                             if matches_pattern(filename, pattern) {
@@ -2200,17 +2201,17 @@ pub unsafe extern "C" fn rt_file_find(
                 }
             }
         }
-        
+
         walk_dir(dir_path, pattern_str, &mut results);
     }
-    
+
     // Create array with results
     let arr = super::collections::rt_array_new(results.len() as u64);
     for path in results {
         let path_val = super::rt_string_new(path.as_ptr(), path.len() as u64);
         super::collections::rt_array_push(arr, path_val);
     }
-    
+
     arr
 }
 
@@ -2234,105 +2235,87 @@ pub unsafe extern "C" fn rt_dir_glob(
 /// Get basename (filename) from path
 /// Returns the final component of the path
 #[no_mangle]
-pub unsafe extern "C" fn rt_path_basename(
-    path_ptr: *const u8,
-    path_len: u64,
-) -> RuntimeValue {
+pub unsafe extern "C" fn rt_path_basename(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
     use std::path::Path;
-    
+
     if path_ptr.is_null() {
         return super::rt_string_new(b"".as_ptr(), 0);
     }
-    
+
     let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
     let path_str = match std::str::from_utf8(path_bytes) {
         Ok(s) => s,
         Err(_) => return super::rt_string_new(b"".as_ptr(), 0),
     };
-    
+
     let path = Path::new(path_str);
-    let basename = path.file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    
+    let basename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
     super::rt_string_new(basename.as_ptr(), basename.len() as u64)
 }
 
 /// Get dirname (directory) from path
 /// Returns the directory component of the path
 #[no_mangle]
-pub unsafe extern "C" fn rt_path_dirname(
-    path_ptr: *const u8,
-    path_len: u64,
-) -> RuntimeValue {
+pub unsafe extern "C" fn rt_path_dirname(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
     use std::path::Path;
-    
+
     if path_ptr.is_null() {
         return super::rt_string_new(b"".as_ptr(), 0);
     }
-    
+
     let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
     let path_str = match std::str::from_utf8(path_bytes) {
         Ok(s) => s,
         Err(_) => return super::rt_string_new(b"".as_ptr(), 0),
     };
-    
+
     let path = Path::new(path_str);
-    let dirname = path.parent()
-        .and_then(|p| p.to_str())
-        .unwrap_or("");
-    
+    let dirname = path.parent().and_then(|p| p.to_str()).unwrap_or("");
+
     super::rt_string_new(dirname.as_ptr(), dirname.len() as u64)
 }
 
 /// Get file extension from path
 /// Returns the extension without the leading dot
 #[no_mangle]
-pub unsafe extern "C" fn rt_path_ext(
-    path_ptr: *const u8,
-    path_len: u64,
-) -> RuntimeValue {
+pub unsafe extern "C" fn rt_path_ext(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
     use std::path::Path;
-    
+
     if path_ptr.is_null() {
         return super::rt_string_new(b"".as_ptr(), 0);
     }
-    
+
     let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
     let path_str = match std::str::from_utf8(path_bytes) {
         Ok(s) => s,
         Err(_) => return super::rt_string_new(b"".as_ptr(), 0),
     };
-    
+
     let path = Path::new(path_str);
-    let ext = path.extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+
     super::rt_string_new(ext.as_ptr(), ext.len() as u64)
 }
 
 /// Convert path to absolute path
 /// Returns the canonicalized absolute path
 #[no_mangle]
-pub unsafe extern "C" fn rt_path_absolute(
-    path_ptr: *const u8,
-    path_len: u64,
-) -> RuntimeValue {
+pub unsafe extern "C" fn rt_path_absolute(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
     use std::path::Path;
-    
+
     if path_ptr.is_null() {
         return super::rt_string_new(b"".as_ptr(), 0);
     }
-    
+
     let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
     let path_str = match std::str::from_utf8(path_bytes) {
         Ok(s) => s,
         Err(_) => return super::rt_string_new(b"".as_ptr(), 0),
     };
-    
+
     let path = Path::new(path_str);
-    
+
     // Try to canonicalize (resolve symlinks and make absolute)
     // If that fails, try to make it absolute without resolving symlinks
     let absolute = if let Ok(canonical) = path.canonicalize() {
@@ -2351,7 +2334,7 @@ pub unsafe extern "C" fn rt_path_absolute(
             Err(_) => path_str.to_string(),
         }
     };
-    
+
     super::rt_string_new(absolute.as_ptr(), absolute.len() as u64)
 }
 
@@ -2360,8 +2343,6 @@ pub unsafe extern "C" fn rt_path_absolute(
 // ============================================================================
 
 use std::sync::atomic::{AtomicBool, AtomicI64};
-use std::sync::Mutex;
-use std::collections::HashMap;
 
 lazy_static::lazy_static! {
     static ref ATOMIC_BOOL_MAP: Mutex<HashMap<i64, Box<AtomicBool>>> = Mutex::new(HashMap::new());
@@ -2390,7 +2371,9 @@ pub extern "C" fn rt_atomic_bool_new(initial: bool) -> i64 {
 /// Load value from atomic boolean
 #[no_mangle]
 pub extern "C" fn rt_atomic_bool_load(handle: i64) -> bool {
-    ATOMIC_BOOL_MAP.lock().unwrap()
+    ATOMIC_BOOL_MAP
+        .lock()
+        .unwrap()
         .get(&handle)
         .map(|atomic| atomic.load(Ordering::SeqCst))
         .unwrap_or(false)
@@ -2407,7 +2390,9 @@ pub extern "C" fn rt_atomic_bool_store(handle: i64, value: bool) {
 /// Swap value of atomic boolean
 #[no_mangle]
 pub extern "C" fn rt_atomic_bool_swap(handle: i64, value: bool) -> bool {
-    ATOMIC_BOOL_MAP.lock().unwrap()
+    ATOMIC_BOOL_MAP
+        .lock()
+        .unwrap()
         .get(&handle)
         .map(|atomic| atomic.swap(value, Ordering::SeqCst))
         .unwrap_or(false)
@@ -2438,7 +2423,9 @@ pub extern "C" fn rt_atomic_int_new(initial: i64) -> i64 {
 /// Load value from atomic integer
 #[no_mangle]
 pub extern "C" fn rt_atomic_int_load(handle: i64) -> i64 {
-    ATOMIC_INT_MAP.lock().unwrap()
+    ATOMIC_INT_MAP
+        .lock()
+        .unwrap()
         .get(&handle)
         .map(|atomic| atomic.load(Ordering::SeqCst))
         .unwrap_or(0)
@@ -2455,7 +2442,9 @@ pub extern "C" fn rt_atomic_int_store(handle: i64, value: i64) {
 /// Swap value of atomic integer
 #[no_mangle]
 pub extern "C" fn rt_atomic_int_swap(handle: i64, value: i64) -> i64 {
-    ATOMIC_INT_MAP.lock().unwrap()
+    ATOMIC_INT_MAP
+        .lock()
+        .unwrap()
         .get(&handle)
         .map(|atomic| atomic.swap(value, Ordering::SeqCst))
         .unwrap_or(0)
@@ -2464,10 +2453,14 @@ pub extern "C" fn rt_atomic_int_swap(handle: i64, value: i64) -> i64 {
 /// Compare and exchange atomic integer
 #[no_mangle]
 pub extern "C" fn rt_atomic_int_compare_exchange(handle: i64, current: i64, new: i64) -> bool {
-    ATOMIC_INT_MAP.lock().unwrap()
+    ATOMIC_INT_MAP
+        .lock()
+        .unwrap()
         .get(&handle)
         .map(|atomic| {
-            atomic.compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+            atomic
+                .compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
         })
         .unwrap_or(false)
 }
@@ -2475,7 +2468,9 @@ pub extern "C" fn rt_atomic_int_compare_exchange(handle: i64, current: i64, new:
 /// Fetch and add to atomic integer
 #[no_mangle]
 pub extern "C" fn rt_atomic_int_fetch_add(handle: i64, value: i64) -> i64 {
-    ATOMIC_INT_MAP.lock().unwrap()
+    ATOMIC_INT_MAP
+        .lock()
+        .unwrap()
         .get(&handle)
         .map(|atomic| atomic.fetch_add(value, Ordering::SeqCst))
         .unwrap_or(0)
@@ -2484,7 +2479,9 @@ pub extern "C" fn rt_atomic_int_fetch_add(handle: i64, value: i64) -> i64 {
 /// Fetch and subtract from atomic integer
 #[no_mangle]
 pub extern "C" fn rt_atomic_int_fetch_sub(handle: i64, value: i64) -> i64 {
-    ATOMIC_INT_MAP.lock().unwrap()
+    ATOMIC_INT_MAP
+        .lock()
+        .unwrap()
         .get(&handle)
         .map(|atomic| atomic.fetch_sub(value, Ordering::SeqCst))
         .unwrap_or(0)
@@ -2493,7 +2490,9 @@ pub extern "C" fn rt_atomic_int_fetch_sub(handle: i64, value: i64) -> i64 {
 /// Fetch and bitwise AND with atomic integer
 #[no_mangle]
 pub extern "C" fn rt_atomic_int_fetch_and(handle: i64, value: i64) -> i64 {
-    ATOMIC_INT_MAP.lock().unwrap()
+    ATOMIC_INT_MAP
+        .lock()
+        .unwrap()
         .get(&handle)
         .map(|atomic| atomic.fetch_and(value, Ordering::SeqCst))
         .unwrap_or(0)
@@ -2502,7 +2501,9 @@ pub extern "C" fn rt_atomic_int_fetch_and(handle: i64, value: i64) -> i64 {
 /// Fetch and bitwise OR with atomic integer
 #[no_mangle]
 pub extern "C" fn rt_atomic_int_fetch_or(handle: i64, value: i64) -> i64 {
-    ATOMIC_INT_MAP.lock().unwrap()
+    ATOMIC_INT_MAP
+        .lock()
+        .unwrap()
         .get(&handle)
         .map(|atomic| atomic.fetch_or(value, Ordering::SeqCst))
         .unwrap_or(0)
@@ -2511,7 +2512,9 @@ pub extern "C" fn rt_atomic_int_fetch_or(handle: i64, value: i64) -> i64 {
 /// Fetch and bitwise XOR with atomic integer
 #[no_mangle]
 pub extern "C" fn rt_atomic_int_fetch_xor(handle: i64, value: i64) -> i64 {
-    ATOMIC_INT_MAP.lock().unwrap()
+    ATOMIC_INT_MAP
+        .lock()
+        .unwrap()
         .get(&handle)
         .map(|atomic| atomic.fetch_xor(value, Ordering::SeqCst))
         .unwrap_or(0)
