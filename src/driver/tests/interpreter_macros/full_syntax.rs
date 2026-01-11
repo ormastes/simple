@@ -131,14 +131,14 @@ main = if msg == "Task: done": 1 else: 0
 fn macro_full_syntax_conditional_in_emit() {
     // Macro emit block with conditional logic
     let code = r#"
-macro clamp(val: Int, min: Int, max: Int) -> (returns result: Int):
+macro clamp(value: Int, min: Int, max: Int) -> (returns result: Int):
     emit result:
-        if val < min:
+        if value < min:
             return min
-        elif val > max:
+        elif value > max:
             return max
         else:
-            return val
+            return value
 
 main = clamp!(15, 10, 20)
 "#;
@@ -149,14 +149,14 @@ main = clamp!(15, 10, 20)
 #[test]
 fn macro_full_syntax_clamp_low() {
     let code = r#"
-macro clamp(val: Int, min: Int, max: Int) -> (returns result: Int):
+macro clamp(value: Int, min: Int, max: Int) -> (returns result: Int):
     emit result:
-        if val < min:
+        if value < min:
             return min
-        elif val > max:
+        elif value > max:
             return max
         else:
-            return val
+            return value
 
 main = clamp!(5, 10, 20)
 "#;
@@ -167,14 +167,14 @@ main = clamp!(5, 10, 20)
 #[test]
 fn macro_full_syntax_clamp_high() {
     let code = r#"
-macro clamp(val: Int, min: Int, max: Int) -> (returns result: Int):
+macro clamp(value: Int, min: Int, max: Int) -> (returns result: Int):
     emit result:
-        if val < min:
+        if value < min:
             return min
-        elif val > max:
+        elif value > max:
             return max
         else:
-            return val
+            return value
 
 main = clamp!(25, 10, 20)
 "#;
@@ -219,9 +219,9 @@ fn macro_full_syntax_function_call_in_emit() {
 fn helper(x: Int) -> Int:
     return x * 2
 
-macro double_it(val: Int) -> (returns result: Int):
+macro double_it(value: Int) -> (returns result: Int):
     emit result:
-        helper(val)
+        helper(value)
 
 main = double_it!(21)
 "#;

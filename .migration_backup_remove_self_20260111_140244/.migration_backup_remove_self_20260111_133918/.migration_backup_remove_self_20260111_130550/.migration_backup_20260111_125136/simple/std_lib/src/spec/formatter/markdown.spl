@@ -1,0 +1,220 @@
+# Markdown Documentation Generator for BDD Specs
+# Converts describe/context/it blocks into GitHub-compatible Markdown
+# Supports screenshot embedding and diagram generation placeholders
+
+use core.collections.{List, Dict}
+use core.string.String
+import screenshot.{screenshot_exists, get_screenshot_path, screenshot_markdown}
+
+class MarkdownFormatter:
+    output: String
+    include_screenshots: Bool
+    include_diagrams: Bool
+    test_file: Option<String>
+
+    fn new() -> MarkdownFormatter:
+        return MarkdownFormatter(
+            output: String.empty(),
+            include_screenshots: true,
+            include_diagrams: true,
+            test_file: None
+        )
+
+    fn with_test_file(self, file: String) -> MarkdownFormatter:
+        return MarkdownFormatter(
+            output: self.output,
+            include_screenshots: self.include_screenshots,
+            include_diagrams: self.include_diagrams,
+            test_file: Some(file)
+        )
+
+    fn with_screenshots(self, enabled: Bool) -> MarkdownFormatter:
+        return MarkdownFormatter(
+            output: self.output,
+            include_screenshots: enabled,
+            include_diagrams: self.include_diagrams,
+            test_file: self.test_file
+        )
+
+    fn with_diagrams(self, enabled: Bool) -> MarkdownFormatter:
+        return MarkdownFormatter(
+            output: self.output,
+            include_screenshots: self.include_screenshots,
+            include_diagrams: enabled,
+            test_file: self.test_file
+        )
+
+    fn format_describe(self, name: String, level: i32) -> String:
+        let prefix = "#" * (level + 1)
+        return "{prefix} {name}\n\n"
+
+    fn format_context(self, name: String, level: i32) -> String:
+        let prefix = "#" * (level + 2)
+        return "{prefix} {name}\n\n"
+
+    fn format_example(self, name: String, status: String, error: Option<String>) -> String:
+        let icon = match status:
+            "pass" => "✅"
+            "fail" => "❌"
+            "skip" => "⏭️"
+            _ => "❓"
+
+        let mut result = "{icon} **{name}**\n\n"
+
+        if let Some(err) = error:
+            result = result + "```\nError: {err}\n```\n\n"
+
+        return result
+
+    fn format_example_with_media(self, name: String, status: String, error: Option<String], is_gui: Bool, has_diagram: Bool) -> String:
+        let mut result = self.format_example(name, status, error)
+
+        # Add screenshot section for @gui tests
+        if is_gui and self.include_screenshots:
+            result = result + self.format_screenshot_section(name)
+
+        # Add diagram section if available
+        if has_diagram and self.include_diagrams:
+            result = result + self.format_diagram_section(name)
+
+        return result
+
+    fn format_screenshot_section(self, test_name: String) -> String:
+        match self.test_file:
+            case Some(file):
+                let before_exists = screenshot_exists(test_name, file, "before")
+                let after_exists = screenshot_exists(test_name, file, "after")
+
+                if before_exists or after_exists:
+                    let mut section = "<details>\n<summary>Screenshots</summary>\n\n"
+
+                    if before_exists:
+                        section = section + "**Before:**\n\n"
+                        section = section + screenshot_markdown(test_name, file, "before") + "\n\n"
+
+                    if after_exists:
+                        section = section + "**After:**\n\n"
+                        section = section + screenshot_markdown(test_name, file, "after") + "\n\n"
+
+                    section = section + "</details>\n\n"
+                    return section
+                else:
+                    # Show placeholder with generation instructions
+                    return self.format_screenshot_placeholder(test_name, file)
+            case None:
+                return ""
+
+    fn format_screenshot_placeholder(self, test_name: String, test_file: String) -> String:
+        let cmd = "simple test --refresh-gui-image {test_file}"
+        return "<details>\n<summary>Screenshots (not available)</summary>\n\n" +
+               "> **Screenshot not captured**\n>\n" +
+               "> To generate: `{cmd}`\n\n" +
+               "</details>\n\n"
+
+    fn format_diagram_section(self, test_name: String) -> String:
+        match self.test_file:
+            case Some(file):
+                let diagram_path = self.get_diagram_path(test_name, file)
+                if diagram_path.is_some():
+                    let path = diagram_path.unwrap()
+                    return "<details>\n<summary>Sequence Diagram</summary>\n\n" +
+                           "```mermaid\n" +
+                           _read_diagram_content(path) +
+                           "\n```\n\n</details>\n\n"
+                else:
+                    return self.format_diagram_placeholder(test_name, file)
+            case None:
+                return ""
+
+    fn format_diagram_placeholder(self, test_name: String, test_file: String) -> String:
+        let cmd = "simple test --seq-diagram {test_file}"
+        return "<details>\n<summary>Diagram (not available)</summary>\n\n" +
+               "> **Diagram not generated**\n>\n" +
+               "> To generate: `{cmd}`\n\n" +
+               "</details>\n\n"
+
+    fn get_diagram_path(self, test_name: String, test_file: String) -> Option<String>:
+        # Compute diagram path similar to screenshot path
+        let base_dir = "doc/spec/diagrams"
+        let relative = test_file
+            .replace("simple/std_lib/test/", "")
+            .replace("test/", "")
+            .replace("_spec.spl", "")
+            .replace("_test.spl", "")
+            .replace(".spl", "")
+
+        let safe_name = test_name.replace(" ", "_").replace("/", "_").to_lowercase()
+        let path = "{base_dir}/{relative}/{safe_name}.mmd"
+
+        if fs.exists(path):
+            return Some(path)
+        else:
+            return None
+
+    fn format_code_block(self, code: String, language: String) -> String:
+        return "```{language}\n{code}\n```\n\n"
+
+# Internal: Read diagram content from file
+fn _read_diagram_content(path: String) -> String:
+    match fs.read_string(path):
+        case Ok(content):
+            return content
+        case Err(_):
+            return "# Error reading diagram"
+
+# Convert spec results to Markdown documentation
+fn format_spec_to_markdown(spec_results: Dict<String, Any>) -> String:
+    let formatter = MarkdownFormatter.new()
+    let mut output = String.empty()
+
+    # Extract spec metadata
+    let suite_name = spec_results.get("suite_name").unwrap_or("Test Suite")
+    output = output + "# {suite_name}\n\n"
+
+    # Add timestamp
+    if let Some(timestamp) = spec_results.get("timestamp"):
+        output = output + "*Generated: {timestamp}*\n\n"
+
+    # Process describe blocks
+    if let Some(describes) = spec_results.get("describe_blocks"):
+        for describe in describes:
+            output = output + formatter.format_describe(
+                describe.get("description").unwrap_or(""),
+                1
+            )
+
+            # Process contexts
+            if let Some(contexts) = describe.get("contexts"):
+                for context in contexts:
+                    output = output + formatter.format_context(
+                        context.get("description").unwrap_or(""),
+                        2
+                    )
+
+                    # Process examples (it blocks)
+                    if let Some(examples) = context.get("examples"):
+                        for example in examples:
+                            let status = example.get("status").unwrap_or("unknown")
+                            let name = example.get("description").unwrap_or("")
+                            let error = example.get("error")
+
+                            output = output + formatter.format_example(name, status, error)
+
+                            # Add code if available
+                            if let Some(code) = example.get("code"):
+                                output = output + formatter.format_code_block(code, "simple")
+
+    # Add summary
+    if let Some(summary) = spec_results.get("summary"):
+        output = output + "\n---\n\n## Summary\n\n"
+        let total = summary.get("total").unwrap_or(0)
+        let passed = summary.get("passed").unwrap_or(0)
+        let failed = summary.get("failed").unwrap_or(0)
+        let skipped = summary.get("skipped").unwrap_or(0)
+
+        output = output + "- **Total:** {total} tests\n"
+        output = output + "- **Passed:** {passed} ✅\n"
+        output = output + "- **Failed:** {failed} ❌\n"
+        output = output + "- **Skipped:** {skipped} ⏭️\n"
+
+    return output

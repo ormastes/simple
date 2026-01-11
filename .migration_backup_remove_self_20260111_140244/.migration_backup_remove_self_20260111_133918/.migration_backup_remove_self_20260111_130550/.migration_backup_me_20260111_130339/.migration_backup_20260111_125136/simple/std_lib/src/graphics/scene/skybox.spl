@@ -1,0 +1,508 @@
+# Skybox - Environment background rendering
+#
+# Renders a cubemap as an infinite-distance background, creating
+# the illusion of sky, environment, or distant scenery.
+#
+# Based on: doc/spec/graphics_3d.md (Part 1.4: Skybox Rendering)
+
+use core.*
+use graphics.math.*
+use graphics.render.*
+
+# =============================================================================
+# Skybox
+# =============================================================================
+
+pub struct Skybox:
+    # Cubemap texture (6 faces)
+    cubemap_texture_id: u64
+
+    # Rendering properties
+    brightness: f32              # Exposure/brightness multiplier
+    rotation: Quat               # Optional rotation
+    tint_color: Vec3             # Color tint
+
+    # Vertex buffer (cube without translation)
+    vertex_buffer_id: u64
+    index_buffer_id: u64
+
+impl Skybox:
+    pub fn new(cubemap_texture_id: u64) -> Skybox:
+        let mut skybox = Skybox {
+            cubemap_texture_id: cubemap_texture_id,
+            brightness: 1.0,
+            rotation: Quat::identity(),
+            tint_color: Vec3::one(),
+            vertex_buffer_id: 0,
+            index_buffer_id: 0
+        }
+
+        skybox.init_geometry()
+        return skybox
+
+    # Initialize cube geometry (unit cube centered at origin)
+    me init_geometry(self):
+        # Cube vertices (positions only, no UVs needed)
+        let vertices = [
+            # Front face
+            Vec3::new(-1.0, -1.0,  1.0),
+            Vec3::new( 1.0, -1.0,  1.0),
+            Vec3::new( 1.0,  1.0,  1.0),
+            Vec3::new(-1.0,  1.0,  1.0),
+
+            # Back face
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(-1.0,  1.0, -1.0),
+            Vec3::new( 1.0,  1.0, -1.0),
+            Vec3::new( 1.0, -1.0, -1.0),
+
+            # Top face
+            Vec3::new(-1.0,  1.0, -1.0),
+            Vec3::new(-1.0,  1.0,  1.0),
+            Vec3::new( 1.0,  1.0,  1.0),
+            Vec3::new( 1.0,  1.0, -1.0),
+
+            # Bottom face
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new( 1.0, -1.0, -1.0),
+            Vec3::new( 1.0, -1.0,  1.0),
+            Vec3::new(-1.0, -1.0,  1.0),
+
+            # Right face
+            Vec3::new( 1.0, -1.0, -1.0),
+            Vec3::new( 1.0,  1.0, -1.0),
+            Vec3::new( 1.0,  1.0,  1.0),
+            Vec3::new( 1.0, -1.0,  1.0),
+
+            # Left face
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(-1.0, -1.0,  1.0),
+            Vec3::new(-1.0,  1.0,  1.0),
+            Vec3::new(-1.0,  1.0, -1.0)
+        ]
+
+        # Indices (CCW winding)
+        let indices = [
+            # Front
+            0, 1, 2,  2, 3, 0,
+            # Back
+            4, 5, 6,  6, 7, 4,
+            # Top
+            8, 9, 10,  10, 11, 8,
+            # Bottom
+            12, 13, 14,  14, 15, 12,
+            # Right
+            16, 17, 18,  18, 19, 16,
+            # Left
+            20, 21, 22,  22, 23, 20
+        ]
+
+        # Upload to GPU
+        self.vertex_buffer_id = extern_create_vertex_buffer(
+            vertices.data_ptr(),
+            vertices.len() * 12  # 3 floats * 4 bytes
+        )
+
+        self.index_buffer_id = extern_create_index_buffer(
+            indices.data_ptr(),
+            indices.len() * 4  # 4 bytes per index
+        )
+
+    # Set brightness/exposure
+    pub fn with_brightness(mut self, brightness: f32) -> Skybox:
+        self.brightness = brightness
+        return self
+
+    # Set rotation
+    pub fn with_rotation(mut self, rotation: Quat) -> Skybox:
+        self.rotation = rotation
+        return self
+
+    # Set color tint
+    pub fn with_tint(mut self, tint: Vec3) -> Skybox:
+        self.tint_color = tint
+        return self
+
+    # Render skybox
+    pub fn render(self, camera: Camera):
+        # Use skybox shader pipeline
+        extern_use_shader_pipeline("skybox")
+
+        # Bind cubemap texture
+        extern_bind_cubemap_texture(0, self.cubemap_texture_id)
+
+        # Set uniforms
+        let view_matrix = camera.get_view_matrix()
+        let projection_matrix = camera.get_projection_matrix()
+
+        # Remove translation from view matrix (keep only rotation)
+        let view_no_translation = Mat4::new(
+            view_matrix.m[0][0], view_matrix.m[0][1], view_matrix.m[0][2], 0.0,
+            view_matrix.m[1][0], view_matrix.m[1][1], view_matrix.m[1][2], 0.0,
+            view_matrix.m[2][0], view_matrix.m[2][1], view_matrix.m[2][2], 0.0,
+            0.0,                  0.0,                  0.0,                  1.0
+        )
+
+        # Apply skybox rotation
+        let rotation_matrix = self.rotation.to_matrix4()
+        let view_rotated = view_no_translation * rotation_matrix
+
+        let view_proj = projection_matrix * view_rotated
+
+        extern_set_uniform_mat4("u_ViewProj", view_proj)
+        extern_set_uniform_float("u_Brightness", self.brightness)
+        extern_set_uniform_vec3("u_TintColor", self.tint_color)
+
+        # Render cube
+        extern_bind_vertex_buffer(self.vertex_buffer_id)
+        extern_bind_index_buffer(self.index_buffer_id)
+        extern_draw_indexed(36)  # 6 faces * 2 triangles * 3 indices
+
+# =============================================================================
+# Skybox Builder - Convenience API
+# =============================================================================
+
+pub struct SkyboxBuilder:
+    cubemap_paths: Option<Array<String>>  # 6 face paths
+    hdr_path: Option<String>              # Equirectangular HDR path
+    color: Option<Vec3>                   # Solid color fallback
+
+impl SkyboxBuilder:
+    pub fn new() -> SkyboxBuilder:
+        return SkyboxBuilder {
+            cubemap_paths: None,
+            hdr_path: None,
+            color: None
+        }
+
+    # Load from 6 separate images (+X, -X, +Y, -Y, +Z, -Z)
+    pub fn from_faces(mut self, paths: Array<String>) -> SkyboxBuilder:
+        self.cubemap_paths = Some(paths)
+        return self
+
+    # Load from equirectangular HDR image
+    pub fn from_hdr(mut self, path: String) -> SkyboxBuilder:
+        self.hdr_path = Some(path)
+        return self
+
+    # Create solid color skybox (for testing)
+    pub fn from_color(mut self, color: Vec3) -> SkyboxBuilder:
+        self.color = Some(color)
+        return self
+
+    # Build skybox
+    pub fn build(self) -> Result<Skybox, String>:
+        # Load cubemap from faces
+        if self.cubemap_paths.is_some():
+            let paths = self.cubemap_paths.unwrap()
+
+            if paths.len() != 6:
+                return Err("Cubemap requires exactly 6 face images")
+
+            let cubemap_id = extern_load_cubemap_from_faces(
+                paths[0].as_ptr(),  # +X
+                paths[1].as_ptr(),  # -X
+                paths[2].as_ptr(),  # +Y
+                paths[3].as_ptr(),  # -Y
+                paths[4].as_ptr(),  # +Z
+                paths[5].as_ptr()   # -Z
+            )
+
+            if cubemap_id == 0:
+                return Err("Failed to load cubemap faces")
+
+            return Ok(Skybox::new(cubemap_id))
+
+        # Load from equirectangular HDR
+        if self.hdr_path.is_some():
+            let path = self.hdr_path.unwrap()
+            let cubemap_id = extern_load_cubemap_from_hdr(path.as_ptr())
+
+            if cubemap_id == 0:
+                return Err("Failed to load HDR cubemap")
+
+            return Ok(Skybox::new(cubemap_id))
+
+        # Create solid color skybox
+        if self.color.is_some():
+            let color = self.color.unwrap()
+            let cubemap_id = extern_create_solid_color_cubemap(color)
+
+            if cubemap_id == 0:
+                return Err("Failed to create solid color cubemap")
+
+            return Ok(Skybox::new(cubemap_id))
+
+        return Err("No skybox source specified")
+
+# =============================================================================
+# Procedural Skybox Generation
+# =============================================================================
+
+pub struct ProceduralSkybox
+
+impl ProceduralSkybox:
+    # Generate gradient skybox (simple sky simulation)
+    pub fn gradient(
+        top_color: Vec3,
+        horizon_color: Vec3,
+        bottom_color: Vec3
+    ) -> Skybox:
+        let cubemap_id = extern_generate_gradient_skybox(
+            top_color,
+            horizon_color,
+            bottom_color
+        )
+
+        return Skybox::new(cubemap_id)
+
+    # Generate atmospheric scattering skybox
+    pub fn atmospheric(
+        sun_direction: Vec3,
+        sun_intensity: f32,
+        atmosphere_thickness: f32
+    ) -> Skybox:
+        let cubemap_id = extern_generate_atmospheric_skybox(
+            sun_direction,
+            sun_intensity,
+            atmosphere_thickness
+        )
+
+        return Skybox::new(cubemap_id)
+
+    # Generate starfield skybox
+    pub fn starfield(
+        star_count: i32,
+        star_brightness: f32,
+        nebula_color: Vec3
+    ) -> Skybox:
+        let cubemap_id = extern_generate_starfield_skybox(
+            star_count,
+            star_brightness,
+            nebula_color
+        )
+
+        return Skybox::new(cubemap_id)
+
+# =============================================================================
+# Skybox Rendering Helpers
+# =============================================================================
+
+# Render skybox with optimal depth settings
+pub fn render_skybox_early(skybox: Skybox, camera: Camera):
+    # Render skybox first with depth = 1.0 (far plane)
+    # Then render scene with depth test LESS_EQUAL
+    extern_set_depth_test(DepthTest::LessEqual)
+    extern_set_depth_write(false)
+
+    skybox.render(camera)
+
+    extern_set_depth_write(true)
+
+pub fn render_skybox_late(skybox: Skybox, camera: Camera):
+    # Render scene first, then skybox only where depth = 1.0
+    # Saves fragment shader invocations
+    extern_set_depth_test(DepthTest::Equal)
+    extern_set_depth_func_value(1.0)
+    extern_set_depth_write(false)
+
+    skybox.render(camera)
+
+    extern_set_depth_test(DepthTest::Less)
+    extern_set_depth_write(true)
+
+# =============================================================================
+# Depth Test Enum
+# =============================================================================
+
+pub enum DepthTest:
+    Never
+    Less
+    Equal
+    LessEqual
+    Greater
+    NotEqual
+    GreaterEqual
+    Always
+
+impl DepthTest:
+    pub fn to_string(self) -> String:
+        """Convert depth test to string."""
+        match self:
+            case Never: "Never"
+            case Less: "Less"
+            case Equal: "Equal"
+            case LessEqual: "LessEqual"
+            case Greater: "Greater"
+            case NotEqual: "NotEqual"
+            case GreaterEqual: "GreaterEqual"
+            case Always: "Always"
+
+    pub fn description(self) -> String:
+        """Get depth test description."""
+        match self:
+            case Never: "Depth test never passes"
+            case Less: "Depth test passes if fragment depth < buffer depth"
+            case Equal: "Depth test passes if fragment depth == buffer depth"
+            case LessEqual: "Depth test passes if fragment depth <= buffer depth"
+            case Greater: "Depth test passes if fragment depth > buffer depth"
+            case NotEqual: "Depth test passes if fragment depth != buffer depth"
+            case GreaterEqual: "Depth test passes if fragment depth >= buffer depth"
+            case Always: "Depth test always passes"
+
+    pub fn is_never(self) -> bool:
+        """Check if depth test is Never."""
+        match self:
+            case Never: true
+            case _: false
+
+    pub fn is_less(self) -> bool:
+        """Check if depth test is Less."""
+        match self:
+            case Less: true
+            case _: false
+
+    pub fn is_equal(self) -> bool:
+        """Check if depth test is Equal."""
+        match self:
+            case Equal: true
+            case _: false
+
+    pub fn is_less_equal(self) -> bool:
+        """Check if depth test is LessEqual."""
+        match self:
+            case LessEqual: true
+            case _: false
+
+    pub fn is_greater(self) -> bool:
+        """Check if depth test is Greater."""
+        match self:
+            case Greater: true
+            case _: false
+
+    pub fn is_not_equal(self) -> bool:
+        """Check if depth test is NotEqual."""
+        match self:
+            case NotEqual: true
+            case _: false
+
+    pub fn is_greater_equal(self) -> bool:
+        """Check if depth test is GreaterEqual."""
+        match self:
+            case GreaterEqual: true
+            case _: false
+
+    pub fn is_always(self) -> bool:
+        """Check if depth test is Always."""
+        match self:
+            case Always: true
+            case _: false
+
+    pub fn is_comparison_test(self) -> bool:
+        """Check if depth test performs comparison (not Never/Always)."""
+        match self:
+            case Never: false
+            case Always: false
+            case _: true
+
+    pub fn is_standard_test(self) -> bool:
+        """Check if depth test is standard (Less or LessEqual)."""
+        match self:
+            case Less: true
+            case LessEqual: true
+            case _: false
+
+    pub fn is_inverted_test(self) -> bool:
+        """Check if depth test is inverted (Greater or GreaterEqual)."""
+        match self:
+            case Greater: true
+            case GreaterEqual: true
+            case _: false
+
+    pub fn is_equality_test(self) -> bool:
+        """Check if depth test checks for equality."""
+        match self:
+            case Equal: true
+            case NotEqual: true
+            case _: false
+
+    pub fn allows_all_fragments(self) -> bool:
+        """Check if depth test allows all fragments (Always)."""
+        match self:
+            case Always: true
+            case _: false
+
+    pub fn rejects_all_fragments(self) -> bool:
+        """Check if depth test rejects all fragments (Never)."""
+        match self:
+            case Never: true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get depth test summary."""
+        let name = self.to_string()
+        let desc = self.description()
+        let mut props = []
+        if self.is_standard_test():
+            props.push("standard")
+        if self.is_inverted_test():
+            props.push("inverted")
+        if self.is_equality_test():
+            props.push("equality")
+        if self.is_comparison_test():
+            props.push("comparison")
+        if self.allows_all_fragments():
+            props.push("allows-all")
+        if self.rejects_all_fragments():
+            props.push("rejects-all")
+        if props.len() > 0:
+            let props_str = ", ".join(props)
+            return "DepthTest: {name} ({desc}, {props_str})"
+        else:
+            return "DepthTest: {name} ({desc})"
+
+# =============================================================================
+# External FFI Functions
+# =============================================================================
+
+extern fn extern_create_vertex_buffer(data: *Vec3, size: i32) -> u64
+extern fn extern_create_index_buffer(data: *i32, size: i32) -> u64
+extern fn extern_use_shader_pipeline(name: *u8)
+extern fn extern_bind_cubemap_texture(slot: i32, texture_id: u64)
+extern fn extern_set_uniform_mat4(name: *u8, matrix: Mat4)
+extern fn extern_set_uniform_float(name: *u8, value: f32)
+extern fn extern_set_uniform_vec3(name: *u8, value: Vec3)
+extern fn extern_bind_vertex_buffer(buffer_id: u64)
+extern fn extern_bind_index_buffer(buffer_id: u64)
+extern fn extern_draw_indexed(index_count: i32)
+
+extern fn extern_load_cubemap_from_faces(
+    pos_x: *u8, neg_x: *u8,
+    pos_y: *u8, neg_y: *u8,
+    pos_z: *u8, neg_z: *u8
+) -> u64
+
+extern fn extern_load_cubemap_from_hdr(path: *u8) -> u64
+extern fn extern_create_solid_color_cubemap(color: Vec3) -> u64
+
+extern fn extern_generate_gradient_skybox(
+    top: Vec3,
+    horizon: Vec3,
+    bottom: Vec3
+) -> u64
+
+extern fn extern_generate_atmospheric_skybox(
+    sun_dir: Vec3,
+    sun_intensity: f32,
+    thickness: f32
+) -> u64
+
+extern fn extern_generate_starfield_skybox(
+    star_count: i32,
+    brightness: f32,
+    nebula: Vec3
+) -> u64
+
+extern fn extern_set_depth_test(mode: DepthTest)
+extern fn extern_set_depth_write(enabled: bool)
+extern fn extern_set_depth_func_value(value: f32)

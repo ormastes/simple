@@ -88,8 +88,8 @@ fn runner_generator_arithmetic_in_yield() {
     // Test arithmetic expression - computed before yield
     run_expect(
         r#"
-let val = 2 * 3
-let gen = generator(\: yield val)
+let value = 2 * 3
+let gen = generator(\: yield value)
 main = next(gen)
 "#,
         6,
@@ -394,8 +394,8 @@ fn parity_generator_exhaustion_with_capture() {
     // Exhausted generator with capture returns nil (0)
     run_expect(
         r#"
-let val = 42
-let gen = generator(\: yield val)
+let value = 42
+let gen = generator(\: yield value)
 let first = next(gen)
 let second = next(gen)
 main = first
@@ -489,13 +489,13 @@ enum Result:
     Err
 
 let r = Result::Ok(42)
-let mut val = 0
+let mut value = 0
 match r:
     Result::Ok(v) =>
-        val = v
+        value = v
     Result::Err =>
-        val = -1
-main = val
+        value = -1
+main = value
 "#,
         42,
     );

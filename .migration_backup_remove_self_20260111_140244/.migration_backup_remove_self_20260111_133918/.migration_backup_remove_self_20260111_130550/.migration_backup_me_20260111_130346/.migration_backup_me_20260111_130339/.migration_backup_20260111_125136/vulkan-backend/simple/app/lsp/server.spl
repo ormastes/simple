@@ -1,0 +1,552 @@
+# LSP Server Implementation
+# Handles LSP requests and maintains server state
+
+import sys
+import io.fs as fs
+import core.collections as collections
+import lsp.protocol as protocol
+import lsp.transport as transport
+import parser.treesitter.{TreeSitterParser, Tree, Query, QueryCursor}
+import parser.treesitter.optimize as optimize
+import lsp.handlers.semantic_tokens as semantic_tokens
+import lsp.handlers.diagnostics as diagnostics
+import lsp.handlers.hover as hover
+import lsp.handlers.definition as definition
+import lsp.handlers.references as references
+import lsp.handlers.completion as completion
+
+# Server state
+enum ServerState:
+    Uninitialized
+    Initialized
+    ShuttingDown
+
+# Document cache entry
+class DocumentInfo:
+    uri: String
+    version: Int
+    text: String
+    tree: Option<Tree>          # Parsed syntax tree
+    parser: TreeSitterParser    # Parser instance
+
+    fn new(uri: String, version: Int, text: String) -> DocumentInfo:
+        # Create parser
+        let parser = TreeSitterParser.new("simple").unwrap_or_else(|| {
+            transport.log_error("Failed to create parser")
+            TreeSitterParser.new("simple").unwrap()  # Should not fail
+        })
+
+        # Parse document
+        let tree = parser.parse(text).ok()
+
+        DocumentInfo(
+            uri: uri,
+            version: version,
+            text: text,
+            tree: tree,
+            parser: parser
+        )
+
+    # Update document with new text
+    fn update(mut self, new_text: String, new_version: Int):
+        # Compute edits for incremental parsing
+        let edits = parser.treesitter.edits.compute_edits(self.text, new_text)
+
+        # Incremental parse
+        self.tree = match self.tree:
+            case Some(old_tree):
+                self.parser.parse_incremental(new_text, old_tree, edits).ok()
+            case None:
+                self.parser.parse(new_text).ok()
+
+        self.text = new_text
+        self.version = new_version
+
+# LSP Server
+class LspServer:
+    state: ServerState
+    documents: Dict<String, DocumentInfo>  # uri -> DocumentInfo
+    query_optimizer: optimize.QueryOptimizer  # Query compilation cache
+    query_cache: optimize.QueryCache  # Query result cache
+    debouncer: optimize.Debouncer  # didChange debouncing
+    metrics: optimize.PerformanceMetrics  # Performance tracking
+
+    fn new() -> LspServer:
+        LspServer(
+            state: ServerState.Uninitialized,
+            documents: {},
+            query_optimizer: optimize.QueryOptimizer.new(),
+            query_cache: optimize.QueryCache.new(100),  # Cache 100 query results
+            debouncer: optimize.Debouncer.new(300),  # 300ms debounce delay
+            metrics: optimize.PerformanceMetrics.new()
+        )
+
+    # Handle initialize request
+    fn handle_initialize(self, id: Int, params: Option<Dict>) -> Result<Nil, String>:
+        transport.log_debug("Handling initialize request")
+
+        # Update state
+        self.state = ServerState.Initialized
+
+        # Build initialize result
+        let result = protocol.InitializeResult.new()
+        let response_data = result.to_json()
+
+        # Send response
+        transport.write_response(id, response_data)?
+
+        Ok(nil)
+
+    # Handle initialized notification
+    fn handle_initialized(self) -> Result<Nil, String>:
+        transport.log_debug("Received initialized notification")
+        Ok(nil)
+
+    # Handle shutdown request
+    fn handle_shutdown(self, id: Int) -> Result<Nil, String>:
+        transport.log_debug("Handling shutdown request")
+
+        # Update state
+        self.state = ServerState.ShuttingDown
+
+        # Send null result
+        transport.write_response(id, {})?
+
+        Ok(nil)
+
+    # Handle exit notification
+    fn handle_exit(self) -> Result<Nil, String>:
+        transport.log_debug("Handling exit notification")
+
+        # Exit with appropriate code
+        match self.state:
+            case ShuttingDown:
+                sys.exit(0)
+            case _:
+                sys.exit(1)
+
+        Ok(nil)
+
+    # Handle textDocument/didOpen notification
+    fn handle_did_open(self, params: Option<Dict>) -> Result<Nil, String>:
+        match params:
+            case None:
+                return Err("Missing params for didOpen")
+            case Some(p):
+                # Extract text document
+                let text_document_data = p.get("textDocument")?
+                let doc = protocol.TextDocumentItem.from_json(text_document_data)?
+
+                # Cache document
+                let doc_info = DocumentInfo.new(doc.uri, doc.version, doc.text)
+                self.documents[doc.uri] = doc_info
+
+                transport.log_debug(f"Opened document: {doc.uri}")
+
+                # Run diagnostics
+                self.publish_diagnostics(doc.uri)?
+
+                Ok(nil)
+
+    # Handle textDocument/didChange notification
+    fn handle_did_change(self, params: Option<Dict>) -> Result<Nil, String>:
+        match params:
+            case None:
+                return Err("Missing params for didChange")
+            case Some(p):
+                # Extract versioned document
+                let text_document_data = p.get("textDocument")?
+                let versioned_doc = protocol.VersionedTextDocumentIdentifier.from_json(text_document_data)?
+
+                # Extract content changes
+                let content_changes = p.get("contentChanges")?
+                if content_changes.is_empty():
+                    return Err("No content changes")
+
+                # Get first change (we use full sync)
+                let change_data = content_changes[0]
+                let change = protocol.TextDocumentContentChangeEvent.from_json(change_data)?
+
+                # Check if we should debounce this update
+                let current_time = sys.time.now_ms()
+                let should_parse = self.debouncer.should_trigger(current_time)
+
+                if should_parse:
+                    # Time the parsing operation
+                    let start_time = sys.time.now_ms()
+
+                    # Update cached document
+                    let doc_info = DocumentInfo.new(
+                        versioned_doc.uri,
+                        versioned_doc.version,
+                        change.text
+                    )
+                    self.documents[versioned_doc.uri] = doc_info
+
+                    let end_time = sys.time.now_ms()
+                    let parse_time = end_time - start_time
+
+                    # Record metrics
+                    self.metrics.record_parse(parse_time)
+
+                    transport.log_debug(f"Changed document: {versioned_doc.uri} (parse: {parse_time:.2f}ms)")
+
+                    # Clear query cache on document change
+                    self.query_cache.clear()
+
+                    # Run diagnostics
+                    self.publish_diagnostics(versioned_doc.uri)?
+                else:
+                    # Mark as pending - will be processed later
+                    transport.log_debug(f"Debouncing change for: {versioned_doc.uri}")
+
+                Ok(nil)
+
+    # Handle textDocument/didClose notification
+    fn handle_did_close(self, params: Option<Dict>) -> Result<Nil, String>:
+        match params:
+            case None:
+                return Err("Missing params for didClose")
+            case Some(p):
+                let text_document_data = p.get("textDocument")?
+                let doc = protocol.TextDocumentIdentifier.from_json(text_document_data)?
+
+                # Remove from cache
+                self.documents.remove(doc.uri)
+
+                transport.log_debug(f"Closed document: {doc.uri}")
+
+                Ok(nil)
+
+    # Publish diagnostics for a document
+    fn publish_diagnostics(self, uri: String) -> Result<Nil, String>:
+        # Get document from cache
+        match self.documents.get(uri):
+            case None:
+                # Document not in cache - send empty diagnostics
+                let params = {
+                    "uri": uri,
+                    "diagnostics": []
+                }
+                transport.write_notification("textDocument/publishDiagnostics", params)?
+                Ok(nil)
+            case Some(doc_info):
+                # Use tree-sitter diagnostics if tree is available
+                match doc_info.tree:
+                    case Some(tree):
+                        diagnostics.handle_diagnostics(uri, tree)
+                    case None:
+                        # No tree - send empty diagnostics
+                        let params = {
+                            "uri": uri,
+                            "diagnostics": []
+                        }
+                        transport.write_notification("textDocument/publishDiagnostics", params)?
+                        Ok(nil)
+
+    # Handle textDocument/completion request
+    fn handle_completion(self, id: Int, params: Option<Dict>) -> Result<Nil, String>:
+        match params:
+            case None:
+                return Err("Missing params for completion")
+            case Some(p):
+                # Extract text document and position
+                let text_document_data = p.get("textDocument")?
+                let doc_id = protocol.TextDocumentIdentifier.from_json(text_document_data)?
+
+                let position_data = p.get("position")?
+                let position = protocol.Position.from_json(position_data)?
+
+                # Get document from cache
+                match self.documents.get(doc_id.uri):
+                    case None:
+                        transport.write_error(
+                            id,
+                            protocol.ERROR_INVALID_PARAMS,
+                            f"Document not found: {doc_id.uri}"
+                        )?
+                        Ok(nil)
+                    case Some(doc_info):
+                        # Use completion handler
+                        match doc_info.tree:
+                            case None:
+                                # No tree - return empty completions
+                                transport.write_response(id, [])?
+                                Ok(nil)
+                            case Some(tree):
+                                let completion_result = completion.handle_completion(
+                                    tree,
+                                    doc_info.text,
+                                    position.line,
+                                    position.character
+                                )?
+
+                                match completion_result:
+                                    case None:
+                                        transport.write_response(id, [])?
+                                    case Some(items):
+                                        transport.write_response(id, items)?
+
+                                Ok(nil)
+
+    # Handle textDocument/references request
+    fn handle_references(self, id: Int, params: Option<Dict>) -> Result<Nil, String>:
+        match params:
+            case None:
+                return Err("Missing params for references")
+            case Some(p):
+                # Extract text document and position
+                let text_document_data = p.get("textDocument")?
+                let doc_id = protocol.TextDocumentIdentifier.from_json(text_document_data)?
+
+                let position_data = p.get("position")?
+                let position = protocol.Position.from_json(position_data)?
+
+                # Extract context (includeDeclaration)
+                let include_declaration = match p.get_optional("context"):
+                    case Some(context):
+                        match context.get_optional("includeDeclaration"):
+                            case Some(val):
+                                val  # Assume boolean
+                            case None:
+                                true  # Default to including declaration
+                    case None:
+                        true
+
+                # Get document from cache
+                match self.documents.get(doc_id.uri):
+                    case None:
+                        transport.write_error(
+                            id,
+                            protocol.ERROR_INVALID_PARAMS,
+                            f"Document not found: {doc_id.uri}"
+                        )?
+                        Ok(nil)
+                    case Some(doc_info):
+                        # Use references handler
+                        match doc_info.tree:
+                            case None:
+                                # No tree - return null
+                                transport.write_response(id, nil)?
+                                Ok(nil)
+                            case Some(tree):
+                                let refs_result = references.handle_references(
+                                    tree,
+                                    doc_info.text,
+                                    position.line,
+                                    position.character,
+                                    include_declaration
+                                )?
+
+                                match refs_result:
+                                    case None:
+                                        transport.write_response(id, nil)?
+                                    case Some(locations):
+                                        # Add URI to each location
+                                        for location in locations:
+                                            location["uri"] = doc_id.uri
+
+                                        transport.write_response(id, locations)?
+
+                                Ok(nil)
+
+    # Handle textDocument/definition request
+    fn handle_definition(self, id: Int, params: Option<Dict>) -> Result<Nil, String>:
+        match params:
+            case None:
+                return Err("Missing params for definition")
+            case Some(p):
+                # Extract text document and position
+                let text_document_data = p.get("textDocument")?
+                let doc_id = protocol.TextDocumentIdentifier.from_json(text_document_data)?
+
+                let position_data = p.get("position")?
+                let position = protocol.Position.from_json(position_data)?
+
+                # Get document from cache
+                match self.documents.get(doc_id.uri):
+                    case None:
+                        transport.write_error(
+                            id,
+                            protocol.ERROR_INVALID_PARAMS,
+                            f"Document not found: {doc_id.uri}"
+                        )?
+                        Ok(nil)
+                    case Some(doc_info):
+                        # Use definition handler
+                        match doc_info.tree:
+                            case None:
+                                # No tree - return null
+                                transport.write_response(id, nil)?
+                                Ok(nil)
+                            case Some(tree):
+                                let def_result = definition.handle_definition(
+                                    tree,
+                                    doc_info.text,
+                                    position.line,
+                                    position.character
+                                )?
+
+                                match def_result:
+                                    case None:
+                                        transport.write_response(id, nil)?
+                                    case Some(location):
+                                        # Add URI to location
+                                        location["uri"] = doc_id.uri
+                                        transport.write_response(id, location)?
+
+                                Ok(nil)
+
+    # Handle textDocument/hover request
+    fn handle_hover(self, id: Int, params: Option<Dict>) -> Result<Nil, String>:
+        match params:
+            case None:
+                return Err("Missing params for hover")
+            case Some(p):
+                # Extract text document and position
+                let text_document_data = p.get("textDocument")?
+                let doc_id = protocol.TextDocumentIdentifier.from_json(text_document_data)?
+
+                let position_data = p.get("position")?
+                let position = protocol.Position.from_json(position_data)?
+
+                # Get document from cache
+                match self.documents.get(doc_id.uri):
+                    case None:
+                        transport.write_error(
+                            id,
+                            protocol.ERROR_INVALID_PARAMS,
+                            f"Document not found: {doc_id.uri}"
+                        )?
+                        Ok(nil)
+                    case Some(doc_info):
+                        # Use hover handler
+                        match doc_info.tree:
+                            case None:
+                                # No tree - return null hover
+                                transport.write_response(id, nil)?
+                                Ok(nil)
+                            case Some(tree):
+                                let hover_result = hover.handle_hover(
+                                    tree,
+                                    doc_info.text,
+                                    position.line,
+                                    position.character
+                                )?
+
+                                match hover_result:
+                                    case None:
+                                        transport.write_response(id, nil)?
+                                    case Some(hover_data):
+                                        transport.write_response(id, hover_data)?
+
+                                Ok(nil)
+
+    # Handle textDocument/semanticTokens/full request
+    fn handle_semantic_tokens_full(self, id: Int, params: Option<Dict>) -> Result<Nil, String>:
+        match params:
+            case None:
+                return Err("Missing params for semanticTokens/full")
+            case Some(p):
+                # Extract text document identifier
+                let text_document_data = p.get("textDocument")?
+                let doc_id = protocol.TextDocumentIdentifier.from_json(text_document_data)?
+
+                # Get document from cache
+                match self.documents.get(doc_id.uri):
+                    case None:
+                        transport.write_error(
+                            id,
+                            protocol.ERROR_INVALID_PARAMS,
+                            f"Document not found: {doc_id.uri}"
+                        )?
+                        Ok(nil)
+                    case Some(doc_info):
+                        # Use semantic tokens handler
+                        match doc_info.tree:
+                            case None:
+                                # No tree - return empty tokens
+                                let result = { "data": [] }
+                                transport.write_response(id, result)?
+                                Ok(nil)
+                            case Some(tree):
+                                let result = semantic_tokens.handle_semantic_tokens_full(tree, doc_info.text)?
+                                transport.write_response(id, result)?
+                                Ok(nil)
+
+    # Main request dispatcher
+    fn handle_request(self, request: protocol.JsonRpcRequest) -> Result<Nil, String>:
+        match request.method:
+            case "initialize":
+                self.handle_initialize(request.id, request.params)
+            case "shutdown":
+                self.handle_shutdown(request.id)
+            case "textDocument/semanticTokens/full":
+                self.handle_semantic_tokens_full(request.id, request.params)
+            case "textDocument/hover":
+                self.handle_hover(request.id, request.params)
+            case "textDocument/definition":
+                self.handle_definition(request.id, request.params)
+            case "textDocument/references":
+                self.handle_references(request.id, request.params)
+            case "textDocument/completion":
+                self.handle_completion(request.id, request.params)
+            case _:
+                # Unknown method
+                transport.write_error(
+                    request.id,
+                    protocol.ERROR_METHOD_NOT_FOUND,
+                    f"Method not found: {request.method}"
+                )?
+                Ok(nil)
+
+    # Main notification dispatcher
+    fn handle_notification(self, notification: protocol.JsonRpcNotification) -> Result<Nil, String>:
+        match notification.method:
+            case "initialized":
+                self.handle_initialized()
+            case "exit":
+                self.handle_exit()
+            case "textDocument/didOpen":
+                self.handle_did_open(notification.params)
+            case "textDocument/didChange":
+                self.handle_did_change(notification.params)
+            case "textDocument/didClose":
+                self.handle_did_close(notification.params)
+            case _:
+                # Unknown notification - ignore (LSP spec allows this)
+                transport.log_debug(f"Ignoring unknown notification: {notification.method}")
+                Ok(nil)
+
+    # Main server loop
+    fn run(self) -> Result<Nil, String>:
+        transport.log_debug("LSP server starting")
+
+        loop:
+            # Read next message
+            let message = match transport.read_message():
+                case Ok(msg):
+                    msg
+                case Err(e):
+                    # EOF or error - exit gracefully
+                    transport.log_debug(f"Read error: {e}")
+                    return Ok(nil)
+
+            # Determine message type
+            let msg_type = transport.parse_message_type(message)?
+
+            # Dispatch based on type
+            match msg_type:
+                case "request":
+                    let request = protocol.JsonRpcRequest.from_json(message)?
+                    self.handle_request(request)?
+                case "notification":
+                    let notification = protocol.JsonRpcNotification.from_json(message)?
+                    self.handle_notification(notification)?
+                case "response":
+                    # We don't expect responses (we're the server)
+                    transport.log_debug("Ignoring unexpected response message")
+                case _:
+                    transport.log_error(f"Unknown message type: {msg_type}")
+
+        Ok(nil)

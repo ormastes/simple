@@ -191,11 +191,11 @@ fn multiline_named_arg_with_nested_call() {
 fn make_val(x):
     return x
 
-fn process(val, extra):
-    return val + extra
+fn process(value, extra):
+    return value + extra
 
 main = process(
-    val: make_val(10),
+    value: make_val(10),
     extra: 5
 )
 "#;

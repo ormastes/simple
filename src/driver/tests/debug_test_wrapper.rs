@@ -24,6 +24,7 @@ fn test_json_two_tests_without_cache_clear() {
 
 #[test]
 fn test_json_spec() {
+    clear_module_cache(); // Clear cache before running test
     let path =
         Path::new("/home/ormastes/dev/pub/simple/simple/std_lib/test/unit/core/json_spec.spl");
     let result = run_test_file(path);

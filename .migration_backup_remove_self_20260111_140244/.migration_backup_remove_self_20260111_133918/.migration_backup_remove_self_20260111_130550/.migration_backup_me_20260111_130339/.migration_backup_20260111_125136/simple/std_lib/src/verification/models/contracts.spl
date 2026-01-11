@@ -1,0 +1,624 @@
+# Contract Models
+# Formal model for function contracts matching Lean 4 definitions.
+#
+# This implements the contract system for Simple:
+# - `requires:` - Preconditions
+# - `ensures:` - Postconditions  
+# - `invariant:` - Class invariants
+# - `decreases:` - Termination arguments
+# - `modifies:` - Frame conditions
+
+# Contract expression kinds
+# Matches Lean: inductive ContractExpr
+enum ContractExprKind:
+    # Boolean literals
+    True_
+    False_
+    # Variables
+    Var           # Variable reference
+    OldValue      # old(expr) - value at function entry
+    Result        # result - return value in ensures
+    # Logical operators
+    And           # expr && expr
+    Or            # expr || expr
+    Not           # !expr
+    Implies       # expr ==> expr
+    Iff           # expr <==> expr
+    # Quantifiers
+    Forall        # forall x: T. expr
+    Exists        # exists x: T. expr
+    # Comparisons
+    Eq            # expr == expr
+    Ne            # expr != expr
+    Lt            # expr < expr
+    Le            # expr <= expr
+    Gt            # expr > expr
+    Ge            # expr >= expr
+    # Arithmetic
+    Add           # expr + expr
+    Sub           # expr - expr
+    Mul           # expr * expr
+    Div           # expr / expr
+    Mod           # expr % expr
+    Neg           # -expr
+    # Collection operations
+    Len           # len(collection)
+    Index         # collection[index]
+    Contains      # element in collection
+    # Function call
+    Call          # func(args...)
+
+impl ContractExprKind:
+    # Type checking methods for literals
+    fn is_true(self) -> Bool:
+        """Check if this is True_ literal.
+        Returns: true for True_
+        Example: ContractExprKind.True_.is_true()  # → true
+        """
+        match self:
+            case True_: true
+            case _: false
+
+    fn is_false(self) -> Bool:
+        """Check if this is False_ literal.
+        Returns: true for False_
+        Example: ContractExprKind.False_.is_false()  # → true
+        """
+        match self:
+            case False_: true
+            case _: false
+
+    # Type checking methods for variables
+    fn is_var(self) -> Bool:
+        """Check if this is Var reference.
+        Returns: true for Var
+        Example: ContractExprKind.Var.is_var()  # → true
+        """
+        match self:
+            case Var: true
+            case _: false
+
+    fn is_old_value(self) -> Bool:
+        """Check if this is OldValue reference.
+        Returns: true for OldValue
+        Example: ContractExprKind.OldValue.is_old_value()  # → true
+        """
+        match self:
+            case OldValue: true
+            case _: false
+
+    fn is_result(self) -> Bool:
+        """Check if this is Result reference.
+        Returns: true for Result
+        Example: ContractExprKind.Result.is_result()  # → true
+        """
+        match self:
+            case Result: true
+            case _: false
+
+    # Property query methods
+    fn is_literal(self) -> Bool:
+        """Check if this is a literal value.
+        Returns: true for True_ or False_
+        Example: ContractExprKind.True_.is_literal()  # → true
+        """
+        match self:
+            case True_: true
+            case False_: true
+            case _: false
+
+    fn is_logical_operator(self) -> Bool:
+        """Check if this is a logical operator.
+        Returns: true for And, Or, Not, Implies, or Iff
+        Example: ContractExprKind.And.is_logical_operator()  # → true
+        """
+        match self:
+            case And: true
+            case Or: true
+            case Not: true
+            case Implies: true
+            case Iff: true
+            case _: false
+
+    fn is_quantifier(self) -> Bool:
+        """Check if this is a quantifier.
+        Returns: true for Forall or Exists
+        Example: ContractExprKind.Forall.is_quantifier()  # → true
+        """
+        match self:
+            case Forall: true
+            case Exists: true
+            case _: false
+
+    fn is_comparison(self) -> Bool:
+        """Check if this is a comparison operator.
+        Returns: true for Eq, Ne, Lt, Le, Gt, or Ge
+        Example: ContractExprKind.Lt.is_comparison()  # → true
+        """
+        match self:
+            case Eq: true
+            case Ne: true
+            case Lt: true
+            case Le: true
+            case Gt: true
+            case Ge: true
+            case _: false
+
+    fn is_arithmetic(self) -> Bool:
+        """Check if this is an arithmetic operator.
+        Returns: true for Add, Sub, Mul, Div, Mod, or Neg
+        Example: ContractExprKind.Add.is_arithmetic()  # → true
+        """
+        match self:
+            case Add: true
+            case Sub: true
+            case Mul: true
+            case Div: true
+            case Mod: true
+            case Neg: true
+            case _: false
+
+    fn is_collection_op(self) -> Bool:
+        """Check if this is a collection operation.
+        Returns: true for Len, Index, or Contains
+        Example: ContractExprKind.Len.is_collection_op()  # → true
+        """
+        match self:
+            case Len: true
+            case Index: true
+            case Contains: true
+            case _: false
+
+    fn is_binary_op(self) -> Bool:
+        """Check if this is a binary operator (requires 2 children).
+        Returns: true for binary operators
+        Example: ContractExprKind.Add.is_binary_op()  # → true
+        """
+        match self:
+            case And: true
+            case Or: true
+            case Implies: true
+            case Iff: true
+            case Eq: true
+            case Ne: true
+            case Lt: true
+            case Le: true
+            case Gt: true
+            case Ge: true
+            case Add: true
+            case Sub: true
+            case Mul: true
+            case Div: true
+            case Mod: true
+            case Index: true
+            case Contains: true
+            case _: false
+
+    fn is_unary_op(self) -> Bool:
+        """Check if this is a unary operator (requires 1 child).
+        Returns: true for unary operators
+        Example: ContractExprKind.Not.is_unary_op()  # → true
+        """
+        match self:
+            case Not: true
+            case Neg: true
+            case OldValue: true
+            case Len: true
+            case _: false
+
+    fn is_variable_reference(self) -> Bool:
+        """Check if this references a variable or value.
+        Returns: true for Var, OldValue, or Result
+        Example: ContractExprKind.Var.is_variable_reference()  # → true
+        """
+        match self:
+            case Var: true
+            case OldValue: true
+            case Result: true
+            case _: false
+
+    # Display methods
+    fn to_string(self) -> String:
+        """Convert ContractExprKind to string representation.
+        Returns: symbolic representation of the expression kind
+        Example: ContractExprKind.Add.to_string()  # → "+"
+        """
+        match self:
+            case True_: "true"
+            case False_: "false"
+            case Var: "var"
+            case OldValue: "old"
+            case Result: "result"
+            case And: "&&"
+            case Or: "||"
+            case Not: "!"
+            case Implies: "==>"
+            case Iff: "<==>"
+            case Forall: "forall"
+            case Exists: "exists"
+            case Eq: "=="
+            case Ne: "!="
+            case Lt: "<"
+            case Le: "<="
+            case Gt: ">"
+            case Ge: ">="
+            case Add: "+"
+            case Sub: "-"
+            case Mul: "*"
+            case Div: "/"
+            case Mod: "%"
+            case Neg: "-"
+            case Len: "len"
+            case Index: "[]"
+            case Contains: "in"
+            case Call: "call"
+
+    fn description(self) -> String:
+        """Get human-readable description of the expression kind.
+        Returns: descriptive explanation
+        Example: ContractExprKind.Implies.description()  # → "Logical implication"
+        """
+        match self:
+            case True_: "Boolean true literal"
+            case False_: "Boolean false literal"
+            case Var: "Variable reference"
+            case OldValue: "Value at function entry"
+            case Result: "Return value in postcondition"
+            case And: "Logical conjunction"
+            case Or: "Logical disjunction"
+            case Not: "Logical negation"
+            case Implies: "Logical implication"
+            case Iff: "Logical biconditional"
+            case Forall: "Universal quantifier"
+            case Exists: "Existential quantifier"
+            case Eq: "Equality comparison"
+            case Ne: "Inequality comparison"
+            case Lt: "Less-than comparison"
+            case Le: "Less-or-equal comparison"
+            case Gt: "Greater-than comparison"
+            case Ge: "Greater-or-equal comparison"
+            case Add: "Arithmetic addition"
+            case Sub: "Arithmetic subtraction"
+            case Mul: "Arithmetic multiplication"
+            case Div: "Arithmetic division"
+            case Mod: "Arithmetic modulo"
+            case Neg: "Arithmetic negation"
+            case Len: "Collection length"
+            case Index: "Collection indexing"
+            case Contains: "Collection membership test"
+            case Call: "Function call"
+
+    fn summary(self) -> String:
+        """Get comprehensive summary of the expression kind.
+        Returns: summary with name, description, and category
+        Example: ContractExprKind.Forall.summary()
+                # → "ContractExprKind: forall (Universal quantifier, quantifier, unary op)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let mut cats = []
+
+        if self.is_literal():
+            cats.push("literal")
+        if self.is_variable_reference():
+            cats.push("variable reference")
+        if self.is_logical_operator():
+            cats.push("logical operator")
+        if self.is_quantifier():
+            cats.push("quantifier")
+        if self.is_comparison():
+            cats.push("comparison")
+        if self.is_arithmetic():
+            cats.push("arithmetic")
+        if self.is_collection_op():
+            cats.push("collection op")
+        if self.is_binary_op():
+            cats.push("binary op")
+        if self.is_unary_op():
+            cats.push("unary op")
+
+        let cats_str = if cats.len() > 0:
+            ", " + cats.join(", ")
+        else:
+            ""
+
+        "ContractExprKind: {name} ({desc}{cats_str})"
+
+# Contract expression
+class ContractExpr:
+    kind: ContractExprKind
+    children: List<ContractExpr>
+    name: Option<String>       # For Var, Call
+    type_name: Option<String>  # For Forall, Exists
+    int_value: Option<Int>     # For integer literals
+    
+    fn new(kind: ContractExprKind) -> ContractExpr:
+        ContractExpr(
+            kind: kind,
+            children: [],
+            name: None,
+            type_name: None,
+            int_value: None
+        )
+
+    me with_children(self, children: List<ContractExpr>) -> ContractExpr:
+        self.children = children
+        self
+
+    me with_name(self, name: String) -> ContractExpr:
+        self.name = Some(name)
+        self
+
+    me with_type(self, type_name: String) -> ContractExpr:
+        self.type_name = Some(type_name)
+        self
+
+    # Factory methods for common expressions
+    fn true_() -> ContractExpr:
+        ContractExpr.new(ContractExprKind.True_)
+
+    fn false_() -> ContractExpr:
+        ContractExpr.new(ContractExprKind.False_)
+
+    fn var(name: String) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.Var).with_name(name)
+
+    fn old_expr(expr: ContractExpr) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.OldValue).with_children([expr])
+
+    fn result() -> ContractExpr:
+        ContractExpr.new(ContractExprKind.Result)
+
+    fn and_(left: ContractExpr, right: ContractExpr) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.And).with_children([left, right])
+
+    fn or_(left: ContractExpr, right: ContractExpr) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.Or).with_children([left, right])
+
+    fn not_(expr: ContractExpr) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.Not).with_children([expr])
+
+    fn implies(left: ContractExpr, right: ContractExpr) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.Implies).with_children([left, right])
+
+    fn forall_(var_name: String, type_name: String, body: ContractExpr) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.Forall)
+            .with_name(var_name)
+            .with_type(type_name)
+            .with_children([body])
+
+    fn exists_(var_name: String, type_name: String, body: ContractExpr) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.Exists)
+            .with_name(var_name)
+            .with_type(type_name)
+            .with_children([body])
+
+    fn eq(left: ContractExpr, right: ContractExpr) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.Eq).with_children([left, right])
+
+    fn lt(left: ContractExpr, right: ContractExpr) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.Lt).with_children([left, right])
+
+    fn le(left: ContractExpr, right: ContractExpr) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.Le).with_children([left, right])
+
+    fn gt(left: ContractExpr, right: ContractExpr) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.Gt).with_children([left, right])
+
+    fn ge(left: ContractExpr, right: ContractExpr) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.Ge).with_children([left, right])
+
+    fn call(func_name: String, args: List<ContractExpr>) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.Call)
+            .with_name(func_name)
+            .with_children(args)
+
+# Contract clause - a single requires/ensures/invariant
+class ContractClause:
+    expr: ContractExpr
+    label: Option<String>   # Optional label for the clause
+    message: Option<String> # Optional message for violations
+
+    fn new(expr: ContractExpr) -> ContractClause:
+        ContractClause(expr: expr, label: None, message: None)
+
+    me with_label(self, label: String) -> ContractClause:
+        self.label = Some(label)
+        self
+
+    me with_message(self, message: String) -> ContractClause:
+        self.message = Some(message)
+        self
+
+# Termination clause for recursive/loop termination proofs
+# Note: Renamed from DecreasesClause to avoid conflict with 'decreases' keyword
+class TerminationClause:
+    exprs: List<ContractExpr>  # Tuple of decreasing expressions
+    well_founded: Bool         # Uses well-founded relation
+
+    fn new(exprs: List<ContractExpr>) -> TerminationClause:
+        TerminationClause(exprs: exprs, well_founded: true)
+
+    fn single(expr: ContractExpr) -> TerminationClause:
+        TerminationClause.new([expr])
+
+# Modifies clause for frame conditions
+class ModifiesClause:
+    locations: List<String>  # Memory locations that may be modified
+    
+    fn new(locations: List<String>) -> ModifiesClause:
+        ModifiesClause(locations: locations)
+
+    fn nothing() -> ModifiesClause:
+        ModifiesClause(locations: [])
+
+# Complete function contract
+# Matches Lean: structure FunctionContract
+class FunctionContract:
+    preconditions: List<ContractClause>     # Preconditions (in:)
+    postconditions: List<ContractClause>    # Postconditions (out:)
+    postconditions_err: List<ContractClause>  # Error postconditions (out_err:)
+    invariants: List<ContractClause>   # Loop/class invariants
+    termination: Option<TerminationClause> # Termination argument
+    modifies: Option<ModifiesClause>   # Frame condition
+
+    fn new() -> FunctionContract:
+        FunctionContract(
+            preconditions: [],
+            postconditions: [],
+            postconditions_err: [],
+            invariants: [],
+            termination: None,
+            modifies: None
+        )
+
+    me add_precondition(self, clause: ContractClause) -> FunctionContract:
+        self.preconditions.push(clause)
+        self
+
+    me add_postcondition(self, clause: ContractClause) -> FunctionContract:
+        self.postconditions.push(clause)
+        self
+
+    me add_postcondition_err(self, clause: ContractClause) -> FunctionContract:
+        self.postconditions_err.push(clause)
+        self
+
+    me add_invariant(self, clause: ContractClause) -> FunctionContract:
+        self.invariants.push(clause)
+        self
+
+    me with_termination(self, termination: TerminationClause) -> FunctionContract:
+        self.termination = Some(termination)
+        self
+
+    me with_modifies(self, modifies: ModifiesClause) -> FunctionContract:
+        self.modifies = Some(modifies)
+        self
+
+    fn has_preconditions(self) -> Bool:
+        self.preconditions.len() > 0
+
+    fn has_postconditions(self) -> Bool:
+        self.postconditions.len() > 0 or self.postconditions_err.len() > 0
+
+    fn has_invariants(self) -> Bool:
+        self.invariants.len() > 0
+
+    fn is_total(self) -> Bool:
+        self.termination.is_some()
+
+# Class invariant
+class ClassInvariant:
+    class_name: String
+    inv_expr: ContractExpr
+    is_public: Bool  # Whether invariant is visible outside class
+
+    fn new(class_name: String, inv_expr: ContractExpr) -> ClassInvariant:
+        ClassInvariant(
+            class_name: class_name,
+            inv_expr: inv_expr,
+            is_public: false
+        )
+
+    me public(self) -> ClassInvariant:
+        self.is_public = true
+        self
+
+# Contract checking context
+class ContractContext:
+    captured_values: Dict<String, ContractExpr>  # Captured old values
+    result_available: Bool                   # Whether result is available
+    in_requires: Bool                        # Currently checking requires
+    in_ensures: Bool                         # Currently checking ensures
+
+    fn new() -> ContractContext:
+        ContractContext(
+            captured_values: {},
+            result_available: false,
+            in_requires: false,
+            in_ensures: false
+        )
+
+    me enter_requires(self):
+        self.in_requires = true
+        self.in_ensures = false
+
+    me enter_ensures(self):
+        self.in_requires = false
+        self.in_ensures = true
+        self.result_available = true
+
+    me capture_old(self, name: String, value: ContractExpr):
+        self.captured_values[name] = value
+
+    fn get_old(self, name: String) -> Option<ContractExpr>:
+        self.captured_values.get(name)
+
+# Check if an expression is pure (no side effects)
+fn is_pure_expr(expr: ContractExpr) -> Bool:
+    match expr.kind:
+        case ContractExprKind.True_: true
+        case ContractExprKind.False_: true
+        case ContractExprKind.Var: true
+        case ContractExprKind.OldValue:
+            expr.children.len() == 1 and is_pure_expr(expr.children[0])
+        case ContractExprKind.Result: true
+        case ContractExprKind.And:
+            expr.children.all(|c| is_pure_expr(c))
+        case ContractExprKind.Or:
+            expr.children.all(|c| is_pure_expr(c))
+        case ContractExprKind.Not:
+            expr.children.len() == 1 and is_pure_expr(expr.children[0])
+        case ContractExprKind.Implies:
+            expr.children.all(|c| is_pure_expr(c))
+        case ContractExprKind.Forall:
+            expr.children.len() == 1 and is_pure_expr(expr.children[0])
+        case ContractExprKind.Exists:
+            expr.children.len() == 1 and is_pure_expr(expr.children[0])
+        case ContractExprKind.Eq:
+            expr.children.all(|c| is_pure_expr(c))
+        case ContractExprKind.Lt:
+            expr.children.all(|c| is_pure_expr(c))
+        case ContractExprKind.Le:
+            expr.children.all(|c| is_pure_expr(c))
+        case ContractExprKind.Gt:
+            expr.children.all(|c| is_pure_expr(c))
+        case ContractExprKind.Ge:
+            expr.children.all(|c| is_pure_expr(c))
+        case ContractExprKind.Add:
+            expr.children.all(|c| is_pure_expr(c))
+        case ContractExprKind.Sub:
+            expr.children.all(|c| is_pure_expr(c))
+        case ContractExprKind.Mul:
+            expr.children.all(|c| is_pure_expr(c))
+        case ContractExprKind.Len:
+            expr.children.all(|c| is_pure_expr(c))
+        case ContractExprKind.Index:
+            expr.children.all(|c| is_pure_expr(c))
+        case ContractExprKind.Call:
+            # Conservative: calls might have side effects
+            false
+        case _:
+            expr.children.all(|c| is_pure_expr(c))
+
+# Validate a contract for well-formedness
+fn validate_contract(contract: FunctionContract) -> List<String>:
+    let mut errors: List<String> = []
+
+    # Check that all precondition expressions are pure
+    for clause in contract.preconditions:
+        if not is_pure_expr(clause.expr):
+            errors.push("Precondition must be a pure expression")
+
+    # Check that all postcondition expressions are pure
+    for clause in contract.postconditions:
+        if not is_pure_expr(clause.expr):
+            errors.push("Postcondition must be a pure expression")
+
+    # Check that invariants are pure
+    for clause in contract.invariants:
+        if not is_pure_expr(clause.expr):
+            errors.push("Invariant must be a pure expression")
+
+    errors

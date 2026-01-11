@@ -1,0 +1,361 @@
+# Scene Loader - Convert SDN scene to runtime Scene objects
+#
+# Converts SDN scene definitions into fully loaded Scene objects with:
+# - Loaded meshes (from .obj, .gltf files)
+# - Configured materials with textures
+# - Scene graph hierarchy
+# - Cameras and lights
+# - Skybox and environment maps
+#
+# Based on: doc/plans/floating-booping-coral.md (Phase 5)
+
+use core.*
+use graphics.math.*
+use graphics.scene.*
+use graphics.loaders.*
+
+# =============================================================================
+# Scene Loader - SDN → Scene conversion
+# =============================================================================
+
+pub struct SceneLoader:
+    base_path: String               # Directory for resolving relative paths
+    material_cache: Dict<String, Material>
+    mesh_cache: Dict<String, Mesh>
+    texture_cache: Dict<String, u64>  # Texture ID cache
+
+impl SceneLoader:
+    # Load scene from SDN file
+    pub fn load_from_file(path: String) -> Result<Scene, String>:
+        # Parse SDN scene
+        let sdn_scene = SdnSceneLoader::load_file(path)?
+
+        # Get base path for resolving relative references
+        let base_path = path_get_directory(path)
+
+        # Create loader
+        let mut loader = SceneLoader {
+            base_path: base_path,
+            material_cache: Dict::new(),
+            mesh_cache: Dict::new(),
+            texture_cache: Dict::new()
+        }
+
+        # Convert to scene
+        return loader.sdn_to_scene(sdn_scene)
+
+    # Load scene from SDN string with base path
+    pub fn load_from_string(contents: String, base_path: String) -> Result<Scene, String>:
+        # Parse SDN scene
+        let sdn_scene = SdnSceneLoader::parse(contents)?
+
+        # Create loader
+        let mut loader = SceneLoader {
+            base_path: base_path,
+            material_cache: Dict::new(),
+            mesh_cache: Dict::new(),
+            texture_cache: Dict::new()
+        }
+
+        # Convert to scene
+        return loader.sdn_to_scene(sdn_scene)
+
+# =============================================================================
+# SDN → Scene Conversion
+# =============================================================================
+
+impl SceneLoader:
+    me sdn_to_scene(self, sdn_scene: SdnScene) -> Result<Scene, String>:
+        # Create empty scene
+        let mut scene = Scene::new()
+        scene.set_name(sdn_scene.name)
+
+        # Load materials first (needed for meshes)
+        for sdn_material in sdn_scene.materials:
+            let material = self.load_material(sdn_material)?
+            self.material_cache.insert(sdn_material.name, material)
+
+        # Process cameras
+        for sdn_camera in sdn_scene.cameras:
+            let camera = self.create_camera(sdn_camera)?
+            scene.add_camera(camera)
+
+        # Process lights
+        for sdn_light in sdn_scene.lights:
+            let light = self.create_light(sdn_light)?
+            scene.add_light(light)
+
+        # Process nodes recursively
+        for sdn_node in sdn_scene.nodes:
+            let scene_node = self.create_scene_node(sdn_node, None)?
+            scene.add_node(scene_node)
+
+        # Setup skybox if specified
+        if sdn_scene.skybox.is_some():
+            let skybox = self.create_skybox(sdn_scene.skybox.unwrap())?
+            scene.set_skybox(skybox)
+
+        # Load environment map if specified
+        if sdn_scene.environment.is_some():
+            let env_path = self.resolve_path(sdn_scene.environment.unwrap())
+            let env_map = EnvironmentMap::from_hdr(env_path, IBLConfig::default())?
+            scene.set_environment(env_map)
+
+        return Ok(scene)
+
+# =============================================================================
+# Camera Creation
+# =============================================================================
+
+impl SceneLoader:
+    fn create_camera(self, sdn_camera: SdnCamera) -> Result<Camera, String>:
+        let mut camera = if sdn_camera.type_name == "perspective":
+            Camera::perspective(
+                sdn_camera.fov,
+                sdn_camera.aspect,
+                sdn_camera.near,
+                sdn_camera.far
+            )
+        else if sdn_camera.type_name == "orthographic":
+            Camera::orthographic(
+                sdn_camera.left,
+                sdn_camera.right,
+                sdn_camera.bottom,
+                sdn_camera.top,
+                sdn_camera.near,
+                sdn_camera.far
+            )
+        else:
+            return Err("Unknown camera type: " + sdn_camera.type_name)
+
+        # Set transform
+        camera.set_position(sdn_camera.position)
+        camera.look_at(sdn_camera.look_at, sdn_camera.up)
+        camera.set_name(sdn_camera.name)
+
+        return Ok(camera)
+
+# =============================================================================
+# Light Creation
+# =============================================================================
+
+impl SceneLoader:
+    fn create_light(self, sdn_light: SdnLight) -> Result<Light, String>:
+        let light = if sdn_light.type_name == "directional":
+            Light::directional(
+                sdn_light.direction,
+                sdn_light.color,
+                sdn_light.intensity
+            )
+        else if sdn_light.type_name == "point":
+            Light::point(
+                sdn_light.position,
+                sdn_light.color,
+                sdn_light.intensity,
+                sdn_light.range
+            )
+        else if sdn_light.type_name == "spot":
+            Light::spot(
+                sdn_light.position,
+                sdn_light.direction,
+                sdn_light.color,
+                sdn_light.intensity,
+                sdn_light.inner_angle,
+                sdn_light.outer_angle,
+                sdn_light.range
+            )
+        else:
+            return Err("Unknown light type: " + sdn_light.type_name)
+
+        light.set_name(sdn_light.name)
+        light.set_cast_shadows(sdn_light.cast_shadows)
+
+        return Ok(light)
+
+# =============================================================================
+# Scene Node Creation
+# =============================================================================
+
+impl SceneLoader:
+    me create_scene_node(self, sdn_node: SdnNode,
+        parent_transform: Option<Mat4>
+    ) -> Result<SceneNode, String>:
+        # Create node
+        let mut node = SceneNode::new(sdn_node.name)
+
+        # Set transform
+        let rotation_quat = Quat::from_euler_degrees(
+            sdn_node.rotation.x,
+            sdn_node.rotation.y,
+            sdn_node.rotation.z
+        )
+
+        node.set_translation(sdn_node.position)
+        node.set_rotation(rotation_quat)
+        node.set_scale(sdn_node.scale)
+
+        # Load mesh if specified
+        if sdn_node.mesh.is_some():
+            let mesh_path = self.resolve_path(sdn_node.mesh.unwrap())
+            let mesh = self.load_mesh(mesh_path)?
+
+            # Get material
+            let material = if sdn_node.material.is_some():
+                let mat_name = sdn_node.material.unwrap()
+                self.material_cache.get(mat_name)
+                    .ok_or("Material not found: " + mat_name)?
+            else:
+                Material::default()
+
+            # Attach mesh renderer component
+            node.add_component(Component::MeshRenderer(
+                mesh_handle: MeshHandle::new(mesh.id()),
+                material: material
+            ))
+
+        # Process children recursively
+        let local_transform = node.get_local_transform()
+        let world_transform = match parent_transform:
+            case Some(parent):
+                parent * local_transform
+            case None:
+                local_transform
+
+        for child_sdn in sdn_node.children:
+            let child_node = self.create_scene_node(child_sdn, Some(world_transform))?
+            node.add_child(child_node)
+
+        return Ok(node)
+
+# =============================================================================
+# Material Loading
+# =============================================================================
+
+impl SceneLoader:
+    me load_material(self, sdn_material: SdnMaterial) -> Result<Material, String>:
+        # Create PBR material
+        let mut material = Material::pbr()
+
+        # Set properties
+        material.set_base_color(sdn_material.base_color)
+        material.set_metallic(sdn_material.metallic)
+        material.set_roughness(sdn_material.roughness)
+        material.set_emissive(sdn_material.emissive)
+
+        # Load textures
+        if sdn_material.albedo_map.is_some():
+            let tex_id = self.load_texture(sdn_material.albedo_map.unwrap())?
+            material.set_albedo_texture(tex_id)
+
+        if sdn_material.metallic_roughness_map.is_some():
+            let tex_id = self.load_texture(sdn_material.metallic_roughness_map.unwrap())?
+            material.set_metallic_roughness_texture(tex_id)
+
+        if sdn_material.normal_map.is_some():
+            let tex_id = self.load_texture(sdn_material.normal_map.unwrap())?
+            material.set_normal_texture(tex_id)
+
+        if sdn_material.ao_map.is_some():
+            let tex_id = self.load_texture(sdn_material.ao_map.unwrap())?
+            material.set_ao_texture(tex_id)
+
+        if sdn_material.emissive_map.is_some():
+            let tex_id = self.load_texture(sdn_material.emissive_map.unwrap())?
+            material.set_emissive_texture(tex_id)
+
+        # Set flags
+        material.set_double_sided(sdn_material.double_sided)
+        material.set_alpha_mode(sdn_material.alpha_mode)
+        material.set_alpha_cutoff(sdn_material.alpha_cutoff)
+
+        material.set_name(sdn_material.name)
+
+        return Ok(material)
+
+    me load_texture(self, relative_path: String) -> Result<u64, String>:
+        # Check cache
+        if self.texture_cache.contains_key(relative_path):
+            return Ok(self.texture_cache.get(relative_path).unwrap())
+
+        # Load texture
+        let full_path = self.resolve_path(relative_path)
+        let texture_id = ImageLoader::load_texture(full_path)?
+
+        # Cache and return
+        self.texture_cache.insert(relative_path, texture_id)
+        return Ok(texture_id)
+
+# =============================================================================
+# Mesh Loading
+# =============================================================================
+
+impl SceneLoader:
+    me load_mesh(self, path: String) -> Result<Mesh, String>:
+        # Check cache
+        if self.mesh_cache.contains_key(path):
+            return Ok(self.mesh_cache.get(path).unwrap())
+
+        # Determine format and load
+        let mesh = if path.ends_with(".obj"):
+            ObjLoader::load_file(path)?
+        else if path.ends_with(".gltf") or path.ends_with(".glb"):
+            # glTF loader returns a scene, extract first mesh
+            let gltf_scene = GltfLoader::load_file(path)?
+            gltf_scene.get_first_mesh()
+                .ok_or("glTF file contains no meshes")?
+        else:
+            return Err("Unsupported mesh format: " + path)
+
+        # Cache and return
+        self.mesh_cache.insert(path, mesh)
+        return Ok(mesh)
+
+# =============================================================================
+# Skybox Creation
+# =============================================================================
+
+impl SceneLoader:
+    me create_skybox(self, sdn_skybox: SdnSkybox) -> Result<Skybox, String>:
+        let skybox = if sdn_skybox.type_name == "cubemap":
+            if sdn_skybox.cubemap_path.is_none():
+                return Err("Cubemap skybox missing 'cubemap' path")
+
+            let cubemap_path = self.resolve_path(sdn_skybox.cubemap_path.unwrap())
+            let cubemap_id = load_cubemap_texture(cubemap_path)?
+            Skybox::from_cubemap(cubemap_id)
+
+        else if sdn_skybox.type_name == "color":
+            Skybox::from_color(sdn_skybox.color)
+
+        else if sdn_skybox.type_name == "procedural":
+            Skybox::procedural_gradient(
+                sdn_skybox.horizon_color,
+                sdn_skybox.zenith_color,
+                sdn_skybox.ground_color
+            )
+
+        else:
+            return Err("Unknown skybox type: " + sdn_skybox.type_name)
+
+        return Ok(skybox)
+
+# =============================================================================
+# Path Resolution
+# =============================================================================
+
+impl SceneLoader:
+    fn resolve_path(self, relative_path: String) -> String:
+        # If absolute path, return as-is
+        if relative_path.starts_with("/") or relative_path.contains(":\\"):
+            return relative_path
+
+        # Join with base path
+        return path_join(self.base_path, relative_path)
+
+# =============================================================================
+# External FFI Functions
+# =============================================================================
+
+extern fn path_get_directory(path: String) -> String
+extern fn path_join(base: String, relative: String) -> String
+extern fn load_cubemap_texture(path: String) -> Result<u64, String>

@@ -4,10 +4,71 @@ use std::collections::HashMap;
 
 use super::*;
 use crate::ast::{BinOp, UnaryOp};
+use crate::error_recovery::{detect_common_mistake, ErrorHint, ErrorHintLevel};
 use crate::macro_registry::ConstValue;
 
 impl<'a> Parser<'a> {
     pub(crate) fn advance(&mut self) {
+        // Detect common mistakes before advancing
+        let next_token = if !self.pending_tokens.is_empty() {
+            Some(&self.pending_tokens[0])
+        } else {
+            None
+        };
+
+        if let Some(mistake) = detect_common_mistake(&self.current, &self.previous, next_token) {
+            // Determine error hint level based on mistake type
+            use crate::error_recovery::CommonMistake;
+            let level = match mistake {
+                // Errors for wrong keywords/syntax
+                CommonMistake::PythonDef
+                | CommonMistake::PythonNone
+                | CommonMistake::PythonTrue
+                | CommonMistake::PythonFalse
+                | CommonMistake::RustLetMut
+                | CommonMistake::JavaPublicClass
+                | CommonMistake::JavaVoid
+                | CommonMistake::JavaNew
+                | CommonMistake::JavaThis
+                | CommonMistake::TsFunction
+                | CommonMistake::TsConst
+                | CommonMistake::TsInterface
+                | CommonMistake::CppNamespace
+                | CommonMistake::CppTemplate
+                | CommonMistake::MissingColon => ErrorHintLevel::Error,
+
+                // Warnings for verbose but valid syntax
+                CommonMistake::VerboseReturnType
+                | CommonMistake::ExplicitSelf
+                | CommonMistake::WrongBrackets
+                | CommonMistake::CSemicolon
+                | CommonMistake::SemicolonAfterBlock => ErrorHintLevel::Warning,
+
+                // Info for style preferences
+                CommonMistake::TsLet
+                | CommonMistake::PythonSelf
+                | CommonMistake::RustFnMut => ErrorHintLevel::Info,
+
+                // Hints for advanced features
+                CommonMistake::RustLifetime
+                | CommonMistake::RustMacro
+                | CommonMistake::RustTurbofish
+                | CommonMistake::TsArrowFunction
+                | CommonMistake::CTypeFirst
+                | CommonMistake::PythonElif => ErrorHintLevel::Hint,
+            };
+
+            let hint = ErrorHint {
+                level,
+                message: format!("Common mistake detected: {}", mistake.suggestion()),
+                span: self.current.span.clone(),
+                suggestion: Some(mistake.suggestion()),
+                help: Some(mistake.message()),
+            };
+
+            self.error_hints.push(hint);
+        }
+
         self.previous = std::mem::replace(
             &mut self.current,
             self.pending_tokens

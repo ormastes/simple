@@ -1,0 +1,381 @@
+# Class Diagram Generator
+# Generates Mermaid class diagrams from call events
+#
+# Output format: Mermaid classDiagram syntax
+# Features:
+# - Extract classes from sequence participants
+# - Show methods called on each class
+# - Infer relationships (uses, calls)
+
+import core.{Option, List, Set, Dict, String}
+import recorder.{CallEvent, CallEventRecorder, CallType}
+import filter.{DiagramFilter}
+import config.{DiagramConfig}
+
+# Method info for a class
+struct MethodInfo:
+    name: String
+    call_count: u32
+    is_static: Bool
+
+    fn new(name: String) -> MethodInfo:
+        return MethodInfo {
+            name: name,
+            call_count: 1,
+            is_static: false,
+        }
+
+# Relationship between classes
+enum RelationType:
+    Uses       # One class uses another (method calls)
+    Depends    # Dependency (parameter types)
+    Owns       # Composition (field types)
+
+impl RelationType:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_uses(self) -> bool:
+        """Check if this is Uses relation.
+
+        Returns:
+            true for Uses
+
+        Example:
+            RelationType::Uses.is_uses()  # → true
+        """
+        match self:
+            case Uses: true
+            case _: false
+
+    fn is_depends(self) -> bool:
+        """Check if this is Depends relation.
+
+        Returns:
+            true for Depends
+
+        Example:
+            RelationType::Depends.is_depends()  # → true
+        """
+        match self:
+            case Depends: true
+            case _: false
+
+    fn is_owns(self) -> bool:
+        """Check if this is Owns relation.
+
+        Returns:
+            true for Owns
+
+        Example:
+            RelationType::Owns.is_owns()  # → true
+        """
+        match self:
+            case Owns: true
+            case _: false
+
+    fn is_runtime(self) -> bool:
+        """Check if relation is established at runtime.
+
+        Returns:
+            true for Uses (method calls happen at runtime)
+
+        Example:
+            RelationType::Uses.is_runtime()  # → true
+            RelationType::Depends.is_runtime()  # → false
+        """
+        match self:
+            case Uses: true
+            case _: false
+
+    fn is_structural(self) -> bool:
+        """Check if relation is structural (compile-time).
+
+        Returns:
+            true for Depends and Owns
+
+        Example:
+            RelationType::Owns.is_structural()  # → true
+            RelationType::Uses.is_structural()  # → false
+        """
+        match self:
+            case Depends: true
+            case Owns: true
+            case Uses: false
+
+    fn is_strong(self) -> bool:
+        """Check if relation is strong (ownership/composition).
+
+        Returns:
+            true for Owns
+
+        Example:
+            RelationType::Owns.is_strong()  # → true
+            RelationType::Uses.is_strong()  # → false
+        """
+        match self:
+            case Owns: true
+            case _: false
+
+    fn arrow_type(self) -> String:
+        """Get UML arrow type for this relation.
+
+        Returns:
+            Arrow notation for diagrams
+
+        Example:
+            RelationType::Uses.arrow_type()  # → "..>"
+            RelationType::Owns.arrow_type()  # → "*--"
+        """
+        match self:
+            case Uses: "..>"
+            case Depends: "-->"
+            case Owns: "*--"
+
+    fn to_string(self) -> String:
+        """Convert relation type to string.
+
+        Returns:
+            Relation name
+
+        Example:
+            RelationType::Uses.to_string()  # → "uses"
+        """
+        match self:
+            case Uses: "uses"
+            case Depends: "depends"
+            case Owns: "owns"
+
+    fn description(self) -> String:
+        """Get relation description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            RelationType::Uses.description()
+            # → "One class uses another (method calls)"
+        """
+        match self:
+            case Uses: "One class uses another (method calls)"
+            case Depends: "Dependency (parameter types)"
+            case Owns: "Composition (field types)"
+
+    fn summary(self) -> String:
+        """Get summary of relation type.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            RelationType::Owns.summary()
+            # → "RelationType: owns (structural, strong, *--)"
+        """
+        let name = self.to_string()
+        let timing = if self.is_runtime(): "runtime" else: "structural"
+        let strength = if self.is_strong(): ", strong" else: ""
+        let arrow = self.arrow_type()
+        return "RelationType: {name} ({timing}{strength}, {arrow})"
+
+struct ClassRelation:
+    from_class: String
+    to_class: String
+    relation_type: RelationType
+    label: String
+
+    fn new(from: String, to: String, rel: RelationType) -> ClassRelation:
+        let label = match rel:
+            case RelationType.Uses:
+                "uses"
+            case RelationType.Depends:
+                "depends"
+            case RelationType.Owns:
+                "owns"
+        return ClassRelation {
+            from_class: from,
+            to_class: to,
+            relation_type: rel,
+            label: label,
+        }
+
+# Class info extracted from events
+struct ClassInfo:
+    name: String
+    methods: Dict<String, MethodInfo>
+    is_architectural: Bool
+
+    fn new(name: String) -> ClassInfo:
+        return ClassInfo {
+            name: name,
+            methods: Dict.new(),
+            is_architectural: false,
+        }
+
+    fn add_method(mut self, method_name: String) -> Void:
+        match self.methods.get(method_name):
+            case Some(info):
+                let mut updated = info
+                updated.call_count += 1
+                self.methods.insert(method_name, updated)
+            case None:
+                self.methods.insert(method_name, MethodInfo.new(method_name))
+
+# Class diagram generator
+class ClassDiagramGenerator:
+    events: List<CallEvent>
+    filter: DiagramFilter
+    config: DiagramConfig
+    classes: Dict<String, ClassInfo>
+    relations: List<ClassRelation>
+    output: String
+
+    fn new(config: DiagramConfig) -> ClassDiagramGenerator:
+        return ClassDiagramGenerator {
+            events: [],
+            filter: config.filter,
+            config: config,
+            classes: Dict.new(),
+            relations: [],
+            output: "",
+        }
+
+    # Generate diagram from recorder
+    fn generate(mut self, recorder: CallEventRecorder) -> String:
+        self.events = recorder.get_events()
+
+        # Mark architectural entities
+        for entity in recorder.get_architectural_entities():
+            match self.classes.get(entity):
+                case Some(cls):
+                    let mut updated = cls
+                    updated.is_architectural = true
+                    self.classes.insert(entity, updated)
+                case None:
+                    pass
+
+        return self.generate_from_events(self.events)
+
+    # Generate diagram from event list
+    fn generate_from_events(mut self, events: List<CallEvent>) -> String:
+        # Filter events if filter is configured
+        let filtered = if self.filter.is_empty():
+            events
+        else:
+            self.filter.filter_events(events)
+
+        # Extract classes and relationships
+        self.extract_classes(filtered)
+        self.extract_relations(filtered)
+
+        # Generate output
+        self.output = ""
+        self.emit_header()
+        self.emit_classes()
+        self.emit_relations()
+        self.emit_footer()
+
+        return self.output
+
+    # Extract classes from events
+    fn extract_classes(mut self, events: List<CallEvent>) -> Void:
+        self.classes = Dict.new()
+
+        for event in events:
+            if event.is_return:
+                continue
+
+            # Extract callee class
+            match event.callee_class:
+                case Some(cls):
+                    if not self.classes.contains(cls):
+                        self.classes.insert(cls, ClassInfo.new(cls))
+
+                    match self.classes.get(cls):
+                        case Some(info):
+                            let mut updated = info
+                            updated.add_method(event.callee)
+                            self.classes.insert(cls, updated)
+                        case None:
+                            pass
+                case None:
+                    # Function call, not a method - skip for class diagram
+                    pass
+
+    # Extract relationships from events
+    fn extract_relations(mut self, events: List<CallEvent>) -> Void:
+        self.relations = []
+        let seen: Set<String> = Set.new()
+
+        for event in events:
+            if event.is_return:
+                continue
+
+            match (event.caller_class, event.callee_class):
+                case (Some(from_cls), Some(to_cls)):
+                    if from_cls != to_cls:
+                        let key = "${from_cls}->${to_cls}"
+                        if not seen.contains(key):
+                            seen.insert(key)
+                            self.relations.push(ClassRelation.new(
+                                from_cls,
+                                to_cls,
+                                RelationType.Uses
+                            ))
+                case _:
+                    pass
+
+    # Emit diagram header
+    fn emit_header(mut self) -> Void:
+        self.output = self.output + "```mermaid\n"
+        self.output = self.output + "classDiagram\n"
+
+    # Emit class definitions
+    fn emit_classes(mut self) -> Void:
+        for (name, info) in self.classes:
+            self.output = self.output + "    class ${name} {\n"
+
+            for (method_name, method_info) in info.methods:
+                let visibility = "+"  # public
+                self.output = self.output + "        ${visibility}${method_name}()\n"
+
+            self.output = self.output + "    }\n"
+
+    # Emit relationships
+    fn emit_relations(mut self) -> Void:
+        self.output = self.output + "\n"
+
+        for rel in self.relations:
+            # Mermaid relationship syntax
+            let arrow = match rel.relation_type:
+                case RelationType.Uses:
+                    "-->"
+                case RelationType.Depends:
+                    "..>"
+                case RelationType.Owns:
+                    "*--"
+
+            self.output = self.output + "    ${rel.from_class} ${arrow} ${rel.to_class} : ${rel.label}\n"
+
+    # Emit footer
+    fn emit_footer(mut self) -> Void:
+        self.output = self.output + "```\n"
+
+# Generate class diagram from recorder
+fn generate_class_diagram(recorder: CallEventRecorder, config: DiagramConfig) -> String:
+    let gen = ClassDiagramGenerator.new(config)
+    return gen.generate(recorder)
+
+# Generate class diagram from events
+fn generate_class_from_events(events: List<CallEvent>, config: DiagramConfig) -> String:
+    let gen = ClassDiagramGenerator.new(config)
+    return gen.generate_from_events(events)
+
+# Simple generation with defaults
+fn to_mermaid_class(recorder: CallEventRecorder) -> String:
+    let config = DiagramConfig.new().with_class_diagram()
+    return generate_class_diagram(recorder, config)
+
+# Exports
+export ClassInfo, ClassRelation, RelationType, ClassDiagramGenerator
+export generate_class_diagram, generate_class_from_events, to_mermaid_class

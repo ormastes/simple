@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 
 use crate::ast::*;
 use crate::error::ParseError;
+use crate::error_recovery::ErrorHint;
 use crate::lexer::Lexer;
 use crate::macro_registry::MacroRegistry;
 use crate::token::{Span, Token, TokenKind};
@@ -58,6 +59,8 @@ pub struct Parser<'a> {
     pub(crate) macro_registry: MacroRegistry,
     /// Current scope for macro symbol registration (e.g., "module", "class:ClassName")
     pub(crate) current_scope: String,
+    /// Collected error hints (helpful messages for common mistakes)
+    pub(crate) error_hints: Vec<ErrorHint>,
 }
 
 impl<'a> Parser<'a> {
@@ -78,6 +81,7 @@ impl<'a> Parser<'a> {
             debug_depth: 0,
             macro_registry: MacroRegistry::new(),
             current_scope: "module".to_string(),
+            error_hints: Vec::new(),
         }
     }
 
@@ -119,6 +123,16 @@ impl<'a> Parser<'a> {
     /// Set debug mode on an existing parser
     pub fn set_debug_mode(&mut self, mode: DebugMode) {
         self.debug_mode = mode;
+    }
+
+    /// Get accumulated error hints (helpful messages for common mistakes)
+    pub fn error_hints(&self) -> &[ErrorHint] {
+        &self.error_hints
+    }
+
+    /// Clear accumulated error hints
+    pub fn clear_error_hints(&mut self) {
+        self.error_hints.clear();
     }
 
     /// Output debug trace message if debug mode is enabled

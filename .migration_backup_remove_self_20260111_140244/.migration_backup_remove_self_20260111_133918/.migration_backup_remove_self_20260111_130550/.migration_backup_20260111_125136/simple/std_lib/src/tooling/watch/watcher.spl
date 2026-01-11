@@ -1,0 +1,502 @@
+# File System Watcher
+# Cross-platform file watching with debouncing
+
+use host.async_nogc_mut.io.fs
+use core.result.{Result, Ok, Err}
+
+# File system event type
+pub enum WatchEvent:
+    Created
+    Modified
+    Deleted
+    Renamed
+
+    pub fn to_string(self): String =
+        """Convert event to string.
+
+        Returns:
+            Event name
+
+        Example:
+            WatchEvent::Modified.to_string()  # → "modified"
+        """
+        match self:
+            WatchEvent::Created: "created"
+            WatchEvent::Modified: "modified"
+            WatchEvent::Deleted: "deleted"
+            WatchEvent::Renamed: "renamed"
+
+    pub fn description(self): String =
+        """Get event description.
+
+        Returns:
+            Human-readable description
+        """
+        match self:
+            WatchEvent::Created: "File created"
+            WatchEvent::Modified: "File modified"
+            WatchEvent::Deleted: "File deleted"
+            WatchEvent::Renamed: "File renamed"
+
+    pub fn is_modification(self): bool =
+        """Check if event is a modification (not creation/deletion).
+
+        Returns:
+            True if Modified or Renamed
+        """
+        match self:
+            WatchEvent::Modified: true
+            WatchEvent::Renamed: true
+            WatchEvent::Created: false
+            WatchEvent::Deleted: false
+
+# File change event
+pub class FileChange:
+    pub path: String
+    pub event: WatchEvent
+    pub timestamp: i64
+
+    pub fn new(path: String, event: WatchEvent): FileChange =
+        """Create file change event.
+
+        Args:
+            path: File path
+            event: Event type
+
+        Returns:
+            File change event
+        """
+        @extern("runtime", "rt_time_now_unix_micros")
+        fn _rt_time_now_unix_micros() -> i64
+
+        FileChange {
+            path: path,
+            event: event,
+            timestamp: _rt_time_now_unix_micros() / 1000  # Convert microseconds to milliseconds
+        }
+
+    pub fn format(self): String =
+        """Format change event for display.
+
+        Returns:
+            Formatted string
+
+        Example:
+            change.format()
+            # → "src/main.spl: modified"
+        """
+        "{self.path}: {self.event.to_string()}"
+
+# Watch configuration
+pub class WatchConfig:
+    pub directories: List<String>
+    pub ignore_patterns: List<String>
+    pub debounce_ms: i32
+    pub recursive: bool
+    pub verbose: bool
+
+    pub fn new(): WatchConfig =
+        """Create default watch configuration.
+
+        Returns:
+            Default config with common ignores
+        """
+        WatchConfig {
+            directories: ["."],
+            ignore_patterns: [
+                ".git",
+                "node_modules",
+                "target",
+                "__pycache__",
+                ".build_cache",
+                "*.pyc",
+                "*.o",
+                "*.so",
+                "*.dylib",
+                "*.dll"
+            ],
+            debounce_ms: 300,
+            recursive: true,
+            verbose: false
+        }
+
+    pub fn add_directory(self, dir: String):
+        """Add directory to watch list.
+
+        Args:
+            dir: Directory path
+        """
+        self.directories.append(dir)
+
+    pub fn add_ignore_pattern(self, pattern: String):
+        """Add ignore pattern.
+
+        Args:
+            pattern: Glob pattern to ignore
+        """
+        self.ignore_patterns.append(pattern)
+
+    pub fn has_directories(self): bool =
+        """Check if directories are configured.
+
+        Returns:
+            True if watch directories exist
+        """
+        self.directories.len() > 0
+
+    pub fn has_ignores(self): bool =
+        """Check if ignore patterns are set.
+
+        Returns:
+            True if ignore patterns exist
+        """
+        self.ignore_patterns.len() > 0
+
+    pub fn summary(self): String =
+        """Get watch config summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            config.summary()
+            # → "Watching 2 dirs (recursive, debounce 300ms, 10 ignores)"
+        """
+        let recur = if self.recursive: "recursive" else: "non-recursive"
+        "Watching {self.directories.len()} dirs ({recur}, debounce {self.debounce_ms}ms, {self.ignore_patterns.len()} ignores)"
+
+# File system watcher
+pub class Watcher:
+    pub config: WatchConfig
+    pub on_change_callback: (List<String>) -> ()
+    pub running: bool
+    pub pending_changes: Dict<String, FileChange>
+    pub last_trigger: i64
+
+    pub fn new(root: String): Watcher =
+        """Create file system watcher.
+
+        Args:
+            root: Directory to watch
+
+        Returns:
+            Watcher with default configuration
+
+        Example:
+            let watcher = Watcher.new(".")
+
+            watcher.on_change(fn(files):
+                print("Files changed: {files}")
+                rebuild_project()
+            )
+
+            watcher.start()  # Blocks
+        """
+        let mut config = WatchConfig.new()
+        config.directories = [root]
+
+        Watcher {
+            config: config,
+            on_change_callback: fn(files): pass,
+            running: false,
+            pending_changes: {},
+            last_trigger: 0
+        }
+
+    pub fn with_config(config: WatchConfig): Watcher =
+        """Create watcher with custom configuration.
+
+        Args:
+            config: Watch configuration
+
+        Returns:
+            Configured watcher
+        """
+        Watcher {
+            config: config,
+            on_change_callback: fn(files): pass,
+            running: false,
+            pending_changes: {},
+            last_trigger: 0
+        }
+
+    pub fn on_change(self, callback: (List<String>) -> ()):
+        """Set change callback function.
+
+        Args:
+            callback: Function to call with list of changed files
+        """
+        self.on_change_callback = callback
+
+    pub fn set_debounce(self, ms: i32):
+        """Set debounce delay.
+
+        Args:
+            ms: Milliseconds to debounce
+        """
+        self.config.debounce_ms = ms
+
+    pub fn add_ignore_pattern(self, pattern: String):
+        """Add ignore pattern.
+
+        Args:
+            pattern: Glob pattern to ignore
+        """
+        self.config.add_ignore_pattern(pattern)
+
+    pub fn start(self):
+        """Start watching for file changes.
+
+        Blocks until stop() is called or process interrupted.
+
+        This is the main event loop:
+        1. Set up OS file watchers
+        2. Receive file change events
+        3. Debounce rapid changes
+        4. Call on_change callback
+        """
+        self.running = true
+
+        if self.config.verbose:
+            print("Starting file watcher...")
+            for dir in self.config.directories:
+                print("  Watching: {dir}")
+
+        # Main event loop
+        while self.running:
+            # TODO: [stdlib][P3] Platform-specific file watching
+            # - Linux: inotify
+            # - macOS: FSEvents
+            # - Windows: ReadDirectoryChangesW
+
+            # For now, use polling (not efficient but portable)
+            self.poll_for_changes()
+
+            # Sleep briefly
+            self.sleep(100)  # 100ms
+
+            # Check if we should trigger callback (debouncing)
+            self.check_and_trigger()
+
+    pub fn stop(self):
+        """Stop watching."""
+        self.running = false
+
+        if self.config.verbose:
+            print("Stopping file watcher")
+
+    pub fn is_running(self): bool =
+        """Check if watcher is running.
+
+        Returns:
+            True if currently watching
+        """
+        self.running
+
+    pub fn has_pending_changes(self): bool =
+        """Check if there are pending changes.
+
+        Returns:
+            True if changes are pending
+        """
+        self.pending_changes.len() > 0
+
+    pub fn pending_count(self): i32 =
+        """Get number of pending changes.
+
+        Returns:
+            Pending change count
+        """
+        self.pending_changes.len()
+
+    fn poll_for_changes(self):
+        """Poll directories for file changes.
+
+        This is a fallback implementation.
+        Production code should use OS-native file watching.
+        """
+        # TODO: [stdlib][P3] Scan directories and check mtimes
+        # This is inefficient but works as fallback
+        pass
+
+    fn check_and_trigger(self):
+        """Check if debounce period elapsed and trigger callback.
+
+        Debouncing algorithm:
+        1. Accumulate file changes in pending_changes
+        2. Wait for debounce_ms milliseconds of quiet
+        3. Trigger callback with all accumulated changes
+        4. Clear pending_changes
+        """
+        if self.pending_changes.len() == 0:
+            return
+
+        @extern("runtime", "rt_time_now_unix_micros")
+        fn _rt_time_now_unix_micros() -> i64
+
+        let now = _rt_time_now_unix_micros() / 1000  # Convert microseconds to milliseconds
+
+        # Check if debounce period elapsed
+        if now - self.last_trigger >= self.config.debounce_ms:
+            # Trigger callback
+            let changed_files = self.get_pending_files()
+
+            if self.config.verbose:
+                print("Triggering rebuild for {changed_files.len()} changed files")
+
+            self.on_change_callback(changed_files)
+
+            # Clear pending changes
+            self.pending_changes = {}
+            self.last_trigger = now
+
+    fn get_pending_files(self): List<String> =
+        """Get list of pending changed files.
+
+        Returns:
+            File paths
+        """
+        let files: List<String> = []
+
+        for (path, _) in self.pending_changes.items():
+            files.append(path)
+
+        files
+
+    fn handle_file_change(self, path: String, event: WatchEvent):
+        """Handle file change event.
+
+        Args:
+            path: File path
+            event: Change event
+        """
+        # Check if file should be ignored
+        if self.should_ignore(path):
+            return
+
+        # Add to pending changes
+        let change = FileChange.new(path, event)
+        self.pending_changes[path] = change
+
+    fn should_ignore(self, path: String): bool =
+        """Check if file should be ignored.
+
+        Args:
+            path: File path
+
+        Returns:
+            True if file matches ignore pattern
+        """
+        for pattern in self.config.ignore_patterns:
+            if self.matches_pattern(path, pattern):
+                return true
+
+        false
+
+    fn matches_pattern(self, path: String, pattern: String): bool =
+        """Check if path matches glob pattern.
+
+        Args:
+            path: File path
+            pattern: Glob pattern
+
+        Returns:
+            True if matches
+
+        Supports:
+        - *.ext - Files ending with .ext
+        - dir/*.spl - Files in dir ending with .spl
+        - **/*.spl - Any .spl file recursively
+        - **/test_* - Any file starting with test_
+        """
+        # Handle recursive patterns
+        if pattern.starts_with("**/"):
+            # Recursive: match anywhere in path
+            let file_pattern = pattern[3:]
+            return self.matches_simple_glob(self.get_filename(path), file_pattern)
+
+        # Handle directory patterns
+        if pattern.contains("/"):
+            # Path pattern: must match directory structure
+            return self.matches_path_glob(path, pattern)
+
+        # Simple filename pattern
+        return self.matches_simple_glob(self.get_filename(path), pattern)
+
+    fn get_filename(self, path: String): String =
+        """Extract filename from path.
+
+        Args:
+            path: File path
+
+        Returns:
+            Filename
+        """
+        let last_slash = path.rfind("/")
+        if last_slash >= 0:
+            path[last_slash+1:]
+        else:
+            path
+
+    fn matches_simple_glob(self, name: String, pattern: String): bool =
+        """Match simple glob pattern (no paths).
+
+        Args:
+            name: Filename
+            pattern: Glob pattern
+
+        Returns:
+            True if matches
+        """
+        if pattern.starts_with("*") and pattern.ends_with("*"):
+            # *substring*
+            let substr = pattern[1:pattern.len()-1]
+            return name.contains(substr)
+        elif pattern.starts_with("*"):
+            # *suffix
+            let suffix = pattern[1:]
+            return name.ends_with(suffix)
+        elif pattern.ends_with("*"):
+            # prefix*
+            let prefix = pattern[0:pattern.len()-1]
+            return name.starts_with(prefix)
+        else:
+            # Exact match
+            return name == pattern
+
+    fn matches_path_glob(self, path: String, pattern: String): bool =
+        """Match path-based glob pattern.
+
+        Args:
+            path: Full file path
+            pattern: Path pattern (e.g., "src/*.spl")
+
+        Returns:
+            True if matches
+        """
+        # Split pattern into directory and filename parts
+        let last_slash = pattern.rfind("/")
+        if last_slash < 0:
+            return false
+
+        let dir_pattern = pattern[0:last_slash]
+        let file_pattern = pattern[last_slash+1:]
+
+        # Check if path contains the directory pattern
+        if not path.contains(dir_pattern):
+            return false
+
+        # Check if filename matches
+        let filename = self.get_filename(path)
+        return self.matches_simple_glob(filename, file_pattern)
+
+    fn sleep(self, ms: i32):
+        """Sleep for milliseconds.
+
+        Args:
+            ms: Milliseconds to sleep
+        """
+        @extern("runtime", "rt_thread_sleep")
+        fn _rt_thread_sleep(millis: i64)
+
+        _rt_thread_sleep(ms as i64)

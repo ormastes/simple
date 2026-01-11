@@ -1,0 +1,670 @@
+# Post-Processing Effects
+#
+# Implements screen-space post-processing effects including tone mapping,
+# bloom, anti-aliasing, and color grading for final image enhancement.
+#
+# Based on: doc/spec/graphics_3d.md (Part 13: Post-Processing)
+
+use core.*
+use graphics.math.*
+use graphics.render.*
+
+# =============================================================================
+# Post-Processing Configuration
+# =============================================================================
+
+pub struct PostProcessConfig:
+    # Tone mapping
+    tone_mapping_mode: ToneMappingMode
+    exposure: f32                      # HDR exposure
+    white_point: f32                   # ACES white point
+
+    # Bloom
+    enable_bloom: bool
+    bloom_threshold: f32               # Brightness threshold
+    bloom_intensity: f32               # Blend amount
+    bloom_radius: f32                  # Blur radius
+
+    # Anti-aliasing
+    enable_fxaa: bool
+    fxaa_quality: FXAAQuality
+
+    # Color grading
+    enable_color_grading: bool
+    saturation: f32                    # Color saturation (0-2)
+    contrast: f32                      # Contrast (0-2)
+    brightness: f32                    # Brightness offset
+    temperature: f32                   # Color temperature (-1 to 1)
+    tint: f32                          # Green-magenta tint (-1 to 1)
+
+    # Vignette
+    enable_vignette: bool
+    vignette_intensity: f32
+    vignette_smoothness: f32
+
+impl PostProcessConfig:
+    pub fn default() -> PostProcessConfig:
+        return PostProcessConfig {
+            tone_mapping_mode: ToneMappingMode::ACES,
+            exposure: 1.0,
+            white_point: 1.0,
+            enable_bloom: true,
+            bloom_threshold: 1.0,
+            bloom_intensity: 0.04,
+            bloom_radius: 5.0,
+            enable_fxaa: true,
+            fxaa_quality: FXAAQuality::Medium,
+            enable_color_grading: false,
+            saturation: 1.0,
+            contrast: 1.0,
+            brightness: 0.0,
+            temperature: 0.0,
+            tint: 0.0,
+            enable_vignette: false,
+            vignette_intensity: 0.5,
+            vignette_smoothness: 0.5
+        }
+
+    pub fn high_quality() -> PostProcessConfig:
+        return PostProcessConfig {
+            tone_mapping_mode: ToneMappingMode::ACES,
+            exposure: 1.0,
+            white_point: 1.0,
+            enable_bloom: true,
+            bloom_threshold: 0.8,
+            bloom_intensity: 0.06,
+            bloom_radius: 7.0,
+            enable_fxaa: true,
+            fxaa_quality: FXAAQuality::High,
+            enable_color_grading: true,
+            saturation: 1.1,
+            contrast: 1.05,
+            brightness: 0.0,
+            temperature: 0.0,
+            tint: 0.0,
+            enable_vignette: true,
+            vignette_intensity: 0.3,
+            vignette_smoothness: 0.8
+        }
+
+    pub fn performance() -> PostProcessConfig:
+        return PostProcessConfig {
+            tone_mapping_mode: ToneMappingMode::Reinhard,
+            exposure: 1.0,
+            white_point: 1.0,
+            enable_bloom: false,
+            bloom_threshold: 1.0,
+            bloom_intensity: 0.0,
+            bloom_radius: 3.0,
+            enable_fxaa: true,
+            fxaa_quality: FXAAQuality::Low,
+            enable_color_grading: false,
+            saturation: 1.0,
+            contrast: 1.0,
+            brightness: 0.0,
+            temperature: 0.0,
+            tint: 0.0,
+            enable_vignette: false,
+            vignette_intensity: 0.0,
+            vignette_smoothness: 0.5
+        }
+
+# =============================================================================
+# Tone Mapping Modes
+# =============================================================================
+
+pub enum ToneMappingMode:
+    None          # No tone mapping (for LDR)
+    Reinhard      # Simple Reinhard operator
+    ReinhardLuma  # Reinhard with luminance
+    ACES          # ACES filmic (industry standard)
+    Filmic        # Uncharted 2 filmic
+    Unreal        # Unreal Engine 3 tone mapper
+
+impl ToneMappingMode:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_none(self) -> bool:
+        """Check if tone mapping is disabled.
+
+        Returns:
+            true for None
+
+        Example:
+            ToneMappingMode::None.is_none()  # → true
+        """
+        match self:
+            case None: true
+            case _: false
+
+    pub fn is_reinhard(self) -> bool:
+        """Check if using simple Reinhard tone mapping.
+
+        Returns:
+            true for Reinhard
+
+        Example:
+            ToneMappingMode::Reinhard.is_reinhard()  # → true
+        """
+        match self:
+            case Reinhard: true
+            case _: false
+
+    pub fn is_reinhard_luma(self) -> bool:
+        """Check if using Reinhard with luminance.
+
+        Returns:
+            true for ReinhardLuma
+
+        Example:
+            ToneMappingMode::ReinhardLuma.is_reinhard_luma()  # → true
+        """
+        match self:
+            case ReinhardLuma: true
+            case _: false
+
+    pub fn is_aces(self) -> bool:
+        """Check if using ACES filmic tone mapping.
+
+        Returns:
+            true for ACES
+
+        Example:
+            ToneMappingMode::ACES.is_aces()  # → true
+        """
+        match self:
+            case ACES: true
+            case _: false
+
+    pub fn is_filmic(self) -> bool:
+        """Check if using Uncharted 2 filmic tone mapping.
+
+        Returns:
+            true for Filmic
+
+        Example:
+            ToneMappingMode::Filmic.is_filmic()  # → true
+        """
+        match self:
+            case Filmic: true
+            case _: false
+
+    pub fn is_unreal(self) -> bool:
+        """Check if using Unreal Engine tone mapping.
+
+        Returns:
+            true for Unreal
+
+        Example:
+            ToneMappingMode::Unreal.is_unreal()  # → true
+        """
+        match self:
+            case Unreal: true
+            case _: false
+
+    pub fn is_enabled(self) -> bool:
+        """Check if tone mapping is enabled.
+
+        Returns:
+            false for None, true otherwise
+
+        Example:
+            ToneMappingMode::None.is_enabled()  # → false
+            ToneMappingMode::ACES.is_enabled()  # → true
+        """
+        match self:
+            case None: false
+            case _: true
+
+    pub fn is_filmic_style(self) -> bool:
+        """Check if using filmic-style tone mapping.
+
+        Returns:
+            true for ACES, Filmic, or Unreal
+
+        Example:
+            ToneMappingMode::ACES.is_filmic_style()  # → true
+            ToneMappingMode::Reinhard.is_filmic_style()  # → false
+        """
+        match self:
+            case ACES: true
+            case Filmic: true
+            case Unreal: true
+            case _: false
+
+    pub fn to_string(self) -> String:
+        """Convert tone mapping mode to string.
+
+        Returns:
+            Mode name
+
+        Example:
+            ToneMappingMode::ACES.to_string()  # → "aces"
+        """
+        match self:
+            case None: "none"
+            case Reinhard: "reinhard"
+            case ReinhardLuma: "reinhard_luma"
+            case ACES: "aces"
+            case Filmic: "filmic"
+            case Unreal: "unreal"
+
+    pub fn description(self) -> String:
+        """Get tone mapping mode description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            ToneMappingMode::ACES.description()
+            # → "ACES filmic (industry standard)"
+        """
+        match self:
+            case None: "No tone mapping (LDR)"
+            case Reinhard: "Simple Reinhard operator"
+            case ReinhardLuma: "Reinhard with luminance preservation"
+            case ACES: "ACES filmic (industry standard)"
+            case Filmic: "Uncharted 2 filmic tone mapper"
+            case Unreal: "Unreal Engine 3 tone mapper"
+
+    pub fn summary(self) -> String:
+        """Get tone mapping mode summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            ToneMappingMode::ACES.summary()
+            # → "ToneMappingMode: aces (ACES filmic (industry standard), enabled, filmic style)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let enabled_status = if self.is_enabled(): "enabled" else: "disabled"
+        let style = if self.is_filmic_style(): ", filmic style" else: ""
+        return "ToneMappingMode: {name} ({desc}, {enabled_status}{style})"
+
+# =============================================================================
+# FXAA Quality Levels
+# =============================================================================
+
+pub enum FXAAQuality:
+    Low           # 9 samples
+    Medium        # 12 samples
+    High          # 29 samples
+    Ultra         # 39 samples
+
+impl FXAAQuality:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_low(self) -> bool:
+        """Check if quality is Low.
+
+        Returns:
+            true for Low
+
+        Example:
+            FXAAQuality::Low.is_low()  # → true
+        """
+        match self:
+            case Low: true
+            case _: false
+
+    pub fn is_medium(self) -> bool:
+        """Check if quality is Medium.
+
+        Returns:
+            true for Medium
+
+        Example:
+            FXAAQuality::Medium.is_medium()  # → true
+        """
+        match self:
+            case Medium: true
+            case _: false
+
+    pub fn is_high(self) -> bool:
+        """Check if quality is High.
+
+        Returns:
+            true for High
+
+        Example:
+            FXAAQuality::High.is_high()  # → true
+        """
+        match self:
+            case High: true
+            case _: false
+
+    pub fn is_ultra(self) -> bool:
+        """Check if quality is Ultra.
+
+        Returns:
+            true for Ultra
+
+        Example:
+            FXAAQuality::Ultra.is_ultra()  # → true
+        """
+        match self:
+            case Ultra: true
+            case _: false
+
+    pub fn sample_count(self) -> i32:
+        """Get number of samples for this quality level.
+
+        Returns:
+            Sample count
+
+        Example:
+            FXAAQuality::Medium.sample_count()  # → 12
+        """
+        match self:
+            case Low: 9
+            case Medium: 12
+            case High: 29
+            case Ultra: 39
+
+    pub fn to_string(self) -> String:
+        """Convert FXAA quality to string.
+
+        Returns:
+            Quality level name
+
+        Example:
+            FXAAQuality::High.to_string()  # → "high"
+        """
+        match self:
+            case Low: "low"
+            case Medium: "medium"
+            case High: "high"
+            case Ultra: "ultra"
+
+    pub fn description(self) -> String:
+        """Get FXAA quality description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            FXAAQuality::High.description()
+            # → "High quality (29 samples)"
+        """
+        match self:
+            case Low: "Low quality (9 samples)"
+            case Medium: "Medium quality (12 samples)"
+            case High: "High quality (29 samples)"
+            case Ultra: "Ultra quality (39 samples)"
+
+    pub fn summary(self) -> String:
+        """Get FXAA quality summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            FXAAQuality::High.summary()
+            # → "FXAAQuality: high (High quality (29 samples))"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        return "FXAAQuality: {name} ({desc})"
+
+# =============================================================================
+# Post-Processing Pipeline
+# =============================================================================
+
+pub struct PostProcessPipeline:
+    config: PostProcessConfig
+
+    # Render targets
+    hdr_buffer_id: u64                 # HDR scene render target
+    bloom_chain: Array<u64>            # Bloom downsampling chain
+    temp_buffer_id: u64                # Temporary buffer
+    ldr_buffer_id: u64                 # Final LDR output
+
+    # Resolution
+    width: i32
+    height: i32
+
+impl PostProcessPipeline:
+    pub fn new(width: i32, height: i32, config: PostProcessConfig) -> PostProcessPipeline:
+        let mut pipeline = PostProcessPipeline {
+            config: config,
+            hdr_buffer_id: 0,
+            bloom_chain: Array::new(),
+            temp_buffer_id: 0,
+            ldr_buffer_id: 0,
+            width: width,
+            height: height
+        }
+
+        pipeline.init_buffers()
+        return pipeline
+
+    me init_buffers(self):
+        # Create HDR buffer (RGBA16F)
+        self.hdr_buffer_id = extern_create_hdr_buffer(self.width, self.height)
+
+        # Create bloom chain (5 mip levels)
+        let mut bloom_width = self.width / 2
+        let mut bloom_height = self.height / 2
+
+        for i in 0..5:
+            let bloom_buffer = extern_create_hdr_buffer(bloom_width, bloom_height)
+            self.bloom_chain.push(bloom_buffer)
+
+            bloom_width = bloom_width / 2
+            bloom_height = bloom_height / 2
+
+        # Create temp buffer
+        self.temp_buffer_id = extern_create_hdr_buffer(self.width, self.height)
+
+        # Create LDR output buffer (RGBA8)
+        self.ldr_buffer_id = extern_create_ldr_buffer(self.width, self.height)
+
+    # Process HDR scene to LDR output
+    pub fn process(self, scene_texture_id: u64) -> u64:
+        let mut current_texture = scene_texture_id
+
+        # Step 1: Bloom (if enabled)
+        if self.config.enable_bloom:
+            current_texture = self.apply_bloom(current_texture)
+
+        # Step 2: Tone mapping + Gamma correction
+        current_texture = self.apply_tone_mapping(current_texture)
+
+        # Step 3: Color grading (if enabled)
+        if self.config.enable_color_grading:
+            current_texture = self.apply_color_grading(current_texture)
+
+        # Step 4: Vignette (if enabled)
+        if self.config.enable_vignette:
+            current_texture = self.apply_vignette(current_texture)
+
+        # Step 5: FXAA (if enabled)
+        if self.config.enable_fxaa:
+            current_texture = self.apply_fxaa(current_texture)
+
+        return current_texture
+
+    # Bloom effect using Kawase blur
+    fn apply_bloom(self, input_texture: u64) -> u64:
+        # Extract bright pixels
+        extern_bind_framebuffer_texture(self.bloom_chain[0])
+        extern_use_shader("bloom_threshold")
+        extern_set_uniform_float("u_Threshold", self.config.bloom_threshold)
+        extern_set_uniform_texture("u_InputTexture", input_texture)
+        extern_draw_fullscreen_quad()
+
+        # Downsample and blur
+        for i in 1..self.bloom_chain.len():
+            extern_bind_framebuffer_texture(self.bloom_chain[i])
+            extern_use_shader("bloom_downsample")
+            extern_set_uniform_texture("u_InputTexture", self.bloom_chain[i - 1])
+            extern_draw_fullscreen_quad()
+
+        # Upsample and combine
+        for i in (self.bloom_chain.len() - 2)..=0:
+            extern_bind_framebuffer_texture(self.bloom_chain[i])
+            extern_use_shader("bloom_upsample")
+            extern_set_uniform_texture("u_InputTexture", self.bloom_chain[i + 1])
+            extern_set_uniform_float("u_FilterRadius", self.config.bloom_radius)
+            extern_draw_fullscreen_quad()
+
+        # Composite bloom with original
+        extern_bind_framebuffer_texture(self.temp_buffer_id)
+        extern_use_shader("bloom_composite")
+        extern_set_uniform_texture("u_SceneTexture", input_texture)
+        extern_set_uniform_texture("u_BloomTexture", self.bloom_chain[0])
+        extern_set_uniform_float("u_BloomIntensity", self.config.bloom_intensity)
+        extern_draw_fullscreen_quad()
+
+        return self.temp_buffer_id
+
+    # Apply tone mapping
+    fn apply_tone_mapping(self, input_texture: u64) -> u64:
+        extern_bind_framebuffer_texture(self.ldr_buffer_id)
+        extern_use_shader("tone_mapping")
+
+        extern_set_uniform_texture("u_InputTexture", input_texture)
+        extern_set_uniform_int("u_ToneMappingMode", self.config.tone_mapping_mode as i32)
+        extern_set_uniform_float("u_Exposure", self.config.exposure)
+        extern_set_uniform_float("u_WhitePoint", self.config.white_point)
+
+        extern_draw_fullscreen_quad()
+
+        return self.ldr_buffer_id
+
+    # Apply color grading
+    fn apply_color_grading(self, input_texture: u64) -> u64:
+        extern_bind_framebuffer_texture(self.temp_buffer_id)
+        extern_use_shader("color_grading")
+
+        extern_set_uniform_texture("u_InputTexture", input_texture)
+        extern_set_uniform_float("u_Saturation", self.config.saturation)
+        extern_set_uniform_float("u_Contrast", self.config.contrast)
+        extern_set_uniform_float("u_Brightness", self.config.brightness)
+        extern_set_uniform_float("u_Temperature", self.config.temperature)
+        extern_set_uniform_float("u_Tint", self.config.tint)
+
+        extern_draw_fullscreen_quad()
+
+        return self.temp_buffer_id
+
+    # Apply vignette effect
+    fn apply_vignette(self, input_texture: u64) -> u64:
+        extern_bind_framebuffer_texture(self.temp_buffer_id)
+        extern_use_shader("vignette")
+
+        extern_set_uniform_texture("u_InputTexture", input_texture)
+        extern_set_uniform_float("u_Intensity", self.config.vignette_intensity)
+        extern_set_uniform_float("u_Smoothness", self.config.vignette_smoothness)
+
+        extern_draw_fullscreen_quad()
+
+        return self.temp_buffer_id
+
+    # Apply FXAA anti-aliasing
+    fn apply_fxaa(self, input_texture: u64) -> u64:
+        extern_bind_framebuffer_texture(self.temp_buffer_id)
+        extern_use_shader("fxaa")
+
+        extern_set_uniform_texture("u_InputTexture", input_texture)
+        extern_set_uniform_int("u_Quality", self.config.fxaa_quality as i32)
+        extern_set_uniform_vec2("u_TexelSize", Vec2::new(
+            1.0 / self.width as f32,
+            1.0 / self.height as f32
+        ))
+
+        extern_draw_fullscreen_quad()
+
+        return self.temp_buffer_id
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
+
+# Calculate luminance (Rec. 709)
+pub fn luminance(color: Vec3) -> f32:
+    return color.x * 0.2126 + color.y * 0.7152 + color.z * 0.0722
+
+# RGB to HSV conversion
+pub fn rgb_to_hsv(rgb: Vec3) -> Vec3:
+    let max_val = max(max(rgb.x, rgb.y), rgb.z)
+    let min_val = min(min(rgb.x, rgb.y), rgb.z)
+    let delta = max_val - min_val
+
+    let mut h = 0.0
+    let s = if max_val != 0.0: delta / max_val else: 0.0
+    let v = max_val
+
+    if delta != 0.0:
+        if rgb.x == max_val:
+            h = (rgb.y - rgb.z) / delta
+        else if rgb.y == max_val:
+            h = 2.0 + (rgb.z - rgb.x) / delta
+        else:
+            h = 4.0 + (rgb.x - rgb.y) / delta
+
+        h = h * 60.0
+        if h < 0.0:
+            h = h + 360.0
+
+    return Vec3::new(h, s, v)
+
+# HSV to RGB conversion
+pub fn hsv_to_rgb(hsv: Vec3) -> Vec3:
+    let h = hsv.x
+    let s = hsv.y
+    let v = hsv.z
+
+    if s == 0.0:
+        return Vec3::new(v, v, v)
+
+    let h_sector = h / 60.0
+    let sector = floor(h_sector) as i32
+    let f = h_sector - sector as f32
+
+    let p = v * (1.0 - s)
+    let q = v * (1.0 - s * f)
+    let t = v * (1.0 - s * (1.0 - f))
+
+    if sector == 0:
+        return Vec3::new(v, t, p)
+    else if sector == 1:
+        return Vec3::new(q, v, p)
+    else if sector == 2:
+        return Vec3::new(p, v, t)
+    else if sector == 3:
+        return Vec3::new(p, q, v)
+    else if sector == 4:
+        return Vec3::new(t, p, v)
+    else:
+        return Vec3::new(v, p, q)
+
+fn max(a: f32, b: f32) -> f32:
+    return if a > b: a else: b
+
+fn min(a: f32, b: f32) -> f32:
+    return if a < b: a else: b
+
+fn floor(x: f32) -> f32:
+    # Would use math library
+    return 0.0  # Placeholder
+
+# =============================================================================
+# External FFI Functions
+# =============================================================================
+
+extern fn extern_create_hdr_buffer(width: i32, height: i32) -> u64
+extern fn extern_create_ldr_buffer(width: i32, height: i32) -> u64
+extern fn extern_bind_framebuffer_texture(texture_id: u64)
+extern fn extern_use_shader(name: *u8)
+extern fn extern_set_uniform_float(name: *u8, value: f32)
+extern fn extern_set_uniform_int(name: *u8, value: i32)
+extern fn extern_set_uniform_vec2(name: *u8, value: Vec2)
+extern fn extern_set_uniform_texture(name: *u8, texture_id: u64)
+extern fn extern_draw_fullscreen_quad()

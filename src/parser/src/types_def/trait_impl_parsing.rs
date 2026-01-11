@@ -53,14 +53,28 @@ impl<'a> Parser<'a> {
         // Parse optional generic params for impl block: impl<T> Trait for Type<T>
         let generic_params = self.parse_generic_params_as_strings()?;
 
-        let first_name = self.expect_identifier()?;
+        // Parse the first type (could be trait name or target type)
+        let first_type = self.parse_type()?;
 
         let (trait_name, target_type) = if self.check(&TokenKind::For) {
+            // impl Trait for Type pattern
             self.advance();
             let target = self.parse_type()?;
-            (Some(first_name), target)
+            // Extract simple name from first_type for trait_name
+            let trait_name_str = match &first_type {
+                Type::Simple(name) | Type::Generic { name, .. } => name.clone(),
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "simple trait name".to_string(),
+                        found: format!("{:?}", first_type),
+                        span: self.current.span.clone(),
+                    })
+                }
+            };
+            (Some(trait_name_str), target)
         } else {
-            (None, Type::Simple(first_name))
+            // impl Type pattern (inherent impl)
+            (None, first_type)
         };
 
         let where_clause = self.parse_where_clause()?;

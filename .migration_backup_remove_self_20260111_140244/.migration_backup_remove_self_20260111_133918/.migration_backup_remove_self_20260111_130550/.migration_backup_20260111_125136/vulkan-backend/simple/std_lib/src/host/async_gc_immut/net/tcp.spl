@@ -1,0 +1,147 @@
+# TCP Networking - Immutable Variant
+# Functional style TCP with immutable connection state
+
+use units.net.*
+use units.size.*
+use host.common.io.error.IoError
+
+# TCP connection state (immutable)
+struct TcpConnection:
+    handle: i64
+    local_addr: SocketAddr
+    peer_addr: SocketAddr
+    bytes_sent: ByteCount
+    bytes_received: ByteCount
+
+impl TcpConnection:
+    # Connect to remote address
+    pub async fn connect(addr: SocketAddr) -> Result<TcpConnection, IoError>:
+        let handle = native_tcp_connect(addr)?
+        let local = native_tcp_local_addr(handle)?
+        return Ok(TcpConnection {
+            handle: handle,
+            local_addr: local,
+            peer_addr: addr,
+            bytes_sent: 0_bytes,
+            bytes_received: 0_bytes
+        })
+
+    fn local_addr(self) -> SocketAddr:
+        self.local_addr
+
+    fn peer_addr(self) -> SocketAddr:
+        self.peer_addr
+
+    fn bytes_sent(self) -> ByteCount:
+        self.bytes_sent
+
+    fn bytes_received(self) -> ByteCount:
+        self.bytes_received
+
+    # Send data, return (bytes_sent, new_connection_state)
+    pub async fn send(self, data: Bytes) -> Result<(ByteCount, TcpConnection), IoError>:
+        let n = native_tcp_send(self.handle, &data)?
+        return Ok((n, TcpConnection {
+            handle: self.handle,
+            local_addr: self.local_addr,
+            peer_addr: self.peer_addr,
+            bytes_sent: self.bytes_sent + n,
+            bytes_received: self.bytes_received
+        }))
+
+    # Send all data
+    pub async fn send_all(self, data: Bytes) -> Result<TcpConnection, IoError>:
+        let mut conn = self
+        let mut offset: u64 = 0
+        let total = data.len()
+        while offset < total:
+            let slice = data.slice(offset, total)
+            let (n, new_conn) = await conn.send(slice)?
+            offset = offset + (n as u64)
+            conn = new_conn
+        return Ok(conn)
+
+    # Receive data, return (data, new_connection_state)
+    pub async fn recv(self, max_bytes: ByteCount) -> Result<(Bytes, TcpConnection), IoError>:
+        let data = native_tcp_recv(self.handle, max_bytes)?
+        let n = (data.len() as ByteCount)
+        return Ok((data, TcpConnection {
+            handle: self.handle,
+            local_addr: self.local_addr,
+            peer_addr: self.peer_addr,
+            bytes_sent: self.bytes_sent,
+            bytes_received: self.bytes_received + n
+        }))
+
+    # Receive until buffer is full or connection closes
+    pub async fn recv_all(self, expected: ByteCount) -> Result<(Bytes, TcpConnection), IoError>:
+        let mut result = Bytes::empty()
+        let mut conn = self
+        while (result.len() as ByteCount) < expected:
+            let remaining = expected - (result.len() as ByteCount)
+            let (chunk, new_conn) = await conn.recv(remaining)?
+            if chunk.is_empty():
+                break
+            result = result.append(chunk)
+            conn = new_conn
+        return Ok((result, conn))
+
+    # Close connection
+    pub async fn close(self) -> Result<(), IoError>:
+        return native_tcp_close(self.handle)
+
+# TCP listener state (immutable)
+struct TcpListener:
+    handle: i64
+    local_addr: SocketAddr
+    accepted_count: u64
+
+impl TcpListener:
+    # Bind to address
+    pub async fn bind(addr: SocketAddr) -> Result<TcpListener, IoError>:
+        let handle = native_tcp_bind(addr)?
+        return Ok(TcpListener {
+            handle: handle,
+            local_addr: addr,
+            accepted_count: 0
+        })
+
+    fn local_addr(self) -> SocketAddr:
+        self.local_addr
+
+    fn accepted_count(self) -> u64:
+        self.accepted_count
+
+    # Accept connection, return (connection, new_listener_state)
+    pub async fn accept(self) -> Result<(TcpConnection, TcpListener), IoError>:
+        let (conn_handle, peer_addr) = native_tcp_accept(self.handle)?
+        let conn = TcpConnection {
+            handle: conn_handle,
+            local_addr: self.local_addr,
+            peer_addr: peer_addr,
+            bytes_sent: 0_bytes,
+            bytes_received: 0_bytes
+        }
+        let new_listener = TcpListener {
+            handle: self.handle,
+            local_addr: self.local_addr,
+            accepted_count: self.accepted_count + 1
+        }
+        return Ok((conn, new_listener))
+
+    # Close listener
+    pub async fn close(self) -> Result<(), IoError>:
+        return native_tcp_listener_close(self.handle)
+
+# ===============================
+# Native function declarations
+# ===============================
+
+extern fn native_tcp_connect(addr: SocketAddr) -> Result<i64, IoError>
+extern fn native_tcp_bind(addr: SocketAddr) -> Result<i64, IoError>
+extern fn native_tcp_accept(handle: i64) -> Result<(i64, SocketAddr), IoError>
+extern fn native_tcp_send(handle: i64, data: &Bytes) -> Result<ByteCount, IoError>
+extern fn native_tcp_recv(handle: i64, max: ByteCount) -> Result<Bytes, IoError>
+extern fn native_tcp_close(handle: i64) -> Result<(), IoError>
+extern fn native_tcp_listener_close(handle: i64) -> Result<(), IoError>
+extern fn native_tcp_local_addr(handle: i64) -> Result<SocketAddr, IoError>

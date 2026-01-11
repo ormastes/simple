@@ -1,0 +1,240 @@
+# Widget Renderer Bridge
+#
+# Connects the widget builder pattern system to the existing async RenderBackend trait.
+# This allows widgets to be rendered through TUI, GUI, and other platform renderers.
+#
+# Architecture:
+#   Widget → WidgetNode → ElementTree → RenderBackend → Platform
+#
+# Usage:
+#   let app = Column::new().child(Text::new("Hello"))
+#   let renderer = WidgetRenderer::new(TuiRenderer::new().await)
+#   await renderer.render_widget(&app)
+
+use core.*
+use ui.widget.*
+use ui.element.*
+use ui.renderer.*  # Existing async RenderBackend trait (includes Event types)
+use ui.widget_context.*
+use ui.state.*
+
+# Widget Renderer - bridges widget system to existing async renderers
+pub struct WidgetRenderer<R: RenderBackend>:
+    # Backend renderer (TUI, HTML, Vulkan, etc.)
+    backend: R
+
+    # Widget context (build context, state, events)
+    context: WidgetContext
+
+    # Current widget tree (for diffing)
+    current_widget: Option<Box<dyn Widget>>
+
+    # Current element tree (cached)
+    current_tree: Option<ElementTree>
+
+    # State for reactive updates
+    dirty: bool
+
+impl<R: RenderBackend> WidgetRenderer<R>:
+    # Create a new widget renderer with backend
+    pub async fn new(backend: R) -> WidgetRenderer<R>:
+        return WidgetRenderer {
+            backend: backend,
+            context: WidgetContext::new(),
+            current_widget: None,
+            current_tree: None,
+            dirty: true
+        }
+
+    # Initialize the renderer
+    pub async fn init(self) -> Future<Result<(), RenderError>>:
+        await self.backend.init()
+
+    # Shutdown the renderer
+    pub async fn shutdown(self) -> Future<Result<(), RenderError>>:
+        await self.backend.shutdown()
+
+    # Get screen dimensions
+    pub fn dimensions(self) -> (u16, u16):
+        return self.backend.dimensions()
+
+    # Render a widget tree
+    pub async fn render_widget(self, widget: &dyn Widget) -> Future<Result<(), RenderError>>:
+        # Build widget to element tree
+        let element_tree = self.build_widget_tree(widget)
+
+        # Render using backend
+        let result = await self.backend.render(&element_tree)
+
+        # Cache tree for diffing
+        if result.is_ok():
+            self.current_tree = Some(element_tree)
+
+        return result
+
+    # Update widget and re-render if changed
+    pub async fn update_widget(self, widget: &dyn Widget) -> Future<Result<(), RenderError>>:
+        # Build new tree
+        let new_tree = self.build_widget_tree(widget)
+
+        # Diff with current tree
+        if let Some(old_tree) = &self.current_tree:
+            let patches = self.diff_trees(old_tree, &new_tree)
+
+            # Apply patches for incremental update
+            let result = await self.backend.apply_patches(&patches)
+
+            if result.is_ok():
+                self.current_tree = Some(new_tree)
+
+            return result
+        else:
+            # No previous tree, full render
+            return await self.render_widget(widget)
+
+    # Clear the screen
+    pub async fn clear(self) -> Future<Result<(), RenderError>>:
+        await self.backend.clear()
+
+    # Flush pending changes
+    pub async fn flush(self) -> Future<Result<(), RenderError>>:
+        await self.backend.flush()
+
+    # Poll for events
+    pub async fn poll_event(self, timeout_ms: u64) -> Future<Result<Option<Event>, RenderError>>:
+        await self.backend.poll_event(timeout_ms)
+
+    # Read next event (blocking)
+    pub async fn read_event(self) -> Future<Result<Event, RenderError>>:
+        await self.backend.read_event()
+
+    # Run widget with event loop
+    pub async fn run(self, widget: &dyn Widget, on_event: fn(Event) -> bool) -> Future<Result<(), RenderError>>:
+        # Initialize
+        await self.init()?
+
+        # Initial render
+        await self.render_widget(widget)?
+
+        # Event loop
+        loop:
+            match await self.poll_event(100):
+                case Ok(Some(event)):
+                    # Handle event
+                    let should_quit = on_event(event)
+
+                    # Re-render if state changed
+                    if self.dirty:
+                        await self.update_widget(widget)?
+                        self.dirty = false
+
+                    if should_quit:
+                        break
+                case Ok(None):
+                    # Timeout, continue
+                    pass
+                case Err(e):
+                    return Err(e)
+
+        # Cleanup
+        await self.shutdown()
+        return Ok(())
+
+# Internal implementation
+impl<R: RenderBackend> WidgetRenderer<R>:
+    # Build widget tree to element tree
+    fn build_widget_tree(self, widget: &dyn Widget) -> ElementTree:
+        # Create build context
+        let mut build_ctx = self.context.build_ctx.clone()
+
+        # Build widget to widget node
+        let widget_node = widget.build(&mut build_ctx)
+
+        # Convert to element tree
+        return widget_node.to_element_tree()
+
+    # Diff two element trees to generate patches
+    fn diff_trees(self, old_tree: &ElementTree, new_tree: &ElementTree) -> PatchSet:
+        # Use existing diff algorithm from ui/diff.spl
+        return diff_elements(old_tree.root(), new_tree.root())
+
+    # Mark renderer as dirty (needs re-render)
+    pub fn mark_dirty(self):
+        self.dirty = true
+
+# Extension to WidgetNode for conversion to ElementTree
+impl WidgetNode:
+    # Convert widget node to element tree
+    pub fn to_element_tree(self) -> ElementTree:
+        # The root element is already built
+        return ElementTree::new(self.root)
+
+# Reactive rendering wrapper
+pub struct ReactiveRenderer<R: RenderBackend>:
+    renderer: WidgetRenderer<R>
+    state_subscriptions: Array<fn()>
+
+impl<R: RenderBackend> ReactiveRenderer<R>:
+    pub async fn new(backend: R) -> ReactiveRenderer<R>:
+        return ReactiveRenderer {
+            renderer: WidgetRenderer::new(backend).await,
+            state_subscriptions: []
+        }
+
+    # Subscribe to state changes
+    pub fn watch_state<T>(self, state: &State<T>, on_change: fn(T)):
+        state.subscribe(|value|:
+            on_change(value)
+            self.renderer.mark_dirty()
+        )
+
+    # Render with automatic re-render on state changes
+    pub async fn render_reactive(self, widget: &dyn Widget) -> Future<Result<(), RenderError>>:
+        await self.renderer.render_widget(widget)
+
+# Helper: Create element tree from widget
+pub fn build_element_tree(widget: &dyn Widget) -> ElementTree:
+    let mut ctx = BuildContext::new()
+    let node = widget.build(&mut ctx)
+    return node.to_element_tree()
+
+# Helper: Create widget renderer with TUI backend
+pub async fn tui_widget_renderer() -> WidgetRenderer<TuiRenderer>:
+    use ui.tui.renderer.*
+    let tui = TuiRenderer::new().await
+    return WidgetRenderer::new(tui).await
+
+# Example usage:
+#
+# # Create a simple counter app
+# fn counter_app(count: i32) -> Box<dyn Widget>:
+#     return Column::new()
+#         .spacing(4)
+#         .padding(EdgeInsets::all(8))
+#         .children([
+#             Text::new("Counter App").style(TextStyle::new().bold()),
+#             Text::new(format!("Count: {}", count)),
+#             Row::new()
+#                 .spacing(4)
+#                 .children([
+#                     Button::new("Decrement").on_click(|| count -= 1),
+#                     Button::new("Reset").on_click(|| count = 0),
+#                     Button::new("Increment").on_click(|| count += 1)
+#                 ])
+#         ])
+#
+# # Run the app
+# let mut count = 0
+# let renderer = tui_widget_renderer().await
+# await renderer.run(&counter_app(count), |event|:
+#     match event:
+#         case Event::Key(key):
+#             if key.is_escape():
+#                 return true  # Quit
+#             if key.char() == Some('+'):
+#                 count += 1
+#             if key.char() == Some('-'):
+#                 count -= 1
+#         case _: pass
+#     return false  # Continue
+# )

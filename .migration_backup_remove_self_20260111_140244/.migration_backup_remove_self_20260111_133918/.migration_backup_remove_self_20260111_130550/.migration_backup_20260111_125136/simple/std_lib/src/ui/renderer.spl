@@ -1,0 +1,608 @@
+# Renderer - Abstract Rendering Backend Trait
+#
+# This module defines the RenderBackend trait that abstracts
+# rendering for different platforms (TUI, GUI, etc.). Each
+# platform provides its own implementation.
+
+use core.*
+use ui.element.*
+use ui.attrs.*
+use ui.patchset.*
+
+# Abstract renderer trait (Async API)
+# Implementations: TUI (terminal), GUI (windowed), HTML (SSR), Vulkan (GPU)
+#
+# All rendering operations are async to enable:
+#   - Non-blocking UI updates
+#   - Parallel CPU and GPU work
+#   - Better responsiveness
+#   - JavaScript-like async/await patterns
+trait RenderBackend:
+    # Initialize the renderer (async - may load resources, compile shaders)
+    async fn init(self) -> Future<Result<(), RenderError>>
+
+    # Shutdown the renderer (async - may wait for GPU idle)
+    async fn shutdown(self) -> Future<Result<(), RenderError>>
+
+    # Get screen/window dimensions (sync - just reading state)
+    fn dimensions(self) -> (u16, u16)
+
+    # Render an element tree (async - GPU work happens in parallel)
+    async fn render(self, tree: &ElementTree) -> Future<Result<(), RenderError>>
+
+    # Apply a patch set to the current view (async - incremental GPU updates)
+    async fn apply_patches(self, patches: &PatchSet) -> Future<Result<(), RenderError>>
+
+    # Clear the screen/window (async - GPU clear operation)
+    async fn clear(self) -> Future<Result<(), RenderError>>
+
+    # Flush pending changes to display (async - wait for GPU completion)
+    async fn flush(self) -> Future<Result<(), RenderError>>
+
+    # Check if an event is available (async - may wait on I/O)
+    async fn poll_event(self, timeout_ms: u64) -> Future<Result<Option<Event>, RenderError>>
+
+    # Read the next event (async - blocks until event arrives)
+    async fn read_event(self) -> Future<Result<Event, RenderError>>
+
+# Rendering error types
+pub enum RenderError:
+    NotInitialized
+    AlreadyInitialized
+    IoError(String)
+    InvalidElement(String)
+    OutOfBounds
+    UnsupportedFeature(String)
+
+impl RenderError:
+    pub fn message(self) -> &str:
+        match self:
+            case NotInitialized: return "renderer not initialized"
+            case AlreadyInitialized: return "renderer already initialized"
+            case IoError(msg): return "I/O error: {msg}"
+            case InvalidElement(msg): return "invalid element: {msg}"
+            case OutOfBounds: return "coordinates out of bounds"
+            case UnsupportedFeature(msg): return "unsupported feature: {msg}"
+
+    pub fn to_string(self) -> String:
+        """Convert render error to string."""
+        match self:
+            case NotInitialized: "not-initialized"
+            case AlreadyInitialized: "already-initialized"
+            case IoError(_): "io-error"
+            case InvalidElement(_): "invalid-element"
+            case OutOfBounds: "out-of-bounds"
+            case UnsupportedFeature(_): "unsupported-feature"
+
+    pub fn description(self) -> String:
+        """Get render error description."""
+        return self.message().to_string()
+
+    pub fn summary(self) -> String:
+        """Get render error summary."""
+        let name = self.to_string()
+        let msg = self.message()
+        return "RenderError: {name} ({msg})"
+
+# UI Event types
+pub enum Event:
+    # Keyboard events
+    Key(KeyEvent)
+    # Mouse events
+    Mouse(MouseEvent)
+    # Window/terminal resize
+    Resize { width: u16, height: u16 }
+    # Focus change
+    FocusGained
+    FocusLost
+    # Paste from clipboard
+    Paste(String)
+
+impl Event:
+    pub fn to_string(self) -> String:
+        """Convert event to string."""
+        match self:
+            case Key(_): "key"
+            case Mouse(_): "mouse"
+            case Resize { .. }: "resize"
+            case FocusGained: "focus-gained"
+            case FocusLost: "focus-lost"
+            case Paste(_): "paste"
+
+    pub fn description(self) -> String:
+        """Get event description."""
+        match self:
+            case Key(_): "Keyboard event"
+            case Mouse(_): "Mouse event"
+            case Resize { width, height }: "Window resize to {width}x{height}"
+            case FocusGained: "Focus gained"
+            case FocusLost: "Focus lost"
+            case Paste(_): "Clipboard paste"
+
+    pub fn is_key(self) -> bool:
+        """Check if event is Key."""
+        match self:
+            case Key(_): true
+            case _: false
+
+    pub fn is_mouse(self) -> bool:
+        """Check if event is Mouse."""
+        match self:
+            case Mouse(_): true
+            case _: false
+
+    pub fn is_resize(self) -> bool:
+        """Check if event is Resize."""
+        match self:
+            case Resize { .. }: true
+            case _: false
+
+    pub fn is_focus_gained(self) -> bool:
+        """Check if event is FocusGained."""
+        match self:
+            case FocusGained: true
+            case _: false
+
+    pub fn is_focus_lost(self) -> bool:
+        """Check if event is FocusLost."""
+        match self:
+            case FocusLost: true
+            case _: false
+
+    pub fn is_paste(self) -> bool:
+        """Check if event is Paste."""
+        match self:
+            case Paste(_): true
+            case _: false
+
+    pub fn is_focus_event(self) -> bool:
+        """Check if event is focus-related."""
+        match self:
+            case FocusGained: true
+            case FocusLost: true
+            case _: false
+
+    pub fn is_input_event(self) -> bool:
+        """Check if event is user input (Key, Mouse, or Paste)."""
+        match self:
+            case Key(_): true
+            case Mouse(_): true
+            case Paste(_): true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get event summary."""
+        let name = self.to_string()
+        let desc = self.description()
+        return "Event: {name} ({desc})"
+
+# Keyboard event
+pub struct KeyEvent:
+    code: KeyCode
+    modifiers: KeyModifiers
+
+pub enum KeyCode:
+    Char(char)
+    Enter
+    Escape
+    Backspace
+    Tab
+    Delete
+    Insert
+    Home
+    End
+    PageUp
+    PageDown
+    Up
+    Down
+    Left
+    Right
+    F(u8)  # F1-F12
+    Null
+
+impl KeyCode:
+    pub fn to_string(self) -> String:
+        """Convert key code to string."""
+        match self:
+            case Char(c): "char-{c}"
+            case Enter: "enter"
+            case Escape: "escape"
+            case Backspace: "backspace"
+            case Tab: "tab"
+            case Delete: "delete"
+            case Insert: "insert"
+            case Home: "home"
+            case End: "end"
+            case PageUp: "page-up"
+            case PageDown: "page-down"
+            case Up: "up"
+            case Down: "down"
+            case Left: "left"
+            case Right: "right"
+            case F(n): "f{n}"
+            case Null: "null"
+
+    pub fn description(self) -> String:
+        """Get key code description."""
+        match self:
+            case Char(c): "Character key: {c}"
+            case Enter: "Enter key"
+            case Escape: "Escape key"
+            case Backspace: "Backspace key"
+            case Tab: "Tab key"
+            case Delete: "Delete key"
+            case Insert: "Insert key"
+            case Home: "Home key"
+            case End: "End key"
+            case PageUp: "Page Up key"
+            case PageDown: "Page Down key"
+            case Up: "Up arrow"
+            case Down: "Down arrow"
+            case Left: "Left arrow"
+            case Right: "Right arrow"
+            case F(n): "Function key F{n}"
+            case Null: "Null key"
+
+    pub fn is_char(self) -> bool:
+        """Check if key is Char."""
+        match self:
+            case Char(_): true
+            case _: false
+
+    pub fn is_arrow(self) -> bool:
+        """Check if key is arrow key."""
+        match self:
+            case Up: true
+            case Down: true
+            case Left: true
+            case Right: true
+            case _: false
+
+    pub fn is_function_key(self) -> bool:
+        """Check if key is function key."""
+        match self:
+            case F(_): true
+            case _: false
+
+    pub fn is_navigation(self) -> bool:
+        """Check if key is navigation key."""
+        match self:
+            case Up: true
+            case Down: true
+            case Left: true
+            case Right: true
+            case Home: true
+            case End: true
+            case PageUp: true
+            case PageDown: true
+            case _: false
+
+    pub fn is_editing(self) -> bool:
+        """Check if key is editing key."""
+        match self:
+            case Backspace: true
+            case Delete: true
+            case Insert: true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get key code summary."""
+        let name = self.to_string()
+        let desc = self.description()
+        let mut props = []
+        if self.is_char():
+            props.push("character")
+        if self.is_arrow():
+            props.push("arrow")
+        if self.is_function_key():
+            props.push("function")
+        if self.is_navigation():
+            props.push("navigation")
+        if self.is_editing():
+            props.push("editing")
+        let props_str = if props.len() > 0: ", {props.join(', ')}" else: ""
+        return "KeyCode: {name} ({desc}{props_str})"
+
+pub struct KeyModifiers:
+    shift: bool
+    ctrl: bool
+    alt: bool
+
+impl KeyModifiers:
+    pub fn none() -> KeyModifiers:
+        return KeyModifiers { shift: false, ctrl: false, alt: false }
+
+    pub fn shift() -> KeyModifiers:
+        return KeyModifiers { shift: true, ctrl: false, alt: false }
+
+    pub fn ctrl() -> KeyModifiers:
+        return KeyModifiers { shift: false, ctrl: true, alt: false }
+
+    pub fn alt() -> KeyModifiers:
+        return KeyModifiers { shift: false, ctrl: false, alt: true }
+
+    pub fn has_shift(self) -> bool:
+        return self.shift
+
+    pub fn has_ctrl(self) -> bool:
+        return self.ctrl
+
+    pub fn has_alt(self) -> bool:
+        return self.alt
+
+impl KeyEvent:
+    pub fn new(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent:
+        return KeyEvent { code: code, modifiers: modifiers }
+
+    # Check if this is a character key
+    pub fn is_char(self) -> bool:
+        match self.code:
+            case Char(_): return true
+            case _: return false
+
+    # Get the character if this is a char key
+    pub fn char(self) -> Option<char>:
+        match self.code:
+            case Char(c): return Some(c)
+            case _: return None
+
+    # Common key checks
+    pub fn is_enter(self) -> bool:
+        return self.code == KeyCode::Enter
+
+    pub fn is_escape(self) -> bool:
+        return self.code == KeyCode::Escape
+
+    pub fn is_tab(self) -> bool:
+        return self.code == KeyCode::Tab
+
+    pub fn is_backspace(self) -> bool:
+        return self.code == KeyCode::Backspace
+
+# Mouse event
+pub struct MouseEvent:
+    kind: MouseEventKind
+    column: u16
+    row: u16
+    modifiers: KeyModifiers
+
+pub enum MouseEventKind:
+    Down(MouseButton)
+    Up(MouseButton)
+    Drag(MouseButton)
+    Moved
+    ScrollDown
+    ScrollUp
+    ScrollLeft
+    ScrollRight
+
+impl MouseEventKind:
+    pub fn to_string(self) -> String:
+        """Convert mouse event kind to string."""
+        match self:
+            case Down(_): "down"
+            case Up(_): "up"
+            case Drag(_): "drag"
+            case Moved: "moved"
+            case ScrollDown: "scroll-down"
+            case ScrollUp: "scroll-up"
+            case ScrollLeft: "scroll-left"
+            case ScrollRight: "scroll-right"
+
+    pub fn description(self) -> String:
+        """Get mouse event kind description."""
+        match self:
+            case Down(btn): "Mouse button down: {btn.to_string()}"
+            case Up(btn): "Mouse button up: {btn.to_string()}"
+            case Drag(btn): "Mouse drag: {btn.to_string()}"
+            case Moved: "Mouse moved"
+            case ScrollDown: "Scroll down"
+            case ScrollUp: "Scroll up"
+            case ScrollLeft: "Scroll left"
+            case ScrollRight: "Scroll right"
+
+    pub fn is_down(self) -> bool:
+        """Check if event is Down."""
+        match self:
+            case Down(_): true
+            case _: false
+
+    pub fn is_up(self) -> bool:
+        """Check if event is Up."""
+        match self:
+            case Up(_): true
+            case _: false
+
+    pub fn is_drag(self) -> bool:
+        """Check if event is Drag."""
+        match self:
+            case Drag(_): true
+            case _: false
+
+    pub fn is_moved(self) -> bool:
+        """Check if event is Moved."""
+        match self:
+            case Moved: true
+            case _: false
+
+    pub fn is_scroll(self) -> bool:
+        """Check if event is scroll."""
+        match self:
+            case ScrollDown: true
+            case ScrollUp: true
+            case ScrollLeft: true
+            case ScrollRight: true
+            case _: false
+
+    pub fn is_click(self) -> bool:
+        """Check if event is click (Down or Up)."""
+        match self:
+            case Down(_): true
+            case Up(_): true
+            case _: false
+
+    pub fn is_button_event(self) -> bool:
+        """Check if event involves a button."""
+        match self:
+            case Down(_): true
+            case Up(_): true
+            case Drag(_): true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get mouse event kind summary."""
+        let name = self.to_string()
+        let desc = self.description()
+        let mut props = []
+        if self.is_click():
+            props.push("click")
+        if self.is_scroll():
+            props.push("scroll")
+        if self.is_button_event():
+            props.push("button")
+        let props_str = if props.len() > 0: ", {props.join(', ')}" else: ""
+        return "MouseEventKind: {name} ({desc}{props_str})"
+
+pub enum MouseButton:
+    Left
+    Right
+    Middle
+
+impl MouseButton:
+    pub fn to_string(self) -> String:
+        """Convert mouse button to string."""
+        match self:
+            case Left: "left"
+            case Right: "right"
+            case Middle: "middle"
+
+    pub fn description(self) -> String:
+        """Get mouse button description."""
+        match self:
+            case Left: "Left mouse button (primary)"
+            case Right: "Right mouse button (secondary/context)"
+            case Middle: "Middle mouse button (scroll wheel)"
+
+    pub fn is_left(self) -> bool:
+        """Check if button is Left."""
+        match self:
+            case Left: true
+            case _: false
+
+    pub fn is_right(self) -> bool:
+        """Check if button is Right."""
+        match self:
+            case Right: true
+            case _: false
+
+    pub fn is_middle(self) -> bool:
+        """Check if button is Middle."""
+        match self:
+            case Middle: true
+            case _: false
+
+    pub fn is_primary(self) -> bool:
+        """Check if button is primary (Left)."""
+        return self.is_left()
+
+    pub fn summary(self) -> String:
+        """Get mouse button summary."""
+        let name = self.to_string()
+        let desc = self.description()
+        return "MouseButton: {name} ({desc})"
+
+impl MouseEvent:
+    pub fn new(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent:
+        return MouseEvent {
+            kind: kind,
+            column: col,
+            row: row,
+            modifiers: KeyModifiers::none()
+        }
+
+    pub fn position(self) -> (u16, u16):
+        return (self.column, self.row)
+
+    pub fn is_click(self) -> bool:
+        match self.kind:
+            case Down(_): return true
+            case _: return false
+
+    pub fn is_scroll(self) -> bool:
+        match self.kind:
+            case ScrollDown | ScrollUp | ScrollLeft | ScrollRight:
+                return true
+            case _:
+                return false
+
+# Computed layout for an element
+pub struct Layout:
+    # Position relative to parent
+    x: u16
+    y: u16
+    # Actual dimensions after layout
+    width: u16
+    height: u16
+    # Content area (after border/padding)
+    content_x: u16
+    content_y: u16
+    content_width: u16
+    content_height: u16
+
+impl Layout:
+    pub fn new(x: u16, y: u16, width: u16, height: u16) -> Layout:
+        return Layout {
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            content_x: x,
+            content_y: y,
+            content_width: width,
+            content_height: height
+        }
+
+    # Apply padding to compute content area
+    pub fn with_padding(self, top: u16, right: u16, bottom: u16, left: u16) -> Layout:
+        self.content_x = self.x + left
+        self.content_y = self.y + top
+        self.content_width = if self.width > left + right { self.width - left - right } else { 0 }
+        self.content_height = if self.height > top + bottom { self.height - top - bottom } else { 0 }
+        return self
+
+    # Check if point is inside layout
+    pub fn contains(self, px: u16, py: u16) -> bool:
+        return px >= self.x and px < self.x + self.width
+            and py >= self.y and py < self.y + self.height
+
+    # Check if point is inside content area
+    pub fn contains_content(self, px: u16, py: u16) -> bool:
+        return px >= self.content_x and px < self.content_x + self.content_width
+            and py >= self.content_y and py < self.content_y + self.content_height
+
+# Layout cache for efficient hit testing and rendering
+pub struct LayoutCache:
+    layouts: Dict<u64, Layout>
+
+impl LayoutCache:
+    pub fn new() -> LayoutCache:
+        return LayoutCache { layouts: Dict::new() }
+
+    pub fn set(self, node_id: NodeId, layout: Layout):
+        self.layouts.set(node_id.value(), layout)
+
+    pub fn get(self, node_id: NodeId) -> Option<&Layout>:
+        return self.layouts.get(&node_id.value())
+
+    pub fn clear(self):
+        self.layouts.clear()
+
+    # Find element at position
+    pub fn hit_test(self, x: u16, y: u16) -> Option<NodeId>:
+        # Note: This returns first match, should be called with
+        # elements in z-order (children after parents)
+        let mut hit: Option<NodeId> = None
+        for (id, layout) in &self.layouts:
+            if layout.contains(x, y):
+                hit = Some(NodeId::new(id))
+        return hit

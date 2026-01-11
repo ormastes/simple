@@ -1,0 +1,307 @@
+# Static File Server
+#
+# Serves static files from a directory with proper content types.
+#
+# ## Example
+#
+# ```simple
+# let app = WebApp::new()
+#     .static_files("/assets", "public/")
+#     .static_files("/", "dist/")
+# ```
+
+use units.size.*
+use host.common.fs.*
+use host.common.path.*
+use web.http.request.*
+use web.http.response.*
+use web.router.Context
+
+# MIME type mapping
+pub struct MimeTypes:
+    extensions: Dict<str, str>
+
+impl MimeTypes:
+    pub fn new() -> MimeTypes:
+        let mut m: Dict<str, str> = Dict::new()
+
+        # Text
+        m.insert("html", "text/html; charset=utf-8")
+        m.insert("htm", "text/html; charset=utf-8")
+        m.insert("css", "text/css; charset=utf-8")
+        m.insert("js", "application/javascript; charset=utf-8")
+        m.insert("mjs", "application/javascript; charset=utf-8")
+        m.insert("json", "application/json")
+        m.insert("xml", "application/xml")
+        m.insert("txt", "text/plain; charset=utf-8")
+        m.insert("md", "text/markdown; charset=utf-8")
+        m.insert("csv", "text/csv; charset=utf-8")
+
+        # Images
+        m.insert("png", "image/png")
+        m.insert("jpg", "image/jpeg")
+        m.insert("jpeg", "image/jpeg")
+        m.insert("gif", "image/gif")
+        m.insert("svg", "image/svg+xml")
+        m.insert("ico", "image/x-icon")
+        m.insert("webp", "image/webp")
+        m.insert("avif", "image/avif")
+
+        # Fonts
+        m.insert("woff", "font/woff")
+        m.insert("woff2", "font/woff2")
+        m.insert("ttf", "font/ttf")
+        m.insert("otf", "font/otf")
+        m.insert("eot", "application/vnd.ms-fontobject")
+
+        # Media
+        m.insert("mp3", "audio/mpeg")
+        m.insert("mp4", "video/mp4")
+        m.insert("webm", "video/webm")
+        m.insert("ogg", "audio/ogg")
+        m.insert("wav", "audio/wav")
+
+        # Documents
+        m.insert("pdf", "application/pdf")
+        m.insert("zip", "application/zip")
+        m.insert("gz", "application/gzip")
+        m.insert("tar", "application/x-tar")
+
+        # Web
+        m.insert("wasm", "application/wasm")
+        m.insert("map", "application/json")
+
+        return MimeTypes { extensions: m }
+
+    pub fn get(self, extension: &str) -> &str:
+        return self.extensions.get(&extension.to_lower())
+            .unwrap_or("application/octet-stream")
+
+    pub fn from_path(self, path: &str) -> &str:
+        if let Some(idx) = path.rfind('.'):
+            let ext = path.slice(idx + 1, path.len())
+            return self.get(ext)
+        return "application/octet-stream"
+
+# Global MIME types instance
+let MIME_TYPES: MimeTypes = MimeTypes::new()
+
+# Static file server configuration
+pub struct StaticFileConfig:
+    root_dir: FilePath
+    index_files: Array<str>
+    cache_control: str
+    max_age: u32
+    enable_etag: bool
+    enable_last_modified: bool
+
+impl StaticFileConfig:
+    pub fn new(root: &str) -> StaticFileConfig:
+        return StaticFileConfig {
+            root_dir: FilePath::new(root),
+            index_files: ["index.html", "index.htm"],
+            cache_control: "public",
+            max_age: 3600,
+            enable_etag: true,
+            enable_last_modified: true
+        }
+
+    pub fn with_index(self, files: Array<str>) -> StaticFileConfig:
+        self.index_files = files
+        return self
+
+    pub fn with_cache(self, control: &str, max_age: u32) -> StaticFileConfig:
+        self.cache_control = control.to_string()
+        self.max_age = max_age
+        return self
+
+    pub fn no_cache(self) -> StaticFileConfig:
+        self.cache_control = "no-cache, no-store, must-revalidate".to_string()
+        self.max_age = 0
+        return self
+
+    pub fn immutable(self) -> StaticFileConfig:
+        self.cache_control = "public, immutable".to_string()
+        self.max_age = 31536000  # 1 year
+        return self
+
+    pub fn disable_etag(self) -> StaticFileConfig:
+        self.enable_etag = false
+        return self
+
+# Static file server
+pub struct StaticFileServer:
+    config: StaticFileConfig
+    mime_types: MimeTypes
+
+impl StaticFileServer:
+    pub fn new(root: &str) -> StaticFileServer:
+        return StaticFileServer {
+            config: StaticFileConfig::new(root),
+            mime_types: MimeTypes::new()
+        }
+
+    pub fn with_config(config: StaticFileConfig) -> StaticFileServer:
+        return StaticFileServer {
+            config: config,
+            mime_types: MimeTypes::new()
+        }
+
+    # Serve a file request
+    pub async fn serve(self, path: &str) -> HttpResponse:
+        # Security: Prevent path traversal
+        let clean_path = self.sanitize_path(path)
+        if clean_path.is_none():
+            return HttpResponse::forbidden().text("Forbidden")
+
+        let file_path = self.config.root_dir.join(&clean_path.unwrap())
+
+        # Check if path is a directory
+        if await file_path.is_dir():
+            # Try index files
+            for index in &self.config.index_files:
+                let index_path = file_path.join(index)
+                if await index_path.exists():
+                    return await self.serve_file(&index_path)
+            return HttpResponse::not_found().text("Not Found")
+
+        # Check if file exists
+        if not await file_path.exists():
+            return HttpResponse::not_found().text("Not Found")
+
+        return await self.serve_file(&file_path)
+
+    # Serve a specific file
+    async fn serve_file(self, path: &FilePath) -> HttpResponse:
+        # Read file metadata
+        let metadata = match await path.metadata():
+            case Ok(m): m
+            case Err(_): return HttpResponse::not_found().text("Not Found")
+
+        # Get content type
+        let content_type = self.mime_types.from_path(&path.to_str())
+
+        # Build response headers
+        let mut response = HttpResponse::ok()
+            .content_type(content_type)
+
+        # Cache headers
+        let cache_header = f"{self.config.cache_control}, max-age={self.config.max_age}"
+        response = response.cache_control(&cache_header)
+
+        # ETag
+        if self.config.enable_etag:
+            let etag = self.compute_etag(&metadata)
+            response = response.header("ETag", &etag)
+
+        # Last-Modified
+        if self.config.enable_last_modified:
+            let modified = metadata.modified().format_http_date()
+            response = response.header("Last-Modified", &modified)
+
+        # Read file content
+        match await path.read_bytes():
+            case Ok(bytes):
+                response = response.body(bytes)
+            case Err(_):
+                return HttpResponse::internal_error().text("Failed to read file")
+
+        return response
+
+    # Sanitize path to prevent directory traversal
+    fn sanitize_path(self, path: &str) -> Option<str>:
+        # Remove leading slash
+        let mut clean = path
+        if clean.starts_with('/'):
+            clean = clean.slice(1, clean.len())
+
+        # Check for path traversal attempts
+        if clean.contains(".."):
+            return None
+        if clean.contains("//"):
+            return None
+        if clean.starts_with('/'):
+            return None
+
+        # Normalize path separators
+        clean = clean.replace("\\", "/")
+
+        return Some(clean.to_string())
+
+    # Compute ETag from file metadata
+    fn compute_etag(self, metadata: &FileMetadata) -> str:
+        let size = metadata.size()
+        let modified = metadata.modified().unix_timestamp()
+        return f"\"{size:x}-{modified:x}\""
+
+# Convenience function to serve static files
+pub async fn serve_static(root: &str, path: &str) -> HttpResponse:
+    let server = StaticFileServer::new(root)
+    return await server.serve(path)
+
+# Static file handler for router
+pub fn static_handler(root: &str) -> fn(Context) -> async HttpResponse:
+    let server = StaticFileServer::new(root)
+
+    return async fn(ctx: Context) -> HttpResponse:
+        # Get the wildcard path parameter
+        let path = ctx.param_or("path", "")
+        return await server.serve(path)
+
+# Create static route matcher (for app.spl)
+pub struct StaticRoute:
+    prefix: str
+    server: StaticFileServer
+
+impl StaticRoute:
+    pub fn new(prefix: &str, root: &str) -> StaticRoute:
+        return StaticRoute {
+            prefix: prefix.to_string(),
+            server: StaticFileServer::new(root)
+        }
+
+    pub fn with_config(prefix: &str, config: StaticFileConfig) -> StaticRoute:
+        return StaticRoute {
+            prefix: prefix.to_string(),
+            server: StaticFileServer::with_config(config)
+        }
+
+    # Check if path matches this static route
+    pub fn matches(self, path: &str) -> bool:
+        return path.starts_with(&self.prefix)
+
+    # Extract file path from request path
+    pub fn extract_path(self, path: &str) -> str:
+        if path.len() > self.prefix.len():
+            return path.slice(self.prefix.len(), path.len()).to_string()
+        return ""
+
+    # Serve the request
+    pub async fn serve(self, path: &str) -> HttpResponse:
+        let file_path = self.extract_path(path)
+        return await self.server.serve(&file_path)
+
+# Convenience: serve single file
+pub async fn serve_file(path: &str) -> HttpResponse:
+    let file_path = FilePath::new(path)
+
+    if not await file_path.exists():
+        return HttpResponse::not_found().text("Not Found")
+
+    let mime_types = MimeTypes::new()
+    let content_type = mime_types.from_path(path)
+
+    match await file_path.read_bytes():
+        case Ok(bytes):
+            return HttpResponse::ok()
+                .content_type(content_type)
+                .body(bytes)
+        case Err(_):
+            return HttpResponse::internal_error().text("Failed to read file")
+
+# Serve favicon
+pub async fn serve_favicon(path: &str) -> HttpResponse:
+    let response = await serve_file(path)
+    if response.get_status().is_success():
+        return response.cache_control("public, max-age=604800")  # 1 week
+    return response

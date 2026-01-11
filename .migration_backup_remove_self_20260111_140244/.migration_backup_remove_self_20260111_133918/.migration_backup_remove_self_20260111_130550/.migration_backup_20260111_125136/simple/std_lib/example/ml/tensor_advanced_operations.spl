@@ -1,0 +1,460 @@
+# Advanced Tensor Operations - Reshape, Broadcast, and Memory Profiling
+#
+# Demonstrates advanced tensor dimension inference operations including:
+# - Reshape with element count verification
+# - Broadcasting rules and shape inference
+# - Memory profiling and optimization
+# - Runtime shape verification
+
+print("============================================================")
+print("  ADVANCED TENSOR OPERATIONS")
+print("============================================================")
+print("")
+
+# ============================================================================
+# Core Types
+# ============================================================================
+
+enum Dim:
+    Literal(value: Int)
+    Named(name: String, lo: Int, hi: Int)
+    Var(id: Int)
+    Unknown
+    Broadcast
+
+enum ShapeError:
+    LiteralMismatch(expected: Int, actual: Int)
+    RankMismatch(left_rank: Int, right_rank: Int)
+    MatmulIncompatible(k1: Int, k2: Int)
+    ReshapeMismatch(input_elems: Int, output_elems: Int)
+    InferenceError(msg: String)
+
+class TensorShape:
+    dims: List<Dim>
+
+    fn __init__(self, dims: List<Dim>):
+        self.dims = dims
+
+    fn ndim(self) -> Int:
+        self.dims.len()
+
+enum ShapeResult:
+    Ok(shape: TensorShape)
+    Err(error: ShapeError)
+
+# ============================================================================
+# Utilities
+# ============================================================================
+
+fn dim_to_string(d: Dim) -> String:
+    match d:
+        case Dim.Literal(v):
+            "{v}"
+        case Dim.Named(n, lo, hi):
+            if lo == hi:
+                "{n}={lo}"
+            else:
+                "{n}:{lo}..{hi}"
+        case Dim.Var(id):
+            "α{id}"
+        case Dim.Unknown:
+            "*"
+        case Dim.Broadcast:
+            "?"
+
+fn shape_to_string(shape: TensorShape) -> String:
+    if shape.dims.len() == 0:
+        return "[]"
+
+    let mut result = "["
+    let mut first = true
+    for d in shape.dims:
+        if not first:
+            result = result + ", "
+        result = result + dim_to_string(d)
+        first = false
+    result + "]"
+
+fn count_elements(shape: TensorShape) -> (Int, Int):
+    """Calculate min and max element counts"""
+    let mut min_elems = 1
+    let mut max_elems = 1
+
+    for d in shape.dims:
+        match d:
+            case Dim.Literal(v):
+                min_elems = min_elems * v
+                max_elems = max_elems * v
+            case Dim.Named(_, lo, hi):
+                min_elems = min_elems * lo
+                max_elems = max_elems * hi
+            case _:
+                min_elems = min_elems * 1
+                max_elems = max_elems * 1000
+
+    (min_elems, max_elems)
+
+# ============================================================================
+# Reshape Operation
+# ============================================================================
+
+fn verify_reshape(input: TensorShape, output: TensorShape) -> ShapeResult:
+    """Verify that reshape preserves element count"""
+    let (in_min, in_max) = count_elements(input)
+    let (out_min, out_max) = count_elements(output)
+
+    # Check if ranges overlap
+    if in_max < out_min or out_max < in_min:
+        return ShapeResult.Err(ShapeError.ReshapeMismatch(
+            input_elems: in_min,
+            output_elems: out_min
+        ))
+
+    ShapeResult.Ok(shape: output)
+
+print("Test 1: Reshape Operations")
+print("------------------------------------------------------------")
+
+# Example 1: Simple reshape (matrix to vector)
+let matrix = TensorShape(dims: [Dim.Literal(value: 4), Dim.Literal(value: 6)])
+let vector = TensorShape(dims: [Dim.Literal(value: 24)])
+
+print("Reshape: {shape_to_string(matrix)} -> {shape_to_string(vector)}")
+match verify_reshape(matrix, vector):
+    case ShapeResult.Ok(_):
+        print("OK: Valid reshape (4x6 = 24 elements)")
+    case ShapeResult.Err(e):
+        print("FAIL: Invalid reshape")
+
+print("About to start Example 2...")
+
+# Example 2: Reshape with batch dimension
+let batched_input = TensorShape(dims: [
+    Dim.Named(name: "batch", lo: 1, hi: 64),
+    Dim.Literal(value: 784)
+])
+let reshaped = TensorShape(dims: [
+    Dim.Named(name: "batch", lo: 1, hi: 64),
+    Dim.Literal(value: 28),
+    Dim.Literal(value: 28)
+])
+
+print("Reshape: {shape_to_string(batched_input)} -> {shape_to_string(reshaped)}")
+match verify_reshape(batched_input, reshaped):
+    case ShapeResult.Ok(_):
+        print("OK: Valid reshape (784 = 28x28)")
+    case ShapeResult.Err(e):
+        print("FAIL: Invalid reshape")
+
+# Example 3: Invalid reshape (element count mismatch)
+let input_bad = TensorShape(dims: [Dim.Literal(value: 10), Dim.Literal(value: 5)])
+let output_bad = TensorShape(dims: [Dim.Literal(value: 12), Dim.Literal(value: 4)])
+
+print("Reshape: {shape_to_string(input_bad)} -> {shape_to_string(output_bad)}")
+match verify_reshape(input_bad, output_bad):
+    case ShapeResult.Ok(_):
+        print("FAIL: Should have failed!")
+    case ShapeResult.Err(e):
+        print("OK: Correctly rejected (50 != 48 elements)")
+
+print("")
+
+# ============================================================================
+# Broadcasting Operations
+# ============================================================================
+
+fn can_broadcast(d1: Dim, d2: Dim) -> Bool:
+    """Check if two dimensions can broadcast"""
+    match d1:
+        case Dim.Literal(1):
+            true
+        case Dim.Literal(v1):
+            match d2:
+                case Dim.Literal(1):
+                    true
+                case Dim.Literal(v2):
+                    v1 == v2
+                case _:
+                    true
+        case _:
+            true
+
+fn infer_broadcast_dim(d1: Dim, d2: Dim) -> Dim:
+    """Infer result dimension from broadcasting"""
+    match d1:
+        case Dim.Literal(1):
+            d2
+        case Dim.Literal(v1):
+            match d2:
+                case Dim.Literal(1):
+                    d1
+                case Dim.Literal(v2):
+                    if v1 == v2:
+                        d1
+                    else:
+                        Dim.Unknown
+                case _:
+                    d1
+        case Dim.Named(n, lo, hi):
+            d1
+        case _:
+            Dim.Unknown
+
+fn broadcast_shapes(s1: TensorShape, s2: TensorShape) -> ShapeResult:
+    """Compute broadcast result shape"""
+    let n1 = s1.ndim()
+    let n2 = s2.ndim()
+    let max_ndim = if n1 > n2: n1 else: n2
+
+    let mut result_dims: List<Dim> = []
+
+    let mut i = 0
+    while i < max_ndim:
+        let idx1 = n1 - 1 - i
+        let idx2 = n2 - 1 - i
+
+        let d1: Dim
+        let d2: Dim
+
+        if idx1 >= 0:
+            d1 = s1.dims[idx1]
+        else:
+            d1 = Dim.Literal(value: 1)
+
+        if idx2 >= 0:
+            d2 = s2.dims[idx2]
+        else:
+            d2 = Dim.Literal(value: 1)
+
+        if can_broadcast(d1, d2):
+            result_dims.push(infer_broadcast_dim(d1, d2))
+        else:
+            return ShapeResult.Err(ShapeError.InferenceError(msg: "Cannot broadcast dimensions"))
+
+        i = i + 1
+
+    # Reverse to get correct order
+    let mut final_dims: List<Dim> = []
+    let mut j = result_dims.len() - 1
+    while j >= 0:
+        final_dims.push(result_dims[j])
+        j = j - 1
+
+    ShapeResult.Ok(shape: TensorShape(dims: final_dims))
+
+print("Test 2: Broadcasting Operations")
+print("------------------------------------------------------------")
+
+# Example 1: Scalar broadcast
+let scalar = TensorShape(dims: [])
+let matrix2 = TensorShape(dims: [Dim.Literal(value: 3), Dim.Literal(value: 4)])
+
+print("Broadcast: scalar + {shape_to_string(matrix2)}")
+print("OK: Scalar broadcasts to any shape -> {shape_to_string(matrix2)}")
+
+# Example 2: Vector broadcast to matrix
+let vector_shape = TensorShape(dims: [Dim.Literal(value: 1), Dim.Literal(value: 4)])
+let matrix_shape = TensorShape(dims: [Dim.Literal(value: 3), Dim.Literal(value: 4)])
+
+print("Broadcast: {shape_to_string(vector_shape)} + {shape_to_string(matrix_shape)}")
+match broadcast_shapes(vector_shape, matrix_shape):
+    case ShapeResult.Ok(result):
+        print("OK: Result: {shape_to_string(result)}")
+    case ShapeResult.Err(e):
+        print("FAIL: Broadcast failed")
+
+# Example 3: Incompatible broadcast
+let a = TensorShape(dims: [Dim.Literal(value: 3), Dim.Literal(value: 5)])
+let b = TensorShape(dims: [Dim.Literal(value: 3), Dim.Literal(value: 4)])
+
+print("Broadcast: {shape_to_string(a)} + {shape_to_string(b)}")
+match broadcast_shapes(a, b):
+    case ShapeResult.Ok(result):
+        print("FAIL: Should have failed!")
+    case ShapeResult.Err(e):
+        print("OK: Correctly rejected (5 != 4)")
+
+print("")
+
+# ============================================================================
+# Memory Profiling
+# ============================================================================
+
+class MemoryProfile:
+    shape_name: String
+    shape: TensorShape
+    min_bytes: Int
+    max_bytes: Int
+    min_mb: Int
+    max_mb: Int
+
+    fn __init__(self, name: String, shape: TensorShape, elem_size: Int):
+        let (min_e, max_e) = count_elements(shape)
+        self.shape_name = name
+        self.shape = shape
+        self.min_bytes = min_e * elem_size
+        self.max_bytes = max_e * elem_size
+        self.min_mb = self.min_bytes / (1024 * 1024)
+        self.max_mb = self.max_bytes / (1024 * 1024)
+
+    fn to_string(self) -> String:
+        let shape_str = shape_to_string(self.shape)
+        if self.min_mb == self.max_mb:
+            "{self.shape_name}: {shape_str} = {self.min_mb} MB"
+        else:
+            "{self.shape_name}: {shape_str} = {self.min_mb}-{self.max_mb} MB"
+
+print("Test 3: Memory Profiling")
+print("------------------------------------------------------------")
+
+let elem_size = 4  # Float32
+
+# CNN layers
+let cnn_layers = [
+    MemoryProfile(
+        name: "Input (NCHW)",
+        shape: TensorShape(dims: [
+            Dim.Named(name: "batch", lo: 1, hi: 64),
+            Dim.Literal(value: 3),
+            Dim.Literal(value: 224),
+            Dim.Literal(value: 224)
+        ]),
+        elem_size: elem_size
+    ),
+    MemoryProfile(
+        name: "Conv1 Output",
+        shape: TensorShape(dims: [
+            Dim.Named(name: "batch", lo: 1, hi: 64),
+            Dim.Literal(value: 64),
+            Dim.Literal(value: 112),
+            Dim.Literal(value: 112)
+        ]),
+        elem_size: elem_size
+    ),
+    MemoryProfile(
+        name: "Conv2 Output",
+        shape: TensorShape(dims: [
+            Dim.Named(name: "batch", lo: 1, hi: 64),
+            Dim.Literal(value: 128),
+            Dim.Literal(value: 56),
+            Dim.Literal(value: 56)
+        ]),
+        elem_size: elem_size
+    ),
+    MemoryProfile(
+        name: "Flattened",
+        shape: TensorShape(dims: [
+            Dim.Named(name: "batch", lo: 1, hi: 64),
+            Dim.Literal(value: 401408)
+        ]),
+        elem_size: elem_size
+    )
+]
+
+print("CNN Memory Profile (per layer):")
+for layer in cnn_layers:
+    print("  {layer.to_string()}")
+
+# Calculate total
+let mut total_min = 0
+let mut total_max = 0
+for layer in cnn_layers:
+    total_min = total_min + layer.min_mb
+    total_max = total_max + layer.max_mb
+
+print("")
+print("Total Memory: {total_min}-{total_max} MB")
+print("Peak batch=64: {total_max} MB")
+print("")
+
+# ============================================================================
+# Runtime Shape Verification
+# ============================================================================
+
+fn verify_runtime_shape(actual: List<Int>, expected: TensorShape) -> Bool:
+    """Verify actual runtime shape matches expected constraints"""
+    if actual.len() != expected.ndim():
+        return false
+
+    let mut i = 0
+    while i < actual.len():
+        let actual_dim = actual[i]
+        let expected_dim = expected.dims[i]
+
+        let valid: Bool
+        match expected_dim:
+            case Dim.Literal(v):
+                valid = (actual_dim == v)
+            case Dim.Named(_, lo, hi):
+                valid = (actual_dim >= lo and actual_dim <= hi)
+            case _:
+                valid = true
+
+        if not valid:
+            return false
+
+        i = i + 1
+
+    true
+
+print("Test 4: Runtime Shape Verification")
+print("------------------------------------------------------------")
+
+let expected_shape = TensorShape(dims: [
+    Dim.Named(name: "batch", lo: 1, hi: 64),
+    Dim.Literal(value: 784)
+])
+
+# Valid shapes
+let valid_shapes = [
+    [32, 784],
+    [1, 784],
+    [64, 784]
+]
+
+print("Expected: {shape_to_string(expected_shape)}")
+print("")
+
+for actual in valid_shapes:
+    let actual_str = "[{actual[0]}, {actual[1]}]"
+    if verify_runtime_shape(actual, expected_shape):
+        print("OK: {actual_str} matches")
+    else:
+        print("FAIL: {actual_str} rejected")
+
+# Invalid shapes
+let invalid_shapes = [
+    [65, 784],
+    [32, 512],
+    [0, 784]
+]
+
+for actual in invalid_shapes:
+    let actual_str = "[{actual[0]}, {actual[1]}]"
+    if verify_runtime_shape(actual, expected_shape):
+        print("FAIL: {actual_str} should have been rejected")
+    else:
+        print("OK: {actual_str} correctly rejected")
+
+print("")
+
+# ============================================================================
+# Summary
+# ============================================================================
+
+print("============================================================")
+print("  SUMMARY")
+print("============================================================")
+print("")
+print("Demonstrated advanced operations:")
+print("  OK: Reshape with element count verification")
+print("  OK: Broadcasting rules and shape inference")
+print("  OK: Memory profiling for CNN architectures")
+print("  OK: Runtime shape constraint verification")
+print("")
+print("Key Capabilities:")
+print("  • Compile-time reshape validation")
+print("  • Numpy-style broadcasting semantics")
+print("  • Memory estimation with min/max bounds")
+print("  • Runtime constraint checking")
+print("============================================================")

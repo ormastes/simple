@@ -1,0 +1,77 @@
+# Trait Implementations and Context Managers
+#
+# Standard trait implementations for File and context manager support.
+
+use core.traits.*
+use host.common.io.*
+
+import file.File
+import mmap.MmapRegion
+
+# ============================================
+# Trait Implementations
+# ============================================
+
+impl Read for File:
+    fn read(self, buf: &mut [u8]) -> Result<usize, IoError>:
+        let mut bytes = Bytes::from_slice(buf)
+        match native_file_read(self.handle, &mut bytes):
+            case Ok(count):
+                buf.copy_from_slice(&bytes.as_slice())
+                Ok(count as usize)
+            case Err(e): Err(e)
+
+impl Write for File:
+    fn write(self, buf: &[u8]) -> Result<usize, IoError>:
+        let bytes = Bytes::from_slice(buf)
+        match native_file_write(self.handle, &bytes):
+            case Ok(count): Ok(count as usize)
+            case Err(e): Err(e)
+
+    fn flush(self) -> Result<(), IoError>:
+        native_file_flush(self.handle)
+
+impl Seek for File:
+    fn seek(self, pos: core.traits.SeekFrom) -> Result<u64, IoError>:
+        let local_pos = match pos:
+            case core.traits.SeekFrom::Start(n): SeekFrom::Start(n)
+            case core.traits.SeekFrom::End(n): SeekFrom::End(n)
+            case core.traits.SeekFrom::Current(n): SeekFrom::Current(n)
+        match native_file_seek(self.handle, local_pos):
+            case Ok(count): Ok(count as u64)
+            case Err(e): Err(e)
+
+impl Drop for File:
+    fn drop(self):
+        native_file_close(self.handle)
+
+# ============================================
+# Context Manager Implementations
+# ============================================
+
+# Context manager for MmapRegion (sync)
+impl ContextManager<MmapRegion> for MmapRegion:
+    fn __enter__(self) -> MmapRegion:
+        return self
+
+    fn __exit__(self, exc: Option<Exception>) -> bool:
+        let _ = self.close()
+        return false
+
+# Async context manager for MmapRegion
+impl AsyncContextManager<MmapRegion> for MmapRegion:
+    async fn __aenter__(self) -> MmapRegion:
+        return self
+
+    async fn __aexit__(self, exc: Option<Exception>) -> bool:
+        let _ = self.close()
+        return false
+
+# Async context manager for File
+impl AsyncContextManager<File> for File:
+    async fn __aenter__(self) -> File:
+        return self
+
+    async fn __aexit__(self, exc: Option<Exception>) -> bool:
+        let _ = await self.close()
+        return false
