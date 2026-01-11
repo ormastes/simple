@@ -1987,49 +1987,85 @@ Extend `call_method_on_value()` to:
 **Type:** Bug
 **Priority:** High
 **Discovered:** 2026-01-05
+**Verified:** 2026-01-11
 **Component:** Interpreter (enum methods)
 
 ### Description
 
-When an enum has a method that matches on `self`, the match never succeeds - all patterns return false or the default.
+When an enum has a method that matches on `self`, the match never succeeds - all patterns return nil. This bug is SPECIFIC to enum methods; standalone functions work correctly.
+
+**IMPORTANT (2026-01-11):** Patterns MUST use qualified names (`Color.Red`). Unqualified names (`Red`) are treated as identifier patterns and always match the first case.
+
+### Verification (2026-01-11)
+
+Comprehensive testing revealed TWO separate issues:
+
+**Issue 1: Unqualified Patterns Treated as Identifiers**
+- Pattern `Red` → Treated as identifier, always matches and binds value
+- Pattern `Color.Red` → Treated as enum variant, matches correctly
+- **Solution:** Always use qualified names in patterns
+
+**Issue 2: Enum Methods Never Match (REAL BUG)**
+- ✅ Module-level match with `Color.Red` → Works correctly
+- ✅ Standalone function with `Color.Red` → Works correctly
+- ❌ Enum method with `Color.Red` → Returns nil (never matches!)
 
 ### Reproduction
 
 ```simple
-pub enum Color:
+enum Color:
     Red
     Green
     Blue
-    
+
     fn to_string(self) -> String:
         match self:
-            Color.Red:
+            case Color.Red:        # Qualified pattern
                 return "red"
-            Color.Green:
+            case Color.Green:
                 return "green"
-            Color.Blue:
+            case Color.Blue:
                 return "blue"
 
-c = Color.Blue
+let c = Color.Blue
 print(c.to_string())  # Expected: "blue", Actual: nil
 ```
+
+**Test Results (2026-01-11):**
+```
+=== Test 1: Red with qualified patterns ===
+Result: nil     # Bug: Should be "red"
+
+=== Test 2: Green with qualified patterns ===
+Result: nil     # Bug: Should be "green"
+
+=== Test 3: Blue with qualified patterns ===
+Result: nil     # Bug: Should be "blue"
+```
+
+**Test Files:**
+- `/tmp/test_enum_method.spl` - Confirmed: unqualified patterns always match Red
+- `/tmp/test_enum_method_qualified.spl` - Confirmed: qualified patterns in methods return nil
+- `/tmp/test_qualified_standalone.spl` - Confirmed: standalone function workaround works ✅
 
 ### Workaround
 
 Use a standalone function instead of an enum method:
 
 ```simple
-pub fn color_to_string(c: Color) -> String:
+fn color_to_string(c: Color) -> String:
     match c:
-        Color.Red:
+        case Color.Red:        # Must use qualified name!
             return "red"
-        Color.Green:
+        case Color.Green:
             return "green"
-        Color.Blue:
+        case Color.Blue:
             return "blue"
 
-print(color_to_string(Color.Blue))  # Works: "blue"
+print(color_to_string(Color.Blue))  # ✅ Works: "blue"
 ```
+
+**Important:** Workaround DOES work (contrary to earlier testing) when using qualified names.
 
 ---
 
