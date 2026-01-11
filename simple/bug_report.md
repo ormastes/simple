@@ -2276,3 +2276,181 @@ This syntax appears in multiple files:
 
 ---
 
+
+## Parser State Corruption with Function Types 🐛 OPEN
+
+**Date Discovered:** 2026-01-11
+**Severity:** Critical
+**Category:** Parser
+**Status:** Open - Multiple related bugs
+
+### Description
+
+The parser has multiple state management bugs triggered by function type field declarations that affect subsequent parsing. These bugs prevent the BDD framework from compiling.
+
+### Bug #1: Function Type Fields Break Named Parameters
+
+When a class has a field with function type (e.g., `block: fn() -> Void`), the parser incorrectly handles colons (`:`) in subsequent code, particularly in named parameter constructor calls.
+
+**Example:**
+```simple
+class Example:
+    block: fn() -> Void
+
+class Group:
+    items: List[Example]
+
+    fn new() -> Group:
+        # This fails to parse!
+        return Group(
+            items: []  # Parser error: "expected Comma, found Colon"
+        )
+```
+
+**Workaround:** Use positional parameters:
+```simple
+return Group([])  # Works
+```
+
+### Bug #2: Identifier "examples" Becomes Keyword After Function Types
+
+After defining a class with a function type field, the identifier `examples` is treated as a reserved keyword/token.
+
+**Example:**
+```simple
+class Example:
+    block: fn() -> Void
+
+class Group:
+    examples: List[Example]  # Field declaration works
+
+    fn add(self, ex: Example) -> Void:
+        self.examples.push(ex)  # Parse error: "expected identifier, found Examples"
+```
+
+**Workaround:** Rename to avoid the word "examples":
+```simple
+class Group:
+    test_examples: List[Example]  # Works
+```
+
+### Bug #3: Multiline If Expressions Not Supported
+
+The parser does not support if expressions spanning multiple lines.
+
+**Example:**
+```simple
+# This fails!
+let result = if condition:
+    value1
+else:
+    value2
+# Parse error: "expected expression, found Newline"
+```
+
+**Workaround:** Use if statements with mutable variables:
+```simple
+let mut result = None
+if condition:
+    result = value1
+else:
+    result = value2
+```
+
+### Bug #4: Lambda Function Syntax Confusion
+
+The parser rejects `fn(param): expr` lambda syntax but accepts `\param: expr` backslash syntax. However, backslash lambdas only support single expressions, not multiline blocks.
+
+**Examples:**
+```simple
+# This fails!
+items.map(fn(x): x * 2)
+# Parse error: "expected expression, found Fn"
+
+# This works!
+items.map(\x: x * 2)
+
+# This also fails - multiline lambda unsupported
+let hook = Hook.BeforeEach(\:
+    let value = compute()
+    store(value)
+)
+# Parse error: "expected expression, found Newline"
+```
+
+**No Workaround Available:** Cannot create complex closures inline. BDD framework requires multiline lambdas for hooks.
+
+### Reproduction Test Cases
+
+All test cases in `/tmp/test_*.spl`:
+
+1. `/tmp/test_fn_field3.spl` - Named parameter bug
+2. `/tmp/test_examples.spl` - "examples" keyword bug  
+3. `/tmp/test_if_expr.spl` - Multiline if expression
+4. `/tmp/test_lambda.spl` - fn() lambda syntax fails
+5. `/tmp/test_lambda3.spl` - \ lambda syntax works
+6. `/tmp/test_lambda_block.spl` - Multiline lambda fails
+
+### Impact
+
+| Bug | Workaround | Blocking |
+|-----|-----------|----------|
+| Named parameters | Use positional | No |
+| "examples" keyword | Rename identifier | No |
+| Multiline if expr | Use if statement | No |
+| Lambda syntax | Use `\param:` | Partial |
+| Multiline lambda | **None** | **YES** |
+
+**Files Affected:**
+
+✅ Working (with workarounds):
+- `simple/std_lib/src/spec/registry.spl` - Core BDD types
+
+❌ Blocked (cannot fix):
+- `simple/std_lib/src/spec/dsl.spl` - BDD DSL (5+ multiline lambdas)
+- `simple/std_lib/src/spec/gherkin.spl` - Gherkin syntax
+- Any feature requiring multiline lambda closures
+
+**Features Blocked:**
+- Full BDD framework (describe/it/context DSL)
+- Hook system (before_each, after_each, etc.)
+- Context composition
+- Shared examples
+- Any complex closure usage
+
+### Root Cause Analysis
+
+The parser appears to have state management issues, particularly around function types. The lexer/parser is not properly resetting/isolating context between declarations. This suggests:
+
+1. Function type parsing leaves parser in corrupted state
+2. Token lookahead or context stack not properly managed
+3. Identifier tokenization affected by prior parse state
+4. Lambda parsing incomplete - missing multiline block support
+
+### Required Fixes
+
+**Priority 1 (Critical):**
+- [ ] Support multiline lambda expressions with multiple statements
+- [ ] Fix parser state corruption after function type field declarations
+- [ ] Fix "examples" identifier tokenization bug
+
+**Priority 2 (High):**
+- [ ] Support multiline if expressions (or document limitation)
+- [ ] Unify lambda syntax (document which forms are supported)
+
+### Files to Fix
+
+Parser implementation:
+- `src/parser/src/lexer.rs` - Token state management
+- `src/parser/src/parser_helpers.rs` - Parser context
+- `src/parser/src/expressions/` - Lambda and if expression parsing
+
+### Related Issues
+
+- Issue #43: Multi-Mode Feature Parse Errors (similar parser issues)
+- Tensor dimension inference tests need standalone imports due to this
+
+**Discovered During:** Tensor dimension inference documentation (#193) and BDD framework restoration
+
+---
+
