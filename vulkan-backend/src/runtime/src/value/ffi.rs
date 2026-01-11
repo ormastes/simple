@@ -1137,3 +1137,143 @@ pub unsafe extern "C" fn rt_dir_list(
         Err(_) => RuntimeValue::NIL,
     }
 }
+
+/// Remove/delete a file
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_remove(
+    path_ptr: *const u8,
+    path_len: u64,
+) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    std::fs::remove_file(path_str).is_ok()
+}
+
+/// Remove a directory
+#[no_mangle]
+pub unsafe extern "C" fn rt_dir_remove(
+    path_ptr: *const u8,
+    path_len: u64,
+    recursive: bool,
+) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    if recursive {
+        std::fs::remove_dir_all(path_str).is_ok()
+    } else {
+        std::fs::remove_dir(path_str).is_ok()
+    }
+}
+
+/// Rename/move a file or directory
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_rename(
+    from_ptr: *const u8,
+    from_len: u64,
+    to_ptr: *const u8,
+    to_len: u64,
+) -> bool {
+    if from_ptr.is_null() || to_ptr.is_null() {
+        return false;
+    }
+
+    let from_bytes = std::slice::from_raw_parts(from_ptr, from_len as usize);
+    let from_str = match std::str::from_utf8(from_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let to_bytes = std::slice::from_raw_parts(to_ptr, to_len as usize);
+    let to_str = match std::str::from_utf8(to_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    std::fs::rename(from_str, to_str).is_ok()
+}
+
+// ============================================================================
+// Environment variable FFI functions
+// ============================================================================
+
+/// Get environment variable value
+#[no_mangle]
+pub unsafe extern "C" fn rt_env_get(
+    name_ptr: *const u8,
+    name_len: u64,
+) -> RuntimeValue {
+    if name_ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    let name_bytes = std::slice::from_raw_parts(name_ptr, name_len as usize);
+    let name_str = match std::str::from_utf8(name_bytes) {
+        Ok(s) => s,
+        Err(_) => return RuntimeValue::NIL,
+    };
+
+    match std::env::var(name_str) {
+        Ok(value) => {
+            let bytes = value.as_bytes();
+            super::rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+        }
+        Err(_) => RuntimeValue::NIL,
+    }
+}
+
+/// Set environment variable
+#[no_mangle]
+pub unsafe extern "C" fn rt_env_set(
+    name_ptr: *const u8,
+    name_len: u64,
+    value_ptr: *const u8,
+    value_len: u64,
+) -> bool {
+    if name_ptr.is_null() || value_ptr.is_null() {
+        return false;
+    }
+
+    let name_bytes = std::slice::from_raw_parts(name_ptr, name_len as usize);
+    let name_str = match std::str::from_utf8(name_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let value_bytes = std::slice::from_raw_parts(value_ptr, value_len as usize);
+    let value_str = match std::str::from_utf8(value_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    std::env::set_var(name_str, value_str);
+    true
+}
+
+/// Get current working directory
+#[no_mangle]
+pub unsafe extern "C" fn rt_env_cwd() -> RuntimeValue {
+    match std::env::current_dir() {
+        Ok(path) => {
+            let path_str = path.to_string_lossy();
+            let bytes = path_str.as_bytes();
+            super::rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+        }
+        Err(_) => RuntimeValue::NIL,
+    }
+}
