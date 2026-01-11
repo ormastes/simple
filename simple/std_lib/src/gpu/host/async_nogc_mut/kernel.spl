@@ -27,6 +27,111 @@ impl LaunchConfig:
             local_size: local
         }
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_global_size(self) -> [u32; 3]:
+        """Get global work size.
+
+        Returns:
+            Global work size in 3D
+
+        Example:
+            config.get_global_size()  # → [1024, 1, 1]
+        """
+        return self.global_size
+
+    fn get_local_size(self) -> [u32; 3]:
+        """Get local work group size.
+
+        Returns:
+            Local work size in 3D
+
+        Example:
+            config.get_local_size()  # → [256, 1, 1]
+        """
+        return self.local_size
+
+    fn total_threads(self) -> u64:
+        """Calculate total number of threads.
+
+        Returns:
+            Total threads (global_x * global_y * global_z)
+
+        Example:
+            config.total_threads()  # → 1024
+        """
+        return (self.global_size[0] as u64) *
+               (self.global_size[1] as u64) *
+               (self.global_size[2] as u64)
+
+    fn total_workgroups(self) -> u64:
+        """Calculate total number of workgroups.
+
+        Returns:
+            Total workgroups
+
+        Example:
+            config.total_workgroups()  # → 4
+        """
+        let groups_x = (self.global_size[0] + self.local_size[0] - 1) / self.local_size[0]
+        let groups_y = (self.global_size[1] + self.local_size[1] - 1) / self.local_size[1]
+        let groups_z = (self.global_size[2] + self.local_size[2] - 1) / self.local_size[2]
+        return (groups_x as u64) * (groups_y as u64) * (groups_z as u64)
+
+    fn is_1d(self) -> bool:
+        """Check if configuration is 1-dimensional.
+
+        Returns:
+            true if only X dimension is used
+
+        Example:
+            config.is_1d()  # → true
+        """
+        return self.global_size[1] == 1 and self.global_size[2] == 1
+
+    fn is_2d(self) -> bool:
+        """Check if configuration is 2-dimensional.
+
+        Returns:
+            true if only X and Y dimensions are used
+
+        Example:
+            config.is_2d()  # → false
+        """
+        return self.global_size[1] > 1 and self.global_size[2] == 1
+
+    fn is_3d(self) -> bool:
+        """Check if configuration is 3-dimensional.
+
+        Returns:
+            true if all dimensions are used
+
+        Example:
+            config.is_3d()  # → false
+        """
+        return self.global_size[2] > 1
+
+    fn summary(self) -> str:
+        """Get launch config summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            config.summary()
+            # → "LaunchConfig: global=[1024,1,1], local=[256,1,1], 1024 threads"
+        """
+        let gx = self.global_size[0]
+        let gy = self.global_size[1]
+        let gz = self.global_size[2]
+        let lx = self.local_size[0]
+        let ly = self.local_size[1]
+        let lz = self.local_size[2]
+        let threads = self.total_threads()
+        return "LaunchConfig: global=[{gx},{gy},{gz}], local=[{lx},{ly},{lz}], {threads} threads"
+
 # Kernel event for synchronization
 struct KernelEvent:
     _handle: u64
@@ -34,6 +139,56 @@ struct KernelEvent:
 impl KernelEvent:
     async fn wait(self) -> Result[(), GpuError]
     fn is_complete(self) -> bool
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_handle(self) -> u64:
+        """Get underlying event handle.
+
+        Returns:
+            Event handle identifier
+
+        Example:
+            event.get_handle()  # → 0x7f8a1c000100
+        """
+        return self._handle
+
+    fn is_pending(self) -> bool:
+        """Check if event is still pending (not complete).
+
+        Returns:
+            true if event is not yet complete
+
+        Example:
+            event.is_pending()  # → false
+        """
+        return not self.is_complete()
+
+    async fn synchronize(self) -> Result[(), GpuError]:
+        """Wait for event to complete (alias for wait).
+
+        Returns:
+            Result with () on success, GpuError on failure
+
+        Example:
+            await event.synchronize()
+        """
+        return await self.wait()
+
+    fn summary(self) -> str:
+        """Get event summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            event.summary()
+            # → "KernelEvent: handle=0x7f8a1c000100, complete=true"
+        """
+        let complete_str = if self.is_complete() { "true" } else { "false" }
+        return "KernelEvent: handle=0x{self._handle:x}, complete={complete_str}"
 
 # Async kernel launch
 extern async fn launch(
