@@ -3210,3 +3210,235 @@ pub extern "C" fn rt_tls_clear(handle: i64) {
 pub extern "C" fn rt_tls_free(handle: i64) {
     TLS_MAP.lock().unwrap().remove(&handle);
 }
+
+// ============================================================================
+// Hash Functions
+// ============================================================================
+
+/// FNV-1a hash function
+#[no_mangle]
+pub unsafe extern "C" fn rt_fnv_hash(data_ptr: *const u8, data_len: u64) -> u64 {
+    if data_ptr.is_null() {
+        return 0;
+    }
+
+    let data = std::slice::from_raw_parts(data_ptr, data_len as usize);
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV offset basis
+
+    for &byte in data {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3); // FNV prime
+    }
+
+    hash
+}
+
+// ============================================================================
+// Standard Input Operations
+// ============================================================================
+
+use std::io::{self, BufRead};
+
+/// Read a line from stdin
+#[no_mangle]
+pub extern "C" fn rt_read_stdin_line() -> RuntimeValue {
+    let stdin = io::stdin();
+    let mut line = String::new();
+
+    match stdin.lock().read_line(&mut line) {
+        Ok(_) => {
+            // Remove trailing newline
+            if line.ends_with('\n') {
+                line.pop();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+            }
+            let bytes = line.as_bytes();
+            unsafe { super::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+        }
+        Err(_) => RuntimeValue::NIL,
+    }
+}
+
+// ============================================================================
+// Mutex Operations (std::sync::Mutex wrapper)
+// ============================================================================
+
+use std::sync::Mutex as StdMutex2;
+
+struct MutexWrapper {
+    data: StdMutex2<RuntimeValue>,
+}
+
+impl MutexWrapper {
+    fn new(value: RuntimeValue) -> Self {
+        Self {
+            data: StdMutex2::new(value),
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref MUTEX_WRAPPER_MAP: Mutex<HashMap<i64, Box<MutexWrapper>>> = Mutex::new(HashMap::new());
+}
+
+static mut MUTEX_WRAPPER_COUNTER: i64 = 1;
+
+/// Create a new mutex with initial value
+#[no_mangle]
+pub extern "C" fn rt_mutex_new(value: RuntimeValue) -> i64 {
+    let mutex = Box::new(MutexWrapper::new(value));
+    unsafe {
+        let handle = MUTEX_WRAPPER_COUNTER;
+        MUTEX_WRAPPER_COUNTER += 1;
+        MUTEX_WRAPPER_MAP.lock().unwrap().insert(handle, mutex);
+        handle
+    }
+}
+
+/// Lock mutex and get value
+#[no_mangle]
+pub extern "C" fn rt_mutex_lock(handle: i64) -> RuntimeValue {
+    MUTEX_WRAPPER_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|mutex| mutex.data.lock().ok().map(|guard| *guard))
+        .unwrap_or(RuntimeValue::NIL)
+}
+
+/// Try to lock mutex without blocking
+#[no_mangle]
+pub extern "C" fn rt_mutex_try_lock(handle: i64) -> RuntimeValue {
+    MUTEX_WRAPPER_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|mutex| mutex.data.try_lock().ok().map(|guard| *guard))
+        .unwrap_or(RuntimeValue::NIL)
+}
+
+/// Unlock mutex and update value
+#[no_mangle]
+pub extern "C" fn rt_mutex_unlock(handle: i64, new_value: RuntimeValue) {
+    if let Some(mutex) = MUTEX_WRAPPER_MAP.lock().unwrap().get(&handle) {
+        if let Ok(mut guard) = mutex.data.lock() {
+            *guard = new_value;
+        }
+    }
+}
+
+/// Free mutex
+#[no_mangle]
+pub extern "C" fn rt_mutex_free(handle: i64) {
+    MUTEX_WRAPPER_MAP.lock().unwrap().remove(&handle);
+}
+
+// ============================================================================
+// RwLock Operations (std::sync::RwLock wrapper)
+// ============================================================================
+
+use std::sync::RwLock as StdRwLock;
+
+struct RwLockWrapper {
+    data: StdRwLock<RuntimeValue>,
+}
+
+impl RwLockWrapper {
+    fn new(value: RuntimeValue) -> Self {
+        Self {
+            data: StdRwLock::new(value),
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref RWLOCK_WRAPPER_MAP: Mutex<HashMap<i64, Box<RwLockWrapper>>> = Mutex::new(HashMap::new());
+}
+
+static mut RWLOCK_WRAPPER_COUNTER: i64 = 1;
+
+/// Create a new RwLock with initial value
+#[no_mangle]
+pub extern "C" fn rt_rwlock_new(value: RuntimeValue) -> i64 {
+    let rwlock = Box::new(RwLockWrapper::new(value));
+    unsafe {
+        let handle = RWLOCK_WRAPPER_COUNTER;
+        RWLOCK_WRAPPER_COUNTER += 1;
+        RWLOCK_WRAPPER_MAP.lock().unwrap().insert(handle, rwlock);
+        handle
+    }
+}
+
+/// Acquire read lock and get value
+#[no_mangle]
+pub extern "C" fn rt_rwlock_read(handle: i64) -> RuntimeValue {
+    RWLOCK_WRAPPER_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|rwlock| rwlock.data.read().ok().map(|guard| *guard))
+        .unwrap_or(RuntimeValue::NIL)
+}
+
+/// Try to acquire read lock without blocking
+#[no_mangle]
+pub extern "C" fn rt_rwlock_try_read(handle: i64) -> RuntimeValue {
+    RWLOCK_WRAPPER_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|rwlock| rwlock.data.try_read().ok().map(|guard| *guard))
+        .unwrap_or(RuntimeValue::NIL)
+}
+
+/// Acquire write lock and get value
+#[no_mangle]
+pub extern "C" fn rt_rwlock_write(handle: i64) -> RuntimeValue {
+    RWLOCK_WRAPPER_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|rwlock| rwlock.data.write().ok().map(|guard| *guard))
+        .unwrap_or(RuntimeValue::NIL)
+}
+
+/// Try to acquire write lock without blocking
+#[no_mangle]
+pub extern "C" fn rt_rwlock_try_write(handle: i64) -> RuntimeValue {
+    RWLOCK_WRAPPER_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|rwlock| rwlock.data.try_write().ok().map(|guard| *guard))
+        .unwrap_or(RuntimeValue::NIL)
+}
+
+/// Set value (requires write lock)
+#[no_mangle]
+pub extern "C" fn rt_rwlock_set(handle: i64, new_value: RuntimeValue) {
+    if let Some(rwlock) = RWLOCK_WRAPPER_MAP.lock().unwrap().get(&handle) {
+        if let Ok(mut guard) = rwlock.data.write() {
+            *guard = new_value;
+        }
+    }
+}
+
+/// Unlock read lock (no-op in Rust, handled by RAII)
+#[no_mangle]
+pub extern "C" fn rt_rwlock_unlock_read(_handle: i64) {
+    // No-op: locks are released automatically when guard is dropped
+}
+
+/// Unlock write lock (no-op in Rust, handled by RAII)
+#[no_mangle]
+pub extern "C" fn rt_rwlock_unlock_write(_handle: i64) {
+    // No-op: locks are released automatically when guard is dropped
+}
+
+/// Free RwLock
+#[no_mangle]
+pub extern "C" fn rt_rwlock_free(handle: i64) {
+    RWLOCK_WRAPPER_MAP.lock().unwrap().remove(&handle);
+}
