@@ -164,9 +164,12 @@ pub class Date:
         }
 
     pub fn today() -> Date:
-        # TODO: [stdlib][P3] Get current date from system
-        # For now, return epoch
-        return Date.new(1970, 1, 1)
+        let micros = rt_time_now_unix_micros()
+        return Date.new(
+            rt_timestamp_get_year(micros),
+            rt_timestamp_get_month(micros),
+            rt_timestamp_get_day(micros)
+        )
 
     pub fn is_leap_year(year: Int) -> Bool:
         if year % 400 == 0:
@@ -232,14 +235,20 @@ pub class Date:
         return self.year + "-" + m + "-" + d
 
     pub fn add_days(self, days: Int) -> Date:
-        # Simple implementation - convert to ordinal, add, convert back
-        # TODO: [stdlib][P1] Implement proper date arithmetic
-        return Date.new(self.year, self.month, self.day + days)
+        # Convert to timestamp, add days, convert back
+        let micros = rt_timestamp_from_components(self.year, self.month, self.day, 0, 0, 0, 0)
+        let new_micros = rt_timestamp_add_days(micros, days)
+        return Date.new(
+            rt_timestamp_get_year(new_micros),
+            rt_timestamp_get_month(new_micros),
+            rt_timestamp_get_day(new_micros)
+        )
 
     pub fn subtract(self, other: Date) -> Int:
         # Return difference in days
-        # TODO: [stdlib][P1] Implement proper date difference calculation
-        return 0
+        let micros1 = rt_timestamp_from_components(self.year, self.month, self.day, 0, 0, 0, 0)
+        let micros2 = rt_timestamp_from_components(other.year, other.month, other.day, 0, 0, 0, 0)
+        return rt_timestamp_diff_days(micros1, micros2)
 
 # DateTime - represents a specific point in time
 pub class DateTime:
@@ -265,19 +274,35 @@ pub class DateTime:
         }
 
     pub fn now() -> DateTime:
-        # TODO: [stdlib][P3] Get current datetime from system using FFI
-        # For now, return Unix epoch
-        return DateTime.new(1970, 1, 1, 0, 0, 0, 0)
+        let micros = rt_time_now_unix_micros()
+        return DateTime.new(
+            rt_timestamp_get_year(micros),
+            rt_timestamp_get_month(micros),
+            rt_timestamp_get_day(micros),
+            rt_timestamp_get_hour(micros),
+            rt_timestamp_get_minute(micros),
+            rt_timestamp_get_second(micros),
+            rt_timestamp_get_microsecond(micros)
+        )
 
     pub fn from_timestamp(timestamp: Int) -> DateTime:
-        # Convert Unix timestamp to DateTime
-        # TODO: [stdlib][P1] Implement proper conversion
-        return DateTime.now()
+        # Convert Unix timestamp (microseconds) to DateTime
+        return DateTime.new(
+            rt_timestamp_get_year(timestamp),
+            rt_timestamp_get_month(timestamp),
+            rt_timestamp_get_day(timestamp),
+            rt_timestamp_get_hour(timestamp),
+            rt_timestamp_get_minute(timestamp),
+            rt_timestamp_get_second(timestamp),
+            rt_timestamp_get_microsecond(timestamp)
+        )
 
     pub fn timestamp(self) -> Int:
-        # Convert to Unix timestamp
-        # TODO: [stdlib][P1] Implement proper conversion
-        return 0
+        # Convert to Unix timestamp (microseconds)
+        return rt_timestamp_from_components(
+            self.year, self.month, self.day,
+            self.hour, self.minute, self.second, self.microsecond
+        )
 
     pub fn date(self) -> Date:
         return Date.new(self.year, self.month, self.day)
@@ -286,33 +311,36 @@ pub class DateTime:
         return Time.new(self.hour, self.minute, self.second, self.microsecond)
 
     pub fn add(self, duration: Duration) -> DateTime:
-        # Add duration to datetime
-        # TODO: [stdlib][P1] Implement proper date/time arithmetic with overflow handling
-        let new_day = self.day + duration.days
-        let new_second = self.second + duration.seconds
-        let new_microsecond = self.microsecond + duration.microseconds
-
-        return DateTime.new(
-            self.year, self.month, new_day,
-            self.hour, self.minute, new_second, new_microsecond
-        )
+        # Add duration to datetime with proper overflow handling
+        let current_micros = self.timestamp()
+        let duration_micros = duration.total_microseconds()
+        let new_micros = current_micros + duration_micros
+        return DateTime.from_timestamp(new_micros)
 
     pub fn subtract_duration(self, duration: Duration) -> DateTime:
-        # Subtract duration from datetime
-        # TODO: [stdlib][P1] Implement proper date/time arithmetic with underflow handling
-        let new_day = self.day - duration.days
-        let new_second = self.second - duration.seconds
-        let new_microsecond = self.microsecond - duration.microseconds
-
-        return DateTime.new(
-            self.year, self.month, new_day,
-            self.hour, self.minute, new_second, new_microsecond
-        )
+        # Subtract duration from datetime with proper underflow handling
+        let current_micros = self.timestamp()
+        let duration_micros = duration.total_microseconds()
+        let new_micros = current_micros - duration_micros
+        return DateTime.from_timestamp(new_micros)
 
     pub fn subtract_datetime(self, other: DateTime) -> Duration:
         # Calculate difference between two datetimes
-        # TODO: [stdlib][P1] Implement proper datetime difference
-        return Duration.new()
+        let micros1 = self.timestamp()
+        let micros2 = other.timestamp()
+        let diff_micros = micros1 - micros2
+
+        # Convert microseconds to days, seconds, microseconds
+        let days = diff_micros / (86400 * 1_000_000)
+        let remaining = diff_micros % (86400 * 1_000_000)
+        let seconds = remaining / 1_000_000
+        let microseconds = remaining % 1_000_000
+
+        return Duration {
+            days: days,
+            seconds: seconds,
+            microseconds: microseconds
+        }
 
     pub fn to_string(self) -> String:
         return self.year + "-" + self.month + "-" + self.day + " " +
