@@ -7,6 +7,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
+// Hash function imports
+use sha1::{Digest, Sha1};
+use sha2::Sha256;
+use xxhash_rust::xxh3::Xxh3;
+
 // ============================================================================
 // Value creation FFI functions
 // ============================================================================
@@ -3306,132 +3311,230 @@ pub extern "C" fn rt_rwlock_unlock_write(_handle: i64) {
 }
 
 // ============================================================================
-// SHA1 Hash Functions (Stub)
+// SHA1 Hash Functions
 // ============================================================================
+
+lazy_static::lazy_static! {
+    static ref SHA1_MAP: Mutex<HashMap<i64, Sha1>> = Mutex::new(HashMap::new());
+}
+
+static mut SHA1_COUNTER: i64 = 1;
 
 /// Create new SHA1 hasher
 #[no_mangle]
 pub extern "C" fn rt_sha1_new() -> i64 {
-    // TODO: Implement SHA1 hasher with external crate
-    0
+    unsafe {
+        let handle = SHA1_COUNTER;
+        SHA1_COUNTER += 1;
+        let hasher = Sha1::new();
+        SHA1_MAP.lock().unwrap().insert(handle, hasher);
+        handle
+    }
 }
 
 /// Write bytes to SHA1 hasher
 #[no_mangle]
-pub unsafe extern "C" fn rt_sha1_write(_handle: i64, _data_ptr: *const u8, _data_len: u64) {
-    // TODO: Implement
+pub unsafe extern "C" fn rt_sha1_write(handle: i64, data_ptr: *const u8, data_len: u64) {
+    if data_ptr.is_null() {
+        return;
+    }
+    let mut map = SHA1_MAP.lock().unwrap();
+    if let Some(hasher) = map.get_mut(&handle) {
+        let data = std::slice::from_raw_parts(data_ptr, data_len as usize);
+        hasher.update(data);
+    }
 }
 
 /// Finalize SHA1 and get hex string
 #[no_mangle]
-pub extern "C" fn rt_sha1_finish(_handle: i64) -> RuntimeValue {
-    // TODO: Implement
-    RuntimeValue::NIL
+pub extern "C" fn rt_sha1_finish(handle: i64) -> RuntimeValue {
+    let mut map = SHA1_MAP.lock().unwrap();
+    if let Some(hasher) = map.remove(&handle) {
+        let result = hasher.finalize();
+        let hex = format!("{:x}", result);
+        let bytes = hex.as_bytes();
+        unsafe { super::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+    } else {
+        RuntimeValue::NIL
+    }
 }
 
 /// Finalize SHA1 and get raw bytes
 #[no_mangle]
-pub extern "C" fn rt_sha1_finish_bytes(_handle: i64) -> RuntimeValue {
-    // TODO: Implement
-    RuntimeValue::NIL
+pub extern "C" fn rt_sha1_finish_bytes(handle: i64) -> RuntimeValue {
+    let mut map = SHA1_MAP.lock().unwrap();
+    if let Some(hasher) = map.remove(&handle) {
+        let result = hasher.finalize();
+        let bytes = result.as_slice();
+        unsafe { super::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+    } else {
+        RuntimeValue::NIL
+    }
 }
 
 /// Reset SHA1 hasher
 #[no_mangle]
-pub extern "C" fn rt_sha1_reset(_handle: i64) {
-    // TODO: Implement
+pub extern "C" fn rt_sha1_reset(handle: i64) {
+    let mut map = SHA1_MAP.lock().unwrap();
+    if let Some(hasher) = map.get_mut(&handle) {
+        *hasher = Sha1::new();
+    }
 }
 
 /// Free SHA1 hasher
 #[no_mangle]
-pub extern "C" fn rt_sha1_free(_handle: i64) {
-    // TODO: Implement
+pub extern "C" fn rt_sha1_free(handle: i64) {
+    SHA1_MAP.lock().unwrap().remove(&handle);
 }
 
 // ============================================================================
-// SHA256 Hash Functions (Stub)
+// SHA256 Hash Functions
 // ============================================================================
+
+lazy_static::lazy_static! {
+    static ref SHA256_MAP: Mutex<HashMap<i64, Sha256>> = Mutex::new(HashMap::new());
+}
+
+static mut SHA256_COUNTER: i64 = 1;
 
 /// Create new SHA256 hasher
 #[no_mangle]
 pub extern "C" fn rt_sha256_new() -> i64 {
-    // TODO: Implement SHA256 hasher with external crate
-    0
+    unsafe {
+        let handle = SHA256_COUNTER;
+        SHA256_COUNTER += 1;
+        let hasher = Sha256::new();
+        SHA256_MAP.lock().unwrap().insert(handle, hasher);
+        handle
+    }
 }
 
 /// Write bytes to SHA256 hasher
 #[no_mangle]
-pub unsafe extern "C" fn rt_sha256_write(_handle: i64, _data_ptr: *const u8, _data_len: u64) {
-    // TODO: Implement
+pub unsafe extern "C" fn rt_sha256_write(handle: i64, data_ptr: *const u8, data_len: u64) {
+    if data_ptr.is_null() {
+        return;
+    }
+    let mut map = SHA256_MAP.lock().unwrap();
+    if let Some(hasher) = map.get_mut(&handle) {
+        let data = std::slice::from_raw_parts(data_ptr, data_len as usize);
+        hasher.update(data);
+    }
 }
 
 /// Finalize SHA256 and get hex string
 #[no_mangle]
-pub extern "C" fn rt_sha256_finish(_handle: i64) -> RuntimeValue {
-    // TODO: Implement
-    RuntimeValue::NIL
+pub extern "C" fn rt_sha256_finish(handle: i64) -> RuntimeValue {
+    let mut map = SHA256_MAP.lock().unwrap();
+    if let Some(hasher) = map.remove(&handle) {
+        let result = hasher.finalize();
+        let hex = format!("{:x}", result);
+        let bytes = hex.as_bytes();
+        unsafe { super::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+    } else {
+        RuntimeValue::NIL
+    }
 }
 
 /// Finalize SHA256 and get raw bytes
 #[no_mangle]
-pub extern "C" fn rt_sha256_finish_bytes(_handle: i64) -> RuntimeValue {
-    // TODO: Implement
-    RuntimeValue::NIL
+pub extern "C" fn rt_sha256_finish_bytes(handle: i64) -> RuntimeValue {
+    let mut map = SHA256_MAP.lock().unwrap();
+    if let Some(hasher) = map.remove(&handle) {
+        let result = hasher.finalize();
+        let bytes = result.as_slice();
+        unsafe { super::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+    } else {
+        RuntimeValue::NIL
+    }
 }
 
 /// Reset SHA256 hasher
 #[no_mangle]
-pub extern "C" fn rt_sha256_reset(_handle: i64) {
-    // TODO: Implement
+pub extern "C" fn rt_sha256_reset(handle: i64) {
+    let mut map = SHA256_MAP.lock().unwrap();
+    if let Some(hasher) = map.get_mut(&handle) {
+        *hasher = Sha256::new();
+    }
 }
 
 /// Free SHA256 hasher
 #[no_mangle]
-pub extern "C" fn rt_sha256_free(_handle: i64) {
-    // TODO: Implement
+pub extern "C" fn rt_sha256_free(handle: i64) {
+    SHA256_MAP.lock().unwrap().remove(&handle);
 }
 
 // ============================================================================
-// XXHash Functions (Stub)
+// XXHash Functions
 // ============================================================================
+
+lazy_static::lazy_static! {
+    static ref XXHASH_MAP: Mutex<HashMap<i64, Xxh3>> = Mutex::new(HashMap::new());
+}
+
+static mut XXHASH_COUNTER: i64 = 1;
 
 /// Create new XXHash hasher
 #[no_mangle]
 pub extern "C" fn rt_xxhash_new() -> i64 {
-    // TODO: Implement XXHash with external crate
-    0
+    unsafe {
+        let handle = XXHASH_COUNTER;
+        XXHASH_COUNTER += 1;
+        let hasher = Xxh3::new();
+        XXHASH_MAP.lock().unwrap().insert(handle, hasher);
+        handle
+    }
 }
 
 /// Create new XXHash hasher with seed
 #[no_mangle]
-pub extern "C" fn rt_xxhash_new_with_seed(_seed: u64) -> i64 {
-    // TODO: Implement
-    0
+pub extern "C" fn rt_xxhash_new_with_seed(seed: u64) -> i64 {
+    unsafe {
+        let handle = XXHASH_COUNTER;
+        XXHASH_COUNTER += 1;
+        let hasher = Xxh3::with_seed(seed);
+        XXHASH_MAP.lock().unwrap().insert(handle, hasher);
+        handle
+    }
 }
 
 /// Write bytes to XXHash hasher
 #[no_mangle]
-pub unsafe extern "C" fn rt_xxhash_write(_handle: i64, _data_ptr: *const u8, _data_len: u64) {
-    // TODO: Implement
+pub unsafe extern "C" fn rt_xxhash_write(handle: i64, data_ptr: *const u8, data_len: u64) {
+    if data_ptr.is_null() {
+        return;
+    }
+    let mut map = XXHASH_MAP.lock().unwrap();
+    if let Some(hasher) = map.get_mut(&handle) {
+        let data = std::slice::from_raw_parts(data_ptr, data_len as usize);
+        hasher.update(data);
+    }
 }
 
 /// Finalize XXHash and get hash value
 #[no_mangle]
-pub extern "C" fn rt_xxhash_finish(_handle: i64) -> u64 {
-    // TODO: Implement
-    0
+pub extern "C" fn rt_xxhash_finish(handle: i64) -> u64 {
+    let mut map = XXHASH_MAP.lock().unwrap();
+    if let Some(hasher) = map.remove(&handle) {
+        hasher.digest()
+    } else {
+        0
+    }
 }
 
 /// Reset XXHash hasher
 #[no_mangle]
-pub extern "C" fn rt_xxhash_reset(_handle: i64) {
-    // TODO: Implement
+pub extern "C" fn rt_xxhash_reset(handle: i64) {
+    let mut map = XXHASH_MAP.lock().unwrap();
+    if let Some(hasher) = map.get_mut(&handle) {
+        hasher.reset();
+    }
 }
 
 /// Free XXHash hasher
 #[no_mangle]
-pub extern "C" fn rt_xxhash_free(_handle: i64) {
-    // TODO: Implement
+pub extern "C" fn rt_xxhash_free(handle: i64) {
+    XXHASH_MAP.lock().unwrap().remove(&handle);
 }
 
 // ============================================================================
