@@ -31,9 +31,41 @@ impl VulkanBackend {
 
     /// Check if Vulkan is available on the system
     fn vulkan_available() -> bool {
-        // TODO: [codegen][P1] Implement actual Vulkan availability check
-        // For now, assume available if feature is enabled
-        true
+        #[cfg(feature = "vulkan")]
+        {
+            // Try to create Vulkan entry point to check availability
+            match unsafe { ash::Entry::load() } {
+                Ok(entry) => {
+                    // Check if we can get the instance version
+                    // This is a lightweight check that confirms Vulkan loader is present
+                    match entry.try_enumerate_instance_version() {
+                        Ok(Some(_version)) => {
+                            // Vulkan 1.1+ loader found
+                            true
+                        }
+                        Ok(None) => {
+                            // Vulkan 1.0 loader found (doesn't support version enumeration)
+                            true
+                        }
+                        Err(_) => {
+                            // Failed to enumerate version
+                            tracing::debug!("Vulkan loader found but version enumeration failed");
+                            false
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Vulkan loader not found or failed to load
+                    tracing::debug!("Vulkan loader not available: {:?}", e);
+                    false
+                }
+            }
+        }
+        #[cfg(not(feature = "vulkan"))]
+        {
+            // Vulkan feature not enabled
+            false
+        }
     }
 }
 
