@@ -1894,3 +1894,4 @@ pub extern "C" fn rt_file_msync(addr: *mut u8, length: u64, flags: i32) -> i32 {
 pub extern "C" fn native_msync(addr: *mut u8, length: u64, flags: i32) -> i32 {
     rt_file_msync(addr, length, flags)
 }
+

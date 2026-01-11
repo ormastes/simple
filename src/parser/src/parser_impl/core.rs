@@ -313,8 +313,7 @@ impl<'a> Parser<'a> {
             TokenKind::Break => self.parse_break(),
             TokenKind::Continue => self.parse_continue(),
             TokenKind::Context => {
-                // Check if this is a context statement (context expr:) or BDD DSL (context "string":)
-                // BDD DSL uses string literals after 'context' keyword
+                // Check if this is a context statement (context expr:) or function call (context(...)) or BDD DSL (context "string":)
                 let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
                     let tok = self.lexer.next_token();
                     self.pending_tokens.push_back(tok.clone());
@@ -326,6 +325,9 @@ impl<'a> Parser<'a> {
                     &next.kind,
                     TokenKind::String(_) | TokenKind::RawString(_) | TokenKind::FString(_)
                 ) {
+                    self.parse_expression_or_assignment()
+                // If next token is an opening paren, treat as function call
+                } else if matches!(&next.kind, TokenKind::LParen) {
                     self.parse_expression_or_assignment()
                 } else {
                     self.parse_context()
