@@ -76,11 +76,37 @@ enum Ordering:
             case AcqRel: return "AcqRel"
             case SeqCst: return "SeqCst"
 
+    fn description(self) -> String:
+        """Get ordering description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            Ordering::SeqCst.description()
+            # → "Sequentially consistent (strongest)"
+        """
+        match self:
+            case Relaxed: return "No synchronization"
+            case Acquire: return "Synchronize-with for reads"
+            case Release: return "Synchronize-with for writes"
+            case AcqRel: return "Both Acquire and Release"
+            case SeqCst: return "Sequentially consistent (strongest)"
+
     fn summary(self) -> String:
-        """Get summary of ordering."""
+        """Get summary of ordering.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            Ordering::SeqCst.summary()
+            # → "Ordering: SeqCst (Sequentially consistent (strongest), synchronizing)"
+        """
         let name = self.to_string()
-        let sync = if self.is_synchronizing(): ", synchronizing" else: ""
-        return "Ordering::{name}{sync}"
+        let desc = self.description()
+        let sync = if self.is_synchronizing(): "synchronizing" else: "no sync"
+        return "Ordering: {name} ({desc}, {sync})"
 
 # FFI declarations for atomic operations
 extern fn rt_atomic_int_new(value: i64) -> i64
@@ -379,6 +405,45 @@ struct AtomicFlag:
     fn free(self):
         rt_atomic_flag_free(self._ptr)
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_set(self, ordering: Ordering = Ordering.Acquire) -> Bool:
+        """Check if flag is set.
+
+        Returns:
+            True if flag is set
+
+        Example:
+            flag.is_set()  # → false
+        """
+        return self.test_and_set(ordering)
+
+    fn is_clear(self, ordering: Ordering = Ordering.Acquire) -> Bool:
+        """Check if flag is clear.
+
+        Returns:
+            True if flag is clear
+
+        Example:
+            flag.is_clear()  # → true
+        """
+        return not self.test_and_set(ordering)
+
+    fn summary(self) -> String:
+        """Get summary of atomic flag.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            flag.summary()
+            # → "AtomicFlag: set" or "AtomicFlag: clear"
+        """
+        let status = if self.test_and_set(): "set" else: "clear"
+        return "AtomicFlag: {status}"
+
 /**
 Atomic reference to an object.
 
@@ -412,6 +477,69 @@ struct AtomicRef[T]:
 
     fn free(self):
         self._atomic.free()
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_null(self, ordering: Ordering = Ordering.Acquire) -> Bool:
+        """Check if reference is null (zero).
+
+        Returns:
+            True if reference is null
+
+        Example:
+            ref.is_null()  # → false
+        """
+        return self._atomic.load(ordering) == 0
+
+    fn is_not_null(self, ordering: Ordering = Ordering.Acquire) -> Bool:
+        """Check if reference is not null.
+
+        Returns:
+            True if reference is not null
+
+        Example:
+            ref.is_not_null()  # → true
+        """
+        return self._atomic.load(ordering) != 0
+
+    fn compare_and_swap(self, expected: T, desired: T, ordering: Ordering = Ordering.AcqRel) -> (Bool, T):
+        """Compare and exchange reference.
+
+        Args:
+            expected: Expected current value
+            desired: Desired new value
+            ordering: Memory ordering
+
+        Returns:
+            Tuple of (success, current_value)
+
+        Example:
+            let (ok, old) = ref.compare_and_swap(old_obj, new_obj)
+        """
+        let expected_ptr = expected as i64
+        let desired_ptr = desired as i64
+        let (success, current_ptr) = self._atomic.compare_exchange(
+            expected_ptr,
+            desired_ptr,
+            ordering,
+            ordering
+        )
+        return (success, current_ptr as T)
+
+    fn summary(self) -> String:
+        """Get summary of atomic reference.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            ref.summary()
+            # → "AtomicRef: 0x7fff12345678"
+        """
+        let ptr = self._atomic.load()
+        return "AtomicRef: 0x{ptr:x}"
 
 /**
 Spin loop hint.
