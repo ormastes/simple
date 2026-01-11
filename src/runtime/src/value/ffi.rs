@@ -3513,7 +3513,6 @@ pub extern "C" fn rt_thread_local_free(handle: i64) {
     // Note: Each thread's local copy will be cleaned up when thread exits
 }
 
-// ============================================================================
 // PyTorch/ML Operations (Stubs - require tch-rs or similar)
 // ============================================================================
 
@@ -3616,12 +3615,7 @@ pub extern "C" fn rt_torch_select(_tensor: RuntimeValue, _dim: i64, _index: i64)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_narrow(
-    _tensor: RuntimeValue,
-    _dim: i64,
-    _start: i64,
-    _length: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_narrow(_tensor: RuntimeValue, _dim: i64, _start: i64, _length: i64) -> RuntimeValue {
     // TODO: Implement tensor narrow
     RuntimeValue::NIL
 }
@@ -3657,19 +3651,13 @@ pub extern "C" fn rt_torch_autograd_context_get_saved_tensors(_ctx: RuntimeValue
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_autograd_context_get_value(
-    _ctx: RuntimeValue,
-    _key: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_autograd_context_get_value(_ctx: RuntimeValue, _key: RuntimeValue) -> RuntimeValue {
     // TODO: Implement get value
     RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_autograd_function_apply(
-    _func: RuntimeValue,
-    _inputs: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_autograd_function_apply(_func: RuntimeValue, _inputs: RuntimeValue) -> RuntimeValue {
     // TODO: Implement autograd function apply
     RuntimeValue::NIL
 }
@@ -3689,10 +3677,7 @@ pub extern "C" fn rt_torch_bce_loss(_pred: RuntimeValue, _target: RuntimeValue) 
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_cross_entropy_loss(
-    _pred: RuntimeValue,
-    _target: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_cross_entropy_loss(_pred: RuntimeValue, _target: RuntimeValue) -> RuntimeValue {
     // TODO: Implement cross entropy loss
     RuntimeValue::NIL
 }
@@ -3700,20 +3685,13 @@ pub extern "C" fn rt_torch_cross_entropy_loss(
 // Neural Network Layers
 
 #[no_mangle]
-pub extern "C" fn rt_torch_conv3d_new(
-    _in_channels: i64,
-    _out_channels: i64,
-    _kernel_size: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_conv3d_new(_in_channels: i64, _out_channels: i64, _kernel_size: i64) -> RuntimeValue {
     // TODO: Implement Conv3d layer
     RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_conv3d_forward(
-    _layer: RuntimeValue,
-    _input: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_conv3d_forward(_layer: RuntimeValue, _input: RuntimeValue) -> RuntimeValue {
     // TODO: Implement Conv3d forward
     RuntimeValue::NIL
 }
@@ -3725,31 +3703,19 @@ pub extern "C" fn rt_torch_rnn_new(_input_size: i64, _hidden_size: i64) -> Runti
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_rnn_forward(
-    _layer: RuntimeValue,
-    _input: RuntimeValue,
-    _hidden: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_rnn_forward(_layer: RuntimeValue, _input: RuntimeValue, _hidden: RuntimeValue) -> RuntimeValue {
     // TODO: Implement RNN forward
     RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_multihead_attention_new(
-    _embed_dim: i64,
-    _num_heads: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_multihead_attention_new(_embed_dim: i64, _num_heads: i64) -> RuntimeValue {
     // TODO: Implement MultiheadAttention layer
     RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_multihead_attention_forward(
-    _layer: RuntimeValue,
-    _query: RuntimeValue,
-    _key: RuntimeValue,
-    _value: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_multihead_attention_forward(_layer: RuntimeValue, _query: RuntimeValue, _key: RuntimeValue, _value: RuntimeValue) -> RuntimeValue {
     // TODO: Implement MultiheadAttention forward
     RuntimeValue::NIL
 }
@@ -3761,38 +3727,25 @@ pub extern "C" fn rt_torch_positional_encoding_new(_d_model: i64, _max_len: i64)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_transformer_encoder_layer_new(
-    _d_model: i64,
-    _nhead: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_transformer_encoder_layer_new(_d_model: i64, _nhead: i64) -> RuntimeValue {
     // TODO: Implement TransformerEncoderLayer
     RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_transformer_encoder_layer_forward(
-    _layer: RuntimeValue,
-    _src: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_transformer_encoder_layer_forward(_layer: RuntimeValue, _src: RuntimeValue) -> RuntimeValue {
     // TODO: Implement TransformerEncoderLayer forward
     RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_transformer_decoder_layer_new(
-    _d_model: i64,
-    _nhead: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_transformer_decoder_layer_new(_d_model: i64, _nhead: i64) -> RuntimeValue {
     // TODO: Implement TransformerDecoderLayer
     RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_transformer_decoder_layer_forward(
-    _layer: RuntimeValue,
-    _tgt: RuntimeValue,
-    _memory: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_transformer_decoder_layer_forward(_layer: RuntimeValue, _tgt: RuntimeValue, _memory: RuntimeValue) -> RuntimeValue {
     // TODO: Implement TransformerDecoderLayer forward
     RuntimeValue::NIL
 }
@@ -3814,10 +3767,7 @@ pub extern "C" fn rt_torch_jit_script(_module: RuntimeValue) -> RuntimeValue {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_jit_trace(
-    _func: RuntimeValue,
-    _example_inputs: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_jit_trace(_func: RuntimeValue, _example_inputs: RuntimeValue) -> RuntimeValue {
     // TODO: Implement JIT tracing
     RuntimeValue::NIL
 }
@@ -3834,10 +3784,7 @@ pub extern "C" fn rt_torch_jit_save(_module: RuntimeValue, _path_ptr: *const u8,
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_jit_forward(
-    _module: RuntimeValue,
-    _inputs: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_jit_forward(_module: RuntimeValue, _inputs: RuntimeValue) -> RuntimeValue {
     // TODO: Implement JIT forward pass
     RuntimeValue::NIL
 }
@@ -3873,12 +3820,7 @@ pub extern "C" fn rt_torch_save(_tensor: RuntimeValue, _path_ptr: *const u8, _pa
 // ONNX Export
 
 #[no_mangle]
-pub extern "C" fn rt_torch_onnx_export(
-    _module: RuntimeValue,
-    _dummy_input: RuntimeValue,
-    _path_ptr: *const u8,
-    _path_len: u64,
-) {
+pub extern "C" fn rt_torch_onnx_export(_module: RuntimeValue, _dummy_input: RuntimeValue, _path_ptr: *const u8, _path_len: u64) {
     // TODO: Implement ONNX export
 }
 
@@ -3914,11 +3856,7 @@ pub extern "C" fn rt_torch_mnist_download(_path_ptr: *const u8, _path_len: u64) 
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_mnist_load(
-    _path_ptr: *const u8,
-    _path_len: u64,
-    _train: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_mnist_load(_path_ptr: *const u8, _path_len: u64, _train: i64) -> RuntimeValue {
     // TODO: Implement MNIST dataset loading
     RuntimeValue::NIL
 }
@@ -3930,11 +3868,7 @@ pub extern "C" fn rt_torch_cifar10_download(_path_ptr: *const u8, _path_len: u64
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_cifar10_load(
-    _path_ptr: *const u8,
-    _path_len: u64,
-    _train: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_cifar10_load(_path_ptr: *const u8, _path_len: u64, _train: i64) -> RuntimeValue {
     // TODO: Implement CIFAR10 dataset loading
     RuntimeValue::NIL
 }
@@ -3948,10 +3882,7 @@ pub extern "C" fn rt_torch_dist_is_available() -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_dist_init_process_group(
-    _backend_ptr: *const u8,
-    _backend_len: u64,
-) -> i64 {
+pub extern "C" fn rt_torch_dist_init_process_group(_backend_ptr: *const u8, _backend_len: u64) -> i64 {
     // TODO: Implement distributed process group initialization
     0
 }
