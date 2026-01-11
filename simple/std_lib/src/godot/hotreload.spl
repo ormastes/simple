@@ -279,9 +279,76 @@ fn get_file_modified_time(path: String) -> f64:
     return get_current_time()
 
 fn get_files_recursive(dir: String, ext: String) -> Array[String]:
-    # TODO: [stdlib][P1] Implement recursive directory traversal
-    # For now, return empty array
-    return []
+    """Recursively find all files with given extension.
+
+    Args:
+        dir: Directory to search
+        ext: File extension to match (without dot)
+
+    Returns:
+        Array of file paths
+    """
+    @extern("runtime", "rt_dir_list")
+    fn _rt_dir_list(path_ptr: &u8, path_len: u64) -> Any
+
+    @extern("runtime", "rt_file_stat")
+    fn _rt_file_stat(
+        path_ptr: &u8,
+        path_len: u64,
+        out_exists: &mut bool,
+        out_is_file: &mut bool,
+        out_is_dir: &mut bool,
+        out_is_readable: &mut bool,
+        out_is_writable: &mut bool,
+        out_size: &mut i64
+    )
+
+    @extern("runtime", "rt_path_ext")
+    fn _rt_path_ext(path_ptr: &u8, path_len: u64) -> String
+
+    var results: Array[String] = []
+
+    # Get directory entries
+    let entries = _rt_dir_list(dir.ptr(), dir.len())
+    if entries.is_nil():
+        return results
+
+    let entry_array = entries as Array[String]
+    for entry_name in entry_array:
+        # Build full path
+        let full_path = "{dir}/{entry_name}"
+
+        # Get file info
+        var exists = false
+        var is_file = false
+        var is_dir = false
+        var is_readable = false
+        var is_writable = false
+        var size: i64 = 0
+
+        _rt_file_stat(
+            full_path.ptr(),
+            full_path.len(),
+            &mut exists,
+            &mut is_file,
+            &mut is_dir,
+            &mut is_readable,
+            &mut is_writable,
+            &mut size
+        )
+
+        if is_dir:
+            # Recursively search subdirectory
+            let sub_results = get_files_recursive(full_path, ext)
+            for sub_path in sub_results:
+                results.push(sub_path)
+        elif is_file:
+            # Check extension
+            let file_ext = _rt_path_ext(full_path.ptr(), full_path.len())
+            if file_ext == ext:
+                results.push(full_path)
+
+    return results
 
 fn get_current_time() -> f64:
     # TODO: [stdlib][P3] Use actual time API
@@ -289,8 +356,16 @@ fn get_current_time() -> f64:
     return 0.0
 
 fn sleep(seconds: f64):
-    # TODO: [stdlib][P1] Implement actual sleep
-    pass
+    """Sleep for specified seconds.
+
+    Args:
+        seconds: Number of seconds to sleep
+    """
+    @extern("runtime", "rt_thread_sleep")
+    fn _rt_thread_sleep(millis: i64)
+
+    let millis = (seconds * 1000.0) as i64
+    _rt_thread_sleep(millis)
 
 
 # Dict and Array placeholders
