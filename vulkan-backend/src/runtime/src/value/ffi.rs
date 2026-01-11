@@ -2296,3 +2296,131 @@ pub unsafe extern "C" fn rt_dir_glob(
     // For now, implement glob as non-recursive find
     rt_file_find(dir_ptr, dir_len, pattern_ptr, pattern_len, false)
 }
+
+// ============================================================================
+// Path Manipulation FFI Functions
+// ============================================================================
+
+/// Get basename (filename) from path
+/// Returns the final component of the path
+#[no_mangle]
+pub unsafe extern "C" fn rt_path_basename(
+    path_ptr: *const u8,
+    path_len: u64,
+) -> RuntimeValue {
+    use std::path::Path;
+    
+    if path_ptr.is_null() {
+        return super::rt_string_new(b"".as_ptr(), 0);
+    }
+    
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return super::rt_string_new(b"".as_ptr(), 0),
+    };
+    
+    let path = Path::new(path_str);
+    let basename = path.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    
+    super::rt_string_new(basename.as_ptr(), basename.len() as u64)
+}
+
+/// Get dirname (directory) from path
+/// Returns the directory component of the path
+#[no_mangle]
+pub unsafe extern "C" fn rt_path_dirname(
+    path_ptr: *const u8,
+    path_len: u64,
+) -> RuntimeValue {
+    use std::path::Path;
+    
+    if path_ptr.is_null() {
+        return super::rt_string_new(b"".as_ptr(), 0);
+    }
+    
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return super::rt_string_new(b"".as_ptr(), 0),
+    };
+    
+    let path = Path::new(path_str);
+    let dirname = path.parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or("");
+    
+    super::rt_string_new(dirname.as_ptr(), dirname.len() as u64)
+}
+
+/// Get file extension from path
+/// Returns the extension without the leading dot
+#[no_mangle]
+pub unsafe extern "C" fn rt_path_ext(
+    path_ptr: *const u8,
+    path_len: u64,
+) -> RuntimeValue {
+    use std::path::Path;
+    
+    if path_ptr.is_null() {
+        return super::rt_string_new(b"".as_ptr(), 0);
+    }
+    
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return super::rt_string_new(b"".as_ptr(), 0),
+    };
+    
+    let path = Path::new(path_str);
+    let ext = path.extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    
+    super::rt_string_new(ext.as_ptr(), ext.len() as u64)
+}
+
+/// Convert path to absolute path
+/// Returns the canonicalized absolute path
+#[no_mangle]
+pub unsafe extern "C" fn rt_path_absolute(
+    path_ptr: *const u8,
+    path_len: u64,
+) -> RuntimeValue {
+    use std::path::Path;
+    
+    if path_ptr.is_null() {
+        return super::rt_string_new(b"".as_ptr(), 0);
+    }
+    
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return super::rt_string_new(b"".as_ptr(), 0),
+    };
+    
+    let path = Path::new(path_str);
+    
+    // Try to canonicalize (resolve symlinks and make absolute)
+    // If that fails, try to make it absolute without resolving symlinks
+    let absolute = if let Ok(canonical) = path.canonicalize() {
+        canonical.to_str().unwrap_or(path_str).to_string()
+    } else {
+        // Fallback: join with current directory
+        match std::env::current_dir() {
+            Ok(cwd) => {
+                let abs_path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    cwd.join(path)
+                };
+                abs_path.to_str().unwrap_or(path_str).to_string()
+            }
+            Err(_) => path_str.to_string(),
+        }
+    };
+    
+    super::rt_string_new(absolute.as_ptr(), absolute.len() as u64)
+}
