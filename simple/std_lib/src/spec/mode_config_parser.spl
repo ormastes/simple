@@ -132,15 +132,55 @@ struct ConfigHierarchy:
 # Extract project root from file path
 # Looks for simple.toml or .git directory
 fn extract_project_root(file_path: String) -> String:
-    # TODO: [stdlib][P1] Implement directory traversal to find project root
-    # For now, assume current directory
+    """Find project root by walking up directories looking for markers."""
+    @extern("runtime", "rt_path_dirname")
+    fn _rt_path_dirname(path_ptr: &u8, path_len: u64) -> String
+
+    @extern("runtime", "rt_file_exists")
+    fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
+
+    # Start from the file's directory
+    var current_dir = _rt_path_dirname(file_path.ptr(), file_path.len())
+    if current_dir.is_empty():
+        current_dir = "."
+
+    # Walk up directories looking for project markers
+    var iterations = 0
+    while iterations < 100:  # Safety limit
+        # Check for simple.toml
+        let toml_path = current_dir + "/simple.toml"
+        if _rt_file_exists(toml_path.ptr(), toml_path.len()):
+            return current_dir
+
+        # Check for .git directory
+        let git_path = current_dir + "/.git"
+        if _rt_file_exists(git_path.ptr(), git_path.len()):
+            return current_dir
+
+        # Go up one level
+        let parent = _rt_path_dirname(current_dir.ptr(), current_dir.len())
+
+        # Stop if we reached root (dirname returns empty or same path)
+        if parent.is_empty() or parent == current_dir:
+            break
+
+        current_dir = parent
+        iterations += 1
+
+    # Fallback to current directory
     "."
 
 # Extract directory from file path
 fn extract_directory(file_path: String) -> String:
-    # TODO: [stdlib][P1] Implement path manipulation
-    # For now, assume current directory
-    "."
+    """Extract parent directory from file path."""
+    @extern("runtime", "rt_path_dirname")
+    fn _rt_path_dirname(path_ptr: &u8, path_len: u64) -> String
+
+    let dirname = _rt_path_dirname(file_path.ptr(), file_path.len())
+    if dirname.is_empty():
+        return "."
+    else:
+        return dirname
 
 # Parse mode names from string list
 export fn parse_mode_names(names: List[String]) -> Option[ModeSet]:
