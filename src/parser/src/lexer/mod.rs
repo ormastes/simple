@@ -19,6 +19,8 @@ pub struct Lexer<'a> {
     at_line_start: bool,
     /// Track bracket depth to suppress INDENT/DEDENT inside delimiters
     bracket_depth: usize,
+    /// Force indentation tracking even inside brackets (for lambda bodies)
+    force_indentation: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -33,7 +35,18 @@ impl<'a> Lexer<'a> {
             pending_tokens: Vec::new(),
             at_line_start: true,
             bracket_depth: 0,
+            force_indentation: false,
         }
+    }
+
+    /// Enable indentation tracking even inside brackets (for lambda bodies)
+    pub fn enable_forced_indentation(&mut self) {
+        self.force_indentation = true;
+    }
+
+    /// Disable forced indentation tracking
+    pub fn disable_forced_indentation(&mut self) {
+        self.force_indentation = false;
     }
 
     pub fn tokenize(&mut self) -> Vec<Token> {
@@ -57,11 +70,11 @@ impl<'a> Lexer<'a> {
             return token;
         }
 
-        // Handle indentation at line start (but not inside brackets)
+        // Handle indentation at line start (but not inside brackets, unless forced)
         if self.at_line_start {
             self.at_line_start = false;
-            // Skip indentation handling when inside brackets/parens/braces
-            if self.bracket_depth == 0 {
+            // Skip indentation handling when inside brackets/parens/braces, unless force_indentation is enabled
+            if self.bracket_depth == 0 || self.force_indentation {
                 if let Some(indent_token) = self.handle_indentation() {
                     return indent_token;
                 }

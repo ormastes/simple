@@ -254,6 +254,10 @@ impl<'a> Parser<'a> {
         // Check if body is an indented block or inline expression
         let body = if self.check(&TokenKind::Newline) {
             eprintln!("DEBUG: Found newline after colon");
+
+            // Enable forced indentation for lambda body (even inside brackets/parens)
+            self.lexer.enable_forced_indentation();
+
             // Consume the newline
             self.advance();
             eprintln!("DEBUG: After consuming newline, current token: {:?}", self.current.kind);
@@ -288,8 +292,14 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
 
+                // Disable forced indentation after lambda body
+                self.lexer.disable_forced_indentation();
+
                 Expr::DoBlock(statements)
             } else {
+                // Disable forced indentation - not a block
+                self.lexer.disable_forced_indentation();
+
                 // Just a newline, parse next expression
                 self.parse_expression()?
             }
