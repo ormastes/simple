@@ -2,6 +2,36 @@
 
 ## Language Rules
 
+### Common Mistakes from Other Languages
+
+Simple provides helpful error messages when you use syntax from other languages. See `doc/guide/common_mistakes.md` for complete guide.
+
+**Quick Reference:**
+
+| From Language | Wrong | Correct Simple |
+|--------------|-------|---------------|
+| Python | `def foo():` | `fn foo():` |
+| Python | `None` | `nil` |
+| Python | `True`/`False` | `true`/`false` |
+| Python | `self.x` | `x` (self implicit) |
+| Rust | `let mut x` | `var x` |
+| Rust | `fn(&mut self)` | `me fn()` |
+| Rust | `::<T>` | `<T>` |
+| Java/C++ | `public class` | `pub class`/`pub struct` |
+| Java/C++ | `void foo()` | `fn foo():` (omit return type) |
+| Java/C++ | `new Point()` | `Point {}` |
+| Java/C++ | `this.x` | `x` (self implicit) |
+| TypeScript | `function foo()` | `fn foo():` |
+| TypeScript | `const x` | `val x` |
+| TypeScript | `interface I` | `trait I:` |
+
+**Error Recovery System:**
+- The parser detects common mistakes and provides helpful suggestions
+- **Warnings** (not errors) for verbose but valid syntax like explicit return types
+- See error messages with examples: `doc/examples/error_messages_demo.spl`
+
+## Language Rules
+
 ### String Literals
 ```simple
 # Double-quoted = interpolated (default)
@@ -268,7 +298,9 @@ File in `simple/bug_report.md`:
 
 ## See Also
 
+- **`doc/guide/common_mistakes.md`** - Complete guide for transitioning from other languages
 - **`doc/guide/coding_style.md`** - Full coding style guide (domain types, defaults, config, AOP)
+- `doc/examples/error_messages_demo.spl` - Demo file showing all error types
 - `doc/spec/syntax.md` - Lexical structure
 - `doc/spec/types.md` - Type system
 - `doc/spec/functions.md` - Functions, pattern matching
