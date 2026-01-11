@@ -1071,3 +1071,143 @@ pub unsafe extern "C" fn rt_file_canonicalize(
         }
     }
 }
+
+/// Read entire file as text
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_read_text(
+    path_ptr: *const u8,
+    path_len: u64,
+) -> RuntimeValue {
+    if path_ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return RuntimeValue::NIL,
+    };
+
+    match std::fs::read_to_string(path_str) {
+        Ok(content) => {
+            let bytes = content.as_bytes();
+            super::rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+        }
+        Err(_) => RuntimeValue::NIL,
+    }
+}
+
+/// Write text to file
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_write_text(
+    path_ptr: *const u8,
+    path_len: u64,
+    content_ptr: *const u8,
+    content_len: u64,
+) -> bool {
+    if path_ptr.is_null() || content_ptr.is_null() {
+        return false;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let content_bytes = std::slice::from_raw_parts(content_ptr, content_len as usize);
+    let content_str = match std::str::from_utf8(content_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    std::fs::write(path_str, content_str).is_ok()
+}
+
+/// Copy file from src to dest
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_copy(
+    src_ptr: *const u8,
+    src_len: u64,
+    dest_ptr: *const u8,
+    dest_len: u64,
+) -> bool {
+    if src_ptr.is_null() || dest_ptr.is_null() {
+        return false;
+    }
+
+    let src_bytes = std::slice::from_raw_parts(src_ptr, src_len as usize);
+    let src_str = match std::str::from_utf8(src_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let dest_bytes = std::slice::from_raw_parts(dest_ptr, dest_len as usize);
+    let dest_str = match std::str::from_utf8(dest_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    std::fs::copy(src_str, dest_str).is_ok()
+}
+
+/// Create directory (with optional recursive creation)
+#[no_mangle]
+pub unsafe extern "C" fn rt_dir_create(
+    path_ptr: *const u8,
+    path_len: u64,
+    recursive: bool,
+) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    if recursive {
+        std::fs::create_dir_all(path_str).is_ok()
+    } else {
+        std::fs::create_dir(path_str).is_ok()
+    }
+}
+
+/// List directory entries
+#[no_mangle]
+pub unsafe extern "C" fn rt_dir_list(
+    path_ptr: *const u8,
+    path_len: u64,
+) -> RuntimeValue {
+    if path_ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return RuntimeValue::NIL,
+    };
+
+    match std::fs::read_dir(path_str) {
+        Ok(entries) => {
+            // Create an array to hold the entry names
+            let array_handle = super::rt_array_new(0);
+
+            for entry_result in entries {
+                if let Ok(entry) = entry_result {
+                    if let Ok(name) = entry.file_name().into_string() {
+                        let bytes = name.as_bytes();
+                        let str_value = super::rt_string_new(bytes.as_ptr(), bytes.len() as u64);
+                        super::rt_array_push(array_handle, str_value);
+                    }
+                }
+            }
+
+            array_handle
+        }
+        Err(_) => RuntimeValue::NIL,
+    }
+}
