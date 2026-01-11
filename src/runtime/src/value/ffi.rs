@@ -2552,7 +2552,9 @@ pub extern "C" fn rt_atomic_flag_new() -> i64 {
 /// Returns true if flag was already set, false if it was clear
 #[no_mangle]
 pub extern "C" fn rt_atomic_flag_test_and_set(handle: i64) -> bool {
-    ATOMIC_FLAG_MAP.lock().unwrap()
+    ATOMIC_FLAG_MAP
+        .lock()
+        .unwrap()
         .get(&handle)
         .map(|flag| flag.swap(true, Ordering::SeqCst))
         .unwrap_or(false)
@@ -2610,7 +2612,9 @@ pub extern "C" fn rt_once_call(handle: i64, _func_ptr: i64) {
 /// Check if Once has been called
 #[no_mangle]
 pub extern "C" fn rt_once_is_completed(handle: i64) -> bool {
-    ONCE_MAP.lock().unwrap()
+    ONCE_MAP
+        .lock()
+        .unwrap()
         .get(&handle)
         .map(|once| once.is_completed())
         .unwrap_or(false)
@@ -2736,7 +2740,9 @@ pub extern "C" fn rt_arena_new(capacity: i64) -> i64 {
 /// Returns pointer to allocated memory, or 0 if allocation failed
 #[no_mangle]
 pub extern "C" fn rt_arena_alloc(handle: i64, size: i64, align: i64) -> i64 {
-    ARENA_MAP.lock().unwrap()
+    ARENA_MAP
+        .lock()
+        .unwrap()
         .get_mut(&handle)
         .and_then(|arena| arena.alloc(size as usize, align as usize))
         .map(|ptr| ptr as i64)
@@ -2746,7 +2752,9 @@ pub extern "C" fn rt_arena_alloc(handle: i64, size: i64, align: i64) -> i64 {
 /// Get arena capacity
 #[no_mangle]
 pub extern "C" fn rt_arena_capacity(handle: i64) -> i64 {
-    ARENA_MAP.lock().unwrap()
+    ARENA_MAP
+        .lock()
+        .unwrap()
         .get(&handle)
         .map(|arena| arena.capacity as i64)
         .unwrap_or(0)
@@ -2755,7 +2763,9 @@ pub extern "C" fn rt_arena_capacity(handle: i64) -> i64 {
 /// Get arena used bytes
 #[no_mangle]
 pub extern "C" fn rt_arena_used(handle: i64) -> i64 {
-    ARENA_MAP.lock().unwrap()
+    ARENA_MAP
+        .lock()
+        .unwrap()
         .get(&handle)
         .map(|arena| arena.used as i64)
         .unwrap_or(0)
@@ -2773,4 +2783,430 @@ pub extern "C" fn rt_arena_reset(handle: i64) {
 #[no_mangle]
 pub extern "C" fn rt_arena_free(handle: i64) {
     ARENA_MAP.lock().unwrap().remove(&handle);
+}
+
+// ============================================================================
+// Concurrent Data Structures
+// ============================================================================
+
+use std::collections::HashMap as StdHashMap;
+use std::collections::VecDeque;
+use std::collections::BTreeMap;
+
+// Concurrent Map
+struct ConcurrentMap {
+    data: Mutex<StdHashMap<i64, RuntimeValue>>,
+}
+
+impl ConcurrentMap {
+    fn new() -> Self {
+        Self {
+            data: Mutex::new(StdHashMap::new()),
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref CONCURRENT_MAP_MAP: Mutex<HashMap<i64, Box<ConcurrentMap>>> = Mutex::new(HashMap::new());
+}
+
+static mut CONCURRENT_MAP_COUNTER: i64 = 1;
+
+/// Create a new concurrent map
+#[no_mangle]
+pub extern "C" fn rt_concurrent_map_new() -> i64 {
+    let map = Box::new(ConcurrentMap::new());
+    unsafe {
+        let handle = CONCURRENT_MAP_COUNTER;
+        CONCURRENT_MAP_COUNTER += 1;
+        CONCURRENT_MAP_MAP.lock().unwrap().insert(handle, map);
+        handle
+    }
+}
+
+/// Insert key-value pair into concurrent map
+#[no_mangle]
+pub extern "C" fn rt_concurrent_map_insert(handle: i64, key: i64, value: RuntimeValue) {
+    if let Some(map) = CONCURRENT_MAP_MAP.lock().unwrap().get(&handle) {
+        map.data.lock().unwrap().insert(key, value);
+    }
+}
+
+/// Get value from concurrent map
+#[no_mangle]
+pub extern "C" fn rt_concurrent_map_get(handle: i64, key: i64) -> RuntimeValue {
+    CONCURRENT_MAP_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|map| map.data.lock().unwrap().get(&key).copied())
+        .unwrap_or(RuntimeValue::NIL)
+}
+
+/// Remove key from concurrent map
+#[no_mangle]
+pub extern "C" fn rt_concurrent_map_remove(handle: i64, key: i64) -> RuntimeValue {
+    CONCURRENT_MAP_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|map| map.data.lock().unwrap().remove(&key))
+        .unwrap_or(RuntimeValue::NIL)
+}
+
+/// Check if concurrent map contains key
+#[no_mangle]
+pub extern "C" fn rt_concurrent_map_contains(handle: i64, key: i64) -> bool {
+    CONCURRENT_MAP_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|map| map.data.lock().unwrap().contains_key(&key))
+        .unwrap_or(false)
+}
+
+/// Get concurrent map length
+#[no_mangle]
+pub extern "C" fn rt_concurrent_map_len(handle: i64) -> i64 {
+    CONCURRENT_MAP_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|map| map.data.lock().unwrap().len() as i64)
+        .unwrap_or(0)
+}
+
+/// Clear concurrent map
+#[no_mangle]
+pub extern "C" fn rt_concurrent_map_clear(handle: i64) {
+    if let Some(map) = CONCURRENT_MAP_MAP.lock().unwrap().get(&handle) {
+        map.data.lock().unwrap().clear();
+    }
+}
+
+/// Free concurrent map
+#[no_mangle]
+pub extern "C" fn rt_concurrent_map_free(handle: i64) {
+    CONCURRENT_MAP_MAP.lock().unwrap().remove(&handle);
+}
+
+// Concurrent Queue
+struct ConcurrentQueue {
+    data: Mutex<VecDeque<RuntimeValue>>,
+}
+
+impl ConcurrentQueue {
+    fn new() -> Self {
+        Self {
+            data: Mutex::new(VecDeque::new()),
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref CONCURRENT_QUEUE_MAP: Mutex<HashMap<i64, Box<ConcurrentQueue>>> = Mutex::new(HashMap::new());
+}
+
+static mut CONCURRENT_QUEUE_COUNTER: i64 = 1;
+
+/// Create a new concurrent queue
+#[no_mangle]
+pub extern "C" fn rt_concurrent_queue_new() -> i64 {
+    let queue = Box::new(ConcurrentQueue::new());
+    unsafe {
+        let handle = CONCURRENT_QUEUE_COUNTER;
+        CONCURRENT_QUEUE_COUNTER += 1;
+        CONCURRENT_QUEUE_MAP.lock().unwrap().insert(handle, queue);
+        handle
+    }
+}
+
+/// Push value to back of concurrent queue
+#[no_mangle]
+pub extern "C" fn rt_concurrent_queue_push(handle: i64, value: RuntimeValue) {
+    if let Some(queue) = CONCURRENT_QUEUE_MAP.lock().unwrap().get(&handle) {
+        queue.data.lock().unwrap().push_back(value);
+    }
+}
+
+/// Pop value from front of concurrent queue
+#[no_mangle]
+pub extern "C" fn rt_concurrent_queue_pop(handle: i64) -> RuntimeValue {
+    CONCURRENT_QUEUE_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|queue| queue.data.lock().unwrap().pop_front())
+        .unwrap_or(RuntimeValue::NIL)
+}
+
+/// Check if concurrent queue is empty
+#[no_mangle]
+pub extern "C" fn rt_concurrent_queue_is_empty(handle: i64) -> bool {
+    CONCURRENT_QUEUE_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|queue| queue.data.lock().unwrap().is_empty())
+        .unwrap_or(true)
+}
+
+/// Get concurrent queue length
+#[no_mangle]
+pub extern "C" fn rt_concurrent_queue_len(handle: i64) -> i64 {
+    CONCURRENT_QUEUE_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|queue| queue.data.lock().unwrap().len() as i64)
+        .unwrap_or(0)
+}
+
+/// Free concurrent queue
+#[no_mangle]
+pub extern "C" fn rt_concurrent_queue_free(handle: i64) {
+    CONCURRENT_QUEUE_MAP.lock().unwrap().remove(&handle);
+}
+
+// Concurrent Stack
+struct ConcurrentStack {
+    data: Mutex<Vec<RuntimeValue>>,
+}
+
+impl ConcurrentStack {
+    fn new() -> Self {
+        Self {
+            data: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref CONCURRENT_STACK_MAP: Mutex<HashMap<i64, Box<ConcurrentStack>>> = Mutex::new(HashMap::new());
+}
+
+static mut CONCURRENT_STACK_COUNTER: i64 = 1;
+
+/// Create a new concurrent stack
+#[no_mangle]
+pub extern "C" fn rt_concurrent_stack_new() -> i64 {
+    let stack = Box::new(ConcurrentStack::new());
+    unsafe {
+        let handle = CONCURRENT_STACK_COUNTER;
+        CONCURRENT_STACK_COUNTER += 1;
+        CONCURRENT_STACK_MAP.lock().unwrap().insert(handle, stack);
+        handle
+    }
+}
+
+/// Push value to concurrent stack
+#[no_mangle]
+pub extern "C" fn rt_concurrent_stack_push(handle: i64, value: RuntimeValue) {
+    if let Some(stack) = CONCURRENT_STACK_MAP.lock().unwrap().get(&handle) {
+        stack.data.lock().unwrap().push(value);
+    }
+}
+
+/// Pop value from concurrent stack
+#[no_mangle]
+pub extern "C" fn rt_concurrent_stack_pop(handle: i64) -> RuntimeValue {
+    CONCURRENT_STACK_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|stack| stack.data.lock().unwrap().pop())
+        .unwrap_or(RuntimeValue::NIL)
+}
+
+/// Check if concurrent stack is empty
+#[no_mangle]
+pub extern "C" fn rt_concurrent_stack_is_empty(handle: i64) -> bool {
+    CONCURRENT_STACK_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|stack| stack.data.lock().unwrap().is_empty())
+        .unwrap_or(true)
+}
+
+/// Get concurrent stack length
+#[no_mangle]
+pub extern "C" fn rt_concurrent_stack_len(handle: i64) -> i64 {
+    CONCURRENT_STACK_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|stack| stack.data.lock().unwrap().len() as i64)
+        .unwrap_or(0)
+}
+
+/// Free concurrent stack
+#[no_mangle]
+pub extern "C" fn rt_concurrent_stack_free(handle: i64) {
+    CONCURRENT_STACK_MAP.lock().unwrap().remove(&handle);
+}
+
+// ============================================================================
+// Resource Pool Operations
+// ============================================================================
+
+struct ResourcePool {
+    available: Mutex<VecDeque<RuntimeValue>>,
+    capacity: usize,
+}
+
+impl ResourcePool {
+    fn new(capacity: usize) -> Self {
+        Self {
+            available: Mutex::new(VecDeque::new()),
+            capacity,
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref POOL_MAP: Mutex<HashMap<i64, Box<ResourcePool>>> = Mutex::new(HashMap::new());
+}
+
+static mut POOL_COUNTER: i64 = 1;
+
+/// Create a new resource pool with given capacity
+#[no_mangle]
+pub extern "C" fn rt_pool_new(capacity: i64) -> i64 {
+    let pool = Box::new(ResourcePool::new(capacity as usize));
+    unsafe {
+        let handle = POOL_COUNTER;
+        POOL_COUNTER += 1;
+        POOL_MAP.lock().unwrap().insert(handle, pool);
+        handle
+    }
+}
+
+/// Acquire a resource from the pool
+/// Returns NIL if pool is empty
+#[no_mangle]
+pub extern "C" fn rt_pool_acquire(handle: i64) -> RuntimeValue {
+    POOL_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|pool| pool.available.lock().unwrap().pop_front())
+        .unwrap_or(RuntimeValue::NIL)
+}
+
+/// Release a resource back to the pool
+#[no_mangle]
+pub extern "C" fn rt_pool_release(handle: i64, resource: RuntimeValue) {
+    if let Some(pool) = POOL_MAP.lock().unwrap().get(&handle) {
+        let mut available = pool.available.lock().unwrap();
+        if available.len() < pool.capacity {
+            available.push_back(resource);
+        }
+    }
+}
+
+/// Get number of available resources in pool
+#[no_mangle]
+pub extern "C" fn rt_pool_available(handle: i64) -> i64 {
+    POOL_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|pool| pool.available.lock().unwrap().len() as i64)
+        .unwrap_or(0)
+}
+
+/// Get pool capacity
+#[no_mangle]
+pub extern "C" fn rt_pool_capacity(handle: i64) -> i64 {
+    POOL_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .map(|pool| pool.capacity as i64)
+        .unwrap_or(0)
+}
+
+/// Free resource pool
+#[no_mangle]
+pub extern "C" fn rt_pool_free(handle: i64) {
+    POOL_MAP.lock().unwrap().remove(&handle);
+}
+
+// ============================================================================
+// Thread-Local Storage Operations
+// ============================================================================
+
+struct ThreadLocalStorage {
+    data: Mutex<BTreeMap<u64, RuntimeValue>>,
+}
+
+impl ThreadLocalStorage {
+    fn new() -> Self {
+        Self {
+            data: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref TLS_MAP: Mutex<HashMap<i64, Box<ThreadLocalStorage>>> = Mutex::new(HashMap::new());
+}
+
+static mut TLS_COUNTER: i64 = 1;
+
+/// Create a new thread-local storage
+#[no_mangle]
+pub extern "C" fn rt_tls_new() -> i64 {
+    let tls = Box::new(ThreadLocalStorage::new());
+    unsafe {
+        let handle = TLS_COUNTER;
+        TLS_COUNTER += 1;
+        TLS_MAP.lock().unwrap().insert(handle, tls);
+        handle
+    }
+}
+
+/// Set thread-local value
+#[no_mangle]
+pub extern "C" fn rt_tls_set(handle: i64, key: u64, value: RuntimeValue) {
+    if let Some(tls) = TLS_MAP.lock().unwrap().get(&handle) {
+        tls.data.lock().unwrap().insert(key, value);
+    }
+}
+
+/// Get thread-local value
+#[no_mangle]
+pub extern "C" fn rt_tls_get(handle: i64, key: u64) -> RuntimeValue {
+    TLS_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|tls| tls.data.lock().unwrap().get(&key).copied())
+        .unwrap_or(RuntimeValue::NIL)
+}
+
+/// Remove thread-local value
+#[no_mangle]
+pub extern "C" fn rt_tls_remove(handle: i64, key: u64) -> RuntimeValue {
+    TLS_MAP
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .and_then(|tls| tls.data.lock().unwrap().remove(&key))
+        .unwrap_or(RuntimeValue::NIL)
+}
+
+/// Clear all thread-local values
+#[no_mangle]
+pub extern "C" fn rt_tls_clear(handle: i64) {
+    if let Some(tls) = TLS_MAP.lock().unwrap().get(&handle) {
+        tls.data.lock().unwrap().clear();
+    }
+}
+
+/// Free thread-local storage
+#[no_mangle]
+pub extern "C" fn rt_tls_free(handle: i64) {
+    TLS_MAP.lock().unwrap().remove(&handle);
 }
