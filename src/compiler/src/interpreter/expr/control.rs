@@ -46,6 +46,7 @@ pub(super) fn eval_control_expr(
             condition,
             then_branch,
             else_branch,
+            ..
         } => {
             let result = if evaluate_expr(condition, env, functions, classes, enums, impl_methods)?
                 .truthy()

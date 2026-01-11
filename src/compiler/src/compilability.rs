@@ -386,6 +386,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             condition,
             then_branch,
             else_branch,
+            ..
         } => {
             analyze_expr(condition, reasons);
             analyze_expr(then_branch, reasons);

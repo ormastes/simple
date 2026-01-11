@@ -191,6 +191,7 @@ impl<'a> CallSiteAnalyzer<'a> {
                 condition,
                 then_branch,
                 else_branch,
+                ..
             } => {
                 self.analyze_expr(condition);
                 self.analyze_expr(then_branch);

@@ -240,10 +240,12 @@ impl<'a> CallSiteRewriter<'a> {
                 move_mode: *move_mode,
             },
             Expr::If {
+                let_pattern,
                 condition,
                 then_branch,
                 else_branch,
             } => Expr::If {
+                let_pattern: let_pattern.clone(),
                 condition: Box::new(self.rewrite_expr(condition)),
                 then_branch: Box::new(self.rewrite_expr(then_branch)),
                 else_branch: else_branch.as_ref().map(|e| Box::new(self.rewrite_expr(e))),

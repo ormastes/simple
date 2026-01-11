@@ -169,6 +169,7 @@ impl TypeChecker {
                 condition,
                 then_branch,
                 else_branch,
+                ..
             } => {
                 let cond_ty = self.infer_expr(condition)?;
                 // Condition should be Bool

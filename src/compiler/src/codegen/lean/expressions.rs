@@ -144,6 +144,7 @@ impl LeanExpr {
                 cond,
                 then_branch,
                 else_branch,
+                ..
             } => {
                 format!(
                     "if {} then {} else {}",

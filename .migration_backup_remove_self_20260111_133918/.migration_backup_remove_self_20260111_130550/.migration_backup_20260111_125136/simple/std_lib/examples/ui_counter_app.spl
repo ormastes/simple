@@ -1,0 +1,190 @@
+# Counter App Example
+#
+# Demonstrates the widget system integrated with the existing async TUI renderer.
+#
+# Features:
+# - Builder pattern widgets (Column, Row, Button, Text)
+# - Reactive state management
+# - Event handling
+# - Integration with async RenderBackend
+#
+# Run with:
+#   ./target/debug/simple simple/std_lib/examples/ui_counter_app.spl
+
+use core.*
+use ui.widget.*
+use ui.layout.*
+use ui.interactive.*
+use ui.display.*
+use ui.state.*
+use ui.widget_renderer.*
+use ui.tui.renderer.*
+use ui.renderer.*
+
+# Counter application state
+struct CounterState:
+    count: State[i32]
+    step: State[i32]
+
+impl CounterState:
+    fn new() -> CounterState:
+        return CounterState {
+            count: State::new(0),
+            step: State::new(1)
+        }
+
+    fn increment(self):
+        let current = self.count.get()
+        let step_val = self.step.get()
+        self.count.set(current + step_val)
+
+    fn decrement(self):
+        let current = self.count.get()
+        let step_val = self.step.get()
+        self.count.set(current - step_val)
+
+    fn reset(self):
+        self.count.set(0)
+
+    fn set_step(self, new_step: i32):
+        self.step.set(new_step)
+
+# Build counter UI
+fn build_counter_ui(state: &CounterState) -> Box[dyn Widget]:
+    let count_value = state.count.get()
+    let step_value = state.step.get()
+
+    return Column::new()
+        .spacing(8)
+        .padding(EdgeInsets::all(16))
+        .align(Align::Center)
+        .children([
+            # Title
+            Text::new("╔════════════════════════╗")
+                .style(TextStyle::new().color(Color::cyan())),
+            Text::new("║   Counter App Demo    ║")
+                .style(TextStyle::new().color(Color::cyan()).bold()),
+            Text::new("╚════════════════════════╝")
+                .style(TextStyle::new().color(Color::cyan())),
+
+            Spacer::new().height(8),
+
+            # Current count display
+            Column::new()
+                .spacing(4)
+                .align(Align::Center)
+                .children([
+                    Text::new("Current Count:")
+                        .style(TextStyle::new().color(Color::white())),
+                    Text::new(format!("{}", count_value))
+                        .style(TextStyle::new()
+                            .font_size(24)
+                            .color(Color::green())
+                            .bold())
+                ]),
+
+            Spacer::new().height(8),
+
+            # Control buttons
+            Row::new()
+                .spacing(4)
+                .align(Align::Center)
+                .children([
+                    Button::new("[-]")
+                        .secondary()
+                        .on_click(|| state.decrement()),
+                    Button::new("[Reset]")
+                        .outlined()
+                        .on_click(|| state.reset()),
+                    Button::new("[+]")
+                        .primary()
+                        .on_click(|| state.increment())
+                ]),
+
+            Spacer::new().height(8),
+
+            # Step size controls
+            Column::new()
+                .spacing(4)
+                .align(Align::Center)
+                .children([
+                    Text::new(format!("Step Size: {}", step_value))
+                        .style(TextStyle::new().color(Color::yellow())),
+                    Row::new()
+                        .spacing(4)
+                        .children([
+                            Button::new("[1]")
+                                .small()
+                                .on_click(|| state.set_step(1)),
+                            Button::new("[5]")
+                                .small()
+                                .on_click(|| state.set_step(5)),
+                            Button::new("[10]")
+                                .small()
+                                .on_click(|| state.set_step(10))
+                        ])
+                ]),
+
+            Spacer::new().height(8),
+
+            # Instructions
+            Divider::new(),
+            Text::new("Keyboard Shortcuts:")
+                .style(TextStyle::new().color(Color::bright_black()).italic()),
+            Text::new("  +/-: Increment/Decrement")
+                .style(TextStyle::new().color(Color::bright_black())),
+            Text::new("  r: Reset counter")
+                .style(TextStyle::new().color(Color::bright_black())),
+            Text::new("  q/Esc: Quit")
+                .style(TextStyle::new().color(Color::bright_black()))
+        ])
+
+# Event handler
+fn handle_event(event: Event, state: &CounterState) -> bool:
+    match event:
+        case Event::Key(key_event):
+            # Quit on Esc or 'q'
+            if key_event.is_escape():
+                return true
+
+            if let Some(ch) = key_event.char():
+                match ch:
+                    case 'q' | 'Q':
+                        return true
+                    case '+' | '=':
+                        state.increment()
+                    case '-' | '_':
+                        state.decrement()
+                    case 'r' | 'R':
+                        state.reset()
+                    case '1':
+                        state.set_step(1)
+                    case '5':
+                        state.set_step(5)
+                    case '0':
+                        state.set_step(10)
+                    case _:
+                        pass
+
+        case _:
+            pass
+
+    return false  # Continue running
+
+# Main entry point
+async fn main():
+    # Create application state
+    let state = CounterState::new()
+
+    # Create TUI renderer
+    let tui_backend = TuiRenderer::new().await
+    let mut renderer = WidgetRenderer::new(tui_backend).await
+
+    # Run application with event loop
+    let app_widget = build_counter_ui(&state)
+
+    match await renderer.run(&app_widget, |event| handle_event(event, &state)):
+        case Ok(_):
+            println("Counter app exited successfully")
+        case Err(e):
+            eprintln(format!("Error running counter app: {}", e.message()))

@@ -98,7 +98,7 @@ impl<'a> Parser<'a> {
 
     /// Parse an if/elif expression (shared logic)
     pub(crate) fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
-        let condition = self.parse_expression()?;
+        let (let_pattern, condition) = self.parse_optional_let_pattern()?;
         self.expect(&TokenKind::Colon)?;
         let then_branch = self.parse_expression()?;
         let else_branch = if self.check(&TokenKind::Elif) {
@@ -112,6 +112,7 @@ impl<'a> Parser<'a> {
             None
         };
         Ok(Expr::If {
+            let_pattern,
             condition: Box::new(condition),
             then_branch: Box::new(then_branch),
             else_branch,

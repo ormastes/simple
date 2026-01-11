@@ -1,0 +1,197 @@
+# String Core - Type definition and constructors
+use core.traits.*
+use core.collections.*
+
+use core.traits.*
+use core.collections.*
+
+# ============================================
+# String Type Definition
+# ============================================
+
+struct String:
+    data: *u8
+    len: usize       # Byte length
+    cap: usize
+
+# ============================================
+# String Error Types
+# ============================================
+
+enum Utf8Error:
+    InvalidByte(position: usize, byte: u8)
+    UnexpectedEnd
+
+impl Display for Utf8Error:
+    fn fmt(self) -> str:
+        match self:
+            case InvalidByte(pos, b): "invalid UTF-8 byte {b} at position {pos}"
+            case UnexpectedEnd: "unexpected end of UTF-8 sequence"
+
+impl Utf8Error:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn to_string(self) -> String:
+        """Convert error to string.
+
+        Returns:
+            Error name
+        """
+        match self:
+            case InvalidByte(_, _): "InvalidByte"
+            case UnexpectedEnd: "UnexpectedEnd"
+
+    pub fn description(self) -> String:
+        """Get detailed error description.
+
+        Returns:
+            Human-readable description
+        """
+        match self:
+            case InvalidByte(pos, byte): "Invalid UTF-8 byte 0x{byte:02X} at position {pos}"
+            case UnexpectedEnd: "Unexpected end of UTF-8 sequence"
+
+    pub fn is_invalid_byte(self) -> bool:
+        """Check if this is an InvalidByte error.
+
+        Returns:
+            True for InvalidByte variant
+        """
+        match self:
+            case InvalidByte(_, _): true
+            case _: false
+
+    pub fn is_unexpected_end(self) -> bool:
+        """Check if this is an UnexpectedEnd error.
+
+        Returns:
+            True for UnexpectedEnd variant
+        """
+        match self:
+            case UnexpectedEnd: true
+            case _: false
+
+    pub fn get_position(self) -> Option[usize]:
+        """Get error position if available.
+
+        Returns:
+            Position for InvalidByte, None otherwise
+        """
+        match self:
+            case InvalidByte(pos, _): Some(pos)
+            case _: None
+
+    pub fn get_byte(self) -> Option[u8]:
+        """Get invalid byte if available.
+
+        Returns:
+            Byte value for InvalidByte, None otherwise
+        """
+        match self:
+            case InvalidByte(_, byte): Some(byte)
+            case _: None
+
+    pub fn summary(self) -> String:
+        """Get summary of UTF-8 error.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            Utf8Error::InvalidByte(5, 0xFF).summary()
+            # → "Utf8Error: InvalidByte at position 5 (byte 0xFF)"
+        """
+        match self:
+            case InvalidByte(pos, byte):
+                "Utf8Error: InvalidByte at position {pos} (byte 0x{byte:02X})"
+            case UnexpectedEnd:
+                "Utf8Error: UnexpectedEnd (truncated sequence)"
+
+impl Error for Utf8Error
+
+# ============================================
+# Constructors
+# ============================================
+
+impl String:
+    # Create empty string
+    fn new() -> String:
+        String { data: nil, len: 0, cap: 0 }
+
+    # Create with pre-allocated capacity
+    fn with_capacity(cap: usize) -> String:
+        if cap == 0:
+            return String::new()
+        let data = alloc[u8](cap)
+        String { data: data, len: 0, cap: cap }
+
+    # Create from string literal (already UTF-8)
+    fn from(s: &str) -> String:
+        if s.len() == 0:
+            return String::new()
+        let len = s.len()
+        let data = alloc[u8](len)
+        danger:
+            copy_mem(data, s.as_ptr(), len)
+        String { data: data, len: len, cap: len }
+
+    # Create from UTF-8 bytes (may fail)
+    fn from_utf8(bytes: Slice[u8]) -> Result[String, Utf8Error]:
+        # Validate UTF-8
+        var i: usize = 0
+        while i < bytes.len():
+            let b = bytes.get(i).expect("valid")
+            if b < 0x80:
+                # ASCII
+                i = i + 1
+            else if b < 0xC0:
+                return Err(Utf8Error::InvalidByte(i, b))
+            else if b < 0xE0:
+                # 2-byte sequence
+                if i + 1 >= bytes.len():
+                    return Err(Utf8Error::UnexpectedEnd)
+                i = i + 2
+            else if b < 0xF0:
+                # 3-byte sequence
+                if i + 2 >= bytes.len():
+                    return Err(Utf8Error::UnexpectedEnd)
+                i = i + 3
+            else if b < 0xF8:
+                # 4-byte sequence
+                if i + 3 >= bytes.len():
+                    return Err(Utf8Error::UnexpectedEnd)
+                i = i + 4
+            else:
+                return Err(Utf8Error::InvalidByte(i, b))
+
+        # Valid UTF-8, copy bytes
+        let data = alloc[u8](bytes.len())
+        danger:
+            for j in 0..bytes.len():
+                data.offset(j as isize).write(bytes.get(j).expect("valid"))
+        Ok(String { data: data, len: bytes.len(), cap: bytes.len() })
+
+    # Create from UTF-8 bytes, replacing invalid sequences
+    fn from_utf8_lossy(bytes: Slice[u8]) -> String:
+        match String::from_utf8(bytes):
+            case Ok(s): s
+            case Err(_):
+                # Fallback: copy valid ASCII, replace invalid with ?
+                var result = String::with_capacity(bytes.len())
+                for i in 0..bytes.len():
+                    let b = bytes.get(i).expect("valid")
+                    if b < 0x80:
+                        result.push_byte(b)
+                    else:
+                        result.push_byte('?' as u8)
+                result
+
+    # Create filled with character
+    fn filled(c: char, count: usize) -> String:
+        var s = String::with_capacity(count * 4)  # Max 4 bytes per char
+        for _ in 0..count:
+            s.push(c)
+        s
+

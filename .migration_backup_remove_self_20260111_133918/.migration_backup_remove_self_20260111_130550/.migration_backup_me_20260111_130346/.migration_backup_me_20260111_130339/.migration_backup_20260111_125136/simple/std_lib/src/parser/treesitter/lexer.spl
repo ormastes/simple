@@ -1,0 +1,286 @@
+# Simple tokenizer for Phase 1
+# Minimal implementation - handles basic tokens, not full indentation
+
+import core.{Option, Result}
+import parser.treesitter.grammar.{Token, TokenKind, Span}
+
+# Lexer state
+struct Lexer:
+    source: str
+    pos: i64
+    line: i64
+    column: i64
+    tokens: [Token]
+
+    fn new(source: str) -> Lexer:
+        return Lexer(
+            source: source,
+            pos: 0,
+            line: 1,
+            column: 1,
+            tokens: []
+        )
+
+    # Tokenize entire source
+    fn tokenize(mut self) -> Result[[Token], str]:
+        while self.pos < self.source.len():
+            self.skip_whitespace()
+
+            if self.pos >= self.source.len():
+                break
+
+            # Try to match token
+            let start_pos = self.pos
+            let start_line = self.line
+            let start_column = self.column
+
+            match self.next_token():
+                case Some(kind):
+                    let end_pos = self.pos
+                    let text = self.source[start_pos:end_pos]
+                    let span = Span(
+                        start_byte: start_pos,
+                        end_byte: end_pos,
+                        start_line: start_line,
+                        end_line: self.line,
+                        start_column: start_column,
+                        end_column: self.column
+                    )
+                    self.tokens.push(Token(kind: kind, text: text, span: span))
+                case None:
+                    return Err("Unexpected character at line " + self.line.to_string() +
+                              ", column " + self.column.to_string())
+
+        # Add EOF token
+        let eof_span = Span(
+            start_byte: self.pos,
+            end_byte: self.pos,
+            start_line: self.line,
+            end_line: self.line,
+            start_column: self.column,
+            end_column: self.column
+        )
+        self.tokens.push(Token(kind: TokenKind.Eof, text: "", span: eof_span))
+
+        return Ok(self.tokens)
+
+    # Get next token kind
+    fn next_token(mut self) -> Option[TokenKind]:
+        let ch = self.current_char()?
+
+        # Keywords and identifiers
+        if self.is_alpha(ch):
+            return Some(self.read_identifier_or_keyword())
+
+        # Numbers
+        if self.is_digit(ch):
+            return Some(self.read_number())
+
+        # Operators and delimiters
+        match ch:
+            case ':':
+                self.advance()
+                return Some(TokenKind.Colon)
+            case '(':
+                self.advance()
+                return Some(TokenKind.LParen)
+            case ')':
+                self.advance()
+                return Some(TokenKind.RParen)
+            case '{':
+                self.advance()
+                return Some(TokenKind.LBrace)
+            case '}':
+                self.advance()
+                return Some(TokenKind.RBrace)
+            case '[':
+                self.advance()
+                return Some(TokenKind.LBracket)
+            case ']':
+                self.advance()
+                return Some(TokenKind.RBracket)
+            case ',':
+                self.advance()
+                return Some(TokenKind.Comma)
+            case ';':
+                self.advance()
+                return Some(TokenKind.Semicolon)
+            case '.':
+                self.advance()
+                return Some(TokenKind.Dot)
+            case '+':
+                self.advance()
+                return Some(TokenKind.Plus)
+            case '*':
+                self.advance()
+                return Some(TokenKind.Star)
+            case '/':
+                self.advance()
+                return Some(TokenKind.Slash)
+            case '%':
+                self.advance()
+                return Some(TokenKind.Percent)
+            case '=':
+                self.advance()
+                if self.peek() == Some('='):
+                    self.advance()
+                    return Some(TokenKind.Eq)
+                else:
+                    return Some(TokenKind.Assign)
+            case '-':
+                self.advance()
+                if self.peek() == Some('>'):
+                    self.advance()
+                    return Some(TokenKind.Arrow)
+                else:
+                    return Some(TokenKind.Minus)
+            case '<':
+                self.advance()
+                if self.peek() == Some('='):
+                    self.advance()
+                    return Some(TokenKind.LtEq)
+                else:
+                    return Some(TokenKind.Lt)
+            case '>':
+                self.advance()
+                if self.peek() == Some('='):
+                    self.advance()
+                    return Some(TokenKind.GtEq)
+                else:
+                    return Some(TokenKind.Gt)
+            case '!':
+                self.advance()
+                if self.peek() == Some('='):
+                    self.advance()
+                    return Some(TokenKind.NotEq)
+                else:
+                    return Some(TokenKind.Not)
+            case '\n':
+                self.advance()
+                self.line = self.line + 1
+                self.column = 1
+                return Some(TokenKind.Newline)
+            case _:
+                return None
+
+    # Read identifier or keyword
+    fn read_identifier_or_keyword(mut self) -> TokenKind:
+        let start = self.pos
+
+        while match self.current_char():
+            case Some(ch): self.is_alpha(ch) or self.is_digit(ch) or ch == '_'
+            case None: false
+        :
+            self.advance()
+
+        let text = self.source[start:self.pos]
+
+        # Check for keywords
+        match text:
+            case "fn": return TokenKind.Fn
+            case "let": return TokenKind.Let
+            case "mut": return TokenKind.Mut
+            case "return": return TokenKind.Return
+            case "if": return TokenKind.If
+            case "else": return TokenKind.Else
+            case "elif": return TokenKind.Elif
+            case "struct": return TokenKind.Struct
+            case "class": return TokenKind.Class
+            case "enum": return TokenKind.Enum
+            case "trait": return TokenKind.Trait
+            case "impl": return TokenKind.Impl
+            case "match": return TokenKind.Match
+            case "case": return TokenKind.Case
+            case "for": return TokenKind.For
+            case "while": return TokenKind.While
+            case "loop": return TokenKind.Loop
+            case "break": return TokenKind.Break
+            case "continue": return TokenKind.Continue
+            case "true": return TokenKind.Bool(true)
+            case "false": return TokenKind.Bool(false)
+            case "nil": return TokenKind.Nil
+            case _:
+                # Check if it's a type identifier (starts with uppercase)
+                # For Phase 1, use simple heuristic: check first character
+                let first_ch = self.source[start]
+                if first_ch >= 'A' and first_ch <= 'Z':
+                    return TokenKind.TypeIdentifier(text)
+                else:
+                    return TokenKind.Identifier(text)
+
+    # Read number literal
+    fn read_number(mut self) -> TokenKind:
+        let start = self.pos
+        let mut has_dot = false
+
+        while match self.current_char():
+            case Some(ch):
+                if ch == '.' and not has_dot:
+                    has_dot = true
+                    true
+                else:
+                    self.is_digit(ch)
+            case None: false
+        :
+            self.advance()
+
+        let text = self.source[start:self.pos]
+
+        # TODO: [parser][P3] proper parsing in Phase 2)
+        if has_dot:
+            # Parse float manually
+            let value = self.simple_parse_float(text)
+            return TokenKind.Float(value)
+        else:
+            # Parse integer manually
+            let value = self.simple_parse_int(text)
+            return TokenKind.Integer(value)
+
+    # Simple integer parsing (Phase 1 helper)
+    fn simple_parse_int(self, text: str) -> i64:
+        let mut result: i64 = 0
+        let mut i = 0
+        while i < text.len():
+            let ch = text[i]
+            if ch >= '0' and ch <= '9':
+                let digit = (ch as i64) - ('0' as i64)
+                result = result * 10 + digit
+            i = i + 1
+        return result
+
+    # Simple float parsing (Phase 1 helper)
+    fn simple_parse_float(self, text: str) -> f64:
+        # For Phase 1, just return 0.0
+        # TODO: [parser][P3] Proper float parsing in Phase 2
+        return 0.0
+
+    # Helper methods
+    fn current_char(self) -> Option[char]:
+        if self.pos < self.source.len():
+            return Some(self.source[self.pos])
+        else:
+            return None
+
+    fn peek(self) -> Option[char]:
+        if self.pos + 1 < self.source.len():
+            return Some(self.source[self.pos + 1])
+        else:
+            return None
+
+    fn advance(mut self):
+        if self.pos < self.source.len():
+            self.pos = self.pos + 1
+            self.column = self.column + 1
+
+    fn skip_whitespace(mut self):
+        while match self.current_char():
+            case Some(ch): ch == ' ' or ch == '\t' or ch == '\r'
+            case None: false
+        :
+            self.advance()
+
+    fn is_alpha(self, ch: char) -> bool:
+        return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or ch == '_'
+
+    fn is_digit(self, ch: char) -> bool:
+        return ch >= '0' and ch <= '9'

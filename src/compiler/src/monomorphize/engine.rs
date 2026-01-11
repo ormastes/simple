@@ -579,10 +579,12 @@ impl<'a> Monomorphizer<'a> {
             }
             // If expression
             Expr::If {
+                let_pattern,
                 condition,
                 then_branch,
                 else_branch,
             } => Expr::If {
+                let_pattern: let_pattern.clone(),
                 condition: Box::new(self.substitute_in_expr(condition, bindings)),
                 then_branch: Box::new(self.substitute_in_expr(then_branch, bindings)),
                 else_branch: else_branch

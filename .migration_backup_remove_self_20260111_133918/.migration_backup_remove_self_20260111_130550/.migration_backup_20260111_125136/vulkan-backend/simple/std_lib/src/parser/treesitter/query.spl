@@ -1,0 +1,250 @@
+# Query system for tree-sitter
+# S-expression pattern matching for syntax highlighting and semantic analysis
+
+import core.{Option, Result}
+import parser.treesitter.tree.{Tree, Node, NodeId, Span}
+
+# Captured node with name
+struct Capture:
+    name: str           # Capture name (e.g., "@keyword", "@function")
+    node: Node          # Captured node
+    index: i64          # Capture index in pattern
+
+    fn new(name: str, node: Node, index: i64) -> Capture:
+        return Capture(name: name, node: node, index: index)
+
+# Query match result
+struct QueryMatch:
+    pattern_index: i64      # Which pattern matched
+    captures: [Capture]     # All captured nodes in this match
+
+    fn new(pattern_index: i64, captures: [Capture]) -> QueryMatch:
+        return QueryMatch(pattern_index: pattern_index, captures: captures)
+
+# Query pattern (simplified for Phase 4)
+enum QueryPattern:
+    # Match node by kind
+    NodeKind(str)                           # (identifier)
+
+    # Match with capture
+    CaptureNode(str, str)                   # (identifier) @name
+
+    # Match with field
+    FieldNode(str, str, QueryPattern)       # name: (identifier)
+
+    # Match with children
+    ParentNode(str, [QueryPattern])         # (function_def ...)
+
+    # Match keyword list
+    KeywordList([str], str)                 # ["fn" "let" "return"] @keyword
+
+# Query struct
+struct Query:
+    patterns: [QueryPattern]        # List of patterns to match
+    capture_names: [str]            # List of capture names (@keyword, @function, etc.)
+    language: str                   # Language name
+
+    fn new(language: str, query_str: str) -> Result[Query, str]:
+        # Phase 4.1: Parse simple query strings
+        # Phase 4.2: Full S-expression parser
+
+        if language != "simple":
+            return Err("Unsupported language: " + language)
+
+        # For Phase 4.1: Pre-defined patterns for syntax highlighting
+        let patterns = build_highlight_patterns()
+        let capture_names = ["keyword", "function", "type", "number", "string", "comment", "operator"]
+
+        return Ok(Query(
+            patterns: patterns,
+            capture_names: capture_names,
+            language: language
+        ))
+
+# Build syntax highlighting patterns (Phase 4.1)
+fn build_highlight_patterns() -> [QueryPattern]:
+    return [
+        # Keywords
+        QueryPattern.KeywordList(
+            ["fn", "let", "mut", "return", "if", "else", "elif", "struct", "class", "enum", "match", "case", "for", "while", "loop", "break", "continue"],
+            "keyword"
+        ),
+
+        # Function names in definitions
+        QueryPattern.FieldNode("function_def", "name",
+            QueryPattern.CaptureNode("identifier", "function")),
+
+        # Type identifiers
+        QueryPattern.CaptureNode("type_identifier", "type"),
+
+        # Numbers
+        QueryPattern.CaptureNode("integer", "number"),
+        QueryPattern.CaptureNode("float", "number"),
+
+        # Strings
+        QueryPattern.CaptureNode("string", "string"),
+    ]
+
+# Query cursor for executing queries
+struct QueryCursor:
+    query: Query
+    tree: Tree
+    matches: [QueryMatch]
+    current_index: i64
+
+    fn new(query: Query, tree: Tree) -> QueryCursor:
+        let mut cursor = QueryCursor(
+            query: query,
+            tree: tree,
+            matches: [],
+            current_index: 0
+        )
+
+        # Execute query to find all matches
+        cursor.execute()
+
+        return cursor
+
+    # Execute query on tree (find all matches)
+    me execute(self):
+        # Walk tree and match patterns
+        match self.tree.root():
+            case Some(root):
+                self.match_node(root, self.tree.root_node)
+            case None:
+                # Empty tree
+
+    # Match patterns against a node and its children
+    me match_node(self, node: Node, node_id: NodeId):
+        # Try to match each pattern against this node
+        for i in range(self.query.patterns.len()):
+            let pattern = self.query.patterns[i]
+            match self.try_match_pattern(pattern, node, node_id):
+                case Some(captures):
+                    # Pattern matched - create QueryMatch
+                    let match = QueryMatch.new(i, captures)
+                    self.matches.push(match)
+                case None:
+                    # Pattern didn't match
+
+        # Recursively match children
+        for child_id in node.children:
+            match self.tree.get_node(child_id):
+                case Some(child):
+                    self.match_node(child, child_id)
+                case None:
+                    # Invalid child ID
+
+    # Try to match a pattern against a node
+    fn try_match_pattern(self, pattern: QueryPattern, node: Node, node_id: NodeId) -> Option[[Capture]]:
+        match pattern:
+            case QueryPattern.NodeKind(kind):
+                if node.kind == kind:
+                    return Some([])
+                else:
+                    return None
+
+            case QueryPattern.CaptureNode(kind, capture_name):
+                if node.kind == kind:
+                    let capture = Capture.new(capture_name, node, 0)
+                    return Some([capture])
+                else:
+                    return None
+
+            case QueryPattern.FieldNode(parent_kind, field_name, child_pattern):
+                if node.kind == parent_kind:
+                    # Try to find field
+                    match node.child_by_field(field_name):
+                        case Some(child_id):
+                            # Match child pattern
+                            match self.tree.get_node(child_id):
+                                case Some(child_node):
+                                    return self.try_match_pattern(child_pattern, child_node, child_id)
+                                case None:
+                                    return None
+                        case None:
+                            return None
+                else:
+                    return None
+
+            case QueryPattern.KeywordList(keywords, capture_name):
+                # Check if node is a keyword token
+                for keyword in keywords:
+                    if node.kind == keyword or node.text == keyword:
+                        let capture = Capture.new(capture_name, node, 0)
+                        return Some([capture])
+                return None
+
+            case _:
+                return None
+
+    # Get next match
+    me next_match(self) -> Option[QueryMatch]:
+        if self.current_index < self.matches.len():
+            let match = self.matches[self.current_index]
+            self.current_index = self.current_index + 1
+            return Some(match)
+        else:
+            return None
+
+    # Reset cursor to beginning
+    me reset(self):
+        self.current_index = 0
+
+    # Get all matches
+    fn all_matches(self) -> [QueryMatch]:
+        return self.matches
+
+# Helper: Convert capture name to semantic token type
+fn capture_to_token_type(capture_name: str) -> str:
+    match capture_name:
+        case "keyword": return "keyword"
+        case "function": return "function"
+        case "type": return "type"
+        case "number": return "number"
+        case "string": return "string"
+        case "comment": return "comment"
+        case "operator": return "operator"
+        case "variable": return "variable"
+        case "parameter": return "parameter"
+        case "property": return "property"
+        case _: return "text"
+
+# Syntax highlighting query (Phase 4.1)
+const SYNTAX_HIGHLIGHTING_QUERY: str = """
+[
+  "fn" "let" "mut" "return" "if" "else" "elif"
+  "struct" "class" "enum" "trait" "impl"
+  "match" "case" "for" "while" "loop" "break" "continue"
+] @keyword
+
+(function_def name: (identifier) @function)
+(struct_def name: (type_identifier) @type)
+(class_def name: (type_identifier) @type)
+(enum_def name: (type_identifier) @type)
+
+(call callee: (identifier) @function.call)
+
+(type_identifier) @type
+(identifier) @variable
+
+(integer) @number
+(float) @number
+(string) @string
+(comment) @comment
+
+["+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">="] @operator
+"""
+
+# Locals query for scoping (Phase 6)
+const LOCALS_QUERY: str = """
+(source_file) @scope
+(function_def) @scope
+(block) @scope
+
+(function_def name: (identifier) @definition.function)
+(let_stmt pattern: (identifier) @definition.var)
+(parameter name: (identifier) @definition.parameter)
+
+(identifier) @reference
+"""

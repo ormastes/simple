@@ -1,0 +1,421 @@
+# Persistent List - Simple Implementation
+# Feature #1385: Immutable List[T] with structural sharing
+
+use core.traits.*
+use core.list.*
+
+# ============================================
+# Persistent List (Immutable)
+# ============================================
+
+"""
+Immutable persistent list using structural sharing.
+
+This is a functional linked list where operations return new lists
+that share structure with the original. Modifications are O(1) for
+prepend and O(n) for append/access.
+
+Example:
+    let list1 = PList.of([1, 2, 3])
+    let list2 = list1.prepend(0)  # [0, 1, 2, 3]
+    # list1 still [1, 2, 3], shares nodes with list2
+"""
+
+enum PList[T]:
+    Empty
+    Cons(head: T, tail: PList[T])
+
+impl PList[T]:
+    # Create empty persistent list
+    fn empty() -> PList[T]:
+        PList::Empty
+
+    # Create from array/list
+    fn of(items: [T]) -> PList[T]:
+        var result = PList::Empty
+        for i in items.len() - 1 .. 0 by -1:
+            result = PList::Cons(items[i], result)
+        result
+
+    # Prepend element (O(1), structural sharing)
+    fn prepend(self, item: T) -> PList[T]:
+        PList::Cons(item, self)
+
+    # Get head element
+    fn head(self) -> Option[T]:
+        match self:
+            case Cons(h, _): Some(h)
+            case Empty: None
+
+    # Get tail (all but first)
+    fn tail(self) -> Option[PList[T]]:
+        match self:
+            case Cons(_, t): Some(t)
+            case Empty: None
+
+    # Get length (O(n))
+    fn len(self) -> usize:
+        match self:
+            case Empty: 0
+            case Cons(_, t): 1 + t.len()
+
+    # Check if empty
+    fn is_empty(self) -> bool:
+        match self:
+            case Empty: true
+            case _: false
+
+    # Get nth element (O(n))
+    fn get(self, index: usize) -> Option[T]:
+        if index == 0:
+            return self.head()
+        match self.tail():
+            case Some(t): t.get(index - 1)
+            case None: None
+
+    # Append element (O(n), creates new list)
+    fn append(self, item: T) -> PList[T]:
+        match self:
+            case Empty: PList::Cons(item, PList::Empty)
+            case Cons(h, t): PList::Cons(h, t.append(item))
+
+    # Map function over list (O(n))
+    fn map[U](self, f: fn(T) -> U) -> PList[U]:
+        match self:
+            case Empty: PList::Empty
+            case Cons(h, t): PList::Cons(f(h), t.map(f))
+
+    # Filter elements (O(n))
+    fn filter(self, pred: fn(T) -> bool) -> PList[T]:
+        match self:
+            case Empty: PList::Empty
+            case Cons(h, t):
+                let rest = t.filter(pred)
+                if pred(h):
+                    PList::Cons(h, rest)
+                else:
+                    rest
+
+    # Fold/reduce (O(n))
+    fn fold[U](self, init: U, f: fn(U, T) -> U) -> U:
+        match self:
+            case Empty: init
+            case Cons(h, t): t.fold(f(init, h), f)
+
+    # Reverse (O(n))
+    fn reverse(self) -> PList[T]:
+        self.fold(PList::Empty, \acc, x: acc.prepend(x))
+
+    # Convert to mutable List
+    fn to_list(self) -> List[T]:
+        var result = List.new()
+        var current = self
+        while not current.is_empty():
+            match current:
+                case Cons(h, t):
+                    result.push(h)
+                    current = t
+                case Empty:
+                    break
+        result
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn size(self) -> usize:
+        """Get size of list (alias for len).
+
+        Returns:
+            Number of elements
+
+        Example:
+            PList.of([1, 2, 3]).size()  # → 3
+        """
+        self.len()
+
+    fn is_singleton(self) -> bool:
+        """Check if list has exactly one element.
+
+        Returns:
+            true if list has 1 element
+
+        Example:
+            PList.of([42]).is_singleton()  # → true
+        """
+        match self:
+            case Cons(_, tail):
+                tail.is_empty()
+            case Empty:
+                false
+
+    fn contains(self, value: T) -> bool where T: Eq:
+        """Check if list contains value.
+
+        Args:
+            value: Value to search for
+
+        Returns:
+            true if found
+
+        Example:
+            PList.of([1, 2, 3]).contains(2)  # → true
+        """
+        match self:
+            case Empty: false
+            case Cons(h, t):
+                if h == value:
+                    true
+                else:
+                    t.contains(value)
+
+    fn take(self, n: usize) -> PList[T]:
+        """Take first n elements.
+
+        Args:
+            n: Number of elements
+
+        Returns:
+            New list with first n elements
+
+        Example:
+            PList.of([1, 2, 3, 4]).take(2)  # → [1, 2]
+        """
+        if n == 0:
+            return PList::Empty
+        match self:
+            case Empty: PList::Empty
+            case Cons(h, t): PList::Cons(h, t.take(n - 1))
+
+    fn drop(self, n: usize) -> PList[T]:
+        """Drop first n elements.
+
+        Args:
+            n: Number of elements to drop
+
+        Returns:
+            New list without first n elements
+
+        Example:
+            PList.of([1, 2, 3, 4]).drop(2)  # → [3, 4]
+        """
+        if n == 0:
+            return self
+        match self:
+            case Empty: PList::Empty
+            case Cons(_, t): t.drop(n - 1)
+
+    fn concat(self, other: PList[T]) -> PList[T]:
+        """Concatenate with another list.
+
+        Args:
+            other: List to append
+
+        Returns:
+            Concatenated list
+
+        Example:
+            PList.of([1, 2]).concat(PList.of([3, 4]))  # → [1, 2, 3, 4]
+        """
+        match self:
+            case Empty: other
+            case Cons(h, t): PList::Cons(h, t.concat(other))
+
+    fn zip[U](self, other: PList[U]) -> PList[(T, U)]:
+        """Zip with another list into pairs.
+
+        Args:
+            other: List to zip with
+
+        Returns:
+            List of pairs
+
+        Example:
+            PList.of([1, 2]).zip(PList.of([3, 4]))  # → [(1,3), (2,4)]
+        """
+        match (self, other):
+            case (Cons(h1, t1), Cons(h2, t2)):
+                PList::Cons((h1, h2), t1.zip(t2))
+            case _:
+                PList::Empty
+
+    fn all(self, pred: fn(T) -> bool) -> bool:
+        """Check if all elements satisfy predicate.
+
+        Args:
+            pred: Predicate function
+
+        Returns:
+            true if all elements pass
+
+        Example:
+            PList.of([2, 4, 6]).all(\x: x % 2 == 0)  # → true
+        """
+        match self:
+            case Empty: true
+            case Cons(h, t):
+                if pred(h):
+                    t.all(pred)
+                else:
+                    false
+
+    fn any(self, pred: fn(T) -> bool) -> bool:
+        """Check if any element satisfies predicate.
+
+        Args:
+            pred: Predicate function
+
+        Returns:
+            true if any element passes
+
+        Example:
+            PList.of([1, 3, 5]).any(\x: x % 2 == 0)  # → false
+        """
+        match self:
+            case Empty: false
+            case Cons(h, t):
+                if pred(h):
+                    true
+                else:
+                    t.any(pred)
+
+    fn find(self, pred: fn(T) -> bool) -> Option[T]:
+        """Find first element matching predicate.
+
+        Args:
+            pred: Predicate function
+
+        Returns:
+            Some(element) if found, None otherwise
+
+        Example:
+            PList.of([1, 2, 3]).find(\x: x > 1)  # → Some(2)
+        """
+        match self:
+            case Empty: None
+            case Cons(h, t):
+                if pred(h):
+                    Some(h)
+                else:
+                    t.find(pred)
+
+    fn partition(self, pred: fn(T) -> bool) -> (PList[T], PList[T]):
+        """Partition list into two lists based on predicate.
+
+        Args:
+            pred: Predicate function
+
+        Returns:
+            Tuple of (matching, non-matching)
+
+        Example:
+            PList.of([1, 2, 3, 4]).partition(\x: x % 2 == 0)
+            # → ([2, 4], [1, 3])
+        """
+        match self:
+            case Empty: (PList::Empty, PList::Empty)
+            case Cons(h, t):
+                let (matches, non_matches) = t.partition(pred)
+                if pred(h):
+                    (PList::Cons(h, matches), non_matches)
+                else:
+                    (matches, PList::Cons(h, non_matches))
+
+    fn intersperse(self, sep: T) -> PList[T]:
+        """Insert separator between elements.
+
+        Args:
+            sep: Separator element
+
+        Returns:
+            List with separators
+
+        Example:
+            PList.of([1, 2, 3]).intersperse(0)  # → [1, 0, 2, 0, 3]
+        """
+        match self:
+            case Empty: PList::Empty
+            case Cons(h, tail):
+                match tail:
+                    case Empty: PList::Cons(h, PList::Empty)
+                    case _: PList::Cons(h, PList::Cons(sep, tail.intersperse(sep)))
+
+    fn flat_map[U](self, f: fn(T) -> PList[U]) -> PList[U]:
+        """Map function and flatten results.
+
+        Args:
+            f: Function returning list
+
+        Returns:
+            Flattened result
+
+        Example:
+            PList.of([1, 2]).flat_map(\x: PList.of([x, x]))
+            # → [1, 1, 2, 2]
+        """
+        match self:
+            case Empty: PList::Empty
+            case Cons(h, t): f(h).concat(t.flat_map(f))
+
+    fn summary(self) -> str where T: Display:
+        """Get summary of persistent list.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            PList.of([1, 2, 3]).summary()
+            # → "PList[3]: [1, 2, 3]"
+        """
+        let len = self.len()
+        let content = self.fmt()
+        return "PList[{len}]: {content}"
+
+# ============================================
+# Display Implementation
+# ============================================
+
+impl Display for PList[T] where T: Display:
+    fn fmt(self) -> str:
+        let items = self.to_list().map(\x: x.to_string()).join(", ")
+        "PList[{items}]"
+
+# ============================================
+# Iteration Support
+# ============================================
+
+impl Iterator[T] for PList[T]:
+    type Item = T
+
+    fn next(self) -> Option[(T, Self)]:
+        match self:
+            case Cons(h, t): Some((h, t))
+            case Empty: None
+
+# ============================================
+# Example Usage
+# ============================================
+
+"""
+Example usage of persistent list:
+
+    # Create from array
+    let list1 = PList.of([1, 2, 3])
+    
+    # Prepend (O(1), shares structure)
+    let list2 = list1.prepend(0)
+    # list1: [1, 2, 3]
+    # list2: [0, 1, 2, 3]
+    
+    # Map
+    let list3 = list1.map(\x: x * 2)  # [2, 4, 6]
+    
+    # Filter
+    let list4 = list1.filter(\x: x > 1)  # [2, 3]
+    
+    # Fold
+    let sum = list1.fold(0, \acc, x: acc + x)  # 6
+    
+    # All operations preserve immutability
+    # Original list1 unchanged throughout
+"""

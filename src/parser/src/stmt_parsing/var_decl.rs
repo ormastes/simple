@@ -136,8 +136,8 @@ impl Parser<'_> {
     pub(crate) fn parse_optional_let_pattern(
         &mut self,
     ) -> Result<(Option<Pattern>, Expr), ParseError> {
-        if self.check(&TokenKind::Let) {
-            self.advance();
+        if self.check(&TokenKind::Let) || self.check(&TokenKind::Val) {
+            self.advance(); // consume let or val
             let pattern = self.parse_pattern()?;
             self.expect(&TokenKind::Assign)?;
             let expr = self.parse_expression()?;
