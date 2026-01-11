@@ -183,3 +183,199 @@ class SdnDocument:
                 return Ok(nil)
             case Err(e):
                 return Err(SdnError.IoError(message: e.to_string()))
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn has_path(self, path: String) -> Bool:
+        """Check if path exists in document.
+
+        Args:
+            path: Dot-separated path
+
+        Returns:
+            true if path exists
+
+        Example:
+            doc.has_path("server.port")  # → true
+        """
+        return self.get(path).is_some()
+
+    fn get_or_default(self, path: String, default: SdnValue) -> SdnValue:
+        """Get value at path or return default.
+
+        Args:
+            path: Dot-separated path
+            default: Default value
+
+        Returns:
+            Value at path or default
+
+        Example:
+            doc.get_or_default("server.port", SdnValue.Int(8080))
+        """
+        match self.get(path):
+            case Some(val): return val
+            case None: return default
+
+    fn is_dict(self) -> Bool:
+        """Check if root is a dictionary.
+
+        Returns:
+            true if root is dict
+
+        Example:
+            doc.is_dict()  # → true
+        """
+        match self.root:
+            case SdnValue.Dict(_): return True
+            case _: return False
+
+    fn is_array(self) -> Bool:
+        """Check if root is an array.
+
+        Returns:
+            true if root is array
+
+        Example:
+            doc.is_array()  # → false
+        """
+        match self.root:
+            case SdnValue.Array(_): return True
+            case _: return False
+
+    fn is_empty(self) -> Bool:
+        """Check if document is empty.
+
+        Returns:
+            true if root is empty dict or array
+
+        Example:
+            doc.is_empty()  # → false
+        """
+        match self.root:
+            case SdnValue.Dict(dict): return dict.is_empty()
+            case SdnValue.Array(arr): return arr.is_empty()
+            case _: return False
+
+    fn reset_modified(mut self):
+        """Reset modification flag.
+
+        Example:
+            doc.reset_modified()
+        """
+        self.modified = False
+
+    fn clone(self) -> SdnDocument:
+        """Clone the document.
+
+        Returns:
+            New document copy
+
+        Example:
+            new_doc = doc.clone()
+        """
+        return SdnDocument(
+            source: self.source.clone(),
+            root: self.root.clone(),
+            modified: self.modified
+        )
+
+    fn merge(mut self, other: SdnDocument) -> Result[Nil, SdnError]:
+        """Merge another document into this one.
+
+        Args:
+            other: Document to merge
+
+        Returns:
+            Ok if successful
+
+        Example:
+            doc.merge(other_doc)
+        """
+        match (self.root, other.root):
+            case (SdnValue.Dict(mut dict1), SdnValue.Dict(dict2)):
+                for (key, value) in dict2.items():
+                    dict1[key] = value
+                self.modified = True
+                return Ok(nil)
+            case _:
+                return Err(SdnError.TypeMismatch(
+                    expected: "dict",
+                    found: self.root.type_name()
+                ))
+
+    fn keys(self) -> Result[List[String], SdnError]:
+        """Get all keys if root is dict.
+
+        Returns:
+            List of keys
+
+        Example:
+            doc.keys()  # → ["name", "age"]
+        """
+        match self.root:
+            case SdnValue.Dict(dict):
+                return Ok(dict.keys().collect())
+            case _:
+                return Err(SdnError.TypeMismatch(
+                    expected: "dict",
+                    found: self.root.type_name()
+                ))
+
+    fn len(self) -> usize:
+        """Get length of root collection.
+
+        Returns:
+            Number of elements
+
+        Example:
+            doc.len()  # → 5
+        """
+        match self.root:
+            case SdnValue.Dict(dict): return dict.len()
+            case SdnValue.Array(arr): return arr.len()
+            case _: return 0
+
+    fn contains_key(self, key: String) -> Bool:
+        """Check if root dict contains key.
+
+        Args:
+            key: Key to check
+
+        Returns:
+            true if key exists
+
+        Example:
+            doc.contains_key("name")  # → true
+        """
+        match self.root:
+            case SdnValue.Dict(dict): return dict.contains_key(key)
+            case _: return False
+
+    fn get_type(self) -> String:
+        """Get root value type name.
+
+        Returns:
+            Type name string
+
+        Example:
+            doc.get_type()  # → "dict"
+        """
+        return self.root.type_name()
+
+    fn summary(self) -> String:
+        """Get summary of document.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            doc.summary()
+            # → "SdnDocument: dict with 5 keys (modified)"
+        """
+        let type_name = self.get_type()
+        let len = self.len()
+        let mod_str = if self.modified: " (modified)" else: ""
+        return "SdnDocument: {type_name} with {len} items{mod_str}"
