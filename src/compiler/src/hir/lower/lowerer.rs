@@ -36,10 +36,7 @@ impl Lowerer {
     }
 
     /// Create a new lowerer with module resolution support for loading imported types
-    pub fn with_module_resolver(
-        module_resolver: ModuleResolver,
-        current_file: PathBuf,
-    ) -> Self {
+    pub fn with_module_resolver(module_resolver: ModuleResolver, current_file: PathBuf) -> Self {
         Self {
             module: HirModule::new(),
             globals: HashMap::new(),

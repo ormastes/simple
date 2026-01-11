@@ -1037,10 +1037,7 @@ pub unsafe extern "C" fn rt_file_stat(
 /// Normalize/canonicalize a file path
 /// Returns the absolute path with all symbolic links resolved
 #[no_mangle]
-pub unsafe extern "C" fn rt_file_canonicalize(
-    path_ptr: *const u8,
-    path_len: u64,
-) -> RuntimeValue {
+pub unsafe extern "C" fn rt_file_canonicalize(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
     if path_ptr.is_null() {
         return RuntimeValue::NIL;
     }
@@ -1074,10 +1071,7 @@ pub unsafe extern "C" fn rt_file_canonicalize(
 
 /// Read entire file as text
 #[no_mangle]
-pub unsafe extern "C" fn rt_file_read_text(
-    path_ptr: *const u8,
-    path_len: u64,
-) -> RuntimeValue {
+pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
     if path_ptr.is_null() {
         return RuntimeValue::NIL;
     }
@@ -1177,10 +1171,7 @@ pub unsafe extern "C" fn rt_dir_create(
 
 /// List directory entries
 #[no_mangle]
-pub unsafe extern "C" fn rt_dir_list(
-    path_ptr: *const u8,
-    path_len: u64,
-) -> RuntimeValue {
+pub unsafe extern "C" fn rt_dir_list(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
     if path_ptr.is_null() {
         return RuntimeValue::NIL;
     }
@@ -1196,13 +1187,11 @@ pub unsafe extern "C" fn rt_dir_list(
             // Create an array to hold the entry names
             let array_handle = super::rt_array_new(0);
 
-            for entry_result in entries {
-                if let Ok(entry) = entry_result {
-                    if let Ok(name) = entry.file_name().into_string() {
-                        let bytes = name.as_bytes();
-                        let str_value = super::rt_string_new(bytes.as_ptr(), bytes.len() as u64);
-                        super::rt_array_push(array_handle, str_value);
-                    }
+            for entry in entries.flatten() {
+                if let Ok(name) = entry.file_name().into_string() {
+                    let bytes = name.as_bytes();
+                    let str_value = super::rt_string_new(bytes.as_ptr(), bytes.len() as u64);
+                    super::rt_array_push(array_handle, str_value);
                 }
             }
 
@@ -1214,10 +1203,7 @@ pub unsafe extern "C" fn rt_dir_list(
 
 /// Remove/delete a file
 #[no_mangle]
-pub unsafe extern "C" fn rt_file_remove(
-    path_ptr: *const u8,
-    path_len: u64,
-) -> bool {
+pub unsafe extern "C" fn rt_file_remove(path_ptr: *const u8, path_len: u64) -> bool {
     if path_ptr.is_null() {
         return false;
     }
@@ -1288,10 +1274,7 @@ pub unsafe extern "C" fn rt_file_rename(
 
 /// Get environment variable value
 #[no_mangle]
-pub unsafe extern "C" fn rt_env_get(
-    name_ptr: *const u8,
-    name_len: u64,
-) -> RuntimeValue {
+pub unsafe extern "C" fn rt_env_get(name_ptr: *const u8, name_len: u64) -> RuntimeValue {
     if name_ptr.is_null() {
         return RuntimeValue::NIL;
     }
@@ -1358,10 +1341,7 @@ pub unsafe extern "C" fn rt_env_cwd() -> RuntimeValue {
 
 /// Decode base64 string to bytes
 #[no_mangle]
-pub unsafe extern "C" fn rt_base64_decode(
-    input_ptr: *const u8,
-    input_len: u64,
-) -> RuntimeValue {
+pub unsafe extern "C" fn rt_base64_decode(input_ptr: *const u8, input_len: u64) -> RuntimeValue {
     if input_ptr.is_null() {
         return RuntimeValue::NIL;
     }
@@ -1374,18 +1354,20 @@ pub unsafe extern "C" fn rt_base64_decode(
 
     // Simple base64 decoding implementation
     const DECODE_TABLE: [u8; 128] = [
-        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 62, 255, 255, 255, 63,
-        52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 255, 255, 255, 0, 255, 255,
-        255, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
-        15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 255, 255, 255, 255, 255,
-        255, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-        41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 62, 255, 255, 255, 63, 52, 53, 54, 55, 56, 57, 58, 59,
+        60, 61, 255, 255, 255, 0, 255, 255, 255, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+        15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 255, 255, 255, 255, 255, 255, 26, 27, 28, 29,
+        30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
+        255, 255, 255, 255, 255,
     ];
 
     let mut result = Vec::new();
-    let input_chars: Vec<u8> = input_str.bytes().filter(|&b| !b.is_ascii_whitespace()).collect();
+    let input_chars: Vec<u8> = input_str
+        .bytes()
+        .filter(|&b| !b.is_ascii_whitespace())
+        .collect();
 
     let mut i = 0;
     while i < input_chars.len() {
@@ -1434,25 +1416,31 @@ pub unsafe extern "C" fn rt_base64_decode(
 
 /// Encode bytes to base64 string
 #[no_mangle]
-pub unsafe extern "C" fn rt_base64_encode(
-    input_ptr: *const u8,
-    input_len: u64,
-) -> RuntimeValue {
+pub unsafe extern "C" fn rt_base64_encode(input_ptr: *const u8, input_len: u64) -> RuntimeValue {
     if input_ptr.is_null() {
         return RuntimeValue::NIL;
     }
 
     let input_bytes = std::slice::from_raw_parts(input_ptr, input_len as usize);
 
-    const ENCODE_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ENCODE_TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let mut result = Vec::new();
     let mut i = 0;
 
     while i < input_bytes.len() {
         let b1 = input_bytes[i];
-        let b2 = if i + 1 < input_bytes.len() { input_bytes[i + 1] } else { 0 };
-        let b3 = if i + 2 < input_bytes.len() { input_bytes[i + 2] } else { 0 };
+        let b2 = if i + 1 < input_bytes.len() {
+            input_bytes[i + 1]
+        } else {
+            0
+        };
+        let b3 = if i + 2 < input_bytes.len() {
+            input_bytes[i + 2]
+        } else {
+            0
+        };
 
         result.push(ENCODE_TABLE[(b1 >> 2) as usize]);
         result.push(ENCODE_TABLE[(((b1 & 0x03) << 4) | (b2 >> 4)) as usize]);
@@ -1595,7 +1583,13 @@ fn days_in_month(year: i32, month: i32) -> i32 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if is_leap_year(year) { 29 } else { 28 },
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 0,
     }
 }
@@ -1851,9 +1845,7 @@ pub extern "C" fn rt_file_munmap(addr: *mut u8, length: u64) -> i32 {
     {
         use libc::munmap;
 
-        unsafe {
-            munmap(addr as *mut libc::c_void, length as usize)
-        }
+        unsafe { munmap(addr as *mut libc::c_void, length as usize) }
     }
 
     #[cfg(not(unix))]
@@ -1870,9 +1862,7 @@ pub extern "C" fn rt_file_madvise(addr: *mut u8, length: u64, advice: i32) -> i3
     {
         use libc::madvise;
 
-        unsafe {
-            madvise(addr as *mut libc::c_void, length as usize, advice)
-        }
+        unsafe { madvise(addr as *mut libc::c_void, length as usize, advice) }
     }
 
     #[cfg(not(unix))]
@@ -1889,9 +1879,7 @@ pub extern "C" fn rt_file_msync(addr: *mut u8, length: u64, flags: i32) -> i32 {
     {
         use libc::msync;
 
-        unsafe {
-            msync(addr as *mut libc::c_void, length as usize, flags)
-        }
+        unsafe { msync(addr as *mut libc::c_void, length as usize, flags) }
     }
 
     #[cfg(not(unix))]
