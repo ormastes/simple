@@ -3,7 +3,7 @@
 use super::collections::RuntimeString;
 use super::core::RuntimeValue;
 use super::heap::{HeapHeader, HeapObjectType};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -3271,11 +3271,22 @@ pub extern "C" fn rt_spin_loop_hint() {
 // ============================================================================
 
 /// Wait on condvar with timeout (milliseconds)
+/// Returns 1 if notified, 0 if timeout
 #[no_mangle]
-pub extern "C" fn rt_condvar_wait_timeout(_condvar: RuntimeValue, _mutex: RuntimeValue, _timeout_ms: u64) -> i64 {
-    // TODO: Implement proper condvar wait with timeout
-    // For now, return 0 (timeout)
-    0
+pub extern "C" fn rt_condvar_wait_timeout(
+    condvar_handle: i64,
+    _mutex_handle: i64,
+    timeout_ms: u64,
+) -> i64 {
+    // Simplified implementation - real version needs proper mutex integration
+    if CONDVAR_MAP.lock().unwrap().get(&condvar_handle).is_some() {
+        // In a real implementation, we'd wait with timeout on the condvar
+        // For now, just sleep for the timeout period and return timeout
+        std::thread::sleep(std::time::Duration::from_millis(timeout_ms));
+        0 // timeout
+    } else {
+        -1 // error: invalid handle
+    }
 }
 
 // ============================================================================
@@ -3424,33 +3435,61 @@ pub extern "C" fn rt_xxhash_free(_handle: i64) {
 }
 
 // ============================================================================
-// Thread-Local Storage (Alternative API - Stub)
+// Thread-Local Storage (Alternative API)
 // ============================================================================
 
-/// Create new thread-local storage
+thread_local! {
+    static THREAD_LOCAL_STORAGE: RefCell<HashMap<i64, RuntimeValue>> = RefCell::new(HashMap::new());
+}
+
+lazy_static::lazy_static! {
+    static ref THREAD_LOCAL_HANDLES: Mutex<HashSet<i64>> = Mutex::new(HashSet::new());
+}
+
+static mut THREAD_LOCAL_COUNTER: i64 = 1;
+
+/// Create new thread-local storage slot
 #[no_mangle]
 pub extern "C" fn rt_thread_local_new() -> i64 {
-    // TODO: Implement thread-local storage
-    0
+    unsafe {
+        let handle = THREAD_LOCAL_COUNTER;
+        THREAD_LOCAL_COUNTER += 1;
+        THREAD_LOCAL_HANDLES.lock().unwrap().insert(handle);
+        handle
+    }
 }
 
 /// Get value from thread-local storage
 #[no_mangle]
-pub extern "C" fn rt_thread_local_get(_handle: i64) -> RuntimeValue {
-    // TODO: Implement
-    RuntimeValue::NIL
+pub extern "C" fn rt_thread_local_get(handle: i64) -> RuntimeValue {
+    // Check if handle is valid
+    if !THREAD_LOCAL_HANDLES.lock().unwrap().contains(&handle) {
+        return RuntimeValue::NIL;
+    }
+
+    THREAD_LOCAL_STORAGE.with(|storage| {
+        storage.borrow().get(&handle).copied().unwrap_or(RuntimeValue::NIL)
+    })
 }
 
 /// Set value in thread-local storage
 #[no_mangle]
-pub extern "C" fn rt_thread_local_set(_handle: i64, _value: RuntimeValue) {
-    // TODO: Implement
+pub extern "C" fn rt_thread_local_set(handle: i64, value: RuntimeValue) {
+    // Check if handle is valid
+    if !THREAD_LOCAL_HANDLES.lock().unwrap().contains(&handle) {
+        return;
+    }
+
+    THREAD_LOCAL_STORAGE.with(|storage| {
+        storage.borrow_mut().insert(handle, value);
+    });
 }
 
-/// Free thread-local storage
+/// Free thread-local storage slot
 #[no_mangle]
-pub extern "C" fn rt_thread_local_free(_handle: i64) {
-    // TODO: Implement
+pub extern "C" fn rt_thread_local_free(handle: i64) {
+    THREAD_LOCAL_HANDLES.lock().unwrap().remove(&handle);
+    // Note: Each thread's local copy will be cleaned up when thread exits
 }
 // ============================================================================
 // PyTorch/ML Operations (Stubs - require tch-rs or similar)

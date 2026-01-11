@@ -3485,7 +3485,11 @@ pub extern "C" fn rt_thread_local_get(handle: i64) -> RuntimeValue {
     }
 
     THREAD_LOCAL_STORAGE.with(|storage| {
-        storage.borrow().get(&handle).copied().unwrap_or(RuntimeValue::NIL)
+        storage
+            .borrow()
+            .get(&handle)
+            .copied()
+            .unwrap_or(RuntimeValue::NIL)
     })
 }
 
