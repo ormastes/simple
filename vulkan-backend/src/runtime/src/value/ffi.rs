@@ -3,6 +3,7 @@
 use super::collections::RuntimeString;
 use super::core::RuntimeValue;
 use super::heap::{HeapHeader, HeapObjectType};
+use std::path::Path;
 
 // ============================================================================
 // Value creation FFI functions
@@ -846,4 +847,153 @@ pub extern "C" fn rt_math_floor(x: f64) -> f64 {
 #[no_mangle]
 pub extern "C" fn rt_math_ceil(x: f64) -> f64 {
     x.ceil()
+}
+
+// ============================================================================
+// File system FFI functions
+// ============================================================================
+
+/// Check if a file or directory exists
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_exists(path_ptr: *const u8, path_len: u64) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    match std::str::from_utf8(path_bytes) {
+        Ok(path_str) => Path::new(path_str).exists(),
+        Err(_) => false,
+    }
+}
+
+/// Get file metadata as a struct
+/// Returns: [exists, is_file, is_dir, is_readable, is_writable, size]
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_stat(
+    path_ptr: *const u8,
+    path_len: u64,
+    out_exists: *mut bool,
+    out_is_file: *mut bool,
+    out_is_dir: *mut bool,
+    out_is_readable: *mut bool,
+    out_is_writable: *mut bool,
+    out_size: *mut i64,
+) {
+    // Initialize all outputs to false/0
+    if !out_exists.is_null() {
+        *out_exists = false;
+    }
+    if !out_is_file.is_null() {
+        *out_is_file = false;
+    }
+    if !out_is_dir.is_null() {
+        *out_is_dir = false;
+    }
+    if !out_is_readable.is_null() {
+        *out_is_readable = false;
+    }
+    if !out_is_writable.is_null() {
+        *out_is_writable = false;
+    }
+    if !out_size.is_null() {
+        *out_size = 0;
+    }
+
+    if path_ptr.is_null() {
+        return;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let path = Path::new(path_str);
+
+    // Check existence
+    if !out_exists.is_null() {
+        *out_exists = path.exists();
+    }
+
+    if !path.exists() {
+        return;
+    }
+
+    // Get metadata
+    if let Ok(metadata) = std::fs::metadata(path) {
+        if !out_is_file.is_null() {
+            *out_is_file = metadata.is_file();
+        }
+        if !out_is_dir.is_null() {
+            *out_is_dir = metadata.is_dir();
+        }
+        if !out_size.is_null() {
+            *out_size = metadata.len() as i64;
+        }
+
+        // Check permissions (Unix-specific)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = metadata.permissions().mode();
+
+            if !out_is_readable.is_null() {
+                *out_is_readable = (mode & 0o400) != 0; // Owner read
+            }
+            if !out_is_writable.is_null() {
+                *out_is_writable = (mode & 0o200) != 0; // Owner write
+            }
+        }
+
+        // Fallback for non-Unix platforms
+        #[cfg(not(unix))]
+        {
+            if !out_is_readable.is_null() {
+                *out_is_readable = !metadata.permissions().readonly();
+            }
+            if !out_is_writable.is_null() {
+                *out_is_writable = !metadata.permissions().readonly();
+            }
+        }
+    }
+}
+
+/// Normalize/canonicalize a file path
+/// Returns the absolute path with all symbolic links resolved
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_canonicalize(
+    path_ptr: *const u8,
+    path_len: u64,
+) -> RuntimeValue {
+    if path_ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return RuntimeValue::NIL,
+    };
+
+    match std::fs::canonicalize(path_str) {
+        Ok(canonical) => {
+            let canonical_str = canonical.to_string_lossy();
+            let bytes = canonical_str.as_bytes();
+            super::rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+        }
+        Err(_) => {
+            // If canonicalize fails, try to make it absolute without resolving symlinks
+            match std::env::current_dir() {
+                Ok(cwd) => {
+                    let absolute = cwd.join(path_str);
+                    let absolute_str = absolute.to_string_lossy();
+                    let bytes = absolute_str.as_bytes();
+                    super::rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+                }
+                Err(_) => RuntimeValue::NIL,
+            }
+        }
+    }
 }
