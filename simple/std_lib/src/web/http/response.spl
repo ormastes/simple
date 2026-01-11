@@ -113,6 +113,147 @@ impl StatusCode:
         let c = self.code()
         return c >= 500 and c < 600
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_informational(self) -> bool:
+        """Check if status is informational (1xx).
+
+        Returns:
+            true if 1xx status
+
+        Example:
+            StatusCode::Ok.is_informational()  # → false
+        """
+        let c = self.code()
+        return c >= 100 and c < 200
+
+    pub fn is_error(self) -> bool:
+        """Check if status is any error (4xx or 5xx).
+
+        Returns:
+            true if error status
+
+        Example:
+            StatusCode::NotFound.is_error()  # → true
+        """
+        self.is_client_error() or self.is_server_error()
+
+    pub fn is_ok(self) -> bool:
+        """Check if status is 200 OK.
+
+        Returns:
+            true if 200 OK
+
+        Example:
+            StatusCode::Ok.is_ok()  # → true
+        """
+        match self:
+            case Ok: true
+            case _: false
+
+    pub fn is_not_found(self) -> bool:
+        """Check if status is 404 Not Found.
+
+        Returns:
+            true if 404
+
+        Example:
+            StatusCode::NotFound.is_not_found()  # → true
+        """
+        match self:
+            case NotFound: true
+            case _: false
+
+    pub fn is_unauthorized(self) -> bool:
+        """Check if status is 401 Unauthorized.
+
+        Returns:
+            true if 401
+
+        Example:
+            StatusCode::Unauthorized.is_unauthorized()  # → true
+        """
+        match self:
+            case Unauthorized: true
+            case _: false
+
+    pub fn is_forbidden(self) -> bool:
+        """Check if status is 403 Forbidden.
+
+        Returns:
+            true if 403
+
+        Example:
+            StatusCode::Forbidden.is_forbidden()  # → true
+        """
+        match self:
+            case Forbidden: true
+            case _: false
+
+    pub fn requires_body(self) -> bool:
+        """Check if status typically requires response body.
+
+        Returns:
+            true if body expected
+
+        Example:
+            StatusCode::Ok.requires_body()  # → true
+            StatusCode::NoContent.requires_body()  # → false
+        """
+        match self:
+            case NoContent | NotModified: false
+            case _: true
+
+    pub fn allows_redirect(self) -> bool:
+        """Check if status is a redirect.
+
+        Returns:
+            true if redirect status
+
+        Example:
+            StatusCode::Found.allows_redirect()  # → true
+        """
+        self.is_redirect()
+
+    pub fn category(self) -> &str:
+        """Get status category name.
+
+        Returns:
+            Category string
+
+        Example:
+            StatusCode::Ok.category()  # → "Success"
+        """
+        let c = self.code()
+        if c >= 100 and c < 200:
+            return "Informational"
+        if c >= 200 and c < 300:
+            return "Success"
+        if c >= 300 and c < 400:
+            return "Redirect"
+        if c >= 400 and c < 500:
+            return "Client Error"
+        if c >= 500 and c < 600:
+            return "Server Error"
+        return "Unknown"
+
+    pub fn summary(self) -> str:
+        """Get summary of status code.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            StatusCode::Ok.summary()
+            # → "200 OK (Success)"
+        """
+        let code = self.code()
+        let reason = self.reason()
+        let cat = self.category()
+        return "{code} {reason} ({cat})"
+
 # HTTP Response
 pub struct HttpResponse:
     status: StatusCode
@@ -265,6 +406,185 @@ impl HttpResponse:
         await stream.write_all(&bytes)?
         await stream.flush()?
         return Ok(())
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_body(self) -> bool:
+        """Check if response has body.
+
+        Returns:
+            true if body present
+
+        Example:
+            response.has_body()  # → true
+        """
+        self.body.is_some()
+
+    pub fn has_header(self, name: &str) -> bool:
+        """Check if header exists.
+
+        Args:
+            name: Header name
+
+        Returns:
+            true if header exists
+
+        Example:
+            response.has_header("Content-Type")  # → true
+        """
+        self.headers.contains_key(name)
+
+    pub fn is_success(self) -> bool:
+        """Check if response is successful (2xx).
+
+        Returns:
+            true if success status
+
+        Example:
+            response.is_success()  # → true
+        """
+        self.status.is_success()
+
+    pub fn is_error(self) -> bool:
+        """Check if response is error (4xx or 5xx).
+
+        Returns:
+            true if error status
+
+        Example:
+            response.is_error()  # → false
+        """
+        self.status.is_error()
+
+    pub fn is_redirect(self) -> bool:
+        """Check if response is redirect (3xx).
+
+        Returns:
+            true if redirect status
+
+        Example:
+            response.is_redirect()  # → false
+        """
+        self.status.is_redirect()
+
+    pub fn get_content_type(self) -> Option[&str]:
+        """Get Content-Type header.
+
+        Returns:
+            Content type
+
+        Example:
+            response.get_content_type()  # → Some("text/html")
+        """
+        self.get_header("Content-Type")
+
+    pub fn get_location(self) -> Option[&str]:
+        """Get Location header (for redirects).
+
+        Returns:
+            Location URL
+
+        Example:
+            response.get_location()  # → Some("/login")
+        """
+        self.get_header("Location")
+
+    pub fn body_len(self) -> usize:
+        """Get body length in bytes.
+
+        Returns:
+            Body size
+
+        Example:
+            response.body_len()  # → 1024
+        """
+        if let Some(body) = &self.body:
+            return body.len()
+        return 0
+
+    pub fn header_count(self) -> usize:
+        """Get number of headers.
+
+        Returns:
+            Header count
+
+        Example:
+            response.header_count()  # → 5
+        """
+        self.headers.len()
+
+    pub fn is_json(self) -> bool:
+        """Check if response content type is JSON.
+
+        Returns:
+            true if JSON
+
+        Example:
+            response.is_json()  # → true
+        """
+        if let Some(ct) = self.get_content_type():
+            return ct.contains("application/json")
+        return false
+
+    pub fn is_html(self) -> bool:
+        """Check if response content type is HTML.
+
+        Returns:
+            true if HTML
+
+        Example:
+            response.is_html()  # → true
+        """
+        if let Some(ct) = self.get_content_type():
+            return ct.contains("text/html")
+        return false
+
+    pub fn is_text(self) -> bool:
+        """Check if response content type is plain text.
+
+        Returns:
+            true if plain text
+
+        Example:
+            response.is_text()  # → true
+        """
+        if let Some(ct) = self.get_content_type():
+            return ct.contains("text/plain")
+        return false
+
+    pub fn with_cors(self, origin: &str) -> HttpResponse:
+        """Add CORS headers.
+
+        Args:
+            origin: Allowed origin
+
+        Returns:
+            self with CORS headers
+
+        Example:
+            response.with_cors("*")
+        """
+        return self
+            .header("Access-Control-Allow-Origin", origin)
+            .header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+            .header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+    pub fn summary(self) -> str:
+        """Get summary of HTTP response.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            response.summary()
+            # → "200 OK (5 headers, 1024 bytes)"
+        """
+        let status = self.status.summary()
+        let headers = self.header_count()
+        let body_size = self.body_len()
+        return "{status} ({headers} headers, {body_size} bytes)"
 
 # Error response helpers
 pub fn error_response(status: StatusCode, message: &str) -> HttpResponse:
