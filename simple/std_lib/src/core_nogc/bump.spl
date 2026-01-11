@@ -11,6 +11,60 @@ pub struct BumpAllocator:
     owned: bool
 
 impl BumpAllocator:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_empty(self) -> bool:
+        """Check if no allocations have been made."""
+        self.ptr == self.start
+
+    pub fn is_full(self) -> bool:
+        """Check if no space remaining."""
+        self.ptr >= self.end
+
+    pub fn utilization(self) -> f64:
+        """Calculate allocator utilization (0.0 to 1.0)."""
+        let cap = self.capacity() as u64
+        if cap > 0:
+            (self.used() as u64) as f64 / cap as f64
+        else:
+            0.0
+
+    pub fn is_owned(self) -> bool:
+        """Check if allocator owns its memory (will free on drop)."""
+        self.owned
+
+    pub fn has_space_for(self, size: ByteCount, align: u64) -> bool:
+        """Check if allocation would fit (alias for can_alloc)."""
+        self.can_alloc(size, align)
+
+    pub fn available(self) -> ByteCount:
+        """Get available bytes (alias for remaining)."""
+        self.remaining()
+
+    pub fn wasted(self) -> ByteCount:
+        """Get wasted bytes due to alignment padding."""
+        # In a bump allocator, wasted space is minimal (only alignment padding)
+        # This is a conservative estimate
+        let cap = self.capacity() as u64
+        let used = self.used() as u64
+        let rem = self.remaining() as u64
+        if cap > (used + rem):
+            (cap - used - rem)_bytes
+        else:
+            0_bytes
+
+    pub fn summary(self) -> String:
+        """Get summary of bump allocator state."""
+        let util = (self.utilization() * 100.0) as u64
+        let ownership = if self.owned: "owned" else: "borrowed"
+        return "BumpAllocator: {self.used()}/{self.capacity()} ({util}% used, {ownership})"
+
+    # =========================================================================
+    # Constructor
+    # =========================================================================
+
     # Create bump allocator with given capacity
     pub fn new(capacity: ByteCount) -> BumpAllocator:
         let size = capacity as u64
@@ -146,12 +200,57 @@ impl BumpAllocator:
 pub struct BumpCheckpoint:
     ptr: *mut u8
 
+impl BumpCheckpoint:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_ptr(self) -> *mut u8:
+        """Get the saved pointer."""
+        self.ptr
+
+    pub fn is_valid_for(self, allocator: &BumpAllocator) -> bool:
+        """Check if this checkpoint is valid for the given allocator."""
+        self.ptr >= allocator.start and self.ptr <= allocator.ptr
+
+    pub fn summary(self) -> String:
+        """Get summary of checkpoint."""
+        return "BumpCheckpoint: ptr={self.ptr as u64}"
+
 # Scoped bump allocator - resets on scope exit
 pub struct ScopedBump:
     allocator: &mut BumpAllocator
     checkpoint: BumpCheckpoint
 
 impl ScopedBump:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_checkpoint(self) -> &BumpCheckpoint:
+        """Get the saved checkpoint (will be restored on drop)."""
+        &self.checkpoint
+
+    pub fn current_usage(self) -> ByteCount:
+        """Get current allocator usage."""
+        self.allocator.used()
+
+    pub fn capacity(self) -> ByteCount:
+        """Get allocator capacity."""
+        self.allocator.capacity()
+
+    pub fn remaining(self) -> ByteCount:
+        """Get remaining bytes."""
+        self.allocator.remaining()
+
+    pub fn summary(self) -> String:
+        """Get summary of scoped bump allocator."""
+        return "ScopedBump: will restore to ptr={self.checkpoint.ptr as u64}, current usage={self.current_usage()}"
+
+    # =========================================================================
+    # Methods
+    # =========================================================================
+
     pub fn new(allocator: &mut BumpAllocator) -> ScopedBump:
         return ScopedBump {
             allocator: allocator,
@@ -177,6 +276,68 @@ pub struct BumpPool:
     chunk_size: ByteCount
 
 impl BumpPool:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_allocators(self) -> bool:
+        """Check if any allocators exist."""
+        self.allocators.len() > 0
+
+    pub fn allocator_count(self) -> usize:
+        """Get number of allocators."""
+        self.allocators.len()
+
+    pub fn is_empty(self) -> bool:
+        """Check if no allocators exist."""
+        self.allocators.len() == 0
+
+    pub fn get_chunk_size(self) -> ByteCount:
+        """Get default chunk size for new allocators."""
+        self.chunk_size
+
+    pub fn get_current_index(self) -> u64:
+        """Get index of current allocator."""
+        self.current
+
+    pub fn total_capacity(self) -> ByteCount:
+        """Get total capacity across all allocators."""
+        let mut total: u64 = 0
+        for alloc in &self.allocators:
+            total = total + (alloc.capacity() as u64)
+        return total_bytes
+
+    pub fn total_used(self) -> ByteCount:
+        """Get total used bytes across all allocators."""
+        let mut total: u64 = 0
+        for alloc in &self.allocators:
+            total = total + (alloc.used() as u64)
+        return total_bytes
+
+    pub fn total_remaining(self) -> ByteCount:
+        """Get total remaining bytes across all allocators."""
+        let mut total: u64 = 0
+        for alloc in &self.allocators:
+            total = total + (alloc.remaining() as u64)
+        return total_bytes
+
+    pub fn utilization(self) -> f64:
+        """Calculate overall pool utilization (0.0 to 1.0)."""
+        let cap = self.total_capacity() as u64
+        if cap > 0:
+            (self.total_used() as u64) as f64 / cap as f64
+        else:
+            0.0
+
+    pub fn summary(self) -> String:
+        """Get summary of bump pool state."""
+        let util = (self.utilization() * 100.0) as u64
+        return "BumpPool: {self.total_used()}/{self.total_capacity()} ({util}% used), {self.allocator_count()} allocators, chunk_size={self.chunk_size}"
+
+    # =========================================================================
+    # Constructor
+    # =========================================================================
+
     pub fn new(chunk_size: ByteCount) -> BumpPool:
         let pool = BumpPool {
             allocators: [],

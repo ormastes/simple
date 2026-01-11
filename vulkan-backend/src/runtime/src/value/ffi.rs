@@ -719,3 +719,131 @@ fn value_to_display_string(v: RuntimeValue) -> String {
         format!("<value:{:#x}>", v.to_raw())
     }
 }
+
+// ============================================================================
+// Process control FFI functions
+// ============================================================================
+
+/// Exit the process with the given exit code.
+#[no_mangle]
+pub extern "C" fn rt_exit(code: i32) -> ! {
+    std::process::exit(code)
+}
+
+// ============================================================================
+// Math FFI functions
+// ============================================================================
+
+/// Power function: base^exp
+#[no_mangle]
+pub extern "C" fn rt_math_pow(base: f64, exp: f64) -> f64 {
+    base.powf(exp)
+}
+
+/// Natural logarithm
+#[no_mangle]
+pub extern "C" fn rt_math_log(x: f64) -> f64 {
+    x.ln()
+}
+
+/// Base-10 logarithm
+#[no_mangle]
+pub extern "C" fn rt_math_log10(x: f64) -> f64 {
+    x.log10()
+}
+
+/// Base-2 logarithm
+#[no_mangle]
+pub extern "C" fn rt_math_log2(x: f64) -> f64 {
+    x.log2()
+}
+
+/// Exponential function: e^x
+#[no_mangle]
+pub extern "C" fn rt_math_exp(x: f64) -> f64 {
+    x.exp()
+}
+
+/// Cube root
+#[no_mangle]
+pub extern "C" fn rt_math_cbrt(x: f64) -> f64 {
+    x.cbrt()
+}
+
+/// Sine
+#[no_mangle]
+pub extern "C" fn rt_math_sin(x: f64) -> f64 {
+    x.sin()
+}
+
+/// Cosine
+#[no_mangle]
+pub extern "C" fn rt_math_cos(x: f64) -> f64 {
+    x.cos()
+}
+
+/// Tangent
+#[no_mangle]
+pub extern "C" fn rt_math_tan(x: f64) -> f64 {
+    x.tan()
+}
+
+/// Arcsine
+#[no_mangle]
+pub extern "C" fn rt_math_asin(x: f64) -> f64 {
+    x.asin()
+}
+
+/// Arccosine
+#[no_mangle]
+pub extern "C" fn rt_math_acos(x: f64) -> f64 {
+    x.acos()
+}
+
+/// Arctangent
+#[no_mangle]
+pub extern "C" fn rt_math_atan(x: f64) -> f64 {
+    x.atan()
+}
+
+/// Two-argument arctangent
+#[no_mangle]
+pub extern "C" fn rt_math_atan2(y: f64, x: f64) -> f64 {
+    y.atan2(x)
+}
+
+/// Hyperbolic sine
+#[no_mangle]
+pub extern "C" fn rt_math_sinh(x: f64) -> f64 {
+    x.sinh()
+}
+
+/// Hyperbolic cosine
+#[no_mangle]
+pub extern "C" fn rt_math_cosh(x: f64) -> f64 {
+    x.cosh()
+}
+
+/// Hyperbolic tangent
+#[no_mangle]
+pub extern "C" fn rt_math_tanh(x: f64) -> f64 {
+    x.tanh()
+}
+
+/// Square root
+#[no_mangle]
+pub extern "C" fn rt_math_sqrt(x: f64) -> f64 {
+    x.sqrt()
+}
+
+/// Floor
+#[no_mangle]
+pub extern "C" fn rt_math_floor(x: f64) -> f64 {
+    x.floor()
+}
+
+/// Ceiling
+#[no_mangle]
+pub extern "C" fn rt_math_ceil(x: f64) -> f64 {
+    x.ceil()
+}
