@@ -249,10 +249,14 @@ impl<'a> Parser<'a> {
         let params = self.parse_lambda_params()?;
         self.expect(&TokenKind::Colon)?;
 
+        eprintln!("DEBUG: parse_lambda_body after colon, current token: {:?}", self.current.kind);
+
         // Check if body is an indented block or inline expression
         let body = if self.check(&TokenKind::Newline) {
+            eprintln!("DEBUG: Found newline after colon");
             // Consume the newline
             self.advance();
+            eprintln!("DEBUG: After consuming newline, current token: {:?}", self.current.kind);
 
             // Check if we have an indent (block body)
             if self.check(&TokenKind::Indent) {
