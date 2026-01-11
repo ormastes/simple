@@ -3256,3 +3256,199 @@ pub extern "C" fn rt_read_stdin_line_ffi() -> RuntimeValue {
         Err(_) => RuntimeValue::NIL,
     }
 }
+// ============================================================================
+// Threading Utilities (Extended)
+// ============================================================================
+
+/// Hint to CPU for spin loops
+#[no_mangle]
+pub extern "C" fn rt_spin_loop_hint() {
+    std::hint::spin_loop();
+}
+
+// ============================================================================
+// Condvar Extended
+// ============================================================================
+
+/// Wait on condvar with timeout (milliseconds)
+#[no_mangle]
+pub extern "C" fn rt_condvar_wait_timeout(_condvar: RuntimeValue, _mutex: RuntimeValue, _timeout_ms: u64) -> i64 {
+    // TODO: Implement proper condvar wait with timeout
+    // For now, return 0 (timeout)
+    0
+}
+
+// ============================================================================
+// RwLock Extended (No-op unlock functions)
+// ============================================================================
+
+/// Unlock read lock (no-op in Rust, handled by RAII)
+#[no_mangle]
+pub extern "C" fn rt_rwlock_unlock_read(_handle: i64) {
+    // No-op: locks are released automatically when guard is dropped
+}
+
+/// Unlock write lock (no-op in Rust, handled by RAII)
+#[no_mangle]
+pub extern "C" fn rt_rwlock_unlock_write(_handle: i64) {
+    // No-op: locks are released automatically when guard is dropped
+}
+
+// ============================================================================
+// SHA1 Hash Functions (Stub)
+// ============================================================================
+
+/// Create new SHA1 hasher
+#[no_mangle]
+pub extern "C" fn rt_sha1_new() -> i64 {
+    // TODO: Implement SHA1 hasher with external crate
+    0
+}
+
+/// Write bytes to SHA1 hasher
+#[no_mangle]
+pub unsafe extern "C" fn rt_sha1_write(_handle: i64, _data_ptr: *const u8, _data_len: u64) {
+    // TODO: Implement
+}
+
+/// Finalize SHA1 and get hex string
+#[no_mangle]
+pub extern "C" fn rt_sha1_finish(_handle: i64) -> RuntimeValue {
+    // TODO: Implement
+    RuntimeValue::NIL
+}
+
+/// Finalize SHA1 and get raw bytes
+#[no_mangle]
+pub extern "C" fn rt_sha1_finish_bytes(_handle: i64) -> RuntimeValue {
+    // TODO: Implement
+    RuntimeValue::NIL
+}
+
+/// Reset SHA1 hasher
+#[no_mangle]
+pub extern "C" fn rt_sha1_reset(_handle: i64) {
+    // TODO: Implement
+}
+
+/// Free SHA1 hasher
+#[no_mangle]
+pub extern "C" fn rt_sha1_free(_handle: i64) {
+    // TODO: Implement
+}
+
+// ============================================================================
+// SHA256 Hash Functions (Stub)
+// ============================================================================
+
+/// Create new SHA256 hasher
+#[no_mangle]
+pub extern "C" fn rt_sha256_new() -> i64 {
+    // TODO: Implement SHA256 hasher with external crate
+    0
+}
+
+/// Write bytes to SHA256 hasher
+#[no_mangle]
+pub unsafe extern "C" fn rt_sha256_write(_handle: i64, _data_ptr: *const u8, _data_len: u64) {
+    // TODO: Implement
+}
+
+/// Finalize SHA256 and get hex string
+#[no_mangle]
+pub extern "C" fn rt_sha256_finish(_handle: i64) -> RuntimeValue {
+    // TODO: Implement
+    RuntimeValue::NIL
+}
+
+/// Finalize SHA256 and get raw bytes
+#[no_mangle]
+pub extern "C" fn rt_sha256_finish_bytes(_handle: i64) -> RuntimeValue {
+    // TODO: Implement
+    RuntimeValue::NIL
+}
+
+/// Reset SHA256 hasher
+#[no_mangle]
+pub extern "C" fn rt_sha256_reset(_handle: i64) {
+    // TODO: Implement
+}
+
+/// Free SHA256 hasher
+#[no_mangle]
+pub extern "C" fn rt_sha256_free(_handle: i64) {
+    // TODO: Implement
+}
+
+// ============================================================================
+// XXHash Functions (Stub)
+// ============================================================================
+
+/// Create new XXHash hasher
+#[no_mangle]
+pub extern "C" fn rt_xxhash_new() -> i64 {
+    // TODO: Implement XXHash with external crate
+    0
+}
+
+/// Create new XXHash hasher with seed
+#[no_mangle]
+pub extern "C" fn rt_xxhash_new_with_seed(_seed: u64) -> i64 {
+    // TODO: Implement
+    0
+}
+
+/// Write bytes to XXHash hasher
+#[no_mangle]
+pub unsafe extern "C" fn rt_xxhash_write(_handle: i64, _data_ptr: *const u8, _data_len: u64) {
+    // TODO: Implement
+}
+
+/// Finalize XXHash and get hash value
+#[no_mangle]
+pub extern "C" fn rt_xxhash_finish(_handle: i64) -> u64 {
+    // TODO: Implement
+    0
+}
+
+/// Reset XXHash hasher
+#[no_mangle]
+pub extern "C" fn rt_xxhash_reset(_handle: i64) {
+    // TODO: Implement
+}
+
+/// Free XXHash hasher
+#[no_mangle]
+pub extern "C" fn rt_xxhash_free(_handle: i64) {
+    // TODO: Implement
+}
+
+// ============================================================================
+// Thread-Local Storage (Alternative API - Stub)
+// ============================================================================
+
+/// Create new thread-local storage
+#[no_mangle]
+pub extern "C" fn rt_thread_local_new() -> i64 {
+    // TODO: Implement thread-local storage
+    0
+}
+
+/// Get value from thread-local storage
+#[no_mangle]
+pub extern "C" fn rt_thread_local_get(_handle: i64) -> RuntimeValue {
+    // TODO: Implement
+    RuntimeValue::NIL
+}
+
+/// Set value in thread-local storage
+#[no_mangle]
+pub extern "C" fn rt_thread_local_set(_handle: i64, _value: RuntimeValue) {
+    // TODO: Implement
+}
+
+/// Free thread-local storage
+#[no_mangle]
+pub extern "C" fn rt_thread_local_free(_handle: i64) {
+    // TODO: Implement
+}
