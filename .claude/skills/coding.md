@@ -120,6 +120,20 @@ fn safe_divide(a: Int, b: Int) -> Int:
 - `mut T` - Exclusive mutable reference
 - `iso T` - Isolated (transferable ownership)
 
+### Function Visibility
+- Functions are **public by default**
+- Prefix with underscore (`_`) for private functions
+
+```simple
+# Public function (default)
+fn calculate(x: Int) -> Int:
+    return _helper(x) * 2
+
+# Private function (underscore prefix)
+fn _helper(x: Int) -> Int:
+    return x + 1
+```
+
 ### Effect Decorators
 ```simple
 @pure       # No side effects
