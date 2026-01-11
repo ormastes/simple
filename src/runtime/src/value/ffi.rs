@@ -3,7 +3,7 @@
 use super::collections::RuntimeString;
 use super::core::RuntimeValue;
 use super::heap::{HeapHeader, HeapObjectType};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -3454,8 +3454,6 @@ pub extern "C" fn rt_xxhash_free(_handle: i64) {
 // ============================================================================
 // Thread-Local Storage (Alternative API)
 // ============================================================================
-
-use std::cell::RefCell;
 
 thread_local! {
     static THREAD_LOCAL_STORAGE: RefCell<HashMap<i64, RuntimeValue>> = RefCell::new(HashMap::new());
