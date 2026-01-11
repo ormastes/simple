@@ -151,215 +151,237 @@ class NFA:
     fn get_state(self, sid: i32) -> NFAState:
         return self.states[sid]
 
-# Regex Parser
+# Regex Parser - redesigned for pass-by-value semantics
 class RegexParser:
     pattern: String
-    pos: i32
-    group_count: i32
 
     fn new(p: String) -> RegexParser:
-        return RegexParser { pattern: p, pos: 0, group_count: 0 }
+        return RegexParser { pattern: p }
 
-    fn peek(self) -> Option[String]:
-        if self.pos >= self.pattern.len():
+    fn peek_at(self, pos: i32) -> Option[String]:
+        if pos >= self.pattern.len():
             return None
-        return Some(self.pattern[self.pos])
+        return Some(self.pattern[pos])
 
-    fn advance(self) -> Option[String]:
-        let c = self.peek()
+    fn advance_from(self, pos: i32) -> (Option[String], i32):
+        let c = self.peek_at(pos)
         if c.is_some():
-            self.pos = self.pos + 1
-        return c
+            return (c, pos + 1)
+        return (None, pos)
 
     fn parse(self) -> RegexNode:
-        return self.parse_alternation()
+        let (node, _final_pos, _group_count) = self.parse_alternation(0, 0)
+        return node
 
-    fn parse_alternation(self) -> RegexNode:
-        let mut left = self.parse_concat()
+    fn parse_alternation(self, pos: i32, group_count: i32) -> (RegexNode, i32, i32):
+        let (mut left, mut current_pos, mut gc) = self.parse_concat(pos, group_count)
 
-        while self.peek() == Some("|"):
-            self.advance()  # consume |
-            let right = self.parse_concat()
+        while self.peek_at(current_pos) == Some("|"):
+            current_pos = current_pos + 1  # consume |
+            let (right, new_pos, new_gc) = self.parse_concat(current_pos, gc)
             left = AltNode.new(left, right)
+            current_pos = new_pos
+            gc = new_gc
 
-        return left
+        return (left, current_pos, gc)
 
-    fn parse_concat(self) -> RegexNode:
+    fn parse_concat(self, pos: i32, group_count: i32) -> (RegexNode, i32, i32):
         let mut nodes = []
+        let mut current_pos = pos
+        let mut gc = group_count
 
         while true:
-            let c = self.peek()
+            let c = self.peek_at(current_pos)
             if c.is_none() or c == Some("|") or c == Some(")"):
                 break
 
-            nodes.append(self.parse_quantified())
+            let (node, new_pos, new_gc) = self.parse_quantified(current_pos, gc)
+            nodes.append(node)
+            current_pos = new_pos
+            gc = new_gc
 
         if nodes.len() == 0:
             # Empty pattern - match empty string
-            return LiteralNode.new("")
+            return (LiteralNode.new(""), current_pos, gc)
 
         if nodes.len() == 1:
-            return nodes[0]
+            return (nodes[0], current_pos, gc)
 
         # Build concatenation tree (left-associative)
         let mut result = nodes[0]
         for i in range(1, nodes.len()):
             result = ConcatNode.new(result, nodes[i])
 
-        return result
+        return (result, current_pos, gc)
 
-    fn parse_quantified(self) -> RegexNode:
-        let mut node = self.parse_atom()
+    fn parse_quantified(self, pos: i32, group_count: i32) -> (RegexNode, i32, i32):
+        let (mut node, mut current_pos, mut gc) = self.parse_atom(pos, group_count)
 
         # Check for quantifiers
-        let c = self.peek()
+        let c = self.peek_at(current_pos)
         if c == Some("*"):
-            self.advance()
-            let greedy = self.peek() != Some("?")
+            current_pos = current_pos + 1
+            let greedy = self.peek_at(current_pos) != Some("?")
             if not greedy:
-                self.advance()
+                current_pos = current_pos + 1
             node = StarNode.new(node, greedy)
         elif c == Some("+"):
-            self.advance()
-            let greedy = self.peek() != Some("?")
+            current_pos = current_pos + 1
+            let greedy = self.peek_at(current_pos) != Some("?")
             if not greedy:
-                self.advance()
+                current_pos = current_pos + 1
             node = PlusNode.new(node, greedy)
         elif c == Some("?"):
-            self.advance()
-            let greedy = self.peek() != Some("?")
+            current_pos = current_pos + 1
+            let greedy = self.peek_at(current_pos) != Some("?")
             if not greedy:
-                self.advance()
+                current_pos = current_pos + 1
             node = QuestionNode.new(node, greedy)
         elif c == Some("{{"):
             # Quantifier {n,m}
-            self.advance()
-            let (min_v, max_v) = self.parse_quantifier_range()
-            let greedy = self.peek() != Some("?")
+            current_pos = current_pos + 1
+            let (min_v, max_v, new_pos) = self.parse_quantifier_range(current_pos)
+            current_pos = new_pos
+            let greedy = self.peek_at(current_pos) != Some("?")
             if not greedy:
-                self.advance()
+                current_pos = current_pos + 1
             node = QuantNode.new(node, min_v, max_v, greedy)
 
-        return node
+        return (node, current_pos, gc)
 
-    fn parse_quantifier_range(self) -> (i32, i32):
+    fn parse_quantifier_range(self, pos: i32) -> (i32, i32, i32):
         # Parse {n}, {n,}, or {n,m}
         let mut num_str = ""
+        let mut current_pos = pos
 
-        while self.peek() != Some(",") and self.peek() != Some("}}"):
-            num_str = num_str + self.advance().unwrap()
+        while self.peek_at(current_pos) != Some(",") and self.peek_at(current_pos) != Some("}}"):
+            let (ch, new_pos) = self.advance_from(current_pos)
+            num_str = num_str + ch.unwrap()
+            current_pos = new_pos
 
         let min_v = num_str.to_int()
 
-        if self.peek() == Some(","):
-            self.advance()  # consume ,
+        if self.peek_at(current_pos) == Some(","):
+            current_pos = current_pos + 1  # consume ,
 
-            if self.peek() == Some("}}"):
+            if self.peek_at(current_pos) == Some("}}"):
                 # {n,} - n or more
-                self.advance()  # consume }
-                return (min_v, -1)
+                current_pos = current_pos + 1  # consume }
+                return (min_v, -1, current_pos)
 
             num_str = ""
-            while self.peek() != Some("}}"):
-                num_str = num_str + self.advance().unwrap()
+            while self.peek_at(current_pos) != Some("}}"):
+                let (ch, new_pos) = self.advance_from(current_pos)
+                num_str = num_str + ch.unwrap()
+                current_pos = new_pos
 
-            self.advance()  # consume }
-            return (min_v, num_str.to_int())
+            current_pos = current_pos + 1  # consume }
+            return (min_v, num_str.to_int(), current_pos)
 
-        self.advance()  # consume }
-        return (min_v, min_v)  # {n} - exactly n
+        current_pos = current_pos + 1  # consume }
+        return (min_v, min_v, current_pos)  # {n} - exactly n
 
-    fn parse_atom(self) -> RegexNode:
-        let c = self.peek()
+    fn parse_atom(self, pos: i32, group_count: i32) -> (RegexNode, i32, i32):
+        let c = self.peek_at(pos)
 
         if c.is_none():
             # Empty - shouldn't happen in well-formed regex
-            return LiteralNode.new("")
+            return (LiteralNode.new(""), pos, group_count)
 
         let ch = c.unwrap()
+        let mut current_pos = pos
+        let mut gc = group_count
 
         # Anchors
         if ch == "^":
-            self.advance()
-            return AnchorNode.new("start")
+            current_pos = current_pos + 1
+            return (AnchorNode.new("start"), current_pos, gc)
 
         if ch == "$":
-            self.advance()
-            return AnchorNode.new("end")
+            current_pos = current_pos + 1
+            return (AnchorNode.new("end"), current_pos, gc)
 
         # Groups
         if ch == "(":
-            self.advance()
+            current_pos = current_pos + 1
 
             # Check for non-capturing group
-            if self.peek() == Some("?") and self.pattern[self.pos + 1] == ":":
-                self.advance()  # ?
-                self.advance()  # :
-                let child = self.parse_alternation()
-                if self.peek() == Some(")"):
-                    self.advance()
-                return child  # Non-capturing group - just return child
+            if self.peek_at(current_pos) == Some("?") and self.peek_at(current_pos + 1) == Some(":"):
+                current_pos = current_pos + 2  # skip ?:
+                let (child, new_pos, new_gc) = self.parse_alternation(current_pos, gc)
+                current_pos = new_pos
+                if self.peek_at(current_pos) == Some(")"):
+                    current_pos = current_pos + 1
+                return (child, current_pos, new_gc)  # Non-capturing group
 
             # Capturing group
-            self.group_count = self.group_count + 1
-            let gid = self.group_count
-            let child = self.parse_alternation()
-            if self.peek() == Some(")"):
-                self.advance()
-            return GroupNode.new(child, gid)
+            gc = gc + 1
+            let gid = gc
+            let (child, new_pos, new_gc) = self.parse_alternation(current_pos, gc)
+            current_pos = new_pos
+            gc = new_gc
+            if self.peek_at(current_pos) == Some(")"):
+                current_pos = current_pos + 1
+            return (GroupNode.new(child, gid), current_pos, gc)
 
         # Character classes
         if ch == "[":
-            return self.parse_char_class()
+            let (cc, new_pos) = self.parse_char_class(current_pos)
+            return (cc, new_pos, gc)
 
         # Escaped characters
         if ch == "\\":
-            self.advance()
-            return self.parse_escape()
+            current_pos = current_pos + 1
+            let (node, new_pos) = self.parse_escape(current_pos)
+            return (node, new_pos, gc)
 
         # Wildcard
         if ch == ".":
-            self.advance()
+            current_pos = current_pos + 1
             # Match any character except newline
             let cc = CharClassNode.new()
             cc.negated = true
             cc.chars.append("\n")
-            return cc
+            return (cc, current_pos, gc)
 
         # Literal character
-        self.advance()
-        return LiteralNode.new(ch)
+        current_pos = current_pos + 1
+        return (LiteralNode.new(ch), current_pos, gc)
 
-    fn parse_char_class(self) -> CharClassNode:
-        self.advance()  # consume [
+    fn parse_char_class(self, pos: i32) -> (CharClassNode, i32):
+        let mut current_pos = pos + 1  # consume [
         let cc = CharClassNode.new()
 
         # Check for negation
-        if self.peek() == Some("^"):
-            self.advance()
+        if self.peek_at(current_pos) == Some("^"):
+            current_pos = current_pos + 1
             cc.negated = true
 
-        while self.peek() != Some("]") and self.peek().is_some():
-            let c = self.advance().unwrap()
+        while self.peek_at(current_pos) != Some("]") and self.peek_at(current_pos).is_some():
+            let (c_opt, new_pos) = self.advance_from(current_pos)
+            let c = c_opt.unwrap()
+            current_pos = new_pos
 
             # Check for range
-            if self.peek() == Some("-") and self.pattern[self.pos + 1] != "]":
-                self.advance()  # consume -
-                let end_char = self.advance().unwrap()
+            if self.peek_at(current_pos) == Some("-") and self.peek_at(current_pos + 1) != Some("]"):
+                current_pos = current_pos + 1  # consume -
+                let (end_char_opt, new_pos2) = self.advance_from(current_pos)
+                let end_char = end_char_opt.unwrap()
+                current_pos = new_pos2
                 cc.ranges.append((c, end_char))
             else:
                 cc.chars.append(c)
 
-        if self.peek() == Some("]"):
-            self.advance()  # consume ]
+        if self.peek_at(current_pos) == Some("]"):
+            current_pos = current_pos + 1  # consume ]
 
-        return cc
+        return (cc, current_pos)
 
-    fn parse_escape(self) -> RegexNode:
-        let c = self.advance()
+    fn parse_escape(self, pos: i32) -> (RegexNode, i32):
+        let (c, new_pos) = self.advance_from(pos)
 
         if c.is_none():
-            return LiteralNode.new("\\")
+            return (LiteralNode.new("\\"), pos)
 
         let ch = c.unwrap()
 
@@ -368,14 +390,14 @@ class RegexParser:
             # Digits [0-9]
             let cc = CharClassNode.new()
             cc.ranges.append(("0", "9"))
-            return cc
+            return (cc, new_pos)
 
         if ch == "D":
             # Non-digits
             let cc = CharClassNode.new()
             cc.ranges.append(("0", "9"))
             cc.negated = true
-            return cc
+            return (cc, new_pos)
 
         if ch == "w":
             # Word characters [a-zA-Z0-9_]
@@ -384,7 +406,7 @@ class RegexParser:
             cc.ranges.append(("A", "Z"))
             cc.ranges.append(("0", "9"))
             cc.chars.append("_")
-            return cc
+            return (cc, new_pos)
 
         if ch == "W":
             # Non-word characters
@@ -394,7 +416,7 @@ class RegexParser:
             cc.ranges.append(("0", "9"))
             cc.chars.append("_")
             cc.negated = true
-            return cc
+            return (cc, new_pos)
 
         if ch == "s":
             # Whitespace
@@ -403,7 +425,7 @@ class RegexParser:
             cc.chars.append("\t")
             cc.chars.append("\n")
             cc.chars.append("\r")
-            return cc
+            return (cc, new_pos)
 
         if ch == "S":
             # Non-whitespace
@@ -413,27 +435,27 @@ class RegexParser:
             cc.chars.append("\n")
             cc.chars.append("\r")
             cc.negated = true
-            return cc
+            return (cc, new_pos)
 
         if ch == "b":
             # Word boundary
-            return AnchorNode.new("word_boundary")
+            return (AnchorNode.new("word_boundary"), new_pos)
 
         if ch == "B":
             # Non-word boundary
-            return AnchorNode.new("non_word_boundary")
+            return (AnchorNode.new("non_word_boundary"), new_pos)
 
         if ch == "n":
-            return LiteralNode.new("\n")
+            return (LiteralNode.new("\n"), new_pos)
 
         if ch == "t":
-            return LiteralNode.new("\t")
+            return (LiteralNode.new("\t"), new_pos)
 
         if ch == "r":
-            return LiteralNode.new("\r")
+            return (LiteralNode.new("\r"), new_pos)
 
         # Escaped special character - treat as literal
-        return LiteralNode.new(ch)
+        return (LiteralNode.new(ch), new_pos)
 
 # NFA Builder using Thompson's construction
 class NFABuilder:
