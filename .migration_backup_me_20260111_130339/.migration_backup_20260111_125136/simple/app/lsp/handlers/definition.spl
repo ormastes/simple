@@ -1,0 +1,258 @@
+# Definition Handler
+# Provides go-to-definition functionality for symbols and Lean artifacts
+
+import lsp.protocol as protocol
+import lsp.transport as transport
+import parser.treesitter.{Tree, Node, NodeId, Span}
+import lsp.handlers.verification as verification
+
+# Symbol definition info
+class SymbolDefinition:
+    name: String
+    kind: String  # "function", "variable", "type", "parameter"
+    span: Span
+    node_id: NodeId
+
+    fn new(name: String, kind: String, span: Span, node_id: NodeId) -> SymbolDefinition:
+        SymbolDefinition(
+            name: name,
+            kind: kind,
+            span: span,
+            node_id: node_id
+        )
+
+# Scope containing symbols
+class Scope:
+    symbols: Dict<String, SymbolDefinition>
+    parent: Option<Scope>
+
+    fn new(parent: Option<Scope>) -> Scope:
+        Scope(symbols: {}, parent: parent)
+
+    # Lookup symbol in this scope or parent scopes
+    fn lookup(name: String) -> Option<SymbolDefinition>:
+        # Check this scope first
+        match self.symbols.get(name):
+            case Some(def):
+                Some(def)
+            case None:
+                # Check parent scope
+                match self.parent:
+                    case Some(parent):
+                        parent.lookup(name)
+                    case None:
+                        None
+
+    # Add symbol to this scope
+    me add(name: String, def: SymbolDefinition):
+        self.symbols[name] = def
+
+# Build symbol table from tree
+fn build_symbol_table(tree: Tree) -> Scope:
+    let mut global_scope = Scope.new(None)
+
+    # Traverse tree and collect definitions
+    fn traverse(node_id: NodeId, current_scope: Scope) -> Scope:
+        match tree.arena.get(node_id):
+            case None:
+                current_scope
+            case Some(node):
+                let mut scope = current_scope
+
+                # Check for definition nodes
+                match node.kind:
+                    case "function_def":
+                        # Extract function name from fields
+                        match node.fields.get("name"):
+                            case Some(name_id):
+                                match tree.arena.get(name_id):
+                                    case Some(name_node):
+                                        let def = SymbolDefinition.new(
+                                            name_node.text,
+                                            "function",
+                                            node.span,
+                                            node_id
+                                        )
+                                        scope.add(name_node.text, def)
+                                    case None:
+                                        pass
+                            case None:
+                                pass
+
+                        # Create new scope for function body
+                        let mut func_scope = Scope.new(Some(scope))
+
+                        # Add parameters to function scope
+                        match node.fields.get("params"):
+                            case Some(params_id):
+                                # Traverse params to add to func_scope
+                                func_scope = traverse(params_id, func_scope)
+                            case None:
+                                pass
+
+                        # Traverse function body with function scope
+                        match node.fields.get("body"):
+                            case Some(body_id):
+                                traverse(body_id, func_scope)
+                            case None:
+                                pass
+
+                        scope
+
+                    case "let_stmt":
+                        # Variable definition
+                        match node.fields.get("pattern"):
+                            case Some(pattern_id):
+                                match tree.arena.get(pattern_id):
+                                    case Some(pattern_node):
+                                        if pattern_node.kind == "identifier":
+                                            let def = SymbolDefinition.new(
+                                                pattern_node.text,
+                                                "variable",
+                                                pattern_node.span,
+                                                pattern_id
+                                            )
+                                            scope.add(pattern_node.text, def)
+                                    case None:
+                                        pass
+                            case None:
+                                pass
+
+                        # Traverse children
+                        for child_id in node.children:
+                            scope = traverse(child_id, scope)
+
+                        scope
+
+                    case "parameter":
+                        # Function parameter
+                        match node.fields.get("name"):
+                            case Some(name_id):
+                                match tree.arena.get(name_id):
+                                    case Some(name_node):
+                                        let def = SymbolDefinition.new(
+                                            name_node.text,
+                                            "parameter",
+                                            name_node.span,
+                                            name_id
+                                        )
+                                        scope.add(name_node.text, def)
+                                    case None:
+                                        pass
+                            case None:
+                                pass
+
+                        scope
+
+                    case "struct_def":
+                        # Type definition
+                        match node.fields.get("name"):
+                            case Some(name_id):
+                                match tree.arena.get(name_id):
+                                    case Some(name_node):
+                                        let def = SymbolDefinition.new(
+                                            name_node.text,
+                                            "type",
+                                            node.span,
+                                            node_id
+                                        )
+                                        scope.add(name_node.text, def)
+                                    case None:
+                                        pass
+                            case None:
+                                pass
+
+                        scope
+
+                    case _:
+                        # Traverse children for other nodes
+                        for child_id in node.children:
+                            scope = traverse(child_id, scope)
+
+                        scope
+
+    traverse(tree.root_node, global_scope)
+
+# Find node at specific position (from hover handler)
+fn find_node_at_position(tree: Tree, line: Int, column: Int) -> Option<Node>:
+    fn position_in_span(span: Span, line: Int, column: Int) -> Bool:
+        if line < span.start_line or line > span.end_line:
+            return false
+        if line == span.start_line and column < span.start_column:
+            return false
+        if line == span.end_line and column > span.end_column:
+            return false
+        true
+
+    fn traverse(node_id: NodeId, best: Option<Node>) -> Option<Node>:
+        match tree.arena.get(node_id):
+            case None:
+                best
+            case Some(node):
+                if not position_in_span(node.span, line, column):
+                    return best
+                let mut new_best = Some(node)
+                for child_id in node.children:
+                    new_best = traverse(child_id, new_best)
+                new_best
+
+    traverse(tree.root_node, None)
+
+# Handle textDocument/definition request
+fn handle_definition(tree: Tree, source: String, line: Int, column: Int) -> Result<Option<Dict>, String>:
+    # Find node at cursor
+    match find_node_at_position(tree, line, column):
+        case None:
+            Ok(None)
+        case Some(node):
+            # Check if this is a reference (identifier)
+            if node.kind != "identifier":
+                return Ok(None)
+
+            # Build symbol table
+            let symbol_table = build_symbol_table(tree)
+
+            # Look up symbol
+            match symbol_table.lookup(node.text):
+                case None:
+                    Ok(None)
+                case Some(def):
+                    # Create location response
+                    let location = {
+                        "range": {
+                            "start": {
+                                "line": def.span.start_line,
+                                "character": def.span.start_column
+                            },
+                            "end": {
+                                "line": def.span.end_line,
+                                "character": def.span.end_column
+                            }
+                        }
+                    }
+
+                    Ok(Some(location))
+
+# Handle go-to-definition for Lean artifacts
+# Returns the location of the Lean file for verified symbols
+fn handle_lean_definition(tree: Tree, source: String, line: Int, column: Int, output_dir: String) -> Result<Option<Dict>, String>:
+    # Check if we're on a verified symbol
+    match verification.handle_lean_definition(tree, line, column, output_dir):
+        case Some(location):
+            Ok(Some(location))
+        case None:
+            Ok(None)
+
+# Handle definition with Lean artifact fallback
+fn handle_definition_with_lean(tree: Tree, source: String, line: Int, column: Int, lean_output_dir: Option<String>) -> Result<Option<Dict>, String>:
+    # First try normal definition
+    match handle_definition(tree, source, line, column)?:
+        case Some(location):
+            Ok(Some(location))
+        case None:
+            # Try Lean artifact definition if output dir is configured
+            match lean_output_dir:
+                case Some(output_dir):
+                    handle_lean_definition(tree, source, line, column, output_dir)
+                case None:
+                    Ok(None)

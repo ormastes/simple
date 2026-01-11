@@ -1,0 +1,517 @@
+# Common SceneNode Trait
+#
+# Engine-agnostic scene graph node interface
+# Works with both Godot Node and Unreal AActor/USceneComponent
+#
+# Features:
+# - Transform hierarchy
+# - Parent-child relationships
+# - Visibility control
+# - Name and tag management
+# - Engine-agnostic API
+
+import sys.ffi
+
+mod scene_node
+
+# Transform3D
+# 3D transformation with position, rotation, and scale
+pub struct Transform3D:
+    position: (f64, f64, f64)
+    rotation: (f64, f64, f64)  # Euler angles (pitch, yaw, roll)
+    scale: (f64, f64, f64)
+
+impl Transform3D:
+    pub fn identity() -> Transform3D:
+        return Transform3D(
+            position: (0.0, 0.0, 0.0),
+            rotation: (0.0, 0.0, 0.0),
+            scale: (1.0, 1.0, 1.0),
+        )
+
+    pub fn new(x: f64, y: f64, z: f64) -> Transform3D:
+        return Transform3D(
+            position: (x, y, z),
+            rotation: (0.0, 0.0, 0.0),
+            scale: (1.0, 1.0, 1.0),
+        )
+
+    pub fn with_rotation(mut self, pitch: f64, yaw: f64, roll: f64) -> Transform3D:
+        self.rotation = (pitch, yaw, roll)
+        return self
+
+    pub fn with_scale(mut self, sx: f64, sy: f64, sz: f64) -> Transform3D:
+        self.scale = (sx, sy, sz)
+        return self
+
+    pub fn get_position(self) -> (f64, f64, f64):
+        return self.position
+
+    pub fn get_rotation(self) -> (f64, f64, f64):
+        return self.rotation
+
+    pub fn get_scale(self) -> (f64, f64, f64):
+        return self.scale
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_identity(self) -> bool:
+        """Check if transform is identity.
+
+        Returns:
+            true if identity transform
+
+        Example:
+            t.is_identity()  # → true
+        """
+        return self.position == (0.0, 0.0, 0.0) and
+               self.rotation == (0.0, 0.0, 0.0) and
+               self.scale == (1.0, 1.0, 1.0)
+
+    pub fn is_at_origin(self) -> bool:
+        """Check if positioned at origin.
+
+        Returns:
+            true if at (0,0,0)
+
+        Example:
+            t.is_at_origin()  # → false
+        """
+        return self.position == (0.0, 0.0, 0.0)
+
+    pub fn is_uniformly_scaled(self) -> bool:
+        """Check if scale is uniform.
+
+        Returns:
+            true if all axes have same scale
+
+        Example:
+            t.is_uniformly_scaled()  # → true
+        """
+        let (sx, sy, sz) = self.scale
+        return sx == sy and sy == sz
+
+    pub fn summary(self) -> String:
+        """Get transform summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            t.summary()
+            # → "Transform3D: pos=(1.0, 2.0, 3.0), rot=(0.0, 0.0, 0.0), scale=(1.0, 1.0, 1.0)"
+        """
+        let (px, py, pz) = self.position
+        let (rx, ry, rz) = self.rotation
+        let (sx, sy, sz) = self.scale
+        return "Transform3D: pos=({px}, {py}, {pz}), rot=({rx}, {ry}, {rz}), scale=({sx}, {sy}, {sz})"
+
+
+# SceneNode trait
+# Common interface for all scene graph nodes
+pub trait SceneNode:
+    # Transform methods
+    fn get_transform(self) -> Transform3D
+    fn set_transform(mut self, transform: Transform3D)
+    fn get_position(self) -> (f64, f64, f64)
+    fn set_position(mut self, x: f64, y: f64, z: f64)
+    fn get_rotation(self) -> (f64, f64, f64)
+    fn set_rotation(mut self, pitch: f64, yaw: f64, roll: f64)
+    fn get_scale(self) -> (f64, f64, f64)
+    fn set_scale(mut self, sx: f64, sy: f64, sz: f64)
+
+    # Hierarchy methods
+    fn get_parent(self) -> Option[SceneNode]
+    fn get_children(self) -> Vec[SceneNode]
+    fn add_child(mut self, child: SceneNode)
+    fn remove_child(mut self, child: SceneNode)
+    fn get_child_count(self) -> i32
+
+    # Naming and tagging
+    fn get_name(self) -> String
+    fn set_name(mut self, name: String)
+    fn has_tag(self, tag: String) -> bool
+    fn add_tag(mut self, tag: String)
+    fn remove_tag(mut self, tag: String)
+
+    # Visibility
+    fn is_visible(self) -> bool
+    fn set_visible(mut self, visible: bool)
+
+    # Lifecycle
+    fn is_active(self) -> bool
+    fn set_active(mut self, active: bool)
+
+
+# GodotNodeAdapter
+# Adapts Godot Node to SceneNode trait
+pub struct GodotNodeAdapter:
+    node_ptr: ffi.VoidPtr
+
+impl GodotNodeAdapter:
+    pub fn new(node_ptr: ffi.VoidPtr) -> GodotNodeAdapter:
+        return GodotNodeAdapter(node_ptr: node_ptr)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_node_ptr(self) -> ffi.VoidPtr:
+        """Get node pointer.
+
+        Returns:
+            Node pointer
+
+        Example:
+            adapter.get_node_ptr()
+        """
+        return self.node_ptr
+
+    pub fn has_node(self) -> bool:
+        """Check if has valid node pointer.
+
+        Returns:
+            true if pointer is not null
+
+        Example:
+            adapter.has_node()  # → true
+        """
+        return not ffi.is_null_ptr(self.node_ptr)
+
+    pub fn summary(self) -> String:
+        """Get Godot node adapter summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            adapter.summary()
+            # → "GodotNodeAdapter: 'MyNode' (visible, active)"
+        """
+        let name = self.get_name()
+        let visible_str = if self.is_visible() { "visible" } else { "hidden" }
+        let active_str = if self.is_active() { "active" } else { "inactive" }
+        return "GodotNodeAdapter: '{name}' ({visible_str}, {active_str})"
+
+impl SceneNode for GodotNodeAdapter:
+    fn get_transform(self) -> Transform3D:
+        let x = ffi.alloc_f64()
+        let y = ffi.alloc_f64()
+        let z = ffi.alloc_f64()
+
+        godot_node_get_position(self.node_ptr, x, y, z)
+        let position = (ffi.read_f64(x), ffi.read_f64(y), ffi.read_f64(z))
+
+        godot_node_get_rotation(self.node_ptr, x, y, z)
+        let rotation = (ffi.read_f64(x), ffi.read_f64(y), ffi.read_f64(z))
+
+        godot_node_get_scale(self.node_ptr, x, y, z)
+        let scale = (ffi.read_f64(x), ffi.read_f64(y), ffi.read_f64(z))
+
+        ffi.free(x)
+        ffi.free(y)
+        ffi.free(z)
+
+        return Transform3D(position: position, rotation: rotation, scale: scale)
+
+    fn set_transform(mut self, transform: Transform3D):
+        let (px, py, pz) = transform.get_position()
+        self.set_position(px, py, pz)
+
+        let (rx, ry, rz) = transform.get_rotation()
+        self.set_rotation(rx, ry, rz)
+
+        let (sx, sy, sz) = transform.get_scale()
+        self.set_scale(sx, sy, sz)
+
+    fn get_position(self) -> (f64, f64, f64):
+        let x = ffi.alloc_f64()
+        let y = ffi.alloc_f64()
+        let z = ffi.alloc_f64()
+        godot_node_get_position(self.node_ptr, x, y, z)
+        let result = (ffi.read_f64(x), ffi.read_f64(y), ffi.read_f64(z))
+        ffi.free(x)
+        ffi.free(y)
+        ffi.free(z)
+        return result
+
+    fn set_position(mut self, x: f64, y: f64, z: f64):
+        godot_node_set_position(self.node_ptr, x, y, z)
+
+    fn get_rotation(self) -> (f64, f64, f64):
+        let x = ffi.alloc_f64()
+        let y = ffi.alloc_f64()
+        let z = ffi.alloc_f64()
+        godot_node_get_rotation(self.node_ptr, x, y, z)
+        let result = (ffi.read_f64(x), ffi.read_f64(y), ffi.read_f64(z))
+        ffi.free(x)
+        ffi.free(y)
+        ffi.free(z)
+        return result
+
+    fn set_rotation(mut self, pitch: f64, yaw: f64, roll: f64):
+        godot_node_set_rotation(self.node_ptr, pitch, yaw, roll)
+
+    fn get_scale(self) -> (f64, f64, f64):
+        let x = ffi.alloc_f64()
+        let y = ffi.alloc_f64()
+        let z = ffi.alloc_f64()
+        godot_node_get_scale(self.node_ptr, x, y, z)
+        let result = (ffi.read_f64(x), ffi.read_f64(y), ffi.read_f64(z))
+        ffi.free(x)
+        ffi.free(y)
+        ffi.free(z)
+        return result
+
+    fn set_scale(mut self, sx: f64, sy: f64, sz: f64):
+        godot_node_set_scale(self.node_ptr, sx, sy, sz)
+
+    fn get_parent(self) -> Option[SceneNode]:
+        let parent_ptr = godot_node_get_parent(self.node_ptr)
+        if ffi.is_null_ptr(parent_ptr):
+            return None
+        else:
+            return Some(GodotNodeAdapter::new(parent_ptr))
+
+    fn get_children(self) -> Vec[SceneNode]:
+        # Stub - would enumerate children
+        return []
+
+    fn add_child(mut self, child: SceneNode):
+        # Stub - would add child
+        pass
+
+    fn remove_child(mut self, child: SceneNode):
+        # Stub - would remove child
+        pass
+
+    fn get_child_count(self) -> i32:
+        return godot_node_get_child_count(self.node_ptr)
+
+    fn get_name(self) -> String:
+        let name_ptr = godot_node_get_name(self.node_ptr)
+        return ffi.string_from_ptr(name_ptr)
+
+    fn set_name(mut self, name: String):
+        godot_node_set_name(self.node_ptr, name)
+
+    fn has_tag(self, tag: String) -> bool:
+        return godot_node_has_tag(self.node_ptr, tag)
+
+    fn add_tag(mut self, tag: String):
+        godot_node_add_tag(self.node_ptr, tag)
+
+    fn remove_tag(mut self, tag: String):
+        godot_node_remove_tag(self.node_ptr, tag)
+
+    fn is_visible(self) -> bool:
+        return godot_node_is_visible(self.node_ptr)
+
+    fn set_visible(mut self, visible: bool):
+        godot_node_set_visible(self.node_ptr, visible)
+
+    fn is_active(self) -> bool:
+        return godot_node_is_active(self.node_ptr)
+
+    fn set_active(mut self, active: bool):
+        godot_node_set_active(self.node_ptr, active)
+
+
+# UnrealActorAdapter
+# Adapts Unreal AActor to SceneNode trait
+pub struct UnrealActorAdapter:
+    actor_ptr: ffi.VoidPtr
+
+impl UnrealActorAdapter:
+    pub fn new(actor_ptr: ffi.VoidPtr) -> UnrealActorAdapter:
+        return UnrealActorAdapter(actor_ptr: actor_ptr)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_actor_ptr(self) -> ffi.VoidPtr:
+        """Get actor pointer.
+
+        Returns:
+            Actor pointer
+
+        Example:
+            adapter.get_actor_ptr()
+        """
+        return self.actor_ptr
+
+    pub fn has_actor(self) -> bool:
+        """Check if has valid actor pointer.
+
+        Returns:
+            true if pointer is not null
+
+        Example:
+            adapter.has_actor()  # → true
+        """
+        return not ffi.is_null_ptr(self.actor_ptr)
+
+    pub fn summary(self) -> String:
+        """Get Unreal actor adapter summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            adapter.summary()
+            # → "UnrealActorAdapter: 'MyActor' (visible, active)"
+        """
+        let name = self.get_name()
+        let visible_str = if self.is_visible() { "visible" } else { "hidden" }
+        let active_str = if self.is_active() { "active" } else { "inactive" }
+        return "UnrealActorAdapter: '{name}' ({visible_str}, {active_str})"
+
+impl SceneNode for UnrealActorAdapter:
+    fn get_transform(self) -> Transform3D:
+        let position = self.get_position()
+        let rotation = self.get_rotation()
+        let scale = self.get_scale()
+        return Transform3D(position: position, rotation: rotation, scale: scale)
+
+    fn set_transform(mut self, transform: Transform3D):
+        let (px, py, pz) = transform.get_position()
+        self.set_position(px, py, pz)
+
+        let (rx, ry, rz) = transform.get_rotation()
+        self.set_rotation(rx, ry, rz)
+
+        let (sx, sy, sz) = transform.get_scale()
+        self.set_scale(sx, sy, sz)
+
+    fn get_position(self) -> (f64, f64, f64):
+        let x = ffi.alloc_f64()
+        let y = ffi.alloc_f64()
+        let z = ffi.alloc_f64()
+        unreal_actor_get_position(self.actor_ptr, x, y, z)
+        let result = (ffi.read_f64(x), ffi.read_f64(y), ffi.read_f64(z))
+        ffi.free(x)
+        ffi.free(y)
+        ffi.free(z)
+        return result
+
+    fn set_position(mut self, x: f64, y: f64, z: f64):
+        unreal_actor_set_position(self.actor_ptr, x, y, z)
+
+    fn get_rotation(self) -> (f64, f64, f64):
+        let x = ffi.alloc_f64()
+        let y = ffi.alloc_f64()
+        let z = ffi.alloc_f64()
+        unreal_actor_get_rotation(self.actor_ptr, x, y, z)
+        let result = (ffi.read_f64(x), ffi.read_f64(y), ffi.read_f64(z))
+        ffi.free(x)
+        ffi.free(y)
+        ffi.free(z)
+        return result
+
+    fn set_rotation(mut self, pitch: f64, yaw: f64, roll: f64):
+        unreal_actor_set_rotation(self.actor_ptr, pitch, yaw, roll)
+
+    fn get_scale(self) -> (f64, f64, f64):
+        let x = ffi.alloc_f64()
+        let y = ffi.alloc_f64()
+        let z = ffi.alloc_f64()
+        unreal_actor_get_scale(self.actor_ptr, x, y, z)
+        let result = (ffi.read_f64(x), ffi.read_f64(y), ffi.read_f64(z))
+        ffi.free(x)
+        ffi.free(y)
+        ffi.free(z)
+        return result
+
+    fn set_scale(mut self, sx: f64, sy: f64, sz: f64):
+        unreal_actor_set_scale(self.actor_ptr, sx, sy, sz)
+
+    fn get_parent(self) -> Option[SceneNode]:
+        let parent_ptr = unreal_actor_get_parent(self.actor_ptr)
+        if ffi.is_null_ptr(parent_ptr):
+            return None
+        else:
+            return Some(UnrealActorAdapter::new(parent_ptr))
+
+    fn get_children(self) -> Vec[SceneNode]:
+        return []
+
+    fn add_child(mut self, child: SceneNode):
+        pass
+
+    fn remove_child(mut self, child: SceneNode):
+        pass
+
+    fn get_child_count(self) -> i32:
+        return unreal_actor_get_child_count(self.actor_ptr)
+
+    fn get_name(self) -> String:
+        let name_ptr = unreal_actor_get_name(self.actor_ptr)
+        return ffi.string_from_ptr(name_ptr)
+
+    fn set_name(mut self, name: String):
+        unreal_actor_set_name(self.actor_ptr, name)
+
+    fn has_tag(self, tag: String) -> bool:
+        return unreal_actor_has_tag(self.actor_ptr, tag)
+
+    fn add_tag(mut self, tag: String):
+        unreal_actor_add_tag(self.actor_ptr, tag)
+
+    fn remove_tag(mut self, tag: String):
+        unreal_actor_remove_tag(self.actor_ptr, tag)
+
+    fn is_visible(self) -> bool:
+        return unreal_actor_is_visible(self.actor_ptr)
+
+    fn set_visible(mut self, visible: bool):
+        unreal_actor_set_visible(self.actor_ptr, visible)
+
+    fn is_active(self) -> bool:
+        return unreal_actor_is_active(self.actor_ptr)
+
+    fn set_active(mut self, active: bool):
+        unreal_actor_set_active(self.actor_ptr, active)
+
+
+# FFI declarations for Godot
+extern "C":
+    fn godot_node_get_position(node: ffi.VoidPtr, x: ffi.VoidPtr, y: ffi.VoidPtr, z: ffi.VoidPtr)
+    fn godot_node_set_position(node: ffi.VoidPtr, x: f64, y: f64, z: f64)
+    fn godot_node_get_rotation(node: ffi.VoidPtr, x: ffi.VoidPtr, y: ffi.VoidPtr, z: ffi.VoidPtr)
+    fn godot_node_set_rotation(node: ffi.VoidPtr, x: f64, y: f64, z: f64)
+    fn godot_node_get_scale(node: ffi.VoidPtr, x: ffi.VoidPtr, y: ffi.VoidPtr, z: ffi.VoidPtr)
+    fn godot_node_set_scale(node: ffi.VoidPtr, x: f64, y: f64, z: f64)
+    fn godot_node_get_parent(node: ffi.VoidPtr) -> ffi.VoidPtr
+    fn godot_node_get_child_count(node: ffi.VoidPtr) -> i32
+    fn godot_node_get_name(node: ffi.VoidPtr) -> ffi.VoidPtr
+    fn godot_node_set_name(node: ffi.VoidPtr, name: String)
+    fn godot_node_has_tag(node: ffi.VoidPtr, tag: String) -> bool
+    fn godot_node_add_tag(node: ffi.VoidPtr, tag: String)
+    fn godot_node_remove_tag(node: ffi.VoidPtr, tag: String)
+    fn godot_node_is_visible(node: ffi.VoidPtr) -> bool
+    fn godot_node_set_visible(node: ffi.VoidPtr, visible: bool)
+    fn godot_node_is_active(node: ffi.VoidPtr) -> bool
+    fn godot_node_set_active(node: ffi.VoidPtr, active: bool)
+
+# FFI declarations for Unreal
+extern "C":
+    fn unreal_actor_get_position(actor: ffi.VoidPtr, x: ffi.VoidPtr, y: ffi.VoidPtr, z: ffi.VoidPtr)
+    fn unreal_actor_set_position(actor: ffi.VoidPtr, x: f64, y: f64, z: f64)
+    fn unreal_actor_get_rotation(actor: ffi.VoidPtr, x: ffi.VoidPtr, y: ffi.VoidPtr, z: ffi.VoidPtr)
+    fn unreal_actor_set_rotation(actor: ffi.VoidPtr, x: f64, y: f64, z: f64)
+    fn unreal_actor_get_scale(actor: ffi.VoidPtr, x: ffi.VoidPtr, y: ffi.VoidPtr, z: ffi.VoidPtr)
+    fn unreal_actor_set_scale(actor: ffi.VoidPtr, x: f64, y: f64, z: f64)
+    fn unreal_actor_get_parent(actor: ffi.VoidPtr) -> ffi.VoidPtr
+    fn unreal_actor_get_child_count(actor: ffi.VoidPtr) -> i32
+    fn unreal_actor_get_name(actor: ffi.VoidPtr) -> ffi.VoidPtr
+    fn unreal_actor_set_name(actor: ffi.VoidPtr, name: String)
+    fn unreal_actor_has_tag(actor: ffi.VoidPtr, tag: String) -> bool
+    fn unreal_actor_add_tag(actor: ffi.VoidPtr, tag: String)
+    fn unreal_actor_remove_tag(actor: ffi.VoidPtr, tag: String)
+    fn unreal_actor_is_visible(actor: ffi.VoidPtr) -> bool
+    fn unreal_actor_set_visible(actor: ffi.VoidPtr, visible: bool)
+    fn unreal_actor_is_active(actor: ffi.VoidPtr) -> bool
+    fn unreal_actor_set_active(actor: ffi.VoidPtr, active: bool)

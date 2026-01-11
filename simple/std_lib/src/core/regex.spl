@@ -21,11 +21,11 @@ class CharClassNode(RegexNode):
     ranges: List[(String, String)]  # Character ranges like a-z
     negated: Bool         # True for [^...]
 
-    fn new() -> CharClassNode:
+    static fn new() -> CharClassNode:
         return CharClassNode { chars: [], ranges: [], negated: false }
 
-    fn matches(self, c: String) -> Bool:
-        let mut found = false
+    fn matches(c: String) -> Bool:
+        var found = false
 
         # Check individual characters
         for ch in self.chars:
@@ -36,8 +36,8 @@ class CharClassNode(RegexNode):
         # Check ranges
         if not found:
             for range in self.ranges:
-                let start = range[0]
-                let end = range[1]
+                val start = range[0]
+                val end = range[1]
                 if c >= start and c <= end:
                     found = true
                     break
@@ -120,11 +120,29 @@ class NFAState:
             group_end: -1
         }
 
-    fn add_transition(self, char: String, target: i32):
-        self.transitions.append((char, target))
+    fn add_transition(char: String, target: i32) -> NFAState:
+        var new_transitions = self.transitions
+        new_transitions.append((char, target))
+        return NFAState {
+            state_id: self.state_id,
+            transitions: new_transitions,
+            epsilon_transitions: self.epsilon_transitions,
+            is_accept: self.is_accept,
+            group_start: self.group_start,
+            group_end: self.group_end
+        }
 
-    fn add_epsilon(self, target: i32):
-        self.epsilon_transitions.append(target)
+    fn add_epsilon(target: i32) -> NFAState:
+        var new_eps = self.epsilon_transitions
+        new_eps.append(target)
+        return NFAState {
+            state_id: self.state_id,
+            transitions: self.transitions,
+            epsilon_transitions: new_eps,
+            is_accept: self.is_accept,
+            group_start: self.group_start,
+            group_end: self.group_end
+        }
 
 # NFA Fragment (used during construction)
 class NFAFragment:
@@ -140,16 +158,76 @@ class NFA:
     start_state: i32
     num_groups: i32
 
-    fn new() -> NFA:
+    static fn new() -> NFA:
         return NFA { states: [], start_state: 0, num_groups: 0 }
 
-    fn add_state(self) -> i32:
-        let sid = self.states.len()
-        self.states.append(NFAState.new(sid))
-        return sid
+    fn add_state() -> (NFA, i32):
+        val sid = self.states.len()
+        var new_states = self.states
+        new_states.append(NFAState.new(sid))
+        val new_nfa = NFA { states: new_states, start_state: self.start_state, num_groups: self.num_groups }
+        return (new_nfa, sid)
 
-    fn get_state(self, sid: i32) -> NFAState:
+    fn get_state(sid: i32) -> NFAState:
         return self.states[sid]
+
+    fn update_state(sid: i32, new_state: NFAState) -> NFA:
+        var new_states = []
+        for i in range(0, self.states.len()):
+            if i == sid:
+                new_states.append(new_state)
+            else:
+                new_states.append(self.states[i])
+        return NFA { states: new_states, start_state: self.start_state, num_groups: self.num_groups }
+
+    fn set_accept(sid: i32) -> NFA:
+        var state = self.states[sid]
+        val new_state = NFAState {
+            state_id: state.state_id,
+            transitions: state.transitions,
+            epsilon_transitions: state.epsilon_transitions,
+            is_accept: true,
+            group_start: state.group_start,
+            group_end: state.group_end
+        }
+        return self.update_state(sid, new_state)
+
+    fn set_group_start(sid: i32, group_id: i32) -> NFA:
+        var state = self.states[sid]
+        val new_state = NFAState {
+            state_id: state.state_id,
+            transitions: state.transitions,
+            epsilon_transitions: state.epsilon_transitions,
+            is_accept: state.is_accept,
+            group_start: group_id,
+            group_end: state.group_end
+        }
+        return self.update_state(sid, new_state)
+
+    fn set_group_end(sid: i32, group_id: i32) -> NFA:
+        var state = self.states[sid]
+        val new_state = NFAState {
+            state_id: state.state_id,
+            transitions: state.transitions,
+            epsilon_transitions: state.epsilon_transitions,
+            is_accept: state.is_accept,
+            group_start: state.group_start,
+            group_end: group_id
+        }
+        return self.update_state(sid, new_state)
+
+    fn set_num_groups(ng: i32) -> NFA:
+        return NFA { states: self.states, start_state: self.start_state, num_groups: ng }
+
+    fn add_transition_to(sid: i32, char: String, target: i32) -> NFA:
+        val state = self.states[sid]
+        val new_state = state.add_transition(char, target)
+        return self.update_state(sid, new_state)
+
+    fn add_epsilon_to(sid: i32, target: i32) -> NFA:
+        val state = self.states[sid]
+        val new_state = state.add_epsilon(target)
+        return self.update_state(sid, new_state)
 
 # Regex Parser - redesigned for pass-by-value semantics
 class RegexParser:
@@ -158,44 +236,44 @@ class RegexParser:
     fn new(p: String) -> RegexParser:
         return RegexParser { pattern: p }
 
-    fn peek_at(self, pos: i32) -> Option[String]:
+    fn peek_at(pos: i32) -> Option[String]:
         if pos >= self.pattern.len():
             return None
         return Some(self.pattern[pos])
 
-    fn advance_from(self, pos: i32) -> (Option[String], i32):
-        let c = self.peek_at(pos)
+    fn advance_from(pos: i32) -> (Option[String], i32):
+        val c = self.peek_at(pos)
         if c.is_some():
             return (c, pos + 1)
         return (None, pos)
 
-    fn parse(self) -> RegexNode:
-        let (node, _final_pos, _group_count) = self.parse_alternation(0, 0)
+    fn parse() -> RegexNode:
+        val (node, _final_pos, _group_count) = self.parse_alternation(0, 0)
         return node
 
-    fn parse_alternation(self, pos: i32, group_count: i32) -> (RegexNode, i32, i32):
-        let (mut left, mut current_pos, mut gc) = self.parse_concat(pos, group_count)
+    fn parse_alternation(pos: i32, group_count: i32) -> (RegexNode, i32, i32):
+        val (mut left, mut current_pos, mut gc) = self.parse_concat(pos, group_count)
 
         while self.peek_at(current_pos) == Some("|"):
             current_pos = current_pos + 1  # consume |
-            let (right, new_pos, new_gc) = self.parse_concat(current_pos, gc)
+            val (right, new_pos, new_gc) = self.parse_concat(current_pos, gc)
             left = AltNode.new(left, right)
             current_pos = new_pos
             gc = new_gc
 
         return (left, current_pos, gc)
 
-    fn parse_concat(self, pos: i32, group_count: i32) -> (RegexNode, i32, i32):
-        let mut nodes = []
-        let mut current_pos = pos
-        let mut gc = group_count
+    fn parse_concat(pos: i32, group_count: i32) -> (RegexNode, i32, i32):
+        var nodes = []
+        var current_pos = pos
+        var gc = group_count
 
         while true:
-            let c = self.peek_at(current_pos)
+            val c = self.peek_at(current_pos)
             if c.is_none() or c == Some("|") or c == Some(")"):
                 break
 
-            let (node, new_pos, new_gc) = self.parse_quantified(current_pos, gc)
+            val (node, new_pos, new_gc) = self.parse_quantified(current_pos, gc)
             nodes.append(node)
             current_pos = new_pos
             gc = new_gc
@@ -208,58 +286,58 @@ class RegexParser:
             return (nodes[0], current_pos, gc)
 
         # Build concatenation tree (left-associative)
-        let mut result = nodes[0]
+        var result = nodes[0]
         for i in range(1, nodes.len()):
             result = ConcatNode.new(result, nodes[i])
 
         return (result, current_pos, gc)
 
-    fn parse_quantified(self, pos: i32, group_count: i32) -> (RegexNode, i32, i32):
-        let (mut node, mut current_pos, mut gc) = self.parse_atom(pos, group_count)
+    fn parse_quantified(pos: i32, group_count: i32) -> (RegexNode, i32, i32):
+        val (mut node, mut current_pos, mut gc) = self.parse_atom(pos, group_count)
 
         # Check for quantifiers
-        let c = self.peek_at(current_pos)
+        val c = self.peek_at(current_pos)
         if c == Some("*"):
             current_pos = current_pos + 1
-            let greedy = self.peek_at(current_pos) != Some("?")
+            val greedy = self.peek_at(current_pos) != Some("?")
             if not greedy:
                 current_pos = current_pos + 1
             node = StarNode.new(node, greedy)
         elif c == Some("+"):
             current_pos = current_pos + 1
-            let greedy = self.peek_at(current_pos) != Some("?")
+            val greedy = self.peek_at(current_pos) != Some("?")
             if not greedy:
                 current_pos = current_pos + 1
             node = PlusNode.new(node, greedy)
         elif c == Some("?"):
             current_pos = current_pos + 1
-            let greedy = self.peek_at(current_pos) != Some("?")
+            val greedy = self.peek_at(current_pos) != Some("?")
             if not greedy:
                 current_pos = current_pos + 1
             node = QuestionNode.new(node, greedy)
         elif c == Some("{{"):
             # Quantifier {n,m}
             current_pos = current_pos + 1
-            let (min_v, max_v, new_pos) = self.parse_quantifier_range(current_pos)
+            val (min_v, max_v, new_pos) = self.parse_quantifier_range(current_pos)
             current_pos = new_pos
-            let greedy = self.peek_at(current_pos) != Some("?")
+            val greedy = self.peek_at(current_pos) != Some("?")
             if not greedy:
                 current_pos = current_pos + 1
             node = QuantNode.new(node, min_v, max_v, greedy)
 
         return (node, current_pos, gc)
 
-    fn parse_quantifier_range(self, pos: i32) -> (i32, i32, i32):
+    fn parse_quantifier_range(pos: i32) -> (i32, i32, i32):
         # Parse {n}, {n,}, or {n,m}
-        let mut num_str = ""
-        let mut current_pos = pos
+        var num_str = ""
+        var current_pos = pos
 
         while self.peek_at(current_pos) != Some(",") and self.peek_at(current_pos) != Some("}}"):
-            let (ch, new_pos) = self.advance_from(current_pos)
+            val (ch, new_pos) = self.advance_from(current_pos)
             num_str = num_str + ch.unwrap()
             current_pos = new_pos
 
-        let min_v = num_str.to_int()
+        val min_v = num_str.to_int()
 
         if self.peek_at(current_pos) == Some(","):
             current_pos = current_pos + 1  # consume ,
@@ -271,7 +349,7 @@ class RegexParser:
 
             num_str = ""
             while self.peek_at(current_pos) != Some("}}"):
-                let (ch, new_pos) = self.advance_from(current_pos)
+                val (ch, new_pos) = self.advance_from(current_pos)
                 num_str = num_str + ch.unwrap()
                 current_pos = new_pos
 
@@ -281,16 +359,16 @@ class RegexParser:
         current_pos = current_pos + 1  # consume }
         return (min_v, min_v, current_pos)  # {n} - exactly n
 
-    fn parse_atom(self, pos: i32, group_count: i32) -> (RegexNode, i32, i32):
-        let c = self.peek_at(pos)
+    fn parse_atom(pos: i32, group_count: i32) -> (RegexNode, i32, i32):
+        val c = self.peek_at(pos)
 
         if c.is_none():
             # Empty - shouldn't happen in well-formed regex
             return (LiteralNode.new(""), pos, group_count)
 
-        let ch = c.unwrap()
-        let mut current_pos = pos
-        let mut gc = group_count
+        val ch = c.unwrap()
+        var current_pos = pos
+        var gc = group_count
 
         # Anchors
         if ch == "^":
@@ -308,7 +386,7 @@ class RegexParser:
             # Check for non-capturing group
             if self.peek_at(current_pos) == Some("?") and self.peek_at(current_pos + 1) == Some(":"):
                 current_pos = current_pos + 2  # skip ?:
-                let (child, new_pos, new_gc) = self.parse_alternation(current_pos, gc)
+                val (child, new_pos, new_gc) = self.parse_alternation(current_pos, gc)
                 current_pos = new_pos
                 if self.peek_at(current_pos) == Some(")"):
                     current_pos = current_pos + 1
@@ -316,8 +394,8 @@ class RegexParser:
 
             # Capturing group
             gc = gc + 1
-            let gid = gc
-            let (child, new_pos, new_gc) = self.parse_alternation(current_pos, gc)
+            val gid = gc
+            val (child, new_pos, new_gc) = self.parse_alternation(current_pos, gc)
             current_pos = new_pos
             gc = new_gc
             if self.peek_at(current_pos) == Some(")"):
@@ -326,20 +404,20 @@ class RegexParser:
 
         # Character classes
         if ch == "[":
-            let (cc, new_pos) = self.parse_char_class(current_pos)
+            val (cc, new_pos) = self.parse_char_class(current_pos)
             return (cc, new_pos, gc)
 
         # Escaped characters
         if ch == "\\":
             current_pos = current_pos + 1
-            let (node, new_pos) = self.parse_escape(current_pos)
+            val (node, new_pos) = self.parse_escape(current_pos)
             return (node, new_pos, gc)
 
         # Wildcard
         if ch == ".":
             current_pos = current_pos + 1
             # Match any character except newline
-            let cc = CharClassNode.new()
+            val cc = CharClassNode.new()
             cc.negated = true
             cc.chars.append("\n")
             return (cc, current_pos, gc)
@@ -348,9 +426,9 @@ class RegexParser:
         current_pos = current_pos + 1
         return (LiteralNode.new(ch), current_pos, gc)
 
-    fn parse_char_class(self, pos: i32) -> (CharClassNode, i32):
-        let mut current_pos = pos + 1  # consume [
-        let cc = CharClassNode.new()
+    fn parse_char_class(pos: i32) -> (CharClassNode, i32):
+        var current_pos = pos + 1  # consume [
+        val cc = CharClassNode.new()
 
         # Check for negation
         if self.peek_at(current_pos) == Some("^"):
@@ -358,15 +436,15 @@ class RegexParser:
             cc.negated = true
 
         while self.peek_at(current_pos) != Some("]") and self.peek_at(current_pos).is_some():
-            let (c_opt, new_pos) = self.advance_from(current_pos)
-            let c = c_opt.unwrap()
+            val (c_opt, new_pos) = self.advance_from(current_pos)
+            val c = c_opt.unwrap()
             current_pos = new_pos
 
             # Check for range
             if self.peek_at(current_pos) == Some("-") and self.peek_at(current_pos + 1) != Some("]"):
                 current_pos = current_pos + 1  # consume -
-                let (end_char_opt, new_pos2) = self.advance_from(current_pos)
-                let end_char = end_char_opt.unwrap()
+                val (end_char_opt, new_pos2) = self.advance_from(current_pos)
+                val end_char = end_char_opt.unwrap()
                 current_pos = new_pos2
                 cc.ranges.append((c, end_char))
             else:
@@ -377,31 +455,31 @@ class RegexParser:
 
         return (cc, current_pos)
 
-    fn parse_escape(self, pos: i32) -> (RegexNode, i32):
-        let (c, new_pos) = self.advance_from(pos)
+    fn parse_escape(pos: i32) -> (RegexNode, i32):
+        val (c, new_pos) = self.advance_from(pos)
 
         if c.is_none():
             return (LiteralNode.new("\\"), pos)
 
-        let ch = c.unwrap()
+        val ch = c.unwrap()
 
         # Predefined character classes
         if ch == "d":
             # Digits [0-9]
-            let cc = CharClassNode.new()
+            val cc = CharClassNode.new()
             cc.ranges.append(("0", "9"))
             return (cc, new_pos)
 
         if ch == "D":
             # Non-digits
-            let cc = CharClassNode.new()
+            val cc = CharClassNode.new()
             cc.ranges.append(("0", "9"))
             cc.negated = true
             return (cc, new_pos)
 
         if ch == "w":
             # Word characters [a-zA-Z0-9_]
-            let cc = CharClassNode.new()
+            val cc = CharClassNode.new()
             cc.ranges.append(("a", "z"))
             cc.ranges.append(("A", "Z"))
             cc.ranges.append(("0", "9"))
@@ -410,7 +488,7 @@ class RegexParser:
 
         if ch == "W":
             # Non-word characters
-            let cc = CharClassNode.new()
+            val cc = CharClassNode.new()
             cc.ranges.append(("a", "z"))
             cc.ranges.append(("A", "Z"))
             cc.ranges.append(("0", "9"))
@@ -420,7 +498,7 @@ class RegexParser:
 
         if ch == "s":
             # Whitespace
-            let cc = CharClassNode.new()
+            val cc = CharClassNode.new()
             cc.chars.append(" ")
             cc.chars.append("\t")
             cc.chars.append("\n")
@@ -429,7 +507,7 @@ class RegexParser:
 
         if ch == "S":
             # Non-whitespace
-            let cc = CharClassNode.new()
+            val cc = CharClassNode.new()
             cc.chars.append(" ")
             cc.chars.append("\t")
             cc.chars.append("\n")
@@ -459,166 +537,170 @@ class RegexParser:
 
 # NFA Builder using Thompson's construction
 class NFABuilder:
-    nfa: NFA
+    # Stateless builder - NFA is passed explicitly
 
-    fn new() -> NFABuilder:
-        return NFABuilder { nfa: NFA.new() }
+    static fn new() -> NFABuilder:
+        return NFABuilder {}
 
-    fn build(self, ast: RegexNode) -> NFA:
-        let frag = self.build_fragment(ast)
+    fn build(ast: RegexNode) -> NFA:
+        var nfa = NFA.new()
+        val (nfa1, frag) = self.build_fragment(nfa, ast)
 
         # Make the end state accept
-        self.nfa.states[frag.end].is_accept = true
-        self.nfa.start_state = frag.start
+        val nfa2 = nfa1.set_accept(frag.end)
 
-        return self.nfa
+        # Set start state
+        val final_nfa = NFA { states: nfa2.states, start_state: frag.start, num_groups: nfa2.num_groups }
 
-    fn build_fragment(self, node: RegexNode) -> NFAFragment:
+        return final_nfa
+
+    fn build_fragment(mut nfa: NFA, node: RegexNode) -> (NFA, NFAFragment):
         # Literal
         if node is LiteralNode:
-            let lit = node as LiteralNode
-            let start = self.nfa.add_state()
-            let end = self.nfa.add_state()
+            val lit = node as LiteralNode
+            val (nfa1, start) = nfa.add_state()
+            val (nfa2, end) = nfa1.add_state()
 
             if lit.char.len() > 0:
-                self.nfa.states[start].add_transition(lit.char, end)
+                val nfa3 = nfa2.add_transition_to(start, lit.char, end)
+                return (nfa3, NFAFragment.new(start, end))
             else:
                 # Empty literal - epsilon transition
-                self.nfa.states[start].add_epsilon(end)
-
-            return NFAFragment.new(start, end)
+                val nfa3 = nfa2.add_epsilon_to(start, end)
+                return (nfa3, NFAFragment.new(start, end))
 
         # Character class
         if node is CharClassNode:
-            let cc = node as CharClassNode
-            let start = self.nfa.add_state()
-            let end = self.nfa.add_state()
+            val cc = node as CharClassNode
+            val (nfa1, start) = nfa.add_state()
+            val (nfa2, end) = nfa1.add_state()
 
             # For char class, we create transitions for each possible character
             # In practice, we'd optimize this, but for now we'll match during execution
             # Add a marker transition
-            self.nfa.states[start].add_transition("__CHARCLASS__", end)
+            val nfa3 = nfa2.add_transition_to(start, "__CHARCLASS__", end)
             # Store the char class in the state (we'll extend NFAState to hold this)
 
-            return NFAFragment.new(start, end)
+            return (nfa3, NFAFragment.new(start, end))
 
         # Concatenation
         if node is ConcatNode:
-            let concat = node as ConcatNode
-            let left_frag = self.build_fragment(concat.left)
-            let right_frag = self.build_fragment(concat.right)
+            val concat = node as ConcatNode
+            val (nfa1, left_frag) = self.build_fragment(nfa, concat.left)
+            val (nfa2, right_frag) = self.build_fragment(nfa1, concat.right)
 
             # Connect left end to right start
-            self.nfa.states[left_frag.end].add_epsilon(right_frag.start)
+            val nfa3 = nfa2.add_epsilon_to(left_frag.end, right_frag.start)
 
-            return NFAFragment.new(left_frag.start, right_frag.end)
+            return (nfa3, NFAFragment.new(left_frag.start, right_frag.end))
 
         # Alternation
         if node is AltNode:
-            let alt = node as AltNode
-            let left_frag = self.build_fragment(alt.left)
-            let right_frag = self.build_fragment(alt.right)
+            val alt = node as AltNode
+            val (nfa1, left_frag) = self.build_fragment(nfa, alt.left)
+            val (nfa2, right_frag) = self.build_fragment(nfa1, alt.right)
 
-            let start = self.nfa.add_state()
-            let end = self.nfa.add_state()
+            val (nfa3, start) = nfa2.add_state()
+            val (nfa4, end) = nfa3.add_state()
 
             # Split from start to both alternatives
-            self.nfa.states[start].add_epsilon(left_frag.start)
-            self.nfa.states[start].add_epsilon(right_frag.start)
+            val nfa5 = nfa4.add_epsilon_to(start, left_frag.start)
+            val nfa6 = nfa5.add_epsilon_to(start, right_frag.start)
 
             # Join both ends
-            self.nfa.states[left_frag.end].add_epsilon(end)
-            self.nfa.states[right_frag.end].add_epsilon(end)
+            val nfa7 = nfa6.add_epsilon_to(left_frag.end, end)
+            val nfa8 = nfa7.add_epsilon_to(right_frag.end, end)
 
-            return NFAFragment.new(start, end)
+            return (nfa8, NFAFragment.new(start, end))
 
         # Star (zero or more)
         if node is StarNode:
-            let star = node as StarNode
-            let child_frag = self.build_fragment(star.child)
+            val star = node as StarNode
+            val (nfa1, child_frag) = self.build_fragment(nfa, star.child)
 
-            let start = self.nfa.add_state()
-            let end = self.nfa.add_state()
+            val (nfa2, start) = nfa1.add_state()
+            val (nfa3, end) = nfa2.add_state()
 
             # Start can skip to end (zero matches)
-            self.nfa.states[start].add_epsilon(child_frag.start)
-            self.nfa.states[start].add_epsilon(end)
+            val nfa4 = nfa3.add_epsilon_to(start, child_frag.start)
+            val nfa5 = nfa4.add_epsilon_to(start, end)
 
             # Child end loops back to start
-            self.nfa.states[child_frag.end].add_epsilon(child_frag.start)
-            self.nfa.states[child_frag.end].add_epsilon(end)
+            val nfa6 = nfa5.add_epsilon_to(child_frag.end, child_frag.start)
+            val nfa7 = nfa6.add_epsilon_to(child_frag.end, end)
 
-            return NFAFragment.new(start, end)
+            return (nfa7, NFAFragment.new(start, end))
 
         # Plus (one or more)
         if node is PlusNode:
-            let plus = node as PlusNode
-            let child_frag = self.build_fragment(plus.child)
+            val plus = node as PlusNode
+            val (nfa1, child_frag) = self.build_fragment(nfa, plus.child)
 
-            let start = self.nfa.add_state()
-            let end = self.nfa.add_state()
+            val (nfa2, start) = nfa1.add_state()
+            val (nfa3, end) = nfa2.add_state()
 
             # Must match at least once
-            self.nfa.states[start].add_epsilon(child_frag.start)
+            val nfa4 = nfa3.add_epsilon_to(start, child_frag.start)
 
             # Child end can loop back or finish
-            self.nfa.states[child_frag.end].add_epsilon(child_frag.start)
-            self.nfa.states[child_frag.end].add_epsilon(end)
+            val nfa5 = nfa4.add_epsilon_to(child_frag.end, child_frag.start)
+            val nfa6 = nfa5.add_epsilon_to(child_frag.end, end)
 
-            return NFAFragment.new(start, end)
+            return (nfa6, NFAFragment.new(start, end))
 
         # Question (zero or one)
         if node is QuestionNode:
-            let quest = node as QuestionNode
-            let child_frag = self.build_fragment(quest.child)
+            val quest = node as QuestionNode
+            val (nfa1, child_frag) = self.build_fragment(nfa, quest.child)
 
-            let start = self.nfa.add_state()
-            let end = self.nfa.add_state()
+            val (nfa2, start) = nfa1.add_state()
+            val (nfa3, end) = nfa2.add_state()
 
             # Can skip child or match once
-            self.nfa.states[start].add_epsilon(child_frag.start)
-            self.nfa.states[start].add_epsilon(end)
+            val nfa4 = nfa3.add_epsilon_to(start, child_frag.start)
+            val nfa5 = nfa4.add_epsilon_to(start, end)
 
-            self.nfa.states[child_frag.end].add_epsilon(end)
+            val nfa6 = nfa5.add_epsilon_to(child_frag.end, end)
 
-            return NFAFragment.new(start, end)
+            return (nfa6, NFAFragment.new(start, end))
 
         # Group
         if node is GroupNode:
-            let group = node as GroupNode
-            let child_frag = self.build_fragment(group.child)
+            val group = node as GroupNode
+            val (nfa1, child_frag) = self.build_fragment(nfa, group.child)
 
-            let start = self.nfa.add_state()
-            let end = self.nfa.add_state()
+            val (nfa2, start) = nfa1.add_state()
+            val (nfa3, end) = nfa2.add_state()
 
             # Mark group boundaries
-            self.nfa.states[start].group_start = group.group_id
-            self.nfa.states[end].group_end = group.group_id
+            val nfa4 = nfa3.set_group_start(start, group.group_id)
+            val nfa5 = nfa4.set_group_end(end, group.group_id)
 
-            self.nfa.states[start].add_epsilon(child_frag.start)
-            self.nfa.states[child_frag.end].add_epsilon(end)
+            val nfa6 = nfa5.add_epsilon_to(start, child_frag.start)
+            val nfa7 = nfa6.add_epsilon_to(child_frag.end, end)
 
-            if group.group_id > self.nfa.num_groups:
-                self.nfa.num_groups = group.group_id
-
-            return NFAFragment.new(start, end)
+            if group.group_id > nfa7.num_groups:
+                val nfa8 = nfa7.set_num_groups(group.group_id)
+                return (nfa8, NFAFragment.new(start, end))
+            else:
+                return (nfa7, NFAFragment.new(start, end))
 
         # Anchor
         if node is AnchorNode:
-            let anchor = node as AnchorNode
-            let start = self.nfa.add_state()
-            let end = self.nfa.add_state()
+            val anchor = node as AnchorNode
+            val (nfa1, start) = nfa.add_state()
+            val (nfa2, end) = nfa1.add_state()
 
             # Anchors are handled during matching, add epsilon transition
-            self.nfa.states[start].add_epsilon(end)
+            val nfa3 = nfa2.add_epsilon_to(start, end)
 
-            return NFAFragment.new(start, end)
+            return (nfa3, NFAFragment.new(start, end))
 
         # Default: empty fragment
-        let start = self.nfa.add_state()
-        let end = self.nfa.add_state()
-        self.nfa.states[start].add_epsilon(end)
-        return NFAFragment.new(start, end)
+        val (nfa1, start) = nfa.add_state()
+        val (nfa2, end) = nfa1.add_state()
+        val nfa3 = nfa2.add_epsilon_to(start, end)
+        return (nfa3, NFAFragment.new(start, end))
 
 # NFA Matcher - simulates NFA execution
 class NFAMatcher:
@@ -629,22 +711,22 @@ class NFAMatcher:
     fn new(nfa_val: NFA, text_val: String) -> NFAMatcher:
         return NFAMatcher { nfa: nfa_val, text: text_val, pos: 0 }
 
-    fn match_at(self, start_pos: i32) -> Option[Match]:
+    fn match_at(start_pos: i32) -> Option[Match]:
         """Try to match starting at the given position."""
-        let mut current_pos = start_pos
+        var current_pos = start_pos
 
         # Track current states with their group captures
-        let mut current_states = []
-        let initial_groups = []  # Empty group captures
+        var current_states = []
+        val initial_groups = []  # Empty group captures
         current_states.append((self.nfa.start_state, initial_groups, start_pos))
 
         # Expand epsilon closures
         current_states = self.epsilon_closure(current_states)
 
-        let mut match_pos = -1
-        let mut match_groups = []
-        let mut iteration_count = 0
-        let max_iterations = self.text.len() + 100  # Safety limit
+        var match_pos = -1
+        var match_groups = []
+        var iteration_count = 0
+        val max_iterations = self.text.len() + 100  # Safety limit
 
         # Process each character
         while current_pos <= self.text.len() and iteration_count < max_iterations:
@@ -652,9 +734,9 @@ class NFAMatcher:
 
             # Check if any current state is accepting
             for state_info in current_states:
-                let state_id = state_info[0]
-                let groups = state_info[1]
-                let state = self.nfa.states[state_id]
+                val state_id = state_info[0]
+                val groups = state_info[1]
+                val state = self.nfa.states[state_id]
 
                 if state.is_accept:
                     # Found a match
@@ -668,20 +750,20 @@ class NFAMatcher:
                 break  # No active states
 
             # Get next character
-            let c = self.text[current_pos]
+            val c = self.text[current_pos]
 
             # Compute next states
-            let mut next_states = []
+            var next_states = []
 
             for state_info in current_states:
-                let state_id = state_info[0]
-                let groups = state_info[1]
-                let state = self.nfa.states[state_id]
+                val state_id = state_info[0]
+                val groups = state_info[1]
+                val state = self.nfa.states[state_id]
 
                 # Check transitions
                 for trans in state.transitions:
-                    let trans_char = trans[0]
-                    let target_id = trans[1]
+                    val trans_char = trans[0]
+                    val target_id = trans[1]
 
                     # Check for exact match or special markers
                     if trans_char == c:
@@ -700,20 +782,20 @@ class NFAMatcher:
             current_states = self.epsilon_closure(next_states)
 
         if match_pos >= 0:
-            let matched_text = self.text.substring(start_pos, match_pos)
-            let m = Match.new(matched_text, start_pos, match_pos)
+            val matched_text = self.text.substring(start_pos, match_pos)
+            val m = Match.new(matched_text, start_pos, match_pos)
             m.groups = match_groups
             return Some(m)
 
         return None
 
-    fn epsilon_closure(self, states: List[(i32, List[String], i32)]) -> List[(i32, List[String], i32)]:
+    fn epsilon_closure(states: List[(i32, List[String], i32)]) -> List[(i32, List[String], i32)]:
         """Compute epsilon closure of a set of states using iterative approach."""
-        let mut result = []
-        let mut visited = []
-        let mut work_queue = []
-        let mut iteration_count = 0
-        let max_iterations = self.nfa.states.len() * 10  # Safety limit
+        var result = []
+        var visited = []
+        var work_queue = []
+        var iteration_count = 0
+        val max_iterations = self.nfa.states.len() * 10  # Safety limit
 
         # Initialize work queue with input states
         for state_info in states:
@@ -723,12 +805,12 @@ class NFAMatcher:
         while work_queue.len() > 0 and iteration_count < max_iterations:
             iteration_count = iteration_count + 1
 
-            let state_info = work_queue[0]
+            val state_info = work_queue[0]
             work_queue = work_queue[1:]  # Remove first element
 
-            let state_id = state_info[0]
-            let groups = state_info[1]
-            let pos = state_info[2]
+            val state_id = state_info[0]
+            val groups = state_info[1]
+            val pos = state_info[2]
 
             # Skip if already visited
             if visited.contains(state_id):
@@ -737,7 +819,7 @@ class NFAMatcher:
             visited.append(state_id)
             result.append(state_info)
 
-            let state = self.nfa.states[state_id]
+            val state = self.nfa.states[state_id]
 
             # Follow epsilon transitions
             for target_id in state.epsilon_transitions:
@@ -754,36 +836,36 @@ class CompiledRegex:
 
     fn new(pattern: String) -> CompiledRegex:
         # Parse pattern to AST
-        let parser = RegexParser.new(pattern)
-        let ast = parser.parse()
+        val parser = RegexParser.new(pattern)
+        val ast = parser.parse()
 
         # Build NFA from AST
-        let builder = NFABuilder.new()
-        let nfa = builder.build(ast)
+        val builder = NFABuilder.new()
+        val nfa = builder.build(ast)
 
         return CompiledRegex { ast: ast, nfa: nfa, pattern_str: pattern }
 
-    fn match_at(self, text: String, pos: i32) -> Option[Match]:
-        let matcher = NFAMatcher.new(self.nfa, text)
+    fn match_at(text: String, pos: i32) -> Option[Match]:
+        val matcher = NFAMatcher.new(self.nfa, text)
         return matcher.match_at(pos)
 
-    fn search(self, text: String) -> Option[Match]:
+    fn search(text: String) -> Option[Match]:
         # Try matching at each position
         for i in range(0, text.len() + 1):
-            let m = self.match_at(text, i)
+            val m = self.match_at(text, i)
             if m.is_some():
                 return m
 
         return None
 
-    fn findall(self, text: String) -> List[Match]:
-        let mut results = []
-        let mut pos = 0
+    fn findall(text: String) -> List[Match]:
+        var results = []
+        var pos = 0
 
         while pos < text.len():
-            let m = self.match_at(text, pos)
+            val m = self.match_at(text, pos)
             if m.is_some():
-                let match_val = m.unwrap()
+                val match_val = m.unwrap()
                 results.append(match_val)
                 # Move past this match
                 pos = match_val.end
@@ -795,13 +877,13 @@ class CompiledRegex:
         return results
 
 # Regex match result
-pub class Match:
+class Match:
     text: String
     start: i32
     end: i32
     groups: List[String]
 
-    pub fn new(text: String, start: i32, end: i32) -> Match:
+    fn new(text: String, start: i32, end: i32) -> Match:
         return Match {
             text: text,
             start: start,
@@ -809,25 +891,25 @@ pub class Match:
             groups: []
         }
 
-    pub fn matched_text(self) -> String:
+    fn matched_text() -> String:
         return self.text
 
-    pub fn span(self) -> (i32, i32):
+    fn span() -> (i32, i32):
         return (self.start, self.end)
 
-    pub fn group(self, index: i32) -> Option[String]:
+    fn group(index: i32) -> Option[String]:
         if index < 0 or index >= self.groups.len():
             return None
         return Some(self.groups[index])
 
-    pub fn all_groups(self) -> List[String]:
+    fn all_groups() -> List[String]:
         return self.groups
 
     # =========================================================================
     # Helper Methods
     # =========================================================================
 
-    pub fn length(self) -> i32:
+    fn length() -> i32:
         """Get length of matched text.
 
         Returns:
@@ -839,7 +921,7 @@ pub class Match:
         """
         return self.end - self.start
 
-    pub fn is_empty(self) -> Bool:
+    fn is_empty() -> Bool:
         """Check if match is empty (zero length).
 
         Returns:
@@ -851,7 +933,7 @@ pub class Match:
         """
         return self.start == self.end
 
-    pub fn has_groups(self) -> Bool:
+    fn has_groups() -> Bool:
         """Check if match has capture groups.
 
         Returns:
@@ -863,7 +945,7 @@ pub class Match:
         """
         return self.groups.len() > 0
 
-    pub fn group_count(self) -> i32:
+    fn group_count() -> i32:
         """Get number of capture groups.
 
         Returns:
@@ -874,7 +956,7 @@ pub class Match:
         """
         return self.groups.len()
 
-    pub fn get_start(self) -> i32:
+    fn get_start() -> i32:
         """Get start position of match.
 
         Returns:
@@ -886,7 +968,7 @@ pub class Match:
         """
         return self.start
 
-    pub fn get_end(self) -> i32:
+    fn get_end() -> i32:
         """Get end position of match.
 
         Returns:
@@ -898,7 +980,7 @@ pub class Match:
         """
         return self.end
 
-    pub fn summary(self) -> String:
+    fn summary() -> String:
         """Get summary of match.
 
         Returns:
@@ -908,25 +990,25 @@ pub class Match:
             match.summary()
             # → "Match: 'text' at [5:9], 2 groups"
         """
-        let text = self.text
-        let start = self.start
-        let end = self.end
-        let groups = self.group_count()
+        val text = self.text
+        val start = self.start
+        val end = self.end
+        val groups = self.group_count()
         return "Match: '{text}' at [{start}:{end}], {groups} groups"
 
 # Compiled regex pattern
-pub class Pattern:
+class Pattern:
     pattern: String
     compiled: CompiledRegex
 
-    pub fn new(pattern: String) -> Pattern:
+    fn new(pattern: String) -> Pattern:
         return Pattern {
             pattern: pattern,
             compiled: CompiledRegex.new(pattern)
         }
 
     # Match at the start of string
-    pub fn match(self, text: String) -> Option[Match]:
+    fn match(text: String) -> Option[Match]:
         """Match pattern at the start of the text using NFA engine.
 
         Args:
@@ -943,7 +1025,7 @@ pub class Pattern:
         return self.compiled.match_at(text, 0)
 
     # Search anywhere in string
-    pub fn search(self, text: String) -> Option[Match]:
+    fn search(text: String) -> Option[Match]:
         """Search for pattern anywhere in the text using NFA engine.
 
         Args:
@@ -959,7 +1041,7 @@ pub class Pattern:
         return self.compiled.search(text)
 
     # Check if entire string matches
-    pub fn fullmatch(self, text: String) -> Option[Match]:
+    fn fullmatch(text: String) -> Option[Match]:
         """Check if entire text matches the pattern.
 
         Args:
@@ -973,15 +1055,15 @@ pub class Pattern:
             pattern.fullmatch("hello")  # → Some(Match)
             pattern.fullmatch("hello123")  # → None
         """
-        let m = self.compiled.match_at(text, 0)
+        val m = self.compiled.match_at(text, 0)
         if m.is_some():
-            let match_val = m.unwrap()
+            val match_val = m.unwrap()
             if match_val.end == text.len():
                 return Some(match_val)
         return None
 
     # Find all matches
-    pub fn findall(self, text: String) -> List[Match]:
+    fn findall(text: String) -> List[Match]:
         """Find all non-overlapping matches in the text.
 
         Args:
@@ -997,7 +1079,7 @@ pub class Pattern:
         return self.compiled.findall(text)
 
     # Replace matches with replacement string
-    pub fn sub(self, replacement: String, text: String, count: i32 = -1) -> String:
+    fn sub(replacement: String, text: String, count: i32 = -1) -> String:
         """Replace matches with replacement string.
 
         Args:
@@ -1012,14 +1094,14 @@ pub class Pattern:
             pattern = Pattern.new("(\\w+)\\s+(\\w+)")
             pattern.sub("\\2 \\1", "hello world")  # → "world hello"
         """
-        let matches = self.findall(text)
+        val matches = self.findall(text)
 
         if matches.len() == 0:
             return text
 
-        let mut result = ""
-        let mut last_end = 0
-        let mut replaced = 0
+        var result = ""
+        var last_end = 0
+        var replaced = 0
 
         for match_val in matches:
             if count >= 0 and replaced >= count:
@@ -1029,7 +1111,7 @@ pub class Pattern:
             result = result + text.substring(last_end, match_val.start)
 
             # Process replacement string (handle backreferences)
-            let replaced_text = self.process_replacement(replacement, match_val)
+            val replaced_text = self.process_replacement(replacement, match_val)
             result = result + replaced_text
 
             last_end = match_val.end
@@ -1040,7 +1122,7 @@ pub class Pattern:
 
         return result
 
-    fn process_replacement(self, replacement: String, match_val: Match) -> String:
+    fn process_replacement(replacement: String, match_val: Match) -> String:
         """Process replacement string, handling backreferences.
 
         Args:
@@ -1050,19 +1132,19 @@ pub class Pattern:
         Returns:
             Processed replacement string
         """
-        let mut result = ""
-        let mut i = 0
+        var result = ""
+        var i = 0
 
         while i < replacement.len():
-            let c = replacement[i]
+            val c = replacement[i]
 
             if c == "\\" and i + 1 < replacement.len():
-                let next = replacement[i + 1]
+                val next = replacement[i + 1]
 
                 # Check for backreference
                 if next >= "0" and next <= "9":
-                    let group_num = next.to_int()
-                    let group = match_val.group(group_num)
+                    val group_num = next.to_int()
+                    val group = match_val.group(group_num)
 
                     if group.is_some():
                         result = result + group.unwrap()
@@ -1078,7 +1160,7 @@ pub class Pattern:
         return result
 
     # Split string by pattern
-    pub fn split(self, text: String, maxsplit: i32 = -1) -> List[String]:
+    fn split(text: String, maxsplit: i32 = -1) -> List[String]:
         """Split string by pattern matches.
 
         Args:
@@ -1092,14 +1174,14 @@ pub class Pattern:
             pattern = Pattern.new("\\s+")
             pattern.split("hello  world  foo")  # → ["hello", "world", "foo"]
         """
-        let matches = self.findall(text)
+        val matches = self.findall(text)
 
         if matches.len() == 0:
             return [text]
 
-        let mut result = []
-        let mut last_end = 0
-        let mut splits = 0
+        var result = []
+        var last_end = 0
+        var splits = 0
 
         for match_val in matches:
             if maxsplit >= 0 and splits >= maxsplit:
@@ -1120,7 +1202,7 @@ pub class Pattern:
     # Helper Methods
     # =========================================================================
 
-    pub fn get_pattern(self) -> String:
+    fn get_pattern() -> String:
         """Get pattern string.
 
         Returns:
@@ -1132,7 +1214,7 @@ pub class Pattern:
         """
         return self.pattern
 
-    pub fn is_empty(self) -> Bool:
+    fn is_empty() -> Bool:
         """Check if pattern is empty.
 
         Returns:
@@ -1144,7 +1226,7 @@ pub class Pattern:
         """
         return self.pattern.len() == 0
 
-    pub fn pattern_length(self) -> i32:
+    fn pattern_length() -> i32:
         """Get length of pattern string.
 
         Returns:
@@ -1156,7 +1238,7 @@ pub class Pattern:
         """
         return self.pattern.len()
 
-    pub fn is_literal(self) -> Bool:
+    fn is_literal() -> Bool:
         """Check if pattern is a simple literal (no regex special chars).
 
         Returns:
@@ -1166,7 +1248,7 @@ pub class Pattern:
             Pattern.new("hello").is_literal()  # → true
             Pattern.new("h.*o").is_literal()   # → false
         """
-        let special_chars = [
+        val special_chars = [
             "\\", ".", "^", "$", "*", "+", "?", "{{", "}}", "[", "]", "(", ")", "|"
         ]
         for ch in special_chars:
@@ -1174,7 +1256,7 @@ pub class Pattern:
                 return false
         return true
 
-    pub fn summary(self) -> String:
+    fn summary() -> String:
         """Get summary of pattern.
 
         Returns:
@@ -1184,50 +1266,50 @@ pub class Pattern:
             pattern.summary()
             # → "Pattern: '[0-9]+' (6 chars, non-literal)"
         """
-        let pattern = self.pattern
-        let len = self.pattern_length()
-        let type = if self.is_literal(): "literal" else: "non-literal"
+        val pattern = self.pattern
+        val len = self.pattern_length()
+        val type = if self.is_literal(): "literal" else: "non-literal"
         return "Pattern: '{pattern}' ({len} chars, {type})"
 
 # Compile a regex pattern
-pub fn compile(pattern: String) -> Pattern:
+fn compile(pattern: String) -> Pattern:
     return Pattern.new(pattern)
 
 # Match at start of string (convenience function)
-pub fn match(pattern: String, text: String) -> Option[Match]:
-    let p = compile(pattern)
+fn match(pattern: String, text: String) -> Option[Match]:
+    val p = compile(pattern)
     return p.match(text)
 
 # Search anywhere in string (convenience function)
-pub fn search(pattern: String, text: String) -> Option[Match]:
-    let p = compile(pattern)
+fn search(pattern: String, text: String) -> Option[Match]:
+    val p = compile(pattern)
     return p.search(text)
 
 # Check if entire string matches (convenience function)
-pub fn fullmatch(pattern: String, text: String) -> Option[Match]:
-    let p = compile(pattern)
+fn fullmatch(pattern: String, text: String) -> Option[Match]:
+    val p = compile(pattern)
     return p.fullmatch(text)
 
 # Find all matches (convenience function)
-pub fn findall(pattern: String, text: String) -> List[Match]:
-    let p = compile(pattern)
+fn findall(pattern: String, text: String) -> List[Match]:
+    val p = compile(pattern)
     return p.findall(text)
 
 # Replace matches (convenience function)
-pub fn sub(pattern: String, replacement: String, text: String, count: i32 = -1) -> String:
-    let p = compile(pattern)
+fn sub(pattern: String, replacement: String, text: String, count: i32 = -1) -> String:
+    val p = compile(pattern)
     return p.sub(replacement, text, count)
 
 # Split by pattern (convenience function)
-pub fn split(pattern: String, text: String, maxsplit: i32 = -1) -> List[String]:
-    let p = compile(pattern)
+fn split(pattern: String, text: String, maxsplit: i32 = -1) -> List[String]:
+    val p = compile(pattern)
     return p.split(text, maxsplit)
 
 # Escape special regex characters
-pub fn escape(text: String) -> String:
+fn escape(text: String) -> String:
     # Escape special regex characters
-    let mut result = text
-    let special_chars = [
+    var result = text
+    val special_chars = [
         "\\", ".", "^", "$", "*", "+", "?", "{{", "}}", "[", "]", "(", ")", "|"
     ]
 
@@ -1237,53 +1319,53 @@ pub fn escape(text: String) -> String:
     return result
 
 # Check if pattern matches (boolean)
-pub fn is_match(pattern: String, text: String) -> Bool:
+fn is_match(pattern: String, text: String) -> Bool:
     return search(pattern, text).is_some()
 
 # Extract matched text from Match
-pub fn extract_text(m: Match) -> String:
+fn extract_text(m: Match) -> String:
     return m.matched_text()
 
 # Character class helpers (for pattern building)
-pub fn digit() -> String:
+fn digit() -> String:
     return "[0-9]"
 
-pub fn word() -> String:
+fn word() -> String:
     return "[a-zA-Z0-9_]"
 
-pub fn whitespace() -> String:
+fn whitespace() -> String:
     return "[ \t\n\r]"
 
-pub fn any_char() -> String:
+fn any_char() -> String:
     return "."
 
 # Quantifier helpers
-pub fn zero_or_more(pattern: String) -> String:
+fn zero_or_more(pattern: String) -> String:
     return pattern + "*"
 
-pub fn one_or_more(pattern: String) -> String:
+fn one_or_more(pattern: String) -> String:
     return pattern + "+"
 
-pub fn optional(pattern: String) -> String:
+fn optional(pattern: String) -> String:
     return pattern + "?"
 
-pub fn exactly(pattern: String, n: i32) -> String:
+fn exactly(pattern: String, n: i32) -> String:
     return "{pattern}{{{n}}}"
 
-pub fn at_least(pattern: String, n: i32) -> String:
+fn at_least(pattern: String, n: i32) -> String:
     return "{pattern}{{{n},}}"
 
-pub fn between(pattern: String, min: i32, max: i32) -> String:
+fn between(pattern: String, min: i32, max: i32) -> String:
     return "{pattern}{{{min},{max}}}"
 
 # Anchor helpers
-pub fn start_of_line() -> String:
+fn start_of_line() -> String:
     return "^"
 
-pub fn end_of_line() -> String:
+fn end_of_line() -> String:
     return "$"
 
-pub fn word_boundary() -> String:
+fn word_boundary() -> String:
     return "\\b"
 
 # Export all types and functions

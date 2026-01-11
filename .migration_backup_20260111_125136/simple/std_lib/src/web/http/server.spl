@@ -1,0 +1,379 @@
+# HTTP Server
+#
+# Accept loop and connection handler for HTTP requests.
+
+use units.net.*
+use units.size.*
+use units.time.*
+use host.async_nogc_mut.net.tcp.*
+use host.common.io.error.IoError
+use web.http.request.*
+use web.http.response.*
+
+# Server configuration
+pub struct ServerConfig:
+    addr: SocketAddr
+    keep_alive: bool
+    keep_alive_timeout: Duration
+    max_connections: u32
+    read_timeout: Duration
+    write_timeout: Duration
+    max_body_size: ByteCount
+
+impl ServerConfig:
+    # Create config with socket address
+    pub fn new(addr: SocketAddr) -> ServerConfig:
+        return ServerConfig {
+            addr: addr,
+            keep_alive: true,
+            keep_alive_timeout: 60.seconds(),
+            max_connections: 1000,
+            read_timeout: 30.seconds(),
+            write_timeout: 30.seconds(),
+            max_body_size: 10.megabytes()
+        }
+
+    # Create config for localhost with port
+    pub fn bind_local(port: u16) -> ServerConfig:
+        let addr = SocketAddr::new(IpAddr::localhost(), Port::new(port))
+        return ServerConfig::new(addr)
+
+    # Builder methods
+    pub fn with_keep_alive(self, enabled: bool) -> ServerConfig:
+        self.keep_alive = enabled
+        return self
+
+    pub fn with_keep_alive_timeout(self, timeout: Duration) -> ServerConfig:
+        self.keep_alive_timeout = timeout
+        return self
+
+    pub fn with_max_connections(self, max: u32) -> ServerConfig:
+        self.max_connections = max
+        return self
+
+    pub fn with_read_timeout(self, timeout: Duration) -> ServerConfig:
+        self.read_timeout = timeout
+        return self
+
+    pub fn with_write_timeout(self, timeout: Duration) -> ServerConfig:
+        self.write_timeout = timeout
+        return self
+
+    pub fn with_max_body_size(self, size: ByteCount) -> ServerConfig:
+        self.max_body_size = size
+        return self
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_addr(self) -> SocketAddr:
+        """Get server address.
+
+        Returns:
+            Socket address
+
+        Example:
+            config.get_addr()  # → 127.0.0.1:8080
+        """
+        return self.addr
+
+    pub fn get_port(self) -> u16:
+        """Get server port.
+
+        Returns:
+            Port number
+
+        Example:
+            config.get_port()  # → 8080
+        """
+        return self.addr.port().as_u16()
+
+    pub fn is_keep_alive_enabled(self) -> bool:
+        """Check if keep-alive is enabled.
+
+        Returns:
+            true if keep-alive enabled
+
+        Example:
+            config.is_keep_alive_enabled()  # → true
+        """
+        return self.keep_alive
+
+    pub fn get_keep_alive_timeout(self) -> Duration:
+        """Get keep-alive timeout.
+
+        Returns:
+            Timeout duration
+
+        Example:
+            config.get_keep_alive_timeout()  # → 60s
+        """
+        return self.keep_alive_timeout
+
+    pub fn get_max_connections(self) -> u32:
+        """Get max connections limit.
+
+        Returns:
+            Max connections
+
+        Example:
+            config.get_max_connections()  # → 1000
+        """
+        return self.max_connections
+
+    pub fn get_read_timeout(self) -> Duration:
+        """Get read timeout.
+
+        Returns:
+            Read timeout duration
+
+        Example:
+            config.get_read_timeout()  # → 30s
+        """
+        return self.read_timeout
+
+    pub fn get_write_timeout(self) -> Duration:
+        """Get write timeout.
+
+        Returns:
+            Write timeout duration
+
+        Example:
+            config.get_write_timeout()  # → 30s
+        """
+        return self.write_timeout
+
+    pub fn get_max_body_size(self) -> ByteCount:
+        """Get max body size limit.
+
+        Returns:
+            Max body size
+
+        Example:
+            config.get_max_body_size()  # → 10 MB
+        """
+        return self.max_body_size
+
+    pub fn has_timeouts(self) -> bool:
+        """Check if any timeouts are configured.
+
+        Returns:
+            true if timeouts set
+
+        Example:
+            config.has_timeouts()  # → true
+        """
+        return self.read_timeout.is_positive() or self.write_timeout.is_positive()
+
+    pub fn is_localhost(self) -> bool:
+        """Check if server binds to localhost.
+
+        Returns:
+            true if localhost
+
+        Example:
+            config.is_localhost()  # → true
+        """
+        return self.addr.ip().is_loopback()
+
+    pub fn summary(self) -> str:
+        """Get summary of server config.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            config.summary()
+            # → "ServerConfig: 127.0.0.1:8080 (keep-alive, max 1000 conn)"
+        """
+        let addr = self.addr
+        let ka = if self.keep_alive: "keep-alive" else: "no keep-alive"
+        let max = self.max_connections
+        return "ServerConfig: {addr} ({ka}, max {max} conn)"
+
+# Handler function type
+pub type HttpHandler = fn(HttpRequest) -> async HttpResponse
+
+# HTTP Server
+pub struct HttpServer:
+    config: ServerConfig
+    handler: HttpHandler
+
+impl HttpServer:
+    # Create new server with config
+    pub fn new(config: ServerConfig) -> HttpServer:
+        return HttpServer {
+            config: config,
+            handler: default_handler
+        }
+
+    # Create server on localhost port
+    pub fn localhost(port: u16) -> HttpServer:
+        return HttpServer::new(ServerConfig::bind_local(port))
+
+    # Set request handler
+    pub fn handler(self, h: HttpHandler) -> HttpServer:
+        self.handler = h
+        return self
+
+    # Get server address
+    pub fn addr(self) -> SocketAddr:
+        return self.config.addr
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_config(self) -> &ServerConfig:
+        """Get server configuration.
+
+        Returns:
+            Server config reference
+
+        Example:
+            server.get_config()
+        """
+        return &self.config
+
+    pub fn get_port(self) -> u16:
+        """Get server port.
+
+        Returns:
+            Port number
+
+        Example:
+            server.get_port()  # → 8080
+        """
+        return self.config.get_port()
+
+    pub fn is_localhost(self) -> bool:
+        """Check if server is bound to localhost.
+
+        Returns:
+            true if localhost
+
+        Example:
+            server.is_localhost()  # → true
+        """
+        return self.config.is_localhost()
+
+    pub fn is_keep_alive_enabled(self) -> bool:
+        """Check if keep-alive is enabled.
+
+        Returns:
+            true if keep-alive enabled
+
+        Example:
+            server.is_keep_alive_enabled()  # → true
+        """
+        return self.config.is_keep_alive_enabled()
+
+    pub fn has_handler(self) -> bool:
+        """Check if custom handler is set.
+
+        Returns:
+            true if handler set
+
+        Example:
+            server.has_handler()  # → true
+        """
+        # Handler is always set (defaults to default_handler)
+        return true
+
+    pub fn with_config(self, config: ServerConfig) -> HttpServer:
+        """Set new configuration.
+
+        Args:
+            config: New server config
+
+        Returns:
+            self for chaining
+
+        Example:
+            server.with_config(new_config)
+        """
+        self.config = config
+        return self
+
+    pub fn bind_addr(self) -> SocketAddr:
+        """Get bind address (alias for addr).
+
+        Returns:
+            Socket address
+
+        Example:
+            server.bind_addr()  # → 127.0.0.1:8080
+        """
+        return self.addr()
+
+    pub fn summary(self) -> str:
+        """Get summary of HTTP server.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            server.summary()
+            # → "HttpServer: 127.0.0.1:8080 (keep-alive enabled)"
+        """
+        let addr = self.addr()
+        let ka = if self.is_keep_alive_enabled(): "keep-alive enabled" else: "keep-alive disabled"
+        return "HttpServer: {addr} ({ka})"
+
+    # Run the server (blocking)
+    pub async fn run(self) -> Result[(), IoError]:
+        let listener = await TcpListener::bind(self.config.addr)?
+
+        loop:
+            let (stream, peer_addr) = await listener.accept()?
+
+            # Spawn connection handler
+            spawn self.handle_connection(stream)
+
+    # Handle single connection
+    async fn handle_connection(self, stream: TcpStream):
+        # Set timeouts
+        let _ = stream.set_read_timeout(Some(self.config.read_timeout))
+        let _ = stream.set_write_timeout(Some(self.config.write_timeout))
+
+        loop:
+            # Parse request
+            match await HttpRequest::parse(&stream):
+                case Ok(request):
+                    # Check Connection header for keep-alive
+                    let should_close = request.header("connection")
+                        .map(|v| v.to_lower() == "close")
+                        .unwrap_or(false)
+
+                    # Call handler
+                    let response = await (self.handler)(request)
+
+                    # Send response
+                    match await response.send(&stream):
+                        case Ok(_):
+                            if should_close or not self.config.keep_alive:
+                                break
+                        case Err(_):
+                            break
+
+                case Err(HttpError::ConnectionClosed):
+                    break
+
+                case Err(e):
+                    # Send error response
+                    let error_resp = server_error_page(&e.to_str())
+                    let _ = await error_resp.send(&stream)
+                    break
+
+        # Close connection
+        let _ = await stream.close()
+
+# Default handler returns 404
+fn default_handler(request: HttpRequest) -> async HttpResponse:
+    return not_found_page(request.path())
+
+# Quick server helper
+pub async fn serve(port: u16, handler: HttpHandler) -> Result[(), IoError]:
+    let server = HttpServer::localhost(port).handler(handler)
+    return await server.run()

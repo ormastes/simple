@@ -1,0 +1,396 @@
+# Context Manager Module
+# Provides the ContextManager trait for resource management with `with` statements
+#
+# Feature #1092: ContextManager trait
+
+from core.sync import Mutex
+
+trait ContextManager:
+    """
+    Context manager protocol for use with `with` statements.
+
+    Implementers must define __enter__ and __exit__ methods to manage
+    resource acquisition and cleanup.
+
+    Example:
+        class FileHandle:
+            fn __enter__():
+                # Acquire resource
+                return self
+
+            fn __exit__(exc_type, exc_value, traceback):
+                # Release resource
+                self.close()
+
+        with FileHandle("file.txt") as f:
+            # Use f
+            pass
+        # f.__exit__ automatically called here
+    """
+
+    fn __enter__():
+        """
+        Enter the context. Called when entering a `with` block.
+        Returns the resource to be bound to the `as` variable.
+        """
+        pass
+
+    fn __exit__(exc_type, exc_value, traceback):
+        """
+        Exit the context. Called when leaving a `with` block.
+
+        Args:
+            exc_type: Exception type if an exception occurred, nil otherwise
+            exc_value: Exception value if an exception occurred, nil otherwise
+            traceback: Exception traceback if an exception occurred, nil otherwise
+
+        Returns:
+            true to suppress the exception, false to propagate it
+        """
+        pass
+
+
+# Example Context Managers
+
+class Timer:
+    """
+    Context manager that times code execution.
+
+    Example:
+        with Timer("operation") as t:
+            # ... code to time ...
+            pass
+        # Prints: operation took 1.23s
+    """
+
+    fn __init__(name):
+        self.name = name
+        self.start_time = 0
+
+    fn __enter__():
+        self.start_time = time_now()
+        return self
+
+    fn __exit__(exc_type, exc_value, traceback):
+        elapsed = time_now() - self.start_time
+        print("{self.name} took {elapsed}s")
+        return false  # Don't suppress exceptions
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_running() -> Bool:
+        """Check if timer has been started (has non-zero start time).
+
+        Returns:
+            true if timer has started
+
+        Example:
+            timer = Timer("test")
+            timer.is_running()  # → false
+            timer.__enter__()
+            timer.is_running()  # → true
+        """
+        return self.start_time != 0
+
+    fn get_elapsed() -> f64:
+        """Get current elapsed time since start.
+
+        Returns:
+            Elapsed time in seconds, or 0 if not started
+
+        Example:
+            timer = Timer("test")
+            timer.__enter__()
+            # ... wait ...
+            elapsed = timer.get_elapsed()  # → time since start
+        """
+        if not self.is_running():
+            return 0.0
+        return time_now() - self.start_time
+
+    fn get_name() -> String:
+        """Get timer name.
+
+        Returns:
+            Timer name string
+
+        Example:
+            timer = Timer("operation")
+            timer.get_name()  # → "operation"
+        """
+        return self.name
+
+    fn summary() -> String:
+        """Get summary of timer.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            timer.summary()
+            # → "Timer 'operation': running, 1.23s elapsed"
+            # → "Timer 'operation': not started"
+        """
+        let name = self.name
+        if not self.is_running():
+            return "Timer '{name}': not started"
+        let elapsed = self.get_elapsed()
+        return "Timer '{name}': running, {elapsed}s elapsed"
+
+
+class Lock:
+    """
+    Context manager for lock acquisition/release.
+
+    Example:
+        lock = Lock()
+        with lock:
+            # Critical section - lock held
+            pass
+        # Lock automatically released
+    """
+
+    fn __init__():
+        self._mutex = Mutex(0)
+        self._guard = None
+
+    fn __enter__():
+        self.acquire()
+        return self
+
+    fn __exit__(exc_type, exc_value, traceback):
+        self.release()
+        return false
+
+    fn acquire():
+        # Acquire the mutex lock - blocks until available
+        self._guard = self._mutex.lock()
+
+    fn release():
+        # Release is automatic when guard goes out of scope
+        # But we can explicitly drop it here
+        self._guard = None
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_locked() -> Bool:
+        """Check if lock is currently held.
+
+        Returns:
+            true if lock is held (guard is not None)
+
+        Example:
+            lock = Lock()
+            lock.is_locked()  # → false
+            lock.acquire()
+            lock.is_locked()  # → true
+            lock.release()
+            lock.is_locked()  # → false
+        """
+        return self._guard is not None
+
+    fn is_unlocked() -> Bool:
+        """Check if lock is not held.
+
+        Returns:
+            true if lock is not held
+
+        Example:
+            lock = Lock()
+            lock.is_unlocked()  # → true
+            lock.acquire()
+            lock.is_unlocked()  # → false
+        """
+        return self._guard is None
+
+    fn summary() -> String:
+        """Get summary of lock.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            lock.summary()
+            # → "Lock: locked" or "Lock: unlocked"
+        """
+        let status = if self.is_locked(): "locked" else: "unlocked"
+        return "Lock: {status}"
+
+
+class TransactionContext:
+    """
+    Context manager for database-like transactions.
+
+    Example:
+        with TransactionContext() as tx:
+            # ... perform operations ...
+            if error:
+                tx.rollback()
+        # Automatically commits or rolls back
+    """
+
+    fn __init__():
+        self.committed = false
+        self.rolled_back = false
+
+    fn __enter__():
+        self.begin()
+        return self
+
+    fn __exit__(exc_type, exc_value, traceback):
+        if exc_type or self.rolled_back:
+            self.rollback()
+        else:
+            self.commit()
+        return false
+
+    fn begin():
+        print("[TX] Transaction started")
+
+    fn commit():
+        if not self.rolled_back:
+            self.committed = true
+            print("[TX] Transaction committed")
+
+    fn rollback():
+        self.rolled_back = true
+        print("[TX] Transaction rolled back")
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_committed() -> Bool:
+        """Check if transaction has been committed.
+
+        Returns:
+            true if transaction was committed
+
+        Example:
+            tx = TransactionContext()
+            tx.is_committed()  # → false
+            tx.commit()
+            tx.is_committed()  # → true
+        """
+        return self.committed
+
+    fn is_rolled_back() -> Bool:
+        """Check if transaction has been rolled back.
+
+        Returns:
+            true if transaction was rolled back
+
+        Example:
+            tx = TransactionContext()
+            tx.is_rolled_back()  # → false
+            tx.rollback()
+            tx.is_rolled_back()  # → true
+        """
+        return self.rolled_back
+
+    fn is_pending() -> Bool:
+        """Check if transaction is pending (neither committed nor rolled back).
+
+        Returns:
+            true if transaction is still pending
+
+        Example:
+            tx = TransactionContext()
+            tx.is_pending()  # → true
+            tx.commit()
+            tx.is_pending()  # → false
+        """
+        return not self.committed and not self.rolled_back
+
+    fn is_completed() -> Bool:
+        """Check if transaction is completed (either committed or rolled back).
+
+        Returns:
+            true if transaction is done
+
+        Example:
+            tx = TransactionContext()
+            tx.is_completed()  # → false
+            tx.commit()
+            tx.is_completed()  # → true
+        """
+        return self.committed or self.rolled_back
+
+    fn summary() -> String:
+        """Get summary of transaction.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            tx.summary()
+            # → "Transaction: pending"
+            # → "Transaction: committed"
+            # → "Transaction: rolled back"
+        """
+        if self.is_committed():
+            return "Transaction: committed"
+        elif self.is_rolled_back():
+            return "Transaction: rolled back"
+        else:
+            return "Transaction: pending"
+
+
+# Helper function to create context managers from callables
+
+fn contextmanager(enter_fn, exit_fn):
+    """
+    Create a context manager from enter/exit functions.
+
+    Example:
+        def my_enter():
+            print("Entering")
+            return "resource"
+
+        def my_exit(exc_type, exc_value, tb):
+            print("Exiting")
+            return false
+
+        cm = contextmanager(my_enter, my_exit)
+        with cm as resource:
+            print("Using {resource}")
+    """
+    class CustomContextManager:
+        fn __enter__():
+            return enter_fn()
+
+        fn __exit__(exc_type, exc_value, traceback):
+            return exit_fn(exc_type, exc_value, traceback)
+
+    return CustomContextManager()
+
+
+# Utility context managers
+
+fn suppress(*exception_types):
+    """
+    Context manager that suppresses specified exception types.
+
+    Example:
+        with suppress(ValueError, KeyError):
+            # Code that might raise ValueError or KeyError
+            raise ValueError("This will be suppressed")
+        # Execution continues normally
+    """
+    class SuppressContext:
+        fn __init__(exceptions):
+            self.exceptions = exceptions
+
+        fn __enter__():
+            return self
+
+        fn __exit__(exc_type, exc_value, traceback):
+            if exc_type in self.exceptions:
+                return true  # Suppress
+            return false  # Propagate
+
+    return SuppressContext(exception_types)

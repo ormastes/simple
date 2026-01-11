@@ -1,0 +1,153 @@
+# External Library Loading
+#
+# Dynamic loading of external native libraries.
+
+import ..core.{Value, InterpreterError}
+
+export load_library, resolve_symbol, ExternLib, Symbol
+
+# A loaded external library
+struct ExternLib:
+    path: String
+    handle: RawPtr
+    symbols: Dict[String, Symbol]
+
+impl ExternLib:
+    fn new(path: &str) -> Result[ExternLib, String]:
+        # Load the library
+        match dlopen(path):
+            case Ok(handle):
+                return Ok(ExternLib {
+                    path: path.to_string(),
+                    handle: handle,
+                    symbols: Dict::new()
+                })
+            case Err(e):
+                return Err(e)
+
+    fn close(self):
+        dlclose(self.handle)
+
+    fn get_symbol(self, name: &str) -> Result[Symbol, String]:
+        # Check cache
+        if let Some(sym) = self.symbols.get(name):
+            return Ok(sym.clone())
+
+        # Resolve symbol
+        match dlsym(self.handle, name):
+            case Ok(ptr):
+                let sym = Symbol { name: name.to_string(), ptr: ptr }
+                self.symbols.set(name.to_string(), sym.clone())
+                return Ok(sym)
+            case Err(e):
+                return Err(e)
+
+# A resolved symbol
+struct Symbol:
+    name: String
+    ptr: RawPtr
+
+impl Symbol:
+    fn call(self, args: Array[Value]) -> Result[Value, InterpreterError]:
+        # TODO: [stdlib][P3] FFI call with argument marshalling
+        return Err(InterpreterError::NotImplemented("extern call".to_string()))
+
+# Registry of loaded libraries
+static mut EXTERN_LIBS: Option[Dict[String, ExternLib]] = None
+
+fn init_libs():
+    unsafe:
+        if EXTERN_LIBS.is_none():
+            EXTERN_LIBS = Some(Dict::new())
+
+# Load an external library
+fn load_library(path: &str) -> Result[ExternLib, InterpreterError]:
+    init_libs()
+
+    # Check if already loaded
+    unsafe:
+        if let Some(ref libs) = EXTERN_LIBS:
+            if let Some(lib) = libs.get(path):
+                return Ok(lib.clone())
+
+    # Load new library
+    match ExternLib::new(path):
+        case Ok(lib):
+            unsafe:
+                if let Some(ref mut libs) = EXTERN_LIBS:
+                    libs.set(path.to_string(), lib.clone())
+            return Ok(lib)
+        case Err(e):
+            return Err(InterpreterError::LoadError(e))
+
+# Resolve a symbol from a library
+fn resolve_symbol(lib: &ExternLib, name: &str) -> Result[Symbol, InterpreterError]:
+    match lib.get_symbol(name):
+        case Ok(sym):
+            return Ok(sym)
+        case Err(e):
+            return Err(InterpreterError::SymbolError(e))
+
+# Unload a library
+fn unload_library(path: &str):
+    unsafe:
+        if let Some(ref mut libs) = EXTERN_LIBS:
+            if let Some(lib) = libs.remove(path):
+                lib.close()
+
+# Platform-specific dynamic loading
+#[cfg(target_os = "linux")]
+extern fn dlopen(path: &str) -> Result[RawPtr, String]
+extern fn dlclose(handle: RawPtr)
+extern fn dlsym(handle: RawPtr, name: &str) -> Result[RawPtr, String]
+
+#[cfg(target_os = "macos")]
+extern fn dlopen(path: &str) -> Result[RawPtr, String]
+extern fn dlclose(handle: RawPtr)
+extern fn dlsym(handle: RawPtr, name: &str) -> Result[RawPtr, String]
+
+#[cfg(target_os = "windows")]
+extern fn LoadLibraryA(path: &str) -> Result[RawPtr, String]
+extern fn FreeLibrary(handle: RawPtr)
+extern fn GetProcAddress(handle: RawPtr, name: &str) -> Result[RawPtr, String]
+
+# Windows compatibility shims
+#[cfg(target_os = "windows")]
+fn dlopen(path: &str) -> Result[RawPtr, String]:
+    return LoadLibraryA(path)
+
+#[cfg(target_os = "windows")]
+fn dlclose(handle: RawPtr):
+    FreeLibrary(handle)
+
+#[cfg(target_os = "windows")]
+fn dlsym(handle: RawPtr, name: &str) -> Result[RawPtr, String]:
+    return GetProcAddress(handle, name)
+
+# Type definitions for FFI
+type RawPtr = u64  # Or platform-appropriate size
+
+# C type mappings
+enum CType:
+    Void
+    Bool
+    Char
+    Short
+    Int
+    Long
+    LongLong
+    Float
+    Double
+    Pointer(Box[CType])
+    Array(Box[CType], usize)
+    Struct(Array[(String, CType)])
+
+# Convert Simple value to C type
+fn value_to_c(val: &Value, ctype: &CType) -> Result[Array[u8], String]:
+    # TODO: [stdlib][P1] Implement proper type marshalling
+    return Err("not implemented".to_string())
+
+# Convert C data to Simple value
+fn c_to_value(data: &Array[u8], ctype: &CType) -> Result[Value, String]:
+    # TODO: [stdlib][P1] Implement proper type unmarshalling
+    return Err("not implemented".to_string())

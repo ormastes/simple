@@ -1,0 +1,611 @@
+# Debug Rendering - Visualization utilities for development
+#
+# Provides wireframe, bounding boxes, axes, normals, and other
+# debug visualizations for 3D scene development and debugging.
+#
+# Based on: doc/spec/graphics_3d.md (Part 14.1: Debug Draw API)
+
+use core.*
+use graphics.math.*
+use graphics.scene.*
+use graphics.render.*
+
+# =============================================================================
+# Debug Rendering Configuration
+# =============================================================================
+
+pub struct DebugRenderConfig:
+    # Line rendering
+    line_width: f32                # Default: 2.0
+    depth_test: bool               # Default: true
+
+    # Colors
+    wireframe_color: Vec4          # Default: white
+    bounds_color: Vec4             # Default: green
+    normal_color: Vec4             # Default: cyan
+    tangent_color: Vec4            # Default: red
+    bitangent_color: Vec4          # Default: blue
+    frustum_color: Vec4            # Default: yellow
+    grid_color: Vec4               # Default: gray
+
+    # Grid
+    grid_size: f32                 # Default: 100.0
+    grid_spacing: f32              # Default: 1.0
+
+impl DebugRenderConfig:
+    pub fn default() -> DebugRenderConfig:
+        return DebugRenderConfig {
+            line_width: 2.0,
+            depth_test: true,
+            wireframe_color: Vec4::new(1.0, 1.0, 1.0, 1.0),
+            bounds_color: Vec4::new(0.0, 1.0, 0.0, 1.0),
+            normal_color: Vec4::new(0.0, 1.0, 1.0, 1.0),
+            tangent_color: Vec4::new(1.0, 0.0, 0.0, 1.0),
+            bitangent_color: Vec4::new(0.0, 0.0, 1.0, 1.0),
+            frustum_color: Vec4::new(1.0, 1.0, 0.0, 1.0),
+            grid_color: Vec4::new(0.5, 0.5, 0.5, 0.3),
+            grid_size: 100.0,
+            grid_spacing: 1.0
+        }
+
+# =============================================================================
+# Debug Draw Commands
+# =============================================================================
+
+pub struct DebugDrawCommand:
+    vertices: Array[Vec3]
+    color: Vec4
+    primitive: DebugPrimitive
+
+pub enum DebugPrimitive:
+    Lines          # Line list
+    LineStrip      # Connected lines
+    LineLoop       # Closed line strip
+    Points         # Point list
+
+impl DebugPrimitive:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_lines(self) -> bool:
+        """Check if primitive is lines (independent line segments).
+
+        Returns:
+            true for Lines
+
+        Example:
+            DebugPrimitive::Lines.is_lines()  # → true
+        """
+        match self:
+            case Lines: true
+            case _: false
+
+    pub fn is_line_strip(self) -> bool:
+        """Check if primitive is line strip (connected lines).
+
+        Returns:
+            true for LineStrip
+
+        Example:
+            DebugPrimitive::LineStrip.is_line_strip()  # → true
+        """
+        match self:
+            case LineStrip: true
+            case _: false
+
+    pub fn is_line_loop(self) -> bool:
+        """Check if primitive is line loop (closed line strip).
+
+        Returns:
+            true for LineLoop
+
+        Example:
+            DebugPrimitive::LineLoop.is_line_loop()  # → true
+        """
+        match self:
+            case LineLoop: true
+            case _: false
+
+    pub fn is_points(self) -> bool:
+        """Check if primitive is point list.
+
+        Returns:
+            true for Points
+
+        Example:
+            DebugPrimitive::Points.is_points()  # → true
+        """
+        match self:
+            case Points: true
+            case _: false
+
+    pub fn is_line_based(self) -> bool:
+        """Check if primitive draws lines.
+
+        Returns:
+            true for Lines, LineStrip, or LineLoop
+
+        Example:
+            DebugPrimitive::LineStrip.is_line_based()  # → true
+            DebugPrimitive::Points.is_line_based()  # → false
+        """
+        match self:
+            case Lines: true
+            case LineStrip: true
+            case LineLoop: true
+            case Points: false
+
+    pub fn uses_connectivity(self) -> bool:
+        """Check if vertices are connected.
+
+        Returns:
+            true for LineStrip or LineLoop
+
+        Example:
+            DebugPrimitive::LineStrip.uses_connectivity()  # → true
+            DebugPrimitive::Lines.uses_connectivity()  # → false
+        """
+        match self:
+            case LineStrip: true
+            case LineLoop: true
+            case _: false
+
+    pub fn is_closed(self) -> bool:
+        """Check if primitive forms a closed shape.
+
+        Returns:
+            true for LineLoop
+
+        Example:
+            DebugPrimitive::LineLoop.is_closed()  # → true
+        """
+        match self:
+            case LineLoop: true
+            case _: false
+
+    pub fn to_string(self) -> String:
+        """Convert debug primitive to string.
+
+        Returns:
+            Primitive type name
+
+        Example:
+            DebugPrimitive::LineStrip.to_string()  # → "line_strip"
+        """
+        match self:
+            case Lines: "lines"
+            case LineStrip: "line_strip"
+            case LineLoop: "line_loop"
+            case Points: "points"
+
+    pub fn description(self) -> String:
+        """Get debug primitive description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            DebugPrimitive::LineStrip.description()
+            # → "Line strip (connected lines)"
+        """
+        match self:
+            case Lines: "Line list (independent segments)"
+            case LineStrip: "Line strip (connected lines)"
+            case LineLoop: "Line loop (closed shape)"
+            case Points: "Point list (individual vertices)"
+
+    pub fn summary(self) -> String:
+        """Get debug primitive summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            DebugPrimitive::LineStrip.summary()
+            # → "DebugPrimitive: line_strip (Line strip (connected lines), line-based, connected)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let prim_type = if self.is_line_based(): "line-based" else: "point-based"
+        let connectivity = if self.uses_connectivity(): ", connected" else: ""
+        let closed_info = if self.is_closed(): ", closed" else: ""
+        return "DebugPrimitive: {name} ({desc}, {prim_type}{connectivity}{closed_info})"
+
+# =============================================================================
+# Debug Renderer
+# =============================================================================
+
+pub struct DebugRenderer:
+    config: DebugRenderConfig
+    commands: Array[DebugDrawCommand]
+
+    # Persistent helpers
+    grid_enabled: bool
+    axes_enabled: bool
+
+    # Line vertex buffer
+    line_buffer_id: u64
+    max_vertices: i32
+
+impl DebugRenderer:
+    pub fn new(config: DebugRenderConfig) -> DebugRenderer:
+        let mut renderer = DebugRenderer {
+            config: config,
+            commands: Array::new(),
+            grid_enabled: false,
+            axes_enabled: true,
+            line_buffer_id: 0,
+            max_vertices: 10000
+        }
+
+        renderer.init_buffers()
+        return renderer
+
+    me init_buffers():
+        # Create dynamic vertex buffer for lines
+        self.line_buffer_id = extern_create_dynamic_vertex_buffer(
+            self.max_vertices * 12  # 3 floats * 4 bytes
+        )
+
+    # Clear all debug draw commands
+    pub fn clear(mut self):
+        self.commands.clear()
+
+    # Enable/disable persistent helpers
+    pub fn set_grid_enabled(mut self, enabled: bool):
+        self.grid_enabled = enabled
+
+    pub fn set_axes_enabled(mut self, enabled: bool):
+        self.axes_enabled = enabled
+
+    # =============================================================================
+    # Basic Primitives
+    # =============================================================================
+
+    # Draw a line
+    pub fn draw_line(mut self, start: Vec3, end: Vec3, color: Vec4):
+        let vertices = Array::new()
+        vertices.push(start)
+        vertices.push(end)
+
+        let command = DebugDrawCommand {
+            vertices: vertices,
+            color: color,
+            primitive: DebugPrimitive::Lines
+        }
+
+        self.commands.push(command)
+
+    # Draw multiple lines
+    pub fn draw_lines(mut self, points: Array[Vec3], color: Vec4):
+        let command = DebugDrawCommand {
+            vertices: points,
+            color: color,
+            primitive: DebugPrimitive::Lines
+        }
+
+        self.commands.push(command)
+
+    # Draw connected line strip
+    pub fn draw_line_strip(mut self, points: Array[Vec3], color: Vec4):
+        let command = DebugDrawCommand {
+            vertices: points,
+            color: color,
+            primitive: DebugPrimitive::LineStrip
+        }
+
+        self.commands.push(command)
+
+    # Draw ray
+    pub fn draw_ray(mut self, origin: Vec3, direction: Vec3, length: f32, color: Vec4):
+        let end = origin + direction.normalize() * length
+        self.draw_line(origin, end, color)
+
+    # =============================================================================
+    # Geometric Shapes
+    # =============================================================================
+
+    # Draw wireframe box (AABB)
+    pub fn draw_box(mut self, min: Vec3, max: Vec3, color: Vec4):
+        let vertices = Array::new()
+
+        # Bottom face
+        vertices.push(Vec3::new(min.x, min.y, min.z))
+        vertices.push(Vec3::new(max.x, min.y, min.z))
+
+        vertices.push(Vec3::new(max.x, min.y, min.z))
+        vertices.push(Vec3::new(max.x, min.y, max.z))
+
+        vertices.push(Vec3::new(max.x, min.y, max.z))
+        vertices.push(Vec3::new(min.x, min.y, max.z))
+
+        vertices.push(Vec3::new(min.x, min.y, max.z))
+        vertices.push(Vec3::new(min.x, min.y, min.z))
+
+        # Top face
+        vertices.push(Vec3::new(min.x, max.y, min.z))
+        vertices.push(Vec3::new(max.x, max.y, min.z))
+
+        vertices.push(Vec3::new(max.x, max.y, min.z))
+        vertices.push(Vec3::new(max.x, max.y, max.z))
+
+        vertices.push(Vec3::new(max.x, max.y, max.z))
+        vertices.push(Vec3::new(min.x, max.y, max.z))
+
+        vertices.push(Vec3::new(min.x, max.y, max.z))
+        vertices.push(Vec3::new(min.x, max.y, min.z))
+
+        # Vertical edges
+        vertices.push(Vec3::new(min.x, min.y, min.z))
+        vertices.push(Vec3::new(min.x, max.y, min.z))
+
+        vertices.push(Vec3::new(max.x, min.y, min.z))
+        vertices.push(Vec3::new(max.x, max.y, min.z))
+
+        vertices.push(Vec3::new(max.x, min.y, max.z))
+        vertices.push(Vec3::new(max.x, max.y, max.z))
+
+        vertices.push(Vec3::new(min.x, min.y, max.z))
+        vertices.push(Vec3::new(min.x, max.y, max.z))
+
+        self.draw_lines(vertices, color)
+
+    # Draw wireframe sphere (circles on 3 axes)
+    pub fn draw_sphere(mut self, center: Vec3, radius: f32, color: Vec4):
+        let segments = 16
+
+        # XY circle
+        self.draw_circle(center, radius, Vec3::new(0.0, 0.0, 1.0), color, segments)
+
+        # XZ circle
+        self.draw_circle(center, radius, Vec3::new(0.0, 1.0, 0.0), color, segments)
+
+        # YZ circle
+        self.draw_circle(center, radius, Vec3::new(1.0, 0.0, 0.0), color, segments)
+
+    # Draw circle
+    pub fn draw_circle(
+        mut self,
+        center: Vec3,
+        radius: f32,
+        normal: Vec3,
+        color: Vec4,
+        segments: i32
+    ):
+        let vertices = Array::new()
+
+        # Calculate tangent and bitangent
+        let up = if abs(normal.y) < 0.999:
+            Vec3::new(0.0, 1.0, 0.0)
+        else:
+            Vec3::new(1.0, 0.0, 0.0)
+
+        let tangent = normal.cross(up).normalize()
+        let bitangent = normal.cross(tangent)
+
+        # Generate circle vertices
+        for i in 0..=segments:
+            let angle = (i as f32 / segments as f32) * 2.0 * PI
+            let x = cos(angle) * radius
+            let y = sin(angle) * radius
+
+            let point = center + tangent * x + bitangent * y
+            vertices.push(point)
+
+        self.draw_line_strip(vertices, color)
+
+    # Draw coordinate axes
+    pub fn draw_axes(mut self, origin: Vec3, size: f32):
+        # X axis (red)
+        self.draw_line(
+            origin,
+            origin + Vec3::new(size, 0.0, 0.0),
+            Vec4::new(1.0, 0.0, 0.0, 1.0)
+        )
+
+        # Y axis (green)
+        self.draw_line(
+            origin,
+            origin + Vec3::new(0.0, size, 0.0),
+            Vec4::new(0.0, 1.0, 0.0, 1.0)
+        )
+
+        # Z axis (blue)
+        self.draw_line(
+            origin,
+            origin + Vec3::new(0.0, 0.0, size),
+            Vec4::new(0.0, 0.0, 1.0, 1.0)
+        )
+
+    # Draw transform gizmo
+    pub fn draw_transform(mut self, transform: Mat4, size: f32):
+        let origin = transform.transform_point(Vec3::zero())
+        let x_axis = transform.transform_vector(Vec3::new(1.0, 0.0, 0.0)).normalize()
+        let y_axis = transform.transform_vector(Vec3::new(0.0, 1.0, 0.0)).normalize()
+        let z_axis = transform.transform_vector(Vec3::new(0.0, 0.0, 1.0)).normalize()
+
+        self.draw_line(origin, origin + x_axis * size, Vec4::new(1.0, 0.0, 0.0, 1.0))
+        self.draw_line(origin, origin + y_axis * size, Vec4::new(0.0, 1.0, 0.0, 1.0))
+        self.draw_line(origin, origin + z_axis * size, Vec4::new(0.0, 0.0, 1.0, 1.0))
+
+    # =============================================================================
+    # Scene Visualizations
+    # =============================================================================
+
+    # Draw frustum (camera view volume)
+    pub fn draw_frustum(mut self, frustum: Frustum, color: Vec4):
+        # Get frustum corners
+        let corners = frustum.get_corners()
+
+        # Near plane
+        self.draw_line(corners[0], corners[1], color)
+        self.draw_line(corners[1], corners[2], color)
+        self.draw_line(corners[2], corners[3], color)
+        self.draw_line(corners[3], corners[0], color)
+
+        # Far plane
+        self.draw_line(corners[4], corners[5], color)
+        self.draw_line(corners[5], corners[6], color)
+        self.draw_line(corners[6], corners[7], color)
+        self.draw_line(corners[7], corners[4], color)
+
+        # Connecting edges
+        self.draw_line(corners[0], corners[4], color)
+        self.draw_line(corners[1], corners[5], color)
+        self.draw_line(corners[2], corners[6], color)
+        self.draw_line(corners[3], corners[7], color)
+
+    # Draw mesh wireframe
+    pub fn draw_mesh_wireframe(mut self, mesh: Mesh, transform: Mat4, color: Vec4):
+        # Get mesh data
+        let vertices = mesh.get_vertices()
+        let indices = mesh.get_indices()
+
+        # Draw all edges
+        let mut edge_vertices = Array::new()
+
+        for i in 0..(indices.len() / 3):
+            let i0 = indices[i * 3 + 0]
+            let i1 = indices[i * 3 + 1]
+            let i2 = indices[i * 3 + 2]
+
+            let v0 = transform.transform_point(vertices[i0].position)
+            let v1 = transform.transform_point(vertices[i1].position)
+            let v2 = transform.transform_point(vertices[i2].position)
+
+            edge_vertices.push(v0)
+            edge_vertices.push(v1)
+
+            edge_vertices.push(v1)
+            edge_vertices.push(v2)
+
+            edge_vertices.push(v2)
+            edge_vertices.push(v0)
+
+        self.draw_lines(edge_vertices, color)
+
+    # Draw mesh normals
+    pub fn draw_mesh_normals(
+        mut self,
+        mesh: Mesh,
+        transform: Mat4,
+        normal_length: f32,
+        color: Vec4
+    ):
+        let vertices = mesh.get_vertices()
+        let normal_matrix = transform.to_mat3()  # Extract 3x3 rotation/scale
+
+        for vertex in vertices:
+            let world_pos = transform.transform_point(vertex.position)
+            let world_normal = normal_matrix.transform_vector(vertex.normal).normalize()
+
+            self.draw_line(
+                world_pos,
+                world_pos + world_normal * normal_length,
+                color
+            )
+
+    # Draw grid
+    pub fn draw_grid(mut self, size: f32, spacing: f32, color: Vec4):
+        let half_size = size / 2.0
+        let line_count = (size / spacing) as i32
+
+        # Lines parallel to X axis
+        for i in -line_count..=line_count:
+            let z = i as f32 * spacing
+            self.draw_line(
+                Vec3::new(-half_size, 0.0, z),
+                Vec3::new( half_size, 0.0, z),
+                color
+            )
+
+        # Lines parallel to Z axis
+        for i in -line_count..=line_count:
+            let x = i as f32 * spacing
+            self.draw_line(
+                Vec3::new(x, 0.0, -half_size),
+                Vec3::new(x, 0.0,  half_size),
+                color
+            )
+
+    # =============================================================================
+    # Rendering
+    # =============================================================================
+
+    # Render all debug draw commands
+    pub fn render(mut self, camera: Camera):
+        # Enable line rendering state
+        extern_set_line_width(self.config.line_width)
+        extern_set_depth_test_enabled(self.config.depth_test)
+        extern_use_shader_pipeline("debug_lines")
+
+        # Set camera uniforms
+        let view_proj = camera.get_projection_matrix() * camera.get_view_matrix()
+        extern_set_uniform_mat4("u_ViewProj", view_proj)
+
+        # Draw persistent helpers
+        if self.grid_enabled:
+            self.draw_grid(
+                self.config.grid_size,
+                self.config.grid_spacing,
+                self.config.grid_color
+            )
+
+        if self.axes_enabled:
+            self.draw_axes(Vec3::zero(), 1.0)
+
+        # Render all commands
+        for command in self.commands:
+            # Upload vertices to buffer
+            extern_update_vertex_buffer(
+                self.line_buffer_id,
+                command.vertices.data_ptr(),
+                command.vertices.len() * 12
+            )
+
+            # Set color uniform
+            extern_set_uniform_vec4("u_Color", command.color)
+
+            # Draw
+            let primitive_type = match command.primitive:
+                DebugPrimitive::Lines => 0
+                DebugPrimitive::LineStrip => 1
+                DebugPrimitive::LineLoop => 2
+                DebugPrimitive::Points => 3
+
+            extern_draw_debug_primitive(
+                self.line_buffer_id,
+                primitive_type,
+                command.vertices.len()
+            )
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+const PI: f32 = 3.14159265359
+
+fn abs(x: f32) -> f32:
+    return if x < 0.0: -x else: x
+
+fn cos(x: f32) -> f32:
+    # Would use math library
+    return 0.0  # Placeholder
+
+fn sin(x: f32) -> f32:
+    # Would use math library
+    return 0.0  # Placeholder
+
+# =============================================================================
+# External FFI Functions
+# =============================================================================
+
+extern fn extern_create_dynamic_vertex_buffer(size: i32) -> u64
+extern fn extern_update_vertex_buffer(buffer_id: u64, data: *Vec3, size: i32)
+extern fn extern_set_line_width(width: f32)
+extern fn extern_set_depth_test_enabled(enabled: bool)
+extern fn extern_use_shader_pipeline(name: *u8)
+extern fn extern_set_uniform_mat4(name: *u8, matrix: Mat4)
+extern fn extern_set_uniform_vec4(name: *u8, value: Vec4)
+extern fn extern_draw_debug_primitive(buffer_id: u64, primitive_type: i32, vertex_count: i32)

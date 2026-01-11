@@ -1,0 +1,204 @@
+# Shell API - Process execution
+# Provides APIs for running shell commands and capturing output
+
+# Extern declarations for file system FFI
+extern fn rt_file_read_text(path: String) -> String
+extern fn rt_file_write_text(path: String, content: String) -> Bool
+extern fn rt_file_exists(path: String) -> Bool
+extern fn rt_file_copy(src: String, dest: String) -> Bool
+extern fn rt_file_remove(path: String) -> Bool
+extern fn rt_file_rename(from: String, to: String) -> Bool
+extern fn rt_dir_create(path: String, recursive: Bool) -> Bool
+extern fn rt_dir_list(path: String) -> List[String]
+extern fn rt_dir_remove(path: String, recursive: Bool) -> Bool
+extern fn rt_env_get(name: String) -> String
+extern fn rt_env_set(name: String, value: String) -> Bool
+extern fn rt_env_cwd() -> String
+
+# Extern declarations for process execution FFI
+extern fn rt_process_run(cmd: String, args: List[String]) -> (String, String, Int)
+extern fn rt_process_spawn(cmd: String, args: List[String]) -> Int
+extern fn rt_process_execute(cmd: String, args: List[String]) -> Int
+
+# Extern declarations for path manipulation FFI
+extern fn rt_path_basename(path: String) -> String
+extern fn rt_path_dirname(path: String) -> String
+extern fn rt_path_ext(path: String) -> String
+extern fn rt_path_absolute(path: String) -> String
+
+# Extern declarations for file/directory search FFI
+extern fn rt_file_find(dir: String, pattern: String, recursive: Bool) -> List[String]
+extern fn rt_dir_glob(dir: String, pattern: String) -> List[String]
+
+# Result type for command execution
+class CommandResult:
+    stdout: str
+    stderr: str
+    exit_code: i64
+    
+    fn ok() -> bool:
+        return self.exit_code == 0
+    
+    fn err() -> bool:
+        return self.exit_code != 0
+
+# Shell command execution module
+mod shell:
+    # Run a command and capture output
+    # Args can be a string or list of strings
+    fn run(cmd: str, args: list[str] = []) -> CommandResult:
+        let (stdout, stderr, exit_code) = rt_process_run(cmd, args)
+        return CommandResult(
+            stdout: stdout,
+            stderr: stderr,
+            exit_code: exit_code
+        )
+    
+    # Pipe multiple commands together
+    # Note: True stdin piping not yet supported - runs commands sequentially
+    fn pipe(commands: list[list[str]]) -> CommandResult:
+        if commands.len() == 0:
+            return CommandResult(stdout: "", stderr: "", exit_code: 0)
+
+        # Run first command
+        let first_cmd = commands[0]
+        if first_cmd.len() == 0:
+            return CommandResult(stdout: "", stderr: "Empty command", exit_code: -1)
+
+        let result = run(first_cmd[0], first_cmd[1:])
+        if commands.len() == 1:
+            return result
+
+        # Run subsequent commands
+        let mut current_stdout = result.stdout
+        let mut all_stderr = result.stderr
+        let mut final_exit_code = result.exit_code
+
+        for i in 1..commands.len():
+            let next_cmd = commands[i]
+            if next_cmd.len() == 0:
+                continue
+
+            let next_result = run(next_cmd[0], next_cmd[1:])
+            current_stdout = next_result.stdout
+            all_stderr = all_stderr + next_result.stderr
+            final_exit_code = next_result.exit_code
+
+            if final_exit_code != 0:
+                break
+
+        return CommandResult(stdout: current_stdout, stderr: all_stderr, exit_code: final_exit_code)
+
+# File operations module
+mod file:
+    # Read entire file as text
+    fn read_text(path: str) -> str:
+        return rt_file_read_text(path)
+
+    # Write text to file
+    fn write_text(path: str, content: str):
+        rt_file_write_text(path, content)
+
+    # Append text to file
+    fn append_text(path: str, content: str):
+        # Read existing content, append, and write back
+        existing = rt_file_read_text(path)
+        rt_file_write_text(path, existing + content)
+
+    # Check if file exists
+    fn exists(path: str) -> bool:
+        return rt_file_exists(path)
+
+    # Copy file
+    fn copy(src: str, dest: str):
+        rt_file_copy(src, dest)
+
+    # Move/rename file
+    fn move(src: str, dest: str):
+        rt_file_rename(src, dest)
+
+    # Delete/remove file
+    fn remove(path: str):
+        rt_file_remove(path)
+
+    # Find files matching pattern
+    fn find(dir: str, pattern: str = "*", recursive: bool = false) -> list[str]:
+        return rt_file_find(dir, pattern, recursive)
+
+# Directory operations module
+mod dir:
+    # List directory entries
+    fn list(path: str) -> list[str]:
+        return rt_dir_list(path)
+
+    # List files matching glob pattern
+    fn glob(path: str, pattern: str) -> list[str]:
+        return rt_dir_glob(path, pattern)
+
+    # Create directory
+    fn create(path: str, recursive: bool = false):
+        rt_dir_create(path, recursive)
+
+    # Remove directory
+    fn remove(path: str, recursive: bool = false):
+        rt_dir_remove(path, recursive)
+
+    # Check if directory exists
+    fn exists(path: str) -> bool:
+        return rt_file_exists(path)
+
+# Path manipulation module
+mod path:
+    # Join path components with platform-specific separator
+    fn join(parts: ...str) -> str:
+        # Implemented in Simple - join with appropriate separator
+        if parts.len() == 0:
+            return ""
+
+        # Get platform separator from env or use / as default
+        separator = "/"  # TODO: Detect platform separator
+
+        # Join all parts
+        result = parts[0]
+        for i in 1..parts.len():
+            # Don't add separator if part already starts with one
+            part = parts[i]
+            if not result.ends_with(separator) and not part.starts_with(separator):
+                result = result + separator + part
+            else:
+                result = result + part
+
+        return result
+
+    # Get basename (filename from path)
+    fn basename(path: str) -> str:
+        return rt_path_basename(path)
+
+    # Get dirname (directory from path)
+    fn dirname(path: str) -> str:
+        return rt_path_dirname(path)
+
+    # Get extension (file extension)
+    fn ext(path: str) -> str:
+        return rt_path_ext(path)
+
+    # Convert to absolute path
+    fn absolute(path: str) -> str:
+        return rt_path_absolute(path)
+
+# Environment variable module
+mod env:
+    # Get environment variable with default
+    fn get(name: str, default: str = "") -> str:
+        result = rt_env_get(name)
+        if result == "":
+            return default
+        return result
+
+    # Set environment variable
+    fn set(name: str, value: str):
+        rt_env_set(name, value)
+
+    # Get current working directory
+    fn cwd() -> str:
+        return rt_env_cwd()

@@ -8,9 +8,9 @@ use graphics.scene.*
 # =============================================================================
 
 impl GltfLoader:
-    fn load_buffers(mut self) -> Result[(), String]:
+    var fn load_buffers() -> Result[(), String]:
         for i in 0..self.file.buffers.len():
-            let buffer = &mut self.file.buffers[i]
+            val buffer = &mut self.file.buffers[i]
 
             # Skip if already loaded (GLB case)
             if not buffer.data.is_empty():
@@ -25,7 +25,7 @@ impl GltfLoader:
                 buffer.data = decode_data_uri(buffer.uri)?
             else:
                 # Load from file
-                let path = path_join(self.base_path, buffer.uri)
+                val path = path_join(self.base_path, buffer.uri)
                 buffer.data = file_read_bytes(path)
                     .map_err(|e| "Failed to load buffer: " + e)?
 
@@ -40,9 +40,9 @@ impl GltfLoader:
 # =============================================================================
 
 impl GltfLoader:
-    fn to_scene(self) -> Result[Scene, String]:
+    fn to_scene() -> Result[Scene, String]:
         # Get default scene or first scene
-        let scene_index = if self.file.default_scene >= 0:
+        val scene_index = if self.file.default_scene >= 0:
             self.file.default_scene as usize
         else if not self.file.scenes.is_empty():
             0
@@ -52,10 +52,10 @@ impl GltfLoader:
         if scene_index >= self.file.scenes.len():
             return Err("Invalid scene index")
 
-        let gltf_scene = &self.file.scenes[scene_index]
+        val gltf_scene = &self.file.scenes[scene_index]
 
         # Create scene
-        let mut scene = Scene::new()
+        var scene = Scene::new()
         scene.name = gltf_scene.name
 
         # Process root nodes
@@ -65,21 +65,19 @@ impl GltfLoader:
 
         return Ok(scene)
 
-    fn process_node(
-        self,
-        scene: &mut Scene,
+    fn process_node(scene: &mut Scene,
         node_index: i32,
         parent_transform: Option[Mat4]
     ) -> Result[(), String]:
-        let gltf_node = &self.file.nodes[node_index as usize]
+        val gltf_node = &self.file.nodes[node_index as usize]
 
         # Calculate node transform
-        let local_transform = if gltf_node.matrix.is_some():
+        val local_transform = if gltf_node.matrix.is_some():
             gltf_node.matrix.unwrap()
         else:
             Mat4::from_trs(gltf_node.translation, gltf_node.rotation, gltf_node.scale)
 
-        let world_transform = match parent_transform:
+        val world_transform = match parent_transform:
             case Some(parent):
                 parent * local_transform
             case None:
@@ -87,14 +85,14 @@ impl GltfLoader:
 
         # Process mesh if present
         if gltf_node.mesh >= 0 and gltf_node.mesh < self.file.meshes.len() as i32:
-            let gltf_mesh = &self.file.meshes[gltf_node.mesh as usize]
+            val gltf_mesh = &self.file.meshes[gltf_node.mesh as usize]
 
             # Convert each primitive to a mesh
             for primitive in gltf_mesh.primitives:
-                let mesh = self.primitive_to_mesh(&primitive)?
+                val mesh = self.primitive_to_mesh(&primitive)?
 
                 # Create scene node
-                let scene_node = SceneNode::new(gltf_node.name)
+                val scene_node = SceneNode::new(gltf_node.name)
                 scene_node.set_transform(world_transform)
                 scene_node.set_mesh(mesh)
 
@@ -106,37 +104,37 @@ impl GltfLoader:
 
         return Ok(())
 
-    fn primitive_to_mesh(self, primitive: &GltfPrimitive) -> Result[Mesh, String]:
+    fn primitive_to_mesh(primitive: &GltfPrimitive) -> Result[Mesh, String]:
         # Get position data (required)
         if primitive.attributes.position < 0:
             return Err("Primitive missing POSITION attribute")
 
-        let positions = self.read_accessor_vec3(primitive.attributes.position)?
+        val positions = self.read_accessor_vec3(primitive.attributes.position)?
 
         # Get indices
-        let indices = if primitive.indices >= 0:
+        val indices = if primitive.indices >= 0:
             self.read_accessor_indices(primitive.indices)?
         else:
             # Generate sequential indices
-            let mut idx = Array[u32]::new()
+            var idx = Array[u32]::new()
             for i in 0..positions.len():
                 idx.push(i as u32)
             idx
 
         # Get normals (or generate)
-        let normals = if primitive.attributes.normal >= 0:
+        val normals = if primitive.attributes.normal >= 0:
             self.read_accessor_vec3(primitive.attributes.normal)?
         else:
             generate_normals(&positions, &indices)
 
         # Get tex coords (or default)
-        let tex_coords = if primitive.attributes.texcoord_0 >= 0:
+        val tex_coords = if primitive.attributes.texcoord_0 >= 0:
             self.read_accessor_vec2(primitive.attributes.texcoord_0)?
         else:
             positions.iter().map(|_| Vec2::zero()).collect()
 
         # Build mesh vertices
-        let mut vertices = Array[MeshVertex]::new()
+        var vertices = Array[MeshVertex]::new()
         for i in 0..positions.len():
             vertices.push(MeshVertex {
                 position: positions[i],
@@ -150,7 +148,7 @@ impl GltfLoader:
         generate_tangents(&mut vertices, &indices)
 
         # Compute AABB
-        let aabb = compute_aabb(&vertices)
+        val aabb = compute_aabb(&vertices)
 
         return Ok(Mesh {
             vertices: vertices,
@@ -158,88 +156,88 @@ impl GltfLoader:
             aabb: aabb
         })
 
-    fn read_accessor_vec3(self, accessor_index: i32) -> Result[Array[Vec3], String]:
-        let accessor = &self.file.accessors[accessor_index as usize]
+    fn read_accessor_vec3(accessor_index: i32) -> Result[Array[Vec3], String]:
+        val accessor = &self.file.accessors[accessor_index as usize]
         if accessor.type_name != "VEC3":
             return Err("Accessor is not VEC3")
 
-        let data = self.get_accessor_data(accessor)?
+        val data = self.get_accessor_data(accessor)?
 
-        let mut result = Array[Vec3]::new()
-        let stride = if accessor.component_type == 5126: 12 else: 0  # FLOAT = 4 bytes * 3
+        var result = Array[Vec3]::new()
+        val stride = if accessor.component_type == 5126: 12 else: 0  # FLOAT = 4 bytes * 3
 
         for i in 0..accessor.count:
-            let offset = (i * stride) as usize
-            let x = read_f32_le(&data, offset)
-            let y = read_f32_le(&data, offset + 4)
-            let z = read_f32_le(&data, offset + 8)
+            val offset = (i * stride) as usize
+            val x = read_f32_le(&data, offset)
+            val y = read_f32_le(&data, offset + 4)
+            val z = read_f32_le(&data, offset + 8)
             result.push(Vec3::new(x, y, z))
 
         return Ok(result)
 
-    fn read_accessor_vec2(self, accessor_index: i32) -> Result[Array[Vec2], String]:
-        let accessor = &self.file.accessors[accessor_index as usize]
+    fn read_accessor_vec2(accessor_index: i32) -> Result[Array[Vec2], String]:
+        val accessor = &self.file.accessors[accessor_index as usize]
         if accessor.type_name != "VEC2":
             return Err("Accessor is not VEC2")
 
-        let data = self.get_accessor_data(accessor)?
+        val data = self.get_accessor_data(accessor)?
 
-        let mut result = Array[Vec2]::new()
-        let stride = if accessor.component_type == 5126: 8 else: 0  # FLOAT = 4 bytes * 2
+        var result = Array[Vec2]::new()
+        val stride = if accessor.component_type == 5126: 8 else: 0  # FLOAT = 4 bytes * 2
 
         for i in 0..accessor.count:
-            let offset = (i * stride) as usize
-            let x = read_f32_le(&data, offset)
-            let y = read_f32_le(&data, offset + 4)
+            val offset = (i * stride) as usize
+            val x = read_f32_le(&data, offset)
+            val y = read_f32_le(&data, offset + 4)
             result.push(Vec2::new(x, y))
 
         return Ok(result)
 
-    fn read_accessor_indices(self, accessor_index: i32) -> Result[Array[u32], String]:
-        let accessor = &self.file.accessors[accessor_index as usize]
+    fn read_accessor_indices(accessor_index: i32) -> Result[Array[u32], String]:
+        val accessor = &self.file.accessors[accessor_index as usize]
         if accessor.type_name != "SCALAR":
             return Err("Index accessor must be SCALAR")
 
-        let data = self.get_accessor_data(accessor)?
+        val data = self.get_accessor_data(accessor)?
 
-        let mut result = Array[u32]::new()
+        var result = Array[u32]::new()
 
         if accessor.component_type == 5123:  # UNSIGNED_SHORT
             for i in 0..accessor.count:
-                let offset = (i * 2) as usize
+                val offset = (i * 2) as usize
                 result.push(read_u16_le(&data, offset) as u32)
         else if accessor.component_type == 5125:  # UNSIGNED_INT
             for i in 0..accessor.count:
-                let offset = (i * 4) as usize
+                val offset = (i * 4) as usize
                 result.push(read_u32_le(&data, offset))
         else:
             return Err("Unsupported index component type")
 
         return Ok(result)
 
-    fn get_accessor_data(self, accessor: &GltfAccessor) -> Result[Array[u8], String]:
+    fn get_accessor_data(accessor: &GltfAccessor) -> Result[Array[u8], String]:
         if accessor.buffer_view < 0:
             return Err("Accessor missing buffer view")
 
-        let view = &self.file.buffer_views[accessor.buffer_view as usize]
-        let buffer = &self.file.buffers[view.buffer as usize]
+        val view = &self.file.buffer_views[accessor.buffer_view as usize]
+        val buffer = &self.file.buffers[view.buffer as usize]
 
-        let start = view.byte_offset + accessor.byte_offset
-        let end = start + self.calculate_accessor_byte_length(accessor, view)
+        val start = view.byte_offset + accessor.byte_offset
+        val end = start + self.calculate_accessor_byte_length(accessor, view)
 
         if end > buffer.data.len() as i32:
             return Err("Accessor data exceeds buffer bounds")
 
         return Ok(buffer.data.slice(start as usize, end as usize))
 
-    fn calculate_accessor_byte_length(self, accessor: &GltfAccessor, view: &GltfBufferView) -> i32:
-        let component_size = match accessor.component_type:
+    fn calculate_accessor_byte_length(accessor: &GltfAccessor, view: &GltfBufferView) -> i32:
+        val component_size = match accessor.component_type:
             case 5120 | 5121: 1  # BYTE, UNSIGNED_BYTE
             case 5122 | 5123: 2  # SHORT, UNSIGNED_SHORT
             case 5125 | 5126: 4  # UNSIGNED_INT, FLOAT
             case _: 0
 
-        let num_components = match accessor.type_name:
+        val num_components = match accessor.type_name:
             case "SCALAR": 1
             case "VEC2": 2
             case "VEC3": 3
@@ -247,7 +245,7 @@ impl GltfLoader:
             case "MAT4": 16
             case _: 0
 
-        let stride = if view.byte_stride > 0:
+        val stride = if view.byte_stride > 0:
             view.byte_stride
         else:
             component_size * num_components
@@ -260,7 +258,7 @@ impl GltfLoader:
 
 fn generate_normals(positions: &Array[Vec3], indices: &Array[u32]) -> Array[Vec3]:
     # Placeholder - generate flat normals
-    let mut normals = Array[Vec3]::new()
+    var normals = Array[Vec3]::new()
     for _ in 0..positions.len():
         normals.push(Vec3::new(0.0, 1.0, 0.0))
     return normals
@@ -268,21 +266,21 @@ fn generate_normals(positions: &Array[Vec3], indices: &Array[u32]) -> Array[Vec3
 fn generate_tangents(vertices: &mut Array[MeshVertex], indices: &Array[u32]):
     # Use same tangent generation as OBJ loader
     for i in 0..indices.len() step 3:
-        let i0 = indices[i] as usize
-        let i1 = indices[i + 1] as usize
-        let i2 = indices[i + 2] as usize
+        val i0 = indices[i] as usize
+        val i1 = indices[i + 1] as usize
+        val i2 = indices[i + 2] as usize
 
-        let v0 = vertices[i0]
-        let v1 = vertices[i1]
-        let v2 = vertices[i2]
+        val v0 = vertices[i0]
+        val v1 = vertices[i1]
+        val v2 = vertices[i2]
 
-        let edge1 = v1.position - v0.position
-        let edge2 = v2.position - v0.position
-        let delta_uv1 = v1.tex_coord - v0.tex_coord
-        let delta_uv2 = v2.tex_coord - v0.tex_coord
+        val edge1 = v1.position - v0.position
+        val edge2 = v2.position - v0.position
+        val delta_uv1 = v1.tex_coord - v0.tex_coord
+        val delta_uv2 = v2.tex_coord - v0.tex_coord
 
-        let f = 1.0 / (delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y)
-        let tangent = Vec3::new(
+        val f = 1.0 / (delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y)
+        val tangent = Vec3::new(
             f * (delta_uv2.y * edge1.x - delta_uv1.y * edge2.x),
             f * (delta_uv2.y * edge1.y - delta_uv1.y * edge2.y),
             f * (delta_uv2.y * edge1.z - delta_uv1.y * edge2.z)
@@ -296,8 +294,8 @@ fn compute_aabb(vertices: &Array[MeshVertex]) -> AABB:
     if vertices.is_empty():
         return AABB { min: Vec3::zero(), max: Vec3::zero() }
 
-    let mut min = vertices[0].position
-    let mut max = vertices[0].position
+    var min = vertices[0].position
+    var max = vertices[0].position
 
     for vertex in vertices:
         min = Vec3::new(
@@ -333,6 +331,6 @@ fn read_u32_le(data: &Array[u8], offset: usize) -> u32:
            ((data[offset + 3] as u32) << 24)
 
 fn read_f32_le(data: &Array[u8], offset: usize) -> f32:
-    let bits = read_u32_le(data, offset)
+    val bits = read_u32_le(data, offset)
     return f32_from_bits(bits)
 

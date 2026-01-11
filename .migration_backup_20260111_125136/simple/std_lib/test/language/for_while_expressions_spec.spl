@@ -1,0 +1,208 @@
+# For/While Expression Forms Specification
+#
+# Feature: For/while loops as expressions with `=>` and `=>:`
+# Status: NOT IMPLEMENTED (skip tests)
+# Priority: Unified Design Phase 3
+# Tracking: doc/research/code_shortening_grammar_analysis.md#unified-design
+
+import spec
+
+describe "For/While Expression Forms":
+
+    context "For expression with =>":
+
+        it "creates yieldable with single expression", skip: true:
+            let numbers = [1, 2, 3, 4, 5]
+            let doubled = for x in numbers => x * 2
+
+            expect(doubled.to_list()).to_equal([2, 4, 6, 8, 10])
+
+        it "filter and map in one expression", skip: true:
+            let numbers = [1, 2, 3, 4, 5, 6]
+            let result = for x in numbers if x % 2 == 0 => x * 2
+
+            expect(result.to_list()).to_equal([4, 8, 12])
+
+    context "For expression with =>: (value block)":
+
+        it "yields last expression of block", skip: true:
+            let numbers = [1, 2, 3]
+            let result = for x in numbers =>:
+                let normalized = x * 10
+                let squared = normalized * normalized
+                squared              # Implicit yield
+
+            expect(result.to_list()).to_equal([100, 400, 900])
+
+        it "multiple statements before yield", skip: true:
+            let strings = ["1", "2", "3"]
+            let result = for s in strings =>:
+                let trimmed = s.trim()
+                let parsed = trimmed.to_i64()
+                let doubled = parsed * 2
+                doubled              # Implicit yield
+
+            expect(result.to_list()).to_equal([2, 4, 6])
+
+    context "For statement with : (side effects)":
+
+        it "traditional loop with side effects", skip: true:
+            let sum = 0
+            for x in [1, 2, 3]:
+                sum += x
+
+            expect(sum).to_equal(6)
+
+        it "returns nil/unit", skip: true:
+            let result = for x in [1, 2, 3]:
+                print(x)
+
+            expect(result).to_equal(nil)  # Or () unit type
+
+    context "While expression with =>":
+
+        it "yields values while condition true", skip: true:
+            let i = 0
+            let result = while i < 5 => (i, i += 1).0
+
+            expect(result.to_list()).to_equal([0, 1, 2, 3, 4])
+
+    context "While expression with =>:":
+
+        it "yields last expression each iteration", skip: true:
+            let i = 0
+            let result = while i < 3 =>:
+                let current = i
+                i += 1
+                current * 10         # Implicit yield
+
+            expect(result.to_list()).to_equal([0, 10, 20])
+
+    context "Desugaring to map/filter":
+
+        it "desugars simple for to map", skip: true:
+            # for x in xs => f(x)
+            # Desugars to:
+            # xs.map(\x: f(x))
+
+            let numbers = [1, 2, 3]
+            let manual = numbers.map(\x: x * 2)
+            let sugar = for x in numbers => x * 2
+
+            expect(sugar.to_list()).to_equal(manual.to_list())
+
+        it "desugars filter+map", skip: true:
+            # for x in xs if p(x) => f(x)
+            # Desugars to:
+            # xs.withFilter(\x: p(x)).map(\x: f(x))
+
+            let numbers = [1, 2, 3, 4, 5, 6]
+            let manual = numbers
+                .withFilter(\x: x % 2 == 0)
+                .map(\x: x * 2)
+            let sugar = for x in numbers if x % 2 == 0 => x * 2
+
+            expect(sugar.to_list()).to_equal(manual.to_list())
+
+    context "Nested for expressions":
+
+        it "desugars to flatMap", skip: true:
+            let xs = [1, 2]
+            let ys = [10, 20]
+
+            let result = for x in xs =>:
+                for y in ys => (x, y)
+
+            # Should produce: [(1,10), (1,20), (2,10), (2,20)]
+            let expected = [(1, 10), (1, 20), (2, 10), (2, 20)]
+            expect(result.to_list()).to_equal(expected)
+
+    context "Lazy evaluation":
+
+        it "is lazy by default", skip: true:
+            let evaluated = []
+
+            let result = for x in [1, 2, 3, 4, 5] =>:
+                evaluated.push(x)
+                x * 2
+
+            # Nothing evaluated yet
+            expect(evaluated).to_equal([])
+
+            # Evaluate
+            let list = result.to_list()
+
+            # Now evaluated
+            expect(evaluated).to_equal([1, 2, 3, 4, 5])
+            expect(list).to_equal([2, 4, 6, 8, 10])
+
+    context "Type: Yieldable[T]":
+
+        it "returns Yieldable[T]", skip: true:
+            let numbers: Array[i64] = [1, 2, 3]
+            let result: Yieldable[i64] = for x in numbers => x * 2
+
+            # Can convert to concrete collection
+            let list: Array[i64] = result.to_list()
+            expect(list).to_equal([2, 4, 6])
+
+    context "Combining with pipeline":
+
+        it "pipes for expression", skip: true:
+            let result = [1, 2, 3, 4, 5]
+                |> (for x in _ if x > 2 => x * 2)
+                |> to_list()
+
+            expect(result).to_equal([6, 8, 10])
+
+    context "LOC reduction":
+
+        it "replaces verbose imperative code", skip: true:
+            # Before (8 lines)
+            let results = []
+            for x in numbers:
+                if x > 0:
+                    let doubled = x * 2
+                    results.push(doubled)
+
+            # After (1 line)
+            let results = for x in numbers if x > 0 =>: x * 2
+
+            expect(true).to_be_true()  # Example comparison
+
+    context "Multi-yield generator with =>*:":
+
+        it "allows explicit yields", skip: true:
+            let numbers = [1, 2, 3]
+            let result = for x in numbers =>*:
+                if x > 1:
+                    yield x
+                    yield x * 10
+
+            # Yields: 2, 20, 3, 30
+            expect(result.to_list()).to_equal([2, 20, 3, 30])
+
+        it "can yield zero times", skip: true:
+            let numbers = [1, 2, 3, 4, 5]
+            let result = for x in numbers =>*:
+                if x % 2 == 0:
+                    yield x
+
+            # Only yields even numbers
+            expect(result.to_list()).to_equal([2, 4])
+
+    context "Edge cases":
+
+        it "works with empty collection", skip: true:
+            let empty: Array[i64] = []
+            let result = for x in empty => x * 2
+
+            expect(result.to_list()).to_equal([])
+
+        it "chains multiple transformations", skip: true:
+            let result = [1, 2, 3, 4, 5]
+                |> (for x in _ => x * 2)
+                |> (for x in _ if x > 5 => x + 1)
+                |> to_list()
+
+            expect(result).to_equal([7, 9, 11])  # 6+1, 8+1, 10+1

@@ -1,0 +1,306 @@
+# VSCode Tasks API
+# Define and execute build tasks, test tasks, and custom commands
+
+# External FFI declarations
+extern fn vscode_tasks_register_provider(task_type: String, callback_id: i64): i64
+extern fn vscode_tasks_execute_task(task_json: String): i64
+extern fn vscode_tasks_fetch_tasks(task_type: String): String
+
+# Task definition
+pub class TaskDefinition:
+    pub type: String
+    pub task: String
+    pub file: String
+    pub args: List[String]
+
+    pub fn new(task_type: String): TaskDefinition =
+        """Create task definition.
+
+        Args:
+            task_type: Task type (e.g., "simple", "shell")
+
+        Example:
+            def = TaskDefinition.new("simple")
+            def.task = "build"
+            def.file = "main.spl"
+        """
+        TaskDefinition {
+            type: task_type,
+            task: "",
+            file: "",
+            args: []
+        }
+
+# Shell execution
+pub class ShellExecution:
+    pub command_line: String
+    pub cwd: String
+    pub env: Dict[String, String]
+
+    pub fn new(command_line: String): ShellExecution =
+        """Create shell execution.
+
+        Args:
+            command_line: Command to execute
+
+        Example:
+            exec = ShellExecution.new("simple build main.spl")
+        """
+        ShellExecution {
+            command_line: command_line,
+            cwd: "",
+            env: {}
+        }
+
+# Process execution
+pub class ProcessExecution:
+    pub process: String
+    pub args: List[String]
+    pub cwd: String
+    pub env: Dict[String, String]
+
+    pub fn new(process: String, args: List[String]): ProcessExecution =
+        """Create process execution.
+
+        Args:
+            process: Process path
+            args: Arguments
+
+        Example:
+            exec = ProcessExecution.new("simple", ["build", "main.spl"])
+        """
+        ProcessExecution {
+            process: process,
+            args: args,
+            cwd: "",
+            env: {}
+        }
+
+# Task scope
+pub let TaskScope_Global: i32 = 1
+pub let TaskScope_Workspace: i32 = 2
+
+# Task group
+pub let TaskGroup_Build: String = "build"
+pub let TaskGroup_Test: String = "test"
+pub let TaskGroup_Clean: String = "clean"
+
+# Task
+pub class Task:
+    pub definition: TaskDefinition
+    pub name: String
+    pub source: String
+    pub execution: ShellExecution?  # or ProcessExecution
+    pub scope: i32
+    pub group: String
+    pub presentation_reveal: i32
+    pub presentation_echo: bool
+    pub presentation_focus: bool
+    pub presentation_panel: i32
+    pub problem_matchers: List[String]
+
+    pub fn new(definition: TaskDefinition, name: String, source: String): Task =
+        """Create task.
+
+        Args:
+            definition: Task definition
+            name: Task name shown to user
+            source: Source extension name
+
+        Example:
+            def = TaskDefinition.new("simple")
+            task = Task.new(def, "Build Project", "Simple Language")
+            task.execution = some(ShellExecution.new("simple build"))
+            task.group = TaskGroup_Build
+        """
+        Task {
+            definition: definition,
+            name: name,
+            source: source,
+            execution: none,
+            scope: TaskScope_Workspace,
+            group: "",
+            presentation_reveal: 1,  # Always = 1, Silent = 2, Never = 3
+            presentation_echo: true,
+            presentation_focus: false,
+            presentation_panel: 1,  # Shared = 1, Dedicated = 2, New = 3
+            problem_matchers: []
+        }
+
+    pub fn to_json(self): String =
+        """Serialize task to JSON."""
+        let json = "{"
+        json = json + '"type":"' + self.definition.type + '",'
+        json = json + '"name":"' + self.name + '",'
+        json = json + '"source":"' + self.source + '",'
+
+        # Execution
+        match self.execution:
+            some(exec):
+                json = json + '"command":"' + exec.command_line + '",'
+            none:
+                pass
+
+        # Group
+        if self.group != "":
+            json = json + '"group":"' + self.group + '",'
+
+        # Remove trailing comma
+        if json.ends_with(","):
+            json = json.substring(0, json.len() - 1)
+
+        json = json + "}"
+        json
+
+# Task provider
+pub fn register_task_provider(
+    task_type: String,
+    provider: fn(): List[Task]
+): i64 =
+    """Register task provider.
+
+    Args:
+        task_type: Task type (e.g., "simple")
+        provider: Function that returns available tasks
+
+    Returns:
+        Subscription ID for disposal
+
+    Example:
+        tasks.register_task_provider("simple", fn():
+            let task_list: List[Task] = []
+
+            # Build task
+            let build_def = TaskDefinition.new("simple")
+            build_def.task = "build"
+
+            let build_task = Task.new(build_def, "Build", "Simple")
+            build_task.execution = some(ShellExecution.new("simple build"))
+            build_task.group = TaskGroup_Build
+            build_task.problem_matchers = ["$simple"]
+
+            task_list.append(build_task)
+
+            # Test task
+            let test_def = TaskDefinition.new("simple")
+            test_def.task = "test"
+
+            let test_task = Task.new(test_def, "Test", "Simple")
+            test_task.execution = some(ShellExecution.new("simple test"))
+            test_task.group = TaskGroup_Test
+
+            task_list.append(test_task)
+
+            return task_list
+        )
+    """
+    # TODO: [stdlib][P3] Store provider callback
+    let callback_id = 0
+    vscode_tasks_register_provider(task_type, callback_id)
+
+# Execute task
+pub fn execute_task(task: Task): i64 =
+    """Execute a task.
+
+    Args:
+        task: Task to execute
+
+    Returns:
+        Execution ID
+
+    Example:
+        def = TaskDefinition.new("simple")
+        task = Task.new(def, "Build", "Simple")
+        task.execution = some(ShellExecution.new("simple build main.spl"))
+
+        exec_id = tasks.execute_task(task)
+    """
+    let json = task.to_json()
+    vscode_tasks_execute_task(json)
+
+# Fetch tasks of a type
+pub fn fetch_tasks(task_type: String): List[Task] =
+    """Fetch all tasks of a given type.
+
+    Args:
+        task_type: Task type filter (empty string for all)
+
+    Returns:
+        List of tasks
+
+    Example:
+        simple_tasks = tasks.fetch_tasks("simple")
+    """
+    let json = vscode_tasks_fetch_tasks(task_type)
+
+    # Parse JSON to Task list
+    # TODO: [stdlib][P3] Proper JSON parsing
+    let task_list: List[Task] = []
+    task_list
+
+# Helper: Create build task
+pub fn create_build_task(name: String, command: String): Task =
+    """Create a build task.
+
+    Args:
+        name: Task name
+        command: Build command
+
+    Returns:
+        Configured build task
+
+    Example:
+        task = tasks.create_build_task("Build Project", "simple build")
+    """
+    let def = TaskDefinition.new("simple")
+    def.task = "build"
+
+    let task = Task.new(def, name, "Simple")
+    task.execution = some(ShellExecution.new(command))
+    task.group = TaskGroup_Build
+    task.problem_matchers = ["$simple"]
+    task
+
+# Helper: Create test task
+pub fn create_test_task(name: String, command: String): Task =
+    """Create a test task.
+
+    Args:
+        name: Task name
+        command: Test command
+
+    Returns:
+        Configured test task
+
+    Example:
+        task = tasks.create_test_task("Run Tests", "simple test")
+    """
+    let def = TaskDefinition.new("simple")
+    def.task = "test"
+
+    let task = Task.new(def, name, "Simple")
+    task.execution = some(ShellExecution.new(command))
+    task.group = TaskGroup_Test
+    task
+
+# Helper: Create custom task
+pub fn create_custom_task(name: String, command: String, group: String): Task =
+    """Create a custom task.
+
+    Args:
+        name: Task name
+        command: Command to run
+        group: Task group (TaskGroup_Build, TaskGroup_Test, TaskGroup_Clean)
+
+    Returns:
+        Custom task
+
+    Example:
+        task = tasks.create_custom_task("Format", "simple fmt", TaskGroup_Build)
+    """
+    let def = TaskDefinition.new("shell")
+
+    let task = Task.new(def, name, "Simple")
+    task.execution = some(ShellExecution.new(command))
+    task.group = group
+    task

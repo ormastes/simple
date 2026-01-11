@@ -1,0 +1,611 @@
+# Type Inference Model
+# Hindley-Milner type inference with extensions for Simple.
+
+# Type variable for unification
+class TypeVar:
+    id: Int
+    bound: Option<Type>
+
+    fn new(id: Int) -> TypeVar:
+        TypeVar(id: id, bound: None)
+
+    me bind(self, ty: Type):
+        self.bound = Some(ty)
+
+    fn is_bound(self) -> Bool:
+        self.bound.is_some()
+
+    fn get_bound(self) -> Option<Type>:
+        self.bound
+
+# Type representation
+enum Type:
+    # Primitive types
+    Int
+    Float
+    Bool
+    String
+    Unit
+    # Type variable
+    Var(TypeVar)
+    # Constructed types
+    Function(params: List<Type>, ret: Type)
+    Array(element: Type)
+    Option_(inner: Type)
+    Result_(ok: Type, err: Type)
+    Tuple(elements: List<Type>)
+    # Named types
+    Named(name: String, args: List<Type>)
+    # Capability-annotated types
+    Capability(cap: String, inner: Type)
+
+    fn to_string(self) -> String:
+        match self:
+            case Int: "Int"
+            case Float: "Float"
+            case Bool: "Bool"
+            case String: "String"
+            case Unit: "()"
+            case Var(tv): "?{tv.id}"
+            case Function(params, ret):
+                let params_str = params.map(|p| p.to_string()).join(", ")
+                "({params_str}) -> {ret.to_string()}"
+            case Array(elem):
+                "[{elem.to_string()}]"
+            case Option_(inner):
+                "Option<{inner.to_string()}>"
+            case Result_(ok, err):
+                "Result<{ok.to_string()}, {err.to_string()}>"
+            case Tuple(elems):
+                let elems_str = elems.map(|e| e.to_string()).join(", ")
+                "({elems_str})"
+            case Named(name, args):
+                if args.len() == 0:
+                    name
+                else:
+                    let args_str = args.map(|a| a.to_string()).join(", ")
+                    "{name}<{args_str}>"
+            case Capability(cap, inner):
+                "{cap} {inner.to_string()}"
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_int(self) -> Bool:
+        """Check if this is Int type.
+
+        Returns:
+            true for Int
+
+        Example:
+            Type.Int.is_int()  # → true
+        """
+        match self:
+            case Int: true
+            case _: false
+
+    fn is_float(self) -> Bool:
+        """Check if this is Float type.
+
+        Returns:
+            true for Float
+
+        Example:
+            Type.Float.is_float()  # → true
+        """
+        match self:
+            case Float: true
+            case _: false
+
+    fn is_bool(self) -> Bool:
+        """Check if this is Bool type.
+
+        Returns:
+            true for Bool
+
+        Example:
+            Type.Bool.is_bool()  # → true
+        """
+        match self:
+            case Bool: true
+            case _: false
+
+    fn is_string(self) -> Bool:
+        """Check if this is String type.
+
+        Returns:
+            true for String
+
+        Example:
+            Type.String.is_string()  # → true
+        """
+        match self:
+            case String: true
+            case _: false
+
+    fn is_unit(self) -> Bool:
+        """Check if this is Unit type.
+
+        Returns:
+            true for Unit
+
+        Example:
+            Type.Unit.is_unit()  # → true
+        """
+        match self:
+            case Unit: true
+            case _: false
+
+    fn is_var(self) -> Bool:
+        """Check if this is type variable.
+
+        Returns:
+            true for Var
+
+        Example:
+            Type.Var(TypeVar.new(0)).is_var()  # → true
+        """
+        match self:
+            case Var(_): true
+            case _: false
+
+    fn is_function(self) -> Bool:
+        """Check if this is Function type.
+
+        Returns:
+            true for Function
+
+        Example:
+            Type.Function([], Type.Int).is_function()  # → true
+        """
+        match self:
+            case Function(_, _): true
+            case _: false
+
+    fn is_array(self) -> Bool:
+        """Check if this is Array type.
+
+        Returns:
+            true for Array
+
+        Example:
+            Type.Array(Type.Int).is_array()  # → true
+        """
+        match self:
+            case Array(_): true
+            case _: false
+
+    fn is_option(self) -> Bool:
+        """Check if this is Option type.
+
+        Returns:
+            true for Option_
+
+        Example:
+            Type.Option_(Type.Int).is_option()  # → true
+        """
+        match self:
+            case Option_(_): true
+            case _: false
+
+    fn is_result(self) -> Bool:
+        """Check if this is Result type.
+
+        Returns:
+            true for Result_
+
+        Example:
+            Type.Result_(Type.Int, Type.String).is_result()  # → true
+        """
+        match self:
+            case Result_(_, _): true
+            case _: false
+
+    fn is_tuple(self) -> Bool:
+        """Check if this is Tuple type.
+
+        Returns:
+            true for Tuple
+
+        Example:
+            Type.Tuple([Type.Int, Type.Bool]).is_tuple()  # → true
+        """
+        match self:
+            case Tuple(_): true
+            case _: false
+
+    fn is_named(self) -> Bool:
+        """Check if this is Named type.
+
+        Returns:
+            true for Named
+
+        Example:
+            Type.Named("Vec", [Type.Int]).is_named()  # → true
+        """
+        match self:
+            case Named(_, _): true
+            case _: false
+
+    fn is_capability(self) -> Bool:
+        """Check if this has capability annotation.
+
+        Returns:
+            true for Capability
+
+        Example:
+            Type.Capability("mut", Type.Int).is_capability()  # → true
+        """
+        match self:
+            case Capability(_, _): true
+            case _: false
+
+    fn is_primitive(self) -> Bool:
+        """Check if this is primitive type.
+
+        Returns:
+            true for Int, Float, Bool, String, Unit
+
+        Example:
+            Type.Int.is_primitive()  # → true
+            Type.Array(Type.Int).is_primitive()  # → false
+        """
+        match self:
+            case Int: true
+            case Float: true
+            case Bool: true
+            case String: true
+            case Unit: true
+            case _: false
+
+    fn is_constructed(self) -> Bool:
+        """Check if this is constructed type.
+
+        Returns:
+            true for Function, Array, Option, Result, Tuple
+
+        Example:
+            Type.Array(Type.Int).is_constructed()  # → true
+        """
+        match self:
+            case Function(_, _): true
+            case Array(_): true
+            case Option_(_): true
+            case Result_(_, _): true
+            case Tuple(_): true
+            case _: false
+
+    fn is_generic(self) -> Bool:
+        """Check if type contains type variables.
+
+        Returns:
+            true if contains Var
+
+        Example:
+            Type.Array(Type.Var(TypeVar.new(0))).is_generic()  # → true
+        """
+        match self:
+            case Var(_): true
+            case Function(params, ret):
+                params.any(|p| p.is_generic()) or ret.is_generic()
+            case Array(elem): elem.is_generic()
+            case Option_(inner): inner.is_generic()
+            case Result_(ok, err): ok.is_generic() or err.is_generic()
+            case Tuple(elems): elems.any(|e| e.is_generic())
+            case Named(_, args): args.any(|a| a.is_generic())
+            case Capability(_, inner): inner.is_generic()
+            case _: false
+
+    fn is_concrete(self) -> Bool:
+        """Check if type is fully concrete (no type variables).
+
+        Returns:
+            true if no type variables
+
+        Example:
+            Type.Int.is_concrete()  # → true
+            Type.Var(TypeVar.new(0)).is_concrete()  # → false
+        """
+        not self.is_generic()
+
+    fn has_capability(self) -> Bool:
+        """Check if type has any capability annotation.
+
+        Returns:
+            true if wrapped in Capability
+
+        Example:
+            Type.Capability("mut", Type.Int).has_capability()  # → true
+        """
+        self.is_capability()
+
+    fn description(self) -> String:
+        """Get type description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            Type.Function([Type.Int], Type.Bool).description()
+            # → "Function type taking Int and returning Bool"
+        """
+        match self:
+            case Int: "Integer type"
+            case Float: "Floating point type"
+            case Bool: "Boolean type"
+            case String: "String type"
+            case Unit: "Unit type (void)"
+            case Var(tv): "Type variable ?{tv.id}"
+            case Function(_, _): "Function type"
+            case Array(_): "Array type"
+            case Option_(_): "Optional value type"
+            case Result_(_, _): "Result type (success or error)"
+            case Tuple(_): "Tuple type"
+            case Named(name, _): "Named type: {name}"
+            case Capability(cap, _): "Capability-annotated type: {cap}"
+
+    fn summary(self) -> String:
+        """Get summary of type.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            Type.Array(Type.Int).summary()
+            # → "Type: [Int] (array, constructed, concrete)"
+        """
+        let type_str = self.to_string()
+        let mut attrs: List<String> = []
+
+        if self.is_primitive():
+            attrs.push("primitive")
+        if self.is_constructed():
+            attrs.push("constructed")
+        if self.is_function():
+            attrs.push("function")
+        if self.is_generic():
+            attrs.push("generic")
+        if self.is_concrete():
+            attrs.push("concrete")
+        if self.has_capability():
+            attrs.push("capability-annotated")
+
+        let attrs_str = attrs.join(", ")
+        return "Type: {type_str} ({attrs_str})"
+
+# Type scheme (polymorphic type)
+class TypeScheme:
+    vars: List<Int>  # Bound type variable IDs
+    ty: Type
+
+    fn new(ty: Type) -> TypeScheme:
+        TypeScheme(vars: [], ty: ty)
+
+    fn forall(vars: List<Int>, ty: Type) -> TypeScheme:
+        TypeScheme(vars: vars, ty: ty)
+
+    fn is_monomorphic(self) -> Bool:
+        self.vars.len() == 0
+
+# Type environment
+class TypeEnv:
+    bindings: Dict<String, TypeScheme>
+    parent: Option<TypeEnv>
+
+    fn new() -> TypeEnv:
+        TypeEnv(bindings: {}, parent: None)
+
+    fn with_parent(parent: TypeEnv) -> TypeEnv:
+        TypeEnv(bindings: {}, parent: Some(parent))
+
+    me bind(self, name: String, scheme: TypeScheme):
+        self.bindings[name] = scheme
+
+    fn lookup(self, name: String) -> Option<TypeScheme>:
+        match self.bindings.get(name):
+            case Some(scheme):
+                Some(scheme)
+            case None:
+                match self.parent:
+                    case Some(parent):
+                        parent.lookup(name)
+                    case None:
+                        None
+
+# Substitution (type variable -> type mapping)
+class Substitution:
+    mappings: Dict<Int, Type>
+
+    fn new() -> Substitution:
+        Substitution(mappings: {})
+
+    me add(self, var_id: Int, ty: Type):
+        self.mappings[var_id] = ty
+
+    fn get(self, var_id: Int) -> Option<Type>:
+        self.mappings.get(var_id)
+
+    fn apply(self, ty: Type) -> Type:
+        match ty:
+            case Type.Var(tv):
+                match self.get(tv.id):
+                    case Some(bound):
+                        self.apply(bound)
+                    case None:
+                        ty
+            case Type.Function(params, ret):
+                Type.Function(
+                    params: params.map(|p| self.apply(p)),
+                    ret: self.apply(ret)
+                )
+            case Type.Array(elem):
+                Type.Array(element: self.apply(elem))
+            case Type.Option_(inner):
+                Type.Option_(inner: self.apply(inner))
+            case Type.Result_(ok, err):
+                Type.Result_(ok: self.apply(ok), err: self.apply(err))
+            case Type.Tuple(elems):
+                Type.Tuple(elements: elems.map(|e| self.apply(e)))
+            case Type.Named(name, args):
+                Type.Named(name: name, args: args.map(|a| self.apply(a)))
+            case Type.Capability(cap, inner):
+                Type.Capability(cap: cap, inner: self.apply(inner))
+            case _:
+                ty
+
+    fn compose(self, other: Substitution) -> Substitution:
+        let mut result = Substitution.new()
+        # Apply self to other's mappings
+        for (id, ty) in other.mappings:
+            result.add(id, self.apply(ty))
+        # Add self's mappings
+        for (id, ty) in self.mappings:
+            if not result.mappings.contains_key(id):
+                result.add(id, ty)
+        result
+
+# Unification error
+class UnificationError:
+    expected: Type
+    actual: Type
+    message: String
+
+    fn new(expected: Type, actual: Type) -> UnificationError:
+        UnificationError(
+            expected: expected,
+            actual: actual,
+            message: "Cannot unify {expected.to_string()} with {actual.to_string()}"
+        )
+
+# Type inference context
+class InferenceContext:
+    next_var_id: Int
+    env: TypeEnv
+    substitution: Substitution
+    errors: List<UnificationError>
+
+    fn new() -> InferenceContext:
+        InferenceContext(
+            next_var_id: 0,
+            env: TypeEnv.new(),
+            substitution: Substitution.new(),
+            errors: []
+        )
+
+    me fresh_var(self) -> Type:
+        let id = self.next_var_id
+        self.next_var_id = self.next_var_id + 1
+        Type.Var(TypeVar.new(id))
+
+    me unify(self, t1: Type, t2: Type) -> Result<Substitution, UnificationError>:
+        let t1_applied = self.substitution.apply(t1)
+        let t2_applied = self.substitution.apply(t2)
+
+        match (t1_applied, t2_applied):
+            # Same type
+            case (Type.Int, Type.Int): Ok(Substitution.new())
+            case (Type.Float, Type.Float): Ok(Substitution.new())
+            case (Type.Bool, Type.Bool): Ok(Substitution.new())
+            case (Type.String, Type.String): Ok(Substitution.new())
+            case (Type.Unit, Type.Unit): Ok(Substitution.new())
+
+            # Type variable on left
+            case (Type.Var(tv), _):
+                if tv.id == t2_applied.get_var_id():
+                    Ok(Substitution.new())
+                else:
+                    let mut sub = Substitution.new()
+                    sub.add(tv.id, t2_applied)
+                    self.substitution = self.substitution.compose(sub)
+                    Ok(sub)
+
+            # Type variable on right
+            case (_, Type.Var(tv)):
+                let mut sub = Substitution.new()
+                sub.add(tv.id, t1_applied)
+                self.substitution = self.substitution.compose(sub)
+                Ok(sub)
+
+            # Function types
+            case (Type.Function(p1, r1), Type.Function(p2, r2)):
+                if p1.len() != p2.len():
+                    return Err(UnificationError.new(t1_applied, t2_applied))
+                for i in 0..p1.len():
+                    self.unify(p1[i], p2[i])?
+                self.unify(r1, r2)
+
+            # Array types
+            case (Type.Array(e1), Type.Array(e2)):
+                self.unify(e1, e2)
+
+            # Option types
+            case (Type.Option_(i1), Type.Option_(i2)):
+                self.unify(i1, i2)
+
+            # Result types
+            case (Type.Result_(o1, e1), Type.Result_(o2, e2)):
+                self.unify(o1, o2)?
+                self.unify(e1, e2)
+
+            # Named types with same name
+            case (Type.Named(n1, a1), Type.Named(n2, a2)):
+                if n1 != n2 or a1.len() != a2.len():
+                    return Err(UnificationError.new(t1_applied, t2_applied))
+                for i in 0..a1.len():
+                    self.unify(a1[i], a2[i])?
+                Ok(Substitution.new())
+
+            case _:
+                Err(UnificationError.new(t1_applied, t2_applied))
+
+    fn generalize(self, ty: Type) -> TypeScheme:
+        # Find free variables in ty that are not in env
+        let free_vars = find_free_vars(ty)
+        TypeScheme.forall(free_vars, ty)
+
+    me instantiate(self, scheme: TypeScheme) -> Type:
+        let mut sub = Substitution.new()
+        for var_id in scheme.vars:
+            sub.add(var_id, self.fresh_var())
+        sub.apply(scheme.ty)
+
+# Find free type variables in a type
+fn find_free_vars(ty: Type) -> List<Int>:
+    let mut vars: List<Int> = []
+
+    fn collect(t: Type):
+        match t:
+            case Type.Var(tv):
+                if not vars.contains(tv.id):
+                    vars.push(tv.id)
+            case Type.Function(params, ret):
+                for p in params:
+                    collect(p)
+                collect(ret)
+            case Type.Array(elem):
+                collect(elem)
+            case Type.Option_(inner):
+                collect(inner)
+            case Type.Result_(ok, err):
+                collect(ok)
+                collect(err)
+            case Type.Tuple(elems):
+                for e in elems:
+                    collect(e)
+            case Type.Named(_, args):
+                for a in args:
+                    collect(a)
+            case Type.Capability(_, inner):
+                collect(inner)
+            case _:
+                pass
+
+    collect(ty)
+    vars
+
+# Helper to get var ID from type
+fn get_var_id(ty: Type) -> Option<Int>:
+    match ty:
+        case Type.Var(tv): Some(tv.id)
+        case _: None

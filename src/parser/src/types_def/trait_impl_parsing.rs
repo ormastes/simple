@@ -134,10 +134,11 @@ impl<'a> Parser<'a> {
                 } else {
                     crate::ast::Visibility::Private
                 };
-                // Handle async functions in impl blocks
+                // Handle async functions and me methods in impl blocks
                 let item = if self.check(&TokenKind::Async) {
                     self.parse_async_function()?
                 } else {
+                    // Handles both 'fn' and 'me' keywords
                     self.parse_function()?
                 };
                 if let Node::Function(mut f) = item {

@@ -1,0 +1,275 @@
+# C/C++ Compiler Adapter
+# Wrapper around gcc/clang/make/cmake
+
+use tooling.core.project.{Language, LanguageConfig}
+use tooling.compiler.interface.{LanguageCompiler, CompilationMode, CompilationResult}
+use core.result.{Result, Ok, Err}
+
+# C/C++ compiler adapter
+pub class CCompiler:
+    pub language: Language
+    pub compiler_cmd: String  # gcc or clang
+    pub use_cmake: bool
+
+    pub fn new(is_cpp: bool, use_cmake: bool): CCompiler =
+        """Create C/C++ compiler.
+
+        Args:
+            is_cpp: True for C++, false for C
+            use_cmake: Use CMake build system
+
+        Returns:
+            Compiler instance
+        """
+        CCompiler {
+            language: if is_cpp then Language.Cpp else Language.C,
+            compiler_cmd: if is_cpp then "g++" else "gcc",
+            use_cmake: use_cmake
+        }
+
+    pub fn compile(
+        self,
+        config: LanguageConfig,
+        mode: CompilationMode,
+        incremental: bool
+    ): CompilationResult =
+        """Compile C/C++ project.
+
+        Uses gcc/clang directly or via CMake.
+
+        Args:
+            config: Language configuration
+            mode: Debug or Release
+            incremental: Use incremental compilation (via make)
+
+        Returns:
+            Compilation result
+        """
+        start_time = time.now()
+
+        # Determine build command
+        build_cmd = if self.use_cmake:
+            self.get_cmake_command(mode, config)
+        else:
+            self.get_compiler_command(mode, config)
+
+        # TODO: [stdlib][P3] Execute build command
+        # result = sys.exec(build_cmd, config.source_dir)
+
+        # For now, return success placeholder
+        CompilationResult {
+            status: "success",
+            output_path: config.output_dir + "/" + config.name,
+            duration_ms: time.now() - start_time,
+            errors: [],
+            warnings: []
+        }
+
+    fn get_compiler_command(mode: CompilationMode, config: LanguageConfig): String =
+        """Get direct compiler command.
+
+        Args:
+            mode: Compilation mode
+            config: Language configuration
+
+        Returns:
+            Compiler command string
+        """
+        # Base command
+        cmd = self.compiler_cmd
+
+        # Add source files (assuming all .c or .cpp in src/)
+        src_ext = if self.language == Language.Cpp then "cpp" else "c"
+        cmd = cmd + " src/*.{src_ext}"
+
+        # Add output flag
+        cmd = cmd + " -o {config.output_dir}/{config.name}"
+
+        # Add mode-specific flags
+        cmd = match mode:
+            CompilationMode.Debug ->
+                # Debug: include debug symbols, no optimization
+                cmd + " -g -O0 -Wall -Wextra"
+            CompilationMode.Release ->
+                # Release: optimize, strip symbols
+                cmd + " -O3 -DNDEBUG -s"
+
+        cmd
+
+    fn get_cmake_command(mode: CompilationMode, config: LanguageConfig): String =
+        """Get CMake build command.
+
+        Args:
+            mode: Compilation mode
+            config: Language configuration
+
+        Returns:
+            CMake command string
+        """
+        # Configure step
+        build_type = match mode:
+            CompilationMode.Debug -> "Debug"
+            CompilationMode.Release -> "Release"
+
+        cmake_config = "cmake -B {config.output_dir} -DCMAKE_BUILD_TYPE={build_type}"
+
+        # Build step
+        cmake_build = "cmake --build {config.output_dir}"
+
+        # Return both commands (would need to execute sequentially)
+        cmake_config + " && " + cmake_build
+
+    pub fn supports_incremental(self): bool =
+        """Check if incremental compilation is supported.
+
+        Supported when using Make or CMake.
+
+        Returns:
+            True if using build system
+        """
+        self.use_cmake  # Also true for Makefile projects
+
+    pub fn get_default_output_dir(self): String =
+        """Get default output directory.
+
+        Returns:
+            Default output path
+        """
+        if self.use_cmake:
+            "build"
+        else:
+            "bin"
+
+    pub fn is_cpp(self): bool =
+        """Check if this is a C++ compiler.
+
+        Returns:
+            True if language is C++
+        """
+        self.language == Language::Cpp
+
+    pub fn is_c(self): bool =
+        """Check if this is a C compiler.
+
+        Returns:
+            True if language is C
+        """
+        self.language == Language::C
+
+    pub fn is_cmake(self): bool =
+        """Check if using CMake build system.
+
+        Returns:
+            True if CMake is enabled
+        """
+        self.use_cmake
+
+    pub fn is_direct_compile(self): bool =
+        """Check if using direct compiler invocation.
+
+        Returns:
+            True if not using CMake
+        """
+        not self.use_cmake
+
+    pub fn get_compiler_name(self): String =
+        """Get compiler executable name.
+
+        Returns:
+            Compiler command (gcc/g++/clang/clang++)
+
+        Example:
+            compiler.get_compiler_name()  # → "gcc" or "g++"
+        """
+        self.compiler_cmd
+
+    pub fn get_build_tool(self): String =
+        """Get build tool name.
+
+        Returns:
+            "cmake" or compiler name
+
+        Example:
+            compiler.get_build_tool()  # → "cmake" or "gcc"
+        """
+        if self.use_cmake:
+            "cmake"
+        else:
+            self.compiler_cmd
+
+    pub fn summary(self): String =
+        """Get compiler summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            compiler.summary()
+            # → "CCompiler: gcc (cmake)" or "CCompiler: g++ (direct)"
+        """
+        let build_system = if self.use_cmake: "cmake" else: "direct"
+        "CCompiler: {self.compiler_cmd} ({build_system})"
+
+    pub fn run_tests(self, config: LanguageConfig): CompilationResult =
+        """Run C/C++ tests.
+
+        Assumes tests are built as executables.
+
+        Args:
+            config: Language configuration
+
+        Returns:
+            Test result
+        """
+        start_time = time.now()
+
+        # TODO: [stdlib][P3] Execute test binaries
+        # Find test executables and run them
+        # result = sys.exec("./test_runner", config.output_dir)
+
+        CompilationResult {
+            status: "success",
+            output_path: "",
+            duration_ms: time.now() - start_time,
+            errors: [],
+            warnings: []
+        }
+
+    pub fn lint(self, config: LanguageConfig): List[String] =
+        """Run clang-tidy for linting.
+
+        Args:
+            config: Language configuration
+
+        Returns:
+            List of lint warnings
+        """
+        # TODO: [stdlib][P3] Execute clang-tidy command
+        # result = sys.exec("clang-tidy src/*.c", config.source_dir)
+
+        []
+
+    pub fn format(self, config: LanguageConfig): bool =
+        """Format code using clang-format.
+
+        Args:
+            config: Language configuration
+
+        Returns:
+            True if successful
+        """
+        # TODO: [stdlib][P3] Execute clang-format command
+        # result = sys.exec("clang-format -i src/*", config.source_dir)
+
+        true
+
+# Trait implementation
+impl LanguageCompiler for CCompiler:
+    fn compile(config: LanguageConfig, mode: CompilationMode, incremental: bool): CompilationResult =
+        self.compile(config, mode, incremental)
+
+    fn supports_incremental(): bool =
+        self.supports_incremental()
+
+    fn get_default_output_dir(): String =
+        self.get_default_output_dir()

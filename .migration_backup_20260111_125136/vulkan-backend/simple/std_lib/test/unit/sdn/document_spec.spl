@@ -1,0 +1,184 @@
+///
+SDN Document Tests
+
+Tests for editable document API.
+
+Covers:
+- Document parsing and reading
+- Path-based mutation (set, delete, push)
+- Modification tracking
+- Serialization (to_sdn, to_json)
+- Error handling
+///
+
+import std.spec
+import sdn.document.SdnDocument
+import sdn.value.SdnValue
+
+describe "SDN Document":
+    context "parsing and reading":
+        it "parses and retrieves values":
+            let source = "name: Alice\nage: 30"
+            match SdnDocument.parse(source):
+                case Ok(doc):
+                    expect doc.get("name").flatmap(|v| v.as_str()) == Some("Alice")
+                    expect doc.get("age").flatmap(|v| v.as_i64()) == Some(30)
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+        it "handles path navigation":
+            let source = "server:\n    host: localhost\n    port: 8080"
+            match SdnDocument.parse(source):
+                case Ok(doc):
+                    expect doc.get("server.host").flatmap(|v| v.as_str()) == Some("localhost")
+                    expect doc.get("server.port").flatmap(|v| v.as_i64()) == Some(8080)
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+        it "returns None for missing paths":
+            let source = "key: value"
+            match SdnDocument.parse(source):
+                case Ok(doc):
+                    expect doc.get("nonexistent") == None
+                    expect doc.get("key.nested") == None
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+    context "mutation":
+        it "sets top-level values":
+            let source = "name: Alice"
+            match SdnDocument.parse(source):
+                case Ok(mut doc):
+                    let result = doc.set("name", SdnValue.String("Bob"))
+                    match result:
+                        case Ok(_):
+                            expect doc.get("name").flatmap(|v| v.as_str()) == Some("Bob")
+                            expect doc.is_modified() == True
+                        case Err(e):
+                            fail("Set error: ${e.to_string()}")
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+        it "sets nested values":
+            let source = "server:\n    host: localhost"
+            match SdnDocument.parse(source):
+                case Ok(mut doc):
+                    let result = doc.set("server.host", SdnValue.String("0.0.0.0"))
+                    match result:
+                        case Ok(_):
+                            expect doc.get("server.host").flatmap(|v| v.as_str()) == Some("0.0.0.0")
+                        case Err(e):
+                            fail("Set error: ${e.to_string()}")
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+        it "deletes values":
+            let source = "a: 1\nb: 2\nc: 3"
+            match SdnDocument.parse(source):
+                case Ok(mut doc):
+                    let result = doc.delete("b")
+                    match result:
+                        case Ok(_):
+                            expect doc.get("a").flatmap(|v| v.as_i64()) == Some(1)
+                            expect doc.get("b") == None
+                            expect doc.get("c").flatmap(|v| v.as_i64()) == Some(3)
+                        case Err(e):
+                            fail("Delete error: ${e.to_string()}")
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+        it "pushes to arrays":
+            let source = "items = [1, 2, 3]"
+            match SdnDocument.parse(source):
+                case Ok(mut doc):
+                    let result = doc.push("items", SdnValue.Int(4))
+                    match result:
+                        case Ok(_):
+                            match doc.get("items"):
+                                case Some(arr):
+                                    match arr.as_array():
+                                        case Some(list):
+                                            expect list.len == 4
+                                        case None:
+                                            fail("Expected array")
+                                case None:
+                                    fail("Expected items")
+                        case Err(e):
+                            fail("Push error: ${e.to_string()}")
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+    context "serialization":
+        it "converts to JSON":
+            let source = "name: Alice\nage: 30"
+            match SdnDocument.parse(source):
+                case Ok(doc):
+                    let json = doc.to_json()
+                    expect json.contains("Alice")
+                    expect json.contains("30")
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+        it "converts to SDN":
+            let source = "name: Alice"
+            match SdnDocument.parse(source):
+                case Ok(doc):
+                    let sdn = doc.to_sdn()
+                    expect sdn.contains("name")
+                    expect sdn.contains("Alice")
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+        it "preserves structure after mutation":
+            let source = "x: 10\ny: 20"
+            match SdnDocument.parse(source):
+                case Ok(mut doc):
+                    doc.set("x", SdnValue.Int(15))
+                    let sdn = doc.to_sdn()
+
+                    # Re-parse and verify
+                    match SdnDocument.parse(sdn):
+                        case Ok(doc2):
+                            expect doc2.get("x").flatmap(|v| v.as_i64()) == Some(15)
+                            expect doc2.get("y").flatmap(|v| v.as_i64()) == Some(20)
+                        case Err(e):
+                            fail("Re-parse error: ${e.to_string()}")
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+    context "modification tracking":
+        it "tracks modifications":
+            let source = "key: value"
+            match SdnDocument.parse(source):
+                case Ok(mut doc):
+                    expect doc.is_modified() == False
+
+                    doc.set("key", SdnValue.String("new_value"))
+                    expect doc.is_modified() == True
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+    context "error handling":
+        it "reports path not found":
+            let source = "key: value"
+            match SdnDocument.parse(source):
+                case Ok(mut doc):
+                    match doc.set("nonexistent.nested", SdnValue.Int(42)):
+                        case Ok(_):
+                            fail("Should have failed with path not found")
+                        case Err(_):
+                            pass  # Expected
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")
+
+        it "reports type mismatch on push":
+            let source = "value: 42"
+            match SdnDocument.parse(source):
+                case Ok(mut doc):
+                    match doc.push("value", SdnValue.Int(43)):
+                        case Ok(_):
+                            fail("Should have failed with type mismatch")
+                        case Err(_):
+                            pass  # Expected (can't push to int)
+                case Err(e):
+                    fail("Parse error: ${e.to_string()}")

@@ -1,0 +1,60 @@
+# MCP Simple dependency extraction tests
+
+import std.spec
+use mcp.simple_lang.dependencies.*
+
+describe "Simple dependency extraction":
+    it "tracks symbol usage across import styles":
+        source = """
+module app.core:
+
+import std.io as io
+use std.math.{abs, max}
+use foo.bar
+from utils.helpers use trim, slug
+pub use app.api.*
+
+pub fn run():
+    io.println("hi")
+    let x = abs(-1)
+    let y = trim("a")
+    let z = foo.bar.baz()
+    return max(x, 2)
+
+pub fn helper():
+    let v = slug("a")
+    return v
+"""
+
+        graph = extract_dependencies(source)
+
+        expect graph.symbol_usage.contains_key("std.io")
+        expect graph.symbol_usage.get("std.io").contains("run")
+
+        expect graph.symbol_usage.contains_key("abs")
+        expect graph.symbol_usage.get("abs").contains("run")
+        expect graph.symbol_usage.contains_key("max")
+        expect graph.symbol_usage.get("max").contains("run")
+
+        expect graph.symbol_usage.contains_key("trim")
+        expect graph.symbol_usage.get("trim").contains("run")
+        expect graph.symbol_usage.contains_key("slug")
+        expect graph.symbol_usage.get("slug").contains("helper")
+
+        expect graph.symbol_usage.contains_key("foo.bar")
+        expect graph.symbol_usage.get("foo.bar").contains("run")
+
+    it "detects self-referential module cycles":
+        source = """
+module core:
+use core.*
+
+pub fn run():
+    return 1
+"""
+
+        graph = extract_dependencies(source)
+        cycles = detect_circular_dependencies(graph)
+
+        expect cycles.len() == 1
+        expect cycles[0] == "core -> core"

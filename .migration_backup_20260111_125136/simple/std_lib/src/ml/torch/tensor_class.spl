@@ -1,0 +1,818 @@
+# Tensor - Multi-dimensional Array with GPU Support
+#
+# Core Tensor class with automatic differentiation support.
+
+export Tensor
+
+import device.{Device, device_code}
+import dtype.{DType, dtype_code}
+import tensor_ffi.{
+    rt_torch_zeros, rt_torch_ones, rt_torch_randn, rt_torch_arange,
+    rt_torch_free, rt_torch_clone,
+    rt_torch_shape, rt_torch_numel, rt_torch_dtype, rt_torch_device,
+    rt_torch_add, rt_torch_sub, rt_torch_mul, rt_torch_div, rt_torch_matmul,
+    rt_torch_add_scalar, rt_torch_mul_scalar,
+    rt_torch_reshape, rt_torch_transpose,
+    rt_torch_to_device, rt_torch_to_cpu, rt_torch_to_cuda,
+    rt_torch_sum, rt_torch_mean, rt_torch_max, rt_torch_min,
+    rt_torch_std, rt_torch_var, rt_torch_norm,
+    rt_torch_item,
+    rt_torch_index, rt_torch_slice, rt_torch_select, rt_torch_narrow,
+    rt_torch_set_requires_grad, rt_torch_requires_grad, rt_torch_backward,
+    rt_torch_grad, rt_torch_zero_grad, rt_torch_detach,
+    rt_torch_gt, rt_torch_allclose,
+    rt_torch_one_hot
+}
+
+
+# ============================================================================
+# Tensor Class
+# ============================================================================
+
+class Tensor:
+    """Multi-dimensional array with GPU support and automatic differentiation.
+
+    A Tensor is a handle to a PyTorch tensor stored in the Rust runtime.
+    All operations are GPU-accelerated when using CUDA device.
+    Supports automatic differentiation for neural network training.
+
+    Attributes:
+        handle: Internal handle to C++ tensor object
+
+    Example:
+        ```simple
+        let x = Tensor::zeros([3, 3])
+        let y = Tensor::ones([3, 3])
+        let z = x + y
+        print(z.item(0, 0))  # Should print 1.0
+
+        # With gradients
+        let x = Tensor::randn([10, 10], requires_grad=true)
+        let y = (x * 2).sum()
+        y.backward()
+        print(x.grad)  # Gradient of y w.r.t. x
+        ```
+    """
+    handle: u64
+
+    fn __init__(handle: u64):
+        """Initialize tensor from handle.
+
+        Args:
+            handle: Internal FFI handle
+
+        Note:
+            Users should not call this directly. Use factory functions instead.
+        """
+        self.handle = handle
+
+    fn __del__():
+        """Free tensor memory."""
+        if self.handle != 0:
+            @rt_torch_free(self.handle)
+
+    # ------------------------------------------------------------------------
+    # Factory Methods
+    # ------------------------------------------------------------------------
+
+    @staticmethod
+    fn zeros(shape: [i64], dtype: DType = DType::Float32, device: Device = Device::CPU, requires_grad: bool = false) -> Tensor:
+        """Create tensor filled with zeros.
+
+        Args:
+            shape: Tensor dimensions
+            dtype: Data type (default: Float32)
+            device: Device to create tensor on (default: CPU)
+            requires_grad: Enable gradient tracking (default: false)
+
+        Returns:
+            New tensor filled with zeros
+
+        Example:
+            ```simple
+            let x = Tensor::zeros([2, 3])  # CPU tensor
+            let y = Tensor::zeros([2, 3], device=Device::CUDA(0))  # GPU tensor
+            let z = Tensor::zeros([2, 3], requires_grad=true)  # With gradients
+            ```
+        """
+        let handle = @rt_torch_zeros(
+            shape.data_ptr(),
+            shape.len() as i32,
+            dtype_code(dtype),
+            device_code(device)
+        )
+        if handle == 0:
+            panic("Failed to create zeros tensor")
+        let tensor = Tensor(handle)
+        if requires_grad:
+            tensor.set_requires_grad(true)
+        return tensor
+
+    @staticmethod
+    fn ones(shape: [i64], dtype: DType = DType::Float32, device: Device = Device::CPU, requires_grad: bool = false) -> Tensor:
+        """Create tensor filled with ones.
+
+        Args:
+            shape: Tensor dimensions
+            dtype: Data type (default: Float32)
+            device: Device to create tensor on (default: CPU)
+            requires_grad: Enable gradient tracking (default: false)
+
+        Returns:
+            New tensor filled with ones
+        """
+        let handle = @rt_torch_ones(
+            shape.data_ptr(),
+            shape.len() as i32,
+            dtype_code(dtype),
+            device_code(device)
+        )
+        if handle == 0:
+            panic("Failed to create ones tensor")
+        let tensor = Tensor(handle)
+        if requires_grad:
+            tensor.set_requires_grad(true)
+        return tensor
+
+    @staticmethod
+    fn randn(shape: [i64], dtype: DType = DType::Float32, device: Device = Device::CPU, requires_grad: bool = false) -> Tensor:
+        """Create tensor with random normal distribution.
+
+        Args:
+            shape: Tensor dimensions
+            dtype: Data type (default: Float32)
+            device: Device to create tensor on (default: CPU)
+            requires_grad: Enable gradient tracking (default: false)
+
+        Returns:
+            New tensor with values from N(0, 1)
+        """
+        let handle = @rt_torch_randn(
+            shape.data_ptr(),
+            shape.len() as i32,
+            dtype_code(dtype),
+            device_code(device)
+        )
+        if handle == 0:
+            panic("Failed to create randn tensor")
+        let tensor = Tensor(handle)
+        if requires_grad:
+            tensor.set_requires_grad(true)
+        return tensor
+
+    @staticmethod
+    fn arange(start: i64, end: i64, step: i64 = 1, dtype: DType = DType::Int64, device: Device = Device::CPU) -> Tensor:
+        """Create 1D tensor with evenly spaced values.
+
+        Args:
+            start: Start value (inclusive)
+            end: End value (exclusive)
+            step: Step size (default: 1)
+            dtype: Data type (default: Int64)
+            device: Device to create tensor on (default: CPU)
+
+        Returns:
+            New 1D tensor with range [start, end)
+        """
+        let handle = @rt_torch_arange(
+            start,
+            end,
+            step,
+            dtype_code(dtype),
+            device_code(device)
+        )
+        if handle == 0:
+            panic("Failed to create arange tensor")
+        return Tensor(handle)
+
+    # ------------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------------
+
+    fn shape() -> [i64]:
+        """Get tensor shape.
+
+        Returns:
+            List of dimension sizes
+        """
+        let mut buf = [0i64; 8]  # Max 8 dimensions
+        let ndim = @rt_torch_shape(self.handle, buf.data_ptr(), 8)
+        return buf[0..ndim].to_list()
+
+    fn numel() -> i64:
+        """Get total number of elements.
+
+        Returns:
+            Product of all dimension sizes
+        """
+        return @rt_torch_numel(self.handle)
+
+    fn dtype() -> DType:
+        """Get tensor data type.
+
+        Returns:
+            Data type enum
+        """
+        let code = @rt_torch_dtype(self.handle)
+        match code:
+            0 -> DType::Float32
+            1 -> DType::Float64
+            2 -> DType::Int32
+            3 -> DType::Int64
+            _ -> panic("Unknown dtype code: {code}")
+
+    fn device() -> Device:
+        """Get tensor device.
+
+        Returns:
+            Device enum (CPU or CUDA)
+        """
+        let code = @rt_torch_device(self.handle)
+        if code == 0:
+            return Device::CPU
+        else:
+            return Device::CUDA(code - 1)
+
+    # ------------------------------------------------------------------------
+    # Arithmetic Operations
+    # ------------------------------------------------------------------------
+
+    fn __add__(other: Tensor) -> Tensor:
+        """Element-wise addition."""
+        let handle = @rt_torch_add(self.handle, other.handle)
+        if handle == 0:
+            panic("Tensor addition failed")
+        return Tensor(handle)
+
+    fn __sub__(other: Tensor) -> Tensor:
+        """Element-wise subtraction."""
+        let handle = @rt_torch_sub(self.handle, other.handle)
+        if handle == 0:
+            panic("Tensor subtraction failed")
+        return Tensor(handle)
+
+    fn __mul__(other: Tensor) -> Tensor:
+        """Element-wise multiplication."""
+        let handle = @rt_torch_mul(self.handle, other.handle)
+        if handle == 0:
+            panic("Tensor multiplication failed")
+        return Tensor(handle)
+
+    fn __div__(other: Tensor) -> Tensor:
+        """Element-wise division."""
+        let handle = @rt_torch_div(self.handle, other.handle)
+        if handle == 0:
+            panic("Tensor division failed")
+        return Tensor(handle)
+
+    fn __matmul__(other: Tensor) -> Tensor:
+        """Matrix multiplication."""
+        let handle = @rt_torch_matmul(self.handle, other.handle)
+        if handle == 0:
+            panic("Matrix multiplication failed")
+        return Tensor(handle)
+
+    # Scalar operations
+
+    fn add_scalar(scalar: f64) -> Tensor:
+        """Add scalar to all elements."""
+        let handle = @rt_torch_add_scalar(self.handle, scalar)
+        if handle == 0:
+            panic("Scalar addition failed")
+        return Tensor(handle)
+
+    fn mul_scalar(scalar: f64) -> Tensor:
+        """Multiply all elements by scalar."""
+        let handle = @rt_torch_mul_scalar(self.handle, scalar)
+        if handle == 0:
+            panic("Scalar multiplication failed")
+        return Tensor(handle)
+
+    # ------------------------------------------------------------------------
+    # Shape Operations
+    # ------------------------------------------------------------------------
+
+    fn reshape(shape: [i64]) -> Tensor:
+        """Reshape tensor (must preserve number of elements).
+
+        Args:
+            shape: New shape
+
+        Returns:
+            Reshaped tensor view
+        """
+        let handle = @rt_torch_reshape(
+            self.handle,
+            shape.data_ptr(),
+            shape.len() as i32
+        )
+        if handle == 0:
+            panic("Reshape failed")
+        return Tensor(handle)
+
+    fn transpose(dim0: i64, dim1: i64) -> Tensor:
+        """Transpose two dimensions.
+
+        Args:
+            dim0: First dimension
+            dim1: Second dimension
+
+        Returns:
+            Transposed tensor view
+        """
+        let handle = @rt_torch_transpose(self.handle, dim0, dim1)
+        if handle == 0:
+            panic("Transpose failed")
+        return Tensor(handle)
+
+    # ------------------------------------------------------------------------
+    # Device Transfer
+    # ------------------------------------------------------------------------
+
+    fn to(device: Device) -> Tensor:
+        """Transfer tensor to device.
+
+        Args:
+            device: Target device
+
+        Returns:
+            Tensor on target device
+        """
+        let handle = @rt_torch_to_device(self.handle, device_code(device))
+        if handle == 0:
+            panic("Device transfer to {device} failed")
+        return Tensor(handle)
+
+    fn to_cpu() -> Tensor:
+        """Transfer tensor to CPU.
+
+        Returns:
+            Tensor on CPU
+        """
+        let handle = @rt_torch_to_cpu(self.handle)
+        if handle == 0:
+            panic("Transfer to CPU failed")
+        return Tensor(handle)
+
+    fn to_cuda(device_id: i32 = 0) -> Tensor:
+        """Transfer tensor to CUDA device.
+
+        Args:
+            device_id: CUDA device ID (default: 0)
+
+        Returns:
+            Tensor on CUDA device
+        """
+        let handle = @rt_torch_to_cuda(self.handle, device_id)
+        if handle == 0:
+            panic("Transfer to CUDA:{device_id} failed")
+        return Tensor(handle)
+
+    # ------------------------------------------------------------------------
+    # Reduction Operations
+    # ------------------------------------------------------------------------
+
+    fn sum(dim: i32 = -1, keepdim: bool = false) -> Tensor:
+        """Sum of all elements or along a dimension.
+
+        Args:
+            dim: Dimension to reduce (-1 for all dimensions)
+            keepdim: Keep reduced dimension with size 1
+
+        Returns:
+            Reduced tensor
+        """
+        let handle = @rt_torch_sum(self.handle, dim, keepdim as i32)
+        if handle == 0:
+            panic("Sum reduction failed")
+        return Tensor(handle)
+
+    fn mean(dim: i32 = -1, keepdim: bool = false) -> Tensor:
+        """Mean of all elements or along a dimension.
+
+        Args:
+            dim: Dimension to reduce (-1 for all dimensions)
+            keepdim: Keep reduced dimension with size 1
+
+        Returns:
+            Reduced tensor
+        """
+        let handle = @rt_torch_mean(self.handle, dim, keepdim as i32)
+        if handle == 0:
+            panic("Mean reduction failed")
+        return Tensor(handle)
+
+    fn max(dim: i32 = -1, keepdim: bool = false) -> Tensor:
+        """Maximum of all elements or along a dimension.
+
+        Args:
+            dim: Dimension to reduce (-1 for all dimensions)
+            keepdim: Keep reduced dimension with size 1
+
+        Returns:
+            Reduced tensor (max values)
+        """
+        let handle = @rt_torch_max(self.handle, dim, keepdim as i32)
+        if handle == 0:
+            panic("Max reduction failed")
+        return Tensor(handle)
+
+    fn min(dim: i32 = -1, keepdim: bool = false) -> Tensor:
+        """Minimum of all elements or along a dimension.
+
+        Args:
+            dim: Dimension to reduce (-1 for all dimensions)
+            keepdim: Keep reduced dimension with size 1
+
+        Returns:
+            Reduced tensor (min values)
+        """
+        let handle = @rt_torch_min(self.handle, dim, keepdim as i32)
+        if handle == 0:
+            panic("Min reduction failed")
+        return Tensor(handle)
+
+    fn std(dim: i32 = -1, keepdim: bool = false, unbiased: bool = true) -> Tensor:
+        """Standard deviation of all elements or along a dimension.
+
+        Args:
+            dim: Dimension to reduce (-1 for all dimensions)
+            keepdim: Keep reduced dimension with size 1
+            unbiased: Use unbiased (Bessel's correction) estimator
+
+        Returns:
+            Reduced tensor (standard deviations)
+        """
+        let handle = @rt_torch_std(self.handle, dim, keepdim as i32, unbiased as i32)
+        if handle == 0:
+            panic("Std reduction failed")
+        return Tensor(handle)
+
+    fn var(dim: i32 = -1, keepdim: bool = false, unbiased: bool = true) -> Tensor:
+        """Variance of all elements or along a dimension.
+
+        Args:
+            dim: Dimension to reduce (-1 for all dimensions)
+            keepdim: Keep reduced dimension with size 1
+            unbiased: Use unbiased (Bessel's correction) estimator
+
+        Returns:
+            Reduced tensor (variances)
+        """
+        let handle = @rt_torch_var(self.handle, dim, keepdim as i32, unbiased as i32)
+        if handle == 0:
+            panic("Var reduction failed")
+        return Tensor(handle)
+
+    fn norm(p: f64 = 2.0, dim: i32 = -1, keepdim: bool = false) -> Tensor:
+        """Norm of tensor.
+
+        Args:
+            p: Norm order (1=L1, 2=L2/Euclidean, etc.)
+            dim: Dimension to reduce (-1 for all dimensions)
+            keepdim: Keep reduced dimension with size 1
+
+        Returns:
+            Tensor norm
+        """
+        let handle = @rt_torch_norm(self.handle, p, dim, keepdim as i32)
+        if handle == 0:
+            panic("Norm failed")
+        return Tensor(handle)
+
+    # ------------------------------------------------------------------------
+    # Data Access
+    # ------------------------------------------------------------------------
+
+    fn item() -> f64:
+        """Get scalar value (tensor must have single element).
+
+        Returns:
+            Scalar value as f64
+        """
+        return @rt_torch_item(self.handle)
+
+    fn clone() -> Tensor:
+        """Create independent copy of tensor.
+
+        Returns:
+            Cloned tensor
+        """
+        let handle = @rt_torch_clone(self.handle)
+        if handle == 0:
+            panic("Clone failed")
+        return Tensor(handle)
+
+    # ------------------------------------------------------------------------
+    # Autograd Operations
+    # ------------------------------------------------------------------------
+
+    fn set_requires_grad(requires_grad: bool):
+        """Enable or disable gradient tracking for this tensor.
+
+        Args:
+            requires_grad: Whether to track gradients
+
+        Example:
+            ```simple
+            let x = torch.randn([10, 10])
+            x.set_requires_grad(true)
+            let y = x * 2
+            y.backward()  # Now we can compute gradients
+            ```
+        """
+        @rt_torch_set_requires_grad(self.handle, requires_grad as i32)
+
+    fn requires_grad() -> bool:
+        """Check if this tensor tracks gradients.
+
+        Returns:
+            True if gradients are tracked, False otherwise
+        """
+        return @rt_torch_requires_grad(self.handle) != 0
+
+    fn backward(gradient: Tensor = None, retain_graph: bool = false):
+        """Compute gradients via backpropagation.
+
+        Computes the gradient of this tensor w.r.t. all tensors with requires_grad=True
+        that were used to compute it.
+
+        Args:
+            gradient: Gradient of external loss (default: ones tensor)
+            retain_graph: Keep computation graph after backward (default: false)
+
+        Example:
+            ```simple
+            let x = torch.randn([10], requires_grad=true)
+            let y = (x * 2).sum()
+            y.backward()  # Compute gradients
+            print(x.grad)  # Gradient of y w.r.t. x
+            ```
+
+        Note:
+            After calling backward(), gradients are accumulated in .grad attribute
+            of all leaf tensors with requires_grad=True.
+        """
+        let grad_handle = 0u64
+        if gradient is not None:
+            grad_handle = gradient.handle
+
+        @rt_torch_backward(self.handle, grad_handle, retain_graph as i32)
+
+    fn grad() -> Tensor:
+        """Get accumulated gradients for this tensor.
+
+        Returns:
+            Tensor containing accumulated gradients, or None if no gradients
+
+        Example:
+            ```simple
+            let x = torch.randn([10], requires_grad=true)
+            let y = (x ** 2).sum()
+            y.backward()
+            let dx = x.grad()  # dy/dx = 2*x
+            ```
+
+        Note:
+            Gradients are accumulated across multiple backward() calls.
+            Use zero_grad() to reset gradients.
+        """
+        let handle = @rt_torch_grad(self.handle)
+        if handle == 0:
+            return None
+        return Tensor(handle)
+
+    fn zero_grad():
+        """Reset accumulated gradients to zero.
+
+        Example:
+            ```simple
+            let x = torch.randn([10], requires_grad=true)
+            let y = x.sum()
+            y.backward()
+            print(x.grad())  # Shows gradients
+
+            x.zero_grad()
+            print(x.grad())  # Now None or zeros
+            ```
+
+        Note:
+            Call this before each training iteration to prevent gradient accumulation.
+        """
+        @rt_torch_zero_grad(self.handle)
+
+    fn detach() -> Tensor:
+        """Create a new tensor detached from the computation graph.
+
+        Returns a tensor that shares storage with this tensor but requires_grad=False.
+        Useful when you want to perform operations without tracking gradients.
+
+        Returns:
+            New tensor detached from graph
+
+        Example:
+            ```simple
+            let x = torch.randn([10], requires_grad=true)
+            let y = x * 2
+            let z = y.detach()  # z shares data with y but no gradients
+            let w = z + 1  # This operation won't be tracked
+            ```
+        """
+        let handle = @rt_torch_detach(self.handle)
+        if handle == 0:
+            panic("Detach failed")
+        return Tensor(handle)
+
+    # ------------------------------------------------------------------------
+    # Indexing and Slicing
+    # ------------------------------------------------------------------------
+
+    fn __getitem__(index: i64) -> Tensor:
+        """Get element or slice by index.
+
+        Args:
+            index: Index along first dimension
+
+        Returns:
+            Indexed tensor (one dimension smaller)
+
+        Example:
+            ```simple
+            let x = torch.tensor([[1, 2], [3, 4], [5, 6]])
+            let row = x[0]  # First row: [1, 2]
+            ```
+        """
+        let handle = @rt_torch_index(self.handle, index)
+        if handle == 0:
+            panic("Indexing failed")
+        return Tensor(handle)
+
+    fn slice(dim: i32, start: i64, end: i64, step: i64 = 1) -> Tensor:
+        """Slice tensor along a dimension.
+
+        Args:
+            dim: Dimension to slice
+            start: Start index (inclusive)
+            end: End index (exclusive)
+            step: Step size (default: 1)
+
+        Returns:
+            Sliced tensor
+
+        Example:
+            ```simple
+            let x = torch.arange([10])
+            let sliced = x.slice(0, 2, 8, 2)  # Elements [2, 4, 6]
+            ```
+        """
+        let handle = @rt_torch_slice(self.handle, dim, start, end, step)
+        if handle == 0:
+            panic("Slicing failed")
+        return Tensor(handle)
+
+    fn select(dim: i32, index: i64) -> Tensor:
+        """Select single index along dimension (reduces dimensionality).
+
+        Args:
+            dim: Dimension to select from
+            index: Index to select
+
+        Returns:
+            Tensor with one fewer dimension
+
+        Example:
+            ```simple
+            let x = torch.tensor([[1, 2, 3], [4, 5, 6]])
+            let col = x.select(1, 0)  # First column: [1, 4]
+            ```
+        """
+        let handle = @rt_torch_select(self.handle, dim, index)
+        if handle == 0:
+            panic("Select failed")
+        return Tensor(handle)
+
+    fn narrow(dim: i32, start: i64, length: i64) -> Tensor:
+        """Return narrow view of tensor along dimension.
+
+        More efficient than slice for continuous ranges.
+
+        Args:
+            dim: Dimension to narrow
+            start: Start index
+            length: Number of elements
+
+        Returns:
+            Narrowed tensor
+
+        Example:
+            ```simple
+            let x = torch.arange([10])
+            let narrow = x.narrow(0, 2, 5)  # Elements [2, 3, 4, 5, 6]
+            ```
+        """
+        let handle = @rt_torch_narrow(self.handle, dim, start, length)
+        if handle == 0:
+            panic("Narrow failed")
+        return Tensor(handle)
+
+    # ------------------------------------------------------------------------
+    # Comparison Operations
+    # ------------------------------------------------------------------------
+
+    fn gt(other: Tensor) -> Tensor:
+        """Element-wise greater than comparison.
+
+        Args:
+            other: Tensor to compare with
+
+        Returns:
+            Boolean tensor (1.0 for true, 0.0 for false)
+
+        Example:
+            ```simple
+            let x = torch.from_data([[1.0, 2.0, 3.0]])
+            let y = torch.from_data([[2.0]])
+            let result = x.gt(y)  # [[0.0, 0.0, 1.0]]
+            ```
+        """
+        let handle = @rt_torch_gt(self.handle, other.handle)
+        if handle == 0:
+            panic("Greater than comparison failed")
+        return Tensor(handle)
+
+    fn allclose(other: Tensor, rtol: f64 = 1e-5, atol: f64 = 1e-8) -> bool:
+        """Check if tensors are element-wise equal within tolerance.
+
+        Args:
+            other: Tensor to compare with
+            rtol: Relative tolerance
+            atol: Absolute tolerance
+
+        Returns:
+            True if all elements are within tolerance
+
+        Example:
+            ```simple
+            let a = torch.from_data([[1.0, 2.0]])
+            let b = torch.from_data([[1.00001, 2.00001]])
+            let close = a.allclose(b)  # true
+            ```
+        """
+        let result = @rt_torch_allclose(self.handle, other.handle, rtol, atol)
+        return result != 0
+
+    # ------------------------------------------------------------------------
+    # Encoding Operations
+    # ------------------------------------------------------------------------
+
+    fn one_hot(num_classes: i64) -> Tensor:
+        """Convert integer tensor to one-hot encoding.
+
+        Args:
+            num_classes: Number of classes
+
+        Returns:
+            One-hot encoded tensor with shape (*input_shape, num_classes)
+
+        Example:
+            ```simple
+            let indices = torch.from_data([0, 2, 1], dtype="int64")
+            let encoded = indices.one_hot(3)
+            # Result: [[1,0,0], [0,0,1], [0,1,0]]
+            ```
+        """
+        let handle = @rt_torch_one_hot(self.handle, num_classes)
+        if handle == 0:
+            panic("One-hot encoding failed")
+        return Tensor(handle)
+
+    # ------------------------------------------------------------------------
+    # Data Access
+    # ------------------------------------------------------------------------
+
+    fn item_at(indices: [i64]) -> f64:
+        """Get scalar value at multi-dimensional index.
+
+        Args:
+            indices: Multi-dimensional index
+
+        Returns:
+            Scalar value at index
+
+        Example:
+            ```simple
+            let x = torch.from_data([[1.0, 2.0], [3.0, 4.0]])
+            let val = x.item_at([1, 0])  # 3.0
+            ```
+        """
+        let handle = self.handle
+        # For each dimension, select that index
+        for idx in indices:
+            let dim = 0  # Always select from first dimension as we reduce
+            handle = @rt_torch_select(handle, dim as i32, idx)
+            if handle == 0:
+                panic("Index selection failed")
+
+        # Final result should be scalar
+        let result = @rt_torch_item(handle)
+        return result

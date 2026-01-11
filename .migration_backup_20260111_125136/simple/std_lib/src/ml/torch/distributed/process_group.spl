@@ -1,0 +1,154 @@
+# Process Group Management
+#
+# Process group class and initialization functions.
+
+export ProcessGroup, _global_process_group
+export init_process_group, destroy_process_group
+export is_initialized, is_available, get_rank, get_world_size, barrier
+
+import backend.Backend
+import ffi.{
+    rt_torch_dist_init_process_group, rt_torch_dist_destroy_process_group,
+    rt_torch_dist_is_available, rt_torch_dist_barrier
+}
+
+# ============================================================================
+# Process Group Class
+# ============================================================================
+
+class ProcessGroup:
+    """Communication group for distributed processes.
+
+    A ProcessGroup manages communication between a subset of distributed processes.
+    By default, all processes belong to the world group.
+
+    Attributes:
+        handle: Internal handle to C++ ProcessGroup object
+        rank: This process's rank within the group
+        world_size: Total number of processes in the group
+    """
+    handle: u64
+    rank: i64
+    world_size: i64
+
+    fn __init__(handle: u64, rank: i64, world_size: i64):
+        """Initialize process group from handle."""
+        self.handle = handle
+        self.rank = rank
+        self.world_size = world_size
+
+    fn __del__():
+        """Cleanup process group resources."""
+        if self.handle != 0:
+            @rt_torch_dist_destroy_process_group(self.handle)
+
+
+# Global process group (initialized by init_process_group)
+let mut _global_process_group: ProcessGroup = None
+
+
+# ============================================================================
+# Initialization Functions
+# ============================================================================
+
+fn init_process_group(
+    backend: Backend = Backend::NCCL,
+    rank: i64 = 0,
+    world_size: i64 = 1,
+    init_method: str = "env://",
+    timeout_seconds: i64 = 1800
+) -> ProcessGroup:
+    """Initialize distributed process group.
+
+    This must be called once at the start of each distributed process.
+    Uses environment variables for coordination:
+    - MASTER_ADDR: IP address of rank 0 process
+    - MASTER_PORT: Port for coordination
+    - RANK: This process's rank (optional if passed as argument)
+    - WORLD_SIZE: Total number of processes (optional if passed as argument)
+
+    Args:
+        backend: Communication backend (default: NCCL)
+        rank: This process's rank (0 to world_size-1)
+        world_size: Total number of processes
+        init_method: Initialization method (default: "env://")
+        timeout_seconds: Timeout for initialization (default: 1800)
+
+    Returns:
+        ProcessGroup object for this process
+    """
+    let backend_str = backend.to_str()
+    let backend_ptr = backend_str.as_ptr()
+    let backend_len = backend_str.len() as i32
+
+    let init_ptr = init_method.as_ptr()
+    let init_len = init_method.len() as i32
+
+    let mut handle = 0u64
+
+    @rt_torch_dist_init_process_group(
+        backend_ptr, backend_len,
+        rank, world_size,
+        init_ptr, init_len,
+        timeout_seconds,
+        &handle
+    )
+
+    if handle == 0:
+        panic("Failed to initialize process group")
+
+    let pg = ProcessGroup(handle, rank, world_size)
+
+    global _global_process_group
+    _global_process_group = pg
+
+    return pg
+
+
+fn destroy_process_group():
+    """Cleanup distributed resources."""
+    global _global_process_group
+
+    if _global_process_group is not None:
+        _global_process_group = None
+
+
+fn is_initialized() -> bool:
+    """Check if distributed training is initialized."""
+    global _global_process_group
+    return _global_process_group is not None
+
+
+fn is_available() -> bool:
+    """Check if distributed training is available."""
+    return @rt_torch_dist_is_available() != 0
+
+
+fn get_rank() -> i64:
+    """Get rank of current process."""
+    global _global_process_group
+
+    if _global_process_group is None:
+        panic("Process group not initialized. Call init_process_group() first.")
+
+    return _global_process_group.rank
+
+
+fn get_world_size() -> i64:
+    """Get total number of processes."""
+    global _global_process_group
+
+    if _global_process_group is None:
+        panic("Process group not initialized. Call init_process_group() first.")
+
+    return _global_process_group.world_size
+
+
+fn barrier(timeout_seconds: i64 = 1800):
+    """Synchronize all processes."""
+    global _global_process_group
+
+    if _global_process_group is None:
+        panic("Process group not initialized")
+
+    @rt_torch_dist_barrier(_global_process_group.handle, timeout_seconds)

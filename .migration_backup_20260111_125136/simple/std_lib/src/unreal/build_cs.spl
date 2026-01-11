@@ -1,0 +1,512 @@
+# Build.cs Generation
+#
+# Generates C# Build.cs files for Unreal Build Tool
+#
+# Features:
+# - Module descriptor generation
+# - Dependency management
+# - Include path configuration
+# - Preprocessor definitions
+#
+# Based on: https://docs.unrealengine.com/5.4/en-US/build-configuration-for-unreal-engine/
+
+import sys.io
+import sys.path
+
+mod build_cs
+
+# ModuleType
+# Type of Unreal module
+pub enum ModuleType:
+    Runtime = 0         # Runtime module (game code)
+    Editor = 1          # Editor-only module
+    Developer = 2       # Developer tools
+    ThirdParty = 3      # Third-party library
+    Plugin = 4          # Plugin module
+
+impl ModuleType:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_runtime(self) -> bool:
+        """Check if module is Runtime type.
+
+        Returns:
+            true for Runtime
+
+        Example:
+            ModuleType::Runtime.is_runtime()  # → true
+        """
+        return self == ModuleType::Runtime
+
+    pub fn is_editor(self) -> bool:
+        """Check if module is Editor type.
+
+        Returns:
+            true for Editor
+
+        Example:
+            ModuleType::Editor.is_editor()  # → true
+        """
+        return self == ModuleType::Editor
+
+    pub fn is_developer(self) -> bool:
+        """Check if module is Developer type.
+
+        Returns:
+            true for Developer
+
+        Example:
+            ModuleType::Developer.is_developer()  # → true
+        """
+        return self == ModuleType::Developer
+
+    pub fn is_third_party(self) -> bool:
+        """Check if module is ThirdParty type.
+
+        Returns:
+            true for ThirdParty
+
+        Example:
+            ModuleType::ThirdParty.is_third_party()  # → true
+        """
+        return self == ModuleType::ThirdParty
+
+    pub fn is_plugin(self) -> bool:
+        """Check if module is Plugin type.
+
+        Returns:
+            true for Plugin
+
+        Example:
+            ModuleType::Plugin.is_plugin()  # → true
+        """
+        return self == ModuleType::Plugin
+
+    pub fn is_game_code(self) -> bool:
+        """Check if module contains game code (Runtime or Plugin).
+
+        Returns:
+            true for Runtime or Plugin
+
+        Example:
+            ModuleType::Runtime.is_game_code()  # → true
+            ModuleType::Editor.is_game_code()  # → false
+        """
+        return self == ModuleType::Runtime or self == ModuleType::Plugin
+
+    pub fn is_build_time(self) -> bool:
+        """Check if module is build/development time only.
+
+        Returns:
+            true for Editor or Developer
+
+        Example:
+            ModuleType::Editor.is_build_time()  # → true
+        """
+        return self == ModuleType::Editor or self == ModuleType::Developer
+
+    pub fn to_string(self) -> String:
+        """Convert module type to UBT string.
+
+        Returns:
+            Unreal Build Tool format string
+
+        Example:
+            ModuleType::Runtime.to_string()  # → "ModuleType.Runtime"
+        """
+        if self == ModuleType::Runtime:
+            return "ModuleType.Runtime"
+        elif self == ModuleType::Editor:
+            return "ModuleType.Editor"
+        elif self == ModuleType::Developer:
+            return "ModuleType.Developer"
+        elif self == ModuleType::ThirdParty:
+            return "ModuleType.ThirdParty"
+        else:
+            return "ModuleType.Plugin"
+
+    pub fn description(self) -> String:
+        """Get module type description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            ModuleType::Runtime.description()
+            # → "Runtime module (game code)"
+        """
+        if self == ModuleType::Runtime:
+            return "Runtime module (game code)"
+        elif self == ModuleType::Editor:
+            return "Editor-only module"
+        elif self == ModuleType::Developer:
+            return "Developer tools module"
+        elif self == ModuleType::ThirdParty:
+            return "Third-party library"
+        else:
+            return "Plugin module"
+
+    pub fn summary(self) -> String:
+        """Get module type summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            ModuleType::Runtime.summary()
+            # → "ModuleType: Runtime (Runtime module (game code), game code)"
+        """
+        let ubt_str = self.to_string()
+        let desc = self.description()
+        let category = if self.is_game_code():
+            "game code"
+        elif self.is_build_time():
+            "build time"
+        else:
+            "third party"
+        return "ModuleType: {ubt_str} ({desc}, {category})"
+
+
+# LoadingPhase
+# When the module should be loaded
+pub enum LoadingPhase:
+    Default = 0         # Default loading
+    PostConfigInit = 1  # After config initialization
+    PreDefault = 2      # Before default modules
+    PreLoadingScreen = 3  # Before loading screen
+
+impl LoadingPhase:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_default(self) -> bool:
+        """Check if loading phase is Default.
+
+        Returns:
+            true for Default
+
+        Example:
+            LoadingPhase::Default.is_default()  # → true
+        """
+        return self == LoadingPhase::Default
+
+    pub fn is_post_config_init(self) -> bool:
+        """Check if loading phase is PostConfigInit.
+
+        Returns:
+            true for PostConfigInit
+
+        Example:
+            LoadingPhase::PostConfigInit.is_post_config_init()  # → true
+        """
+        return self == LoadingPhase::PostConfigInit
+
+    pub fn is_pre_default(self) -> bool:
+        """Check if loading phase is PreDefault.
+
+        Returns:
+            true for PreDefault
+
+        Example:
+            LoadingPhase::PreDefault.is_pre_default()  # → true
+        """
+        return self == LoadingPhase::PreDefault
+
+    pub fn is_pre_loading_screen(self) -> bool:
+        """Check if loading phase is PreLoadingScreen.
+
+        Returns:
+            true for PreLoadingScreen
+
+        Example:
+            LoadingPhase::PreLoadingScreen.is_pre_loading_screen()  # → true
+        """
+        return self == LoadingPhase::PreLoadingScreen
+
+    pub fn is_early_loading(self) -> bool:
+        """Check if module loads early (before default).
+
+        Returns:
+            true for PreDefault or PreLoadingScreen
+
+        Example:
+            LoadingPhase::PreDefault.is_early_loading()  # → true
+            LoadingPhase::Default.is_early_loading()  # → false
+        """
+        return self == LoadingPhase::PreDefault or self == LoadingPhase::PreLoadingScreen
+
+    pub fn loads_before_default(self) -> bool:
+        """Check if loading happens before default phase.
+
+        Returns:
+            true for PreDefault or PreLoadingScreen
+
+        Example:
+            LoadingPhase::PreLoadingScreen.loads_before_default()  # → true
+        """
+        return self.is_early_loading()
+
+    pub fn to_string(self) -> String:
+        """Convert loading phase to UBT string.
+
+        Returns:
+            Unreal Build Tool format string
+
+        Example:
+            LoadingPhase::Default.to_string()  # → "LoadingPhase.Default"
+        """
+        if self == LoadingPhase::PostConfigInit:
+            return "LoadingPhase.PostConfigInit"
+        elif self == LoadingPhase::PreDefault:
+            return "LoadingPhase.PreDefault"
+        elif self == LoadingPhase::PreLoadingScreen:
+            return "LoadingPhase.PreLoadingScreen"
+        else:
+            return "LoadingPhase.Default"
+
+    pub fn description(self) -> String:
+        """Get loading phase description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            LoadingPhase::Default.description()
+            # → "Default loading phase"
+        """
+        if self == LoadingPhase::PostConfigInit:
+            return "After config initialization"
+        elif self == LoadingPhase::PreDefault:
+            return "Before default modules"
+        elif self == LoadingPhase::PreLoadingScreen:
+            return "Before loading screen"
+        else:
+            return "Default loading phase"
+
+    pub fn summary(self) -> String:
+        """Get loading phase summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            LoadingPhase::PreDefault.summary()
+            # → "LoadingPhase: PreDefault (Before default modules, early loading)"
+        """
+        let ubt_str = self.to_string()
+        let desc = self.description()
+        let timing = if self.is_early_loading():
+            "early loading"
+        elif self.is_post_config_init():
+            "post-config"
+        else:
+            "standard loading"
+        return "LoadingPhase: {ubt_str} ({desc}, {timing})"
+
+
+# BuildCsGenerator
+# Builder for generating .Build.cs files
+pub struct BuildCsGenerator:
+    module_name: String
+    module_type: ModuleType
+    loading_phase: LoadingPhase
+    public_dependencies: Vec[String]
+    private_dependencies: Vec[String]
+    public_include_paths: Vec[String]
+    private_include_paths: Vec[String]
+    definitions: Vec[String]
+
+impl BuildCsGenerator:
+    # Create new generator
+    pub fn new(module_name: String) -> BuildCsGenerator:
+        return BuildCsGenerator(
+            module_name: module_name,
+            module_type: ModuleType::Runtime,
+            loading_phase: LoadingPhase::Default,
+            public_dependencies: [],
+            private_dependencies: [],
+            public_include_paths: [],
+            private_include_paths: [],
+            definitions: [],
+        )
+
+    # Set module type
+    pub fn module_type(mut self, module_type: ModuleType) -> BuildCsGenerator:
+        self.module_type = module_type
+        return self
+
+    # Set loading phase
+    pub fn loading_phase(mut self, phase: LoadingPhase) -> BuildCsGenerator:
+        self.loading_phase = phase
+        return self
+
+    # Add public dependency
+    pub fn public_dependency(mut self, dep: String) -> BuildCsGenerator:
+        self.public_dependencies.push(dep)
+        return self
+
+    # Add private dependency
+    pub fn private_dependency(mut self, dep: String) -> BuildCsGenerator:
+        self.private_dependencies.push(dep)
+        return self
+
+    # Add core dependencies (Core, CoreUObject, Engine)
+    pub fn with_core_dependencies(mut self) -> BuildCsGenerator:
+        return self
+            .public_dependency("Core")
+            .public_dependency("CoreUObject")
+            .public_dependency("Engine")
+
+    # Add public include path
+    pub fn public_include_path(mut self, path: String) -> BuildCsGenerator:
+        self.public_include_paths.push(path)
+        return self
+
+    # Add private include path
+    pub fn private_include_path(mut self, path: String) -> BuildCsGenerator:
+        self.private_include_paths.push(path)
+        return self
+
+    # Add preprocessor definition
+    pub fn definition(mut self, def: String) -> BuildCsGenerator:
+        self.definitions.push(def)
+        return self
+
+    # Generate the .Build.cs file content
+    pub fn generate(self) -> String:
+        let mut content = ""
+
+        # Header
+        content = content + "// Auto-generated Build.cs for " + self.module_name + "\n"
+        content = content + "// Generated by Simple Unreal Integration\n\n"
+
+        # Using statements
+        content = content + "using UnrealBuildTool;\n\n"
+
+        # Class definition
+        content = content + "public class " + self.module_name + " : ModuleRules\n"
+        content = content + "{\n"
+        content = content + "\tpublic " + self.module_name + "(ReadOnlyTargetRules Target) : base(Target)\n"
+        content = content + "\t{\n"
+
+        # Module type
+        content = content + "\t\tType = " + self.module_type.to_string() + ";\n\n"
+
+        # Loading phase
+        if self.loading_phase != LoadingPhase::Default:
+            content = content + "\t\tLoadingPhase = " + self.loading_phase.to_string() + ";\n\n"
+
+        # Public dependencies
+        if self.public_dependencies.len() > 0:
+            content = content + "\t\tPublicDependencyModuleNames.AddRange(new string[]\n"
+            content = content + "\t\t{\n"
+            for i in 0..self.public_dependencies.len():
+                let dep = self.public_dependencies[i]
+                content = content + "\t\t\t\"" + dep + "\""
+                if i < self.public_dependencies.len() - 1:
+                    content = content + ","
+                content = content + "\n"
+            content = content + "\t\t});\n\n"
+
+        # Private dependencies
+        if self.private_dependencies.len() > 0:
+            content = content + "\t\tPrivateDependencyModuleNames.AddRange(new string[]\n"
+            content = content + "\t\t{\n"
+            for i in 0..self.private_dependencies.len():
+                let dep = self.private_dependencies[i]
+                content = content + "\t\t\t\"" + dep + "\""
+                if i < self.private_dependencies.len() - 1:
+                    content = content + ","
+                content = content + "\n"
+            content = content + "\t\t});\n\n"
+
+        # Public include paths
+        if self.public_include_paths.len() > 0:
+            content = content + "\t\tPublicIncludePaths.AddRange(new string[]\n"
+            content = content + "\t\t{\n"
+            for i in 0..self.public_include_paths.len():
+                let path_str = self.public_include_paths[i]
+                content = content + "\t\t\t\"" + path_str + "\""
+                if i < self.public_include_paths.len() - 1:
+                    content = content + ","
+                content = content + "\n"
+            content = content + "\t\t});\n\n"
+
+        # Private include paths
+        if self.private_include_paths.len() > 0:
+            content = content + "\t\tPrivateIncludePaths.AddRange(new string[]\n"
+            content = content + "\t\t{\n"
+            for i in 0..self.private_include_paths.len():
+                let path_str = self.private_include_paths[i]
+                content = content + "\t\t\t\"" + path_str + "\""
+                if i < self.private_include_paths.len() - 1:
+                    content = content + ","
+                content = content + "\n"
+            content = content + "\t\t});\n\n"
+
+        # Preprocessor definitions
+        if self.definitions.len() > 0:
+            content = content + "\t\tPublicDefinitions.AddRange(new string[]\n"
+            content = content + "\t\t{\n"
+            for i in 0..self.definitions.len():
+                let def = self.definitions[i]
+                content = content + "\t\t\t\"" + def + "\""
+                if i < self.definitions.len() - 1:
+                    content = content + ","
+                content = content + "\n"
+            content = content + "\t\t});\n\n"
+
+        # Close constructor and class
+        content = content + "\t}\n"
+        content = content + "}\n"
+
+        return content
+
+    # Write to file
+    pub fn write_to_file(self, output_path: String) -> bool:
+        let content = self.generate()
+        return io.write_file(output_path, content)
+
+
+# Preset generators
+
+# Generate a basic game module Build.cs
+pub fn generate_game_module(module_name: String) -> String:
+    return BuildCsGenerator::new(module_name)
+        .with_core_dependencies()
+        .private_dependency("InputCore")
+        .private_dependency("Slate")
+        .private_dependency("SlateCore")
+        .generate()
+
+# Generate an editor module Build.cs
+pub fn generate_editor_module(module_name: String, game_module: String) -> String:
+    return BuildCsGenerator::new(module_name)
+        .module_type(ModuleType::Editor)
+        .with_core_dependencies()
+        .public_dependency(game_module)
+        .private_dependency("UnrealEd")
+        .private_dependency("EditorStyle")
+        .private_dependency("Slate")
+        .private_dependency("SlateCore")
+        .generate()
+
+# Generate a plugin module Build.cs
+pub fn generate_plugin_module(module_name: String) -> String:
+    return BuildCsGenerator::new(module_name)
+        .module_type(ModuleType::Plugin)
+        .with_core_dependencies()
+        .private_dependency("Projects")
+        .generate()
+
+# Generate a third-party library Build.cs
+pub fn generate_thirdparty_module(module_name: String, lib_path: String) -> String:
+    let mut gen = BuildCsGenerator::new(module_name)
+        .module_type(ModuleType::ThirdParty)
+
+    gen = gen.public_include_path(lib_path + "/Include")
+
+    return gen.generate()

@@ -1,0 +1,645 @@
+# Incremental Compilation Support
+# Only recompile changed files and their dependencies
+
+use host.async_nogc_mut.io.fs
+use host.common.io.types.FilePath
+use core.result.{Result, Ok, Err}
+use tooling.core.project.Language
+use sdn.{SdnDocument, SdnValue, to_sdn}
+
+# File change tracking entry
+pub class FileEntry:
+    pub path: String
+    pub mtime: i64
+    pub hash: String
+    pub language: Language
+
+    pub fn new(path: String, language: Language): FileEntry =
+        """Create file entry for tracking.
+
+        Args:
+            path: File path
+            language: Source language
+
+        Returns:
+            File entry with current mtime and hash
+        """
+        FileEntry {
+            path: path,
+            mtime: 0,  # TODO: [stdlib][P3] Get file mtime
+            hash: "",  # TODO: [stdlib][P3] Compute SHA256 hash
+            language: language
+        }
+
+    pub fn has_changed(self, old_entry: FileEntry): bool =
+        """Check if file has changed since last build.
+
+        Args:
+            old_entry: Previous file entry
+
+        Returns:
+            True if file modified
+        """
+        self.mtime != old_entry.mtime or self.hash != old_entry.hash
+
+    pub fn is_newer_than(self, other: FileEntry): bool =
+        """Check if this file is newer than another.
+
+        Args:
+            other: Other file entry
+
+        Returns:
+            True if this file modified more recently
+        """
+        self.mtime > other.mtime
+
+    pub fn format(self): String =
+        """Format file entry for display.
+
+        Returns:
+            Human-readable string
+
+        Example:
+            entry.format()
+            # → "src/main.spl (Simple, hash: abc123...)"
+        """
+        let short_hash = if self.hash.len() > 8: self.hash[0:8] else: self.hash
+        "{self.path} ({self.language.to_string()}, hash: {short_hash}...)"
+
+# Incremental build cache
+pub class IncrementalCache:
+    pub entries: Dict[String, FileEntry]
+    pub dependencies: Dict[String, List[String]]
+    pub cache_path: String
+
+    pub fn new(cache_path: String): IncrementalCache =
+        """Create empty incremental cache.
+
+        Args:
+            cache_path: Path to cache file
+
+        Returns:
+            Empty cache
+        """
+        IncrementalCache {
+            entries: {},
+            dependencies: {},
+            cache_path: cache_path
+        }
+
+    pub fn load(cache_path: String): IncrementalCache =
+        """Load cache from disk.
+
+        Args:
+            cache_path: Path to cache file
+
+        Returns:
+            Loaded cache or empty if file doesn't exist
+
+        Example:
+            let cache = IncrementalCache.load(".build_cache.sdn")
+            if cache.is_empty():
+                print("No previous build cache found")
+        """
+        # Try to load from SDN file
+        match fs.read_text_sync(cache_path as FilePath):
+            Ok(content):
+                match SdnDocument.parse(content):
+                    Ok(doc):
+                        # Parse cache from SDN
+                        self.parse_cache_from_sdn(doc, cache_path)
+                    Err(_):
+                        # Parse error, return empty cache
+                        IncrementalCache.new(cache_path)
+            Err(_):
+                # File doesn't exist, return empty cache
+                IncrementalCache.new(cache_path)
+
+    fn parse_cache_from_sdn(doc: SdnDocument, cache_path: String): IncrementalCache =
+        """Parse cache from SDN document.
+
+        Args:
+            doc: Parsed SDN document
+            cache_path: Cache file path
+
+        Returns:
+            Loaded cache
+        """
+        let mut cache = IncrementalCache.new(cache_path)
+
+        # Parse entries
+        match doc.get("entries"):
+            some(SdnValue::Dict(entries_dict)):
+                for (path, entry_val) in entries_dict.items():
+                    match self.parse_file_entry(path, entry_val):
+                        some(entry):
+                            cache.entries[path] = entry
+                        none:
+                            pass
+            _:
+                pass
+
+        # Parse dependencies
+        match doc.get("dependencies"):
+            some(SdnValue::Dict(deps_dict)):
+                for (file, deps_val) in deps_dict.items():
+                    match deps_val:
+                        SdnValue::Array(deps_arr):
+                            let deps_list: List[String] = []
+                            for dep_val in deps_arr:
+                                match dep_val:
+                                    SdnValue::String(dep):
+                                        deps_list.append(dep)
+                                    _:
+                                        pass
+                            cache.dependencies[file] = deps_list
+                        _:
+                            pass
+            _:
+                pass
+
+        cache
+
+    fn parse_file_entry(path: String, value: SdnValue): FileEntry? =
+        """Parse file entry from SDN value.
+
+        Args:
+            path: File path
+            value: SDN value
+
+        Returns:
+            Parsed file entry
+        """
+        match value:
+            SdnValue::Dict(dict):
+                # Get mtime
+                let mtime = match dict.get("mtime"):
+                    some(SdnValue::Int(mt)):
+                        mt
+                    _:
+                        0
+
+                # Get hash
+                let hash = match dict.get("hash"):
+                    some(SdnValue::String(h)):
+                        h
+                    _:
+                        ""
+
+                # Get language
+                let language = match dict.get("language"):
+                    some(SdnValue::String(lang_str)):
+                        self.parse_language(lang_str)
+                    _:
+                        Language::Simple
+
+                some(FileEntry {
+                    path: path,
+                    mtime: mtime,
+                    hash: hash,
+                    language: language
+                })
+            _:
+                none
+
+    fn parse_language(lang_str: String): Language =
+        """Parse language from string.
+
+        Args:
+            lang_str: Language name
+
+        Returns:
+            Language enum
+        """
+        match lang_str:
+            "Simple": Language::Simple
+            "Rust": Language::Rust
+            "Python": Language::Python
+            "JavaScript": Language::JavaScript
+            "TypeScript": Language::TypeScript
+            "Go": Language::Go
+            "C": Language::C
+            "Cpp": Language::Cpp
+            _: Language::Simple
+
+    pub fn save(self): Result[(), String] =
+        """Save cache to disk.
+
+        Returns:
+            Ok if successful, Err with error message
+
+        SDN Format:
+            entries:
+              src/main.spl:
+                mtime: 1704744000
+                hash: abc123
+                language: Simple
+
+            dependencies:
+              src/main.spl: [src/lib.spl, src/util.spl]
+              src/lib.spl: [src/core.spl]
+        """
+        # Build SDN structure
+        let mut sdn_entries: Dict[String, SdnValue] = {}
+        let mut sdn_deps: Dict[String, SdnValue] = {}
+
+        # Serialize entries
+        for (path, entry) in self.entries.items():
+            let entry_dict: Dict[String, SdnValue] = {}
+            entry_dict["mtime"] = SdnValue::Int(entry.mtime)
+            entry_dict["hash"] = SdnValue::String(entry.hash)
+            entry_dict["language"] = SdnValue::String(self.language_to_string(entry.language))
+
+            sdn_entries[path] = SdnValue::Dict(entry_dict)
+
+        # Serialize dependencies
+        for (file, deps) in self.dependencies.items():
+            let deps_array: List[SdnValue] = []
+            for dep in deps:
+                deps_array.append(SdnValue::String(dep))
+
+            sdn_deps[file] = SdnValue::Array(deps_array)
+
+        # Build root document
+        let root_dict: Dict[String, SdnValue] = {}
+        root_dict["entries"] = SdnValue::Dict(sdn_entries)
+        root_dict["dependencies"] = SdnValue::Dict(sdn_deps)
+
+        let root_value = SdnValue::Dict(root_dict)
+
+        # Serialize to SDN text
+        let sdn_text = to_sdn(root_value)
+
+        # Write to file
+        match fs.write_text_sync(self.cache_path as FilePath, &sdn_text):
+            Ok(_):
+                Ok(())
+            Err(err):
+                Err("Failed to write cache: " + err.to_string())
+
+    fn language_to_string(language: Language): String =
+        """Convert language enum to string.
+
+        Args:
+            language: Language enum
+
+        Returns:
+            Language name
+        """
+        match language:
+            Language::Simple: "Simple"
+            Language::Rust: "Rust"
+            Language::Python: "Python"
+            Language::JavaScript: "JavaScript"
+            Language::TypeScript: "TypeScript"
+            Language::Go: "Go"
+            Language::C: "C"
+            Language::Cpp: "Cpp"
+
+    pub fn add_file(self, path: String, language: Language):
+        """Add file to cache.
+
+        Args:
+            path: File path
+            language: Source language
+        """
+        let entry = FileEntry.new(path, language)
+        self.entries[path] = entry
+
+    pub fn add_dependency(self, file: String, dependency: String):
+        """Add dependency relationship.
+
+        Args:
+            file: Source file
+            dependency: Dependency file
+
+        Example:
+            cache.add_dependency("app.spl", "lib.spl")
+        """
+        if not self.dependencies.contains_key(file):
+            self.dependencies[file] = []
+
+        self.dependencies[file].append(dependency)
+
+    pub fn get_changed_files(self, current_files: List[String]): List[String] =
+        """Detect changed files since last build.
+
+        Args:
+            current_files: Current source files
+
+        Returns:
+            List of changed file paths
+
+        Algorithm:
+        1. For each current file, check if mtime/hash changed
+        2. Include new files not in cache
+        3. Include files whose dependencies changed
+        """
+        let changed: List[String] = []
+
+        # Check existing files for changes
+        for path in current_files:
+            if not self.entries.contains_key(path):
+                # New file
+                changed.append(path)
+            else:
+                # Check if modified
+                let old_entry = self.entries[path]
+                let current_entry = FileEntry.new(path, old_entry.language)
+
+                if current_entry.has_changed(old_entry):
+                    changed.append(path)
+
+        changed
+
+    pub fn get_dirty_files(
+        self,
+        changed_files: List[String]
+    ): List[String] =
+        """Get all files that need recompilation.
+
+        Args:
+            changed_files: Files that changed
+
+        Returns:
+            All files affected by changes (transitive)
+
+        Algorithm:
+        1. Start with changed files
+        2. Find all files that depend on changed files
+        3. Recursively find transitive dependents
+        4. Return union of all dirty files
+        """
+        let dirty: List[String] = []
+        let visited: Dict[String, bool] = {}
+
+        # Add changed files
+        for file in changed_files:
+            self.mark_dirty_recursive(file, dirty, visited)
+
+        dirty
+
+    fn mark_dirty_recursive(file: String,
+        dirty: List[String],
+        visited: Dict[String, bool]
+    ):
+        """Recursively mark files as dirty.
+
+        Args:
+            file: File to mark
+            dirty: List of dirty files (output)
+            visited: Set of visited files
+        """
+        if visited.contains_key(file):
+            return
+
+        visited[file] = true
+        dirty.append(file)
+
+        # Find reverse dependencies (files that depend on this file)
+        let reverse_deps = self.get_reverse_dependencies(file)
+        for dep in reverse_deps:
+            self.mark_dirty_recursive(dep, dirty, visited)
+
+    pub fn get_reverse_dependencies(self, file: String): List[String] =
+        """Get files that depend on given file.
+
+        Args:
+            file: File to find dependents of
+
+        Returns:
+            List of dependent files
+        """
+        let dependents: List[String] = []
+
+        for (source, deps) in self.dependencies.items():
+            if deps.contains(file):
+                dependents.append(source)
+
+        dependents
+
+    pub fn is_empty(self): bool =
+        """Check if cache is empty.
+
+        Returns:
+            True if no entries
+        """
+        self.entries.len() == 0
+
+    pub fn clear(self):
+        """Clear all cache entries."""
+        self.entries = {}
+        self.dependencies = {}
+
+    pub fn file_count(self): i32 =
+        """Get number of tracked files.
+
+        Returns:
+            File count
+        """
+        self.entries.len()
+
+    pub fn dependency_count(self): i32 =
+        """Get total number of dependencies.
+
+        Returns:
+            Total dependency edges
+        """
+        let mut count = 0
+        for (_, deps) in self.dependencies.items():
+            count += deps.len()
+        count
+
+    pub fn summary(self): String =
+        """Get cache summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            cache.summary()
+            # → "Cache: 150 files, 320 dependencies"
+        """
+        "Cache: {self.file_count()} files, {self.dependency_count()} dependencies"
+
+# Incremental compiler - manages incremental compilation
+pub class IncrementalCompiler:
+    pub cache: IncrementalCache
+    pub verbose: bool
+
+    pub fn new(cache_path: String): IncrementalCompiler =
+        """Create incremental compiler.
+
+        Args:
+            cache_path: Path to build cache
+
+        Returns:
+            Compiler with loaded or empty cache
+        """
+        IncrementalCompiler {
+            cache: IncrementalCache.load(cache_path),
+            verbose: false
+        }
+
+    pub fn set_verbose(self, enabled: bool):
+        """Enable verbose logging.
+
+        Args:
+            enabled: True to log incremental decisions
+        """
+        self.verbose = enabled
+
+    pub fn analyze_changes(
+        self,
+        all_files: List[String]
+    ): IncrementalAnalysis =
+        """Analyze which files need recompilation.
+
+        Args:
+            all_files: All source files in project
+
+        Returns:
+            Analysis with changed and dirty files
+
+        Example:
+            let compiler = IncrementalCompiler.new(".build_cache")
+            let analysis = compiler.analyze_changes(all_files)
+
+            print("Changed: {analysis.changed_files.len()}")
+            print("Dirty: {analysis.dirty_files.len()}")
+            print("Clean: {analysis.clean_files.len()}")
+        """
+        let changed = self.cache.get_changed_files(all_files)
+        let dirty = self.cache.get_dirty_files(changed)
+        let clean = self.get_clean_files(all_files, dirty)
+
+        if self.verbose:
+            print("Incremental analysis:")
+            print("  Total files: {all_files.len()}")
+            print("  Changed: {changed.len()}")
+            print("  Dirty: {dirty.len()}")
+            print("  Clean: {clean.len()}")
+
+        IncrementalAnalysis {
+            changed_files: changed,
+            dirty_files: dirty,
+            clean_files: clean
+        }
+
+    fn get_clean_files(all_files: List[String],
+        dirty_files: List[String]
+    ): List[String] =
+        """Get files that don't need recompilation.
+
+        Args:
+            all_files: All source files
+            dirty_files: Files that need recompilation
+
+        Returns:
+            Clean files
+        """
+        let clean: List[String] = []
+
+        for file in all_files:
+            if not dirty_files.contains(file):
+                clean.append(file)
+
+        clean
+
+    pub fn update_cache(
+        self,
+        compiled_files: List[String],
+        dependencies: Dict[String, List[String]]
+    ):
+        """Update cache after compilation.
+
+        Args:
+            compiled_files: Files that were compiled
+            dependencies: Dependency map for each file
+
+        Example:
+            compiler.update_cache(
+                compiled_files: ["app.spl", "lib.spl"],
+                dependencies: {
+                    "app.spl": ["lib.spl", "core.spl"],
+                    "lib.spl": ["core.spl"]
+                }
+            )
+            compiler.save_cache()
+        """
+        # Update file entries
+        for file in compiled_files:
+            # TODO: [stdlib][P3] Detect language from file extension
+            let language = Language::Simple
+            self.cache.add_file(file, language)
+
+        # Update dependencies
+        for (file, deps) in dependencies.items():
+            for dep in deps:
+                self.cache.add_dependency(file, dep)
+
+        if self.verbose:
+            print("Updated cache with {compiled_files.len()} files")
+
+    pub fn save_cache(self): Result[(), String] =
+        """Save cache to disk.
+
+        Returns:
+            Ok if successful
+        """
+        self.cache.save()
+
+# Incremental analysis result
+pub class IncrementalAnalysis:
+    pub changed_files: List[String]
+    pub dirty_files: List[String]
+    pub clean_files: List[String]
+
+    pub fn is_clean_build(self): bool =
+        """Check if this is a clean build.
+
+        Returns:
+            True if all files are dirty
+        """
+        self.clean_files.len() == 0
+
+    pub fn speedup_ratio(self): f64 =
+        """Calculate speedup from incremental compilation.
+
+        Returns:
+            Ratio of files skipped (e.g., 0.9 = 90% speedup)
+        """
+        let total = self.clean_files.len() + self.dirty_files.len()
+        if total == 0:
+            return 0.0
+
+        (self.clean_files.len() as f64) / (total as f64)
+
+    pub fn summary(self): String =
+        """Get analysis summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            analysis.summary()
+            # → "Incremental: 5 changed, 12 dirty, 150 clean (92.6% speedup)"
+        """
+        let speedup = self.speedup_ratio() * 100.0
+        "Incremental: {self.changed_files.len()} changed, {self.dirty_files.len()} dirty, {self.clean_files.len()} clean ({speedup:.1f}% speedup)"
+
+    pub fn should_rebuild(self): bool =
+        """Check if rebuild is needed.
+
+        Returns:
+            True if any dirty files exist
+        """
+        self.dirty_files.len() > 0
+
+    pub fn total_files(self): i32 =
+        """Get total file count.
+
+        Returns:
+            Clean + dirty files
+        """
+        self.clean_files.len() + self.dirty_files.len()

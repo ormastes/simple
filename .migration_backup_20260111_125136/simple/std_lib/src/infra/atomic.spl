@@ -1,0 +1,688 @@
+/**
+Atomic Types
+
+Lock-free atomic primitives for concurrent programming.
+
+Features:
+- AtomicInt: Atomic integer operations
+- AtomicBool: Atomic boolean flag
+- AtomicRef: Atomic reference to object
+- AtomicFlag: Simple atomic flag (spinlock building block)
+- Memory ordering control for advanced use cases
+
+```sdoctest
+>>> let counter = AtomicInt.new(0)
+>>> counter.fetch_add(1)
+0
+>>> counter.load()
+1
+```
+*/
+
+# Memory ordering for atomic operations
+enum Ordering:
+    Relaxed    # No synchronization
+    Acquire    # Synchronize-with for reads
+    Release    # Synchronize-with for writes
+    AcqRel     # Both Acquire and Release
+    SeqCst     # Sequentially consistent (strongest)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_relaxed() -> Bool:
+        """Check if ordering is Relaxed (no synchronization)."""
+        match self:
+            case Relaxed: return true
+            case _: return false
+
+    fn is_acquire() -> Bool:
+        """Check if ordering is Acquire."""
+        match self:
+            case Acquire: return true
+            case _: return false
+
+    fn is_release() -> Bool:
+        """Check if ordering is Release."""
+        match self:
+            case Release: return true
+            case _: return false
+
+    fn is_acq_rel() -> Bool:
+        """Check if ordering is AcqRel."""
+        match self:
+            case AcqRel: return true
+            case _: return false
+
+    fn is_seq_cst() -> Bool:
+        """Check if ordering is SeqCst (strongest)."""
+        match self:
+            case SeqCst: return true
+            case _: return false
+
+    fn is_synchronizing() -> Bool:
+        """Check if ordering provides synchronization (not Relaxed)."""
+        match self:
+            case Relaxed: return false
+            case _: return true
+
+    fn to_string() -> String:
+        """Convert ordering to string."""
+        match self:
+            case Relaxed: return "Relaxed"
+            case Acquire: return "Acquire"
+            case Release: return "Release"
+            case AcqRel: return "AcqRel"
+            case SeqCst: return "SeqCst"
+
+    fn description() -> String:
+        """Get ordering description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            Ordering::SeqCst.description()
+            # → "Sequentially consistent (strongest)"
+        """
+        match self:
+            case Relaxed: return "No synchronization"
+            case Acquire: return "Synchronize-with for reads"
+            case Release: return "Synchronize-with for writes"
+            case AcqRel: return "Both Acquire and Release"
+            case SeqCst: return "Sequentially consistent (strongest)"
+
+    fn summary() -> String:
+        """Get summary of ordering.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            Ordering::SeqCst.summary()
+            # → "Ordering: SeqCst (Sequentially consistent (strongest), synchronizing)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let sync = if self.is_synchronizing(): "synchronizing" else: "no sync"
+        return "Ordering: {name} ({desc}, {sync})"
+
+# FFI declarations for atomic operations
+extern fn rt_atomic_int_new(value: i64) -> i64
+extern fn rt_atomic_int_load(ptr: i64, ordering: i64) -> i64
+extern fn rt_atomic_int_store(ptr: i64, value: i64, ordering: i64)
+extern fn rt_atomic_int_swap(ptr: i64, value: i64, ordering: i64) -> i64
+extern fn rt_atomic_int_compare_exchange(ptr: i64, expected: i64, desired: i64, success: i64, failure: i64) -> i64
+extern fn rt_atomic_int_fetch_add(ptr: i64, value: i64, ordering: i64) -> i64
+extern fn rt_atomic_int_fetch_sub(ptr: i64, value: i64, ordering: i64) -> i64
+extern fn rt_atomic_int_fetch_and(ptr: i64, value: i64, ordering: i64) -> i64
+extern fn rt_atomic_int_fetch_or(ptr: i64, value: i64, ordering: i64) -> i64
+extern fn rt_atomic_int_fetch_xor(ptr: i64, value: i64, ordering: i64) -> i64
+extern fn rt_atomic_int_free(ptr: i64)
+
+extern fn rt_atomic_bool_new(value: i64) -> i64
+extern fn rt_atomic_bool_load(ptr: i64, ordering: i64) -> i64
+extern fn rt_atomic_bool_store(ptr: i64, value: i64, ordering: i64)
+extern fn rt_atomic_bool_swap(ptr: i64, value: i64, ordering: i64) -> i64
+extern fn rt_atomic_bool_free(ptr: i64)
+
+extern fn rt_atomic_flag_new() -> i64
+extern fn rt_atomic_flag_test_and_set(ptr: i64, ordering: i64) -> i64
+extern fn rt_atomic_flag_clear(ptr: i64, ordering: i64)
+extern fn rt_atomic_flag_free(ptr: i64)
+
+extern fn rt_spin_loop_hint()
+
+/**
+Convert ordering enum to FFI value.
+*/
+fn ordering_to_int(o: Ordering) -> i64:
+    match o:
+        case Relaxed:
+            return 0
+        case Acquire:
+            return 1
+        case Release:
+            return 2
+        case AcqRel:
+            return 3
+        case SeqCst:
+            return 4
+
+/**
+Atomic 64-bit integer.
+
+Provides lock-free atomic operations on integers.
+All operations are thread-safe.
+
+```sdoctest
+>>> let counter = AtomicInt.new(0)
+>>> counter.fetch_add(5)
+0
+>>> counter.load()
+5
+>>> counter.compare_exchange(5, 10)
+(true, 5)
+>>> counter.load()
+10
+```
+*/
+struct AtomicInt:
+    _ptr: i64
+
+    /**
+    Create a new atomic integer with initial value.
+    */
+    fn new(value: i64) -> AtomicInt:
+        let ptr = rt_atomic_int_new(value)
+        return AtomicInt(_ptr: ptr)
+
+    /**
+    Load the current value.
+    */
+    fn load(ordering: Ordering = Ordering.SeqCst) -> i64:
+        return rt_atomic_int_load(self._ptr, ordering_to_int(ordering))
+
+    /**
+    Store a new value.
+    */
+    fn store(value: i64, ordering: Ordering = Ordering.SeqCst):
+        rt_atomic_int_store(self._ptr, value, ordering_to_int(ordering))
+
+    /**
+    Swap the value, returning the old value.
+    */
+    fn swap(value: i64, ordering: Ordering = Ordering.SeqCst) -> i64:
+        return rt_atomic_int_swap(self._ptr, value, ordering_to_int(ordering))
+
+    /**
+    Compare and exchange.
+    If current == expected, sets to desired and returns (true, current).
+    Otherwise returns (false, current).
+    */
+    fn compare_exchange(expected: i64,
+        desired: i64,
+        success_order: Ordering = Ordering.SeqCst,
+        failure_order: Ordering = Ordering.SeqCst
+    ) -> (Bool, i64):
+        let result = rt_atomic_int_compare_exchange(
+            self._ptr,
+            expected,
+            desired,
+            ordering_to_int(success_order),
+            ordering_to_int(failure_order)
+        )
+        # Result encoding: success in high bit, value in low bits
+        let success = (result >> 63) == 0
+        let current = result & 0x7FFFFFFFFFFFFFFF
+        return (success, current)
+
+    /**
+    Atomically add and return the previous value.
+    */
+    fn fetch_add(value: i64, ordering: Ordering = Ordering.SeqCst) -> i64:
+        return rt_atomic_int_fetch_add(self._ptr, value, ordering_to_int(ordering))
+
+    /**
+    Atomically subtract and return the previous value.
+    */
+    fn fetch_sub(value: i64, ordering: Ordering = Ordering.SeqCst) -> i64:
+        return rt_atomic_int_fetch_sub(self._ptr, value, ordering_to_int(ordering))
+
+    /**
+    Atomically AND and return the previous value.
+    */
+    fn fetch_and(value: i64, ordering: Ordering = Ordering.SeqCst) -> i64:
+        return rt_atomic_int_fetch_and(self._ptr, value, ordering_to_int(ordering))
+
+    /**
+    Atomically OR and return the previous value.
+    */
+    fn fetch_or(value: i64, ordering: Ordering = Ordering.SeqCst) -> i64:
+        return rt_atomic_int_fetch_or(self._ptr, value, ordering_to_int(ordering))
+
+    /**
+    Atomically XOR and return the previous value.
+    */
+    fn fetch_xor(value: i64, ordering: Ordering = Ordering.SeqCst) -> i64:
+        return rt_atomic_int_fetch_xor(self._ptr, value, ordering_to_int(ordering))
+
+    /**
+    Increment and return the new value.
+    */
+    fn increment(ordering: Ordering = Ordering.SeqCst) -> i64:
+        return self.fetch_add(1, ordering) + 1
+
+    /**
+    Decrement and return the new value.
+    */
+    fn decrement(ordering: Ordering = Ordering.SeqCst) -> i64:
+        return self.fetch_sub(1, ordering) - 1
+
+    /**
+    Free the atomic.
+    */
+    fn free():
+        rt_atomic_int_free(self._ptr)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_zero(ordering: Ordering = Ordering.SeqCst) -> Bool:
+        """Check if value is zero."""
+        return self.load(ordering) == 0
+
+    fn is_positive(ordering: Ordering = Ordering.SeqCst) -> Bool:
+        """Check if value is positive."""
+        return self.load(ordering) > 0
+
+    fn is_negative(ordering: Ordering = Ordering.SeqCst) -> Bool:
+        """Check if value is negative."""
+        return self.load(ordering) < 0
+
+    fn summary() -> String:
+        """Get summary of atomic integer.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            counter.summary()
+            # → "AtomicInt: 42"
+        """
+        let value = self.load()
+        return "AtomicInt: {value}"
+
+/**
+Atomic boolean.
+
+Provides lock-free atomic operations on booleans.
+
+```sdoctest
+>>> let flag = AtomicBool.new(false)
+>>> flag.load()
+false
+>>> flag.store(true)
+>>> flag.swap(false)
+true
+```
+*/
+struct AtomicBool:
+    _ptr: i64
+
+    fn new(value: Bool) -> AtomicBool:
+        let int_val = if value: 1 else: 0
+        let ptr = rt_atomic_bool_new(int_val)
+        return AtomicBool(_ptr: ptr)
+
+    fn load(ordering: Ordering = Ordering.SeqCst) -> Bool:
+        return rt_atomic_bool_load(self._ptr, ordering_to_int(ordering)) == 1
+
+    fn store(value: Bool, ordering: Ordering = Ordering.SeqCst):
+        let int_val = if value: 1 else: 0
+        rt_atomic_bool_store(self._ptr, int_val, ordering_to_int(ordering))
+
+    fn swap(value: Bool, ordering: Ordering = Ordering.SeqCst) -> Bool:
+        let int_val = if value: 1 else: 0
+        return rt_atomic_bool_swap(self._ptr, int_val, ordering_to_int(ordering)) == 1
+
+    /**
+    Compare and swap.
+    */
+    fn compare_and_swap(expected: Bool, desired: Bool, ordering: Ordering = Ordering.SeqCst) -> Bool:
+        let old = self.swap(desired, ordering)
+        return old == expected
+
+    fn free():
+        rt_atomic_bool_free(self._ptr)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_set(ordering: Ordering = Ordering.SeqCst) -> Bool:
+        """Check if flag is set (true)."""
+        return self.load(ordering)
+
+    fn is_clear(ordering: Ordering = Ordering.SeqCst) -> Bool:
+        """Check if flag is clear (false)."""
+        return not self.load(ordering)
+
+    fn summary() -> String:
+        """Get summary of atomic boolean.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            flag.summary()
+            # → "AtomicBool: true"
+        """
+        let value = self.load()
+        return "AtomicBool: {value}"
+
+/**
+Atomic flag for spinlock implementation.
+
+Simple atomic flag that can be atomically set and cleared.
+Used as building block for spinlocks.
+
+```sdoctest
+>>> let flag = AtomicFlag.new()
+>>> flag.test_and_set()  # Returns false (was clear)
+false
+>>> flag.test_and_set()  # Returns true (was set)
+true
+>>> flag.clear()
+>>> flag.test_and_set()  # Returns false again
+false
+```
+*/
+struct AtomicFlag:
+    _ptr: i64
+
+    fn new() -> AtomicFlag:
+        let ptr = rt_atomic_flag_new()
+        return AtomicFlag(_ptr: ptr)
+
+    /**
+    Atomically set the flag and return the previous state.
+    Returns true if the flag was already set.
+    */
+    fn test_and_set(ordering: Ordering = Ordering.Acquire) -> Bool:
+        return rt_atomic_flag_test_and_set(self._ptr, ordering_to_int(ordering)) == 1
+
+    /**
+    Clear the flag.
+    */
+    fn clear(ordering: Ordering = Ordering.Release):
+        rt_atomic_flag_clear(self._ptr, ordering_to_int(ordering))
+
+    fn free():
+        rt_atomic_flag_free(self._ptr)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_set(ordering: Ordering = Ordering.Acquire) -> Bool:
+        """Check if flag is set.
+
+        Returns:
+            True if flag is set
+
+        Example:
+            flag.is_set()  # → false
+        """
+        return self.test_and_set(ordering)
+
+    fn is_clear(ordering: Ordering = Ordering.Acquire) -> Bool:
+        """Check if flag is clear.
+
+        Returns:
+            True if flag is clear
+
+        Example:
+            flag.is_clear()  # → true
+        """
+        return not self.test_and_set(ordering)
+
+    fn summary() -> String:
+        """Get summary of atomic flag.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            flag.summary()
+            # → "AtomicFlag: set" or "AtomicFlag: clear"
+        """
+        let status = if self.test_and_set(): "set" else: "clear"
+        return "AtomicFlag: {status}"
+
+/**
+Atomic reference to an object.
+
+Provides atomic load/store of object references.
+
+```sdoctest
+>>> let ref = AtomicRef.new(some_object)
+>>> let obj = ref.load()
+>>> ref.store(another_object)
+```
+*/
+struct AtomicRef[T]:
+    _atomic: AtomicInt
+
+    fn new(value: T) -> AtomicRef[T]:
+        let ptr = value as i64
+        return AtomicRef(_atomic: AtomicInt.new(ptr))
+
+    fn load(ordering: Ordering = Ordering.Acquire) -> T:
+        let ptr = self._atomic.load(ordering)
+        return ptr as T
+
+    fn store(value: T, ordering: Ordering = Ordering.Release):
+        let ptr = value as i64
+        self._atomic.store(ptr, ordering)
+
+    fn swap(value: T, ordering: Ordering = Ordering.AcqRel) -> T:
+        let ptr = value as i64
+        let old = self._atomic.swap(ptr, ordering)
+        return old as T
+
+    fn free():
+        self._atomic.free()
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_null(ordering: Ordering = Ordering.Acquire) -> Bool:
+        """Check if reference is null (zero).
+
+        Returns:
+            True if reference is null
+
+        Example:
+            ref.is_null()  # → false
+        """
+        return self._atomic.load(ordering) == 0
+
+    fn is_not_null(ordering: Ordering = Ordering.Acquire) -> Bool:
+        """Check if reference is not null.
+
+        Returns:
+            True if reference is not null
+
+        Example:
+            ref.is_not_null()  # → true
+        """
+        return self._atomic.load(ordering) != 0
+
+    fn compare_and_swap(expected: T, desired: T, ordering: Ordering = Ordering.AcqRel) -> (Bool, T):
+        """Compare and exchange reference.
+
+        Args:
+            expected: Expected current value
+            desired: Desired new value
+            ordering: Memory ordering
+
+        Returns:
+            Tuple of (success, current_value)
+
+        Example:
+            let (ok, old) = ref.compare_and_swap(old_obj, new_obj)
+        """
+        let expected_ptr = expected as i64
+        let desired_ptr = desired as i64
+        let (success, current_ptr) = self._atomic.compare_exchange(
+            expected_ptr,
+            desired_ptr,
+            ordering,
+            ordering
+        )
+        return (success, current_ptr as T)
+
+    fn summary() -> String:
+        """Get summary of atomic reference.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            ref.summary()
+            # → "AtomicRef: 0x7fff12345678"
+        """
+        let ptr = self._atomic.load()
+        return "AtomicRef: 0x{ptr:x}"
+
+/**
+Spin loop hint.
+
+Signals to the CPU that we're in a spin loop.
+May reduce power consumption and improve performance.
+*/
+fn spin_loop_hint():
+    rt_spin_loop_hint()
+
+/**
+Simple spinlock implementation using AtomicFlag.
+
+```sdoctest
+>>> let lock = Spinlock.new()
+>>> lock.acquire()
+>>> # critical section
+>>> lock.release()
+```
+*/
+struct Spinlock:
+    _flag: AtomicFlag
+
+    fn new() -> Spinlock:
+        return Spinlock(_flag: AtomicFlag.new())
+
+    /**
+    Acquire the lock, spinning until available.
+    */
+    fn acquire():
+        while self._flag.test_and_set(Ordering.Acquire):
+            spin_loop_hint()
+
+    /**
+    Try to acquire the lock without blocking.
+    Returns true if acquired.
+    */
+    fn try_acquire() -> Bool:
+        return not self._flag.test_and_set(Ordering.Acquire)
+
+    /**
+    Release the lock.
+    */
+    fn release():
+        self._flag.clear(Ordering.Release)
+
+    fn free():
+        self._flag.free()
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_locked() -> Bool:
+        """Check if lock is currently held.
+
+        Note: This is a best-effort check and may be stale immediately.
+        """
+        return not self.try_acquire() or (self.release(), false)[1]
+
+    fn summary() -> String:
+        """Get summary of spinlock.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            lock.summary()
+            # → "Spinlock: unlocked" or "Spinlock: locked"
+        """
+        let status = if self.is_locked(): "locked" else: "unlocked"
+        return "Spinlock: {status}"
+
+/**
+Atomic counter with convenience methods.
+
+```sdoctest
+>>> let counter = Counter.new()
+>>> counter.inc()
+>>> counter.inc()
+>>> counter.get()
+2
+>>> counter.add(10)
+>>> counter.get()
+12
+```
+*/
+struct Counter:
+    _atomic: AtomicInt
+
+    fn new() -> Counter:
+        return Counter(_atomic: AtomicInt.new(0))
+
+    fn from(value: i64) -> Counter:
+        return Counter(_atomic: AtomicInt.new(value))
+
+    fn get() -> i64:
+        return self._atomic.load()
+
+    fn set(value: i64):
+        self._atomic.store(value)
+
+    fn inc() -> i64:
+        return self._atomic.increment()
+
+    fn dec() -> i64:
+        return self._atomic.decrement()
+
+    fn add(value: i64) -> i64:
+        return self._atomic.fetch_add(value) + value
+
+    fn sub(value: i64) -> i64:
+        return self._atomic.fetch_sub(value) - value
+
+    fn reset():
+        self._atomic.store(0)
+
+    fn free():
+        self._atomic.free()
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_zero() -> Bool:
+        """Check if counter is zero."""
+        return self.get() == 0
+
+    fn is_positive() -> Bool:
+        """Check if counter is positive."""
+        return self.get() > 0
+
+    fn is_negative() -> Bool:
+        """Check if counter is negative."""
+        return self.get() < 0
+
+    fn summary() -> String:
+        """Get summary of counter.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            counter.summary()
+            # → "Counter: 42"
+        """
+        let value = self.get()
+        return "Counter: {value}"

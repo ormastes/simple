@@ -1,0 +1,386 @@
+# SSR - Server-Side Rendering
+#
+# Integration between UI framework and HTTP responses.
+
+use ui.element.*
+use ui.gui.html.HtmlRenderer
+use ui.gui.theme.*
+use web.http.response.*
+
+# Render options for SSR
+pub struct RenderOptions:
+    title: str
+    theme: Option[Theme]
+    head_extra: str
+    minify: bool
+
+impl RenderOptions:
+    # Create with title
+    pub fn new(title: &str) -> RenderOptions:
+        return RenderOptions {
+            title: title.to_string(),
+            theme: None,
+            head_extra: String::new(),
+            minify: false
+        }
+
+    # Set theme
+    pub fn with_theme(self, theme: Theme) -> RenderOptions:
+        self.theme = Some(theme)
+        return self
+
+    # Set light theme
+    pub fn light_theme(self) -> RenderOptions:
+        return self.with_theme(Theme::light())
+
+    # Set dark theme
+    pub fn dark_theme(self) -> RenderOptions:
+        return self.with_theme(Theme::dark())
+
+    # Add extra head content
+    pub fn with_head(self, html: &str) -> RenderOptions:
+        self.head_extra.push_str(html)
+        return self
+
+    # Add stylesheet link
+    pub fn with_stylesheet(self, href: &str) -> RenderOptions:
+        return self.with_head(&"<link rel=\"stylesheet\" href=\"{href}\">")
+
+    # Add script
+    pub fn with_script(self, src: &str) -> RenderOptions:
+        return self.with_head(&"<script src=\"{src}\"></script>")
+
+    # Enable minification
+    pub fn minified(self) -> RenderOptions:
+        self.minify = true
+        return self
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_theme(self) -> bool:
+        """Check if theme is set.
+
+        Returns:
+            true if theme is configured
+
+        Example:
+            options.has_theme()  # → true
+        """
+        return self.theme.is_some()
+
+    pub fn get_theme(self) -> Option[&Theme]:
+        """Get theme if set.
+
+        Returns:
+            Theme reference or None
+
+        Example:
+            options.get_theme()  # → Some(Theme)
+        """
+        return self.theme.as_ref()
+
+    pub fn is_minified(self) -> bool:
+        """Check if minification enabled.
+
+        Returns:
+            true if minify is enabled
+
+        Example:
+            options.is_minified()  # → false
+        """
+        return self.minify
+
+    pub fn has_head_extra(self) -> bool:
+        """Check if has extra head content.
+
+        Returns:
+            true if head_extra is not empty
+
+        Example:
+            options.has_head_extra()  # → true
+        """
+        return not self.head_extra.is_empty()
+
+    pub fn get_title(self) -> &str:
+        """Get page title.
+
+        Returns:
+            Title string
+
+        Example:
+            options.get_title()  # → "My Page"
+        """
+        return &self.title
+
+    pub fn summary(self) -> String:
+        """Get render options summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            options.summary()
+            # → "RenderOptions: 'My Page', theme=Some, minify=false"
+        """
+        let theme_str = if self.has_theme() { "Some" } else { "None" }
+        return "RenderOptions: '{self.title}', theme={theme_str}, minify={self.minify}"
+
+# SSR Renderer
+pub struct SsrRenderer:
+    options: RenderOptions
+    html_renderer: HtmlRenderer
+
+impl SsrRenderer:
+    # Create with options
+    pub fn new(options: RenderOptions) -> SsrRenderer:
+        let mut html_renderer = HtmlRenderer::new()
+        if options.minify:
+            html_renderer = html_renderer.minified()
+        return SsrRenderer {
+            options: options,
+            html_renderer: html_renderer
+        }
+
+    # Create with title only
+    pub fn with_title(title: &str) -> SsrRenderer:
+        return SsrRenderer::new(RenderOptions::new(title))
+
+    # Render element tree to full HTML page
+    pub fn render_page(self, tree: &ElementTree) -> str:
+        # Use the existing HtmlRenderer
+        let html = self.html_renderer.render_document(tree, &self.options.title)
+
+        # If we have extra head content, inject it
+        if not self.options.head_extra.is_empty():
+            # Find </head> and insert before it
+            if let Some(idx) = html.find("</head>"):
+                let before = html.slice(0, idx)
+                let after = html.slice(idx, html.len())
+                return "{before}{self.options.head_extra}{after}"
+
+        return html
+
+    # Render to HTTP response
+    pub fn render_response(self, tree: &ElementTree) -> HttpResponse:
+        let html = self.render_page(tree)
+        return HttpResponse::ok().html(&html)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_title(self) -> &str:
+        """Get page title from options.
+
+        Returns:
+            Title string
+
+        Example:
+            renderer.get_title()  # → "My Page"
+        """
+        return self.options.get_title()
+
+    pub fn is_minified(self) -> bool:
+        """Check if minification is enabled.
+
+        Returns:
+            true if minify enabled
+
+        Example:
+            renderer.is_minified()  # → true
+        """
+        return self.options.is_minified()
+
+    pub fn has_theme(self) -> bool:
+        """Check if theme is configured.
+
+        Returns:
+            true if theme set
+
+        Example:
+            renderer.has_theme()  # → true
+        """
+        return self.options.has_theme()
+
+    pub fn summary(self) -> String:
+        """Get SSR renderer summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            renderer.summary()
+            # → "SsrRenderer: 'My Page', minify=true"
+        """
+        let title = self.get_title()
+        let minify = self.is_minified()
+        return "SsrRenderer: '{title}', minify={minify}"
+
+# Convenience functions
+
+# Render element tree to HTML string
+pub fn render_to_html(tree: &ElementTree, title: &str) -> str:
+    let renderer = SsrRenderer::with_title(title)
+    return renderer.render_page(tree)
+
+# Render element tree to HTTP response
+pub fn render_to_response(tree: &ElementTree, title: &str) -> HttpResponse:
+    let renderer = SsrRenderer::with_title(title)
+    return renderer.render_response(tree)
+
+# Render with options
+pub fn render_with_options(tree: &ElementTree, options: RenderOptions) -> HttpResponse:
+    let renderer = SsrRenderer::new(options)
+    return renderer.render_response(tree)
+
+# HTML page builder for more control
+pub struct HtmlPage:
+    title: str
+    head: String
+    body: String
+    scripts: Array[str]
+
+impl HtmlPage:
+    pub fn new(title: &str) -> HtmlPage:
+        return HtmlPage {
+            title: title.to_string(),
+            head: String::new(),
+            body: String::new(),
+            scripts: []
+        }
+
+    pub fn with_meta(self, name: &str, content: &str) -> HtmlPage:
+        self.head.push_str(&"<meta name=\"{name}\" content=\"{content}\">\n")
+        return self
+
+    pub fn with_stylesheet(self, href: &str) -> HtmlPage:
+        self.head.push_str(&"<link rel=\"stylesheet\" href=\"{href}\">\n")
+        return self
+
+    pub fn with_script(self, src: &str) -> HtmlPage:
+        self.scripts.push(src.to_string())
+        return self
+
+    pub fn with_inline_style(self, css: &str) -> HtmlPage:
+        self.head.push_str(&"<style>{css}</style>\n")
+        return self
+
+    pub fn with_body(self, html: &str) -> HtmlPage:
+        self.body = html.to_string()
+        return self
+
+    pub fn with_tree(self, tree: &ElementTree) -> HtmlPage:
+        let renderer = HtmlRenderer::new()
+        renderer.render_tree(tree)
+        self.body = renderer.html().to_string()
+        self.head.push_str(&"<style>{renderer.css()}</style>\n")
+        return self
+
+    pub fn to_html(self) -> str:
+        let mut scripts_html = String::new()
+        for src in &self.scripts:
+            scripts_html.push_str(&"<script src=\"{src}\"></script>\n")
+
+        return """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{self.title}</title>
+{self.head}
+</head>
+<body>
+{self.body}
+{scripts_html}
+</body>
+</html>"""
+
+    pub fn to_response(self) -> HttpResponse:
+        return HttpResponse::ok().html(&self.to_html())
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_scripts(self) -> bool:
+        """Check if page has any scripts.
+
+        Returns:
+            true if scripts array is not empty
+
+        Example:
+            page.has_scripts()  # → true
+        """
+        return not self.scripts.is_empty()
+
+    pub fn script_count(self) -> u64:
+        """Get number of scripts.
+
+        Returns:
+            Count of script tags
+
+        Example:
+            page.script_count()  # → 3
+        """
+        return self.scripts.len()
+
+    pub fn has_head(self) -> bool:
+        """Check if has head content.
+
+        Returns:
+            true if head is not empty
+
+        Example:
+            page.has_head()  # → true
+        """
+        return not self.head.is_empty()
+
+    pub fn has_body(self) -> bool:
+        """Check if body is set.
+
+        Returns:
+            true if body is not empty
+
+        Example:
+            page.has_body()  # → true
+        """
+        return not self.body.is_empty()
+
+    pub fn is_empty(self) -> bool:
+        """Check if page has no content.
+
+        Returns:
+            true if no head, body, or scripts
+
+        Example:
+            page.is_empty()  # → false
+        """
+        return self.head.is_empty() and self.body.is_empty() and self.scripts.is_empty()
+
+    pub fn get_title(self) -> &str:
+        """Get page title.
+
+        Returns:
+            Title string
+
+        Example:
+            page.get_title()  # → "My Page"
+        """
+        return &self.title
+
+    pub fn summary(self) -> String:
+        """Get HTML page summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            page.summary()
+            # → "HtmlPage: 'My Page', 3 scripts, head=true, body=true"
+        """
+        let scripts = self.script_count()
+        let has_head = self.has_head()
+        let has_body = self.has_body()
+        return "HtmlPage: '{self.title}', {scripts} scripts, head={has_head}, body={has_body}"

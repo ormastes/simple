@@ -1,0 +1,141 @@
+# Async Resource Manager
+#
+# Parallel resource loading: textures, fonts, images.
+
+use core.*
+use concurrency.*
+
+import types.{Image, Buffer}
+
+export AsyncResourceManager, AsyncBufferManager, AsyncTextRenderer
+
+# ============================================================================
+# Async Resource Manager
+# ============================================================================
+
+struct AsyncResourceManager:
+    textures: Dict[u64, Image]
+    font_atlas: Option[Image]
+    loading_cache: Dict[String, Future[Result[u64, String]]]
+    next_texture_id: u64
+
+impl AsyncResourceManager:
+    fn new(device: &VulkanDevice) -> AsyncResourceManager:
+        return AsyncResourceManager {
+            textures: Dict::new(),
+            font_atlas: None,
+            loading_cache: Dict::new(),
+            next_texture_id: 1
+        }
+
+    # Load texture asynchronously
+    async fn load_texture_async(self, path: &str) -> Future[Result[u64, String]]:
+        # Check if already loading
+        if let Some(future) = self.loading_cache.get(path):
+            return await future
+
+        # Start loading
+        let load_future = async {
+            # TODO: [ui][P3] Read file asynchronously
+            let image_data = await fs::read_async(path)
+
+            # TODO: [ui][P3] Decode image
+            let decoded = await spawn_blocking(|| {
+                decode_image(&image_data)
+            })
+
+            # TODO: [ui][P3] Upload to GPU
+            let texture = await self.device.create_texture_async(
+                decoded.width,
+                decoded.height,
+                decoded.data
+            )
+
+            # Cache and return
+            let texture_id = self.next_texture_id
+            self.next_texture_id = self.next_texture_id + 1
+            self.textures.set(texture_id, texture)
+
+            return Ok(texture_id)
+        }
+
+        # Cache the future
+        self.loading_cache.set(path.to_string(), load_future)
+
+        return await load_future
+
+    # Preload all resources in parallel
+    async fn preload_resources_async(self, tree: &ElementTree) -> Future[()]:
+        let load_futures: Array[Future[Result[u64, String]]] = []
+
+        for elem in tree.iter():
+            if let Some(src) = elem.attrs.get("src"):
+                if not self.is_loaded(src):
+                    load_futures.push(self.load_texture_async(src))
+
+        let results = await Future::all(load_futures)
+
+        for result in results:
+            match result:
+                case Err(e):
+                    log_error("Failed to load resource: {e}")
+                case Ok(_):
+                    pass
+
+        return Future::ready(())
+
+    fn is_loaded(path: &str) -> bool:
+        return self.loading_cache.contains_key(path)
+
+# ============================================================================
+# Async Buffer Manager
+# ============================================================================
+
+struct AsyncBufferManager:
+    vertex_buffers: Array[Buffer]
+    index_buffers: Array[Buffer]
+
+impl AsyncBufferManager:
+    fn new(device: &VulkanDevice) -> AsyncBufferManager:
+        return AsyncBufferManager {
+            vertex_buffers: [],
+            index_buffers: []
+        }
+
+    async fn upload_draw_list_async(self, draw_list: &DrawList, frame_index: usize)
+        -> Future[()]:
+        let vertex_upload = async {
+            # TODO: [ui][P3] vmaMapMemory + memcpy + vmaUnmapMemory
+            ()
+        }
+
+        let index_upload = async {
+            # TODO: [ui][P3] vmaMapMemory + memcpy + vmaUnmapMemory
+            ()
+        }
+
+        await Future::join(vertex_upload, index_upload)
+
+        return Future::ready(())
+
+    async fn update_partial_async(self, draw_list: &DrawList, regions: &Array[DirtyRegion])
+        -> Future[()]:
+        # TODO: [ui][P3] Update only affected regions
+        return Future::ready(())
+
+# ============================================================================
+# Async Text Renderer
+# ============================================================================
+
+struct AsyncTextRenderer:
+    font_atlas: Option[Image]
+
+impl AsyncTextRenderer:
+    fn new(device: &VulkanDevice) -> AsyncTextRenderer:
+        return AsyncTextRenderer {
+            font_atlas: None
+        }
+
+    async fn load_default_font_async(self) -> Future[Result[(), String]]:
+        # TODO: [ui][P3] Load default font, generate SDF atlas
+        return Future::ready(Ok(()))

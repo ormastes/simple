@@ -45,7 +45,20 @@ impl<'a> Parser<'a> {
         attributes: Vec<Attribute>,
     ) -> Result<Node, ParseError> {
         let start_span = self.current.span;
-        self.expect(&TokenKind::Fn)?;
+
+        // Accept both 'fn' and 'me' keywords
+        // 'me' indicates a mutable method (modifies self)
+        let is_me_method = if self.check(&TokenKind::Me) {
+            self.advance();
+            true
+        } else {
+            self.expect(&TokenKind::Fn)?;
+            false
+        };
+
+        // Note: is_me_method is currently stored but not used
+        // Future: can be used to enforce mutable self parameter
+        let _ = is_me_method; // Suppress unused warning
 
         // Allow keywords like 'new', 'type', etc. as function names
         let name = self.expect_method_name()?;

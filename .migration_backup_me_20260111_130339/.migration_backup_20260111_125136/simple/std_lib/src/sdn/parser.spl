@@ -1,0 +1,649 @@
+///
+Module: sdn.parser
+
+One-pass LL(2) parser for SDN documents.
+
+Features:
+- LL(2) lookahead for dict vs array disambiguation
+- Parses all SDN forms: primitives, inline collections, block collections, tables
+- Helpful error messages with source locations
+- One-pass parsing (no backtracking)
+
+Usage:
+    import sdn.parser
+    let parser = Parser.new("name: Alice\nage: 30")
+    let doc = parser.parse()  # Returns SdnValue.Dict
+///
+
+import error.{SdnError, Span, syntax_error_with_span, unexpected_token}
+import token.{Token, TokenKind}
+import lexer.{Lexer, tokenize}
+import value.SdnValue
+
+# Public exports
+export Parser, parse
+
+/// SDN parser state
+class Parser:
+    tokens: List[Token]
+    pos: Int
+
+    fn new(source: String) -> Parser:
+        """Create a new parser from source string"""
+        let tokens = tokenize(source)
+        return Parser(
+            tokens: tokens,
+            pos: 0
+        )
+
+    me parse() -> Result[SdnValue, SdnError]:
+        """Parse the document into an SdnValue (typically a Dict)"""
+        let mut root = {}
+
+        loop:
+            self.skip_newlines()
+
+            if self.is_at_end():
+                break
+
+            # Parse top-level statement
+            match self.parse_statement():
+                case Ok(Some((key, value))):
+                    root[key] = value
+                case Ok(None):
+                    break
+                case Err(e):
+                    return Err(e)
+
+        return Ok(SdnValue.Dict(root))
+
+    me parse_statement() -> Result[Option[Tuple[String, SdnValue]], SdnError]:
+        """Parse a single statement"""
+        self.skip_newlines()
+
+        if self.is_at_end():
+            return Ok(None)
+
+        # Must start with an identifier
+        let name = self.expect_identifier()?
+
+        # Check what follows
+        match self.peek_kind():
+            case Some(TokenKind.Colon):
+                self.advance()
+                return self.parse_colon_stmt(name)
+
+            case Some(TokenKind.Equals):
+                self.advance()
+                let value = self.parse_inline_value()?
+                self.skip_newlines()
+                return Ok(Some((name, value)))
+
+            case Some(TokenKind.Pipe):
+                return self.parse_named_table(name)
+
+            case _:
+                let span = self.current_span()
+                let msg = "Expected ':', '=', or '|' after identifier '${name}'"
+                return Err(syntax_error_with_span(msg, span))
+
+    me parse_colon_stmt(name: String) -> Result[Option[Tuple[String, SdnValue]], SdnError]:
+        """Parse statement after ':'"""
+        match self.peek_kind():
+            case Some(TokenKind.Table):
+                # Typed table
+                return self.parse_typed_table(name)
+
+            case Some(TokenKind.Newline):
+                # Block form or empty
+                self.skip_newlines()
+                match self.peek_kind():
+                    case Some(TokenKind.Indent):
+                        self.advance()  # consume INDENT
+                        let value = self.parse_block()?
+                        return Ok(Some((name, value)))
+                    case _:
+                        # Empty value
+                        return Ok(Some((name, SdnValue.Null)))
+
+            case Some(TokenKind.Indent):
+                # Block form
+                self.advance()  # consume INDENT
+                let value = self.parse_block()?
+                return Ok(Some((name, value)))
+
+            case _:
+                # Simple value
+                let value = self.parse_value()?
+                self.skip_newlines()
+                return Ok(Some((name, value)))
+
+    me parse_block() -> Result[SdnValue, SdnError]:
+        """Parse a block (after INDENT)"""
+        self.skip_newlines()
+
+        # Look ahead to determine if this is a dict or array block
+        if self.is_dict_block():
+            return self.parse_dict_block()
+        else:
+            return self.parse_array_block()
+
+    fn is_dict_block() -> Bool:
+        """
+        Check if the current block is a dict (ident: value) or array.
+
+        This is the LL(2) lookahead!
+        Look for pattern: identifier followed by colon
+        """
+        match self.peek_kind():
+            case Some(TokenKind.Identifier(_)):
+                match self.peek_kind_at(1):
+                    case Some(TokenKind.Colon):
+                        return True
+                    case _:
+                        return False
+            case _:
+                return False
+
+    me parse_dict_block() -> Result[SdnValue, SdnError]:
+        """Parse a dict block"""
+        let mut dict = {}
+
+        loop:
+            self.skip_newlines()
+
+            match self.peek_kind():
+                case Some(TokenKind.Dedent):
+                    self.advance()
+                    break
+                case Some(TokenKind.Eof):
+                    break
+                case None:
+                    break
+
+                case Some(TokenKind.Identifier(_)):
+                    let key = self.expect_identifier()?
+
+                    match self.peek_kind():
+                        case Some(TokenKind.Colon):
+                            self.advance()
+                            match self.parse_colon_stmt(key.clone()):
+                                case Ok(Some((_, value))):
+                                    dict[key] = value
+                                case Ok(None):
+                                    pass
+                                case Err(e):
+                                    return Err(e)
+
+                        case Some(TokenKind.Equals):
+                            self.advance()
+                            let value = self.parse_inline_value()?
+                            dict[key] = value
+                            self.skip_newlines()
+
+                        case Some(TokenKind.Pipe):
+                            match self.parse_named_table(key.clone()):
+                                case Ok(Some((_, value))):
+                                    dict[key] = value
+                                case Ok(None):
+                                    pass
+                                case Err(e):
+                                    return Err(e)
+
+                        case _:
+                            # Bare identifier as value
+                            dict[key.clone()] = SdnValue.String(key)
+                            self.skip_newlines()
+
+                case _:
+                    # Unexpected token in dict block
+                    self.advance()
+
+        return Ok(SdnValue.Dict(dict))
+
+    me parse_array_block() -> Result[SdnValue, SdnError]:
+        """Parse an array block"""
+        let mut arr = []
+
+        loop:
+            self.skip_newlines()
+
+            match self.peek_kind():
+                case Some(TokenKind.Dedent):
+                    self.advance()
+                    break
+                case Some(TokenKind.Eof):
+                    break
+                case None:
+                    break
+
+                case _:
+                    let value = self.parse_value()?
+                    arr.push(value)
+                    self.skip_newlines()
+
+        return Ok(SdnValue.Array(arr))
+
+    me parse_typed_table(name: String) -> Result[Option[Tuple[String, SdnValue]], SdnError]:
+        """Parse a typed table: `name: table{types}`"""
+        self.advance()  # consume 'table'
+        self.expect(TokenKind.LBrace)?
+
+        let mut types = []
+        loop:
+            match self.peek_kind():
+                case Some(TokenKind.RBrace):
+                    break
+                case _:
+                    let type_name = self.expect_identifier()?
+                    types.push(type_name)
+
+                    match self.peek_kind():
+                        case Some(TokenKind.Comma):
+                            self.advance()
+                        case _:
+                            break
+
+        self.expect(TokenKind.RBrace)?
+
+        # Check for short form (=) or long form (newline + indent)
+        let rows = match self.peek_kind():
+            case Some(TokenKind.Equals):
+                self.advance()
+                self.parse_inline_tuple_list()?
+
+            case Some(TokenKind.Newline):
+                self.skip_newlines()
+                match self.peek_kind():
+                    case Some(TokenKind.Indent):
+                        self.advance()
+                        self.parse_table_rows(types.len)?
+                    case _:
+                        []
+
+            case Some(TokenKind.Indent):
+                self.advance()
+                self.parse_table_rows(types.len)?
+
+            case _:
+                []
+
+        return Ok(Some((name, SdnValue.typed_table(types, rows))))
+
+    me parse_named_table(name: String) -> Result[Option[Tuple[String, SdnValue]], SdnError]:
+        """Parse a named table: `name |fields|`"""
+        self.expect(TokenKind.Pipe)?
+
+        let mut fields = []
+        loop:
+            match self.peek_kind():
+                case Some(TokenKind.Pipe):
+                    break
+                case _:
+                    let field = self.expect_identifier()?
+                    fields.push(field)
+
+                    match self.peek_kind():
+                        case Some(TokenKind.Comma):
+                            self.advance()
+                        case _:
+                            break
+
+        self.expect(TokenKind.Pipe)?
+
+        # Check for inline row or block rows
+        let rows = match self.peek_kind():
+            case Some(TokenKind.Newline):
+                self.skip_newlines()
+                match self.peek_kind():
+                    case Some(TokenKind.Indent):
+                        self.advance()
+                        self.parse_table_rows(fields.len)?
+                    case _:
+                        []
+
+            case Some(TokenKind.Indent):
+                self.advance()
+                self.parse_table_rows(fields.len)?
+
+            case _:
+                # Inline single row
+                let row = self.parse_table_row(fields.len)?
+                self.skip_newlines()
+                [row]
+
+        return Ok(Some((name, SdnValue.named_table(fields, rows))))
+
+    me parse_table_rows(expected_cols: Int) -> Result[List[List[SdnValue]], SdnError]:
+        """Parse table rows in block form"""
+        let mut rows = []
+
+        loop:
+            self.skip_newlines()
+
+            match self.peek_kind():
+                case Some(TokenKind.Dedent):
+                    self.advance()
+                    break
+                case Some(TokenKind.Eof):
+                    break
+                case None:
+                    break
+
+                case _:
+                    let row = self.parse_table_row(expected_cols)?
+                    rows.push(row)
+                    self.skip_newlines()
+
+        return Ok(rows)
+
+    me parse_table_row(expected_cols: Int) -> Result[List[SdnValue], SdnError]:
+        """Parse a single table row"""
+        let mut row = []
+
+        loop:
+            if self.is_at_end():
+                break
+
+            match self.peek_kind():
+                case Some(TokenKind.Newline):
+                    break
+                case Some(TokenKind.Dedent):
+                    break
+                case _:
+                    let value = self.parse_value()?
+                    row.push(value)
+
+                    match self.peek_kind():
+                        case Some(TokenKind.Comma):
+                            self.advance()
+                        case _:
+                            break
+
+        # Validate row length
+        if row.len != expected_cols and expected_cols > 0:
+            return Err(SdnError.InvalidTableRow(
+                expected: expected_cols,
+                found: row.len
+            ))
+
+        return Ok(row)
+
+    me parse_inline_tuple_list() -> Result[List[List[SdnValue]], SdnError]:
+        """Parse inline tuple list: `[(v1, v2), (v3, v4)]`"""
+        self.expect(TokenKind.LBracket)?
+
+        let mut rows = []
+
+        loop:
+            match self.peek_kind():
+                case Some(TokenKind.RBracket):
+                    break
+                case _:
+                    self.expect(TokenKind.LParen)?
+                    let mut row = []
+
+                    loop:
+                        match self.peek_kind():
+                            case Some(TokenKind.RParen):
+                                break
+                            case _:
+                                let value = self.parse_value()?
+                                row.push(value)
+
+                                match self.peek_kind():
+                                    case Some(TokenKind.Comma):
+                                        self.advance()
+                                    case _:
+                                        break
+
+                    self.expect(TokenKind.RParen)?
+                    rows.push(row)
+
+                    match self.peek_kind():
+                        case Some(TokenKind.Comma):
+                            self.advance()
+                        case _:
+                            break
+
+        self.expect(TokenKind.RBracket)?
+        return Ok(rows)
+
+    me parse_inline_value() -> Result[SdnValue, SdnError]:
+        """Parse an inline value (dict or array with `=`)"""
+        match self.peek_kind():
+            case Some(TokenKind.LBrace):
+                return self.parse_inline_dict()
+            case Some(TokenKind.LBracket):
+                return self.parse_inline_array()
+            case _:
+                return self.parse_value()
+
+    me parse_inline_dict() -> Result[SdnValue, SdnError]:
+        """Parse inline dict: `{k: v, k: v}`"""
+        self.expect(TokenKind.LBrace)?
+
+        let mut dict = {}
+
+        loop:
+            match self.peek_kind():
+                case Some(TokenKind.RBrace):
+                    break
+                case _:
+                    let key = self.expect_identifier()?
+                    self.expect(TokenKind.Colon)?
+                    let value = self.parse_value()?
+                    dict[key] = value
+
+                    match self.peek_kind():
+                        case Some(TokenKind.Comma):
+                            self.advance()
+                        case _:
+                            break
+
+        self.expect(TokenKind.RBrace)?
+        return Ok(SdnValue.Dict(dict))
+
+    me parse_inline_array() -> Result[SdnValue, SdnError]:
+        """Parse inline array: `[v, v, v]`"""
+        self.expect(TokenKind.LBracket)?
+
+        let mut arr = []
+
+        loop:
+            match self.peek_kind():
+                case Some(TokenKind.RBracket):
+                    break
+                case _:
+                    let value = self.parse_value()?
+                    arr.push(value)
+
+                    match self.peek_kind():
+                        case Some(TokenKind.Comma):
+                            self.advance()
+                        case _:
+                            break
+
+        self.expect(TokenKind.RBracket)?
+        return Ok(SdnValue.Array(arr))
+
+    me parse_value() -> Result[SdnValue, SdnError]:
+        """Parse a single value"""
+        match self.peek_kind():
+            case Some(TokenKind.Integer(i)):
+                self.advance()
+                return Ok(SdnValue.Int(i))
+
+            case Some(TokenKind.Float(f)):
+                self.advance()
+                return Ok(SdnValue.Float(f))
+
+            case Some(TokenKind.String(s)):
+                self.advance()
+                return Ok(SdnValue.String(s))
+
+            case Some(TokenKind.Bool(b)):
+                self.advance()
+                return Ok(SdnValue.Bool(b))
+
+            case Some(TokenKind.Null):
+                self.advance()
+                return Ok(SdnValue.Null)
+
+            case Some(TokenKind.Identifier(s)):
+                # Bare string
+                self.advance()
+                return Ok(SdnValue.String(s))
+
+            case Some(TokenKind.LBrace):
+                return self.parse_inline_dict()
+
+            case Some(TokenKind.LBracket):
+                return self.parse_inline_array()
+
+            case _:
+                let span = self.current_span()
+                return Err(syntax_error_with_span("Expected value", span))
+
+    # === Helper methods ===
+
+    fn peek() -> Option[Token]:
+        """Look at current token without consuming"""
+        if self.pos < self.tokens.len:
+            return Some(self.tokens[self.pos])
+        return None
+
+    fn peek_kind() -> Option[TokenKind]:
+        """Look at current token kind"""
+        match self.peek():
+            case Some(token):
+                return Some(token.kind)
+            case None:
+                return None
+
+    fn peek_kind_at(offset: Int) -> Option[TokenKind]:
+        """Look ahead by offset tokens (LL(2) lookahead!)"""
+        let idx = self.pos + offset
+        if idx < self.tokens.len:
+            return Some(self.tokens[idx].kind)
+        return None
+
+    me advance() -> Option[Token]:
+        """Consume and return current token"""
+        if self.pos < self.tokens.len:
+            let token = self.tokens[self.pos]
+            self.pos += 1
+            return Some(token)
+        return None
+
+    fn is_at_end() -> Bool:
+        """Check if we're at EOF"""
+        match self.peek_kind():
+            case Some(TokenKind.Eof):
+                return True
+            case None:
+                return True
+            case _:
+                return False
+
+    me skip_newlines():
+        """Skip all newline tokens"""
+        loop:
+            match self.peek_kind():
+                case Some(TokenKind.Newline):
+                    self.advance()
+                case _:
+                    break
+
+    fn current_span() -> Span:
+        """Get span of current token"""
+        match self.peek():
+            case Some(token):
+                return token.span
+            case None:
+                return Span.default()
+
+    me expect(expected: TokenKind) -> Result[Nil, SdnError]:
+        """Expect a specific token kind"""
+        match self.peek_kind():
+            case Some(kind):
+                if self.tokens_match(kind, expected):
+                    self.advance()
+                    return Ok(nil)
+                else:
+                    let span = self.current_span()
+                    return Err(unexpected_token(
+                        expected.name(),
+                        kind.name(),
+                        span
+                    ))
+            case None:
+                let span = self.current_span()
+                return Err(SdnError.UnexpectedEof(span: Some(span)))
+
+    fn tokens_match(a: TokenKind, b: TokenKind) -> Bool:
+        """Check if two token kinds match (ignoring associated data)"""
+        # This is a simplified match - in reality we need discriminant comparison
+        match (a, b):
+            case (TokenKind.Integer(_), TokenKind.Integer(_)):
+                return True
+            case (TokenKind.Float(_), TokenKind.Float(_)):
+                return True
+            case (TokenKind.String(_), TokenKind.String(_)):
+                return True
+            case (TokenKind.Bool(_), TokenKind.Bool(_)):
+                return True
+            case (TokenKind.Identifier(_), TokenKind.Identifier(_)):
+                return True
+            case (TokenKind.Null, TokenKind.Null):
+                return True
+            case (TokenKind.Table, TokenKind.Table):
+                return True
+            case (TokenKind.Colon, TokenKind.Colon):
+                return True
+            case (TokenKind.Equals, TokenKind.Equals):
+                return True
+            case (TokenKind.Pipe, TokenKind.Pipe):
+                return True
+            case (TokenKind.Comma, TokenKind.Comma):
+                return True
+            case (TokenKind.LBrace, TokenKind.LBrace):
+                return True
+            case (TokenKind.RBrace, TokenKind.RBrace):
+                return True
+            case (TokenKind.LBracket, TokenKind.LBracket):
+                return True
+            case (TokenKind.RBracket, TokenKind.RBracket):
+                return True
+            case (TokenKind.LParen, TokenKind.LParen):
+                return True
+            case (TokenKind.RParen, TokenKind.RParen):
+                return True
+            case (TokenKind.Newline, TokenKind.Newline):
+                return True
+            case (TokenKind.Indent, TokenKind.Indent):
+                return True
+            case (TokenKind.Dedent, TokenKind.Dedent):
+                return True
+            case (TokenKind.Eof, TokenKind.Eof):
+                return True
+            case _:
+                return False
+
+    me expect_identifier() -> Result[String, SdnError]:
+        """Expect an identifier token and return its value"""
+        match self.peek_kind():
+            case Some(TokenKind.Identifier(s)):
+                self.advance()
+                return Ok(s)
+            case Some(other):
+                let span = self.current_span()
+                return Err(unexpected_token("identifier", other.name(), span))
+            case None:
+                let span = self.current_span()
+                return Err(SdnError.UnexpectedEof(span: Some(span)))
+
+/// Parse a complete SDN source string
+fn parse(source: String) -> Result[SdnValue, SdnError]:
+    let mut parser = Parser.new(source)
+    return parser.parse()

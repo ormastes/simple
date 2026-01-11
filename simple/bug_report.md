@@ -41,8 +41,9 @@
 | Verification Module Reserved Keywords | ✅ FIXED | High |
 | Exported Enum Scope Loss Across Tests | ✅ FIXED | Critical |
 | Multi-Mode Feature Parse Errors | ✅ FIXED | Critical |
+| Regex NFA Matcher Returns Empty Matches | 🐛 OPEN | High |
 
-**Summary:** 32 fixed, 2 open, 1 investigating, 3 workarounds
+**Summary:** 32 fixed, 3 open, 1 investigating, 3 workarounds
 
 ---
 
@@ -2673,6 +2674,110 @@ Created comprehensive BDD spec test:
 
 **Discovered During:** Tensor dimension inference documentation (#193) and BDD framework restoration
 **Resolved:** 2026-01-11 (critical blockers fixed, workarounds documented)
+
+---
+
+## Regex NFA Matcher Returns Empty Matches 🐛 OPEN
+
+**Type:** Bug - Runtime Logic Error
+**Priority:** High
+**Status:** 🐛 OPEN
+**Discovered:** 2026-01-11
+**Component:** Standard Library - Regex Module (NFA Matcher)
+
+### Description
+
+The NFA-based regex matcher in `std.core.regex` always returns matches with `start=0, end=0` (empty matches) regardless of the pattern or input text. This affects all pattern matching operations.
+
+### Symptoms
+
+All regex matches return zero-length matches:
+- Pattern `"hello"` searching in `"hello world"` returns `Match(text='', start=0, end=0)`
+- Pattern `"xyz"` searching in `"hello world"` returns `Match(text='', start=0, end=0)` (should return None)
+
+### Root Cause
+
+Unknown - likely issue in one of:
+1. **Accept state detection** in `NFAMatcher.match_at()` - may be accepting at wrong position
+2. **Position tracking** - `match_pos` variable not being updated correctly
+3. **Epsilon closure computation** - states may not be transitioning properly
+4. **Match text extraction** - `substring(start_pos, match_pos)` calculation
+
+### Test Case
+
+```simple
+import std.core.regex
+
+# Test 1: Should match "hello" at position 0-5
+val pattern1 = regex.compile("hello")
+val result1 = pattern1.search("hello world")
+# Expected: Match(text="hello", start=0, end=5)
+# Actual: Match(text="", start=0, end=0)
+
+# Test 2: Should return None
+val pattern2 = regex.compile("xyz")
+val result2 = pattern2.search("hello world")
+# Expected: None
+# Actual: Match(text="", start=0, end=0)
+```
+
+### Files Affected
+
+**Core Implementation:**
+- `simple/std_lib/src/core/regex.spl:714-790` - `NFAMatcher.match_at()` method
+- `simple/std_lib/src/core/regex.spl:792-829` - `NFAMatcher.epsilon_closure()` method
+- `simple/std_lib/src/core/regex.spl:557-703` - `NFABuilder.build_fragment()` (NFA construction)
+
+**Test Files:**
+- `test_regex_simple.spl` - Basic literal matching tests (both failing)
+- `test_regex_debug2.spl` - Debug test showing empty match issue
+
+### Workaround
+
+None currently available. The regex module compiles successfully but matching is non-functional.
+
+### Related Work
+
+**Successfully Completed:**
+- ✅ Regex AST with all node types (Literal, CharClass, Concat, Alt, Star, Plus, Question, Quant, Group, Anchor)
+- ✅ RegexParser with position-passing pattern for pass-by-value semantics
+- ✅ NFABuilder using Thompson's construction, redesigned for immutable NFA state management
+- ✅ NFA helper methods (add_state, update_state, set_accept, add_epsilon_to, add_transition_to)
+- ✅ Module compiles without errors
+- ✅ Pattern compilation works (creates valid NFA structures)
+
+### Investigation Notes
+
+**NFA Construction:** Verified as correct - states are being added and connected properly with epsilon transitions and character transitions.
+
+**Matching Logic Suspect Areas:**
+```simple
+# Line 732-744: Accept state check - match_pos may always stay -1 or 0
+while current_pos <= self.text.len() and iteration_count < max_iterations:
+    for state_info in current_states:
+        val state = self.nfa.states[state_id]
+        if state.is_accept:
+            match_pos = current_pos  # <-- May not be reached or set incorrectly
+            match_groups = groups
+```
+
+**TODO(P1):** Add debug logging to track:
+- Which states are in the epsilon closure
+- When accept states are encountered
+- What `current_pos` and `match_pos` values are during matching
+- Whether character transitions are being followed correctly
+
+### Next Steps
+
+1. Add instrumentation/logging to `match_at()` to trace state transitions
+2. Verify epsilon closure is computing correct reachable states
+3. Check if accept states are marked correctly during NFA construction
+4. Validate character matching logic (line 764-776)
+
+**Priority:** High - blocks regex functionality in stdlib
+
+**Discovered During:** Standard library TODO implementation (P1 regex engine)
+**Status:** Requires debugging session to trace NFA execution
 
 ---
 

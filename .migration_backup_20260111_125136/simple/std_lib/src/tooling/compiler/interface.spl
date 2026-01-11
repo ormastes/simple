@@ -1,0 +1,912 @@
+# Multi-Language Compiler Interface
+# Unified compilation interface for multiple programming languages
+
+use tooling.core.project.{Language, LanguageConfig}
+use core.result.{Result, Ok, Err}
+
+# Compilation mode
+pub enum CompilationMode:
+    Debug
+    Release
+    Profile
+
+    pub fn to_string(self): String =
+        """Convert compilation mode to string.
+
+        Returns:
+            Mode name
+
+        Example:
+            CompilationMode::Release.to_string()  # → "release"
+        """
+        match self:
+            CompilationMode::Debug: "debug"
+            CompilationMode::Release: "release"
+            CompilationMode::Profile: "profile"
+
+    pub fn description(self): String =
+        """Get mode description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            CompilationMode::Debug.description()
+            # → "Debug build with symbols and assertions"
+        """
+        match self:
+            CompilationMode::Debug:
+                "Debug build with symbols and assertions"
+            CompilationMode::Release:
+                "Release build with optimizations"
+            CompilationMode::Profile:
+                "Profile build with debug info and optimizations"
+
+    pub fn enables_optimizations(self): bool =
+        """Check if mode enables optimizations.
+
+        Returns:
+            True if optimizations enabled
+
+        Example:
+            CompilationMode::Debug.enables_optimizations()  # → false
+            CompilationMode::Release.enables_optimizations()  # → true
+        """
+        match self:
+            CompilationMode::Debug: false
+            CompilationMode::Release: true
+            CompilationMode::Profile: true
+
+    pub fn includes_debug_info(self): bool =
+        """Check if mode includes debug information.
+
+        Returns:
+            True if debug info included
+
+        Example:
+            CompilationMode::Debug.includes_debug_info()  # → true
+            CompilationMode::Release.includes_debug_info()  # → false
+        """
+        match self:
+            CompilationMode::Debug: true
+            CompilationMode::Release: false
+            CompilationMode::Profile: true
+
+    pub fn is_debug(self): bool =
+        """Check if mode is Debug.
+
+        Returns:
+            True for Debug variant
+
+        Example:
+            CompilationMode::Debug.is_debug()  # → true
+        """
+        match self:
+            CompilationMode::Debug: true
+            _: false
+
+    pub fn is_release(self): bool =
+        """Check if mode is Release.
+
+        Returns:
+            True for Release variant
+
+        Example:
+            CompilationMode::Release.is_release()  # → true
+        """
+        match self:
+            CompilationMode::Release: true
+            _: false
+
+    pub fn is_profile(self): bool =
+        """Check if mode is Profile.
+
+        Returns:
+            True for Profile variant
+
+        Example:
+            CompilationMode::Profile.is_profile()  # → true
+        """
+        match self:
+            CompilationMode::Profile: true
+            _: false
+
+    pub fn is_production_ready(self): bool =
+        """Check if mode produces production-ready builds.
+
+        Returns:
+            True for Release
+
+        Example:
+            CompilationMode::Release.is_production_ready()  # → true
+        """
+        match self:
+            CompilationMode::Release: true
+            _: false
+
+    pub fn summary(self): String =
+        """Get compilation mode summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            CompilationMode::Release.summary()
+            # → "CompilationMode: release (Release build with optimizations, optimized, production-ready)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let opt_status = if self.enables_optimizations(): "optimized" else: "unoptimized"
+        let build_type = if self.is_production_ready():
+            ", production-ready"
+        elif self.is_profile():
+            ", profiling"
+        else:
+            ", development"
+        return "CompilationMode: {name} ({desc}, {opt_status}{build_type})"
+
+# Compilation result
+pub class CompilationResult:
+    pub success: bool
+    pub artifacts: List[Artifact]
+    pub errors: List[CompilationError]
+    pub warnings: List[CompilationError]
+    pub duration_ms: i64
+
+    pub fn new(): CompilationResult =
+        """Create empty compilation result."""
+        CompilationResult {
+            success: true,
+            artifacts: [],
+            errors: [],
+            warnings: [],
+            duration_ms: 0
+        }
+
+    pub fn is_ok(self): bool =
+        """Check if compilation succeeded.
+
+        Returns:
+            True if no errors
+        """
+        self.errors.len() == 0
+
+    pub fn add_error(self, error: CompilationError):
+        """Add compilation error.
+
+        Args:
+            error: Error to add
+        """
+        self.errors.append(error)
+        self.success = false
+
+    pub fn add_warning(self, warning: CompilationError):
+        """Add compilation warning.
+
+        Args:
+            warning: Warning to add
+        """
+        self.warnings.append(warning)
+
+    pub fn add_artifact(self, artifact: Artifact):
+        """Add build artifact.
+
+        Args:
+            artifact: Artifact to add
+        """
+        self.artifacts.append(artifact)
+
+    pub fn artifact_count(self): i32 =
+        """Get artifact count.
+
+        Returns:
+            Number of artifacts
+        """
+        self.artifacts.len()
+
+    pub fn error_count(self): i32 =
+        """Get error count.
+
+        Returns:
+            Number of errors
+        """
+        self.errors.len()
+
+    pub fn warning_count(self): i32 =
+        """Get warning count.
+
+        Returns:
+            Number of warnings
+        """
+        self.warnings.len()
+
+    pub fn has_warnings(self): bool =
+        """Check if there are warnings.
+
+        Returns:
+            True if warnings present
+        """
+        self.warnings.len() > 0
+
+    pub fn has_errors(self): bool =
+        """Check if there are errors.
+
+        Returns:
+            True if errors present
+        """
+        self.errors.len() > 0
+
+    pub fn duration_seconds(self): f64 =
+        """Get compilation duration in seconds.
+
+        Returns:
+            Duration in seconds
+        """
+        (self.duration_ms as f64) / 1000.0
+
+    pub fn summary(self): String =
+        """Get compilation summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            result.summary()
+            # → "✓ 5 artifacts (0 errors, 2 warnings) in 1.2s"
+        """
+        if self.is_ok():
+            "✓ {self.artifact_count()} artifacts ({self.error_count()} errors, {self.warning_count()} warnings) in {self.duration_seconds():.1f}s"
+        else:
+            "✗ Compilation failed: {self.error_count()} errors, {self.warning_count()} warnings"
+
+# Build artifact
+pub class Artifact:
+    pub path: String
+    pub artifact_type: ArtifactType
+    pub size_bytes: i64
+    pub language: Language
+
+    pub fn new(path: String, artifact_type: ArtifactType, language: Language): Artifact =
+        """Create build artifact.
+
+        Args:
+            path: Path to artifact file
+            artifact_type: Type of artifact
+            language: Source language
+
+        Returns:
+            Artifact instance
+        """
+        Artifact {
+            path: path,
+            artifact_type: artifact_type,
+            size_bytes: 0,  # File size could be queried but not critical
+            language: language
+        }
+
+    pub fn get_extension(self): String =
+        """Get artifact file extension.
+
+        Returns:
+            File extension
+
+        Examples:
+        - Executable: "" (Unix) or ".exe" (Windows)
+        - Library: ".so" (Unix) or ".dll" (Windows)
+        - StaticLibrary: ".a" (Unix) or ".lib" (Windows)
+        - Object: ".o"
+        - Archive: ".tar.gz", ".zip"
+        """
+        match self.artifact_type:
+            ArtifactType::Executable:
+                self.get_executable_extension()
+            ArtifactType::Library:
+                self.get_library_extension()
+            ArtifactType::StaticLibrary:
+                self.get_static_lib_extension()
+            ArtifactType::Object:
+                ".o"
+            ArtifactType::Archive:
+                ".tar.gz"
+            ArtifactType::Package:
+                self.get_package_extension()
+
+    fn get_executable_extension(): String =
+        """Get executable extension for platform."""
+        # Platform-specific, default to Unix
+        ""
+
+    fn get_library_extension(): String =
+        """Get shared library extension for platform."""
+        ".so"
+
+    fn get_static_lib_extension(): String =
+        """Get static library extension for platform."""
+        ".a"
+
+    fn get_package_extension(): String =
+        """Get package extension based on language."""
+        match self.language:
+            Language::Rust: ".crate"
+            Language::Python: ".whl"
+            Language::JavaScript: ".tgz"
+            Language::Go: ".tar.gz"
+            _: ".tar.gz"
+
+# Artifact type
+pub enum ArtifactType:
+    Executable
+    Library
+    StaticLibrary
+    Object
+    Archive
+    Package
+
+impl ArtifactType:
+    pub fn to_string(self): String =
+        """Convert artifact type to string.
+
+        Returns:
+            Type name
+
+        Example:
+            ArtifactType::Executable.to_string()  # → "executable"
+        """
+        match self:
+            ArtifactType::Executable: "executable"
+            ArtifactType::Library: "library"
+            ArtifactType::StaticLibrary: "static-library"
+            ArtifactType::Object: "object"
+            ArtifactType::Archive: "archive"
+            ArtifactType::Package: "package"
+
+    pub fn description(self): String =
+        """Get artifact type description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            ArtifactType::Executable.description()
+            # → "Executable binary"
+        """
+        match self:
+            ArtifactType::Executable: "Executable binary"
+            ArtifactType::Library: "Shared library"
+            ArtifactType::StaticLibrary: "Static library"
+            ArtifactType::Object: "Object file"
+            ArtifactType::Archive: "Archive file"
+            ArtifactType::Package: "Distribution package"
+
+    pub fn is_executable(self): bool =
+        """Check if type is Executable.
+
+        Returns:
+            True if Executable variant
+        """
+        match self:
+            ArtifactType::Executable: true
+            _: false
+
+    pub fn is_library(self): bool =
+        """Check if type is Library.
+
+        Returns:
+            True if Library variant
+        """
+        match self:
+            ArtifactType::Library: true
+            _: false
+
+    pub fn is_static_library(self): bool =
+        """Check if type is StaticLibrary.
+
+        Returns:
+            True if StaticLibrary variant
+        """
+        match self:
+            ArtifactType::StaticLibrary: true
+            _: false
+
+    pub fn is_object(self): bool =
+        """Check if type is Object.
+
+        Returns:
+            True if Object variant
+        """
+        match self:
+            ArtifactType::Object: true
+            _: false
+
+    pub fn is_archive(self): bool =
+        """Check if type is Archive.
+
+        Returns:
+            True if Archive variant
+        """
+        match self:
+            ArtifactType::Archive: true
+            _: false
+
+    pub fn is_package(self): bool =
+        """Check if type is Package.
+
+        Returns:
+            True if Package variant
+        """
+        match self:
+            ArtifactType::Package: true
+            _: false
+
+    pub fn is_linkable(self): bool =
+        """Check if artifact is linkable (library or static library).
+
+        Returns:
+            True if can be linked against
+
+        Example:
+            ArtifactType::Library.is_linkable()  # → true
+            ArtifactType::Executable.is_linkable()  # → false
+        """
+        match self:
+            ArtifactType::Library: true
+            ArtifactType::StaticLibrary: true
+            _: false
+
+    pub fn is_runnable(self): bool =
+        """Check if artifact is runnable.
+
+        Returns:
+            True if can be executed directly
+
+        Example:
+            ArtifactType::Executable.is_runnable()  # → true
+        """
+        match self:
+            ArtifactType::Executable: true
+            _: false
+
+    pub fn is_distributable(self): bool =
+        """Check if artifact is for distribution.
+
+        Returns:
+            True if package or archive
+
+        Example:
+            ArtifactType::Package.is_distributable()  # → true
+        """
+        match self:
+            ArtifactType::Package: true
+            ArtifactType::Archive: true
+            _: false
+
+    pub fn summary(self): String =
+        """Get artifact type summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            ArtifactType::Library.summary()
+            # → "ArtifactType: library (Shared library, linkable)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let mut props = []
+
+        if self.is_runnable():
+            props.append("runnable")
+        if self.is_linkable():
+            props.append("linkable")
+        if self.is_distributable():
+            props.append("distributable")
+
+        if props.len() > 0:
+            let props_str = props.join(", ")
+            "ArtifactType: {name} ({desc}, {props_str})"
+        else:
+            "ArtifactType: {name} ({desc})"
+
+# Compilation error/warning
+pub class CompilationError:
+    pub file: String
+    pub line: i32
+    pub column: i32
+    pub message: String
+    pub severity: ErrorSeverity
+    pub code: String
+    pub language: Language
+
+    pub fn new(
+        file: String,
+        line: i32,
+        column: i32,
+        message: String,
+        severity: ErrorSeverity,
+        language: Language
+    ): CompilationError =
+        """Create compilation error.
+
+        Args:
+            file: Source file with error
+            line: Line number (1-indexed)
+            column: Column number (1-indexed)
+            message: Error message
+            severity: Error severity
+            language: Source language
+
+        Returns:
+            Compilation error instance
+        """
+        CompilationError {
+            file: file,
+            line: line,
+            column: column,
+            message: message,
+            severity: severity,
+            code: "",
+            language: language
+        }
+
+    pub fn format(self): String =
+        """Format error for display.
+
+        Returns:
+            Formatted error string
+
+        Example:
+            src/main.rs:10:5: error: expected expression
+        """
+        let severity_str = match self.severity:
+            ErrorSeverity::Error: "error"
+            ErrorSeverity::Warning: "warning"
+            ErrorSeverity::Info: "info"
+
+        "{self.file}:{self.line}:{self.column}: {severity_str}: {self.message}"
+
+    pub fn format_with_symbol(self): String =
+        """Format error with severity symbol.
+
+        Returns:
+            Formatted error string with symbol
+
+        Example:
+            ✗ src/main.rs:10:5: expected expression
+        """
+        "{self.severity.symbol()} {self.file}:{self.line}:{self.column}: {self.message}"
+
+    pub fn is_error(self): bool =
+        """Check if this is an error (not warning or info).
+
+        Returns:
+            True if error level
+        """
+        self.severity.is_error()
+
+    pub fn get_location(self): String =
+        """Get location string.
+
+        Returns:
+            File location
+
+        Example:
+            error.get_location()  # → "src/main.rs:10:5"
+        """
+        "{self.file}:{self.line}:{self.column}"
+
+# Error severity
+pub enum ErrorSeverity:
+    Error
+    Warning
+    Info
+
+    pub fn to_string(self): String =
+        """Convert severity to string.
+
+        Returns:
+            Severity name
+
+        Example:
+            ErrorSeverity::Error.to_string()  # → "error"
+        """
+        match self:
+            ErrorSeverity::Error: "error"
+            ErrorSeverity::Warning: "warning"
+            ErrorSeverity::Info: "info"
+
+    pub fn is_error(self): bool =
+        """Check if this is an error (not warning or info).
+
+        Returns:
+            True if error level
+
+        Example:
+            ErrorSeverity::Error.is_error()  # → true
+            ErrorSeverity::Warning.is_error()  # → false
+        """
+        match self:
+            ErrorSeverity::Error: true
+            ErrorSeverity::Warning: false
+            ErrorSeverity::Info: false
+
+    pub fn symbol(self): String =
+        """Get symbol for severity.
+
+        Returns:
+            Symbol character
+
+        Example:
+            ErrorSeverity::Error.symbol()  # → "✗"
+            ErrorSeverity::Warning.symbol()  # → "⚠"
+        """
+        match self:
+            ErrorSeverity::Error: "✗"
+            ErrorSeverity::Warning: "⚠"
+            ErrorSeverity::Info: "ℹ"
+
+    pub fn description(self): String =
+        """Get severity description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            ErrorSeverity::Error.description()
+            # → "Error: compilation failed"
+        """
+        match self:
+            ErrorSeverity::Error: "Error: compilation failed"
+            ErrorSeverity::Warning: "Warning: potential issue detected"
+            ErrorSeverity::Info: "Info: informational message"
+
+    pub fn is_warning(self): bool =
+        """Check if this is a warning.
+
+        Returns:
+            True if warning level
+        """
+        match self:
+            ErrorSeverity::Warning: true
+            _: false
+
+    pub fn is_info(self): bool =
+        """Check if this is info.
+
+        Returns:
+            True if info level
+        """
+        match self:
+            ErrorSeverity::Info: true
+            _: false
+
+    pub fn should_fail_build(self): bool =
+        """Check if this severity should fail the build.
+
+        Returns:
+            True if should fail build (errors only)
+        """
+        match self:
+            ErrorSeverity::Error: true
+            _: false
+
+    pub fn summary(self): String =
+        """Get comprehensive severity summary.
+
+        Returns:
+            Summary with severity name and characteristics
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let symbol = self.symbol()
+        let mut props = []
+        if self.should_fail_build():
+            props.push("fails-build")
+        props.push("symbol={symbol}")
+        if props.len() > 0:
+            let props_str = ", ".join(props)
+            return "ErrorSeverity: {name} ({desc}, {props_str})"
+        else:
+            return "ErrorSeverity: {name} ({desc})"
+
+# Language compiler interface (adapter pattern)
+pub trait LanguageCompiler:
+    """Interface for language-specific compilers.
+
+    Each language (Simple, Rust, Python, etc.) implements this trait
+    to provide unified compilation interface.
+    """
+
+    fn compile(config: LanguageConfig,
+        mode: CompilationMode,
+        incremental: bool
+    ): CompilationResult
+
+    fn get_language(): Language
+
+    fn supports_incremental(): bool
+
+    fn get_executable_extension(): String
+
+    fn get_library_extension(): String
+
+# Compiler registry - manages language-specific compilers
+pub class CompilerRegistry:
+    pub compilers: Dict[Language, LanguageCompiler]
+
+    pub fn new(): CompilerRegistry =
+        """Create compiler registry."""
+        CompilerRegistry {
+            compilers: {}
+        }
+
+    pub fn register(self, language: Language, compiler: LanguageCompiler):
+        """Register language compiler.
+
+        Args:
+            language: Language to register
+            compiler: Compiler implementation
+
+        Example:
+            let registry = CompilerRegistry.new()
+            registry.register(Language::Simple, SimpleCompiler.new())
+            registry.register(Language::Rust, RustCompiler.new())
+        """
+        self.compilers[language] = compiler
+
+    pub fn get_compiler(self, language: Language): LanguageCompiler? =
+        """Get compiler for language.
+
+        Args:
+            language: Language to get compiler for
+
+        Returns:
+            Compiler if registered
+        """
+        self.compilers.get(language)
+
+    pub fn has_compiler(self, language: Language): bool =
+        """Check if compiler is registered.
+
+        Args:
+            language: Language to check
+
+        Returns:
+            True if compiler is available
+        """
+        self.compilers.contains_key(language)
+
+# Multi-language compiler orchestrator
+pub class MultiLanguageCompiler:
+    pub registry: CompilerRegistry
+    pub mode: CompilationMode
+    pub incremental: bool
+    pub parallel: bool
+
+    pub fn new(): MultiLanguageCompiler =
+        """Create multi-language compiler.
+
+        Returns:
+            Compiler with default settings
+
+        Example:
+            let compiler = MultiLanguageCompiler.new()
+            compiler.set_mode(CompilationMode::Release)
+            compiler.set_parallel(true)
+        """
+        let registry = CompilerRegistry.new()
+
+        MultiLanguageCompiler {
+            registry: registry,
+            mode: CompilationMode::Debug,
+            incremental: false,
+            parallel: false
+        }
+
+    pub fn set_mode(self, mode: CompilationMode):
+        """Set compilation mode.
+
+        Args:
+            mode: Debug, Release, or Profile
+        """
+        self.mode = mode
+
+    pub fn set_incremental(self, enabled: bool):
+        """Enable/disable incremental compilation.
+
+        Args:
+            enabled: True to enable incremental builds
+        """
+        self.incremental = enabled
+
+    pub fn set_parallel(self, enabled: bool):
+        """Enable/disable parallel compilation.
+
+        Args:
+            enabled: True to compile languages in parallel
+        """
+        self.parallel = enabled
+
+    pub fn compile_all(self, languages: List[LanguageConfig]): CompilationResult =
+        """Compile all languages.
+
+        Args:
+            languages: List of language configurations to compile
+
+        Returns:
+            Combined compilation result
+
+        Example:
+            let compiler = MultiLanguageCompiler.new()
+            let result = compiler.compile_all(project.languages)
+
+            if result.is_ok():
+                print("✓ Built {result.artifacts.len()} artifacts")
+            else:
+                for error in result.errors:
+                    print(error.format())
+        """
+        @extern("runtime", "rt_time_now_unix_micros")
+        fn _rt_time_now_unix_micros() -> i64
+
+        let combined = CompilationResult.new()
+        let start_time = _rt_time_now_unix_micros() / 1000  # Convert microseconds to milliseconds
+
+        for lang_config in languages:
+            let compiler = self.registry.get_compiler(lang_config.language)
+
+            match compiler:
+                some(c):
+                    let result = c.compile(lang_config, self.mode, self.incremental)
+
+                    # Merge results
+                    combined.artifacts.extend(result.artifacts)
+                    combined.errors.extend(result.errors)
+                    combined.warnings.extend(result.warnings)
+
+                    if not result.is_ok():
+                        combined.success = false
+                none:
+                    let error = CompilationError.new(
+                        file: "",
+                        line: 0,
+                        column: 0,
+                        message: "No compiler registered for {lang_config.language}",
+                        severity: ErrorSeverity::Error,
+                        language: lang_config.language
+                    )
+                    combined.add_error(error)
+
+        let end_time = _rt_time_now_unix_micros() / 1000  # Convert microseconds to milliseconds
+        combined.duration_ms = end_time - start_time
+
+        combined
+
+    pub fn compile_single(
+        self,
+        language: Language,
+        config: LanguageConfig
+    ): CompilationResult =
+        """Compile single language.
+
+        Args:
+            language: Language to compile
+            config: Language configuration
+
+        Returns:
+            Compilation result
+        """
+        match self.registry.get_compiler(language):
+            some(compiler):
+                compiler.compile(config, self.mode, self.incremental)
+            none:
+                let result = CompilationResult.new()
+                let error = CompilationError.new(
+                    file: "",
+                    line: 0,
+                    column: 0,
+                    message: "No compiler registered for {language}",
+                    severity: ErrorSeverity::Error,
+                    language: language
+                )
+                result.add_error(error)
+                result

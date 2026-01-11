@@ -1,0 +1,650 @@
+# SceneNode - Hierarchical scene graph node
+#
+# Provides scene graph structure with parent-child relationships,
+# component system, and world transform computation.
+#
+# Based on: doc/plans/floating-booping-coral.md (3D Graphics Library)
+
+use core.*
+use graphics.math.*
+
+# =============================================================================
+# NodeId - Unique identifier for scene nodes
+# =============================================================================
+
+pub struct NodeId:
+    id: u64
+
+impl NodeId:
+    pub fn new(id: u64) -> NodeId:
+        return NodeId { id: id }
+
+    pub fn invalid() -> NodeId:
+        return NodeId { id: 0 }
+
+    pub fn is_valid(self) -> bool:
+        return self.id != 0
+
+    pub fn value(self) -> u64:
+        return self.id
+
+# =============================================================================
+# Component - Attachable components for scene nodes
+# =============================================================================
+
+pub enum Component:
+    MeshRenderer(mesh: MeshHandle, material: MaterialHandle)
+    Camera(camera: Camera)
+    Light(light: Light)
+    Custom(name: String, data: Any)
+
+impl Component:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_mesh_renderer(self) -> bool:
+        """Check if this is a MeshRenderer component.
+
+        Returns:
+            true for MeshRenderer
+
+        Example:
+            Component::MeshRenderer(mesh, mat).is_mesh_renderer()  # → true
+        """
+        match self:
+            case MeshRenderer(_, _): true
+            case _: false
+
+    pub fn is_camera(self) -> bool:
+        """Check if this is a Camera component.
+
+        Returns:
+            true for Camera
+
+        Example:
+            Component::Camera(cam).is_camera()  # → true
+        """
+        match self:
+            case Camera(_): true
+            case _: false
+
+    pub fn is_light(self) -> bool:
+        """Check if this is a Light component.
+
+        Returns:
+            true for Light
+
+        Example:
+            Component::Light(light).is_light()  # → true
+        """
+        match self:
+            case Light(_): true
+            case _: false
+
+    pub fn is_custom(self) -> bool:
+        """Check if this is a Custom component.
+
+        Returns:
+            true for Custom
+
+        Example:
+            Component::Custom("physics", data).is_custom()  # → true
+        """
+        match self:
+            case Custom(_, _): true
+            case _: false
+
+    pub fn is_builtin_component(self) -> bool:
+        """Check if this is a built-in component type.
+
+        Returns:
+            false for Custom, true for MeshRenderer, Camera, or Light
+
+        Example:
+            Component::Camera(cam).is_builtin_component()  # → true
+            Component::Custom("physics", data).is_builtin_component()  # → false
+        """
+        match self:
+            case MeshRenderer(_, _): true
+            case Camera(_): true
+            case Light(_): true
+            case Custom(_, _): false
+
+    pub fn is_render_component(self) -> bool:
+        """Check if this component is used for rendering.
+
+        Returns:
+            true for MeshRenderer, Camera, or Light
+
+        Example:
+            Component::MeshRenderer(mesh, mat).is_render_component()  # → true
+        """
+        match self:
+            case MeshRenderer(_, _): true
+            case Camera(_): true
+            case Light(_): true
+            case Custom(_, _): false
+
+    pub fn to_string(self) -> String:
+        """Convert component to string.
+
+        Returns:
+            Component type name
+
+        Example:
+            Component::Camera(cam).to_string()  # → "camera"
+        """
+        match self:
+            case MeshRenderer(_, _): "mesh_renderer"
+            case Camera(_): "camera"
+            case Light(_): "light"
+            case Custom(name, _): "custom({name})"
+
+    pub fn description(self) -> String:
+        """Get component description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            Component::Camera(cam).description()
+            # → "Camera component (view and projection)"
+        """
+        match self:
+            case MeshRenderer(_, _): "MeshRenderer component (3D model rendering)"
+            case Camera(_): "Camera component (view and projection)"
+            case Light(_): "Light component (scene illumination)"
+            case Custom(name, _): "Custom component: {name}"
+
+    pub fn summary(self) -> String:
+        """Get component summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            Component::Camera(cam).summary()
+            # → "Component: camera (Camera component (view and projection), built-in, rendering)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let component_type = if self.is_builtin_component(): "built-in" else: "custom"
+        let usage = if self.is_render_component(): ", rendering" else: ""
+        return "Component: {name} ({desc}, {component_type}{usage})"
+
+# Component handles (for resource management)
+pub struct MeshHandle:
+    id: u64
+
+impl MeshHandle:
+    pub fn new(id: u64) -> MeshHandle:
+        return MeshHandle { id: id }
+
+    pub fn invalid() -> MeshHandle:
+        return MeshHandle { id: 0 }
+
+    pub fn is_valid(self) -> bool:
+        return self.id != 0
+
+pub struct MaterialHandle:
+    id: u64
+
+impl MaterialHandle:
+    pub fn new(id: u64) -> MaterialHandle:
+        return MaterialHandle { id: id }
+
+    pub fn invalid() -> MaterialHandle:
+        return MaterialHandle { id: 0 }
+
+    pub fn is_valid(self) -> bool:
+        return self.id != 0
+
+# =============================================================================
+# SceneNode - Hierarchical transform node with components
+# =============================================================================
+
+pub struct SceneNode:
+    id: NodeId
+    name: String
+    transform: Transform           # Local transform (relative to parent)
+    components: Array[Component]   # Attached components
+    children: Array[SceneNode]     # Child nodes
+    parent_id: Option[NodeId]      # Parent node ID
+    world_transform_cache: Option[Mat4]  # Cached world transform
+
+impl SceneNode:
+    # Constructors
+    pub fn new(id: NodeId, name: String) -> SceneNode:
+        return SceneNode {
+            id: id,
+            name: name,
+            transform: Transform::identity(),
+            components: Array::new(),
+            children: Array::new(),
+            parent_id: None,
+            world_transform_cache: None
+        }
+
+    pub fn with_transform(id: NodeId, name: String, transform: Transform) -> SceneNode:
+        return SceneNode {
+            id: id,
+            name: name,
+            transform: transform,
+            components: Array::new(),
+            children: Array::new(),
+            parent_id: None,
+            world_transform_cache: None
+        }
+
+    # Identity
+    pub fn get_id(self) -> NodeId:
+        return self.id
+
+    pub fn get_name(self) -> String:
+        return self.name
+
+    pub fn set_name(mut self, name: String):
+        self.name = name
+
+    # Transform management
+    pub fn get_transform(self) -> Transform:
+        return self.transform
+
+    pub fn set_transform(mut self, transform: Transform):
+        self.transform = transform
+        self.invalidate_world_transform()
+
+    pub fn get_local_matrix(self) -> Mat4:
+        return self.transform.to_matrix()
+
+    # World transform computation
+    pub fn get_world_transform(self, parent_world: Option[Mat4]) -> Mat4:
+        let local = self.get_local_matrix()
+
+        match parent_world:
+            case Some(parent):
+                return parent * local
+            case None:
+                return local
+
+    pub fn invalidate_world_transform(mut self):
+        self.world_transform_cache = None
+        # Recursively invalidate children
+        for child in self.children:
+            child.invalidate_world_transform()
+
+    # Hierarchy management
+    pub fn get_parent_id(self) -> Option[NodeId]:
+        return self.parent_id
+
+    pub fn set_parent(mut self, parent_id: NodeId):
+        self.parent_id = Some(parent_id)
+        self.invalidate_world_transform()
+
+    pub fn remove_parent(mut self):
+        self.parent_id = None
+        self.invalidate_world_transform()
+
+    pub fn add_child(mut self, child: SceneNode) -> SceneNode:
+        let mut new_child = child
+        new_child.set_parent(self.id)
+        self.children.push(new_child)
+        return new_child
+
+    pub fn remove_child(mut self, child_id: NodeId) -> Option[SceneNode]:
+        let mut index = -1
+        for i in 0..self.children.len():
+            if self.children[i].id.value() == child_id.value():
+                index = i
+                break
+
+        if index >= 0:
+            let child = self.children.remove(index)
+            return Some(child)
+
+        return None
+
+    pub fn get_child(self, index: i32) -> Option[SceneNode]:
+        if index >= 0 and index < self.children.len():
+            return Some(self.children[index])
+        return None
+
+    pub fn get_child_count(self) -> i32:
+        return self.children.len()
+
+    pub fn find_child_by_name(self, name: String) -> Option[SceneNode]:
+        for child in self.children:
+            if child.name == name:
+                return Some(child)
+        return None
+
+    # Component management
+    pub fn add_component(mut self, component: Component):
+        self.components.push(component)
+
+    pub fn remove_component(mut self, index: i32) -> Option[Component]:
+        if index >= 0 and index < self.components.len():
+            return Some(self.components.remove(index))
+        return None
+
+    pub fn get_component(self, index: i32) -> Option[Component]:
+        if index >= 0 and index < self.components.len():
+            return Some(self.components[index])
+        return None
+
+    pub fn get_component_count(self) -> i32:
+        return self.components.len()
+
+    # Component queries
+    pub fn has_camera(self) -> bool:
+        for component in self.components:
+            match component:
+                case Component::Camera(_):
+                    return true
+                case _:
+                    continue
+        return false
+
+    pub fn has_light(self) -> bool:
+        for component in self.components:
+            match component:
+                case Component::Light(_):
+                    return true
+                case _:
+                    continue
+        return false
+
+    pub fn has_mesh_renderer(self) -> bool:
+        for component in self.components:
+            match component:
+                case Component::MeshRenderer(_, _):
+                    return true
+                case _:
+                    continue
+        return false
+
+    pub fn get_camera(self) -> Option[Camera]:
+        for component in self.components:
+            match component:
+                case Component::Camera(camera):
+                    return Some(camera)
+                case _:
+                    continue
+        return None
+
+    pub fn get_light(self) -> Option[Light]:
+        for component in self.components:
+            match component:
+                case Component::Light(light):
+                    return Some(light)
+                case _:
+                    continue
+        return None
+
+    pub fn get_mesh_renderer(self) -> Option[(MeshHandle, MaterialHandle)]:
+        for component in self.components:
+            match component:
+                case Component::MeshRenderer(mesh, material):
+                    return Some((mesh, material))
+                case _:
+                    continue
+        return None
+
+    # Transform operations (convenience methods)
+    pub fn translate(mut self, offset: Vec3) -> SceneNode:
+        self.transform = self.transform.translate(offset)
+        self.invalidate_world_transform()
+        return self
+
+    pub fn rotate(mut self, rotation: Quaternion) -> SceneNode:
+        self.transform = self.transform.rotate(rotation)
+        self.invalidate_world_transform()
+        return self
+
+    pub fn rotate_euler(mut self, pitch: f32, yaw: f32, roll: f32) -> SceneNode:
+        self.transform = self.transform.rotate_euler(pitch, yaw, roll)
+        self.invalidate_world_transform()
+        return self
+
+    pub fn scale_uniform(mut self, factor: f32) -> SceneNode:
+        self.transform = self.transform.scale_uniform(factor)
+        self.invalidate_world_transform()
+        return self
+
+    # Direction vectors (world space)
+    pub fn forward(self, parent_world: Option[Mat4]) -> Vec3:
+        let world = self.get_world_transform(parent_world)
+        let forward_local = Vec3::new(0.0, 0.0, -1.0)
+        return world.transform_vector(forward_local).normalize()
+
+    pub fn right(self, parent_world: Option[Mat4]) -> Vec3:
+        let world = self.get_world_transform(parent_world)
+        let right_local = Vec3::new(1.0, 0.0, 0.0)
+        return world.transform_vector(right_local).normalize()
+
+    pub fn up(self, parent_world: Option[Mat4]) -> Vec3:
+        let world = self.get_world_transform(parent_world)
+        let up_local = Vec3::new(0.0, 1.0, 0.0)
+        return world.transform_vector(up_local).normalize()
+
+# =============================================================================
+# Scene - Root container for scene graph
+# =============================================================================
+
+pub struct Scene:
+    name: String
+    root: SceneNode
+    next_node_id: u64
+
+impl Scene:
+    pub fn new(name: String) -> Scene:
+        return Scene {
+            name: name,
+            root: SceneNode::new(NodeId::new(1), "Root"),
+            next_node_id: 2
+        }
+
+    pub fn get_name(self) -> String:
+        return self.name
+
+    pub fn get_root(self) -> SceneNode:
+        return self.root
+
+    pub fn get_root_mut(mut self) -> SceneNode:
+        return self.root
+
+    pub fn create_node(mut self, name: String) -> NodeId:
+        let id = NodeId::new(self.next_node_id)
+        self.next_node_id = self.next_node_id + 1
+        return id
+
+    pub fn create_node_with_transform(mut self, name: String, transform: Transform) -> NodeId:
+        let id = NodeId::new(self.next_node_id)
+        self.next_node_id = self.next_node_id + 1
+        return id
+
+    # Traverse scene graph and apply function to each node
+    pub fn traverse(self, visitor: fn(SceneNode, Mat4)):
+        self.traverse_node(self.root, Mat4::identity(), visitor)
+
+    fn traverse_node(node: SceneNode, parent_world: Mat4, visitor: fn(SceneNode, Mat4)):
+        let world = node.get_world_transform(Some(parent_world))
+        visitor(node, world)
+
+        for child in node.children:
+            self.traverse_node(child, world, visitor)
+
+    # =============================================================================
+    # Scene Queries - Find nodes by various criteria
+    # =============================================================================
+
+    # Find node by ID (depth-first search)
+    pub fn find_node_by_id(self, target_id: NodeId) -> Option[SceneNode]:
+        return self.find_node_in_subtree(self.root, target_id)
+
+    fn find_node_in_subtree(node: SceneNode, target_id: NodeId) -> Option[SceneNode]:
+        if node.id.value() == target_id.value():
+            return Some(node)
+
+        for child in node.children:
+            let result = self.find_node_in_subtree(child, target_id)
+            if result.is_some():
+                return result
+
+        return None
+
+    # Find first node with given name
+    pub fn find_node_by_name(self, name: String) -> Option[SceneNode]:
+        return self.find_node_by_name_in_subtree(self.root, name)
+
+    fn find_node_by_name_in_subtree(node: SceneNode, name: String) -> Option[SceneNode]:
+        if node.name == name:
+            return Some(node)
+
+        for child in node.children:
+            let result = self.find_node_by_name_in_subtree(child, name)
+            if result.is_some():
+                return result
+
+        return None
+
+    # Collect all nodes with camera components
+    pub fn find_all_cameras(self) -> Array[(SceneNode, Camera)]:
+        let mut cameras = Array::new()
+        self.collect_cameras_in_subtree(self.root, cameras)
+        return cameras
+
+    fn collect_cameras_in_subtree(node: SceneNode, mut cameras: Array[(SceneNode, Camera)]):
+        if node.has_camera():
+            let camera = node.get_camera().unwrap()
+            cameras.push((node, camera))
+
+        for child in node.children:
+            self.collect_cameras_in_subtree(child, cameras)
+
+    # Collect all nodes with light components
+    pub fn find_all_lights(self) -> Array[(SceneNode, Light)]:
+        let mut lights = Array::new()
+        self.collect_lights_in_subtree(self.root, lights)
+        return lights
+
+    fn collect_lights_in_subtree(node: SceneNode, mut lights: Array[(SceneNode, Light)]):
+        if node.has_light():
+            let light = node.get_light().unwrap()
+            lights.push((node, light))
+
+        for child in node.children:
+            self.collect_lights_in_subtree(child, lights)
+
+    # Collect all nodes with mesh renderers
+    pub fn find_all_mesh_renderers(self) -> Array[(SceneNode, MeshHandle, MaterialHandle)]:
+        let mut renderers = Array::new()
+        self.collect_renderers_in_subtree(self.root, renderers)
+        return renderers
+
+    fn collect_renderers_in_subtree(node: SceneNode,
+        mut renderers: Array[(SceneNode, MeshHandle, MaterialHandle)]
+    ):
+        if node.has_mesh_renderer():
+            let (mesh, material) = node.get_mesh_renderer().unwrap()
+            renderers.push((node, mesh, material))
+
+        for child in node.children:
+            self.collect_renderers_in_subtree(child, renderers)
+
+    # Get first active camera in scene
+    pub fn get_active_camera(self) -> Option[Camera]:
+        return self.get_active_camera_in_subtree(self.root)
+
+    fn get_active_camera_in_subtree(node: SceneNode) -> Option[Camera]:
+        if node.has_camera():
+            return node.get_camera()
+
+        for child in node.children:
+            let result = self.get_active_camera_in_subtree(child)
+            if result.is_some():
+                return result
+
+        return None
+
+    # =============================================================================
+    # Advanced Traversal - Breadth-first and filtered traversal
+    # =============================================================================
+
+    # Traverse scene graph breadth-first
+    pub fn traverse_breadth_first(self, visitor: fn(SceneNode, Mat4)):
+        let mut queue = Array::new()
+        queue.push((self.root, Mat4::identity()))
+
+        while queue.len() > 0:
+            let (node, parent_world) = queue.remove(0)
+            let world = node.get_world_transform(Some(parent_world))
+
+            visitor(node, world)
+
+            for child in node.children:
+                queue.push((child, world))
+
+    # Traverse only nodes matching predicate
+    pub fn traverse_filtered(self, predicate: fn(SceneNode) -> bool, visitor: fn(SceneNode, Mat4)):
+        self.traverse_filtered_node(self.root, Mat4::identity(), predicate, visitor)
+
+    fn traverse_filtered_node(node: SceneNode,
+        parent_world: Mat4,
+        predicate: fn(SceneNode) -> bool,
+        visitor: fn(SceneNode, Mat4)
+    ):
+        let world = node.get_world_transform(Some(parent_world))
+
+        if predicate(node):
+            visitor(node, world)
+
+        for child in node.children:
+            self.traverse_filtered_node(child, world, predicate, visitor)
+
+    # Collect all nodes matching predicate
+    pub fn collect_nodes(self, predicate: fn(SceneNode) -> bool) -> Array[SceneNode]:
+        let mut nodes = Array::new()
+        self.collect_nodes_in_subtree(self.root, predicate, nodes)
+        return nodes
+
+    fn collect_nodes_in_subtree(node: SceneNode,
+        predicate: fn(SceneNode) -> bool,
+        mut nodes: Array[SceneNode]
+    ):
+        if predicate(node):
+            nodes.push(node)
+
+        for child in node.children:
+            self.collect_nodes_in_subtree(child, predicate, nodes)
+
+    # =============================================================================
+    # Scene Statistics and Utilities
+    # =============================================================================
+
+    # Count total nodes in scene
+    pub fn node_count(self) -> i32:
+        return self.count_nodes_in_subtree(self.root)
+
+    fn count_nodes_in_subtree(node: SceneNode) -> i32:
+        let mut count = 1  # Count this node
+
+        for child in node.children:
+            count = count + self.count_nodes_in_subtree(child)
+
+        return count
+
+    # Get maximum depth of scene graph
+    pub fn max_depth(self) -> i32:
+        return self.get_depth_of_subtree(self.root, 0)
+
+    fn get_depth_of_subtree(node: SceneNode, current_depth: i32) -> i32:
+        let mut max_child_depth = current_depth
+
+        for child in node.children:
+            let child_depth = self.get_depth_of_subtree(child, current_depth + 1)
+            if child_depth > max_child_depth:
+                max_child_depth = child_depth
+
+        return max_child_depth

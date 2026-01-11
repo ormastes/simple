@@ -1,0 +1,92 @@
+# Inverse Kinematics - IK chain solving
+#
+# Two-bone IK chain for limb positioning.
+
+export IKChain
+
+use graphics.math.*
+use skeleton.*
+use animation_utils.*
+
+# =============================================================================
+# Inverse Kinematics (IK) - Two-bone IK chain
+# =============================================================================
+
+pub struct IKChain:
+    joints: Array[i32]                # Joint indices in chain
+    target_position: Vec3             # IK target position
+    pole_vector: Vec3                 # Pole vector for orientation
+    chain_length: f32                 # Total chain length
+
+impl IKChain:
+    # Create two-bone IK chain (e.g., shoulder-elbow-wrist)
+    pub fn two_bone(
+        root_joint: i32,
+        mid_joint: i32,
+        end_joint: i32
+    ) -> IKChain:
+        return IKChain {
+            joints: [root_joint, mid_joint, end_joint].to_array(),
+            target_position: Vec3::zero(),
+            pole_vector: Vec3::new(0.0, 1.0, 0.0),
+            chain_length: 0.0
+        }
+
+    # Solve two-bone IK
+    pub fn solve_two_bone(
+        mut self,
+        skeleton: &Skeleton,
+        target: Vec3,
+        pole: Vec3
+    ) -> (Transform, Transform):
+        # Get joint positions
+        let root_pos = skeleton.joints[self.joints[0] as usize].local_transform.translation
+        let mid_pos = skeleton.joints[self.joints[1] as usize].local_transform.translation
+        let end_pos = skeleton.joints[self.joints[2] as usize].local_transform.translation
+
+        # Bone lengths
+        let upper_length = (mid_pos - root_pos).length()
+        let lower_length = (end_pos - mid_pos).length()
+        let total_length = upper_length + lower_length
+
+        # Vector from root to target
+        let to_target = target - root_pos
+        let target_distance = to_target.length()
+
+        # Clamp to reachable distance
+        let clamped_distance = min_f32(target_distance, total_length * 0.999)
+        let target_dir = to_target.normalize()
+
+        # Law of cosines for angles
+        let cos_angle0 = (
+            upper_length * upper_length +
+            clamped_distance * clamped_distance -
+            lower_length * lower_length
+        ) / (2.0 * upper_length * clamped_distance)
+
+        let cos_angle1 = (
+            upper_length * upper_length +
+            lower_length * lower_length -
+            clamped_distance * clamped_distance
+        ) / (2.0 * upper_length * lower_length)
+
+        let angle0 = acos_f32(clamp_f32(cos_angle0, -1.0, 1.0))
+        let angle1 = acos_f32(clamp_f32(cos_angle1, -1.0, 1.0))
+
+        # Compute rotations
+        let root_rotation = Quat::look_rotation(target_dir, pole)
+        let mid_rotation = Quat::from_axis_angle(pole.normalize(), 3.14159 - angle1)
+
+        let root_transform = Transform::new(
+            root_pos,
+            root_rotation * Quat::from_axis_angle(pole.normalize(), angle0),
+            Vec3::new(1.0, 1.0, 1.0)
+        )
+
+        let mid_transform = Transform::new(
+            mid_pos,
+            mid_rotation,
+            Vec3::new(1.0, 1.0, 1.0)
+        )
+
+        return (root_transform, mid_transform)

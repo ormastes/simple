@@ -1,0 +1,712 @@
+# Symbol Table with Cross-Reference Support
+# Tracks symbols and their relationships across a codebase
+
+use mcp.simple_lang.types.*
+
+# Reference kinds for cross-reference tracking
+pub enum RefKind:
+    Import          # import X / use X
+    Call            # function/method call
+    Implements      # impl Trait for Type
+    Inherits        # class Child(Parent)
+    Uses            # type usage (field type, param type, return type)
+    Instantiates    # Type() / Type.new()
+    Overrides       # method override
+
+impl RefKind:
+    pub fn is_import(self) -> bool:
+        """Check if this is Import reference kind.
+
+        Returns: true for Import
+
+        Example:
+            RefKind.Import.is_import()  # → true
+        """
+        match self:
+            case Import: true
+            case _: false
+
+    pub fn is_call(self) -> bool:
+        """Check if this is Call reference kind.
+
+        Returns: true for Call
+
+        Example:
+            RefKind.Call.is_call()  # → true
+        """
+        match self:
+            case Call: true
+            case _: false
+
+    pub fn is_implements(self) -> bool:
+        """Check if this is Implements reference kind.
+
+        Returns: true for Implements
+
+        Example:
+            RefKind.Implements.is_implements()  # → true
+        """
+        match self:
+            case Implements: true
+            case _: false
+
+    pub fn is_inherits(self) -> bool:
+        """Check if this is Inherits reference kind.
+
+        Returns: true for Inherits
+
+        Example:
+            RefKind.Inherits.is_inherits()  # → true
+        """
+        match self:
+            case Inherits: true
+            case _: false
+
+    pub fn is_uses(self) -> bool:
+        """Check if this is Uses reference kind.
+
+        Returns: true for Uses
+
+        Example:
+            RefKind.Uses.is_uses()  # → true
+        """
+        match self:
+            case Uses: true
+            case _: false
+
+    pub fn is_instantiates(self) -> bool:
+        """Check if this is Instantiates reference kind.
+
+        Returns: true for Instantiates
+
+        Example:
+            RefKind.Instantiates.is_instantiates()  # → true
+        """
+        match self:
+            case Instantiates: true
+            case _: false
+
+    pub fn is_overrides(self) -> bool:
+        """Check if this is Overrides reference kind.
+
+        Returns: true for Overrides
+
+        Example:
+            RefKind.Overrides.is_overrides()  # → true
+        """
+        match self:
+            case Overrides: true
+            case _: false
+
+    pub fn is_type_relationship(self) -> bool:
+        """Check if this represents a type-level relationship.
+
+        Type relationships include trait implementations and class inheritance.
+
+        Returns: true for Implements or Inherits
+
+        Example:
+            RefKind.Implements.is_type_relationship()  # → true
+            RefKind.Call.is_type_relationship()        # → false
+        """
+        match self:
+            case Implements: true
+            case Inherits: true
+            case _: false
+
+    pub fn is_code_reference(self) -> bool:
+        """Check if this represents a code-level reference.
+
+        Code references include function calls, type usages, and instantiations.
+
+        Returns: true for Call, Uses, or Instantiates
+
+        Example:
+            RefKind.Call.is_code_reference()    # → true
+            RefKind.Import.is_code_reference()  # → false
+        """
+        match self:
+            case Call: true
+            case Uses: true
+            case Instantiates: true
+            case _: false
+
+    pub fn is_definition_override(self) -> bool:
+        """Check if this represents definition override.
+
+        Returns: true for Overrides
+
+        Example:
+            RefKind.Overrides.is_definition_override()  # → true
+        """
+        match self:
+            case Overrides: true
+            case _: false
+
+    pub fn is_module_dependency(self) -> bool:
+        """Check if this represents module-level dependency.
+
+        Returns: true for Import
+
+        Example:
+            RefKind.Import.is_module_dependency()  # → true
+        """
+        match self:
+            case Import: true
+            case _: false
+
+    pub fn to_string(self) -> String:
+        """Convert RefKind to string representation.
+
+        Returns: lowercase string name of the reference kind
+
+        Example:
+            RefKind.Import.to_string()      # → "import"
+            RefKind.Implements.to_string()  # → "implements"
+        """
+        match self:
+            case Import: "import"
+            case Call: "call"
+            case Implements: "implements"
+            case Inherits: "inherits"
+            case Uses: "uses"
+            case Instantiates: "instantiates"
+            case Overrides: "overrides"
+
+    pub fn description(self) -> String:
+        """Get human-readable description of the reference kind.
+
+        Returns: descriptive explanation of what this reference kind represents
+
+        Example:
+            RefKind.Import.description()      # → "Module import or use statement"
+            RefKind.Implements.description()  # → "Trait implementation"
+        """
+        match self:
+            case Import: "Module import or use statement"
+            case Call: "Function or method call"
+            case Implements: "Trait implementation"
+            case Inherits: "Class inheritance"
+            case Uses: "Type usage in declarations"
+            case Instantiates: "Type instantiation"
+            case Overrides: "Method override"
+
+    pub fn summary(self) -> String:
+        """Get comprehensive summary of the reference kind.
+
+        Returns: multi-line summary with name, description, and categorization
+
+        Example:
+            RefKind.Import.summary()
+            # → "RefKind: import (Module import or use statement, module dependency)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let mut category = "other"
+
+        if self.is_type_relationship():
+            category = "type relationship"
+        elif self.is_code_reference():
+            category = "code reference"
+        elif self.is_definition_override():
+            category = "definition override"
+        elif self.is_module_dependency():
+            category = "module dependency"
+
+        return "RefKind: {name} ({desc}, {category})"
+
+# Backward compatibility: keep standalone function that delegates to method
+pub fn refkind_to_string(kind: RefKind) -> String:
+    return kind.to_string()
+
+# Location in source code
+pub class SourceLocation:
+    pub file: String
+    pub line: i64
+    pub column: i64
+
+    pub fn new(file: String, line: i64, column: i64) -> SourceLocation:
+        return SourceLocation {
+            file: file,
+            line: line,
+            column: column
+        }
+
+    pub fn to_string(self) -> String:
+        return "{self.file}:{self.line}:{self.column}"
+
+# A reference from one symbol to another
+pub class Reference:
+    pub from_symbol: String   # fully qualified name of referencing symbol
+    pub to_symbol: String     # fully qualified name of referenced symbol
+    pub kind: RefKind
+    pub location: SourceLocation
+
+    pub fn new(from_sym: String, to_sym: String, kind: RefKind, loc: SourceLocation) -> Reference:
+        return Reference {
+            from_symbol: from_sym,
+            to_symbol: to_sym,
+            kind: kind,
+            location: loc
+        }
+
+    pub fn to_string(self) -> String:
+        kind_str = refkind_to_string(self.kind)
+        loc_str = self.location.to_string()
+        return self.from_symbol + " --[" + kind_str + "]--> " + self.to_symbol + " at " + loc_str
+
+# Qualified symbol with module path
+pub class QualifiedSymbol:
+    pub module_path: String   # e.g., "mcp.simple_lang.parser"
+    pub symbol: Symbol
+    pub parent: Option[String]  # parent class/trait name if method
+
+    pub fn new(path: String, symbol: Symbol) -> QualifiedSymbol:
+        return QualifiedSymbol {
+            module_path: path,
+            symbol: symbol,
+            parent: None
+        }
+
+    pub fn with_parent(path: String, symbol: Symbol, parent: String) -> QualifiedSymbol:
+        return QualifiedSymbol {
+            module_path: path,
+            symbol: symbol,
+            parent: Some(parent)
+        }
+
+    pub fn fully_qualified_name(self) -> String:
+        match self.parent:
+            Some(p):
+                return "{self.module_path}.{p}.{self.symbol.name}"
+            None:
+                return "{self.module_path}.{self.symbol.name}"
+
+# Symbol Table - tracks symbols and cross-references across files
+pub class SymbolTable:
+    pub symbols: Dict[String, QualifiedSymbol]  # fqn -> symbol
+    pub references: List[Reference]
+    pub files: Dict[String, List[String]]       # file -> list of symbol fqns
+
+    pub fn new() -> SymbolTable:
+        return SymbolTable {
+            symbols: {},
+            references: [],
+            files: {}
+        }
+
+    # Add a symbol to the table
+    pub fn add_symbol(self, qsym: QualifiedSymbol):
+        fqn = qsym.fully_qualified_name()
+        self.symbols = self.symbols.set(fqn, qsym)
+
+        # Track file -> symbols mapping
+        file = qsym.module_path
+        if self.files.contains_key(file):
+            syms = self.files.get(file)
+            syms = syms.append(fqn)
+            self.files = self.files.set(file, syms)
+        else:
+            self.files = self.files.set(file, [fqn])
+
+    # Add a reference between symbols
+    pub fn add_reference(self, ref: Reference):
+        self.references = self.references.append(ref)
+
+    # Add reference with shorthand
+    pub fn add_ref(self, from_sym: String, to_sym: String, kind: RefKind, file: String, line: i64):
+        loc = SourceLocation.new(file, line, 0)
+        ref = Reference.new(from_sym, to_sym, kind, loc)
+        self.references = self.references.append(ref)
+
+    # Find all references TO a symbol
+    pub fn find_references(self, symbol_name: String) -> List[Reference]:
+        result = []
+        for ref in self.references:
+            if ref.to_symbol == symbol_name:
+                result = result.append(ref)
+        return result
+
+    # Find all references FROM a symbol
+    pub fn find_outgoing_references(self, symbol_name: String) -> List[Reference]:
+        result = []
+        for ref in self.references:
+            if ref.from_symbol == symbol_name:
+                result = result.append(ref)
+        return result
+
+    # Find all implementations of a trait
+    pub fn find_implementations(self, trait_name: String) -> List[QualifiedSymbol]:
+        result = []
+        for ref in self.references:
+            if ref.to_symbol == trait_name and ref.kind == RefKind.Implements:
+                if self.symbols.contains_key(ref.from_symbol):
+                    result = result.append(self.symbols.get(ref.from_symbol))
+        return result
+
+    # Find all subclasses of a class
+    pub fn find_subclasses(self, class_name: String) -> List[QualifiedSymbol]:
+        result = []
+        for ref in self.references:
+            if ref.to_symbol == class_name and ref.kind == RefKind.Inherits:
+                if self.symbols.contains_key(ref.from_symbol):
+                    result = result.append(self.symbols.get(ref.from_symbol))
+        return result
+
+    # Find all callers of a function/method
+    pub fn find_callers(self, func_name: String) -> List[Reference]:
+        result = []
+        for ref in self.references:
+            if ref.to_symbol == func_name and ref.kind == RefKind.Call:
+                result = result.append(ref)
+        return result
+
+    # Find all functions/methods called by a symbol
+    pub fn find_callees(self, func_name: String) -> List[Reference]:
+        result = []
+        for ref in self.references:
+            if ref.from_symbol == func_name and ref.kind == RefKind.Call:
+                result = result.append(ref)
+        return result
+
+    # Find all usages of a type
+    pub fn find_type_usages(self, type_name: String) -> List[Reference]:
+        result = []
+        for ref in self.references:
+            if ref.to_symbol == type_name and ref.kind == RefKind.Uses:
+                result = result.append(ref)
+        return result
+
+    # Find all instantiations of a type
+    pub fn find_instantiations(self, type_name: String) -> List[Reference]:
+        result = []
+        for ref in self.references:
+            if ref.to_symbol == type_name and ref.kind == RefKind.Instantiates:
+                result = result.append(ref)
+        return result
+
+    # Get symbol by fully qualified name
+    pub fn get_symbol(self, fqn: String) -> Option[QualifiedSymbol]:
+        if self.symbols.contains_key(fqn):
+            return Some(self.symbols.get(fqn))
+        return None
+
+    # Get all symbols in a file/module
+    pub fn get_symbols_in_file(self, file: String) -> List[QualifiedSymbol]:
+        result = []
+        if self.files.contains_key(file):
+            fqns = self.files.get(file)
+            for fqn in fqns:
+                if self.symbols.contains_key(fqn):
+                    result = result.append(self.symbols.get(fqn))
+        return result
+
+    # Get all symbols of a specific kind
+    pub fn get_symbols_by_kind(self, kind: SymbolKind) -> List[QualifiedSymbol]:
+        result = []
+        for fqn in self.symbols.keys():
+            qsym = self.symbols.get(fqn)
+            if qsym.symbol.kind == kind:
+                result = result.append(qsym)
+        return result
+
+    # Get all public symbols
+    pub fn get_public_symbols(self) -> List[QualifiedSymbol]:
+        result = []
+        for fqn in self.symbols.keys():
+            qsym = self.symbols.get(fqn)
+            if qsym.symbol.visibility == Visibility.Public:
+                result = result.append(qsym)
+        return result
+
+    # Build call graph (function -> [called functions])
+    pub fn build_call_graph(self) -> Dict[String, List[String]]:
+        graph = {}
+        for ref in self.references:
+            if ref.kind == RefKind.Call:
+                if graph.contains_key(ref.from_symbol):
+                    callees = graph.get(ref.from_symbol)
+                    if not callees.contains(ref.to_symbol):
+                        callees = callees.append(ref.to_symbol)
+                        graph = graph.set(ref.from_symbol, callees)
+                else:
+                    graph = graph.set(ref.from_symbol, [ref.to_symbol])
+        return graph
+
+    # Build reverse call graph (function -> [calling functions])
+    pub fn build_reverse_call_graph(self) -> Dict[String, List[String]]:
+        graph = {}
+        for ref in self.references:
+            if ref.kind == RefKind.Call:
+                if graph.contains_key(ref.to_symbol):
+                    callers = graph.get(ref.to_symbol)
+                    if not callers.contains(ref.from_symbol):
+                        callers = callers.append(ref.from_symbol)
+                        graph = graph.set(ref.to_symbol, callers)
+                else:
+                    graph = graph.set(ref.to_symbol, [ref.from_symbol])
+        return graph
+
+    # Get inheritance tree for a class
+    pub fn get_inheritance_chain(self, class_name: String) -> List[String]:
+        chain = [class_name]
+        current = class_name
+
+        # Walk up the inheritance chain
+        let mut found = true
+        while found:
+            found = false
+            for ref in self.references:
+                if ref.from_symbol == current and ref.kind == RefKind.Inherits:
+                    chain = chain.append(ref.to_symbol)
+                    current = ref.to_symbol
+                    found = true
+                    break
+
+        return chain
+
+    # Get statistics about the symbol table
+    pub fn stats(self) -> Dict[String, i64]:
+        result = {}
+        result = result.set("total_symbols", self.symbols.len())
+        result = result.set("total_references", self.references.len())
+        result = result.set("total_files", self.files.len())
+
+        # Count by kind
+        let mut classes = 0
+        let mut functions = 0
+        let mut traits = 0
+        let mut methods = 0
+
+        for fqn in self.symbols.keys():
+            qsym = self.symbols.get(fqn)
+            match qsym.symbol.kind:
+                SymbolKind.Class:
+                    classes = classes + 1
+                SymbolKind.Function:
+                    functions = functions + 1
+                SymbolKind.Trait:
+                    traits = traits + 1
+                SymbolKind.Method:
+                    methods = methods + 1
+                _:
+                    pass
+
+        result = result.set("classes", classes)
+        result = result.set("functions", functions)
+        result = result.set("traits", traits)
+        result = result.set("methods", methods)
+
+        # Count by reference kind
+        let mut imports = 0
+        let mut calls = 0
+        let mut implements = 0
+        let mut inherits = 0
+        let mut uses = 0
+
+        for ref in self.references:
+            match ref.kind:
+                RefKind.Import:
+                    imports = imports + 1
+                RefKind.Call:
+                    calls = calls + 1
+                RefKind.Implements:
+                    implements = implements + 1
+                RefKind.Inherits:
+                    inherits = inherits + 1
+                RefKind.Uses:
+                    uses = uses + 1
+                _:
+                    pass
+
+        result = result.set("import_refs", imports)
+        result = result.set("call_refs", calls)
+        result = result.set("implements_refs", implements)
+        result = result.set("inherits_refs", inherits)
+        result = result.set("uses_refs", uses)
+
+        return result
+
+# Helper: Extract references from parsed symbols and source
+pub fn extract_references(source: String, module_path: String, symbols: List[Symbol]) -> List[Reference]:
+    refs = []
+    lines = source.split("\n")
+
+    line_num = 0
+    for line in lines:
+        stripped = line.strip()
+
+        # Track import references
+        if stripped.starts_with("import ") or stripped.starts_with("use "):
+            imported = extract_import_target(stripped)
+            if imported != "":
+                loc = SourceLocation.new(module_path, line_num, 0)
+                ref = Reference.new(module_path, imported, RefKind.Import, loc)
+                refs = refs.append(ref)
+
+        # Track class inheritance
+        if stripped.starts_with("class ") or stripped.starts_with("pub class "):
+            parent = extract_parent_class(stripped)
+            if parent != "":
+                class_name = extract_class_name(stripped)
+                fqn = "{module_path}.{class_name}"
+                loc = SourceLocation.new(module_path, line_num, 0)
+                ref = Reference.new(fqn, parent, RefKind.Inherits, loc)
+                refs = refs.append(ref)
+
+        # Track trait implementations
+        if stripped.starts_with("impl "):
+            impl_info = extract_impl_info(stripped)
+            if impl_info.trait_name != "" and impl_info.type_name != "":
+                fqn = "{module_path}.{impl_info.type_name}"
+                loc = SourceLocation.new(module_path, line_num, 0)
+                ref = Reference.new(fqn, impl_info.trait_name, RefKind.Implements, loc)
+                refs = refs.append(ref)
+
+        line_num = line_num + 1
+
+    return refs
+
+# Helper class for impl info
+class ImplInfo:
+    trait_name: String
+    type_name: String
+
+# Extract import target from import/use statement
+fn extract_import_target(line: String) -> String:
+    stripped = line.strip()
+
+    if stripped.starts_with("import "):
+        rest = stripped.substring(7, stripped.len())
+        # Handle "import X as Y" -> return X
+        if rest.contains(" as "):
+            parts = rest.split(" as ")
+            return parts[0].strip()
+        return rest.strip()
+
+    if stripped.starts_with("use "):
+        rest = stripped.substring(4, stripped.len())
+        # Handle "use X.*" -> return X
+        if rest.ends_with(".*"):
+            return rest.substring(0, rest.len() - 2)
+        # Handle "use X.{a, b}" -> return X
+        if rest.contains('.{'):
+            idx = rest.find('.{')
+            match idx:
+                Some(i):
+                    return rest.substring(0, i)
+                None:
+                    return rest
+        return rest.strip()
+
+    return ""
+
+# Extract parent class from class definition
+fn extract_parent_class(line: String) -> String:
+    # Pattern: "class Child(Parent):" or "pub class Child(Parent):"
+    if not line.contains("("):
+        return ""
+
+    start = line.find("(")
+    end = line.find(")")
+
+    match start:
+        Some(s):
+            match end:
+                Some(e):
+                    if e > s:
+                        return line.substring(s + 1, e).strip()
+                None:
+                    return ""
+        None:
+            return ""
+
+    return ""
+
+# Extract class name from class definition
+fn extract_class_name(line: String) -> String:
+    stripped = line.strip()
+
+    # Remove "pub " prefix
+    if stripped.starts_with("pub "):
+        stripped = stripped.substring(4, stripped.len())
+
+    # Remove "class " prefix
+    if stripped.starts_with("class "):
+        stripped = stripped.substring(6, stripped.len())
+
+    # Find end of name (before parenthesis or colon)
+    end_idx = stripped.len()
+
+    paren = stripped.find("(")
+    match paren:
+        Some(p):
+            end_idx = p
+        None:
+            pass
+
+    colon = stripped.find(":")
+    match colon:
+        Some(c):
+            if c < end_idx:
+                end_idx = c
+        None:
+            pass
+
+    return stripped.substring(0, end_idx).strip()
+
+# Extract impl info from impl statement
+fn extract_impl_info(line: String) -> ImplInfo:
+    # Pattern: "impl Trait for Type:" or "impl Type:"
+    stripped = line.strip()
+
+    if not stripped.starts_with("impl "):
+        return ImplInfo { trait_name: "", type_name: "" }
+
+    rest = stripped.substring(5, stripped.len())
+
+    # Remove trailing colon
+    if rest.ends_with(":"):
+        rest = rest.substring(0, rest.len() - 1)
+
+    if rest.contains(" for "):
+        parts = rest.split(" for ")
+        return ImplInfo {
+            trait_name: parts[0].strip(),
+            type_name: parts[1].strip()
+        }
+    else:
+        # impl Type: (inherent impl, no trait)
+        return ImplInfo {
+            trait_name: "",
+            type_name: rest.strip()
+        }
+
+# Build symbol table from multiple files
+pub fn build_symbol_table(files: List[FileContext]) -> SymbolTable:
+    table = SymbolTable.new()
+
+    for file in files:
+        module_path = file.path
+
+        # Add symbols
+        for symbol in file.symbols:
+            qsym = QualifiedSymbol.new(module_path, symbol)
+            table.add_symbol(qsym)
+
+        # Extract and add references
+        refs = extract_references(file.source, module_path, file.symbols)
+        for ref in refs:
+            table.add_reference(ref)
+
+    return table
+
+# Exports
+export RefKind
+export refkind_to_string
+export SourceLocation
+export Reference
+export QualifiedSymbol
+export SymbolTable
+export extract_references
+export build_symbol_table

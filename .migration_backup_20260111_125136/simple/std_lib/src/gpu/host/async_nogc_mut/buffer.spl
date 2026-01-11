@@ -1,0 +1,268 @@
+# GPU Buffer Management - Async buffer allocation, upload, and download
+
+use std.core.result.*
+
+# GPU buffer handle
+struct Buffer[T]:
+    _handle: u64
+    _size: u64
+
+# Error type
+enum GpuError:
+    OutOfMemory
+    InvalidDevice
+    TransferFailed
+    KernelFailed
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn to_string(self) -> String:
+        """Convert error to string.
+
+        Returns:
+            Error name
+        """
+        match self:
+            case GpuError::OutOfMemory:
+                return "out_of_memory"
+            case GpuError::InvalidDevice:
+                return "invalid_device"
+            case GpuError::TransferFailed:
+                return "transfer_failed"
+            case GpuError::KernelFailed:
+                return "kernel_failed"
+
+    pub fn description(self) -> String:
+        """Get error description.
+
+        Returns:
+            Human-readable description
+        """
+        match self:
+            case GpuError::OutOfMemory:
+                return "GPU out of memory"
+            case GpuError::InvalidDevice:
+                return "Invalid GPU device"
+            case GpuError::TransferFailed:
+                return "GPU memory transfer failed"
+            case GpuError::KernelFailed:
+                return "GPU kernel execution failed"
+
+    pub fn is_memory_error(self) -> bool:
+        """Check if error is memory-related.
+
+        Returns:
+            True for OutOfMemory or TransferFailed
+        """
+        match self:
+            case GpuError::OutOfMemory:
+                return true
+            case GpuError::InvalidDevice:
+                return false
+            case GpuError::TransferFailed:
+                return true
+            case GpuError::KernelFailed:
+                return false
+
+    pub fn is_recoverable(self) -> bool:
+        """Check if error might be recoverable.
+
+        Returns:
+            True if retry might succeed
+        """
+        match self:
+            case GpuError::OutOfMemory:
+                return true  # Might free memory and retry
+            case GpuError::InvalidDevice:
+                return false  # Device error is permanent
+            case GpuError::TransferFailed:
+                return true  # Transfer might succeed on retry
+            case GpuError::KernelFailed:
+                return false  # Kernel logic error
+
+    pub fn is_out_of_memory(self) -> bool:
+        """Check if this is OutOfMemory error.
+
+        Returns:
+            True for OutOfMemory variant
+        """
+        match self:
+            case GpuError::OutOfMemory: true
+            case _: false
+
+    pub fn is_invalid_device(self) -> bool:
+        """Check if this is InvalidDevice error.
+
+        Returns:
+            True for InvalidDevice variant
+        """
+        match self:
+            case GpuError::InvalidDevice: true
+            case _: false
+
+    pub fn is_transfer_failed(self) -> bool:
+        """Check if this is TransferFailed error.
+
+        Returns:
+            True for TransferFailed variant
+        """
+        match self:
+            case GpuError::TransferFailed: true
+            case _: false
+
+    pub fn is_kernel_failed(self) -> bool:
+        """Check if this is KernelFailed error.
+
+        Returns:
+            True for KernelFailed variant
+        """
+        match self:
+            case GpuError::KernelFailed: true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get summary of GPU error.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            GpuError::OutOfMemory.summary()
+            # → "GpuError: out_of_memory (GPU out of memory, recoverable)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let recoverable = if self.is_recoverable(): "recoverable" else: "fatal"
+        return "GpuError: {name} ({desc}, {recoverable})"
+
+# Buffer operations (async)
+impl Buffer[T]:
+    async fn upload(self, data: &[T]) -> Result[(), GpuError]
+    async fn download(self) -> Result[Array[T], GpuError]
+    fn len() -> u64
+    fn size_bytes() -> u64
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_handle() -> u64:
+        """Get underlying buffer handle.
+
+        Returns:
+            Buffer handle identifier
+
+        Example:
+            buffer.get_handle()  # → 0x7f8a1c002000
+        """
+        return self._handle
+
+    fn get_size() -> u64:
+        """Get buffer size (number of elements).
+
+        Returns:
+            Number of elements of type T
+
+        Example:
+            buffer.get_size()  # → 1024
+        """
+        return self._size
+
+    fn is_empty() -> bool:
+        """Check if buffer is empty.
+
+        Returns:
+            true if buffer has no elements
+
+        Example:
+            buffer.is_empty()  # → false
+        """
+        return self._size == 0
+
+    fn has_elements() -> bool:
+        """Check if buffer contains elements.
+
+        Returns:
+            true if buffer has elements
+
+        Example:
+            buffer.has_elements()  # → true
+        """
+        return self._size > 0
+
+    fn size_kb() -> f64:
+        """Get buffer size in kilobytes.
+
+        Returns:
+            Size in KB
+
+        Example:
+            buffer.size_kb()  # → 4.0
+        """
+        return self.size_bytes() as f64 / 1024.0
+
+    fn size_mb() -> f64:
+        """Get buffer size in megabytes.
+
+        Returns:
+            Size in MB
+
+        Example:
+            buffer.size_mb()  # → 0.004
+        """
+        return self.size_bytes() as f64 / (1024.0 * 1024.0)
+
+    async fn try_upload(self, data: &[T]) -> bool:
+        """Try to upload data, returning success status.
+
+        Args:
+            data: Data to upload
+
+        Returns:
+            true if upload succeeded
+
+        Example:
+            if await buffer.try_upload(data):
+                print("Upload successful")
+        """
+        match await self.upload(data):
+            case Ok(_):
+                return true
+            case Err(_):
+                return false
+
+    async fn try_download(self) -> Option[Array[T]]:
+        """Try to download data, returning None on error.
+
+        Returns:
+            Some(data) on success, None on failure
+
+        Example:
+            if let Some(data) = await buffer.try_download():
+                print("Downloaded {data.len()} elements")
+        """
+        match await self.download():
+            case Ok(data):
+                return Some(data)
+            case Err(_):
+                return None
+
+    fn summary() -> str:
+        """Get buffer summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            buffer.summary()
+            # → "Buffer[T]: handle=0x7f8a1c002000, 1024 elements, 4.0 KB"
+        """
+        let size_kb = self.size_kb()
+        return "Buffer[T]: handle=0x{self._handle:x}, {self._size} elements, {size_kb} KB"
+
+# Buffer allocation
+extern async fn alloc[T](count: u64) -> Result[Buffer[T], GpuError]
+extern async fn alloc_upload[T](data: &[T]) -> Result[Buffer[T], GpuError]
+extern fn free[T](buf: Buffer[T])

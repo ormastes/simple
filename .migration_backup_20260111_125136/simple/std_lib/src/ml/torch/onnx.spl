@@ -1,0 +1,864 @@
+# PyTorch ONNX Export and TorchScript
+#
+# Export PyTorch models to ONNX format for deployment and interoperability.
+# Compile models to TorchScript for production serving.
+#
+# ## Functions
+# - `export_onnx()`: Export model to ONNX format
+# - `load_onnx()`: Load ONNX model
+# - `check_onnx()`: Validate ONNX model
+# - `script()`: Compile model to TorchScript via scripting
+# - `trace()`: Compile model to TorchScript via tracing
+# - `save_torchscript()`: Save TorchScript model
+# - `load_torchscript()`: Load TorchScript model
+#
+# ## Classes
+# - `ONNXExportOptions`: Configuration for ONNX export
+# - `ScriptModule`: TorchScript compiled module
+#
+# ## Example - ONNX Export
+# ```simple
+# import ml.torch as torch
+# import ml.torch.nn as nn
+# import ml.torch.onnx as onnx
+#
+# # Create model
+# let model = nn.Sequential([
+#     nn.Linear(10, 20),
+#     nn.ReLU(),
+#     nn.Linear(20, 1)
+# ])
+#
+# # Export to ONNX
+# let dummy_input = torch.randn([1, 10])
+# onnx.export_onnx(
+#     model,
+#     dummy_input,
+#     "model.onnx",
+#     input_names=["input"],
+#     output_names=["output"],
+#     dynamic_axes={"input": {0: "batch_size"}}
+# )
+#
+# # Verify ONNX model
+# onnx.check_onnx("model.onnx")
+# ```
+#
+# ## Example - TorchScript
+# ```simple
+# import ml.torch.onnx as onnx
+#
+# # Compile via scripting (supports control flow)
+# let scripted = onnx.script(model)
+# onnx.save_torchscript(scripted, "model_scripted.pt")
+#
+# # Compile via tracing (faster, no control flow)
+# let traced = onnx.trace(model, example_inputs=[dummy_input])
+# onnx.save_torchscript(traced, "model_traced.pt")
+#
+# # Load and run
+# let loaded = onnx.load_torchscript("model_scripted.pt")
+# let output = loaded(input_tensor)
+# ```
+
+export export_onnx, load_onnx, check_onnx
+
+import ml.torch.tensor_class.{Tensor}
+export script, trace, save_torchscript, load_torchscript
+
+import ml.torch.tensor_class.{Tensor}
+export ONNXExportOptions, ScriptModule, TrainingMode
+
+import ml.torch.tensor_class.{Tensor}
+
+import .. as torch
+
+
+# ============================================================================
+# ONNX Export Options
+# ============================================================================
+
+enum TrainingMode:
+    """Training mode for ONNX export.
+
+    - EVAL: Export in evaluation mode (default)
+    - TRAINING: Export in training mode (includes dropout, batch norm in training mode)
+    - PRESERVE: Preserve current model state
+    """
+    EVAL
+    TRAINING
+    PRESERVE
+
+    fn code() -> i32:
+        match self:
+            TrainingMode::EVAL -> 0
+            TrainingMode::TRAINING -> 1
+            TrainingMode::PRESERVE -> 2
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_eval() -> bool:
+        """Check if this is EVAL mode.
+
+        Returns:
+            true for EVAL
+
+        Example:
+            TrainingMode::EVAL.is_eval()  # → true
+        """
+        match self:
+            case EVAL: true
+            case _: false
+
+    fn is_training() -> bool:
+        """Check if this is TRAINING mode.
+
+        Returns:
+            true for TRAINING
+
+        Example:
+            TrainingMode::TRAINING.is_training()  # → true
+        """
+        match self:
+            case TRAINING: true
+            case _: false
+
+    fn is_preserve() -> bool:
+        """Check if this is PRESERVE mode.
+
+        Returns:
+            true for PRESERVE
+
+        Example:
+            TrainingMode::PRESERVE.is_preserve()  # → true
+        """
+        match self:
+            case PRESERVE: true
+            case _: false
+
+    fn affects_model_state() -> bool:
+        """Check if mode affects model training state.
+
+        Returns:
+            true for EVAL and TRAINING (change state), false for PRESERVE
+
+        Example:
+            TrainingMode::EVAL.affects_model_state()  # → true
+            TrainingMode::PRESERVE.affects_model_state()  # → false
+        """
+        match self:
+            case EVAL: true
+            case TRAINING: true
+            case PRESERVE: false
+
+    fn to_string() -> String:
+        """Convert mode to string.
+
+        Returns:
+            Mode name
+
+        Example:
+            TrainingMode::EVAL.to_string()  # → "eval"
+        """
+        match self:
+            case EVAL: "eval"
+            case TRAINING: "training"
+            case PRESERVE: "preserve"
+
+    fn summary() -> String:
+        """Get summary of training mode.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            TrainingMode::EVAL.summary()
+            # → "TrainingMode: eval (affects model state)"
+        """
+        let name = self.to_string()
+        let state = if self.affects_model_state(): "affects model state" else: "preserves state"
+        return "TrainingMode: {name} ({state})"
+
+
+class ONNXExportOptions:
+    """Configuration options for ONNX export.
+
+    Attributes:
+        export_params: Include trained parameters in export
+        training: Training mode for export
+        input_names: Names for input tensors
+        output_names: Names for output tensors
+        dynamic_axes: Axes with dynamic dimensions
+        opset_version: ONNX opset version
+        do_constant_folding: Optimize constant expressions
+        keep_initializers_as_inputs: Keep initializers as inputs
+        verbose: Print export information
+        operator_export_type: How to export operators
+    """
+    export_params: bool
+    training: TrainingMode
+    input_names: [str]
+    output_names: [str]
+    dynamic_axes: {str: {i64: str}}  # e.g., {"input": {0: "batch_size"}}
+    opset_version: i64
+    do_constant_folding: bool
+    keep_initializers_as_inputs: bool
+    verbose: bool
+
+    fn __init__(export_params: bool = true,
+        training: TrainingMode = TrainingMode::EVAL,
+        input_names: [str] = None,
+        output_names: [str] = None,
+        dynamic_axes: {str: {i64: str}} = None,
+        opset_version: i64 = 14,
+        do_constant_folding: bool = true,
+        keep_initializers_as_inputs: bool = false,
+        verbose: bool = false
+    ):
+        """Initialize ONNX export options.
+
+        Args:
+            export_params: Include parameters (default: true)
+            training: Training mode (default: EVAL)
+            input_names: Input tensor names (default: ["input"])
+            output_names: Output tensor names (default: ["output"])
+            dynamic_axes: Dynamic dimension specifications (default: None)
+            opset_version: ONNX opset version (default: 14)
+            do_constant_folding: Constant folding optimization (default: true)
+            keep_initializers_as_inputs: Keep initializers as graph inputs (default: false)
+            verbose: Print export details (default: false)
+        """
+        self.export_params = export_params
+        self.training = training
+        self.input_names = input_names if input_names is not None else ["input"]
+        self.output_names = output_names if output_names is not None else ["output"]
+        self.dynamic_axes = dynamic_axes if dynamic_axes is not None else {}
+        self.opset_version = opset_version
+        self.do_constant_folding = do_constant_folding
+        self.keep_initializers_as_inputs = keep_initializers_as_inputs
+        self.verbose = verbose
+
+
+# ============================================================================
+# ONNX Export
+# ============================================================================
+
+fn export_onnx(
+    model: any,
+    args: any,  # Example inputs (tuple or single tensor)
+    filepath: str,
+    export_params: bool = true,
+    verbose: bool = false,
+    training: TrainingMode = TrainingMode::EVAL,
+    input_names: [str] = None,
+    output_names: [str] = None,
+    opset_version: i64 = 14,
+    dynamic_axes: {str: {i64: str}} = None,
+    do_constant_folding: bool = true,
+    keep_initializers_as_inputs: bool = false
+):
+    """Export PyTorch model to ONNX format.
+
+    Args:
+        model: PyTorch model (nn.Module)
+        args: Example inputs for tracing (tensor or tuple of tensors)
+        filepath: Output ONNX file path
+        export_params: Include trained parameters (default: true)
+        verbose: Print export information (default: false)
+        training: Training mode for export (default: EVAL)
+        input_names: Names for input tensors (default: ["input"])
+        output_names: Names for output tensors (default: ["output"])
+        opset_version: ONNX opset version (default: 14)
+        dynamic_axes: Dynamic dimension specifications (default: None)
+        do_constant_folding: Optimize constants (default: true)
+        keep_initializers_as_inputs: Keep initializers as inputs (default: false)
+
+    Example:
+        ```simple
+        import ml.torch.onnx as onnx
+
+        # Simple export
+        onnx.export_onnx(model, dummy_input, "model.onnx")
+
+        # Export with dynamic batch size
+        onnx.export_onnx(
+            model,
+            dummy_input,
+            "model.onnx",
+            input_names=["images"],
+            output_names=["predictions"],
+            dynamic_axes={
+                "images": {0: "batch_size"},
+                "predictions": {0: "batch_size"}
+            }
+        )
+
+        # Export with multiple inputs
+        onnx.export_onnx(
+            model,
+            (input1, input2),
+            "model.onnx",
+            input_names=["text", "image"],
+            output_names=["logits"]
+        )
+        ```
+
+    Note:
+        The model is traced with the provided example inputs.
+        Control flow may not be captured correctly - use TorchScript for that.
+    """
+    # Get model handle
+    let model_handle = model.handle if hasattr(model, "handle") else 0u64
+
+    # Get input tensor handle(s)
+    let mut input_handles = []
+    if isinstance(args, tuple) or isinstance(args, list):
+        for arg in args:
+            if hasattr(arg, "handle"):
+                input_handles.append(arg.handle)
+    else:
+        if hasattr(args, "handle"):
+            input_handles.append(args.handle)
+
+    # Convert dynamic_axes to FFI format
+    # Simplified: just pass flag if dynamic axes exist
+    let has_dynamic = dynamic_axes is not None and dynamic_axes.len() > 0
+
+    # Default names
+    let in_names = input_names if input_names is not None else ["input"]
+    let out_names = output_names if output_names is not None else ["output"]
+
+    # Convert names to C strings
+    let mut in_names_ptrs = []
+    let mut in_names_lens = []
+    for name in in_names:
+        in_names_ptrs.append(name.as_ptr())
+        in_names_lens.append(name.len() as i32)
+
+    let mut out_names_ptrs = []
+    let mut out_names_lens = []
+    for name in out_names:
+        out_names_ptrs.append(name.as_ptr())
+        out_names_lens.append(name.len() as i32)
+
+    let filepath_ptr = filepath.as_ptr()
+    let filepath_len = filepath.len() as i32
+
+    let result = @rt_torch_onnx_export(
+        model_handle,
+        input_handles.data_ptr(),
+        input_handles.len() as i32,
+        filepath_ptr,
+        filepath_len,
+        export_params as i32,
+        verbose as i32,
+        training.code(),
+        in_names_ptrs.data_ptr(),
+        in_names_lens.data_ptr(),
+        in_names.len() as i32,
+        out_names_ptrs.data_ptr(),
+        out_names_lens.data_ptr(),
+        out_names.len() as i32,
+        opset_version,
+        has_dynamic as i32,
+        do_constant_folding as i32,
+        keep_initializers_as_inputs as i32
+    )
+
+    if result != 0:
+        panic("ONNX export failed for {filepath}")
+
+    if verbose:
+        print("Successfully exported model to {filepath}")
+
+
+fn load_onnx(filepath: str, device: torch.Device = torch.Device::CPU) -> any:
+    """Load ONNX model.
+
+    Args:
+        filepath: ONNX file path
+        device: Device to load model on (default: CPU)
+
+    Returns:
+        Loaded ONNX model wrapper
+
+    Example:
+        ```simple
+        let model = onnx.load_onnx("model.onnx")
+        let output = model.run(input_tensor)
+        ```
+
+    Note:
+        Returns an ONNX runtime model, not a PyTorch model.
+        Use for inference only.
+    """
+    let filepath_ptr = filepath.as_ptr()
+    let filepath_len = filepath.len() as i32
+
+    let mut handle = 0u64
+
+    @rt_torch_onnx_load(
+        filepath_ptr,
+        filepath_len,
+        device_code(device),
+        &handle
+    )
+
+    if handle == 0:
+        panic("Failed to load ONNX model from {filepath}")
+
+    return ONNXModel(handle, filepath)
+
+
+fn check_onnx(filepath: str, check_type: str = "full"):
+    """Validate ONNX model.
+
+    Checks that ONNX model is well-formed and valid.
+
+    Args:
+        filepath: ONNX file path
+        check_type: Validation level ("full", "shape", "version")
+
+    Example:
+        ```simple
+        # Export and validate
+        onnx.export_onnx(model, dummy_input, "model.onnx")
+        onnx.check_onnx("model.onnx")
+        print("Model is valid!")
+        ```
+
+    Raises:
+        Error if model is invalid
+    """
+    let filepath_ptr = filepath.as_ptr()
+    let filepath_len = filepath.len() as i32
+
+    let check_ptr = check_type.as_ptr()
+    let check_len = check_type.len() as i32
+
+    let result = @rt_torch_onnx_check(
+        filepath_ptr,
+        filepath_len,
+        check_ptr,
+        check_len
+    )
+
+    if result != 0:
+        panic("ONNX model validation failed for {filepath}")
+
+
+class ONNXModel:
+    """Loaded ONNX model wrapper.
+
+    Attributes:
+        handle: Internal ONNX model handle
+        filepath: Original file path
+    """
+    handle: u64
+    filepath: str
+
+    fn __init__(handle: u64, filepath: str):
+        self.handle = handle
+        self.filepath = filepath
+
+    fn __del__():
+        if self.handle != 0:
+            @rt_torch_onnx_free(self.handle)
+
+    fn run(*inputs) -> any:
+        """Run inference on ONNX model.
+
+        Args:
+            *inputs: Input tensors
+
+        Returns:
+            Output tensor or tuple of output tensors
+        """
+        # Get input handles
+        let mut input_handles = []
+        for inp in inputs:
+            if hasattr(inp, "handle"):
+                input_handles.append(inp.handle)
+
+        let mut output_handle = 0u64
+
+        @rt_torch_onnx_run(
+            self.handle,
+            input_handles.data_ptr(),
+            input_handles.len() as i32,
+            &output_handle
+        )
+
+        if output_handle == 0:
+            panic("ONNX inference failed")
+
+        return Tensor(output_handle)
+
+
+# ============================================================================
+# TorchScript Compilation
+# ============================================================================
+
+class ScriptModule:
+    """TorchScript compiled module.
+
+    A JIT-compiled version of a PyTorch model for production deployment.
+    Supports serialization and can run without Python interpreter.
+
+    Attributes:
+        handle: Internal TorchScript module handle
+        original_model: Original PyTorch model (if available)
+    """
+    handle: u64
+    original_model: any
+
+    fn __init__(handle: u64, original_model: any = None):
+        self.handle = handle
+        self.original_model = original_model
+
+    fn __del__():
+        if self.handle != 0:
+            @rt_torch_jit_free(self.handle)
+
+    fn __call__(*args, **kwargs) -> any:
+        """Run inference.
+
+        Args:
+            *args: Input tensors
+
+        Returns:
+            Model output
+        """
+        return self.forward(*args, **kwargs)
+
+    fn forward(*args) -> any:
+        """Forward pass.
+
+        Args:
+            *args: Input tensors
+
+        Returns:
+            Model output
+        """
+        # Get input handles
+        let mut input_handles = []
+        for arg in args:
+            if hasattr(arg, "handle"):
+                input_handles.append(arg.handle)
+
+        let mut output_handle = 0u64
+
+        @rt_torch_jit_forward(
+            self.handle,
+            input_handles.data_ptr(),
+            input_handles.len() as i32,
+            &output_handle
+        )
+
+        if output_handle == 0:
+            panic("TorchScript forward failed")
+
+        return Tensor(output_handle)
+
+    fn save(filepath: str):
+        """Save TorchScript module to file.
+
+        Args:
+            filepath: Output file path
+        """
+        save_torchscript(self, filepath)
+
+    fn eval():
+        """Set to evaluation mode."""
+        @rt_torch_jit_eval(self.handle)
+
+    fn train(mode: bool = true):
+        """Set training mode.
+
+        Args:
+            mode: Training mode (default: true)
+        """
+        @rt_torch_jit_train(self.handle, mode as i32)
+
+
+fn script(model: any, optimize: bool = true) -> ScriptModule:
+    """Compile model to TorchScript via scripting.
+
+    Scripting analyzes the model's source code and compiles it to TorchScript.
+    Supports control flow (if, for, while) but requires type annotations.
+
+    Args:
+        model: PyTorch model (nn.Module)
+        optimize: Apply optimizations (default: true)
+
+    Returns:
+        Compiled TorchScript module
+
+    Example:
+        ```simple
+        import ml.torch.onnx as onnx
+
+        # Compile model
+        let scripted = onnx.script(model)
+
+        # Save
+        scripted.save("model_scripted.pt")
+
+        # Run inference
+        let output = scripted(input_tensor)
+        ```
+
+    Note:
+        Model code must be compatible with TorchScript (limited Python features).
+        Use torch.jit.script decorators for functions.
+    """
+    let model_handle = model.handle if hasattr(model, "handle") else 0u64
+
+    let mut script_handle = 0u64
+
+    @rt_torch_jit_script(
+        model_handle,
+        optimize as i32,
+        &script_handle
+    )
+
+    if script_handle == 0:
+        panic("TorchScript scripting failed")
+
+    return ScriptModule(script_handle, model)
+
+
+fn trace(
+    model: any,
+    example_inputs: any,
+    check_trace: bool = true,
+    check_tolerance: f64 = 1e-5,
+    strict: bool = true,
+    optimize: bool = true
+) -> ScriptModule:
+    """Compile model to TorchScript via tracing.
+
+    Tracing records operations during a forward pass with example inputs.
+    Faster than scripting but doesn't capture control flow (if/for/while).
+
+    Args:
+        model: PyTorch model (nn.Module)
+        example_inputs: Example inputs for tracing
+        check_trace: Verify trace correctness (default: true)
+        check_tolerance: Tolerance for verification (default: 1e-5)
+        strict: Strict tracing (default: true)
+        optimize: Apply optimizations (default: true)
+
+    Returns:
+        Compiled TorchScript module
+
+    Example:
+        ```simple
+        # Trace model
+        let dummy_input = torch.randn([1, 3, 224, 224])
+        let traced = onnx.trace(model, example_inputs=dummy_input)
+
+        # Save
+        traced.save("model_traced.pt")
+
+        # Run inference
+        let output = traced(test_input)
+        ```
+
+    Note:
+        Control flow is not captured. The traced graph follows the path
+        taken by the example inputs. Use scripting if you need control flow.
+    """
+    let model_handle = model.handle if hasattr(model, "handle") else 0u64
+
+    # Get example input handles
+    let mut input_handles = []
+    if isinstance(example_inputs, tuple) or isinstance(example_inputs, list):
+        for inp in example_inputs:
+            if hasattr(inp, "handle"):
+                input_handles.append(inp.handle)
+    else:
+        if hasattr(example_inputs, "handle"):
+            input_handles.append(example_inputs.handle)
+
+    let mut trace_handle = 0u64
+
+    @rt_torch_jit_trace(
+        model_handle,
+        input_handles.data_ptr(),
+        input_handles.len() as i32,
+        check_trace as i32,
+        check_tolerance,
+        strict as i32,
+        optimize as i32,
+        &trace_handle
+    )
+
+    if trace_handle == 0:
+        panic("TorchScript tracing failed")
+
+    return ScriptModule(trace_handle, model)
+
+
+fn save_torchscript(module: ScriptModule, filepath: str):
+    """Save TorchScript module to file.
+
+    Args:
+        module: TorchScript module
+        filepath: Output file path
+
+    Example:
+        ```simple
+        let scripted = onnx.script(model)
+        onnx.save_torchscript(scripted, "model.pt")
+        ```
+    """
+    let filepath_ptr = filepath.as_ptr()
+    let filepath_len = filepath.len() as i32
+
+    let result = @rt_torch_jit_save(
+        module.handle,
+        filepath_ptr,
+        filepath_len
+    )
+
+    if result != 0:
+        panic("Failed to save TorchScript module to {filepath}")
+
+
+fn load_torchscript(filepath: str, device: torch.Device = torch.Device::CPU) -> ScriptModule:
+    """Load TorchScript module from file.
+
+    Args:
+        filepath: TorchScript file path
+        device: Device to load on (default: CPU)
+
+    Returns:
+        Loaded TorchScript module
+
+    Example:
+        ```simple
+        # Load model
+        let model = onnx.load_torchscript("model.pt")
+
+        # Move to GPU
+        model = model.to(torch.Device::CUDA(0))
+
+        # Run inference
+        let output = model(input_tensor)
+        ```
+    """
+    let filepath_ptr = filepath.as_ptr()
+    let filepath_len = filepath.len() as i32
+
+    let mut handle = 0u64
+
+    @rt_torch_jit_load(
+        filepath_ptr,
+        filepath_len,
+        device_code(device),
+        &handle
+    )
+
+    if handle == 0:
+        panic("Failed to load TorchScript module from {filepath}")
+
+    return ScriptModule(handle)
+
+
+# ============================================================================
+# External FFI Functions
+# ============================================================================
+
+# These are implemented in src/runtime/src/value/torch.rs
+
+# ONNX export/import
+extern fn rt_torch_onnx_export(
+    model_handle: u64,
+    input_handles: *u64,
+    num_inputs: i32,
+    filepath_ptr: *u8,
+    filepath_len: i32,
+    export_params: i32,
+    verbose: i32,
+    training_mode: i32,
+    input_names_ptr: **u8,
+    input_names_len: *i32,
+    num_input_names: i32,
+    output_names_ptr: **u8,
+    output_names_len: *i32,
+    num_output_names: i32,
+    opset_version: i64,
+    dynamic_axes: i32,
+    do_constant_folding: i32,
+    keep_initializers_as_inputs: i32
+) -> i32
+
+extern fn rt_torch_onnx_load(
+    filepath_ptr: *u8,
+    filepath_len: i32,
+    device: i32,
+    handle_out: *u64
+) -> i32
+
+extern fn rt_torch_onnx_check(
+    filepath_ptr: *u8,
+    filepath_len: i32,
+    check_type_ptr: *u8,
+    check_type_len: i32
+) -> i32
+
+extern fn rt_torch_onnx_free(handle: u64) -> i32
+
+extern fn rt_torch_onnx_run(
+    model_handle: u64,
+    input_handles: *u64,
+    num_inputs: i32,
+    output_handle_out: *u64
+) -> i32
+
+# TorchScript JIT
+extern fn rt_torch_jit_script(
+    model_handle: u64,
+    optimize: i32,
+    script_handle_out: *u64
+) -> i32
+
+extern fn rt_torch_jit_trace(
+    model_handle: u64,
+    input_handles: *u64,
+    num_inputs: i32,
+    check_trace: i32,
+    check_tolerance: f64,
+    strict: i32,
+    optimize: i32,
+    trace_handle_out: *u64
+) -> i32
+
+extern fn rt_torch_jit_save(
+    module_handle: u64,
+    filepath_ptr: *u8,
+    filepath_len: i32
+) -> i32
+
+extern fn rt_torch_jit_load(
+    filepath_ptr: *u8,
+    filepath_len: i32,
+    device: i32,
+    handle_out: *u64
+) -> i32
+
+extern fn rt_torch_jit_forward(
+    module_handle: u64,
+    input_handles: *u64,
+    num_inputs: i32,
+    output_handle_out: *u64
+) -> i32
+
+extern fn rt_torch_jit_free(handle: u64) -> i32
+
+extern fn rt_torch_jit_eval(handle: u64) -> i32
+
+extern fn rt_torch_jit_train(handle: u64, mode: i32) -> i32

@@ -1,0 +1,108 @@
+# Environment - Variable Bindings
+#
+# Manages variable scopes and bindings.
+
+from value import {Value}
+
+export Environment, Scope, Binding
+
+# A single variable binding
+struct Binding:
+    name: String
+    value: Value
+    mutable: bool
+
+# A single scope (lexical block)
+struct Scope:
+    bindings: Dict[String, Binding]
+    parent: Option[&Scope]
+
+impl Scope:
+    fn new() -> Scope:
+        return Scope {
+            bindings: Dict::new(),
+            parent: None
+        }
+
+    fn with_parent(parent: &Scope) -> Scope:
+        return Scope {
+            bindings: Dict::new(),
+            parent: Some(parent)
+        }
+
+    fn define(self, name: String, value: Value, mutable: bool):
+        self.bindings.set(name.clone(), Binding {
+            name: name,
+            value: value,
+            mutable: mutable
+        })
+
+    fn get(self, name: &str) -> Option[&Binding]:
+        if let Some(binding) = self.bindings.get(name):
+            return Some(binding)
+        if let Some(parent) = self.parent:
+            return parent.get(name)
+        return None
+
+    fn set(self, name: &str, value: Value) -> Result[(), String]:
+        if let Some(binding) = self.bindings.get_mut(name):
+            if not binding.mutable:
+                return Err("Cannot assign to immutable variable: {name}".to_string())
+            binding.value = value
+            return Ok(())
+        if let Some(parent) = self.parent:
+            return parent.set(name, value)
+        return Err("Undefined variable: {name}".to_string())
+
+# The environment (stack of scopes)
+struct Environment:
+    scopes: Array[Scope]
+    globals: Scope
+
+impl Environment:
+    fn new() -> Environment:
+        return Environment {
+            scopes: [Scope::new()],
+            globals: Scope::new()
+        }
+
+    # Enter a new scope
+    fn push_scope(self):
+        let parent = self.current_scope()
+        self.scopes.push(Scope::with_parent(parent))
+
+    # Exit current scope
+    fn pop_scope(self):
+        if self.scopes.len() > 1:
+            self.scopes.pop()
+
+    # Get current scope
+    fn current_scope(self) -> &Scope:
+        return &self.scopes[self.scopes.len() - 1]
+
+    fn current_scope_mut(self) -> &mut Scope:
+        let idx = self.scopes.len() - 1
+        return &mut self.scopes[idx]
+
+    # Define a variable in current scope
+    fn define(self, name: String, value: Value):
+        self.current_scope_mut().define(name, value, true)
+
+    fn define_const(self, name: String, value: Value):
+        self.current_scope_mut().define(name, value, false)
+
+    # Get a variable
+    fn get(self, name: &str) -> Option[Value]:
+        if let Some(binding) = self.current_scope().get(name):
+            return Some(binding.value.clone())
+        if let Some(binding) = self.globals.get(name):
+            return Some(binding.value.clone())
+        return None
+
+    # Set a variable
+    fn set(self, name: &str, value: Value) -> Result[(), String]:
+        return self.current_scope_mut().set(name, value)
+
+    # Define a global
+    fn define_global(self, name: String, value: Value):
+        self.globals.define(name, value, true)

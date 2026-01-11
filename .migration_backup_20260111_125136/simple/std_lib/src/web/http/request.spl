@@ -1,0 +1,729 @@
+# HTTP Request Parser
+#
+# Parses raw TCP bytes into structured HttpRequest.
+
+use units.net.*
+use units.size.*
+use host.async_nogc_mut.net.tcp.TcpStream
+use host.common.io.error.IoError
+
+# HTTP Methods
+pub enum HttpMethod:
+    Get
+    Post
+    Put
+    Delete
+    Patch
+    Head
+    Options
+    Connect
+    Trace
+
+impl HttpMethod:
+    pub fn from_str(s: &str) -> Option[HttpMethod]:
+        match s.to_upper():
+            case "GET": Some(HttpMethod::Get)
+            case "POST": Some(HttpMethod::Post)
+            case "PUT": Some(HttpMethod::Put)
+            case "DELETE": Some(HttpMethod::Delete)
+            case "PATCH": Some(HttpMethod::Patch)
+            case "HEAD": Some(HttpMethod::Head)
+            case "OPTIONS": Some(HttpMethod::Options)
+            case "CONNECT": Some(HttpMethod::Connect)
+            case "TRACE": Some(HttpMethod::Trace)
+            case _: None
+
+    pub fn to_str(self) -> &str:
+        match self:
+            case Get: "GET"
+            case Post: "POST"
+            case Put: "PUT"
+            case Delete: "DELETE"
+            case Patch: "PATCH"
+            case Head: "HEAD"
+            case Options: "OPTIONS"
+            case Connect: "CONNECT"
+            case Trace: "TRACE"
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_get(self) -> bool:
+        """Check if method is GET.
+
+        Returns:
+            true if GET
+
+        Example:
+            HttpMethod::Get.is_get()  # → true
+        """
+        match self:
+            case Get: true
+            case _: false
+
+    pub fn is_post(self) -> bool:
+        """Check if method is POST.
+
+        Returns:
+            true if POST
+
+        Example:
+            HttpMethod::Post.is_post()  # → true
+        """
+        match self:
+            case Post: true
+            case _: false
+
+    pub fn is_safe(self) -> bool:
+        """Check if method is safe (GET, HEAD, OPTIONS).
+
+        Returns:
+            true if safe method
+
+        Example:
+            HttpMethod::Get.is_safe()  # → true
+            HttpMethod::Post.is_safe()  # → false
+        """
+        match self:
+            case Get | Head | Options: true
+            case _: false
+
+    pub fn is_idempotent(self) -> bool:
+        """Check if method is idempotent.
+
+        Returns:
+            true if idempotent
+
+        Example:
+            HttpMethod::Put.is_idempotent()  # → true
+            HttpMethod::Post.is_idempotent()  # → false
+        """
+        match self:
+            case Get | Head | Put | Delete | Options | Trace: true
+            case _: false
+
+    pub fn allows_body(self) -> bool:
+        """Check if method typically allows request body.
+
+        Returns:
+            true if body allowed
+
+        Example:
+            HttpMethod::Post.allows_body()  # → true
+            HttpMethod::Get.allows_body()  # → false
+        """
+        match self:
+            case Post | Put | Patch: true
+            case _: false
+
+    pub fn description(self) -> String:
+        """Get HTTP method description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            HttpMethod::Get.description()  # → "Retrieve resource"
+        """
+        match self:
+            case Get: "Retrieve resource"
+            case Post: "Create new resource"
+            case Put: "Update/replace resource"
+            case Delete: "Delete resource"
+            case Patch: "Partial update resource"
+            case Head: "Retrieve headers only"
+            case Options: "Get communication options"
+            case Connect: "Establish tunnel"
+            case Trace: "Echo request for debugging"
+
+    pub fn summary(self) -> String:
+        """Get HTTP method summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            HttpMethod::Get.summary()
+            # → "HttpMethod: GET (Retrieve resource, safe, idempotent)"
+        """
+        let name = self.to_str()
+        let desc = self.description()
+        let mut props = []
+
+        if self.is_safe():
+            props.push("safe")
+        if self.is_idempotent():
+            props.push("idempotent")
+        if self.allows_body():
+            props.push("allows body")
+
+        let props_str = props.join(", ")
+        return "HttpMethod: {name} ({desc}, {props_str})"
+
+# HTTP Error types
+pub enum HttpError:
+    # Parsing errors
+    InvalidRequestLine
+    InvalidHeader
+    InvalidMethod
+    InvalidPath
+    InvalidVersion
+    # Body errors
+    NoBody
+    InvalidJson
+    InvalidForm
+    BodyTooLarge
+    # Connection errors
+    ConnectionClosed
+    ReadTimeout
+    WriteTimeout
+    # IO wrapper
+    IoError(IoError)
+
+impl HttpError:
+    pub fn to_string(self) -> String:
+        """Convert error to string.
+
+        Returns:
+            Error variant name
+
+        Example:
+            HttpError::InvalidMethod.to_string()  # → "invalid-method"
+        """
+        match self:
+            case InvalidRequestLine: "invalid-request-line"
+            case InvalidHeader: "invalid-header"
+            case InvalidMethod: "invalid-method"
+            case InvalidPath: "invalid-path"
+            case InvalidVersion: "invalid-version"
+            case NoBody: "no-body"
+            case InvalidJson: "invalid-json"
+            case InvalidForm: "invalid-form"
+            case BodyTooLarge: "body-too-large"
+            case ConnectionClosed: "connection-closed"
+            case ReadTimeout: "read-timeout"
+            case WriteTimeout: "write-timeout"
+            case IoError(_): "io-error"
+
+    pub fn to_str(self) -> str:
+        match self:
+            case InvalidRequestLine: "Invalid request line"
+            case InvalidHeader: "Invalid header"
+            case InvalidMethod: "Invalid HTTP method"
+            case InvalidPath: "Invalid path"
+            case InvalidVersion: "Invalid HTTP version"
+            case NoBody: "No request body"
+            case InvalidJson: "Invalid JSON body"
+            case InvalidForm: "Invalid form body"
+            case BodyTooLarge: "Request body too large"
+            case ConnectionClosed: "Connection closed"
+            case ReadTimeout: "Read timeout"
+            case WriteTimeout: "Write timeout"
+            case IoError(e): "IO error: {e}"
+
+    pub fn description(self) -> String:
+        """Get error description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            HttpError::InvalidMethod.description()  # → "Invalid HTTP method"
+        """
+        match self:
+            case InvalidRequestLine: "Invalid request line"
+            case InvalidHeader: "Invalid header"
+            case InvalidMethod: "Invalid HTTP method"
+            case InvalidPath: "Invalid path"
+            case InvalidVersion: "Invalid HTTP version"
+            case NoBody: "No request body"
+            case InvalidJson: "Invalid JSON body"
+            case InvalidForm: "Invalid form body"
+            case BodyTooLarge: "Request body too large"
+            case ConnectionClosed: "Connection closed"
+            case ReadTimeout: "Read timeout"
+            case WriteTimeout: "Write timeout"
+            case IoError(e): "IO error: {e.description()}"
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_parse_error(self) -> bool:
+        """Check if error is a parsing error.
+
+        Returns:
+            true if parsing error
+
+        Example:
+            HttpError::InvalidMethod.is_parse_error()  # → true
+        """
+        match self:
+            case InvalidRequestLine | InvalidHeader | InvalidMethod | InvalidPath | InvalidVersion: true
+            case _: false
+
+    pub fn is_body_error(self) -> bool:
+        """Check if error is a body-related error.
+
+        Returns:
+            true if body error
+
+        Example:
+            HttpError::InvalidJson.is_body_error()  # → true
+        """
+        match self:
+            case NoBody | InvalidJson | InvalidForm | BodyTooLarge: true
+            case _: false
+
+    pub fn is_connection_error(self) -> bool:
+        """Check if error is a connection error.
+
+        Returns:
+            true if connection error
+
+        Example:
+            HttpError::ConnectionClosed.is_connection_error()  # → true
+        """
+        match self:
+            case ConnectionClosed | ReadTimeout | WriteTimeout: true
+            case _: false
+
+    pub fn is_timeout(self) -> bool:
+        """Check if error is a timeout.
+
+        Returns:
+            true if timeout error
+
+        Example:
+            HttpError::ReadTimeout.is_timeout()  # → true
+        """
+        match self:
+            case ReadTimeout | WriteTimeout: true
+            case _: false
+
+    pub fn is_io_error(self) -> bool:
+        """Check if error wraps an IO error.
+
+        Returns:
+            true if IO error
+
+        Example:
+            HttpError::IoError(err).is_io_error()  # → true
+        """
+        match self:
+            case IoError(_): true
+            case _: false
+
+    pub fn status_code(self) -> u16:
+        """Get suggested HTTP status code for error.
+
+        Returns:
+            HTTP status code
+
+        Example:
+            HttpError::InvalidMethod.status_code()  # → 400
+        """
+        match self:
+            case InvalidRequestLine | InvalidHeader | InvalidMethod | InvalidPath | InvalidVersion: 400
+            case NoBody | InvalidJson | InvalidForm: 400
+            case BodyTooLarge: 413
+            case ConnectionClosed | ReadTimeout | WriteTimeout: 408
+            case IoError(_): 500
+
+    pub fn summary(self) -> String:
+        """Get HTTP error summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            HttpError::InvalidMethod.summary()
+            # → "HttpError: invalid-method (Invalid HTTP method, parse error, status 400)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let status = self.status_code()
+        let mut props = []
+
+        if self.is_parse_error():
+            props.push("parse error")
+        elif self.is_body_error():
+            props.push("body error")
+        elif self.is_connection_error():
+            props.push("connection error")
+
+        if self.is_timeout():
+            props.push("timeout")
+
+        props.push("status {status}")
+        let props_str = props.join(", ")
+        return "HttpError: {name} ({desc}, {props_str})"
+
+# Parsed HTTP Request
+pub struct HttpRequest:
+    method: HttpMethod
+    path: str
+    query: Dict[str, str]
+    headers: Dict[str, str]
+    body: Option[Bytes]
+    version: str
+    remote_addr: SocketAddr
+
+impl HttpRequest:
+    # Parse request from TCP stream
+    pub async fn parse(stream: &TcpStream) -> Result[HttpRequest, HttpError]:
+        # Read initial buffer (request line + headers)
+        let mut buf = Bytes::with_capacity(8192)
+        let n = await stream.read(&mut buf).map_err(|e| HttpError::IoError(e))?
+
+        if n == 0:
+            return Err(HttpError::ConnectionClosed)
+
+        # Find end of headers (double CRLF)
+        let header_end = find_header_end(&buf)
+        if header_end.is_none():
+            return Err(HttpError::InvalidRequestLine)
+
+        let header_bytes = buf.slice(0, header_end.unwrap())
+        let header_str = header_bytes.to_utf8().map_err(|_| HttpError::InvalidRequestLine)?
+
+        # Parse request line
+        let lines = header_str.split("\r\n")
+        if lines.is_empty():
+            return Err(HttpError::InvalidRequestLine)
+
+        let request_line = lines[0]
+        let (method, path, query, version) = parse_request_line(&request_line)?
+
+        # Parse headers
+        let mut headers: Dict[str, str] = Dict::new()
+        for i in 1..lines.len():
+            let line = lines[i]
+            if line.is_empty():
+                break
+            if let Some((name, value)) = parse_header_line(&line):
+                headers.insert(name.to_lower(), value)
+
+        # Parse body if Content-Length present
+        let body = if let Some(len_str) = headers.get("content-length"):
+            let len = len_str.parse_u64().map_err(|_| HttpError::InvalidHeader)?
+            if len > 0:
+                let body_start = header_end.unwrap() + 4  # Skip \r\n\r\n
+                let mut body_buf = Bytes::with_capacity(len as usize)
+
+                # Copy already-read body bytes
+                let already_read = buf.len() - body_start
+                if already_read > 0:
+                    body_buf.extend(buf.slice(body_start, buf.len()))
+
+                # Read remaining body
+                let remaining = len - (already_read as u64)
+                if remaining > 0:
+                    let mut rest = Bytes::with_capacity(remaining as usize)
+                    await stream.read_exact(&mut rest).map_err(|e| HttpError::IoError(e))?
+                    body_buf.extend(&rest)
+
+                Some(body_buf)
+            else:
+                None
+        else:
+            None
+
+        return Ok(HttpRequest {
+            method: method,
+            path: path,
+            query: query,
+            headers: headers,
+            body: body,
+            version: version,
+            remote_addr: stream.peer_addr()
+        })
+
+    # Accessors
+    pub fn method(self) -> HttpMethod:
+        return self.method
+
+    pub fn path(self) -> &str:
+        return &self.path
+
+    pub fn query_param(self, name: &str) -> Option[&str]:
+        return self.query.get(name)
+
+    pub fn header(self, name: &str) -> Option[&str]:
+        return self.headers.get(&name.to_lower())
+
+    pub fn content_type(self) -> Option[&str]:
+        return self.header("content-type")
+
+    pub fn content_length(self) -> Option[u64]:
+        if let Some(s) = self.header("content-length"):
+            return s.parse_u64().ok()
+        return None
+
+    pub fn remote_addr(self) -> SocketAddr:
+        return self.remote_addr
+
+    # Body parsing
+    pub fn body_text(self) -> Result[str, HttpError]:
+        match &self.body:
+            case Some(bytes):
+                bytes.to_utf8().map_err(|_| HttpError::InvalidJson)
+            case None:
+                Err(HttpError::NoBody)
+
+    pub fn body_bytes(self) -> Option[&Bytes]:
+        return self.body.as_ref()
+
+    pub fn has_body(self) -> bool:
+        return self.body.is_some()
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_get(self) -> bool:
+        """Check if request method is GET.
+
+        Returns:
+            true if GET request
+
+        Example:
+            request.is_get()  # → true
+        """
+        self.method.is_get()
+
+    pub fn is_post(self) -> bool:
+        """Check if request method is POST.
+
+        Returns:
+            true if POST request
+
+        Example:
+            request.is_post()  # → true
+        """
+        self.method.is_post()
+
+    pub fn has_query_param(self, name: &str) -> bool:
+        """Check if query parameter exists.
+
+        Args:
+            name: Parameter name
+
+        Returns:
+            true if parameter exists
+
+        Example:
+            request.has_query_param("id")  # → true
+        """
+        self.query.contains_key(name)
+
+    pub fn has_header(self, name: &str) -> bool:
+        """Check if header exists.
+
+        Args:
+            name: Header name
+
+        Returns:
+            true if header exists
+
+        Example:
+            request.has_header("content-type")  # → true
+        """
+        self.headers.contains_key(&name.to_lower())
+
+    pub fn is_json(self) -> bool:
+        """Check if request content type is JSON.
+
+        Returns:
+            true if JSON content type
+
+        Example:
+            request.is_json()  # → true
+        """
+        if let Some(ct) = self.content_type():
+            return ct.contains("application/json")
+        return false
+
+    pub fn is_form(self) -> bool:
+        """Check if request content type is form data.
+
+        Returns:
+            true if form content type
+
+        Example:
+            request.is_form()  # → true
+        """
+        if let Some(ct) = self.content_type():
+            return ct.contains("application/x-www-form-urlencoded")
+        return false
+
+    pub fn is_multipart(self) -> bool:
+        """Check if request is multipart form data.
+
+        Returns:
+            true if multipart
+
+        Example:
+            request.is_multipart()  # → true
+        """
+        if let Some(ct) = self.content_type():
+            return ct.contains("multipart/form-data")
+        return false
+
+    pub fn accepts_json(self) -> bool:
+        """Check if client accepts JSON response.
+
+        Returns:
+            true if accepts JSON
+
+        Example:
+            request.accepts_json()  # → true
+        """
+        if let Some(accept) = self.header("accept"):
+            return accept.contains("application/json")
+        return false
+
+    pub fn user_agent(self) -> Option[&str]:
+        """Get User-Agent header.
+
+        Returns:
+            User agent string
+
+        Example:
+            request.user_agent()  # → Some("Mozilla/5.0...")
+        """
+        self.header("user-agent")
+
+    pub fn is_xhr(self) -> bool:
+        """Check if request is XMLHttpRequest.
+
+        Returns:
+            true if XHR request
+
+        Example:
+            request.is_xhr()  # → true
+        """
+        if let Some(req_with) = self.header("x-requested-with"):
+            return req_with == "XMLHttpRequest"
+        return false
+
+    pub fn query_count(self) -> usize:
+        """Get number of query parameters.
+
+        Returns:
+            Query parameter count
+
+        Example:
+            request.query_count()  # → 3
+        """
+        self.query.len()
+
+    pub fn header_count(self) -> usize:
+        """Get number of headers.
+
+        Returns:
+            Header count
+
+        Example:
+            request.header_count()  # → 5
+        """
+        self.headers.len()
+
+    pub fn summary(self) -> str:
+        """Get summary of HTTP request.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            request.summary()
+            # → "GET /api/users?page=1 HTTP/1.1 (5 headers)"
+        """
+        let method = self.method.to_str()
+        let path = &self.path
+        let query_str = if self.query_count() > 0:
+            let params = self.query_count()
+            "?({params} params)"
+        else:
+            ""
+        let version = &self.version
+        let headers = self.header_count()
+        return "{method} {path}{query_str} {version} ({headers} headers)"
+
+# Helper: Find end of headers (double CRLF)
+fn find_header_end(buf: &Bytes) -> Option[usize]:
+    let pattern = "\r\n\r\n".as_bytes()
+    for i in 0..(buf.len() - 3):
+        if buf[i] == pattern[0] and buf[i+1] == pattern[1] and
+           buf[i+2] == pattern[2] and buf[i+3] == pattern[3]:
+            return Some(i)
+    return None
+
+# Helper: Parse request line "GET /path?query HTTP/1.1"
+fn parse_request_line(line: &str) -> Result[(HttpMethod, str, Dict[str, str], str), HttpError]:
+    let parts = line.split(" ")
+    if parts.len() != 3:
+        return Err(HttpError::InvalidRequestLine)
+
+    let method = HttpMethod::from_str(parts[0]).ok_or(HttpError::InvalidMethod)?
+    let path_query = parts[1]
+    let version = parts[2].to_string()
+
+    # Split path and query
+    let (path, query) = if let Some(idx) = path_query.find('?'):
+        let p = path_query.slice(0, idx)
+        let q = parse_query_string(&path_query.slice(idx + 1, path_query.len()))
+        (p.to_string(), q)
+    else:
+        (path_query.to_string(), Dict::new())
+
+    return Ok((method, path, query, version))
+
+# Helper: Parse header line "Name: Value"
+fn parse_header_line(line: &str) -> Option[(str, str)]:
+    if let Some(idx) = line.find(':'):
+        let name = line.slice(0, idx).trim()
+        let value = line.slice(idx + 1, line.len()).trim()
+        return Some((name.to_string(), value.to_string()))
+    return None
+
+# Helper: Parse query string "key1=value1&key2=value2"
+fn parse_query_string(query: &str) -> Dict[str, str]:
+    let mut result: Dict[str, str] = Dict::new()
+    if query.is_empty():
+        return result
+
+    let pairs = query.split('&')
+    for pair in pairs:
+        if let Some(idx) = pair.find('='):
+            let key = url_decode(&pair.slice(0, idx))
+            let value = url_decode(&pair.slice(idx + 1, pair.len()))
+            result.insert(key, value)
+        else:
+            result.insert(url_decode(pair), "")
+
+    return result
+
+# Helper: URL decode
+fn url_decode(s: &str) -> str:
+    let mut result = String::new()
+    let mut i = 0
+    let bytes = s.as_bytes()
+
+    while i < bytes.len():
+        if bytes[i] == '%' as u8 and i + 2 < bytes.len():
+            let hex = s.slice(i + 1, i + 3)
+            if let Ok(byte) = u8::from_str_radix(&hex, 16):
+                result.push(byte as char)
+                i = i + 3
+                continue
+        else if bytes[i] == '+' as u8:
+            result.push(' ')
+            i = i + 1
+            continue
+
+        result.push(bytes[i] as char)
+        i = i + 1
+
+    return result

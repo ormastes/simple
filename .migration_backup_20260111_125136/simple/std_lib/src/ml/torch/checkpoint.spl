@@ -1,0 +1,115 @@
+# Checkpoint - Model Save/Load Functions
+#
+# Functions for saving and loading model state and training checkpoints.
+
+export save, load
+
+import device.{Device, device_code}
+
+
+# ============================================================================
+# Save/Load Functions
+# ============================================================================
+
+fn save(obj: {str: any}, path: str):
+    """Save model state or checkpoint to file.
+
+    Saves a dictionary of tensors, model states, or training checkpoints to disk.
+    Common use cases:
+    - Save model weights: `torch.save(model.state_dict(), "model.pth")`
+    - Save checkpoint: `torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "epoch": 10}, "checkpoint.pth")`
+
+    Args:
+        obj: Dictionary to save (typically state_dict or checkpoint)
+        path: File path to save to
+
+    Example:
+        ```simple
+        # Save model only
+        torch.save(model.state_dict(), "model_weights.pth")
+
+        # Save full training checkpoint
+        let checkpoint = {
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "epoch": current_epoch,
+            "loss": best_loss
+        }
+        torch.save(checkpoint, "checkpoint.pth")
+        ```
+
+    Note:
+        Uses PyTorch's native serialization format (pickle).
+    """
+    # Convert Simple dict to format suitable for FFI
+    let keys = []
+    let values = []
+
+    for (key, value) in obj.items():
+        keys.append(key)
+        values.append(value)
+
+    # Call FFI to save
+    let result = @rt_torch_save(
+        keys.as_ptr(),
+        values.as_ptr(),
+        keys.len() as i32,
+        path.as_ptr(),
+        path.len() as i32
+    )
+
+    if result != 0:
+        panic("Failed to save checkpoint to {path}")
+
+
+fn load(path: str, device: Device = Device::CPU) -> {str: any}:
+    """Load model state or checkpoint from file.
+
+    Loads a previously saved dictionary from disk.
+
+    Args:
+        path: File path to load from
+        device: Device to load tensors to (default: CPU)
+
+    Returns:
+        Dictionary with loaded data
+
+    Example:
+        ```simple
+        # Load model weights
+        let state = torch.load("model_weights.pth")
+        model.load_state_dict(state)
+
+        # Load training checkpoint
+        let checkpoint = torch.load("checkpoint.pth")
+        model.load_state_dict(checkpoint["model_state"])
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        let start_epoch = checkpoint["epoch"]
+        ```
+
+    Note:
+        Loaded tensors will be on the specified device.
+    """
+    # Call FFI to load
+    let handle = @rt_torch_load(
+        path.as_ptr(),
+        path.len() as i32,
+        device_code(device)
+    )
+
+    if handle == 0:
+        panic("Failed to load checkpoint from {path}")
+
+    # Convert loaded data to Simple dict
+    # (Implementation depends on FFI design - simplified here)
+    let result = {}
+    # TODO: [stdlib][P1] Proper deserialization from handle
+    return result
+
+
+# ============================================================================
+# External FFI Functions
+# ============================================================================
+
+extern fn rt_torch_save(keys: *str, values: *any, count: i32, path: *u8, path_len: i32) -> i32
+extern fn rt_torch_load(path: *u8, path_len: i32, device: i32) -> u64

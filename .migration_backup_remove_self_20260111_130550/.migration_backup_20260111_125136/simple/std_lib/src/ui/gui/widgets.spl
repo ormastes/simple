@@ -1,0 +1,808 @@
+# GUI Widgets - Graphical UI Components
+#
+# Pre-built widgets styled for graphical display.
+# These widgets build on the shared Element types with
+# GUI-specific styling and behavior.
+
+use core.*
+use ui.element.*
+use ui.attrs.*
+use ui.gui.theme.*
+
+# Card component - elevated surface with content
+pub struct Card:
+    id: NodeId
+    title: Option[String]
+    content: Array[Element]
+    elevation: u8  # 0-5, higher = more shadow
+    padding: u16
+
+impl Card:
+    pub fn new(id: NodeId) -> Card:
+        return Card {
+            id: id,
+            title: None,
+            content: [],
+            elevation: 1,
+            padding: 16
+        }
+
+    pub fn with_title(self, title: &str) -> Card:
+        self.title = Some(title.to_string())
+        return self
+
+    pub fn with_elevation(self, level: u8) -> Card:
+        self.elevation = level.min(5)
+        return self
+
+    pub fn with_padding(self, padding: u16) -> Card:
+        self.padding = padding
+        return self
+
+    pub fn add_content(self, elem: Element):
+        self.content.push(elem)
+
+    pub fn to_element(self, alloc: fn() -> NodeId, theme: &Theme) -> Element:
+        let mut card = Element::new(self.id, ElementKind::Box)
+            .with_class("card")
+            .with_class(&"elevation-{self.elevation}")
+            .with_style("background-color", &color_to_style(&theme.palette.surface))
+            .with_style("border-radius", &"{theme.border_radius.md}px")
+            .with_style("padding", &"{self.padding}px")
+
+        # Add title if present
+        if let Some(title) = &self.title:
+            let title_elem = Element::new(alloc(), ElementKind::Heading(2))
+                .with_text(title)
+                .with_class("card-title")
+                .with_style("color", &color_to_style(&theme.palette.text_primary))
+                .with_style("margin-bottom", &"{theme.spacing.sm}px")
+            card = card.with_child(title_elem)
+
+        # Add content
+        for elem in &self.content:
+            card = card.with_child(elem.clone())
+
+        return card
+
+# Chip component - compact element for tags/selections
+pub struct Chip:
+    id: NodeId
+    label: String
+    icon: Option[String]
+    deletable: bool
+    selected: bool
+    variant: ChipVariant
+
+pub enum ChipVariant:
+    Filled
+    Outlined
+
+impl ChipVariant:
+    pub fn to_string(self) -> String:
+        """Convert chip variant to string.
+
+        Returns:
+            Variant name
+        """
+        match self:
+            case ChipVariant::Filled: "filled"
+            case ChipVariant::Outlined: "outlined"
+
+    pub fn description(self) -> String:
+        """Get variant description.
+
+        Returns:
+            Human-readable description
+        """
+        match self:
+            case ChipVariant::Filled:
+                "Filled background style"
+            case ChipVariant::Outlined:
+                "Outlined border style"
+
+    pub fn is_filled(self) -> bool:
+        """Check if filled variant."""
+        match self:
+            case ChipVariant::Filled: true
+            case _: false
+
+    pub fn is_outlined(self) -> bool:
+        """Check if outlined variant."""
+        match self:
+            case ChipVariant::Outlined: true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get summary of chip variant.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            ChipVariant::Filled.summary()
+            # → "ChipVariant: filled (Filled background style)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        return "ChipVariant: {name} ({desc})"
+
+impl Chip:
+    pub fn new(id: NodeId, label: &str) -> Chip:
+        return Chip {
+            id: id,
+            label: label.to_string(),
+            icon: None,
+            deletable: false,
+            selected: false,
+            variant: ChipVariant::Filled
+        }
+
+    pub fn with_icon(self, icon: &str) -> Chip:
+        self.icon = Some(icon.to_string())
+        return self
+
+    pub fn deletable(self) -> Chip:
+        self.deletable = true
+        return self
+
+    pub fn selected(self) -> Chip:
+        self.selected = true
+        return self
+
+    pub fn outlined(self) -> Chip:
+        self.variant = ChipVariant::Outlined
+        return self
+
+    pub fn to_element(self, alloc: fn() -> NodeId, theme: &Theme) -> Element:
+        let bg_color = match self.variant:
+            case ChipVariant::Filled:
+                if self.selected { &theme.palette.primary } else { &theme.palette.hover }
+            case ChipVariant::Outlined:
+                &theme.palette.surface
+
+        let text_color = match self.variant:
+            case ChipVariant::Filled:
+                if self.selected { &theme.palette.surface } else { &theme.palette.text_primary }
+            case ChipVariant::Outlined:
+                if self.selected { &theme.palette.primary } else { &theme.palette.text_primary }
+
+        let mut chip = Element::new(self.id, ElementKind::Span)
+            .with_class("chip")
+            .with_style("display", "inline-flex")
+            .with_style("align-items", "center")
+            .with_style("padding", "4px 12px")
+            .with_style("border-radius", &"{theme.border_radius.full}px")
+            .with_style("background-color", &color_to_style(bg_color))
+            .with_style("color", &color_to_style(text_color))
+
+        if self.variant == ChipVariant::Outlined:
+            chip = chip.with_style("border", &"1px solid {color_to_style(&theme.palette.border)}")
+
+        # Add icon if present
+        if let Some(icon) = &self.icon:
+            let icon_elem = Element::new(alloc(), ElementKind::Span)
+                .with_text(icon)
+                .with_class("chip-icon")
+                .with_style("margin-right", "4px")
+            chip = chip.with_child(icon_elem)
+
+        # Add label
+        let label_elem = Element::new(alloc(), ElementKind::Span)
+            .with_text(&self.label)
+            .with_class("chip-label")
+        chip = chip.with_child(label_elem)
+
+        # Add delete button if deletable
+        if self.deletable:
+            let delete_elem = Element::new(alloc(), ElementKind::Span)
+                .with_text("×")
+                .with_class("chip-delete")
+                .with_style("margin-left", "4px")
+                .with_style("cursor", "pointer")
+            chip = chip.with_child(delete_elem)
+
+        return chip
+
+# Avatar component - user/entity image
+pub struct Avatar:
+    id: NodeId
+    src: Option[String]  # Image URL
+    alt: String
+    initials: Option[String]
+    size: AvatarSize
+
+pub enum AvatarSize:
+    Small   # 32px
+    Medium  # 40px
+    Large   # 56px
+
+impl AvatarSize:
+    pub fn to_string(self) -> String:
+        """Convert avatar size to string.
+
+        Returns:
+            Size name
+        """
+        match self:
+            case AvatarSize::Small: "small"
+            case AvatarSize::Medium: "medium"
+            case AvatarSize::Large: "large"
+
+    pub fn description(self) -> String:
+        """Get size description.
+
+        Returns:
+            Human-readable description
+        """
+        match self:
+            case AvatarSize::Small: "Small avatar (32px)"
+            case AvatarSize::Medium: "Medium avatar (40px)"
+            case AvatarSize::Large: "Large avatar (56px)"
+
+    pub fn to_pixels(self) -> u16:
+        """Get size in pixels.
+
+        Returns:
+            Size in pixels
+        """
+        match self:
+            case AvatarSize::Small: 32
+            case AvatarSize::Medium: 40
+            case AvatarSize::Large: 56
+
+    pub fn is_small(self) -> bool:
+        """Check if small size."""
+        match self:
+            case AvatarSize::Small: true
+            case _: false
+
+    pub fn is_medium(self) -> bool:
+        """Check if medium size."""
+        match self:
+            case AvatarSize::Medium: true
+            case _: false
+
+    pub fn is_large(self) -> bool:
+        """Check if large size."""
+        match self:
+            case AvatarSize::Large: true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get summary of avatar size.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            AvatarSize::Medium.summary()
+            # → "AvatarSize: medium (40px)"
+        """
+        let name = self.to_string()
+        let pixels = self.to_pixels()
+        return "AvatarSize: {name} ({pixels}px)"
+
+impl Avatar:
+    pub fn new(id: NodeId, alt: &str) -> Avatar:
+        return Avatar {
+            id: id,
+            src: None,
+            alt: alt.to_string(),
+            initials: None,
+            size: AvatarSize::Medium
+        }
+
+    pub fn with_src(self, src: &str) -> Avatar:
+        self.src = Some(src.to_string())
+        return self
+
+    pub fn with_initials(self, initials: &str) -> Avatar:
+        self.initials = Some(initials.to_string())
+        return self
+
+    pub fn small(self) -> Avatar:
+        self.size = AvatarSize::Small
+        return self
+
+    pub fn large(self) -> Avatar:
+        self.size = AvatarSize::Large
+        return self
+
+    pub fn to_element(self, alloc: fn() -> NodeId, theme: &Theme) -> Element:
+        let size_px = match self.size:
+            case AvatarSize::Small: 32
+            case AvatarSize::Medium: 40
+            case AvatarSize::Large: 56
+
+        let mut avatar = Element::new(self.id, ElementKind::Div)
+            .with_class("avatar")
+            .with_style("width", &"{size_px}px")
+            .with_style("height", &"{size_px}px")
+            .with_style("border-radius", "50%")
+            .with_style("overflow", "hidden")
+            .with_style("display", "flex")
+            .with_style("align-items", "center")
+            .with_style("justify-content", "center")
+            .with_style("background-color", &color_to_style(&theme.palette.primary_light))
+
+        if let Some(src) = &self.src:
+            # Image avatar
+            avatar = avatar.with_attr("style", &"background-image: url({src}); background-size: cover;")
+        else if let Some(initials) = &self.initials:
+            # Initials avatar
+            let text_elem = Element::new(alloc(), ElementKind::Span)
+                .with_text(initials)
+                .with_style("color", &color_to_style(&theme.palette.primary_dark))
+                .with_style("font-weight", "500")
+            avatar = avatar.with_child(text_elem)
+
+        return avatar
+
+# Badge component - small count/status indicator
+pub struct Badge:
+    id: NodeId
+    content: String
+    variant: BadgeVariant
+    max: Option[u32]
+
+pub enum BadgeVariant:
+    Default
+    Primary
+    Secondary
+    Error
+    Success
+
+impl BadgeVariant:
+    pub fn to_string(self) -> String:
+        """Convert badge variant to string.
+
+        Returns:
+            Variant name
+        """
+        match self:
+            case BadgeVariant::Default: "default"
+            case BadgeVariant::Primary: "primary"
+            case BadgeVariant::Secondary: "secondary"
+            case BadgeVariant::Error: "error"
+            case BadgeVariant::Success: "success"
+
+    pub fn description(self) -> String:
+        """Get variant description.
+
+        Returns:
+            Human-readable description
+        """
+        match self:
+            case BadgeVariant::Default: "Default badge style"
+            case BadgeVariant::Primary: "Primary color badge"
+            case BadgeVariant::Secondary: "Secondary color badge"
+            case BadgeVariant::Error: "Error/danger badge"
+            case BadgeVariant::Success: "Success badge"
+
+    pub fn is_semantic(self) -> bool:
+        """Check if this is a semantic variant.
+
+        Returns:
+            True for Error or Success
+        """
+        match self:
+            case BadgeVariant::Error: true
+            case BadgeVariant::Success: true
+            case _: false
+
+    pub fn is_default(self) -> bool:
+        """Check if default variant."""
+        match self:
+            case BadgeVariant::Default: true
+            case _: false
+
+    pub fn is_primary(self) -> bool:
+        """Check if primary variant."""
+        match self:
+            case BadgeVariant::Primary: true
+            case _: false
+
+    pub fn is_error(self) -> bool:
+        """Check if error variant."""
+        match self:
+            case BadgeVariant::Error: true
+            case _: false
+
+    pub fn is_success(self) -> bool:
+        """Check if success variant."""
+        match self:
+            case BadgeVariant::Success: true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get comprehensive badge variant summary.
+
+        Returns:
+            Summary with variant name and characteristics
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let mut props = []
+        if self.is_semantic():
+            props.push("semantic")
+        if self.is_primary():
+            props.push("primary")
+        if self.is_default():
+            props.push("default")
+        if props.len() > 0:
+            let props_str = ", ".join(props)
+            return "BadgeVariant: {name} ({desc}, {props_str})"
+        else:
+            return "BadgeVariant: {name} ({desc})"
+
+impl Badge:
+    pub fn new(id: NodeId, content: &str) -> Badge:
+        return Badge {
+            id: id,
+            content: content.to_string(),
+            variant: BadgeVariant::Default,
+            max: None
+        }
+
+    pub fn count(id: NodeId, count: u32) -> Badge:
+        return Badge {
+            id: id,
+            content: count.to_string(),
+            variant: BadgeVariant::Default,
+            max: None
+        }
+
+    pub fn with_max(self, max: u32) -> Badge:
+        self.max = Some(max)
+        if let Ok(count) = self.content.parse_int():
+            if (count as u32) > max:
+                self.content = "{max}+"
+        return self
+
+    pub fn primary(self) -> Badge:
+        self.variant = BadgeVariant::Primary
+        return self
+
+    pub fn error(self) -> Badge:
+        self.variant = BadgeVariant::Error
+        return self
+
+    pub fn success(self) -> Badge:
+        self.variant = BadgeVariant::Success
+        return self
+
+    pub fn to_element(self, alloc: fn() -> NodeId, theme: &Theme) -> Element:
+        let bg_color = match self.variant:
+            case BadgeVariant::Default: &theme.palette.secondary
+            case BadgeVariant::Primary: &theme.palette.primary
+            case BadgeVariant::Secondary: &theme.palette.secondary
+            case BadgeVariant::Error: &theme.palette.error
+            case BadgeVariant::Success: &theme.palette.success
+
+        return Element::new(self.id, ElementKind::Span)
+            .with_class("badge")
+            .with_text(&self.content)
+            .with_style("display", "inline-flex")
+            .with_style("align-items", "center")
+            .with_style("justify-content", "center")
+            .with_style("min-width", "20px")
+            .with_style("height", "20px")
+            .with_style("padding", "0 6px")
+            .with_style("border-radius", "10px")
+            .with_style("background-color", &color_to_style(bg_color))
+            .with_style("color", &color_to_style(&theme.palette.surface))
+            .with_style("font-size", "12px")
+            .with_style("font-weight", "500")
+
+# Tooltip component - hover information
+pub struct Tooltip:
+    id: NodeId
+    content: String
+    position: TooltipPosition
+
+pub enum TooltipPosition:
+    Top
+    Bottom
+    Left
+    Right
+
+impl TooltipPosition:
+    pub fn to_string(self) -> String:
+        """Convert tooltip position to string.
+
+        Returns:
+            Position name
+        """
+        match self:
+            case TooltipPosition::Top: "top"
+            case TooltipPosition::Bottom: "bottom"
+            case TooltipPosition::Left: "left"
+            case TooltipPosition::Right: "right"
+
+    pub fn description(self) -> String:
+        """Get position description.
+
+        Returns:
+            Human-readable description
+        """
+        match self:
+            case TooltipPosition::Top: "Display above element"
+            case TooltipPosition::Bottom: "Display below element"
+            case TooltipPosition::Left: "Display to left of element"
+            case TooltipPosition::Right: "Display to right of element"
+
+    pub fn is_vertical(self) -> bool:
+        """Check if vertical position.
+
+        Returns:
+            True for Top or Bottom
+        """
+        match self:
+            case TooltipPosition::Top: true
+            case TooltipPosition::Bottom: true
+            case _: false
+
+    pub fn is_horizontal(self) -> bool:
+        """Check if horizontal position.
+
+        Returns:
+            True for Left or Right
+        """
+        match self:
+            case TooltipPosition::Left: true
+            case TooltipPosition::Right: true
+            case _: false
+
+    pub fn is_top(self) -> bool:
+        """Check if top position."""
+        match self:
+            case TooltipPosition::Top: true
+            case _: false
+
+    pub fn is_bottom(self) -> bool:
+        """Check if bottom position."""
+        match self:
+            case TooltipPosition::Bottom: true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get summary of tooltip position.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            TooltipPosition::Top.summary()
+            # → "TooltipPosition: top (Display above element, vertical)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let orientation = if self.is_vertical(): "vertical" else: "horizontal"
+        return "TooltipPosition: {name} ({desc}, {orientation})"
+
+impl Tooltip:
+    pub fn new(id: NodeId, content: &str) -> Tooltip:
+        return Tooltip {
+            id: id,
+            content: content.to_string(),
+            position: TooltipPosition::Top
+        }
+
+    pub fn bottom(self) -> Tooltip:
+        self.position = TooltipPosition::Bottom
+        return self
+
+    pub fn left(self) -> Tooltip:
+        self.position = TooltipPosition::Left
+        return self
+
+    pub fn right(self) -> Tooltip:
+        self.position = TooltipPosition::Right
+        return self
+
+    pub fn to_element(self, alloc: fn() -> NodeId, theme: &Theme) -> Element:
+        return Element::new(self.id, ElementKind::Span)
+            .with_class("tooltip")
+            .with_attr("data-tooltip", &self.content)
+            .with_attr("data-position", &self.position_str())
+            .with_style("position", "relative")
+
+    fn position_str(self) -> &str:
+        match self.position:
+            case TooltipPosition::Top: return "top"
+            case TooltipPosition::Bottom: return "bottom"
+            case TooltipPosition::Left: return "left"
+            case TooltipPosition::Right: return "right"
+
+# Divider component - visual separator
+pub struct Divider:
+    id: NodeId
+    orientation: DividerOrientation
+    variant: DividerVariant
+
+pub enum DividerOrientation:
+    Horizontal
+    Vertical
+
+impl DividerOrientation:
+    pub fn to_string(self) -> String:
+        """Convert divider orientation to string.
+
+        Returns:
+            Orientation name
+        """
+        match self:
+            case DividerOrientation::Horizontal: "horizontal"
+            case DividerOrientation::Vertical: "vertical"
+
+    pub fn description(self) -> String:
+        """Get orientation description.
+
+        Returns:
+            Human-readable description
+        """
+        match self:
+            case DividerOrientation::Horizontal:
+                "Horizontal divider (full width)"
+            case DividerOrientation::Vertical:
+                "Vertical divider (full height)"
+
+    pub fn is_horizontal(self) -> bool:
+        """Check if horizontal orientation."""
+        match self:
+            case DividerOrientation::Horizontal: true
+            case _: false
+
+    pub fn is_vertical(self) -> bool:
+        """Check if vertical orientation."""
+        match self:
+            case DividerOrientation::Vertical: true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get summary of divider orientation.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            DividerOrientation::Horizontal.summary()
+            # → "DividerOrientation: horizontal (Horizontal divider (full width))"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        return "DividerOrientation: {name} ({desc})"
+
+pub enum DividerVariant:
+    Full
+    Inset
+    Middle
+
+impl DividerVariant:
+    pub fn to_string(self) -> String:
+        """Convert divider variant to string.
+
+        Returns:
+            Variant name
+        """
+        match self:
+            case DividerVariant::Full: "full"
+            case DividerVariant::Inset: "inset"
+            case DividerVariant::Middle: "middle"
+
+    pub fn description(self) -> String:
+        """Get variant description.
+
+        Returns:
+            Human-readable description
+        """
+        match self:
+            case DividerVariant::Full:
+                "Full width/height divider"
+            case DividerVariant::Inset:
+                "Inset divider with left margin"
+            case DividerVariant::Middle:
+                "Middle divider with both margins"
+
+    pub fn has_margins(self) -> bool:
+        """Check if variant has margins.
+
+        Returns:
+            True for Inset or Middle
+        """
+        match self:
+            case DividerVariant::Full: false
+            case _: true
+
+    pub fn is_full(self) -> bool:
+        """Check if full variant."""
+        match self:
+            case DividerVariant::Full: true
+            case _: false
+
+    pub fn is_inset(self) -> bool:
+        """Check if inset variant."""
+        match self:
+            case DividerVariant::Inset: true
+            case _: false
+
+    pub fn is_middle(self) -> bool:
+        """Check if middle variant."""
+        match self:
+            case DividerVariant::Middle: true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get summary of divider variant.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            DividerVariant::Inset.summary()
+            # → "DividerVariant: inset (Inset divider with left margin, has margins)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let margins = if self.has_margins(): "has margins" else: "no margins"
+        return "DividerVariant: {name} ({desc}, {margins})"
+
+impl Divider:
+    pub fn horizontal(id: NodeId) -> Divider:
+        return Divider {
+            id: id,
+            orientation: DividerOrientation::Horizontal,
+            variant: DividerVariant::Full
+        }
+
+    pub fn vertical(id: NodeId) -> Divider:
+        return Divider {
+            id: id,
+            orientation: DividerOrientation::Vertical,
+            variant: DividerVariant::Full
+        }
+
+    pub fn inset(self) -> Divider:
+        self.variant = DividerVariant::Inset
+        return self
+
+    pub fn middle(self) -> Divider:
+        self.variant = DividerVariant::Middle
+        return self
+
+    pub fn to_element(self, theme: &Theme) -> Element:
+        let mut divider = Element::new(self.id, ElementKind::Div)
+            .with_class("divider")
+            .with_style("background-color", &color_to_style(&theme.palette.border))
+
+        match self.orientation:
+            case DividerOrientation::Horizontal:
+                divider = divider
+                    .with_style("height", "1px")
+                    .with_style("width", "100%")
+
+                match self.variant:
+                    case DividerVariant::Inset:
+                        divider = divider.with_style("margin-left", "72px")
+                    case DividerVariant::Middle:
+                        divider = divider
+                            .with_style("margin-left", "16px")
+                            .with_style("margin-right", "16px")
+                    case DividerVariant::Full: pass
+
+            case DividerOrientation::Vertical:
+                divider = divider
+                    .with_style("width", "1px")
+                    .with_style("height", "100%")
+                    .with_style("align-self", "stretch")
+
+        return divider
+
+# Helper to convert Color to CSS style string
+fn color_to_style(color: &Color) -> String:
+    let rgba = color.to_rgba()
+    let r = (rgba >> 16) & 0xFF
+    let g = (rgba >> 8) & 0xFF
+    let b = rgba & 0xFF
+    return "rgb({r}, {g}, {b})"

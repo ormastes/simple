@@ -1,0 +1,315 @@
+# Rust/Cargo Compiler Adapter
+# Integrates cargo build with tooling framework
+
+use tooling.core.project.{Language, LanguageConfig}
+use tooling.compiler.interface.{
+    LanguageCompiler,
+    CompilationMode,
+    CompilationResult,
+    Artifact,
+    ArtifactType,
+    CompilationError,
+    ErrorSeverity
+}
+
+# Rust compiler adapter (uses cargo)
+pub class RustCompiler:
+    pub cargo_path: String
+    pub target_dir: String
+
+    pub fn new(): RustCompiler =
+        """Create Rust compiler adapter.
+
+        Returns:
+            Compiler with default settings
+
+        Example:
+            let compiler = RustCompiler.new()
+            let result = compiler.compile(config, CompilationMode::Release, false)
+        """
+        RustCompiler {
+            cargo_path: "cargo",  # Use 'cargo' from PATH
+            target_dir: "target"
+        }
+
+    pub fn set_cargo_path(self, path: String):
+        """Set path to cargo binary.
+
+        Args:
+            path: Path to cargo
+        """
+        self.cargo_path = path
+
+    pub fn set_target_dir(self, dir: String):
+        """Set custom target directory.
+
+        Args:
+            dir: Target directory path
+        """
+        self.target_dir = dir
+
+    pub fn get_build_command(self, mode: CompilationMode): String =
+        """Get cargo build command for display.
+
+        Args:
+            mode: Compilation mode
+
+        Returns:
+            Command string
+
+        Example:
+            compiler.get_build_command(CompilationMode::Release)
+            # → "cargo build --release"
+        """
+        let mode_flag = match mode:
+            CompilationMode::Debug: ""
+            CompilationMode::Release: " --release"
+            CompilationMode::Profile: " --profile release"
+
+        "{self.cargo_path} build{mode_flag}"
+
+impl LanguageCompiler for RustCompiler:
+    fn compile(
+        self,
+        config: LanguageConfig,
+        mode: CompilationMode,
+        incremental: bool
+    ): CompilationResult =
+        """Compile Rust code using cargo.
+
+        Args:
+            config: Language configuration
+            mode: Compilation mode (Debug/Release/Profile)
+            incremental: Enable incremental compilation (always on in cargo)
+
+        Returns:
+            Compilation result
+        """
+        @extern("runtime", "rt_time_now_unix_micros")
+        fn _rt_time_now_unix_micros() -> i64
+
+        let result = CompilationResult.new()
+        let start_time = _rt_time_now_unix_micros() / 1000  # Convert microseconds to milliseconds
+
+        # Build cargo command
+        let mut args: List[String] = []
+        args.append("build")
+
+        # Add mode flag
+        match mode:
+            CompilationMode::Debug:
+                pass  # Default
+            CompilationMode::Release:
+                args.append("--release")
+            CompilationMode::Profile:
+                args.append("--profile")
+                args.append("release")  # Use release profile for profiling
+
+        # Add manifest path
+        args.append("--manifest-path")
+        args.append("{config.root}/Cargo.toml")
+
+        # Add JSON output for easier parsing
+        args.append("--message-format")
+        args.append("json-render-diagnostics")
+
+        # Execute cargo
+        let output = self.execute_cargo(args)
+
+        # Parse cargo JSON output
+        if output.exit_code == 0:
+            # Success - parse artifacts from JSON
+            let artifacts = self.parse_artifacts(output.stdout, mode, config.root)
+            for artifact in artifacts:
+                result.add_artifact(artifact)
+        else:
+            # Failure - parse errors from JSON
+            let errors = self.parse_errors_json(output.stdout)
+            for error in errors:
+                result.add_error(error)
+
+        let end_time = _rt_time_now_unix_micros() / 1000  # Convert microseconds to milliseconds
+        result.duration_ms = end_time - start_time
+
+        result
+
+    fn get_language(self): Language =
+        """Get language type.
+
+        Returns:
+            Language::Rust
+        """
+        Language::Rust
+
+    fn supports_incremental(self): bool =
+        """Check if incremental compilation is supported.
+
+        Returns:
+            True (cargo always uses incremental compilation)
+        """
+        true
+
+    fn get_executable_extension(self): String =
+        """Get executable file extension.
+
+        Returns:
+            "" on Unix, ".exe" on Windows
+        """
+        # TODO: [stdlib][P3] Detect platform
+        ""
+
+    fn get_library_extension(self): String =
+        """Get library file extension.
+
+        Returns:
+            ".so" on Linux, ".dylib" on macOS, ".dll" on Windows
+        """
+        # TODO: [stdlib][P3] Detect platform
+        ".so"
+
+# Helper class for process execution
+class ProcessOutput:
+    pub exit_code: i32
+    pub stdout: String
+    pub stderr: String
+
+    pub fn new(exit_code: i32, stdout: String, stderr: String): ProcessOutput =
+        ProcessOutput {
+            exit_code: exit_code,
+            stdout: stdout,
+            stderr: stderr
+        }
+
+    pub fn is_success(self): bool =
+        """Check if process succeeded.
+
+        Returns:
+            True if exit code is 0
+        """
+        self.exit_code == 0
+
+    pub fn is_failure(self): bool =
+        """Check if process failed.
+
+        Returns:
+            True if exit code is non-zero
+        """
+        self.exit_code != 0
+
+    pub fn has_stdout(self): bool =
+        """Check if stdout is non-empty.
+
+        Returns:
+            True if stdout has content
+        """
+        not self.stdout.is_empty()
+
+    pub fn has_stderr(self): bool =
+        """Check if stderr is non-empty.
+
+        Returns:
+            True if stderr has content
+        """
+        not self.stderr.is_empty()
+
+    pub fn summary(self): String =
+        """Get process output summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            output.summary()
+            # → "Exit code: 0, stdout: 1234 bytes, stderr: 0 bytes"
+        """
+        "Exit code: {self.exit_code}, stdout: {self.stdout.len()} bytes, stderr: {self.stderr.len()} bytes"
+
+# Helper methods
+impl RustCompiler:
+    fn execute_cargo(self, args: List[String]): ProcessOutput =
+        """Execute cargo command.
+
+        Args:
+            args: Cargo arguments
+
+        Returns:
+            Process output
+        """
+        # TODO: [stdlib][P1] Implement actual process execution
+        # For now, return mock success
+        ProcessOutput.new(0, "{\"success\":true}", "")
+
+    fn parse_artifacts(
+        self,
+        json_output: String,
+        mode: CompilationMode,
+        root: String
+    ): List[Artifact] =
+        """Parse artifacts from cargo JSON output.
+
+        Args:
+            json_output: Cargo JSON output
+            mode: Compilation mode
+            root: Project root
+
+        Returns:
+            List of build artifacts
+
+        Cargo JSON format:
+        {"reason":"compiler-artifact","target":{"name":"app","kind":["bin"]},"filenames":["/path/to/app"],"...}
+        """
+        let artifacts: List[Artifact] = []
+
+        # TODO: [stdlib][P2] Parse JSON when available
+        # For now, infer artifact path
+        let mode_dir = match mode:
+            CompilationMode::Debug: "debug"
+            CompilationMode::Release: "release"
+            CompilationMode::Profile: "release"
+
+        let artifact_path = "{root}/target/{mode_dir}/app"
+        let artifact = Artifact.new(
+            artifact_path,
+            ArtifactType::Executable,
+            Language::Rust
+        )
+        artifacts.append(artifact)
+
+        artifacts
+
+    fn parse_errors_json(self, json_output: String): List[CompilationError] =
+        """Parse errors from cargo JSON output.
+
+        Args:
+            json_output: Cargo JSON diagnostic output
+
+        Returns:
+            List of compilation errors
+
+        Cargo JSON diagnostic format:
+        {"reason":"compiler-message","message":{"level":"error","message":"...","spans":[{"file_name":"...","line_start":10,"column_start":5}]}}
+        """
+        let errors: List[CompilationError] = []
+
+        # TODO: [stdlib][P2] Parse JSON when available
+        # For now, return empty list
+        errors
+
+    fn parse_error_message(self, json_msg: String): CompilationError =
+        """Parse single error message from JSON.
+
+        Args:
+            json_msg: JSON error message object
+
+        Returns:
+            Compilation error
+        """
+        # TODO: [stdlib][P1] Implement JSON parsing
+        CompilationError.new(
+            file: "",
+            line: 0,
+            column: 0,
+            message: "Parse error",
+            severity: ErrorSeverity::Error,
+            language: Language::Rust
+        )

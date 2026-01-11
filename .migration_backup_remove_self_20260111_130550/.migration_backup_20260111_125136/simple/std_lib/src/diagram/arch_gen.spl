@@ -1,0 +1,490 @@
+# Architecture Diagram Generator
+# Generates Mermaid architecture diagrams showing only architectural entities
+#
+# Architectural entities:
+# - Entities tagged with @architectural annotation
+# - Packages (modules) are architectural by default
+# - Can be filtered to specific architectural layers
+#
+# Output format: Mermaid flowchart TD syntax
+
+import core.{Option, List, Set, Dict, String}
+import recorder.{CallEvent, CallEventRecorder, CallType}
+import filter.{DiagramFilter}
+import config.{DiagramConfig}
+
+# Architectural layer classification
+enum ArchLayer:
+    Presentation  # UI, API controllers
+    Application   # Use cases, services
+    Domain        # Business logic, entities
+    Infrastructure  # Database, external services
+    Unknown       # Not classified
+
+impl ArchLayer:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_presentation(self) -> bool:
+        """Check if this is Presentation layer.
+
+        Returns:
+            true for Presentation
+
+        Example:
+            ArchLayer::Presentation.is_presentation()  # → true
+        """
+        match self:
+            case Presentation: true
+            case _: false
+
+    fn is_application(self) -> bool:
+        """Check if this is Application layer.
+
+        Returns:
+            true for Application
+
+        Example:
+            ArchLayer::Application.is_application()  # → true
+        """
+        match self:
+            case Application: true
+            case _: false
+
+    fn is_domain(self) -> bool:
+        """Check if this is Domain layer.
+
+        Returns:
+            true for Domain
+
+        Example:
+            ArchLayer::Domain.is_domain()  # → true
+        """
+        match self:
+            case Domain: true
+            case _: false
+
+    fn is_infrastructure(self) -> bool:
+        """Check if this is Infrastructure layer.
+
+        Returns:
+            true for Infrastructure
+
+        Example:
+            ArchLayer::Infrastructure.is_infrastructure()  # → true
+        """
+        match self:
+            case Infrastructure: true
+            case _: false
+
+    fn is_unknown(self) -> bool:
+        """Check if this is Unknown layer.
+
+        Returns:
+            true for Unknown
+
+        Example:
+            ArchLayer::Unknown.is_unknown()  # → true
+        """
+        match self:
+            case Unknown: true
+            case _: false
+
+    fn is_business_logic(self) -> bool:
+        """Check if layer contains business logic.
+
+        Returns:
+            true for Domain and Application
+
+        Example:
+            ArchLayer::Domain.is_business_logic()  # → true
+            ArchLayer::Infrastructure.is_business_logic()  # → false
+        """
+        match self:
+            case Domain: true
+            case Application: true
+            case _: false
+
+    fn is_external_facing(self) -> bool:
+        """Check if layer interfaces with external systems.
+
+        Returns:
+            true for Presentation and Infrastructure
+
+        Example:
+            ArchLayer::Presentation.is_external_facing()  # → true
+            ArchLayer::Domain.is_external_facing()  # → false
+        """
+        match self:
+            case Presentation: true
+            case Infrastructure: true
+            case _: false
+
+    fn is_core(self) -> bool:
+        """Check if this is core/business layer.
+
+        Returns:
+            true for Domain
+
+        Example:
+            ArchLayer::Domain.is_core()  # → true
+        """
+        match self:
+            case Domain: true
+            case _: false
+
+    fn layer_number(self) -> i32:
+        """Get layer number in clean architecture ordering.
+
+        Returns:
+            Layer number (1=Domain, 2=Application, 3=Presentation/Infrastructure, -1=Unknown)
+
+        Example:
+            ArchLayer::Domain.layer_number()  # → 1
+            ArchLayer::Presentation.layer_number()  # → 3
+        """
+        match self:
+            case Domain: 1
+            case Application: 2
+            case Presentation: 3
+            case Infrastructure: 3
+            case Unknown: -1
+
+    fn to_string(self) -> String:
+        """Convert layer to string.
+
+        Returns:
+            Layer name
+
+        Example:
+            ArchLayer::Application.to_string()  # → "application"
+        """
+        match self:
+            case Presentation: "presentation"
+            case Application: "application"
+            case Domain: "domain"
+            case Infrastructure: "infrastructure"
+            case Unknown: "unknown"
+
+    fn description(self) -> String:
+        """Get layer description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            ArchLayer::Domain.description()
+            # → "Business logic, entities"
+        """
+        match self:
+            case Presentation: "UI, API controllers"
+            case Application: "Use cases, services"
+            case Domain: "Business logic, entities"
+            case Infrastructure: "Database, external services"
+            case Unknown: "Not classified"
+
+    fn summary(self) -> String:
+        """Get summary of architectural layer.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            ArchLayer::Domain.summary()
+            # → "ArchLayer: domain (core business logic, layer 1)"
+        """
+        let name = self.to_string()
+        let layer_num = self.layer_number()
+        let category = if self.is_core():
+                           "core business logic"
+                       else if self.is_business_logic():
+                           "business logic"
+                       else if self.is_external_facing():
+                           "external interface"
+                       else:
+                           "not classified"
+        return if layer_num >= 0:
+            "ArchLayer: {name} ({category}, layer {layer_num})"
+        else:
+            "ArchLayer: {name} ({category})"
+
+# Architectural entity info
+struct ArchEntity:
+    name: String
+    entity_type: String      # package, class, module
+    layer: ArchLayer
+    dependencies: Set[String]
+    is_package: Bool
+
+    fn new(name: String) -> ArchEntity:
+        return ArchEntity {
+            name: name,
+            entity_type: "class",
+            layer: ArchLayer.Unknown,
+            dependencies: Set.new(),
+            is_package: false,
+        }
+
+    me as_package(self) -> ArchEntity:
+        self.is_package = true
+        self.entity_type = "package"
+        return self
+
+    me with_layer(self, layer: ArchLayer) -> ArchEntity:
+        self.layer = layer
+        return self
+
+    me add_dependency(self, dep: String) -> Void:
+        self.dependencies.insert(dep)
+
+# Architecture diagram generator
+class ArchDiagramGenerator:
+    events: List[CallEvent]
+    filter: DiagramFilter
+    config: DiagramConfig
+    entities: Dict[String, ArchEntity]
+    architectural_set: Set[String]
+    output: String
+
+    fn new(config: DiagramConfig) -> ArchDiagramGenerator:
+        return ArchDiagramGenerator {
+            events: [],
+            filter: config.filter,
+            config: config,
+            entities: Dict.new(),
+            architectural_set: Set.new(),
+            output: "",
+        }
+
+    # Generate diagram from recorder
+    me generate(self, recorder: CallEventRecorder) -> String:
+        self.events = recorder.get_events()
+        self.architectural_set = recorder.get_architectural_entities()
+
+        return self.generate_from_events(self.events)
+
+    # Generate diagram from event list
+    me generate_from_events(self, events: List[CallEvent]) -> String:
+        # Filter events if filter is configured
+        let filtered = if self.filter.is_empty():
+            events
+        else:
+            self.filter.filter_events(events)
+
+        # Extract architectural entities
+        self.extract_entities(filtered)
+        self.extract_dependencies(filtered)
+
+        # Generate output
+        self.output = ""
+        self.emit_header()
+        self.emit_subgraphs()
+        self.emit_dependencies()
+        self.emit_footer()
+
+        return self.output
+
+    # Check if an entity is architectural
+    fn is_architectural(self, name: String) -> Bool:
+        # Explicitly marked as architectural
+        if self.architectural_set.contains(name):
+            return true
+
+        # Packages are architectural by default (names ending with module path)
+        if name.contains(".") or name.contains("::"):
+            return true
+
+        # Class names that look like packages (all lowercase with underscores)
+        if name == name.to_lowercase() and name.contains("_"):
+            return true
+
+        return false
+
+    # Get package name from entity name
+    fn get_package(self, name: String) -> Option[String]:
+        # Extract package from qualified name
+        if name.contains("."):
+            let parts = name.split(".")
+            if parts.len() > 1:
+                return Some(parts[0])
+        if name.contains("::"):
+            let parts = name.split("::")
+            if parts.len() > 1:
+                return Some(parts[0])
+        return None
+
+    # Extract architectural entities from events
+    me extract_entities(self, events: List[CallEvent]) -> Void:
+        self.entities = Dict.new()
+
+        for event in events:
+            if event.is_return:
+                continue
+
+            # Check caller
+            let caller = event.get_caller_participant()
+            if self.is_architectural(caller):
+                if not self.entities.contains(caller):
+                    let entity = ArchEntity.new(caller)
+                    self.entities.insert(caller, entity)
+
+            # Check callee
+            let callee = event.get_callee_participant()
+            if self.is_architectural(callee):
+                if not self.entities.contains(callee):
+                    let entity = ArchEntity.new(callee)
+                    self.entities.insert(callee, entity)
+
+            # Also add packages
+            match self.get_package(caller):
+                case Some(pkg):
+                    if not self.entities.contains(pkg):
+                        let entity = ArchEntity.new(pkg).as_package()
+                        self.entities.insert(pkg, entity)
+                case None:
+                    pass
+
+            match self.get_package(callee):
+                case Some(pkg):
+                    if not self.entities.contains(pkg):
+                        let entity = ArchEntity.new(pkg).as_package()
+                        self.entities.insert(pkg, entity)
+                case None:
+                    pass
+
+    # Extract dependencies between architectural entities
+    me extract_dependencies(self, events: List[CallEvent]) -> Void:
+        for event in events:
+            if event.is_return:
+                continue
+
+            let caller = event.get_caller_participant()
+            let callee = event.get_callee_participant()
+
+            # Only track dependencies between architectural entities
+            if not self.is_architectural(caller) or not self.is_architectural(callee):
+                continue
+
+            if caller == callee:
+                continue
+
+            match self.entities.get(caller):
+                case Some(entity):
+                    let mut updated = entity
+                    updated.add_dependency(callee)
+                    self.entities.insert(caller, updated)
+                case None:
+                    pass
+
+            # Also track package-level dependencies
+            match (self.get_package(caller), self.get_package(callee)):
+                case (Some(from_pkg), Some(to_pkg)):
+                    if from_pkg != to_pkg:
+                        match self.entities.get(from_pkg):
+                            case Some(entity):
+                                let mut updated = entity
+                                updated.add_dependency(to_pkg)
+                                self.entities.insert(from_pkg, updated)
+                            case None:
+                                pass
+                case _:
+                    pass
+
+    # Emit diagram header
+    me emit_header(self) -> Void:
+        self.output = self.output + "```mermaid\n"
+        self.output = self.output + "flowchart TD\n"
+
+    # Emit subgraphs for packages
+    me emit_subgraphs(self) -> Void:
+        # Group entities by package
+        let packages: Dict[String, List[String]] = Dict.new()
+
+        for (name, entity) in self.entities:
+            if entity.is_package:
+                continue
+
+            match self.get_package(name):
+                case Some(pkg):
+                    match packages.get(pkg):
+                        case Some(members):
+                            let mut updated = members
+                            updated.push(name)
+                            packages.insert(pkg, updated)
+                        case None:
+                            packages.insert(pkg, [name])
+                case None:
+                    # Standalone entity
+                    match packages.get("_standalone"):
+                        case Some(members):
+                            let mut updated = members
+                            updated.push(name)
+                            packages.insert("_standalone", updated)
+                        case None:
+                            packages.insert("_standalone", [name])
+
+        # Emit subgraphs
+        for (pkg_name, members) in packages:
+            if pkg_name == "_standalone":
+                # Emit standalone entities without subgraph
+                for member in members:
+                    let safe_id = sanitize_id(member)
+                    self.output = self.output + "    ${safe_id}[${member}]\n"
+            else:
+                self.output = self.output + "    subgraph ${pkg_name}[\"${pkg_name}\"]\n"
+                for member in members:
+                    let safe_id = sanitize_id(member)
+                    let short_name = member.split(".").last().unwrap_or(member)
+                    self.output = self.output + "        ${safe_id}[${short_name}]\n"
+                self.output = self.output + "    end\n"
+
+        self.output = self.output + "\n"
+
+    # Emit dependencies
+    me emit_dependencies(self) -> Void:
+        let seen: Set[String] = Set.new()
+
+        for (name, entity) in self.entities:
+            for dep in entity.dependencies:
+                let key = "${name}->${dep}"
+                if seen.contains(key):
+                    continue
+                seen.insert(key)
+
+                let from_id = sanitize_id(name)
+                let to_id = sanitize_id(dep)
+                self.output = self.output + "    ${from_id} --> ${to_id}\n"
+
+    # Emit footer
+    me emit_footer(self) -> Void:
+        self.output = self.output + "```\n"
+
+# Sanitize name for Mermaid ID (remove special chars)
+fn sanitize_id(name: String) -> String:
+    let result = ""
+    for c in name.chars():
+        if c.is_alphanumeric() or c == '_':
+            result = result + c
+        else:
+            result = result + "_"
+    return result
+
+# Generate architecture diagram from recorder
+fn generate_arch_diagram(recorder: CallEventRecorder, config: DiagramConfig) -> String:
+    let gen = ArchDiagramGenerator.new(config)
+    return gen.generate(recorder)
+
+# Generate architecture diagram from events
+fn generate_arch_from_events(events: List[CallEvent], config: DiagramConfig) -> String:
+    let gen = ArchDiagramGenerator.new(config)
+    return gen.generate_from_events(events)
+
+# Simple generation with defaults
+fn to_mermaid_arch(recorder: CallEventRecorder) -> String:
+    let config = DiagramConfig.new().with_architecture()
+    return generate_arch_diagram(recorder, config)
+
+# Exports
+export ArchEntity, ArchLayer, ArchDiagramGenerator
+export generate_arch_diagram, generate_arch_from_events, to_mermaid_arch, sanitize_id

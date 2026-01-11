@@ -1,0 +1,109 @@
+/// Doctest Runner
+/// 
+/// Executes doctest examples in isolated environment and matches output
+
+use parser::{DoctestExample, Expected}
+use matcher::{MatchResult, match_output, match_exception}
+
+/// Execution result for a single example
+struct ExampleResult:
+    example: DoctestExample
+    result: MatchResult
+    execution_time_ms: Int
+    
+    fn passed() -> Bool:
+        match self.result:
+            case MatchResult.Pass:
+                return True
+            case _:
+                return False
+
+/// Runner for executing doctests
+struct DoctestRunner:
+    /// Timeout for each example (ms)
+    default_timeout_ms: Int
+    
+    /// Create new runner with default timeout
+    fn new(timeout_ms: Int = 5000) -> DoctestRunner:
+        return DoctestRunner(default_timeout_ms: timeout_ms)
+    
+    /// Run a single doctest example
+    fn run_example(example: DoctestExample) -> ExampleResult:
+        start_time = current_time_ms()
+        
+        # Create isolated interpreter context
+        ctx = create_interpreter_context()
+        
+        # Execute setup (suppress output)
+        for setup_line in example.setup:
+            try:
+                execute_line(ctx, setup_line, capture_output: False)
+            catch e:
+                # Setup failure is a test failure
+                return ExampleResult(
+                    example: example,
+                    result: MatchResult.Fail("Setup failed: ${e}"),
+                    execution_time_ms: current_time_ms() - start_time
+                )
+        
+        # Execute main code
+        actual_output = ""
+        exception_raised = None
+        
+        for code_line in example.code:
+            try:
+                output = execute_line(ctx, code_line, capture_output: True)
+                actual_output += output
+            catch e:
+                # Extract exception type and message
+                exception_raised = (e.type_name(), e.message())
+                break
+        
+        # Execute teardown (suppress output, ignore errors)
+        for teardown_line in example.teardown:
+            try:
+                execute_line(ctx, teardown_line, capture_output: False)
+            catch _:
+                # Teardown errors are logged but don't fail test
+                pass
+        
+        # Match result
+        result = if exception_raised is None:
+            match_output(actual_output.trim(), example.expected)
+        else:
+            (exc_type, exc_msg) = exception_raised
+            match_exception(exc_type, exc_msg, example.expected)
+        
+        execution_time = current_time_ms() - start_time
+        
+        return ExampleResult(
+            example: example,
+            result: result,
+            execution_time_ms: execution_time
+        )
+    
+    /// Run multiple examples
+    fn run_examples(examples: List[DoctestExample]) -> List[ExampleResult]:
+        results = []
+        for ex in examples:
+            results.push(self.run_example(ex))
+        return results
+
+# Interpreter context (placeholder - will integrate with actual interpreter)
+struct InterpreterContext:
+    env: Dict[String, Value]
+
+fn create_interpreter_context() -> InterpreterContext:
+    return InterpreterContext(env: Dict.new())
+
+fn execute_line(ctx: InterpreterContext, code: String, capture_output: Bool) -> String:
+    # TODO: Integrate with actual Simple interpreter
+    # For now, return mock output
+    return ""
+
+fn current_time_ms() -> Int:
+    # TODO: Use std.time
+    return 0
+
+# Value placeholder
+type Value = Any

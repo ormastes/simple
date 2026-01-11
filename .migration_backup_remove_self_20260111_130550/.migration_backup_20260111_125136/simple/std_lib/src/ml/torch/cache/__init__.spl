@@ -1,0 +1,664 @@
+# Smart Caching System
+#
+# Memory-aware mmap caching with priority-based allocation.
+# Automatically falls back to normal I/O when memory limit exceeded.
+#
+# ## Features
+# - File scanning with size analysis
+# - Priority-based memory allocation
+# - Automatic fallback to normal I/O
+# - Change detection and cache invalidation
+# - Background tokenizer loading
+# - Mmap-based zero-copy access
+#
+# ## Example
+# ```simple
+# import ml.torch.cache.{CacheManager, CacheMode}
+#
+# # Create cache with 8GB limit
+# let cache = CacheManager(memory_limit=8_000_000_000)
+#
+# # Scan files with priorities
+# let dataset_files = ["train.tar", "val.tar", "vocab.txt"]
+# let priorities = {"vocab.txt": 2, "train.tar": 1}
+# cache.scan_files(dataset_files, priorities=priorities)
+#
+# # Get cached data (mmap or normal I/O)
+# let data = cache.get("vocab.txt")
+#
+# # Check cache stats
+# print(cache.stats())
+# ```
+
+export CacheManager, CacheMode, FileCacheEntry, CachedData, TokenizerCache
+
+
+# ============================================================================
+# Enums and Data Classes
+# ============================================================================
+
+# Cache mode for file loading:
+# - Mmap: Memory-mapped (zero-copy)
+# - Normal: Standard buffered I/O
+# - None: No caching (direct load)
+# - Disabled: Explicitly disabled for this file
+enum CacheMode:
+    Mmap
+    Normal
+    None
+    Disabled
+
+impl CacheMode:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_mmap(self) -> bool:
+        """Check if this is Mmap mode.
+
+        Returns:
+            true for Mmap
+
+        Example:
+            CacheMode::Mmap.is_mmap()  # → true
+        """
+        match self:
+            case Mmap: true
+            case _: false
+
+    fn is_normal(self) -> bool:
+        """Check if this is Normal mode.
+
+        Returns:
+            true for Normal
+
+        Example:
+            CacheMode::Normal.is_normal()  # → true
+        """
+        match self:
+            case Normal: true
+            case _: false
+
+    fn is_none(self) -> bool:
+        """Check if this is None mode (no caching).
+
+        Returns:
+            true for None
+
+        Example:
+            CacheMode::None.is_none()  # → true
+        """
+        match self:
+            case None: true
+            case _: false
+
+    fn is_disabled(self) -> bool:
+        """Check if this is Disabled mode.
+
+        Returns:
+            true for Disabled
+
+        Example:
+            CacheMode::Disabled.is_disabled()  # → true
+        """
+        match self:
+            case Disabled: true
+            case _: false
+
+    fn is_enabled(self) -> bool:
+        """Check if caching is enabled (not None or Disabled).
+
+        Returns:
+            true for Mmap and Normal
+
+        Example:
+            CacheMode::Mmap.is_enabled()  # → true
+            CacheMode::None.is_enabled()  # → false
+        """
+        match self:
+            case Mmap: true
+            case Normal: true
+            case _: false
+
+    fn is_zero_copy(self) -> bool:
+        """Check if mode uses zero-copy access.
+
+        Returns:
+            true for Mmap
+
+        Example:
+            CacheMode::Mmap.is_zero_copy()  # → true
+            CacheMode::Normal.is_zero_copy()  # → false
+        """
+        match self:
+            case Mmap: true
+            case _: false
+
+    fn uses_memory(self) -> bool:
+        """Check if mode allocates memory.
+
+        Returns:
+            true for Mmap and Normal
+
+        Example:
+            CacheMode::Normal.uses_memory()  # → true
+        """
+        match self:
+            case Mmap: true
+            case Normal: true
+            case _: false
+
+    fn to_string(self) -> String:
+        """Convert mode to string.
+
+        Returns:
+            Mode name
+
+        Example:
+            CacheMode::Mmap.to_string()  # → "mmap"
+        """
+        match self:
+            case Mmap: "mmap"
+            case Normal: "normal"
+            case None: "none"
+            case Disabled: "disabled"
+
+    fn description(self) -> String:
+        """Get mode description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            CacheMode::Mmap.description()
+            # → "Memory-mapped (zero-copy)"
+        """
+        match self:
+            case Mmap: "Memory-mapped (zero-copy)"
+            case Normal: "Standard buffered I/O"
+            case None: "No caching (direct load)"
+            case Disabled: "Explicitly disabled"
+
+    fn summary(self) -> String:
+        """Get summary of cache mode.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            CacheMode::Mmap.summary()
+            # → "CacheMode: mmap (enabled, zero-copy, uses memory)"
+        """
+        let name = self.to_string()
+        let status = if self.is_enabled(): "enabled" else: "disabled"
+        let zc = if self.is_zero_copy(): "zero-copy" else: "copy"
+        let mem = if self.uses_memory(): "uses memory" else: "no memory"
+        return "CacheMode: {name} ({status}, {zc}, {mem})"
+
+
+class FileCacheEntry:
+    """Cache entry for a single file.
+
+    Attributes:
+        path: File path
+        size: File size in bytes
+        priority: Cache priority (0=low, 1=normal, 2=high)
+        cache_mode: How to cache this file
+        last_accessed: Last access timestamp
+        mtime: File modification time
+    """
+    path: str
+    size: i64
+    priority: i32
+    cache_mode: CacheMode
+    last_accessed: f64
+    mtime: f64
+
+    fn __init__(
+        self,
+        path: str,
+        size: i64,
+        priority: i32,
+        cache_mode: CacheMode,
+        last_accessed: f64,
+        mtime: f64
+    ):
+        self.path = path
+        self.size = size
+        self.priority = priority
+        self.cache_mode = cache_mode
+        self.last_accessed = last_accessed
+        self.mtime = mtime
+
+
+class CachedData:
+    """Cached file data.
+
+    Attributes:
+        data: File data as bytes
+        cached: Whether data came from cache
+    """
+    data: bytes
+    cached: bool
+
+    fn __init__(self, data: bytes, cached: bool):
+        self.data = data
+        self.cached = cached
+
+
+# ============================================================================
+# Cache Manager
+# ============================================================================
+
+class CacheManager:
+    """Memory-aware cache manager with mmap support.
+
+    Automatically allocates mmap regions for files based on priority
+    and available memory. Falls back to normal I/O when memory limit
+    is exceeded.
+
+    Example:
+        ```simple
+        let cache = CacheManager(memory_limit=8_000_000_000)
+
+        cache.scan_files(
+            ["data/train.tar", "data/val.tar", "vocab.txt"],
+            priorities={"vocab.txt": 2}  # High priority
+        )
+
+        let stats = cache.stats()
+        print("Cached {stats.cached_files} files ({stats.cached_size} bytes)")
+
+        let data = cache.get("vocab.txt")  # Mmap access
+        ```
+
+    Attributes:
+        entries: List of file cache entries
+        total_size: Total cached size in bytes
+        memory_limit: Maximum memory for mmap regions
+        mmap_regions: Active mmap regions by path
+    """
+    entries: [FileCacheEntry]
+    total_size: i64
+    memory_limit: i64
+    mmap_regions: any  # path -> handle
+
+    fn __init__(self, memory_limit: i64):
+        """Initialize cache manager.
+
+        Args:
+            memory_limit: Maximum memory for mmap (null = auto-detect 80% of RAM)
+        """
+        self.memory_limit = memory_limit
+        self.entries = []
+        self.total_size = 0
+        self.mmap_regions = {}
+
+    fn scan_files(self, paths: any, priorities: any) -> any:
+        """Scan files and determine caching strategy.
+
+        Sorts files by priority (high to low), then size (small to large).
+        Allocates mmap for files until memory limit is reached.
+
+        Args:
+            paths: List of file paths to scan
+            priorities: Priority map (0=low, 1=normal, 2=high)
+
+        Returns:
+            Statistics dict with total_files, total_size, cached_size, etc.
+
+        Example:
+            ```simple
+            stats = cache.scan_files(
+                ["data1.bin", "data2.bin", "vocab.txt"],
+                priorities={"vocab.txt": 2}
+            )
+            print("Cached {stats['cached_files']}/{stats['total_files']} files")
+            ```
+        """
+        # Collect file info
+        let files = []
+        for path in paths:
+            if not fs.exists(path):
+                continue
+
+            let stat = fs.stat(path)
+            files.append({
+                "path": path,
+                "size": stat.size,
+                "priority": priorities.get(path, 1),  # Default priority = 1
+                "mtime": stat.mtime
+            })
+
+        # Sort by priority (high to low), then size (small to large)
+        files.sort(key=lambda f: (-f["priority"], f["size"]))
+
+        # Determine cache strategy
+        let cumulative_size: i64 = 0
+        for file in files:
+            let cache_mode: CacheMode
+
+            # Check if adding this file exceeds memory
+            if cumulative_size + file["size"] > self.memory_limit:
+                cache_mode = CacheMode.Normal
+            else:
+                cache_mode = CacheMode.Mmap
+                cumulative_size += file["size"]
+
+            let entry = FileCacheEntry(
+                path=file["path"],
+                size=file["size"],
+                priority=file["priority"],
+                cache_mode=cache_mode,
+                last_accessed=time.now(),
+                mtime=file["mtime"]
+            )
+            self.entries.append(entry)
+
+        self.total_size = cumulative_size
+
+        return {
+            "total_files": files.len(),
+            "total_size": sum(f["size"] for f in files),
+            "cached_size": cumulative_size,
+            "cached_files": sum(1 for e in self.entries if e.cache_mode == CacheMode.Mmap),
+            "memory_limit": self.memory_limit
+        }
+
+    fn get(self, path: str) -> CachedData:
+        """Get file data (from cache or load).
+
+        Args:
+            path: File path
+
+        Returns:
+            CachedData with file contents
+
+        Example:
+            ```simple
+            let data = cache.get("vocab.txt")
+            if data.cached:
+                print("Loaded from mmap cache")
+            ```
+        """
+        let entry = self._find_entry(path)
+
+        if entry is null:
+            # Not tracked, load directly
+            return self._load_normal(path)
+
+        # Check if file changed
+        let current_mtime = fs.stat(path).mtime
+        if current_mtime > entry.mtime:
+            # File changed, invalidate cache
+            self._invalidate(path)
+            entry.mtime = current_mtime
+
+        # Update access time
+        entry.last_accessed = time.now()
+
+        # Return based on cache mode
+        match entry.cache_mode:
+            CacheMode.Mmap:
+                return self._load_mmap(entry)
+            CacheMode.Normal:
+                return self._load_normal(path)
+            CacheMode.None:
+                return self._load_direct(path)
+            CacheMode.Disabled:
+                return self._load_direct(path)
+
+    fn set_cache_mode(self, path: str, mode: CacheMode):
+        """Override cache mode for specific file.
+
+        Args:
+            path: File path
+            mode: New cache mode
+        """
+        let entry = self._find_entry(path)
+        if entry is not null:
+            if entry.cache_mode == CacheMode.Mmap and mode != CacheMode.Mmap:
+                self._invalidate(path)
+            entry.cache_mode = mode
+
+    fn cleanup(self):
+        """Cleanup all mmap regions."""
+        for path, handle in self.mmap_regions.items():
+            native_mmap_unmap(handle)
+        self.mmap_regions.clear()
+
+    fn stats(self) -> {str: any}:
+        """Get cache statistics.
+
+        Returns:
+            Statistics dictionary
+        """
+        return {
+            "total_entries": self.entries.len(),
+            "mmap_count": sum(1 for e in self.entries if e.cache_mode == CacheMode.Mmap),
+            "total_size": self.total_size,
+            "memory_limit": self.memory_limit,
+            "memory_usage_pct": (self.total_size * 100 / self.memory_limit).to_i32(),
+            "active_mmaps": self.mmap_regions.len()
+        }
+
+    # ========================================================================
+    # Helper Methods
+    # ========================================================================
+
+    fn _find_entry(self, path: str) -> FileCacheEntry | null:
+        """Find cache entry by path."""
+        for entry in self.entries:
+            if entry.path == path:
+                return entry
+        return null
+
+    fn _load_mmap(self, entry: FileCacheEntry) -> CachedData:
+        """Load via mmap (zero-copy).
+
+        Args:
+            entry: Cache entry
+
+        Returns:
+            Cached data
+        """
+        # Check if already mapped
+        if entry.path in self.mmap_regions:
+            let handle = self.mmap_regions[entry.path]
+            let data = native_mmap_read(handle, offset=0, size=entry.size)
+            return CachedData(data, cached=true)
+
+        # Create mmap region
+        let handle = native_mmap_create(entry.path)
+        let data = native_mmap_read(handle, offset=0, size=entry.size)
+
+        self.mmap_regions[entry.path] = handle
+
+        return CachedData(data, cached=true)
+
+    fn _load_normal(self, path: str) -> CachedData:
+        """Load via standard I/O (buffered).
+
+        Args:
+            path: File path
+
+        Returns:
+            Uncached data
+        """
+        let data = fs.read_bytes(path)
+        return CachedData(data, cached=false)
+
+    fn _load_direct(self, path: str) -> CachedData:
+        """Direct load (no caching).
+
+        Args:
+            path: File path
+
+        Returns:
+            Uncached data
+        """
+        let data = fs.read_bytes(path)
+        return CachedData(data, cached=false)
+
+    fn _invalidate(self, path: str):
+        """Invalidate cache for file.
+
+        Args:
+            path: File path
+        """
+        if path in self.mmap_regions:
+            let handle = self.mmap_regions[path]
+            native_mmap_unmap(handle)
+            del self.mmap_regions[path]
+
+
+# ============================================================================
+# Tokenizer Cache
+# ============================================================================
+
+class TokenizerCache:
+    """Background tokenizer loader using async file I/O.
+
+    Loads tokenizer files (vocab, merges) asynchronously in background
+    while training setup continues.
+
+    Example:
+        ```simple
+        # Start loading in background
+        let tokenizer = TokenizerCache("vocab.txt", "merges.txt")
+
+        # Continue with other setup
+        let model = create_model()
+        let optimizer = create_optimizer()
+
+        # Wait for tokenizer if not ready
+        tokenizer.wait_ready()
+        let vocab = tokenizer.get_vocab()
+        ```
+
+    Attributes:
+        vocab_handle: Async file handle for vocab
+        merges_handle: Async file handle for merges (optional)
+        cache_dir: Cache directory
+        ready: Whether tokenizer is loaded
+    """
+    vocab_handle: i64
+    merges_handle: i64 | null
+    cache_dir: str
+    ready: bool
+
+    fn __init__(self, vocab_path: str, merges_path: str):
+        """Initialize tokenizer cache with background loading.
+
+        Args:
+            vocab_path: Path to vocabulary file
+            merges_path: Path to merges file (optional)
+        """
+        self.cache_dir = fs.cache_dir("tokenizers")
+        self.ready = false
+
+        # Start background loading
+        self.vocab_handle = self._start_async_load(vocab_path, prefault=true)
+
+        if merges_path is not null:
+            self.merges_handle = self._start_async_load(merges_path, prefault=true)
+        else:
+            self.merges_handle = null
+
+    fn wait_ready(self):
+        """Block until tokenizer is loaded."""
+        native_async_file_wait(self.vocab_handle)
+
+        if self.merges_handle is not null:
+            native_async_file_wait(self.merges_handle)
+
+        self.ready = true
+
+    fn is_ready(self) -> bool:
+        """Non-blocking check if tokenizer is ready.
+
+        Returns:
+            True if loaded
+        """
+        let vocab_ready = native_async_file_is_ready(self.vocab_handle)
+
+        if self.merges_handle is not null:
+            let merges_ready = native_async_file_is_ready(self.merges_handle)
+            return vocab_ready and merges_ready
+
+        return vocab_ready
+
+    fn get_vocab(self) -> bytes:
+        """Get vocab data (blocks if not ready).
+
+        Returns:
+            Vocab file contents
+        """
+        if not self.ready:
+            self.wait_ready()
+
+        return self._get_file_data(self.vocab_handle)
+
+    fn get_merges(self) -> bytes | null:
+        """Get merges data (blocks if not ready).
+
+        Returns:
+            Merges file contents or null if no merges file
+        """
+        if self.merges_handle is null:
+            return null
+
+        if not self.ready:
+            self.wait_ready()
+
+        return self._get_file_data(self.merges_handle)
+
+    # ========================================================================
+    # Helper Methods
+    # ========================================================================
+
+    fn _start_async_load(self, path: str, prefault: bool) -> i64:
+        """Start async file loading with mmap.
+
+        Args:
+            path: File path
+            prefault: Whether to prefault pages
+
+        Returns:
+            Async file handle
+        """
+        # Create async file handle
+        let handle = native_async_file_create(path, mode=0, prefault=prefault)
+
+        # Start loading in background
+        native_async_file_start_loading(handle)
+
+        return handle
+
+    fn _get_file_data(self, handle: i64) -> bytes:
+        """Get file data from async handle.
+
+        Args:
+            handle: Async file handle
+
+        Returns:
+            File contents
+        """
+        # Wait completes and returns the data
+        return native_async_file_wait(handle)
+
+
+# ============================================================================
+# FFI Declarations
+# ============================================================================
+
+# Mmap operations
+@native_mmap_create(path: str) -> i64
+@native_mmap_read(handle: i64, offset: i64, size: i64) -> bytes
+@native_mmap_unmap(handle: i64) -> i32
+
+# Async file operations
+@native_async_file_create(path: str, mode: i32, prefault: bool) -> i64
+@native_async_file_start_loading(handle: i64) -> i32
+@native_async_file_is_ready(handle: i64) -> i32
+@native_async_file_wait(handle: i64) -> bytes

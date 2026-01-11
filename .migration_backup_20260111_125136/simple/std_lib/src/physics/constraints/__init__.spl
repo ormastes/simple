@@ -1,0 +1,495 @@
+# Physics Constraints - Joint Constraints
+#
+# Constraint solving for joints, springs, and other connections.
+#
+# ## Classes
+# - `Joint`: Base joint constraint
+# - `DistanceJoint`: Fixed distance constraint
+# - `SpringJoint`: Spring constraint
+# - `Solver`: Constraint solver
+#
+# ## Example
+# ```simple
+# import physics.constraints as constraints
+#
+# # Create spring between two bodies
+# let spring = constraints.SpringJoint(
+#     body1,
+#     body2,
+#     stiffness=100.0,
+#     damping=10.0,
+#     rest_length=5.0
+# )
+#
+# # Solve constraints
+# spring.solve(dt=0.016)
+# ```
+
+export Joint, DistanceJoint, SpringJoint, Solver, DistanceConstraint, HingeConstraint, SliderConstraint, FixedConstraint, ConstraintSolver
+
+import ..core as core
+import ..dynamics as dynamics
+
+
+# ============================================================================
+# Joint Base Class
+# ============================================================================
+
+class Joint:
+    """Base class for joint constraints.
+
+    Joints constrain the relative motion of two rigid bodies.
+    """
+    body1: dynamics.RigidBody
+    body2: dynamics.RigidBody
+
+    fn __init__(body1: dynamics.RigidBody, body2: dynamics.RigidBody):
+        """Initialize joint.
+
+        Args:
+            body1: First rigid body
+            body2: Second rigid body
+        """
+        self.body1 = body1
+        self.body2 = body2
+
+    fn solve(dt: f64):
+        """Solve constraint (override in subclasses).
+
+        Args:
+            dt: Time step
+        """
+        pass
+
+
+# ============================================================================
+# Distance Joint
+# ============================================================================
+
+class DistanceJoint(Joint):
+    """Fixed distance constraint between two bodies.
+
+    Maintains constant distance between body centers.
+    """
+    distance: f64
+
+    fn __init__(body1: dynamics.RigidBody,
+        body2: dynamics.RigidBody,
+        distance: f64
+    ):
+        """Initialize distance joint.
+
+        Args:
+            body1: First rigid body
+            body2: Second rigid body
+            distance: Fixed distance to maintain
+        """
+        super().__init__(body1, body2)
+        self.distance = distance
+
+    fn solve(dt: f64):
+        """Solve distance constraint.
+
+        Args:
+            dt: Time step
+        """
+        # Vector from body1 to body2
+        let delta = self.body2.position.sub(self.body1.position)
+        let current_distance = delta.magnitude()
+
+        if current_distance == 0:
+            return
+
+        # Error: how far from target distance
+        let error = current_distance - self.distance
+
+        # Correction direction
+        let correction_dir = delta.scale(1.0 / current_distance)
+
+        # Correction amount (50% to each body for stability)
+        let correction = correction_dir.scale(error * 0.5)
+
+        # Apply correction to positions
+        if self.body1.mass > 0:
+            self.body1.position = self.body1.position.add(correction)
+
+        if self.body2.mass > 0:
+            self.body2.position = self.body2.position.sub(correction)
+
+
+# ============================================================================
+# Spring Joint
+# ============================================================================
+
+class SpringJoint(Joint):
+    """Spring constraint with stiffness and damping.
+
+    Applies Hooke's law: F = -k * (x - rest_length) - damping * v
+    """
+    stiffness: f64
+    damping: f64
+    rest_length: f64
+
+    fn __init__(body1: dynamics.RigidBody,
+        body2: dynamics.RigidBody,
+        stiffness: f64,
+        damping: f64,
+        rest_length: f64
+    ):
+        """Initialize spring joint.
+
+        Args:
+            body1: First rigid body
+            body2: Second rigid body
+            stiffness: Spring constant (k)
+            damping: Damping coefficient
+            rest_length: Rest length of spring
+        """
+        super().__init__(body1, body2)
+        self.stiffness = stiffness
+        self.damping = damping
+        self.rest_length = rest_length
+
+    fn solve(dt: f64):
+        """Apply spring forces.
+
+        Args:
+            dt: Time step
+        """
+        # Vector from body1 to body2
+        let delta = self.body2.position.sub(self.body1.position)
+        let current_length = delta.magnitude()
+
+        if current_length == 0:
+            return
+
+        # Direction from body1 to body2
+        let direction = delta.scale(1.0 / current_length)
+
+        # Spring force: F = -k * (x - rest_length)
+        let spring_force = (current_length - self.rest_length) * self.stiffness
+
+        # Damping force: F = -damping * relative_velocity
+        let relative_velocity = self.body2.velocity.sub(self.body1.velocity)
+        let velocity_along_spring = relative_velocity.dot(direction)
+        let damping_force = velocity_along_spring * self.damping
+
+        # Total force along spring direction
+        let total_force_mag = spring_force + damping_force
+        let force = direction.scale(total_force_mag)
+
+        # Apply equal and opposite forces
+        self.body1.add_force(force)
+        self.body2.add_force(force.scale(-1.0))
+
+
+# ============================================================================
+# Constraint Solver
+# ============================================================================
+
+class Solver:
+    """Constraint solver using iterative methods."""
+    iterations: i32
+
+    fn __init__(iterations: i32 = 10):
+        """Initialize solver.
+
+        Args:
+            iterations: Number of solver iterations (default: 10)
+        """
+        self.iterations = iterations
+
+    fn solve(joints: [Joint], dt: f64):
+        """Solve all constraints iteratively.
+
+        Args:
+            joints: List of joint constraints
+            dt: Time step
+        """
+        for _ in range(self.iterations):
+            for joint in joints:
+                joint.solve(dt)
+
+
+# ============================================================================
+# Test Interface - Additional Constraint Types
+# ============================================================================
+
+class DistanceConstraint:
+    """Distance constraint for tests (extended version of DistanceJoint).
+
+    Supports min/max distance, stiffness, damping, and break force.
+    """
+    body1: dynamics.RigidBody
+    body2: dynamics.RigidBody
+    distance: f64
+    max_distance: f64
+    min_distance: f64
+    stiffness: f64
+    damping: f64
+    break_force: f64
+
+    fn __init__(body1: dynamics.RigidBody,
+        body2: dynamics.RigidBody,
+        distance: f64 = 0.0,
+        max_distance: f64 = 0.0,
+        min_distance: f64 = 0.0,
+        stiffness: f64 = 1.0,
+        damping: f64 = 0.0,
+        break_force: f64 = 0.0
+    ):
+        """Initialize distance constraint.
+
+        Args:
+            body1: First rigid body
+            body2: Second rigid body
+            distance: Fixed distance (0 = use max/min only)
+            max_distance: Maximum distance (0 = no limit)
+            min_distance: Minimum distance (0 = no limit)
+            stiffness: Constraint stiffness (1.0 = rigid, <1.0 = soft)
+            damping: Damping coefficient
+            break_force: Force threshold for breaking (0 = unbreakable)
+        """
+        self.body1 = body1
+        self.body2 = body2
+        self.distance = distance
+        self.max_distance = max_distance
+        self.min_distance = min_distance
+        self.stiffness = stiffness
+        self.damping = damping
+        self.break_force = break_force
+
+    fn solve(dt: f64) -> bool:
+        """Solve constraint.
+
+        Args:
+            dt: Time step
+
+        Returns:
+            True if constraint broke, False otherwise
+        """
+        # Calculate current distance
+        let delta = self.body2.position.sub(self.body1.position)
+        let current_distance = delta.magnitude()
+
+        if current_distance == 0.0:
+            return false
+
+        # Check if we should enforce constraint
+        let mut target_distance = self.distance
+
+        if self.distance == 0.0:
+            # Use min/max distance (rope-like)
+            if self.max_distance > 0.0 and current_distance > self.max_distance:
+                target_distance = self.max_distance
+            elif self.min_distance > 0.0 and current_distance < self.min_distance:
+                target_distance = self.min_distance
+            else:
+                return false  # Within limits, no correction needed
+
+        # Error amount
+        let error = current_distance - target_distance
+        let direction = delta.scale(1.0 / current_distance)
+
+        # Apply stiffness
+        let correction_amount = error * self.stiffness
+
+        # Check break force
+        if self.break_force > 0.0:
+            let force_mag = correction_amount / dt
+            if force_mag > self.break_force:
+                return true  # Constraint breaks
+
+        # Apply correction
+        let correction = direction.scale(correction_amount * 0.5)
+
+        if self.body1.mass > 0.0:
+            self.body1.position = self.body1.position.add(correction)
+
+        if self.body2.mass > 0.0:
+            self.body2.position = self.body2.position.sub(correction)
+
+        return false  # Constraint holds
+
+
+class HingeConstraint:
+    """Hinge joint constraint (rotation around axis).
+
+    Allows rotation around a single axis while restricting translation.
+    """
+    body1: dynamics.RigidBody
+    body2: dynamics.RigidBody
+    pivot: core.Vector3
+    axis: core.Vector3
+    min_angle: f64
+    max_angle: f64
+
+    fn __init__(body1: dynamics.RigidBody,
+        body2: dynamics.RigidBody,
+        pivot: core.Vector3,
+        axis: core.Vector3,
+        min_angle: f64 = 0.0,
+        max_angle: f64 = 0.0
+    ):
+        """Initialize hinge constraint.
+
+        Args:
+            body1: First rigid body
+            body2: Second rigid body
+            pivot: Pivot point
+            axis: Rotation axis
+            min_angle: Minimum angle (degrees, 0 = no limit)
+            max_angle: Maximum angle (degrees, 0 = no limit)
+        """
+        self.body1 = body1
+        self.body2 = body2
+        self.pivot = pivot
+        self.axis = axis
+        self.min_angle = min_angle
+        self.max_angle = max_angle
+
+    fn has_limits() -> bool:
+        """Check if constraint has angle limits."""
+        return self.min_angle != 0.0 or self.max_angle != 0.0
+
+    fn solve(dt: f64):
+        """Solve hinge constraint."""
+        # Simplified: just keep bodies near pivot
+        let delta = self.body2.position.sub(self.body1.position)
+        let target_delta = self.pivot
+        let error = delta.sub(target_delta)
+
+        let correction = error.scale(0.5)
+
+        if self.body1.mass > 0.0:
+            self.body1.position = self.body1.position.add(correction)
+
+        if self.body2.mass > 0.0:
+            self.body2.position = self.body2.position.sub(correction)
+
+
+class SliderConstraint:
+    """Slider constraint (translation along axis).
+
+    Allows translation along a single axis while restricting rotation.
+    """
+    body1: dynamics.RigidBody
+    body2: dynamics.RigidBody
+    axis: core.Vector3
+    min_distance: f64
+    max_distance: f64
+
+    fn __init__(body1: dynamics.RigidBody,
+        body2: dynamics.RigidBody,
+        axis: core.Vector3,
+        min_distance: f64 = 0.0,
+        max_distance: f64 = 0.0
+    ):
+        """Initialize slider constraint.
+
+        Args:
+            body1: First rigid body
+            body2: Second rigid body
+            axis: Slide axis
+            min_distance: Minimum distance along axis (0 = no limit)
+            max_distance: Maximum distance along axis (0 = no limit)
+        """
+        self.body1 = body1
+        self.body2 = body2
+        self.axis = axis.normalize()
+        self.min_distance = min_distance
+        self.max_distance = max_distance
+
+    fn has_limits() -> bool:
+        """Check if constraint has distance limits."""
+        return self.min_distance != 0.0 or self.max_distance != 0.0
+
+    fn solve(dt: f64):
+        """Solve slider constraint."""
+        # Project relative position onto axis
+        let delta = self.body2.position.sub(self.body1.position)
+        let along_axis = delta.dot(self.axis)
+        let on_axis = self.axis.scale(along_axis)
+        let off_axis = delta.sub(on_axis)
+
+        # Correct off-axis component
+        let correction = off_axis.scale(0.5)
+
+        if self.body1.mass > 0.0:
+            self.body1.position = self.body1.position.add(correction)
+
+        if self.body2.mass > 0.0:
+            self.body2.position = self.body2.position.sub(correction)
+
+
+class FixedConstraint:
+    """Fixed constraint (locks relative position and rotation).
+
+    Bodies move together as if welded.
+    """
+    body1: dynamics.RigidBody
+    body2: dynamics.RigidBody
+    initial_offset: core.Vector3
+
+    fn __init__(body1: dynamics.RigidBody, body2: dynamics.RigidBody):
+        """Initialize fixed constraint.
+
+        Args:
+            body1: First rigid body
+            body2: Second rigid body
+        """
+        self.body1 = body1
+        self.body2 = body2
+        self.initial_offset = body2.position.sub(body1.position)
+
+    fn solve(dt: f64):
+        """Solve fixed constraint."""
+        # Maintain initial offset
+        let target_pos = self.body1.position.add(self.initial_offset)
+        let error = self.body2.position.sub(target_pos)
+
+        # Correction (full correction to body2 if body1 is static)
+        if self.body1.mass == 0.0:
+            self.body2.position = target_pos
+        else:
+            let correction = error.scale(0.5)
+            if self.body1.mass > 0.0:
+                self.body1.position = self.body1.position.add(correction)
+            if self.body2.mass > 0.0:
+                self.body2.position = self.body2.position.sub(correction)
+
+
+class ConstraintSolver:
+    """Constraint solver for managing multiple constraints."""
+    constraints: [any]
+    iterations: i64
+
+    fn __init__(iterations: i64 = 10):
+        """Initialize constraint solver.
+
+        Args:
+            iterations: Number of solver iterations
+        """
+        self.constraints = []
+        self.iterations = iterations
+
+    fn add_constraint(constraint: any):
+        """Add constraint to solver.
+
+        Args:
+            constraint: Constraint to add
+        """
+        self.constraints.append(constraint)
+
+    fn solve(dt: f64, iterations: i64 = 0):
+        """Solve all constraints.
+
+        Args:
+            dt: Time step
+            iterations: Override iteration count (0 = use default)
+        """
+        let iter_count = iterations if iterations > 0 else self.iterations
+
+        for _ in range(iter_count):
+            for constraint in self.constraints:
+                constraint.solve(dt)

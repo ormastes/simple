@@ -1,0 +1,276 @@
+# Debug Rendering Shaders - Simple line and wireframe rendering
+#
+# Provides basic shaders for debug visualization: lines, wireframes,
+# points with solid colors.
+#
+# Based on: doc/spec/graphics_3d.md (Part 14.1: Debug Draw API)
+
+use core.*
+use graphics.math.*
+
+# =============================================================================
+# Debug Line Vertex Input
+# =============================================================================
+
+pub struct DebugVertexInput:
+    position: Vec3      # Vertex position (world space)
+
+# =============================================================================
+# Debug Uniforms
+# =============================================================================
+
+pub struct DebugUniforms:
+    view_proj_matrix: Mat4    # View-projection matrix
+    color: Vec4               # Line/point color
+
+# =============================================================================
+# Debug Varyings
+# =============================================================================
+
+pub struct DebugVaryings:
+    color: Vec4
+
+# =============================================================================
+# Debug Lines Vertex Shader
+# =============================================================================
+
+#[vertex_shader]
+pub fn debug_lines_vertex_shader(
+    input: DebugVertexInput,
+    uniforms: DebugUniforms
+) -> (Vec4, DebugVaryings):
+    # Transform to clip space
+    let clip_pos = uniforms.view_proj_matrix.transform_point(input.position)
+
+    # Pass color through
+    let varyings = DebugVaryings {
+        color: uniforms.color
+    }
+
+    return (clip_pos, varyings)
+
+# =============================================================================
+# Debug Lines Fragment Shader
+# =============================================================================
+
+#[fragment_shader]
+pub fn debug_lines_fragment_shader(varyings: DebugVaryings) -> Vec4:
+    return varyings.color
+
+# =============================================================================
+# Debug Points Vertex Shader (with size)
+# =============================================================================
+
+pub struct DebugPointUniforms:
+    view_proj_matrix: Mat4
+    color: Vec4
+    point_size: f32          # Point size in pixels
+
+#[vertex_shader]
+pub fn debug_points_vertex_shader(
+    input: DebugVertexInput,
+    uniforms: DebugPointUniforms
+) -> (Vec4, DebugVaryings):
+    let clip_pos = uniforms.view_proj_matrix.transform_point(input.position)
+
+    # Set point size
+    gl_PointSize = uniforms.point_size
+
+    let varyings = DebugVaryings {
+        color: uniforms.color
+    }
+
+    return (clip_pos, varyings)
+
+#[fragment_shader]
+pub fn debug_points_fragment_shader(varyings: DebugVaryings) -> Vec4:
+    # Make points circular (discard outside circle)
+    let coord = gl_PointCoord * 2.0 - Vec2::one()
+    let dist = coord.length()
+
+    if dist > 1.0:
+        discard()
+
+    return varyings.color
+
+# =============================================================================
+# Debug Wireframe Shader (with barycentric coordinates)
+# =============================================================================
+
+pub struct DebugWireframeVaryings:
+    barycentric: Vec3    # Barycentric coordinates
+    color: Vec4
+
+pub struct DebugWireframeUniforms:
+    view_proj_matrix: Mat4
+    model_matrix: Mat4
+    wireframe_color: Vec4
+    fill_color: Vec4
+    line_width: f32
+
+#[vertex_shader]
+pub fn debug_wireframe_vertex_shader(
+    input: DebugVertexInput,
+    barycentric: Vec3,   # Per-vertex barycentric (0,0,1), (0,1,0), (1,0,0)
+    uniforms: DebugWireframeUniforms
+) -> (Vec4, DebugWireframeVaryings):
+    # Transform to world space
+    let world_pos = uniforms.model_matrix.transform_point(input.position)
+
+    # Transform to clip space
+    let clip_pos = uniforms.view_proj_matrix.transform_point(world_pos)
+
+    let varyings = DebugWireframeVaryings {
+        barycentric: barycentric,
+        color: uniforms.wireframe_color
+    }
+
+    return (clip_pos, varyings)
+
+#[fragment_shader]
+pub fn debug_wireframe_fragment_shader(
+    varyings: DebugWireframeVaryings,
+    uniforms: DebugWireframeUniforms
+) -> Vec4:
+    # Calculate distance to nearest edge using barycentric coordinates
+    let edge_dist = min(min(varyings.barycentric.x, varyings.barycentric.y), varyings.barycentric.z)
+
+    # Convert to screen space distance
+    let fwidth_bary = fwidth(edge_dist)
+    let edge_width = uniforms.line_width * fwidth_bary
+
+    # Smooth transition at edge
+    let edge_factor = smoothstep(0.0, edge_width, edge_dist)
+
+    # Blend between wireframe and fill
+    return lerp_vec4(uniforms.wireframe_color, uniforms.fill_color, edge_factor)
+
+# =============================================================================
+# Debug Bounding Box Shader
+# =============================================================================
+
+pub struct DebugBoxUniforms:
+    view_proj_matrix: Mat4
+    box_min: Vec3
+    box_max: Vec3
+    color: Vec4
+
+# Cube vertices (8 corners generated in shader)
+#[vertex_shader]
+pub fn debug_box_vertex_shader(
+    vertex_id: i32,
+    uniforms: DebugBoxUniforms
+) -> (Vec4, DebugVaryings):
+    # Generate cube corner from vertex ID (0-7)
+    let x = if (vertex_id & 1) != 0: uniforms.box_max.x else: uniforms.box_min.x
+    let y = if (vertex_id & 2) != 0: uniforms.box_max.y else: uniforms.box_min.y
+    let z = if (vertex_id & 4) != 0: uniforms.box_max.z else: uniforms.box_min.z
+
+    let position = Vec3::new(x, y, z)
+    let clip_pos = uniforms.view_proj_matrix.transform_point(position)
+
+    let varyings = DebugVaryings {
+        color: uniforms.color
+    }
+
+    return (clip_pos, varyings)
+
+# =============================================================================
+# Debug Normals Shader (Geometry Shader Alternative)
+# =============================================================================
+
+pub struct DebugNormalsInput:
+    position: Vec3
+    normal: Vec3
+
+pub struct DebugNormalsUniforms:
+    view_proj_matrix: Mat4
+    model_matrix: Mat4
+    normal_matrix: Mat3
+    normal_length: f32
+    color: Vec4
+
+# Vertex shader passes through data
+#[vertex_shader]
+pub fn debug_normals_vertex_shader(
+    input: DebugNormalsInput,
+    uniforms: DebugNormalsUniforms
+) -> DebugNormalsInput:
+    return input
+
+# Geometry shader generates normal lines
+#[geometry_shader]
+pub fn debug_normals_geometry_shader(
+    input: DebugNormalsInput,
+    uniforms: DebugNormalsUniforms
+) -> Array[(Vec4, DebugVaryings)]:
+    # Transform position to world space
+    let world_pos = uniforms.model_matrix.transform_point(input.position)
+
+    # Transform normal to world space
+    let world_normal = uniforms.normal_matrix.transform_vector(input.normal).normalize()
+
+    # Generate line from position along normal
+    let start = world_pos
+    let end = world_pos + world_normal * uniforms.normal_length
+
+    # Output two vertices (line)
+    let mut output = Array::new()
+
+    let start_clip = uniforms.view_proj_matrix.transform_point(start)
+    let end_clip = uniforms.view_proj_matrix.transform_point(end)
+
+    let varyings = DebugVaryings {
+        color: uniforms.color
+    }
+
+    output.push((start_clip, varyings))
+    output.push((end_clip, varyings))
+
+    return output
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+fn min(a: f32, b: f32) -> f32:
+    return if a < b: a else: b
+
+fn fwidth(x: f32) -> f32:
+    # Derivative approximation (provided by GPU)
+    return abs(ddx(x)) + abs(ddy(x))
+
+fn ddx(x: f32) -> f32:
+    # Screen-space X derivative (provided by GPU)
+    return 0.0  # Placeholder
+
+fn ddy(x: f32) -> f32:
+    # Screen-space Y derivative (provided by GPU)
+    return 0.0  # Placeholder
+
+fn abs(x: f32) -> f32:
+    return if x < 0.0: -x else: x
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32:
+    let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+fn clamp(value: f32, min_val: f32, max_val: f32) -> f32:
+    return max(min_val, min(max_val, value))
+
+fn max(a: f32, b: f32) -> f32:
+    return if a > b: a else: b
+
+fn lerp_vec4(a: Vec4, b: Vec4, t: f32) -> Vec4:
+    return a * (1.0 - t) + b * t
+
+# =============================================================================
+# Built-in Shader Variables
+# =============================================================================
+
+# Point rendering
+extern var gl_PointSize: f32
+extern var gl_PointCoord: Vec2
+
+# Discard fragment
+extern fn discard()

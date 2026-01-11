@@ -1,0 +1,626 @@
+# Unreal Build Tool (UBT) Integration
+#
+# Provides programmatic access to Unreal's build system
+#
+# Features:
+# - UBT command generation
+# - Build configuration (Development, Shipping, Debug)
+# - Platform targeting (Win64, Linux, Mac, Android, iOS)
+# - Module dependency resolution
+#
+# Based on: https://docs.unrealengine.com/5.4/en-US/unreal-build-tool-in-unreal-engine/
+
+import sys.process
+import sys.path
+import sys.env
+
+mod ubt
+
+# BuildConfiguration
+# Unreal build configurations
+pub enum BuildConfiguration:
+    Debug = 0           # Full debug symbols, no optimization
+    DebugGame = 1       # Debug game code, optimized engine
+    Development = 2     # Default development build
+    Shipping = 3        # Final release build
+    Test = 4            # QA testing build
+
+impl BuildConfiguration:
+    pub fn to_string(self) -> String:
+        if self == BuildConfiguration::Debug:
+            return "Debug"
+        elif self == BuildConfiguration::DebugGame:
+            return "DebugGame"
+        elif self == BuildConfiguration::Development:
+            return "Development"
+        elif self == BuildConfiguration::Shipping:
+            return "Shipping"
+        else:
+            return "Test"
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn description(self) -> String:
+        """Get build configuration description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            BuildConfiguration::Shipping.description()
+            # → "Final release build (fully optimized, no debug)"
+        """
+        if self == BuildConfiguration::Debug:
+            return "Full debug symbols, no optimization"
+        elif self == BuildConfiguration::DebugGame:
+            return "Debug game code, optimized engine"
+        elif self == BuildConfiguration::Development:
+            return "Default development build (moderate optimization)"
+        elif self == BuildConfiguration::Shipping:
+            return "Final release build (fully optimized, no debug)"
+        else:
+            return "QA testing build (optimized with logging)"
+
+    pub fn is_debug(self) -> bool:
+        """Check if configuration is Debug.
+
+        Returns:
+            True if Debug
+        """
+        return self == BuildConfiguration::Debug
+
+    pub fn is_debug_game(self) -> bool:
+        """Check if configuration is DebugGame.
+
+        Returns:
+            True if DebugGame
+        """
+        return self == BuildConfiguration::DebugGame
+
+    pub fn is_development(self) -> bool:
+        """Check if configuration is Development.
+
+        Returns:
+            True if Development
+        """
+        return self == BuildConfiguration::Development
+
+    pub fn is_shipping(self) -> bool:
+        """Check if configuration is Shipping.
+
+        Returns:
+            True if Shipping
+        """
+        return self == BuildConfiguration::Shipping
+
+    pub fn is_test(self) -> bool:
+        """Check if configuration is Test.
+
+        Returns:
+            True if Test
+        """
+        return self == BuildConfiguration::Test
+
+    pub fn has_debug_symbols(self) -> bool:
+        """Check if configuration includes debug symbols.
+
+        Returns:
+            True for Debug and DebugGame
+
+        Example:
+            BuildConfiguration::Debug.has_debug_symbols()  # → true
+            BuildConfiguration::Shipping.has_debug_symbols()  # → false
+        """
+        return self == BuildConfiguration::Debug or self == BuildConfiguration::DebugGame
+
+    pub fn is_optimized(self) -> bool:
+        """Check if configuration uses optimization.
+
+        Returns:
+            True for all except Debug
+
+        Example:
+            BuildConfiguration::Shipping.is_optimized()  # → true
+            BuildConfiguration::Debug.is_optimized()  # → false
+        """
+        return self != BuildConfiguration::Debug
+
+    pub fn is_shippable(self) -> bool:
+        """Check if configuration is suitable for shipping.
+
+        Returns:
+            True for Shipping
+
+        Example:
+            BuildConfiguration::Shipping.is_shippable()  # → true
+        """
+        return self == BuildConfiguration::Shipping
+
+    pub fn is_development_mode(self) -> bool:
+        """Check if configuration is for development/testing.
+
+        Returns:
+            True for Debug, DebugGame, Development, or Test
+
+        Example:
+            BuildConfiguration::Development.is_development_mode()  # → true
+        """
+        return self != BuildConfiguration::Shipping
+
+    pub fn summary(self) -> String:
+        """Get build configuration summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            BuildConfiguration::Shipping.summary()
+            # → "BuildConfiguration: Shipping (Final release build (fully optimized, no debug), optimized, shippable)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let mut props = []
+
+        if self.has_debug_symbols():
+            props.push("debug symbols")
+        if self.is_optimized():
+            props.push("optimized")
+        if self.is_shippable():
+            props.push("shippable")
+        if self.is_development_mode():
+            props.push("development mode")
+
+        if props.len() > 0:
+            let props_str = ", ".join(props)
+            return "BuildConfiguration: {name} ({desc}, {props_str})"
+        else:
+            return "BuildConfiguration: {name} ({desc})"
+
+
+# BuildPlatform
+# Target platforms for Unreal builds
+pub enum BuildPlatform:
+    Win64 = 0
+    Linux = 1
+    Mac = 2
+    Android = 3
+    iOS = 4
+
+impl BuildPlatform:
+    pub fn to_string(self) -> String:
+        if self == BuildPlatform::Win64:
+            return "Win64"
+        elif self == BuildPlatform::Linux:
+            return "Linux"
+        elif self == BuildPlatform::Mac:
+            return "Mac"
+        elif self == BuildPlatform::Android:
+            return "Android"
+        else:
+            return "iOS"
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn description(self) -> String:
+        """Get build platform description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            BuildPlatform::Win64.description()
+            # → "Windows 64-bit (DirectX 11/12, Vulkan)"
+        """
+        if self == BuildPlatform::Win64:
+            return "Windows 64-bit (DirectX 11/12, Vulkan)"
+        elif self == BuildPlatform::Linux:
+            return "Linux (Vulkan, OpenGL)"
+        elif self == BuildPlatform::Mac:
+            return "macOS (Metal)"
+        elif self == BuildPlatform::Android:
+            return "Android mobile (Vulkan, OpenGL ES)"
+        else:
+            return "iOS mobile (Metal)"
+
+    pub fn is_win64(self) -> bool:
+        """Check if platform is Win64.
+
+        Returns:
+            True if Win64
+        """
+        return self == BuildPlatform::Win64
+
+    pub fn is_linux(self) -> bool:
+        """Check if platform is Linux.
+
+        Returns:
+            True if Linux
+        """
+        return self == BuildPlatform::Linux
+
+    pub fn is_mac(self) -> bool:
+        """Check if platform is Mac.
+
+        Returns:
+            True if Mac
+        """
+        return self == BuildPlatform::Mac
+
+    pub fn is_android(self) -> bool:
+        """Check if platform is Android.
+
+        Returns:
+            True if Android
+        """
+        return self == BuildPlatform::Android
+
+    pub fn is_ios(self) -> bool:
+        """Check if platform is iOS.
+
+        Returns:
+            True if iOS
+        """
+        return self == BuildPlatform::iOS
+
+    pub fn is_desktop(self) -> bool:
+        """Check if platform is desktop.
+
+        Returns:
+            True for Win64, Linux, or Mac
+
+        Example:
+            BuildPlatform::Win64.is_desktop()  # → true
+            BuildPlatform::Android.is_desktop()  # → false
+        """
+        return self == BuildPlatform::Win64 or self == BuildPlatform::Linux or self == BuildPlatform::Mac
+
+    pub fn is_mobile(self) -> bool:
+        """Check if platform is mobile.
+
+        Returns:
+            True for Android or iOS
+
+        Example:
+            BuildPlatform::iOS.is_mobile()  # → true
+        """
+        return self == BuildPlatform::Android or self == BuildPlatform::iOS
+
+    pub fn is_windows(self) -> bool:
+        """Check if platform is Windows-based.
+
+        Returns:
+            True for Win64
+
+        Example:
+            BuildPlatform::Win64.is_windows()  # → true
+        """
+        return self == BuildPlatform::Win64
+
+    pub fn is_unix_like(self) -> bool:
+        """Check if platform is Unix-like.
+
+        Returns:
+            True for Linux, Mac, Android, or iOS
+
+        Example:
+            BuildPlatform::Linux.is_unix_like()  # → true
+        """
+        return self != BuildPlatform::Win64
+
+    pub fn is_apple(self) -> bool:
+        """Check if platform is Apple ecosystem.
+
+        Returns:
+            True for Mac or iOS
+
+        Example:
+            BuildPlatform::Mac.is_apple()  # → true
+        """
+        return self == BuildPlatform::Mac or self == BuildPlatform::iOS
+
+    pub fn supports_vulkan(self) -> bool:
+        """Check if platform supports Vulkan graphics API.
+
+        Returns:
+            True for Win64, Linux, or Android
+
+        Example:
+            BuildPlatform::Win64.supports_vulkan()  # → true
+        """
+        return self == BuildPlatform::Win64 or self == BuildPlatform::Linux or self == BuildPlatform::Android
+
+    pub fn supports_metal(self) -> bool:
+        """Check if platform supports Metal graphics API.
+
+        Returns:
+            True for Mac or iOS
+
+        Example:
+            BuildPlatform::iOS.supports_metal()  # → true
+        """
+        return self == BuildPlatform::Mac or self == BuildPlatform::iOS
+
+    pub fn summary(self) -> String:
+        """Get build platform summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            BuildPlatform::Win64.summary()
+            # → "BuildPlatform: Win64 (Windows 64-bit (DirectX 11/12, Vulkan), desktop, windows, supports Vulkan)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let mut props = []
+
+        if self.is_desktop():
+            props.push("desktop")
+        if self.is_mobile():
+            props.push("mobile")
+        if self.is_windows():
+            props.push("windows")
+        if self.is_unix_like():
+            props.push("unix-like")
+        if self.is_apple():
+            props.push("apple")
+        if self.supports_vulkan():
+            props.push("supports Vulkan")
+        if self.supports_metal():
+            props.push("supports Metal")
+
+        if props.len() > 0:
+            let props_str = ", ".join(props)
+            return "BuildPlatform: {name} ({desc}, {props_str})"
+        else:
+            return "BuildPlatform: {name} ({desc})"
+
+
+# UBTCommand
+# Builder for UBT command-line invocations
+pub struct UBTCommand:
+    project_file: String
+    target_name: String
+    platform: BuildPlatform
+    configuration: BuildConfiguration
+    extra_args: Vec[String]
+
+impl UBTCommand:
+    # Create new UBT command
+    pub fn new(project_file: String, target_name: String) -> UBTCommand:
+        return UBTCommand(
+            project_file: project_file,
+            target_name: target_name,
+            platform: BuildPlatform::Win64,
+            configuration: BuildConfiguration::Development,
+            extra_args: [],
+        )
+
+    # Set platform
+    pub fn platform(mut self, platform: BuildPlatform) -> UBTCommand:
+        self.platform = platform
+        return self
+
+    # Set configuration
+    pub fn configuration(mut self, config: BuildConfiguration) -> UBTCommand:
+        self.configuration = config
+        return self
+
+    # Add extra argument
+    pub fn arg(mut self, arg: String) -> UBTCommand:
+        self.extra_args.push(arg)
+        return self
+
+    # Add verbose logging
+    pub fn verbose(mut self) -> UBTCommand:
+        return self.arg("-Verbose")
+
+    # Enable progress output
+    pub fn progress(mut self) -> UBTCommand:
+        return self.arg("-Progress")
+
+    # Generate project files
+    pub fn generate_project_files(mut self) -> UBTCommand:
+        return self.arg("-ProjectFiles")
+
+    # Clean before building
+    pub fn clean(mut self) -> UBTCommand:
+        return self.arg("-Clean")
+
+    # Build command-line string
+    pub fn build_command_line(self) -> Vec[String]:
+        let mut args = Vec::new()
+
+        # Add target name
+        args.push(self.target_name)
+
+        # Add platform
+        args.push(self.platform.to_string())
+
+        # Add configuration
+        args.push(self.configuration.to_string())
+
+        # Add project file
+        args.push("-Project=" + self.project_file)
+
+        # Add extra arguments
+        for arg in self.extra_args:
+            args.push(arg)
+
+        return args
+
+    # Execute the build
+    pub fn execute(self) -> BuildResult:
+        let ubt_path = find_ubt_executable()
+
+        if ubt_path.is_none():
+            return BuildResult(
+                success: false,
+                exit_code: -1,
+                output: "",
+                error: "UBT executable not found",
+            )
+
+        let ubt_exe = ubt_path.unwrap()
+        let args = self.build_command_line()
+
+        # Execute UBT
+        let result = process.run(ubt_exe, args)
+
+        return BuildResult(
+            success: result.exit_code == 0,
+            exit_code: result.exit_code,
+            output: result.stdout,
+            error: result.stderr,
+        )
+
+
+# BuildResult
+# Result of a UBT build operation
+pub struct BuildResult:
+    success: bool
+    exit_code: i32
+    output: String
+    error: String
+
+impl BuildResult:
+    pub fn is_success(self) -> bool:
+        return self.success
+
+    pub fn get_exit_code(self) -> i32:
+        return self.exit_code
+
+    pub fn get_output(self) -> String:
+        return self.output
+
+    pub fn get_error(self) -> String:
+        return self.error
+
+
+# UnrealEngineInstallation
+# Represents an installed Unreal Engine version
+pub struct UnrealEngineInstallation:
+    engine_root: String
+    version: String
+
+impl UnrealEngineInstallation:
+    # Create from engine root path
+    pub fn new(engine_root: String) -> UnrealEngineInstallation:
+        let version = detect_engine_version(engine_root)
+        return UnrealEngineInstallation(
+            engine_root: engine_root,
+            version: version,
+        )
+
+    # Get engine root directory
+    pub fn get_engine_root(self) -> String:
+        return self.engine_root
+
+    # Get engine version
+    pub fn get_version(self) -> String:
+        return self.version
+
+    # Get UBT executable path
+    pub fn get_ubt_path(self) -> String:
+        if sys.env.is_windows():
+            return path.join(self.engine_root, "Engine/Binaries/DotNET/UnrealBuildTool/UnrealBuildTool.exe")
+        else:
+            return path.join(self.engine_root, "Engine/Binaries/DotNET/UnrealBuildTool/UnrealBuildTool.dll")
+
+    # Get UHT executable path
+    pub fn get_uht_path(self) -> String:
+        return path.join(self.engine_root, "Engine/Binaries/Win64/UnrealHeaderTool.exe")
+
+    # Check if installation is valid
+    pub fn is_valid(self) -> bool:
+        let ubt_exists = path.exists(self.get_ubt_path())
+        let engine_dir_exists = path.exists(path.join(self.engine_root, "Engine"))
+
+        return ubt_exists && engine_dir_exists
+
+
+# Helper functions
+
+# Find UBT executable in common locations
+fn find_ubt_executable() -> Option[String]:
+    # Try environment variable
+    let ue_root = env.get("UE_ROOT")
+    if ue_root.is_some():
+        let install = UnrealEngineInstallation::new(ue_root.unwrap())
+        if install.is_valid():
+            return Some(install.get_ubt_path())
+
+    # Try common installation paths
+    let common_paths = get_common_install_paths()
+
+    for path_str in common_paths:
+        let install = UnrealEngineInstallation::new(path_str)
+        if install.is_valid():
+            return Some(install.get_ubt_path())
+
+    return None
+
+
+# Get common Unreal Engine installation paths
+fn get_common_install_paths() -> Vec[String]:
+    let mut paths = Vec::new()
+
+    if sys.env.is_windows():
+        # Epic Games Launcher default
+        paths.push("C:/Program Files/Epic Games/UE_5.4")
+        paths.push("C:/Program Files/Epic Games/UE_5.3")
+        # Custom builds
+        paths.push("C:/UnrealEngine")
+    elif sys.env.is_linux():
+        paths.push("/opt/UnrealEngine")
+        paths.push(env.get_home() + "/UnrealEngine")
+    elif sys.env.is_macos():
+        paths.push("/Users/Shared/Epic Games/UE_5.4")
+        paths.push("/Applications/UnrealEngine")
+
+    return paths
+
+
+# Detect engine version from installation
+fn detect_engine_version(engine_root: String) -> String:
+    # Try to read Build.version file
+    let version_file = path.join(engine_root, "Engine/Build/Build.version")
+
+    if path.exists(version_file):
+        # TODO: [stdlib][P2] Parse JSON version file
+        return "5.4.0"  # Placeholder
+
+    return "Unknown"
+
+
+# Utility functions
+
+# Build a project with default settings
+pub fn build_project(project_file: String, target: String) -> BuildResult:
+    return UBTCommand::new(project_file, target)
+        .platform(BuildPlatform::Win64)
+        .configuration(BuildConfiguration::Development)
+        .execute()
+
+# Build a project for shipping
+pub fn build_for_shipping(project_file: String, target: String, platform: BuildPlatform) -> BuildResult:
+    return UBTCommand::new(project_file, target)
+        .platform(platform)
+        .configuration(BuildConfiguration::Shipping)
+        .execute()
+
+# Clean and rebuild a project
+pub fn clean_and_rebuild(project_file: String, target: String) -> BuildResult:
+    return UBTCommand::new(project_file, target)
+        .clean()
+        .execute()
+
+# Generate Visual Studio project files
+pub fn generate_vs_project(project_file: String) -> BuildResult:
+    return UBTCommand::new(project_file, "")
+        .generate_project_files()
+        .execute()

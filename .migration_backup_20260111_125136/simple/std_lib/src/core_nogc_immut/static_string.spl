@@ -1,0 +1,469 @@
+# Static string (fixed capacity, stack allocated, immutable API)
+# Returns new strings instead of mutating
+
+# Static string error type
+enum StaticStringError:
+    TooLong
+    InvalidUtf8
+
+impl StaticStringError:
+    fn message() -> str:
+        match self:
+            case TooLong: return "string too long for fixed capacity"
+            case InvalidUtf8: return "invalid UTF-8 sequence"
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn to_string() -> String:
+        """Convert error to string."""
+        match self:
+            case TooLong: return "TooLong"
+            case InvalidUtf8: return "InvalidUtf8"
+
+    fn description() -> String:
+        """Get detailed error description."""
+        return self.message()
+
+    fn is_too_long() -> bool:
+        """Check if this is TooLong error."""
+        match self:
+            case TooLong: true
+            case _: false
+
+    fn is_invalid_utf8() -> bool:
+        """Check if this is InvalidUtf8 error."""
+        match self:
+            case InvalidUtf8: true
+            case _: false
+
+    fn summary() -> String:
+        """Get summary of static string error.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            StaticStringError::TooLong.summary()
+            # → "StaticStringError: TooLong (string too long for fixed capacity)"
+        """
+        let name = self.to_string()
+        let desc = self.message()
+        return "StaticStringError: {name} ({desc})"
+
+struct StaticString[const N: usize]:
+    data: [u8; N]
+    len: usize
+
+impl StaticString[const N: usize]:
+    fn new() -> StaticString[N]:
+        StaticString { data: [0u8; N], len: 0 }
+
+    fn from_str(s: &str) -> Option[StaticString[N]]:
+        if s.len() <= N:
+            var data = [0u8; N]
+            for i in 0..s.len():
+                data[i] = s.bytes()[i]
+            Some(StaticString { data: data, len: s.len() })
+        else:
+            None
+
+    # Create from string, truncating if too long
+    fn from_str_truncate(s: &str) -> StaticString[N]:
+        var data = [0u8; N]
+        let copy_len = if s.len() < N: s.len() else: N
+        for i in 0..copy_len:
+            data[i] = s.bytes()[i]
+        StaticString { data: data, len: copy_len }
+
+    fn len() -> usize:
+        self.len
+
+    fn capacity() -> usize:
+        N
+
+    fn is_empty() -> bool:
+        self.len == 0
+
+    fn is_full() -> bool:
+        self.len == N
+
+    fn remaining() -> usize:
+        N - self.len
+
+    fn as_str() -> &str:
+        &self.data[0..self.len]
+
+    fn as_bytes() -> &[u8]:
+        &self.data[0..self.len]
+
+    fn byte_at(index: usize) -> Option[u8]:
+        if index < self.len:
+            Some(self.data[index])
+        else:
+            None
+
+    # Returns new string with char appended
+    fn push_char(c: char) -> Option[StaticString[N]]:
+        let char_len = c.len_utf8()
+        if self.len + char_len <= N:
+            var new_data = self.data
+            c.encode_utf8(&new_data[self.len..])
+            Some(StaticString { data: new_data, len: self.len + char_len })
+        else:
+            None
+
+    # Returns new string with byte appended
+    fn push_byte(b: u8) -> Option[StaticString[N]]:
+        if self.len < N:
+            var new_data = self.data
+            new_data[self.len] = b
+            Some(StaticString { data: new_data, len: self.len + 1 })
+        else:
+            None
+
+    # Returns new string with str appended
+    fn push_str(s: &str) -> Option[StaticString[N]]:
+        if self.len + s.len() <= N:
+            var new_data = self.data
+            for i in 0..s.len():
+                new_data[self.len + i] = s.bytes()[i]
+            Some(StaticString { data: new_data, len: self.len + s.len() })
+        else:
+            None
+
+    # Returns new string concatenated (alias for push_str for clarity)
+    fn concat(other: &str) -> Option[StaticString[N]]:
+        self.push_str(other)
+
+    # Returns (popped_byte, new_string)
+    fn pop_byte() -> Option[(u8, StaticString[N])]:
+        if self.len > 0:
+            let b = self.data[self.len - 1]
+            Some((b, StaticString { data: self.data, len: self.len - 1 }))
+        else:
+            None
+
+    # Returns cleared string
+    fn cleared() -> StaticString[N]:
+        StaticString { data: self.data, len: 0 }
+
+    # Returns truncated string
+    fn truncated(new_len: usize) -> StaticString[N]:
+        if new_len < self.len:
+            StaticString { data: self.data, len: new_len }
+        else:
+            self
+
+    # Check if starts with prefix
+    fn starts_with(prefix: &str) -> bool:
+        if prefix.len() > self.len:
+            return false
+        for i in 0..prefix.len():
+            if self.data[i] != prefix.bytes()[i]:
+                return false
+        true
+
+    # Check if ends with suffix
+    fn ends_with(suffix: &str) -> bool:
+        if suffix.len() > self.len:
+            return false
+        let offset = self.len - suffix.len()
+        for i in 0..suffix.len():
+            if self.data[offset + i] != suffix.bytes()[i]:
+                return false
+        true
+
+    # Check if contains substring
+    fn contains(needle: &str) -> bool:
+        self.find(needle).is_some()
+
+    # Find substring, returns index
+    fn find(needle: &str) -> Option[usize]:
+        if needle.len() > self.len or needle.is_empty():
+            return None
+
+        let end = self.len - needle.len() + 1
+        for i in 0..end:
+            var found = true
+            for j in 0..needle.len():
+                if self.data[i + j] != needle.bytes()[j]:
+                    found = false
+                    break
+            if found:
+                return Some(i)
+        None
+
+    # Compare equality
+    fn eq(other: &str) -> bool:
+        if self.len != other.len():
+            return false
+        for i in 0..self.len:
+            if self.data[i] != other.bytes()[i]:
+                return false
+        true
+
+    # Returns trimmed string (whitespace removed from start and end)
+    fn trimmed() -> StaticString[N]:
+        var start: usize = 0
+        var end = self.len
+
+        while start < end and is_whitespace(self.data[start]):
+            start = start + 1
+
+        while end > start and is_whitespace(self.data[end - 1]):
+            end = end - 1
+
+        var new_data = [0u8; N]
+        let new_len = end - start
+        for i in 0..new_len:
+            new_data[i] = self.data[start + i]
+        StaticString { data: new_data, len: new_len }
+
+    # Returns uppercased string (ASCII only)
+    fn uppercased() -> StaticString[N]:
+        var new_data = self.data
+        for i in 0..self.len:
+            let b = new_data[i]
+            if b >= 'a' as u8 and b <= 'z' as u8:
+                new_data[i] = b - 32
+        StaticString { data: new_data, len: self.len }
+
+    # Returns lowercased string (ASCII only)
+    fn lowercased() -> StaticString[N]:
+        var new_data = self.data
+        for i in 0..self.len:
+            let b = new_data[i]
+            if b >= 'A' as u8 and b <= 'Z' as u8:
+                new_data[i] = b + 32
+        StaticString { data: new_data, len: self.len }
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_nearly_full(threshold: f64) -> bool:
+        """Check if string usage exceeds threshold (0.0 to 1.0)."""
+        if N == 0:
+            return true
+        return (self.len as f64) / (N as f64) >= threshold
+
+    fn utilization() -> f64:
+        """Calculate string utilization (0.0 to 1.0)."""
+        if N > 0:
+            (self.len as f64) / (N as f64)
+        else:
+            0.0
+
+    fn is_ascii() -> bool:
+        """Check if all bytes are ASCII (< 128)."""
+        for i in 0..self.len:
+            if self.data[i] >= 128:
+                return false
+        return true
+
+    fn is_alphabetic_ascii() -> bool:
+        """Check if all bytes are ASCII alphabetic."""
+        if self.len == 0:
+            return false
+        for i in 0..self.len:
+            let b = self.data[i]
+            if not ((b >= 'A' as u8 and b <= 'Z' as u8) or (b >= 'a' as u8 and b <= 'z' as u8)):
+                return false
+        return true
+
+    fn is_numeric_ascii() -> bool:
+        """Check if all bytes are ASCII numeric."""
+        if self.len == 0:
+            return false
+        for i in 0..self.len:
+            let b = self.data[i]
+            if not (b >= '0' as u8 and b <= '9' as u8):
+                return false
+        return true
+
+    fn is_alphanumeric_ascii() -> bool:
+        """Check if all bytes are ASCII alphanumeric."""
+        if self.len == 0:
+            return false
+        for i in 0..self.len:
+            let b = self.data[i]
+            let is_alpha = (b >= 'A' as u8 and b <= 'Z' as u8) or (b >= 'a' as u8 and b <= 'z' as u8)
+            let is_digit = b >= '0' as u8 and b <= '9' as u8
+            if not (is_alpha or is_digit):
+                return false
+        return true
+
+    fn is_whitespace_only() -> bool:
+        """Check if string contains only whitespace."""
+        if self.len == 0:
+            return false
+        for i in 0..self.len:
+            if not is_whitespace(self.data[i]):
+                return false
+        return true
+
+    fn has_whitespace() -> bool:
+        """Check if string contains any whitespace."""
+        for i in 0..self.len:
+            if is_whitespace(self.data[i]):
+                return true
+        return false
+
+    fn summary() -> String:
+        """Get summary of static string."""
+        let util = (self.utilization() * 100.0) as usize
+        let ascii = if self.is_ascii(): "ASCII" else: "non-ASCII"
+        return "StaticString[{N}]: {self.len}/{N} ({util}% full, {ascii})"
+
+# Helper function
+fn is_whitespace(b: u8) -> bool:
+    b == ' ' as u8 or b == '\t' as u8 or b == '\n' as u8 or b == '\r' as u8
+
+# Common type aliases
+type StaticString16 = StaticString[16]
+type StaticString32 = StaticString[32]
+type StaticString64 = StaticString[64]
+type StaticString128 = StaticString[128]
+type StaticString256 = StaticString[256]
+type StaticString512 = StaticString[512]
+type StaticString1024 = StaticString[1024]
+
+# Path-sized static string
+type StaticPathString = StaticString[4096]
+
+# Name-sized static string
+type StaticNameString = StaticString[256]
+
+# ============================================
+# Trait Implementations
+# ============================================
+
+use core.traits.*
+
+impl Default for StaticString[const N: usize]:
+    fn default() -> Self:
+        StaticString::new()
+
+impl Clone for StaticString[const N: usize]:
+    fn clone() -> Self:
+        StaticString { data: self.data, len: self.len }
+
+impl Len for StaticString[const N: usize]:
+    fn len() -> usize:
+        self.len
+
+impl Capacity for StaticString[const N: usize]:
+    fn capacity() -> usize:
+        N
+
+    fn is_full() -> bool:
+        self.len == N
+
+impl AsSlice[u8] for StaticString[const N: usize]:
+    fn as_slice() -> &[u8]:
+        &self.data[0..self.len]
+
+impl AsRef[str] for StaticString[const N: usize]:
+    fn as_ref() -> &str:
+        self.as_str()
+
+impl Borrow[str] for StaticString[const N: usize]:
+    fn borrow() -> &str:
+        self.as_str()
+
+impl Eq for StaticString[const N: usize]:
+    fn eq(other: &Self) -> bool:
+        if self.len != other.len:
+            return false
+        for i in 0..self.len:
+            if self.data[i] != other.data[i]:
+                return false
+        true
+
+impl Ord for StaticString[const N: usize]:
+    fn cmp(other: &Self) -> Ordering:
+        let min_len = if self.len < other.len: self.len else: other.len
+        for i in 0..min_len:
+            if self.data[i] < other.data[i]:
+                return Ordering::Less
+            if self.data[i] > other.data[i]:
+                return Ordering::Greater
+        if self.len < other.len:
+            Ordering::Less
+        else if self.len > other.len:
+            Ordering::Greater
+        else:
+            Ordering::Equal
+
+impl Hash for StaticString[const N: usize]:
+    fn hash() -> u64:
+        var h: u64 = 0
+        for i in 0..self.len:
+            h = h * 31 + (self.data[i] as u64)
+        h
+
+impl Display for StaticString[const N: usize]:
+    fn fmt() -> str:
+        self.as_str()
+
+impl Display for StaticStringError:
+    fn fmt() -> str:
+        self.message()
+
+impl Error for StaticStringError
+
+impl FromStr for StaticString[const N: usize]:
+    type Err = StaticStringError
+    fn from_str(s: &str) -> Result[Self, Self::Err]:
+        match StaticString::from_str(s):
+            case Some(ss): Ok(ss)
+            case None: Err(StaticStringError::TooLong)
+
+impl IntoIterator for StaticString[const N: usize]:
+    type Item = u8
+    type IntoIter = StaticStringIter[N]
+    fn into_iter() -> Self::IntoIter:
+        StaticStringIter { string: self, index: 0 }
+
+# Iterator for StaticString bytes
+struct StaticStringIter[const N: usize]:
+    string: StaticString[N]
+    index: usize
+
+impl Iterator for StaticStringIter[const N: usize]:
+    type Item = u8
+    fn next() -> Option[Self::Item]:
+        if self.index < self.string.len:
+            let b = self.string.data[self.index]
+            self.index = self.index + 1
+            Some(b)
+        else:
+            None
+
+impl ExactSizeIterator for StaticStringIter[const N: usize]:
+    fn len() -> usize:
+        self.string.len - self.index
+
+impl StaticStringIter[const N: usize]:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_done() -> bool:
+        """Check if iterator is exhausted."""
+        return self.index >= self.string.len
+
+    fn remaining() -> usize:
+        """Get number of remaining bytes."""
+        if self.index < self.string.len:
+            self.string.len - self.index
+        else:
+            0
+
+    fn summary() -> String:
+        """Get summary of iterator state."""
+        let rem = self.remaining()
+        let done = if self.is_done(): "done" else: "active"
+        return "StaticStringIter[{N}]: {rem} remaining ({done})"

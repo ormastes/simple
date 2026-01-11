@@ -67,8 +67,11 @@ impl<'a> super::Lexer<'a> {
         // Check for keywords
         match name.as_str() {
             "fn" => TokenKind::Fn,
-            "let" => TokenKind::Let,
-            "mut" => TokenKind::Mut,
+            "me" => TokenKind::Me,
+            "let" => TokenKind::Let,   // Legacy
+            "mut" => TokenKind::Mut,   // Legacy
+            "val" => TokenKind::Val,
+            "var" => TokenKind::Var,
             "if" => TokenKind::If,
             "elif" => TokenKind::Elif,
             "else" => TokenKind::Else,
