@@ -125,6 +125,47 @@ fn safe_divide(a: i32, b: i32) -> i32:
 - `mut T` - Exclusive mutable reference
 - `iso T` - Isolated (transferable ownership)
 
+### Method Self Parameter
+`self` is **implicit** - you don't specify the type. Use `mut` to indicate mutability:
+
+```simple
+pub struct Counter:
+    value: i32
+
+impl Counter:
+    # Immutable self - read-only access
+    fn get_value(self) -> i32:
+        return self.value
+
+    # Mutable self - can modify fields
+    fn increment(mut self):
+        self.value += 1
+
+    # Mutable self with parameter
+    fn add(mut self, amount: i32):
+        self.value += amount
+
+    # Immutable self with multiple params
+    fn is_greater_than(self, other: i32) -> bool:
+        return self.value > other
+```
+
+**Rules:**
+- Use `self` for read-only methods (getters, queries, checks)
+- Use `mut self` for methods that modify the struct (setters, mutators)
+- **Never** write `self: Counter` or `mut self: Counter` - type is implicit
+
+**Quick Reference:**
+```simple
+fn getter(self) -> i32:           # ✓ Read-only
+fn setter(mut self, val: i32):    # ✓ Mutates
+fn query(self) -> bool:           # ✓ Read-only check
+fn modify(mut self):              # ✓ Mutates
+
+fn wrong(self: MyType):           # ✗ Don't specify type
+fn bad(mut self: MyType):         # ✗ Type is implicit
+```
+
 ### Function Visibility
 - Functions are **public by default**
 - Prefix with underscore (`_`) for private functions
