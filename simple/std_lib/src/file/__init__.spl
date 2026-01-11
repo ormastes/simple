@@ -20,6 +20,12 @@
 
 # Extern declarations for FFI
 extern fn rt_file_exists(path: String) -> Bool
+extern fn rt_file_open(path: String, mode: Int) -> Int
+extern fn rt_file_get_size(fd: Int) -> Int
+extern fn rt_file_close(fd: Int) -> Void
+extern fn rt_file_mmap(addr: *void, length: Int, prot: Int, flags: Int, fd: Int, offset: Int) -> *u8
+extern fn rt_file_munmap(addr: *u8, length: Int) -> Int
+extern fn rt_file_madvise(addr: *u8, length: Int, advice: Int) -> Int
 
 # Re-export public API
 pub use file.mmap.*
@@ -106,35 +112,45 @@ fn file_exists(path: String) -> bool:
 
 # Open file and return file descriptor
 fn sys_open(path: String, mode: OpenMode) -> Result[i32, FileError]:
-    # TODO: [stdlib][P1] Implement via FFI
-    # Placeholder: return fake fd
-    return Ok(3)
+    let mode_int = match mode:
+        case ReadOnly: 0
+        case ReadWrite: 1
+        case WriteOnly: 2
+    let fd = rt_file_open(path, mode_int)
+    if fd == -1:
+        return Err(FileError::OpenFailed)
+    return Ok(fd)
 
 # Get file size
 fn sys_file_size(fd: i32) -> Result[usize, FileError]:
-    # TODO: [stdlib][P1] Implement via FFI
-    # Placeholder: return dummy size
-    return Ok(1024)
+    let size = rt_file_get_size(fd)
+    if size == 0:
+        return Err(FileError::IoError("Failed to get file size"))
+    return Ok(size as usize)
 
 # Close file descriptor
 fn sys_close(fd: i32):
-    # TODO: [stdlib][P1] Implement via FFI
-    pass
+    rt_file_close(fd)
 
 # Memory map a file
 fn sys_mmap(addr: *void, length: usize, prot: i32, flags: i32, fd: i32, offset: usize) -> Result[*u8, FileError]:
-    # TODO: [stdlib][P1] Implement via FFI - actual mmap system call
-    # Placeholder: return fake pointer
-    return Ok(null)
+    let ptr = rt_file_mmap(addr, length as Int, prot, flags, fd, offset as Int)
+    if ptr == null:
+        return Err(FileError::MmapFailed("mmap failed"))
+    return Ok(ptr)
 
 # Unmap memory region
 fn sys_munmap(addr: *u8, length: usize) -> Result[void, FileError]:
-    # TODO: [stdlib][P1] Implement via FFI
+    let result = rt_file_munmap(addr, length as Int)
+    if result == -1:
+        return Err(FileError::IoError("munmap failed"))
     return Ok(void)
 
 # Advise kernel on memory access pattern
 fn sys_madvise(addr: *u8, length: usize, advice: i32) -> Result[void, FileError]:
-    # TODO: [stdlib][P1] Implement via FFI
+    let result = rt_file_madvise(addr, length as Int, advice)
+    if result == -1:
+        return Err(FileError::IoError("madvise failed"))
     return Ok(void)
 
 # File opening mode
