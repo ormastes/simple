@@ -1895,3 +1895,214 @@ pub extern "C" fn native_msync(addr: *mut u8, length: u64, flags: i32) -> i32 {
     rt_file_msync(addr, length, flags)
 }
 
+// ============================================================================
+// Process Execution FFI Functions
+// ============================================================================
+
+/// Execute a command and capture output
+/// Returns tuple (stdout: String, stderr: String, exit_code: Int)
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_run(
+    cmd_ptr: *const u8,
+    cmd_len: u64,
+    args: RuntimeValue,
+) -> RuntimeValue {
+    use std::process::Command;
+
+    // Helper to extract string from RuntimeValue
+    fn extract_string(val: RuntimeValue) -> Option<String> {
+        if !val.is_heap() {
+            return None;
+        }
+        unsafe {
+            let ptr = val.as_heap_ptr();
+            if (*ptr).object_type != HeapObjectType::String {
+                return None;
+            }
+            let str_obj = ptr as *const RuntimeString;
+            let data = (str_obj.add(1)) as *const u8;
+            let slice = std::slice::from_raw_parts(data, (*str_obj).len as usize);
+            Some(String::from_utf8_lossy(slice).into_owned())
+        }
+    }
+
+    if cmd_ptr.is_null() {
+        // Return tuple: ("", "", -1)
+        let empty_str = super::rt_string_new(b"".as_ptr(), 0);
+        let tuple = super::collections::rt_tuple_new(3);
+        super::collections::rt_tuple_set(tuple, 0, empty_str);
+        super::collections::rt_tuple_set(tuple, 1, empty_str);
+        super::collections::rt_tuple_set(tuple, 2, RuntimeValue::from_int(-1));
+        return tuple;
+    }
+
+    let cmd_bytes = std::slice::from_raw_parts(cmd_ptr, cmd_len as usize);
+    let cmd_str = match std::str::from_utf8(cmd_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            let empty_str = super::rt_string_new(b"".as_ptr(), 0);
+            let tuple = super::collections::rt_tuple_new(3);
+            super::collections::rt_tuple_set(tuple, 0, empty_str);
+            super::collections::rt_tuple_set(tuple, 1, empty_str);
+            super::collections::rt_tuple_set(tuple, 2, RuntimeValue::from_int(-1));
+            return tuple;
+        }
+    };
+
+    // Build command with arguments
+    let mut command = Command::new(cmd_str);
+
+    // Extract args from List[String]
+    let args_len = super::collections::rt_array_len(args);
+    if args_len > 0 {
+        for i in 0..args_len {
+            let arg_val = super::collections::rt_array_get(args, i);
+            if let Some(arg_str) = extract_string(arg_val) {
+                command.arg(arg_str);
+            }
+        }
+    }
+
+    // Execute command
+    match command.output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let exit_code = output.status.code().unwrap_or(-1) as i64;
+
+            let stdout_val = super::rt_string_new(stdout.as_ptr(), stdout.len() as u64);
+            let stderr_val = super::rt_string_new(stderr.as_ptr(), stderr.len() as u64);
+
+            let tuple = super::collections::rt_tuple_new(3);
+            super::collections::rt_tuple_set(tuple, 0, stdout_val);
+            super::collections::rt_tuple_set(tuple, 1, stderr_val);
+            super::collections::rt_tuple_set(tuple, 2, RuntimeValue::from_int(exit_code));
+            tuple
+        }
+        Err(_) => {
+            let empty_str = super::rt_string_new(b"".as_ptr(), 0);
+            let tuple = super::collections::rt_tuple_new(3);
+            super::collections::rt_tuple_set(tuple, 0, empty_str);
+            super::collections::rt_tuple_set(tuple, 1, empty_str);
+            super::collections::rt_tuple_set(tuple, 2, RuntimeValue::from_int(-1));
+            tuple
+        }
+    }
+}
+
+/// Spawn a process without waiting
+/// Returns process ID or -1 on error
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_spawn(
+    cmd_ptr: *const u8,
+    cmd_len: u64,
+    args: RuntimeValue,
+) -> i64 {
+    use std::process::Command;
+
+    // Helper to extract string from RuntimeValue
+    fn extract_string(val: RuntimeValue) -> Option<String> {
+        if !val.is_heap() {
+            return None;
+        }
+        unsafe {
+            let ptr = val.as_heap_ptr();
+            if (*ptr).object_type != HeapObjectType::String {
+                return None;
+            }
+            let str_obj = ptr as *const RuntimeString;
+            let data = (str_obj.add(1)) as *const u8;
+            let slice = std::slice::from_raw_parts(data, (*str_obj).len as usize);
+            Some(String::from_utf8_lossy(slice).into_owned())
+        }
+    }
+
+    if cmd_ptr.is_null() {
+        return -1;
+    }
+
+    let cmd_bytes = std::slice::from_raw_parts(cmd_ptr, cmd_len as usize);
+    let cmd_str = match std::str::from_utf8(cmd_bytes) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    // Build command with arguments
+    let mut command = Command::new(cmd_str);
+
+    // Extract args from List[String]
+    let args_len = super::collections::rt_array_len(args);
+    if args_len > 0 {
+        for i in 0..args_len {
+            let arg_val = super::collections::rt_array_get(args, i);
+            if let Some(arg_str) = extract_string(arg_val) {
+                command.arg(arg_str);
+            }
+        }
+    }
+
+    // Spawn process
+    match command.spawn() {
+        Ok(child) => child.id() as i64,
+        Err(_) => -1,
+    }
+}
+
+/// Execute a command and return just the exit code
+/// Returns exit code or -1 on error
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_execute(
+    cmd_ptr: *const u8,
+    cmd_len: u64,
+    args: RuntimeValue,
+) -> i32 {
+    use std::process::Command;
+
+    // Helper to extract string from RuntimeValue
+    fn extract_string(val: RuntimeValue) -> Option<String> {
+        if !val.is_heap() {
+            return None;
+        }
+        unsafe {
+            let ptr = val.as_heap_ptr();
+            if (*ptr).object_type != HeapObjectType::String {
+                return None;
+            }
+            let str_obj = ptr as *const RuntimeString;
+            let data = (str_obj.add(1)) as *const u8;
+            let slice = std::slice::from_raw_parts(data, (*str_obj).len as usize);
+            Some(String::from_utf8_lossy(slice).into_owned())
+        }
+    }
+
+    if cmd_ptr.is_null() {
+        return -1;
+    }
+
+    let cmd_bytes = std::slice::from_raw_parts(cmd_ptr, cmd_len as usize);
+    let cmd_str = match std::str::from_utf8(cmd_bytes) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    // Build command with arguments
+    let mut command = Command::new(cmd_str);
+
+    // Extract args from List[String]
+    let args_len = super::collections::rt_array_len(args);
+    if args_len > 0 {
+        for i in 0..args_len {
+            let arg_val = super::collections::rt_array_get(args, i);
+            if let Some(arg_str) = extract_string(arg_val) {
+                command.arg(arg_str);
+            }
+        }
+    }
+
+    // Execute command
+    match command.status() {
+        Ok(status) => status.code().unwrap_or(-1),
+        Err(_) => -1,
+    }
+}
+
