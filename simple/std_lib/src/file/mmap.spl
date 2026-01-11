@@ -3,6 +3,12 @@
 # Core mmap abstraction with safety wrappers.
 # Provides zero-copy file access through memory mapping.
 
+# mmap system call constants
+const PROT_READ: i32 = 1
+const PROT_WRITE: i32 = 2
+const MAP_SHARED: i32 = 1
+const MAP_PRIVATE: i32 = 2
+
 # Memory-mapped region - represents a file mapped into memory
 pub struct MmapRegion:
     data: *u8              # Pointer to mapped memory
@@ -14,15 +20,17 @@ pub struct MmapRegion:
     # Get the mapped data as a byte slice
     pub fn as_bytes(self) -> &[u8]:
         # Safety: data pointer is valid for length bytes
-        # TODO: [stdlib][P1] Implement via FFI - slice_from_raw_parts
-        return []
+        # Create slice from raw pointer and length
+        unsafe:
+            return slice_from_raw_parts(self.data, self.length)
 
     # Get the mapped data as a string (UTF-8 validated)
     pub fn as_str(self) -> Result[&str, FileError]:
         let bytes = self.as_bytes()
-        # TODO: [stdlib][P3] Validate UTF-8
-        # For now, placeholder
-        return Ok("")
+        # Convert bytes to string with UTF-8 validation
+        match str_from_utf8(bytes):
+            case Ok(s): return Ok(s)
+            case Err(_): return Err(FileError::InvalidUtf8)
 
     # Advise kernel on memory access pattern
     pub fn advise(self, advice: MmapAdvice):
@@ -42,8 +50,10 @@ pub struct MmapRegion:
     pub fn slice(self, start: usize, end: usize) -> Result[&[u8], FileError]:
         if start > self.length or end > self.length or start > end:
             return Err(FileError::OutOfBounds)
-        # TODO: [stdlib][P3] Return slice
-        return Ok([])
+        let slice_len = end - start
+        unsafe:
+            let slice_ptr = (self.data as usize + start) as *u8
+            return Ok(slice_from_raw_parts(slice_ptr, slice_len))
 
     # =========================================================================
     # Helper Methods
@@ -233,27 +243,23 @@ pub struct OpenOptions:
 
     # Get mmap protection flags (for sys_mmap)
     pub fn get_prot_flags(self) -> i32:
-        # TODO: [stdlib][P3] Map to actual PROT_* constants
-        # PROT_READ = 1, PROT_WRITE = 2
         match self.mode:
             case MmapMode::ReadOnly:
-                return 1  # PROT_READ
+                return PROT_READ
             case MmapMode::ReadWrite:
-                return 3  # PROT_READ | PROT_WRITE
+                return PROT_READ | PROT_WRITE
             case MmapMode::CopyOnWrite:
-                return 3  # PROT_READ | PROT_WRITE
+                return PROT_READ | PROT_WRITE
 
     # Get mmap flags (for sys_mmap)
     pub fn get_map_flags(self) -> i32:
-        # TODO: [stdlib][P3] Map to actual MAP_* constants
-        # MAP_SHARED = 1, MAP_PRIVATE = 2
         match self.mode:
             case MmapMode::ReadOnly:
-                return 2  # MAP_PRIVATE
+                return MAP_PRIVATE
             case MmapMode::ReadWrite:
-                return 1  # MAP_SHARED
+                return MAP_SHARED
             case MmapMode::CopyOnWrite:
-                return 2  # MAP_PRIVATE
+                return MAP_PRIVATE
 
     # =========================================================================
     # Helper Methods

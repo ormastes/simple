@@ -5,6 +5,14 @@
 
 use file.mmap
 
+# Extern FFI declarations for async file operations
+extern fn native_async_file_create(path: String, mode: i32, prefault: i32) -> i64
+extern fn native_async_file_start_loading(handle_id: i64) -> ()
+extern fn native_async_file_is_ready(handle_id: i64) -> i32
+extern fn native_async_file_get_state(handle_id: i64) -> i32
+extern fn native_async_file_wait(handle_id: i64) -> Any
+extern fn async_yield() -> ()
+
 # File loading state
 pub enum FileState:
     Pending             # Not yet started loading
@@ -80,37 +88,39 @@ pub struct AsyncFileHandle:
     path: String        # File path
     state: FileState    # Current loading state
     options: OpenOptions # Opening options
+    handle_id: i64      # Runtime handle ID
 
     # Create a new async handle (doesn't start loading)
     pub fn new(path: String) -> AsyncFileHandle:
+        let handle_id = native_async_file_create(path, 0, 0)
         return AsyncFileHandle {
             path: path,
             state: FileState::Pending,
-            options: OpenOptions::new()
+            options: OpenOptions::new(),
+            handle_id: handle_id
         }
 
     # Create handle with custom options
     pub fn with_options(path: String, opts: OpenOptions) -> AsyncFileHandle:
+        let mode = if opts.mode == MmapMode::Private then 0 else 1
+        let prefault = if opts.prefault then 1 else 0
+        let handle_id = native_async_file_create(path, mode, prefault)
         return AsyncFileHandle {
             path: path,
             state: FileState::Pending,
-            options: opts
+            options: opts,
+            handle_id: handle_id
         }
 
     # Start loading the file in background
     pub fn start_loading(mut self):
-        # TODO: [stdlib][P3] Spawn background worker to load file
-        # For now, mark as Loading
+        native_async_file_start_loading(self.handle_id)
         self.state = FileState::Loading
-        pass
 
     # Check if file is ready (non-blocking)
     pub fn is_ready(self) -> bool:
-        match self.state:
-            case FileState::Ready(_):
-                return true
-            case _:
-                return false
+        let ready = native_async_file_is_ready(self.handle_id)
+        return ready == 1
 
     # Check if loading failed
     pub fn is_failed(self) -> bool:
@@ -126,31 +136,22 @@ pub struct AsyncFileHandle:
 
     # Wait for file to load (async, blocks until ready)
     pub async fn wait(self) -> Result[MmapRegion, FileError]:
-        # TODO: [stdlib][P1] Implement actual async waiting
-        # For now, check state
-        match self.state:
-            case FileState::Ready(region):
-                return Ok(region)
-            case FileState::Failed(error):
-                return Err(error)
-            case FileState::Loading:
-                # TODO: [stdlib][P3] Actually wait for completion
-                return Err(FileError::IoError("Still loading"))
-            case FileState::Pending:
-                return Err(FileError::IoError("Not started"))
+        let result = native_async_file_wait(self.handle_id)
+        # Convert result to MmapRegion or FileError
+        # Assuming result is the MmapRegion on success or error on failure
+        if result != nil:
+            return Ok(result as MmapRegion)
+        else:
+            return Err(FileError::IoError("Failed to load file"))
 
     # Get the loaded region (blocks if not ready)
     pub fn get(self) -> Result[MmapRegion, FileError]:
-        match self.state:
-            case FileState::Ready(region):
-                return Ok(region)
-            case FileState::Failed(error):
-                return Err(error)
-            case FileState::Loading:
-                # TODO: [stdlib][P3] Block until ready
-                return Err(FileError::IoError("Still loading"))
-            case FileState::Pending:
-                return Err(FileError::IoError("Not started"))
+        # Block until file is ready
+        let result = native_async_file_wait(self.handle_id)
+        if result != nil:
+            return Ok(result as MmapRegion)
+        else:
+            return Err(FileError::IoError("Failed to load file"))
 
     # Try to get the region without blocking
     pub fn try_get(self) -> Option[MmapRegion]:
@@ -162,7 +163,8 @@ pub struct AsyncFileHandle:
 
     # Cancel loading (if still in progress)
     pub fn cancel(mut self):
-        # TODO: [stdlib][P3] Cancel background worker
+        # Note: Currently marks as failed; actual background thread cancellation
+        # would require additional FFI support
         match self.state:
             case FileState::Loading:
                 self.state = FileState::Failed(FileError::IoError("Cancelled"))
