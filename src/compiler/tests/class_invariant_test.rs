@@ -95,15 +95,15 @@ fn test_constructor_with_precondition_and_invariant() {
     // Constructor can have both preconditions and invariants
     let source = r#"
 class PositiveValue:
-    val: i64
+    value: i64
 
     invariant:
-        self.val > 0
+        self.value > 0
 
     fn new(x: i64) -> PositiveValue:
         in:
             x > 0
-        return PositiveValue(val: x)
+        return PositiveValue(value: x)
 "#;
 
     assert!(compile_class(source).is_ok());
@@ -126,10 +126,10 @@ class Counter:
     fn new() -> Counter:
         return Counter(value: 0)
 
-    pub fn increment(self):
+    pub fn increment():
         self.value = self.value + 1
 
-    pub fn decrement(self):
+    pub fn decrement():
         in:
             self.value > 0
         self.value = self.value - 1
@@ -256,8 +256,8 @@ fn test_class_without_invariant() {
 class Simple:
     value: i64
 
-    fn new(val: i64) -> Simple:
-        return Simple(value: val)
+    fn new(value: i64) -> Simple:
+        return Simple(value: value)
 
     pub fn get_value() -> i64:
         return self.value
@@ -271,16 +271,16 @@ fn test_invariant_with_method_call() {
     // Invariants can reference pure methods
     let source = r#"
 class ValueHolder:
-    val: i64
+    value: i64
 
     fn is_positive() -> bool:
-        return self.val > 0
+        return self.value > 0
 
     invariant:
         self.is_positive()
 
     fn new(v: i64) -> ValueHolder:
-        return ValueHolder(val: v)
+        return ValueHolder(value: v)
 "#;
 
     assert!(compile_class(source).is_ok());
@@ -301,8 +301,8 @@ class Internal:
     invariant:
         self.value >= 0
 
-    fn create_internal(val: i64) -> Internal:
-        return Internal(value: val)
+    fn create_internal(value: i64) -> Internal:
+        return Internal(value: value)
 "#;
 
     // This should compile either way
@@ -319,8 +319,8 @@ class Public:
     invariant:
         self.value >= 0
 
-    pub fn new(val: i64) -> Public:
-        return Public(value: val)
+    pub fn new(value: i64) -> Public:
+        return Public(value: value)
 "#;
 
     assert!(compile_class(source).is_ok());
@@ -339,8 +339,8 @@ class Counter:
     pub fn new() -> Counter:
         return Counter(count: 0)
 
-    pub fn from_value(val: i64) -> Counter:
-        return Counter(count: val)
+    pub fn from_value(value: i64) -> Counter:
+        return Counter(count: value)
 "#;
 
     assert!(compile_class(source).is_ok());
@@ -394,7 +394,7 @@ class BankAccount:
     fn internal_adjust(self, delta: i64):
         self.balance = self.balance + delta
 
-    pub fn get_balance(self) -> i64:
+    pub fn get_balance() -> i64:
         return self.balance
 "#;
 
@@ -440,15 +440,15 @@ class MathHelper:
     invariant:
         self.value >= 0
 
-    fn new(val: i64) -> MathHelper:
-        return MathHelper(value: val)
+    fn new(value: i64) -> MathHelper:
+        return MathHelper(value: value)
 
     fn compute_factorial(n: i64) -> i64:
         if n <= 1:
             return 1
         return n * MathHelper.compute_factorial(n - 1)
 
-    pub fn get_value(self) -> i64:
+    pub fn get_value() -> i64:
         return self.value
 "#;
 
@@ -473,7 +473,7 @@ struct Point:
     fn origin() -> Point:
         return Point(x: 0, y: 0)
 
-    pub fn distance_from_origin(self) -> i64:
+    pub fn distance_from_origin() -> i64:
         return self.x * self.x + self.y * self.y
 "#;
 

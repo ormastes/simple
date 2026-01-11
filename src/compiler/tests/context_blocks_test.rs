@@ -112,8 +112,8 @@ class Counter:
     fn __init__(self):
         self.value = 0
 
-    fn set(self, val):
-        self.value = val
+    fn set(v):
+        self.value = v
         return self
 
     fn get(self):

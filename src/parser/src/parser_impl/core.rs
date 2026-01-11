@@ -238,10 +238,10 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.parse_pub_item_with_doc(doc_comment)
             }
-            TokenKind::Mut => self.parse_mut_let(),  // Legacy: mut let
-            TokenKind::Let => self.parse_let(),      // Legacy: let
-            TokenKind::Val => self.parse_val(),      // New: val (immutable)
-            TokenKind::Var => self.parse_var(),      // New: var (mutable)
+            TokenKind::Mut => self.parse_mut_let(), // Legacy: mut let
+            TokenKind::Let => self.parse_let(),     // Legacy: let
+            TokenKind::Val => self.parse_val(),     // New: val (immutable)
+            TokenKind::Var => self.parse_var(),     // New: var (mutable)
             TokenKind::Const => self.parse_const(),
             TokenKind::Static => self.parse_static(),
             TokenKind::Shared => self.parse_shared_let(),
