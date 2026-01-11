@@ -12,6 +12,10 @@ use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use xxhash_rust::xxh3::Xxh3;
 
+// PyTorch imports (conditional)
+#[cfg(feature = "pytorch")]
+use tch::{Device, Kind, Tensor};
+
 // ============================================================================
 // Value creation FFI functions
 // ============================================================================
@@ -3616,14 +3620,78 @@ pub extern "C" fn rt_thread_local_free(handle: i64) {
     // Note: Each thread's local copy will be cleaned up when thread exits
 }
 
-// PyTorch/ML Operations (Stubs - require tch-rs or similar)
+// PyTorch/ML Operations
 // ============================================================================
+
+#[cfg(feature = "pytorch")]
+lazy_static::lazy_static! {
+    static ref TENSOR_MAP: Mutex<HashMap<i64, Tensor>> = Mutex::new(HashMap::new());
+}
+
+#[cfg(feature = "pytorch")]
+static mut TENSOR_COUNTER: i64 = 1;
+
+#[cfg(feature = "pytorch")]
+fn store_tensor(tensor: Tensor) -> i64 {
+    unsafe {
+        let handle = TENSOR_COUNTER;
+        TENSOR_COUNTER += 1;
+        TENSOR_MAP.lock().unwrap().insert(handle, tensor);
+        handle
+    }
+}
+
+#[cfg(feature = "pytorch")]
+fn get_tensor(handle: i64) -> Option<Tensor> {
+    TENSOR_MAP.lock().unwrap().get(&handle).cloned()
+}
+
+#[cfg(feature = "pytorch")]
+fn remove_tensor(handle: i64) -> Option<Tensor> {
+    TENSOR_MAP.lock().unwrap().remove(&handle)
+}
+
+// Helper to convert RuntimeValue to tensor handle
+#[cfg(feature = "pytorch")]
+fn value_to_tensor_handle(value: RuntimeValue) -> Option<i64> {
+    if value.is_int() {
+        Some(value.as_int())
+    } else {
+        None
+    }
+}
 
 // Basic Tensor Operations
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_add(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
+    let a_handle = match value_to_tensor_handle(a) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+    let b_handle = match value_to_tensor_handle(b) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let a_tensor = match get_tensor(a_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+    let b_tensor = match get_tensor(b_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = a_tensor + b_tensor;
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_add(_a: RuntimeValue, _b: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement tensor addition
     RuntimeValue::NIL
 }
 
