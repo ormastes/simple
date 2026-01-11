@@ -38,11 +38,11 @@
 | Enum Method `self` Match Fails | 🐛 OPEN | High |
 | String `>=` `<=` Comparison Unsupported | 🔄 WORKAROUND | Medium |
 | Dict `contains()` Method Missing | 🔄 WORKAROUND | Low |
-| Verification Module Reserved Keywords | 🐛 OPEN | High |
+| Verification Module Reserved Keywords | ✅ FIXED | High |
 | Exported Enum Scope Loss Across Tests | ✅ FIXED | Critical |
 | Multi-Mode Feature Parse Errors | ✅ FIXED | Critical |
 
-**Summary:** 31 fixed, 3 open, 1 investigating, 3 workarounds
+**Summary:** 32 fixed, 2 open, 1 investigating, 3 workarounds
 
 ---
 
@@ -2126,57 +2126,73 @@ if d.contains_key("a"):
 
 ---
 
-## Verification Module Reserved Keywords 🐛 OPEN
+## Verification Module Reserved Keywords ✅ FIXED
 
 **Type:** Bug
 **Priority:** High
 **Discovered:** 2026-01-05
+**Resolved:** 2026-01-11
 **Component:** Parser / Verification Module
 
 ### Description
 
-The verification module (`simple/std_lib/src/verification/`) uses several identifiers that are reserved keywords in Simple, causing parse failures when trying to run the regeneration scripts.
+The verification module (`simple/std_lib/src/verification/`) used the reserved keyword `decreases` as an identifier (class name, field name, parameter name), causing parse failures when trying to run the regeneration scripts.
 
-Affected files and keywords:
-- `verification/lean/codegen.spl` - Used `requires` as field name (fixed to `preconditions`)
-- `verification/lean/emitter.spl` - Unknown LParen issue
-- `verification/lean/types.spl` - RBracket parse error
-- `verification/lean/expressions.spl` - `For` keyword used as identifier
-- `io/fs.spl` - `Default` keyword used as identifier
+The `decreases` keyword is reserved in Simple for contract syntax (`decreases:`) to specify termination measures for recursive functions.
 
-### Error Messages
+### Status
+
+✅ **FIXED** (2026-01-11)
+
+**Root Cause:** The `Decreases` token is a reserved keyword (TokenKind::Decreases) used for contract declarations. When used as a class name, field name, or parameter name, the parser expected an identifier but found the keyword token, causing "Unexpected token: expected identifier, found Decreases" errors.
+
+**Affected Files:**
+- `verification/models/contracts.spl` - `DecreasesClause` class name, `decreases` field
+- `verification/lean/codegen.spl` - `decreases` field in LeanFunction
+- `verification/lean/emitter.spl` - `decreases` parameter in emit_function_data()
+
+**Fix Applied:**
+1. Renamed `DecreasesClause` → `TerminationClause` (contracts.spl line 158)
+2. Renamed field `decreases` → `termination` (contracts.spl line 186)
+3. Renamed method `with_decreases()` → `with_termination()` (contracts.spl line 215)
+4. Renamed field `decreases` → `termination_measure` in LeanFunction (codegen.spl line 46)
+5. Renamed parameter `decreases` → `termination_measure` in emit_function_data() (emitter.spl line 77)
+6. Added missing `make_nat_type()` helper function (codegen.spl)
+
+**Files Changed:**
+- `simple/std_lib/src/verification/models/contracts.spl` - 4 renames
+- `simple/std_lib/src/verification/lean/codegen.spl` - 2 renames + add make_nat_type()
+- `simple/std_lib/src/verification/lean/emitter.spl` - 1 rename
+
+### Error Messages (Before Fix)
 
 ```
-error: parse: Unexpected token: expected identifier, found LParen
-error: parse: Unexpected token: expected Comma, found RBracket
-error: parse: Unexpected token: expected Comma, found For
-error: parse: Unexpected token: expected expression, found Default
+ERROR Failed to parse module path="simple/std_lib/src/verification/models/contracts.spl"
+error=Unexpected token: expected identifier, found Decreases
 ```
 
 ### Reproduction
 
 ```bash
-./target/debug/simple simple/std_lib/src/verification/test_codegen.spl
 ./target/debug/simple simple/std_lib/src/verification/regenerate/__init__.spl
 ```
 
-### Expected
+### Verification (After Fix)
 
-The verification regeneration module should run successfully, generating Lean files from Simple sources.
+```bash
+./target/debug/simple simple/std_lib/src/verification/regenerate/__init__.spl
+# Output:
+# Regenerating Lean verification files...
+# [1/15] regenerate_nogc_compile... ✓
+# ...
+# [14/15] regenerate_tensor_dimensions... ✓
+# [15/15] regenerate_tensor_memory... ✓
+# Generated: verification/tensor_dimensions/src/TensorDimensions.lean (6364 bytes)
+# Generated: verification/tensor_dimensions/src/TensorMemory.lean (1132 bytes)
+# All files validated successfully!
+```
 
-### Actual
-
-Multiple parse errors prevent the verification module from loading.
-
-### Partial Fix Applied
-
-Changed `contract.requires` to `contract.preconditions` and `contract.ensures` to `contract.postconditions` in:
-- `verification/lean/codegen.spl`
-- `verification/models/contracts.spl`
-
-### Remaining Issues
-
-Other files in the verification module still use syntax not supported by the parser.
+All 15 verification regeneration steps now complete successfully.
 
 ## Exported Enum Scope Loss Across Tests ✅ FIXED
 
