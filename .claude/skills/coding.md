@@ -5,12 +5,12 @@
 ### String Literals
 ```simple
 # Double-quoted = interpolated (default)
-let name = "World"
-let greeting = "Hello, {name}!"   # "Hello, World!"
+val name = "World"
+val greeting = "Hello, {name}!"   # "Hello, World!"
 print("Value: {1 + 2}")           # "Value: 3"
 
 # Single-quoted = raw (no interpolation)
-let raw = 'No {interpolation} here'
+val raw = 'No {interpolation} here'
 
 # Triple-quoted = docstring (multi-line)
 """
@@ -20,6 +20,25 @@ documentation
 ```
 
 **DO NOT** use `f"..."` prefix - it's redundant.
+
+### Variable Declarations
+```simple
+# Immutable variable (default, preferred)
+val name = "Alice"
+val count = 42
+val items = [1, 2, 3]
+
+# Mutable variable (explicit)
+var counter = 0
+var buffer = []
+counter += 1
+buffer.append(item)
+```
+
+**Rules:**
+- Use `val` for immutable variables (preferred, safe default)
+- Use `var` for mutable variables (explicit mutation)
+- Prefer `val` unless you need to reassign the variable
 
 ### Scripts Policy
 
@@ -32,7 +51,7 @@ import std.fs
 import std.args
 
 fn main():
-    let args = args.get_args()
+    val args = args.get_args()
     if args.len() < 2:
         io.println("Usage: simple scripts/my_tool.spl <arg>")
         return 1
@@ -126,53 +145,54 @@ fn safe_divide(a: i32, b: i32) -> i32:
 - `iso T` - Isolated (transferable ownership)
 
 ### Method Self Parameter
-`self` is **implicit** - you don't specify the type. Use `mut` to indicate mutability:
+Simple uses **LL(1)-friendly syntax** with **implicit self**. Use `me` for mutable methods:
 
 ```simple
 pub struct Counter:
     value: i32
 
 impl Counter:
-    # Immutable self - read-only access
-    fn get_value(self) -> i32:
+    # Static method - no self access
+    static fn new() -> Counter:
+        return Counter(value: 0)
+
+    # Immutable method - self is implicit
+    fn get_value() -> i32:
         return self.value
 
-    # Mutable self - can modify fields
-    fn increment(mut self):
+    # Mutable method - use 'me' keyword
+    me increment():
         self.value += 1
 
-    # Mutable self with parameter
-    fn add(mut self, amount: i32):
+    # Mutable method with parameters
+    me add(amount: i32):
         self.value += amount
 
-    # Immutable self with multiple params
-    fn is_greater_than(self, other: i32) -> bool:
+    # Immutable method with parameters
+    fn is_greater_than(other: i32) -> bool:
         return self.value > other
 ```
 
 **Rules:**
-- Use `self` for read-only methods (getters, queries, checks)
-- Use `mut self` for methods that modify the struct (setters, mutators)
-- **Never** write `self: Counter` or `mut self: Counter` - type is implicit
+- `static fn` - Static/associated function, no self access
+- `fn` - Immutable method, self implicit (read-only)
+- `me` - Mutable method, self implicit (mutable)
+- In method bodies, use `self.field` to access fields
 
 **Quick Reference:**
 ```simple
-# Instance methods - always have self parameter
-fn getter(self) -> i32:           # ✓ Read-only instance method
-fn setter(mut self, val: i32):    # ✓ Mutable instance method
-fn query(self) -> bool:           # ✓ Read-only check
-fn modify(mut self):              # ✓ Mutates the instance
+# Static methods (no self)
+static fn new() -> Counter:                  # ✓ Static constructor
+static fn from_value(val: i32) -> Counter:  # ✓ Static factory
 
-# Static/associated functions - no self parameter
-fn new() -> Counter:              # ✓ Static constructor
-fn from_value(val: i32) -> Counter:  # ✓ Static factory
-
-# Wrong - never specify self's type
-fn wrong(self: MyType):           # ✗ Don't specify type
-fn bad(mut self: MyType):         # ✗ Type is implicit
+# Instance methods (self IMPLICIT)
+fn getter() -> i32:                          # ✓ Read-only instance method
+me setter(val: i32):                         # ✓ Mutable instance method
+fn query() -> bool:                          # ✓ Read-only check
+me modify():                                 # ✓ Mutates the instance
 ```
 
-**Important:** `self` parameter must ALWAYS be written for instance methods. The word "implicit" means the **type** is implicit, not the parameter itself.
+**Important:** `self` is implicit in signatures but explicit in method bodies.
 
 ```simple
 pub struct Point:
@@ -181,33 +201,33 @@ pub struct Point:
 
 impl Point:
     # Static method - no self, called as Point::new()
-    fn new(x: f64, y: f64) -> Point:
+    static fn new(x: f64, y: f64) -> Point:
         return Point(x: x, y: y)
 
-    # Instance method - immutable self, called as point.get_x()
-    fn get_x(self) -> f64:
+    # Immutable method - self implicit, called as point.get_x()
+    fn get_x() -> f64:
         return self.x
 
-    # Instance method - mutable self, called as point.set_x(5.0)
-    fn set_x(mut self, value: f64):
+    # Mutable method - self implicit, called as point.set_x(5.0)
+    me set_x(value: f64):
         self.x = value
 
-    # Instance method - immutable self, called as point.distance_to(other)
-    fn distance_to(self, other: Point) -> f64:
-        let dx = self.x - other.x
-        let dy = self.y - other.y
+    # Immutable method - self implicit, called as point.distance_to(other)
+    fn distance_to(other: Point) -> f64:
+        val dx = self.x - other.x
+        val dy = self.y - other.y
         return (dx * dx + dy * dy).sqrt()
 
-    # Instance method - mutable self, called as point.translate(10.0, 20.0)
-    fn translate(mut self, dx: f64, dy: f64):
+    # Mutable method - self implicit, called as point.translate(10.0, 20.0)
+    me translate(dx: f64, dy: f64):
         self.x += dx
         self.y += dy
 ```
 
 **Summary:**
-- **Instance method with read-only access:** `fn method(self, ...)`
-- **Instance method with mutation:** `fn method(mut self, ...)`
-- **Static/associated function:** `fn function(...)` (no self at all)
+- **Static method:** `static fn method(...)` (no self)
+- **Instance method (read-only):** `fn method(...)` (self implicit)
+- **Instance method (mutable):** `me method(...)` (self implicit)
 
 ### Function Visibility
 - Functions are **public by default**

@@ -1,0 +1,197 @@
+# Configuration File Parsing (#2051)
+# Parse mode configuration from SDN, TOML, and file attributes
+
+import execution_mode.{ModeSet, string_to_mode}
+import mode_config.{
+    ModeConfig,
+    ProjectConfig,
+    DirectoryConfig,
+    FileConfig,
+    FailureStrategy,
+    string_to_failure_strategy,
+    parse_mode_list
+}
+
+## SDN Configuration Parser
+# Parse .spec_config.sdn files for directory-level configuration
+
+# Parse SDN config file
+export fn parse_sdn_config(content: String) -> Option[DirectoryConfig]:
+    # TODO: [stdlib][P1] Implement SDN parsing when SDN parser is available
+    # For now, return default config
+    Some(DirectoryConfig.new())
+
+# Example .spec_config.sdn format:
+# modes: [interpreter, jit, smf_cranelift]
+# skip_modes: [smf_llvm]
+# mode_failure_strategy: skip_remaining
+
+## TOML Configuration Parser
+# Parse simple.toml [test] section for project-level configuration
+
+# Parse TOML [test] section
+export fn parse_toml_test_config(content: String) -> Option[ProjectConfig]:
+    # TODO: [stdlib][P1] Implement TOML parsing when TOML parser is available
+    # For now, return default config
+    Some(ProjectConfig.default())
+
+# Example simple.toml [test] section:
+# [test]
+# default_modes = ["interpreter", "jit", "smf_cranelift", "smf_llvm"]
+# mode_failure_strategy = "skip_remaining"
+
+## File Attribute Parser
+# Parse #[modes(...)] attributes from file content
+
+# Parse file attributes for mode configuration
+export fn parse_file_attributes(content: String) -> FileConfig:
+    let mut config = FileConfig.new()
+
+    # TODO: [stdlib][P1] Implement attribute parsing
+    # Look for patterns like:
+    # #[modes(interpreter, jit)]
+    # #[skip_modes(smf_llvm)]
+    # #[only_modes(interpreter)]
+    # #[mode_failure_strategy(fail_all)]
+
+    config
+
+## Configuration Discovery
+# Find and load configuration files in the hierarchy
+
+# Discover project configuration from simple.toml
+export fn discover_project_config(project_root: String) -> ProjectConfig:
+    let toml_path = "{project_root}/simple.toml"
+
+    # TODO: [stdlib][P3] Check if file exists and read it
+    # For now, return default
+    ProjectConfig.default()
+
+# Discover directory configuration from .spec_config.sdn
+export fn discover_directory_config(dir_path: String, parent: ModeConfig) -> ModeConfig:
+    let sdn_path = "{dir_path}/.spec_config.sdn"
+
+    # TODO: [stdlib][P3] Check if file exists and read it
+    # For now, return parent config
+    parent
+
+# Discover file configuration from file attributes
+export fn discover_file_config(file_path: String, parent: ModeConfig) -> ModeConfig:
+    # TODO: [stdlib][P2] Read file and parse attributes
+    # For now, return parent config
+    parent
+
+## Configuration Builder
+# Build complete configuration hierarchy for a test file
+
+struct ConfigHierarchy:
+    project: ProjectConfig
+    directory: Option[DirectoryConfig]
+    file: Option[FileConfig]
+
+    # Build configuration hierarchy for a test file path
+    fn for_file(file_path: String) -> ConfigHierarchy:
+        # Extract project root and directory from file path
+        let project_root = extract_project_root(file_path)
+        let dir_path = extract_directory(file_path)
+
+        # Load configurations
+        let project = discover_project_config(project_root)
+
+        # TODO: [stdlib][P3] Load directory and file configs
+        let directory = None
+        let file = None
+
+        ConfigHierarchy {
+            project: project,
+            directory: directory,
+            file: file
+        }
+
+    # Build ModeConfig from the hierarchy
+    fn build_config(self) -> ModeConfig:
+        # Start with project config
+        let mut config = self.project.to_mode_config()
+
+        # Apply directory config if present
+        match self.directory:
+            case Some(dir_config) =>
+                config = dir_config.to_mode_config(config)
+            case None => pass
+
+        # Apply file config if present
+        match self.file:
+            case Some(file_config) =>
+                config = file_config.to_mode_config(config)
+            case None => pass
+
+        config
+
+## Helper Functions
+
+# Extract project root from file path
+# Looks for simple.toml or .git directory
+fn extract_project_root(file_path: String) -> String:
+    """Find project root by walking up directories looking for markers."""
+    @extern("runtime", "rt_path_dirname")
+    fn _rt_path_dirname(path_ptr: &u8, path_len: u64) -> String
+
+    @extern("runtime", "rt_file_exists")
+    fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
+
+    # Start from the file's directory
+    var current_dir = _rt_path_dirname(file_path.ptr(), file_path.len())
+    if current_dir.is_empty():
+        current_dir = "."
+
+    # Walk up directories looking for project markers
+    var iterations = 0
+    while iterations < 100:  # Safety limit
+        # Check for simple.toml
+        let toml_path = current_dir + "/simple.toml"
+        if _rt_file_exists(toml_path.ptr(), toml_path.len()):
+            return current_dir
+
+        # Check for .git directory
+        let git_path = current_dir + "/.git"
+        if _rt_file_exists(git_path.ptr(), git_path.len()):
+            return current_dir
+
+        # Go up one level
+        let parent = _rt_path_dirname(current_dir.ptr(), current_dir.len())
+
+        # Stop if we reached root (dirname returns empty or same path)
+        if parent.is_empty() or parent == current_dir:
+            break
+
+        current_dir = parent
+        iterations += 1
+
+    # Fallback to current directory
+    "."
+
+# Extract directory from file path
+fn extract_directory(file_path: String) -> String:
+    """Extract parent directory from file path."""
+    @extern("runtime", "rt_path_dirname")
+    fn _rt_path_dirname(path_ptr: &u8, path_len: u64) -> String
+
+    let dirname = _rt_path_dirname(file_path.ptr(), file_path.len())
+    if dirname.is_empty():
+        return "."
+    else:
+        return dirname
+
+# Parse mode names from string list
+export fn parse_mode_names(names: List[String]) -> Option[ModeSet]:
+    let mut modes = []
+
+    for name in names:
+        match string_to_mode(name):
+            case Some(mode) => modes.push(mode)
+            case None => return None
+
+    Some(ModeSet.new(modes))
+
+## Exports
+export ConfigHierarchy

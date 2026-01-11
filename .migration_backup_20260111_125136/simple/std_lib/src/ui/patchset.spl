@@ -1,0 +1,551 @@
+# PatchSet - Structural UI Update Operations
+#
+# This module defines patch operations for reactive UI updates.
+# Rather than re-rendering the entire UI, patches describe minimal
+# changes needed to update the view.
+
+use core.*
+use ui.element.*
+use ui.attrs.*
+
+# A patch operation to apply to the UI tree
+pub enum PatchOp:
+    # Text/content updates
+    SetText {
+        node_id: NodeId
+        text: String
+    }
+
+    # Attribute updates
+    SetAttr {
+        node_id: NodeId
+        name: String
+        value: String
+    }
+    RemoveAttr {
+        node_id: NodeId
+        name: String
+    }
+
+    # Class updates
+    AddClass {
+        node_id: NodeId
+        class: String
+    }
+    RemoveClass {
+        node_id: NodeId
+        class: String
+    }
+
+    # Style updates
+    SetStyle {
+        node_id: NodeId
+        property: String
+        value: String
+    }
+    RemoveStyle {
+        node_id: NodeId
+        property: String
+    }
+
+    # Child manipulation
+    InsertChild {
+        parent_id: NodeId
+        index: u64
+        element: Element
+    }
+    RemoveChild {
+        parent_id: NodeId
+        child_id: NodeId
+    }
+    ReplaceChild {
+        parent_id: NodeId
+        old_id: NodeId
+        element: Element
+    }
+    MoveChild {
+        parent_id: NodeId
+        child_id: NodeId
+        from_index: u64
+        to_index: u64
+    }
+
+    # Full subtree replacement
+    ReplaceSubtree {
+        node_id: NodeId
+        element: Element
+    }
+
+    # Focus changes
+    SetFocus {
+        node_id: NodeId
+    }
+    ClearFocus {
+        node_id: NodeId
+    }
+
+    # Event binding
+    BindEvent {
+        node_id: NodeId
+        event: String
+        handler_id: u64
+    }
+    UnbindEvent {
+        node_id: NodeId
+        event: String
+    }
+
+impl PatchOp:
+    # Get the target node ID for this patch
+    pub fn target_id(self) -> NodeId:
+        match self:
+            case SetText { node_id, .. }: return node_id
+            case SetAttr { node_id, .. }: return node_id
+            case RemoveAttr { node_id, .. }: return node_id
+            case AddClass { node_id, .. }: return node_id
+            case RemoveClass { node_id, .. }: return node_id
+            case SetStyle { node_id, .. }: return node_id
+            case RemoveStyle { node_id, .. }: return node_id
+            case InsertChild { parent_id, .. }: return parent_id
+            case RemoveChild { parent_id, .. }: return parent_id
+            case ReplaceChild { parent_id, .. }: return parent_id
+            case MoveChild { parent_id, .. }: return parent_id
+            case ReplaceSubtree { node_id, .. }: return node_id
+            case SetFocus { node_id }: return node_id
+            case ClearFocus { node_id }: return node_id
+            case BindEvent { node_id, .. }: return node_id
+            case UnbindEvent { node_id, .. }: return node_id
+
+    # Check if this patch modifies children
+    pub fn is_structural(self) -> bool:
+        match self:
+            case InsertChild { .. } | RemoveChild { .. } | ReplaceChild { .. }:
+                return true
+            case MoveChild { .. } | ReplaceSubtree { .. }:
+                return true
+            case _:
+                return false
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_text_update(self) -> bool:
+        """Check if this is a text update operation.
+
+        Returns:
+            true for SetText variant
+
+        Example:
+            patch.is_text_update()  # → true
+        """
+        match self:
+            case SetText { .. }:
+                return true
+            case _:
+                return false
+
+    pub fn is_attr_update(self) -> bool:
+        """Check if this is an attribute operation.
+
+        Returns:
+            true for SetAttr/RemoveAttr
+
+        Example:
+            patch.is_attr_update()  # → true
+        """
+        match self:
+            case SetAttr { .. } | RemoveAttr { .. }:
+                return true
+            case _:
+                return false
+
+    pub fn is_class_update(self) -> bool:
+        """Check if this is a class operation.
+
+        Returns:
+            true for AddClass/RemoveClass
+
+        Example:
+            patch.is_class_update()  # → true
+        """
+        match self:
+            case AddClass { .. } | RemoveClass { .. }:
+                return true
+            case _:
+                return false
+
+    pub fn is_style_update(self) -> bool:
+        """Check if this is a style operation.
+
+        Returns:
+            true for SetStyle/RemoveStyle
+
+        Example:
+            patch.is_style_update()  # → true
+        """
+        match self:
+            case SetStyle { .. } | RemoveStyle { .. }:
+                return true
+            case _:
+                return false
+
+    pub fn is_child_operation(self) -> bool:
+        """Check if this modifies children.
+
+        Returns:
+            true for InsertChild/RemoveChild/ReplaceChild/MoveChild
+
+        Example:
+            patch.is_child_operation()  # → true
+        """
+        match self:
+            case InsertChild { .. } | RemoveChild { .. }:
+                return true
+            case ReplaceChild { .. } | MoveChild { .. }:
+                return true
+            case _:
+                return false
+
+    pub fn is_focus_operation(self) -> bool:
+        """Check if this is a focus operation.
+
+        Returns:
+            true for SetFocus/ClearFocus
+
+        Example:
+            patch.is_focus_operation()  # → true
+        """
+        match self:
+            case SetFocus { .. } | ClearFocus { .. }:
+                return true
+            case _:
+                return false
+
+    pub fn is_event_operation(self) -> bool:
+        """Check if this is an event operation.
+
+        Returns:
+            true for BindEvent/UnbindEvent
+
+        Example:
+            patch.is_event_operation()  # → true
+        """
+        match self:
+            case BindEvent { .. } | UnbindEvent { .. }:
+                return true
+            case _:
+                return false
+
+    pub fn is_removal(self) -> bool:
+        """Check if this is a removal operation.
+
+        Returns:
+            true for RemoveAttr/RemoveClass/RemoveStyle/RemoveChild
+
+        Example:
+            patch.is_removal()  # → true
+        """
+        match self:
+            case RemoveAttr { .. } | RemoveClass { .. }:
+                return true
+            case RemoveStyle { .. } | RemoveChild { .. }:
+                return true
+            case _:
+                return false
+
+    pub fn is_addition(self) -> bool:
+        """Check if this is an addition operation.
+
+        Returns:
+            true for SetAttr/AddClass/SetStyle/InsertChild
+
+        Example:
+            patch.is_addition()  # → true
+        """
+        match self:
+            case SetAttr { .. } | AddClass { .. }:
+                return true
+            case SetStyle { .. } | InsertChild { .. }:
+                return true
+            case _:
+                return false
+
+    pub fn is_cosmetic(self) -> bool:
+        """Check if this is a cosmetic update (not structural).
+
+        Returns:
+            true for text/attr/class/style updates
+
+        Example:
+            patch.is_cosmetic()  # → true
+        """
+        return not self.is_structural()
+
+    pub fn requires_reflow(self) -> bool:
+        """Check if this operation might require layout reflow.
+
+        Returns:
+            true for structural changes or style updates
+
+        Example:
+            patch.requires_reflow()  # → true
+        """
+        match self:
+            case InsertChild { .. } | RemoveChild { .. }:
+                return true
+            case ReplaceChild { .. } | MoveChild { .. }:
+                return true
+            case ReplaceSubtree { .. } | SetStyle { .. }:
+                return true
+            case _:
+                return false
+
+    pub fn to_string(self) -> String:
+        """Convert patch operation to string.
+
+        Returns:
+            Operation name
+
+        Example:
+            patch.to_string()  # → "SetText"
+        """
+        match self:
+            case SetText { .. }: "SetText"
+            case SetAttr { .. }: "SetAttr"
+            case RemoveAttr { .. }: "RemoveAttr"
+            case AddClass { .. }: "AddClass"
+            case RemoveClass { .. }: "RemoveClass"
+            case SetStyle { .. }: "SetStyle"
+            case RemoveStyle { .. }: "RemoveStyle"
+            case InsertChild { .. }: "InsertChild"
+            case RemoveChild { .. }: "RemoveChild"
+            case ReplaceChild { .. }: "ReplaceChild"
+            case MoveChild { .. }: "MoveChild"
+            case ReplaceSubtree { .. }: "ReplaceSubtree"
+            case SetFocus { .. }: "SetFocus"
+            case ClearFocus { .. }: "ClearFocus"
+            case BindEvent { .. }: "BindEvent"
+            case UnbindEvent { .. }: "UnbindEvent"
+
+    fn description() -> String:
+        """Get patch operation description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            patch.description()
+            # → "Update element text content"
+        """
+        match self:
+            case SetText { .. }: "Update element text content"
+            case SetAttr { .. }: "Set element attribute value"
+            case RemoveAttr { .. }: "Remove element attribute"
+            case AddClass { .. }: "Add CSS class to element"
+            case RemoveClass { .. }: "Remove CSS class from element"
+            case SetStyle { .. }: "Set inline style property"
+            case RemoveStyle { .. }: "Remove inline style property"
+            case InsertChild { .. }: "Insert child element at index"
+            case RemoveChild { .. }: "Remove child element"
+            case ReplaceChild { .. }: "Replace child element with new element"
+            case MoveChild { .. }: "Move child element to new index"
+            case ReplaceSubtree { .. }: "Replace entire subtree with new element"
+            case SetFocus { .. }: "Set focus on element"
+            case ClearFocus { .. }: "Clear focus from element"
+            case BindEvent { .. }: "Bind event handler to element"
+            case UnbindEvent { .. }: "Unbind event handler from element"
+
+    pub fn summary(self) -> String:
+        """Get patch operation summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            patch.summary()  # → "PatchOp: SetText (target: 42, cosmetic)"
+        """
+        let op_name = self.to_string()
+        let target = self.target_id().value()
+        let mut props = []
+
+        if self.is_structural():
+            props.push("structural")
+        else:
+            props.push("cosmetic")
+
+        if self.is_removal():
+            props.push("removal")
+        if self.is_addition():
+            props.push("addition")
+
+        let props_str = props.join(", ")
+        return "PatchOp: {op_name} (target: {target}, {props_str})"
+
+# A set of patches to apply atomically
+pub struct PatchSet:
+    patches: Array[PatchOp]
+
+impl PatchSet:
+    # Create an empty patch set
+    pub fn new() -> PatchSet:
+        return PatchSet { patches: [] }
+
+    # Add a patch operation
+    pub fn add(self, op: PatchOp):
+        self.patches.push(op)
+
+    # Add multiple operations
+    pub fn extend(self, ops: Array[PatchOp]):
+        for op in ops:
+            self.patches.push(op)
+
+    # Get number of patches
+    pub fn len(self) -> u64:
+        return self.patches.len()
+
+    # Check if empty
+    pub fn is_empty(self) -> bool:
+        return self.patches.is_empty()
+
+    # Iterate over patches
+    pub fn iter(self) -> &Array[PatchOp]:
+        return &self.patches
+
+    # Clear all patches
+    pub fn clear(self):
+        self.patches.clear()
+
+    # Helper: add text update
+    pub fn set_text(self, node_id: NodeId, text: &str):
+        self.add(PatchOp::SetText {
+            node_id: node_id,
+            text: text.to_string()
+        })
+
+    # Helper: add attribute update
+    pub fn set_attr(self, node_id: NodeId, name: &str, value: &str):
+        self.add(PatchOp::SetAttr {
+            node_id: node_id,
+            name: name.to_string(),
+            value: value.to_string()
+        })
+
+    # Helper: remove attribute
+    pub fn remove_attr(self, node_id: NodeId, name: &str):
+        self.add(PatchOp::RemoveAttr {
+            node_id: node_id,
+            name: name.to_string()
+        })
+
+    # Helper: add class
+    pub fn add_class(self, node_id: NodeId, class: &str):
+        self.add(PatchOp::AddClass {
+            node_id: node_id,
+            class: class.to_string()
+        })
+
+    # Helper: remove class
+    pub fn remove_class(self, node_id: NodeId, class: &str):
+        self.add(PatchOp::RemoveClass {
+            node_id: node_id,
+            class: class.to_string()
+        })
+
+    # Helper: insert child
+    pub fn insert_child(self, parent_id: NodeId, index: u64, element: Element):
+        self.add(PatchOp::InsertChild {
+            parent_id: parent_id,
+            index: index,
+            element: element
+        })
+
+    # Helper: remove child
+    pub fn remove_child(self, parent_id: NodeId, child_id: NodeId):
+        self.add(PatchOp::RemoveChild {
+            parent_id: parent_id,
+            child_id: child_id
+        })
+
+    # Helper: replace subtree
+    pub fn replace(self, node_id: NodeId, element: Element):
+        self.add(PatchOp::ReplaceSubtree {
+            node_id: node_id,
+            element: element
+        })
+
+    # Helper: move child
+    pub fn move_child(self, parent_id: NodeId, child_id: NodeId, from: u64, to: u64):
+        self.add(PatchOp::MoveChild {
+            parent_id: parent_id,
+            child_id: child_id,
+            from_index: from,
+            to_index: to
+        })
+
+    # Helper: set focus
+    pub fn focus(self, node_id: NodeId):
+        self.add(PatchOp::SetFocus { node_id: node_id })
+
+    # Helper: bind event
+    pub fn bind_event(self, node_id: NodeId, event: &str, handler_id: u64):
+        self.add(PatchOp::BindEvent {
+            node_id: node_id,
+            event: event.to_string(),
+            handler_id: handler_id
+        })
+
+    # Optimize the patch set by merging/eliminating redundant operations
+    pub fn optimize(self) -> PatchSet:
+        # Track latest operations per node
+        let mut text_ops: Dict[u64, PatchOp] = Dict::new()
+        let mut attr_ops: Dict[String, PatchOp] = Dict::new()
+        let mut class_ops: Dict[String, PatchOp] = Dict::new()
+        let mut structural_ops: Array[PatchOp] = []
+
+        for op in &self.patches:
+            let target = op.target_id().value()
+            match op:
+                case SetText { node_id, text }:
+                    # Only keep latest text update per node
+                    text_ops.set(target, op)
+                case SetAttr { node_id, name, value }:
+                    let key = "{target}:{name}"
+                    attr_ops.set(key, op)
+                case RemoveAttr { node_id, name }:
+                    let key = "{target}:{name}"
+                    # Remove any pending SetAttr
+                    attr_ops.remove(&key)
+                    attr_ops.set(key, op)
+                case AddClass { node_id, class }:
+                    let key = "{target}:{class}"
+                    class_ops.set(key, op)
+                case RemoveClass { node_id, class }:
+                    let key = "{target}:{class}"
+                    # Remove any pending AddClass
+                    class_ops.remove(&key)
+                    class_ops.set(key, op)
+                case _:
+                    # Keep structural ops in order
+                    structural_ops.push(op)
+
+        # Build optimized patch set
+        let mut result = PatchSet::new()
+
+        # Add structural ops first (order matters)
+        for op in structural_ops:
+            result.add(op)
+
+        # Add text ops
+        for (_, op) in text_ops:
+            result.add(op)
+
+        # Add attr ops
+        for (_, op) in attr_ops:
+            result.add(op)
+
+        # Add class ops
+        for (_, op) in class_ops:
+            result.add(op)
+
+        return result

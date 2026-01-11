@@ -1,0 +1,960 @@
+# Tensor Dimension Inference Model
+# Provides compile-time dimension tracking with range constraints.
+# Dimensions can be inferred through operations like matmul, reshape, etc.
+
+# ============================================================================
+# Dimension Representation
+# ============================================================================
+
+# Dimension variable for inference (like type variables)
+class DimVar:
+    id: Int
+    name: Option<String>  # Optional name: "batch", "seq_len", etc.
+    bound: Option<Dim>
+
+    fn new(id: Int) -> DimVar:
+        DimVar(id: id, name: None, bound: None)
+
+    fn named(id: Int, name: String) -> DimVar:
+        DimVar(id: id, name: Some(name), bound: None)
+
+    me set_bound(dim: Dim):
+        self.bound = Some(dim)
+
+    fn is_bound() -> Bool:
+        self.bound.is_some()
+
+# Dimension: can be literal, variable, or dynamic
+enum Dim:
+    # Fixed dimension size
+    Literal(value: Int)
+    # Dimension variable (for inference)
+    Var(var: DimVar)
+    # Named dimension with optional range constraint
+    Named(name: String, range: Option<(Int, Int)>)
+    # Dynamic dimension (unknown at compile time, checked at runtime)
+    Dynamic
+    # Broadcast dimension (can be 1 or match)
+    Broadcast
+
+    fn to_string() -> String:
+        match self:
+            case Literal(v): "{v}"
+            case Var(v):
+                match v.name:
+                    case Some(n): "?{n}"
+                    case None: "?{v.id}"
+            case Named(n, range):
+                match range:
+                    case Some((lo, hi)): "{n}: {lo}..{hi}"
+                    case None: "{n}"
+            case Dynamic: "?"
+            case Broadcast: "#"
+
+    fn is_concrete() -> Bool:
+        match self:
+            case Literal(_): True
+            case Named(_, None): True
+            case _: False
+
+    fn get_value() -> Option<Int>:
+        match self:
+            case Literal(v): Some(v)
+            case _: None
+
+    fn get_range() -> Option<(Int, Int)>:
+        match self:
+            case Literal(v): Some((v, v))
+            case Named(_, range): range
+            case _: None
+
+    fn is_literal() -> Bool:
+        """Check if this is Literal dimension.
+        Returns: true for Literal
+        Example: Dim.Literal(value: 10).is_literal()  # → True
+        """
+        match self:
+            case Literal(_): True
+            case _: False
+
+    fn is_var() -> Bool:
+        """Check if this is Var dimension.
+        Returns: true for Var
+        Example: Dim.Var(var: v).is_var()  # → True
+        """
+        match self:
+            case Var(_): True
+            case _: False
+
+    fn is_named() -> Bool:
+        """Check if this is Named dimension.
+        Returns: true for Named
+        Example: Dim.Named(name: "batch", range: None).is_named()  # → True
+        """
+        match self:
+            case Named(_, _): True
+            case _: False
+
+    fn is_dynamic() -> Bool:
+        """Check if this is Dynamic dimension.
+        Returns: true for Dynamic
+        Example: Dim.Dynamic.is_dynamic()  # → True
+        """
+        match self:
+            case Dynamic: True
+            case _: False
+
+    fn is_broadcast() -> Bool:
+        """Check if this is Broadcast dimension.
+        Returns: true for Broadcast
+        Example: Dim.Broadcast.is_broadcast()  # → True
+        """
+        match self:
+            case Broadcast: True
+            case _: False
+
+    fn is_inferred() -> Bool:
+        """Check if dimension requires inference (Var or Dynamic).
+        Returns: true for Var or Dynamic
+        Example: Dim.Var(var: v).is_inferred()  # → True
+        """
+        match self:
+            case Var(_): True
+            case Dynamic: True
+            case _: False
+
+    fn has_range() -> Bool:
+        """Check if dimension has range constraints.
+        Returns: true if Named with range or Literal
+        Example: Dim.Named(name: "batch", range: Some((1, 64))).has_range()  # → True
+        """
+        self.get_range().is_some()
+
+    fn description() -> String:
+        """Get human-readable description of the dimension kind.
+        Returns: descriptive explanation
+        Example: Dim.Literal(value: 10).description()  # → "Fixed dimension size: 10"
+        """
+        match self:
+            case Literal(v): "Fixed dimension size: {v}"
+            case Var(v):
+                match v.name:
+                    case Some(n): "Dimension variable: {n} (id={v.id})"
+                    case None: "Dimension variable: id={v.id}"
+            case Named(n, range):
+                match range:
+                    case Some((lo, hi)): "Named dimension: {n} in range [{lo}, {hi}]"
+                    case None: "Named dimension: {n}"
+            case Dynamic: "Dynamic dimension (runtime-determined)"
+            case Broadcast: "Broadcast dimension (flexible)"
+
+    fn summary() -> String:
+        """Get comprehensive summary of the dimension.
+        Returns: summary with type, representation, and properties
+        Example: Dim.Named(name: "batch", range: Some((1, 64))).summary()
+                # → "Dim: batch: 1..64 (Named dimension: batch in range [1, 64], has range, inferred=false)"
+        """
+        let repr = self.to_string()
+        let desc = self.description()
+        let mut props = []
+
+        if self.is_concrete():
+            props.push("concrete")
+        if self.has_range():
+            props.push("has range")
+        if self.is_inferred():
+            props.push("inferred=true")
+        else:
+            props.push("inferred=false")
+
+        let props_str = if props.len() > 0:
+            ", " + props.join(", ")
+        else:
+            ""
+
+        "Dim: {repr} ({desc}{props_str})"
+
+# Dimension constraint for verification
+enum DimConstraint:
+    # Two dimensions must be equal
+    Equal(d1: Dim, d2: Dim)
+    # Dimension must be greater than value
+    GreaterThan(d: Dim, min: Int)
+    # Dimension must be less than value
+    LessThan(d: Dim, max: Int)
+    # Dimension must be in range
+    InRange(d: Dim, min: Int, max: Int)
+    # Product of dimensions must equal value
+    ProductEquals(dims: List<Dim>, value: Int)
+    # Two products must be equal (for reshape)
+    ProductsEqual(dims1: List<Dim>, dims2: List<Dim>)
+
+    fn to_string() -> String:
+        match self:
+            case Equal(d1, d2): "{d1.to_string()} = {d2.to_string()}"
+            case GreaterThan(d, min): "{d.to_string()} > {min}"
+            case LessThan(d, max): "{d.to_string()} < {max}"
+            case InRange(d, min, max): "{min} <= {d.to_string()} <= {max}"
+            case ProductEquals(dims, val):
+                let dims_str = dims.mapped(\d: d.to_string()).join(" * ")
+                "{dims_str} = {val}"
+            case ProductsEqual(d1s, d2s):
+                let s1 = d1s.mapped(|d| d.to_string()).join(" * ")
+                let s2 = d2s.mapped(|d| d.to_string()).join(" * ")
+                "{s1} = {s2}"
+
+    fn is_equal() -> Bool:
+        """Check if this is Equal constraint.
+        Returns: true for Equal
+        Example: DimConstraint.Equal(d1: d1, d2: d2).is_equal()  # → True
+        """
+        match self:
+            case Equal(_, _): True
+            case _: False
+
+    fn is_greater_than() -> Bool:
+        """Check if this is GreaterThan constraint.
+        Returns: true for GreaterThan
+        Example: DimConstraint.GreaterThan(d: d, min: 1).is_greater_than()  # → True
+        """
+        match self:
+            case GreaterThan(_, _): True
+            case _: False
+
+    fn is_less_than() -> Bool:
+        """Check if this is LessThan constraint.
+        Returns: true for LessThan
+        Example: DimConstraint.LessThan(d: d, max: 100).is_less_than()  # → True
+        """
+        match self:
+            case LessThan(_, _): True
+            case _: False
+
+    fn is_in_range() -> Bool:
+        """Check if this is InRange constraint.
+        Returns: true for InRange
+        Example: DimConstraint.InRange(d: d, min: 1, max: 100).is_in_range()  # → True
+        """
+        match self:
+            case InRange(_, _, _): True
+            case _: False
+
+    fn is_product_equals() -> Bool:
+        """Check if this is ProductEquals constraint.
+        Returns: true for ProductEquals
+        Example: DimConstraint.ProductEquals(dims: ds, value: 100).is_product_equals()  # → True
+        """
+        match self:
+            case ProductEquals(_, _): True
+            case _: False
+
+    fn is_products_equal() -> Bool:
+        """Check if this is ProductsEqual constraint.
+        Returns: true for ProductsEqual
+        Example: DimConstraint.ProductsEqual(dims1: d1s, dims2: d2s).is_products_equal()  # → True
+        """
+        match self:
+            case ProductsEqual(_, _): True
+            case _: False
+
+    fn is_equality_constraint() -> Bool:
+        """Check if constraint enforces equality.
+        Returns: true for Equal or ProductsEqual
+        Example: DimConstraint.Equal(d1: d1, d2: d2).is_equality_constraint()  # → True
+        """
+        match self:
+            case Equal(_, _): True
+            case ProductsEqual(_, _): True
+            case _: False
+
+    fn is_range_constraint() -> Bool:
+        """Check if constraint enforces range bounds.
+        Returns: true for GreaterThan, LessThan, or InRange
+        Example: DimConstraint.InRange(d: d, min: 1, max: 100).is_range_constraint()  # → True
+        """
+        match self:
+            case GreaterThan(_, _): True
+            case LessThan(_, _): True
+            case InRange(_, _, _): True
+            case _: False
+
+    fn is_product_constraint() -> Bool:
+        """Check if constraint involves product of dimensions.
+        Returns: true for ProductEquals or ProductsEqual
+        Example: DimConstraint.ProductEquals(dims: ds, value: 100).is_product_constraint()  # → True
+        """
+        match self:
+            case ProductEquals(_, _): True
+            case ProductsEqual(_, _): True
+            case _: False
+
+    fn description() -> String:
+        """Get human-readable description of the constraint.
+        Returns: descriptive explanation
+        Example: DimConstraint.Equal(d1: d1, d2: d2).description()
+                # → "Equality constraint: two dimensions must be equal"
+        """
+        match self:
+            case Equal(_, _): "Equality constraint: two dimensions must be equal"
+            case GreaterThan(_, _): "Lower bound constraint: dimension must exceed minimum"
+            case LessThan(_, _): "Upper bound constraint: dimension must not exceed maximum"
+            case InRange(_, _, _): "Range constraint: dimension must be within bounds"
+            case ProductEquals(_, _): "Product constraint: product of dimensions must equal value"
+            case ProductsEqual(_, _): "Product equality constraint: two products must be equal"
+
+    fn summary() -> String:
+        """Get comprehensive summary of the constraint.
+        Returns: summary with constraint expression, description, and category
+        Example: DimConstraint.InRange(d: d, min: 1, max: 100).summary()
+                # → "DimConstraint: 1 <= d <= 100 (Range constraint: dimension must be within bounds, range constraint)"
+        """
+        let expr = self.to_string()
+        let desc = self.description()
+        let mut category = "other"
+
+        if self.is_equality_constraint():
+            category = "equality constraint"
+        elif self.is_range_constraint():
+            category = "range constraint"
+        elif self.is_product_constraint():
+            category = "product constraint"
+
+        "DimConstraint: {expr} ({desc}, {category})"
+
+# ============================================================================
+# Tensor Shape
+# ============================================================================
+
+# Tensor shape: list of dimensions
+class TensorShape:
+    dims: List<Dim>
+
+    fn new(dims: List<Dim>) -> TensorShape:
+        TensorShape(dims: dims)
+
+    fn from_literals(sizes: List<Int>) -> TensorShape:
+        TensorShape(dims: sizes.mapped(|s| Dim.Literal(value: s)))
+
+    fn ndim() -> Int:
+        self.dims.len()
+
+    fn to_string() -> String:
+        let dim_strs = self.dims.mapped(|d| d.to_string())
+        "[" + dim_strs.join(", ") + "]"
+
+    fn get(idx: Int) -> Option<Dim>:
+        if idx >= 0 and idx < self.dims.len():
+            Some(self.dims[idx])
+        else if idx < 0 and -idx <= self.dims.len():
+            Some(self.dims[self.dims.len() + idx])
+        else:
+            None
+
+    fn is_concrete() -> Bool:
+        self.dims.all(|d| d.is_concrete())
+
+    # Get minimum total elements (from range minimums)
+    fn min_elements() -> Option<Int>:
+        let mut product = 1
+        for d in self.dims:
+            match d.get_range():
+                case Some((lo, _)):
+                    product = product * lo
+                case None:
+                    return None
+        Some(product)
+
+    # Get maximum total elements (from range maximums)
+    fn max_elements() -> Option<Int>:
+        let mut product = 1
+        for d in self.dims:
+            match d.get_range():
+                case Some((_, hi)):
+                    product = product * hi
+                case None:
+                    return None
+        Some(product)
+
+# ============================================================================
+# Shape Environment
+# ============================================================================
+
+# Environment tracking dimension bindings and constraints
+class ShapeEnv:
+    bindings: Dict<Int, Dim>       # Variable ID -> bound dimension
+    named_dims: Dict<String, Dim>  # Named dimension -> value/range
+    constraints: List<DimConstraint>
+
+    fn new() -> ShapeEnv:
+        ShapeEnv(bindings: {}, named_dims: {}, constraints: [])
+
+    me bind_var(var_id: Int, dim: Dim):
+        self.bindings[var_id] = dim
+
+    me bind_named(name: String, dim: Dim):
+        self.named_dims[name] = dim
+
+    me add_constraint(c: DimConstraint):
+        self.constraints.push(c)
+
+    fn lookup_var(var_id: Int) -> Option<Dim>:
+        self.bindings.get(var_id)
+
+    fn lookup_named(name: String) -> Option<Dim>:
+        self.named_dims.get(name)
+
+    fn apply(dim: Dim) -> Dim:
+        match dim:
+            case Dim.Var(v):
+                match self.lookup_var(v.id):
+                    case Some(bound):
+                        self.apply(bound)
+                    case None:
+                        dim
+            case Dim.Named(n, _):
+                match self.lookup_named(n):
+                    case Some(bound):
+                        self.apply(bound)
+                    case None:
+                        dim
+            case _:
+                dim
+
+    fn apply_shape(shape: TensorShape) -> TensorShape:
+        TensorShape(dims: shape.dims.mapped(|d| self.apply(d)))
+
+# ============================================================================
+# Shape Errors
+# ============================================================================
+
+enum ShapeError:
+    RankMismatch(expected: Int, actual: Int)
+    DimMismatch(dim_idx: Int, expected: Dim, actual: Dim)
+    DimOutOfRange(dim_idx: Int, value: Int, min: Int, max: Int)
+    MatmulShapeMismatch(left: TensorShape, right: TensorShape)
+    ReshapeElementsMismatch(input: TensorShape, output: TensorShape)
+    BroadcastIncompatible(shapes: List<TensorShape>)
+    InferenceError(message: String)
+
+    fn to_string() -> String:
+        match self:
+            case RankMismatch(e, a):
+                "Rank mismatch: expected {e} dimensions, got {a}"
+            case DimMismatch(idx, e, a):
+                "Dimension {idx} mismatch: expected {e.to_string()}, got {a.to_string()}"
+            case DimOutOfRange(idx, v, min, max):
+                "Dimension {idx} out of range: {v} not in [{min}, {max}]"
+            case MatmulShapeMismatch(l, r):
+                "Matmul shape mismatch: {l.to_string()} @ {r.to_string()}"
+            case ReshapeElementsMismatch(i, o):
+                "Reshape elements mismatch: {i.to_string()} -> {o.to_string()}"
+            case BroadcastIncompatible(shapes):
+                let ss = shapes.mapped(|s| s.to_string()).join(", ")
+                "Broadcast incompatible shapes: {ss}"
+            case InferenceError(msg):
+                "Inference error: {msg}"
+
+    fn is_rank_mismatch() -> Bool:
+        """Check if this is RankMismatch error.
+        Returns: true for RankMismatch
+        Example: ShapeError.RankMismatch(expected: 3, actual: 2).is_rank_mismatch()  # → True
+        """
+        match self:
+            case RankMismatch(_, _): True
+            case _: False
+
+    fn is_dim_mismatch() -> Bool:
+        """Check if this is DimMismatch error.
+        Returns: true for DimMismatch
+        Example: ShapeError.DimMismatch(dim_idx: 0, expected: d1, actual: d2).is_dim_mismatch()  # → True
+        """
+        match self:
+            case DimMismatch(_, _, _): True
+            case _: False
+
+    fn is_dim_out_of_range() -> Bool:
+        """Check if this is DimOutOfRange error.
+        Returns: true for DimOutOfRange
+        Example: ShapeError.DimOutOfRange(dim_idx: 0, value: 200, min: 1, max: 100).is_dim_out_of_range()  # → True
+        """
+        match self:
+            case DimOutOfRange(_, _, _, _): True
+            case _: False
+
+    fn is_matmul_shape_mismatch() -> Bool:
+        """Check if this is MatmulShapeMismatch error.
+        Returns: true for MatmulShapeMismatch
+        Example: ShapeError.MatmulShapeMismatch(left: l, right: r).is_matmul_shape_mismatch()  # → True
+        """
+        match self:
+            case MatmulShapeMismatch(_, _): True
+            case _: False
+
+    fn is_reshape_elements_mismatch() -> Bool:
+        """Check if this is ReshapeElementsMismatch error.
+        Returns: true for ReshapeElementsMismatch
+        Example: ShapeError.ReshapeElementsMismatch(input: i, output: o).is_reshape_elements_mismatch()  # → True
+        """
+        match self:
+            case ReshapeElementsMismatch(_, _): True
+            case _: False
+
+    fn is_broadcast_incompatible() -> Bool:
+        """Check if this is BroadcastIncompatible error.
+        Returns: true for BroadcastIncompatible
+        Example: ShapeError.BroadcastIncompatible(shapes: ss).is_broadcast_incompatible()  # → True
+        """
+        match self:
+            case BroadcastIncompatible(_): True
+            case _: False
+
+    fn is_inference_error() -> Bool:
+        """Check if this is InferenceError.
+        Returns: true for InferenceError
+        Example: ShapeError.InferenceError(message: "failed").is_inference_error()  # → True
+        """
+        match self:
+            case InferenceError(_): True
+            case _: False
+
+    fn is_shape_mismatch() -> Bool:
+        """Check if error is related to shape incompatibility.
+        Returns: true for MatmulShapeMismatch, ReshapeElementsMismatch, or BroadcastIncompatible
+        Example: ShapeError.MatmulShapeMismatch(left: l, right: r).is_shape_mismatch()  # → True
+        """
+        match self:
+            case MatmulShapeMismatch(_, _): True
+            case ReshapeElementsMismatch(_, _): True
+            case BroadcastIncompatible(_): True
+            case _: False
+
+    fn is_dimension_error() -> Bool:
+        """Check if error is related to individual dimension issues.
+        Returns: true for DimMismatch or DimOutOfRange
+        Example: ShapeError.DimOutOfRange(dim_idx: 0, value: 200, min: 1, max: 100).is_dimension_error()  # → True
+        """
+        match self:
+            case DimMismatch(_, _, _): True
+            case DimOutOfRange(_, _, _, _): True
+            case _: False
+
+    fn is_structural_error() -> Bool:
+        """Check if error is related to structural incompatibility.
+        Returns: true for RankMismatch or shape mismatches
+        Example: ShapeError.RankMismatch(expected: 3, actual: 2).is_structural_error()  # → True
+        """
+        match self:
+            case RankMismatch(_, _): True
+            case MatmulShapeMismatch(_, _): True
+            case ReshapeElementsMismatch(_, _): True
+            case BroadcastIncompatible(_): True
+            case _: False
+
+    fn description() -> String:
+        """Get human-readable description of the error kind.
+        Returns: descriptive explanation
+        Example: ShapeError.RankMismatch(expected: 3, actual: 2).description()
+                # → "Rank mismatch: tensor has wrong number of dimensions"
+        """
+        match self:
+            case RankMismatch(_, _): "Rank mismatch: tensor has wrong number of dimensions"
+            case DimMismatch(_, _, _): "Dimension mismatch: dimension size doesn't match expected value"
+            case DimOutOfRange(_, _, _, _): "Dimension out of range: dimension size violates range constraint"
+            case MatmulShapeMismatch(_, _): "Matrix multiplication shape mismatch: incompatible shapes for matmul"
+            case ReshapeElementsMismatch(_, _): "Reshape elements mismatch: total elements don't match"
+            case BroadcastIncompatible(_): "Broadcast incompatible: shapes cannot be broadcast together"
+            case InferenceError(_): "Inference error: dimension inference failed"
+
+    fn summary() -> String:
+        """Get comprehensive summary of the error.
+        Returns: summary with error message, description, and category
+        Example: ShapeError.RankMismatch(expected: 3, actual: 2).summary()
+                # → "ShapeError: Rank mismatch: expected 3 dimensions, got 2 (Rank mismatch: tensor has wrong number of dimensions, structural error)"
+        """
+        let msg = self.to_string()
+        let desc = self.description()
+        let mut category = "other"
+
+        if self.is_structural_error():
+            category = "structural error"
+        elif self.is_dimension_error():
+            category = "dimension error"
+        elif self.is_inference_error():
+            category = "inference error"
+
+        "ShapeError: {msg} ({desc}, {category})"
+
+# ============================================================================
+# Dimension Inference Context
+# ============================================================================
+
+class DimInferenceContext:
+    next_var_id: Int
+    env: ShapeEnv
+    errors: List<ShapeError>
+
+    fn new() -> DimInferenceContext:
+        DimInferenceContext(
+            next_var_id: 0,
+            env: ShapeEnv.new(),
+            errors: []
+        )
+
+    me fresh_var() -> Dim:
+        let id = self.next_var_id
+        self.next_var_id = self.next_var_id + 1
+        Dim.Var(var: DimVar.new(id))
+
+    me fresh_named_var(name: String) -> Dim:
+        let id = self.next_var_id
+        self.next_var_id = self.next_var_id + 1
+        Dim.Var(var: DimVar.named(id, name))
+
+    me add_error(err: ShapeError):
+        self.errors.push(err)
+
+    fn has_errors() -> Bool:
+        self.errors.len() > 0
+
+# ============================================================================
+# Dimension Unification
+# ============================================================================
+
+# Unify two dimensions
+fn unify_dims(ctx: mut DimInferenceContext, d1: Dim, d2: Dim) -> Result<Dim, ShapeError>:
+    let d1_applied = ctx.env.apply(d1)
+    let d2_applied = ctx.env.apply(d2)
+
+    match (d1_applied, d2_applied):
+        # Same literal
+        case (Dim.Literal(v1), Dim.Literal(v2)):
+            if v1 == v2:
+                Ok(d1_applied)
+            else:
+                Err(ShapeError.DimMismatch(dim_idx: 0, expected: d1_applied, actual: d2_applied))
+
+        # Variable on left - bind it
+        case (Dim.Var(v), _):
+            ctx.env.bind_var(v.id, d2_applied)
+            Ok(d2_applied)
+
+        # Variable on right - bind it
+        case (_, Dim.Var(v)):
+            ctx.env.bind_var(v.id, d1_applied)
+            Ok(d1_applied)
+
+        # Named with same name
+        case (Dim.Named(n1, r1), Dim.Named(n2, r2)):
+            if n1 == n2:
+                # Merge ranges (intersection)
+                match r1:
+                    case Some((lo1, hi1)):
+                        match r2:
+                            case Some((lo2, hi2)):
+                                let lo = max(lo1, lo2)
+                                let hi = min(hi1, hi2)
+                                if lo <= hi:
+                                    Ok(Dim.Named(name: n1, range: Some((lo, hi))))
+                                else:
+                                    Err(ShapeError.InferenceError(message: "Range intersection empty for dimension '{n1}': [{lo1}..{hi1}] ∩ [{lo2}..{hi2}] = ∅"))
+                            case None:
+                                Ok(Dim.Named(name: n1, range: Some((lo1, hi1))))
+                    case None:
+                        match r2:
+                            case Some((lo2, hi2)):
+                                Ok(Dim.Named(name: n1, range: Some((lo2, hi2))))
+                            case None:
+                                Ok(Dim.Named(name: n1, range: None))
+            else:
+                # Different names - add equality constraint
+                ctx.env.add_constraint(DimConstraint.Equal(d1: d1_applied, d2: d2_applied))
+                Ok(d1_applied)
+
+        # Named with literal - bind named to literal
+        case (Dim.Named(n, range), Dim.Literal(v)):
+            # Check range constraint
+            match range:
+                case Some((lo, hi)):
+                    if v < lo or v > hi:
+                        return Err(ShapeError.DimOutOfRange(dim_idx: 0, value: v, min: lo, max: hi))
+                case None:
+                    ()
+            ctx.env.bind_named(n, Dim.Literal(value: v))
+            Ok(Dim.Literal(value: v))
+
+        case (Dim.Literal(v), Dim.Named(n, range)):
+            # Check range constraint
+            match range:
+                case Some((lo, hi)):
+                    if v < lo or v > hi:
+                        return Err(ShapeError.DimOutOfRange(dim_idx: 0, value: v, min: lo, max: hi))
+                case None:
+                    ()
+            ctx.env.bind_named(n, Dim.Literal(value: v))
+            Ok(Dim.Literal(value: v))
+
+        # Dynamic matches anything
+        case (Dim.Dynamic, _): Ok(d2_applied)
+        case (_, Dim.Dynamic): Ok(d1_applied)
+
+        # Broadcast rules
+        case (Dim.Broadcast, Dim.Literal(1)): Ok(Dim.Literal(value: 1))
+        case (Dim.Literal(1), Dim.Broadcast): Ok(Dim.Literal(value: 1))
+        case (Dim.Broadcast, _): Ok(d2_applied)
+        case (_, Dim.Broadcast): Ok(d1_applied)
+
+        case _:
+            Err(ShapeError.DimMismatch(dim_idx: 0, expected: d1_applied, actual: d2_applied))
+
+# Unify two shapes
+fn unify_shapes(ctx: mut DimInferenceContext, s1: TensorShape, s2: TensorShape) -> Result<TensorShape, ShapeError>:
+    if s1.ndim() != s2.ndim():
+        return Err(ShapeError.RankMismatch(expected: s1.ndim(), actual: s2.ndim()))
+
+    let mut result_dims: List<Dim> = []
+    for i in 0..s1.ndim():
+        let d1 = s1.dims[i]
+        let d2 = s2.dims[i]
+        match unify_dims(ctx, d1, d2):
+            case Ok(unified):
+                result_dims.push(unified)
+            case Err(e):
+                match e:
+                    case ShapeError.DimMismatch(_, exp, act):
+                        return Err(ShapeError.DimMismatch(dim_idx: i, expected: exp, actual: act))
+                    case _:
+                        return Err(e)
+
+    Ok(TensorShape(dims: result_dims))
+
+# ============================================================================
+# Shape Inference for Operations
+# ============================================================================
+
+# Infer output shape of matrix multiplication
+# matmul: [..., M, K] @ [..., K, N] -> [..., M, N]
+fn infer_matmul_shape(ctx: mut DimInferenceContext, left: TensorShape, right: TensorShape) -> Result<TensorShape, ShapeError>:
+    if left.ndim() < 2 or right.ndim() < 2:
+        return Err(ShapeError.MatmulShapeMismatch(left: left, right: right))
+
+    # Get contraction dimensions
+    let left_k = left.get(-1).unwrap()
+    let right_k = right.get(-2).unwrap()
+
+    # Unify contraction dimension
+    match unify_dims(ctx, left_k, right_k):
+        case Err(_):
+            return Err(ShapeError.MatmulShapeMismatch(left: left, right: right))
+        case Ok(_):
+            ()
+
+    # Output shape: [..., M, N]
+    let m = left.get(-2).unwrap()
+    let n = right.get(-1).unwrap()
+
+    # Handle batch dimensions
+    let left_batch = left.dims[0..left.ndim()-2]
+    let right_batch = right.dims[0..right.ndim()-2]
+
+    # Broadcast batch dimensions
+    let batch: List<Dim>
+    if left_batch.len() == 0:
+        batch = right_batch
+    else if right_batch.len() == 0:
+        batch = left_batch
+    else:
+        # Simple case: same batch dims
+        batch = left_batch
+
+    let mut result_dims = batch.to_list()
+    result_dims.push(m)
+    result_dims.push(n)
+
+    Ok(TensorShape(dims: result_dims))
+
+# Infer broadcast shape for element-wise operations
+fn infer_broadcast_shape(ctx: mut DimInferenceContext, shapes: List<TensorShape>) -> Result<TensorShape, ShapeError>:
+    if shapes.len() == 0:
+        return Err(ShapeError.InferenceError(message: "Cannot infer broadcast shape: empty shape list provided"))
+
+    if shapes.len() == 1:
+        return Ok(shapes[0])
+
+    # Find max rank
+    let max_rank = shapes.mapped(|s| s.ndim()).max().unwrap_or(0)
+
+    # Pad shapes to max rank (from the right)
+    let mut padded: List<List<Dim> > = []
+    for s in shapes:
+        let pad_count = max_rank - s.ndim()
+        let mut dims: List<Dim> = []
+        for _ in 0..pad_count:
+            dims.push(Dim.Literal(value: 1))
+        for d in s.dims:
+            dims.push(d)
+        padded.push(dims)
+
+    # Broadcast each dimension
+    let mut result_dims: List<Dim> = []
+    for i in 0..max_rank:
+        let dims_at_i = padded.mapped(|p| p[i])
+        let mut result_dim = dims_at_i[0]
+
+        for j in 1..dims_at_i.len():
+            let d = dims_at_i[j]
+            match broadcast_dim(ctx, result_dim, d):
+                case Ok(broadcasted):
+                    result_dim = broadcasted
+                case Err(_):
+                    return Err(ShapeError.BroadcastIncompatible(shapes: shapes))
+
+        result_dims.push(result_dim)
+
+    Ok(TensorShape(dims: result_dims))
+
+# Broadcast two dimensions
+fn broadcast_dim(ctx: mut DimInferenceContext, d1: Dim, d2: Dim) -> Result<Dim, ShapeError>:
+    let d1_applied = ctx.env.apply(d1)
+    let d2_applied = ctx.env.apply(d2)
+
+    match (d1_applied, d2_applied):
+        # Same dimension
+        case (Dim.Literal(v1), Dim.Literal(v2)):
+            if v1 == v2:
+                Ok(d1_applied)
+            else if v1 == 1:
+                Ok(d2_applied)
+            else if v2 == 1:
+                Ok(d1_applied)
+            else:
+                Err(ShapeError.DimMismatch(dim_idx: 0, expected: d1_applied, actual: d2_applied))
+
+        # One is literal 1 - broadcast to other
+        case (Dim.Literal(1), _): Ok(d2_applied)
+        case (_, Dim.Literal(1)): Ok(d1_applied)
+
+        # Variables and named dims
+        case _:
+            unify_dims(ctx, d1_applied, d2_applied)
+
+# Verify reshape is valid (same total elements)
+fn verify_reshape(ctx: mut DimInferenceContext, input: TensorShape, output: TensorShape) -> Result<(), ShapeError>:
+    # Add constraint that products must be equal
+    ctx.env.add_constraint(DimConstraint.ProductsEqual(dims1: input.dims, dims2: output.dims))
+
+    # If both shapes are concrete, verify immediately
+    if input.is_concrete() and output.is_concrete():
+        let in_prod = input.dims.mapped(|d| d.get_value().unwrap_or(1)).product()
+        let out_prod = output.dims.mapped(|d| d.get_value().unwrap_or(1)).product()
+        if in_prod != out_prod:
+            return Err(ShapeError.ReshapeElementsMismatch(input: input, output: output))
+
+    Ok(())
+
+# Infer shape after transpose
+fn infer_transpose_shape(shape: TensorShape, dim0: Int, dim1: Int) -> Result<TensorShape, ShapeError>:
+    let n = shape.ndim()
+    if dim0 < 0 or dim0 >= n or dim1 < 0 or dim1 >= n:
+        return Err(ShapeError.InferenceError(message: "Invalid transpose dimensions: dim0={dim0}, dim1={dim1} for shape with {n} dimensions"))
+
+    let mut new_dims = shape.dims.clone()
+    let tmp = new_dims[dim0]
+    new_dims[dim0] = new_dims[dim1]
+    new_dims[dim1] = tmp
+
+    Ok(TensorShape(dims: new_dims))
+
+# Infer shape after reduction (sum, mean, etc.)
+fn infer_reduction_shape(shape: TensorShape, dim: Int, keepdim: Bool) -> Result<TensorShape, ShapeError>:
+    let n = shape.ndim()
+    let actual_dim = if dim < 0: n + dim else: dim
+
+    if actual_dim < 0 or actual_dim >= n:
+        return Err(ShapeError.InferenceError(message: "Invalid reduction dimension: dim={dim} (normalized to {actual_dim}) for shape with {n} dimensions"))
+
+    let mut new_dims: List<Dim> = []
+    for i in 0..n:
+        if i == actual_dim:
+            if keepdim:
+                new_dims.push(Dim.Literal(value: 1))
+        else:
+            new_dims.push(shape.dims[i])
+
+    Ok(TensorShape(dims: new_dims))
+
+# ============================================================================
+# Runtime Verification
+# ============================================================================
+
+# Verify actual shape matches declared shape with constraints
+fn verify_shape_at_runtime(actual: List<Int>, declared: TensorShape) -> Result<(), ShapeError>:
+    if actual.len() != declared.ndim():
+        return Err(ShapeError.RankMismatch(expected: declared.ndim(), actual: actual.len()))
+
+    for i in 0..actual.len():
+        let actual_dim = actual[i]
+        let declared_dim = declared.dims[i]
+
+        match declared_dim:
+            case Dim.Literal(v):
+                if actual_dim != v:
+                    return Err(ShapeError.DimMismatch(
+                        dim_idx: i,
+                        expected: declared_dim,
+                        actual: Dim.Literal(value: actual_dim)
+                    ))
+            case Dim.Named(_, range):
+                match range:
+                    case Some((lo, hi)):
+                        if actual_dim < lo or actual_dim > hi:
+                            return Err(ShapeError.DimOutOfRange(
+                                dim_idx: i,
+                                value: actual_dim,
+                                min: lo,
+                                max: hi
+                            ))
+                    case None:
+                        ()  # No constraint
+            case Dim.Dynamic:
+                ()  # Always valid
+            case Dim.Broadcast:
+                ()  # Always valid
+            case Dim.Var(_):
+                ()  # Should be bound by inference
+
+    Ok(())
+
+# ============================================================================
+# Memory Estimation
+# ============================================================================
+
+# Estimate memory bounds for a tensor
+fn estimate_tensor_memory(shape: TensorShape, element_bytes: Int) -> (Int, Int):
+    match (shape.min_elements(), shape.max_elements()):
+        case (Some(min_e), Some(max_e)):
+            (min_e * element_bytes, max_e * element_bytes)
+        case _:
+            (0, 0)  # Unknown
+
+# Helper functions
+fn max(a: Int, b: Int) -> Int:
+    if a > b:
+        a
+    else:
+        b
+
+fn min(a: Int, b: Int) -> Int:
+    if a < b:
+        a
+    else:
+        b
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Dim, DimVar, DimConstraint, TensorShape, ShapeEnv
+export DimInferenceContext, ShapeError
+export unify_dims, unify_shapes, infer_matmul_shape, infer_broadcast_shape
+export verify_reshape, verify_shape_at_runtime, estimate_tensor_memory
+export max, min

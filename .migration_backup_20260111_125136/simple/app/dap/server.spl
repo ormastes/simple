@@ -1,0 +1,360 @@
+# DAP Server Implementation
+# Handles DAP requests and manages debugging state
+
+import sys
+import dap.protocol as protocol
+import dap.transport as transport
+import dap.breakpoints as breakpoints
+
+# Debugger state
+enum DebuggerState:
+    Uninitialized
+    Initialized
+    Launched
+    Running
+    Stopped
+    Terminated
+
+# DAP Server
+class DapServer:
+    state: DebuggerState
+    breakpoint_manager: breakpoints.BreakpointManager
+    current_thread_id: Int
+    current_frame_id: Int
+    stop_reason: Option<protocol.StopReason>
+
+    fn new() -> DapServer:
+        DapServer(
+            state: DebuggerState.Uninitialized,
+            breakpoint_manager: breakpoints.BreakpointManager.new(),
+            current_thread_id: 1,
+            current_frame_id: 1,
+            stop_reason: None
+        )
+
+    # Handle initialize request
+    fn handle_initialize(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        transport.log_debug("Handling initialize request")
+
+        # Update state
+        self.state = DebuggerState.Initialized
+
+        # Build capabilities
+        let capabilities = protocol.Capabilities.default()
+
+        # Send response
+        transport.write_response(request_seq, true, command, Some(capabilities))?
+
+        # Send initialized event
+        transport.write_event("initialized", {})?
+
+        Ok(nil)
+
+    # Handle launch request
+    fn handle_launch(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        transport.log_debug("Handling launch request")
+
+        # Extract launch configuration
+        match arguments:
+            case Some(args):
+                # TODO: [stdlib][P2] Parse program path, args, etc.
+                # For now, just acknowledge
+                transport.log_debug("Launch config: {args}")
+            case None:
+                pass
+
+        # Update state
+        self.state = DebuggerState.Launched
+
+        # Send response
+        transport.write_response(request_seq, true, command, None)?
+
+        Ok(nil)
+
+    # Handle configurationDone request
+    fn handle_configuration_done(request_seq: Int, command: String) -> Result<Nil, String>:
+        transport.log_debug("Handling configurationDone request")
+
+        # Send response
+        transport.write_response(request_seq, true, command, None)?
+
+        # Update state to running
+        self.state = DebuggerState.Running
+
+        # TODO: [stdlib][P3] Actually start execution
+        # For now, immediately send a stopped event
+        self.send_stopped_event(protocol.StopReason.Entry)?
+
+        Ok(nil)
+
+    # Handle setBreakpoints request
+    fn handle_set_breakpoints(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        match arguments:
+            case None:
+                return Err("Missing arguments for setBreakpoints")
+            case Some(args):
+                # Extract source
+                let source_data = args.get("source")?
+                let source_path = source_data.get("path")?
+
+                # Extract breakpoints
+                let breakpoints_data = args.get("breakpoints")?
+                let mut source_breakpoints = []
+
+                for bp_data in breakpoints_data:
+                    let source_bp = protocol.SourceBreakpoint.from_json(bp_data)?
+                    source_breakpoints.push(source_bp)
+
+                # Set breakpoints
+                let entries = self.breakpoint_manager.set_breakpoints(source_path, source_breakpoints)
+
+                # Build response
+                let mut protocol_breakpoints = []
+                for entry in entries:
+                    protocol_breakpoints.push(entry.to_protocol_breakpoint().to_json())
+
+                let body = {
+                    "breakpoints": protocol_breakpoints
+                }
+
+                transport.log_debug("Set {entries.len()} breakpoints in {source_path}")
+
+                # Send response
+                transport.write_response(request_seq, true, command, Some(body))?
+
+                Ok(nil)
+
+    # Handle threads request
+    fn handle_threads(request_seq: Int, command: String) -> Result<Nil, String>:
+        # Return single main thread
+        let thread = protocol.Thread.new(self.current_thread_id, "Main Thread")
+
+        let body = {
+            "threads": [thread.to_json()]
+        }
+
+        transport.write_response(request_seq, true, command, Some(body))?
+
+        Ok(nil)
+
+    # Handle stackTrace request
+    fn handle_stack_trace(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        # Build a mock stack frame
+        # TODO: [stdlib][P3] Get actual stack from interpreter
+        let frame = protocol.StackFrame.new(
+            self.current_frame_id,
+            "main",
+            1,
+            0
+        )
+
+        let body = {
+            "stackFrames": [frame.to_json()],
+            "totalFrames": 1
+        }
+
+        transport.write_response(request_seq, true, command, Some(body))?
+
+        Ok(nil)
+
+    # Handle scopes request
+    fn handle_scopes(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        # Return local and global scopes
+        let local_scope = protocol.Scope.new("Local", 1)
+        let global_scope = protocol.Scope.new("Global", 2)
+
+        let body = {
+            "scopes": [
+                local_scope.to_json(),
+                global_scope.to_json()
+            ]
+        }
+
+        transport.write_response(request_seq, true, command, Some(body))?
+
+        Ok(nil)
+
+    # Handle variables request
+    fn handle_variables(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        match arguments:
+            case None:
+                return Err("Missing arguments for variables")
+            case Some(args):
+                let variables_reference = args.get("variablesReference")?
+
+                # Mock variables for now
+                # TODO: [stdlib][P3] Get actual variables from interpreter
+                let var1 = protocol.Variable.new("x", "42").with_type("Int")
+                let var2 = protocol.Variable.new("name", "\"example\"").with_type("String")
+
+                let body = {
+                    "variables": [
+                        var1.to_json(),
+                        var2.to_json()
+                    ]
+                }
+
+                transport.write_response(request_seq, true, command, Some(body))?
+
+                Ok(nil)
+
+    # Handle continue request
+    fn handle_continue(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        transport.log_debug("Handling continue request")
+
+        # Update state
+        self.state = DebuggerState.Running
+
+        let body = {
+            "allThreadsContinued": true
+        }
+
+        transport.write_response(request_seq, true, command, Some(body))?
+
+        # TODO: [stdlib][P3] Actually continue execution
+        # For now, just acknowledge
+
+        Ok(nil)
+
+    # Handle pause request
+    fn handle_pause(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        transport.log_debug("Handling pause request")
+
+        # Send response
+        transport.write_response(request_seq, true, command, None)?
+
+        # Send stopped event
+        self.send_stopped_event(protocol.StopReason.Pause)?
+
+        Ok(nil)
+
+    # Handle next (step over) request
+    fn handle_next(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        transport.log_debug("Handling next (step over) request")
+
+        # Send response
+        transport.write_response(request_seq, true, command, None)?
+
+        # TODO: [stdlib][P3] Actually step
+        # For now, send stopped event immediately
+        self.send_stopped_event(protocol.StopReason.Step)?
+
+        Ok(nil)
+
+    # Handle stepIn request
+    fn handle_step_in(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        transport.log_debug("Handling stepIn request")
+
+        transport.write_response(request_seq, true, command, None)?
+
+        self.send_stopped_event(protocol.StopReason.Step)?
+
+        Ok(nil)
+
+    # Handle stepOut request
+    fn handle_step_out(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        transport.log_debug("Handling stepOut request")
+
+        transport.write_response(request_seq, true, command, None)?
+
+        self.send_stopped_event(protocol.StopReason.Step)?
+
+        Ok(nil)
+
+    # Handle disconnect request
+    fn handle_disconnect(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        transport.log_debug("Handling disconnect request")
+
+        # Update state
+        self.state = DebuggerState.Terminated
+
+        # Send response
+        transport.write_response(request_seq, true, command, None)?
+
+        # Send terminated event
+        transport.write_event("terminated", {})?
+
+        Ok(nil)
+
+    # Send stopped event
+    fn send_stopped_event(reason: protocol.StopReason) -> Result<Nil, String>:
+        self.state = DebuggerState.Stopped
+        self.stop_reason = Some(reason)
+
+        let body = {
+            "reason": reason.to_string(),
+            "threadId": self.current_thread_id,
+            "allThreadsStopped": true
+        }
+
+        transport.write_event("stopped", body)?
+
+        Ok(nil)
+
+    # Main request dispatcher
+    fn handle_request(request: protocol.DapRequest) -> Result<Nil, String>:
+        match request.command:
+            case "initialize":
+                self.handle_initialize(request.id, request.command, request.arguments)
+            case "launch":
+                self.handle_launch(request.id, request.command, request.arguments)
+            case "configurationDone":
+                self.handle_configuration_done(request.id, request.command)
+            case "setBreakpoints":
+                self.handle_set_breakpoints(request.id, request.command, request.arguments)
+            case "threads":
+                self.handle_threads(request.id, request.command)
+            case "stackTrace":
+                self.handle_stack_trace(request.id, request.command, request.arguments)
+            case "scopes":
+                self.handle_scopes(request.id, request.command, request.arguments)
+            case "variables":
+                self.handle_variables(request.id, request.command, request.arguments)
+            case "continue":
+                self.handle_continue(request.id, request.command, request.arguments)
+            case "pause":
+                self.handle_pause(request.id, request.command, request.arguments)
+            case "next":
+                self.handle_next(request.id, request.command, request.arguments)
+            case "stepIn":
+                self.handle_step_in(request.id, request.command, request.arguments)
+            case "stepOut":
+                self.handle_step_out(request.id, request.command, request.arguments)
+            case "disconnect":
+                self.handle_disconnect(request.id, request.command, request.arguments)
+            case _:
+                # Unknown command
+                transport.log_error("Unknown command: {request.command}")
+                transport.write_response(request.id, false, request.command, None)?
+                Ok(nil)
+
+    # Main server loop
+    fn run() -> Result<Nil, String>:
+        transport.log_debug("DAP server starting")
+
+        loop:
+            # Check if terminated
+            match self.state:
+                case Terminated:
+                    transport.log_debug("Server terminated")
+                    return Ok(nil)
+                case _:
+                    pass
+
+            # Read next message
+            let message = match transport.read_message():
+                case Ok(msg):
+                    msg
+                case Err(e):
+                    transport.log_debug("Read error: {e}")
+                    return Ok(nil)
+
+            # Parse message type
+            let msg_type = transport.parse_message_type(message)?
+
+            # Only handle requests (DAP doesn't use notifications from client)
+            if msg_type == "request":
+                let request = protocol.DapRequest.from_json(message)?
+                self.handle_request(request)?
+
+        Ok(nil)

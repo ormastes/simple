@@ -1,0 +1,356 @@
+# TUI Widgets - High-level TUI Components
+#
+# Pre-built widgets for common TUI patterns like menus,
+# dialogs, progress bars, etc.
+
+use core.*
+use ui.element.*
+use ui.attrs.*
+
+# Menu widget - vertical list of selectable items
+pub struct Menu:
+    id: NodeId
+    items: Array[MenuItem]
+    selected: u64
+    title: Option[String]
+
+pub struct MenuItem:
+    label: String
+    key: Option[char]
+    enabled: bool
+
+impl Menu:
+    pub fn new(id: NodeId) -> Menu:
+        return Menu {
+            id: id,
+            items: [],
+            selected: 0,
+            title: None
+        }
+
+    pub fn with_title(self, title: &str) -> Menu:
+        self.title = Some(title.to_string())
+        return self
+
+    pub fn add_item(self, label: &str) -> Menu:
+        self.items.push(MenuItem {
+            label: label.to_string(),
+            key: None,
+            enabled: true
+        })
+        return self
+
+    pub fn add_item_with_key(self, label: &str, key: char) -> Menu:
+        self.items.push(MenuItem {
+            label: label.to_string(),
+            key: Some(key),
+            enabled: true
+        })
+        return self
+
+    pub fn select_next(self):
+        if self.selected < self.items.len() - 1:
+            self.selected = self.selected + 1
+
+    pub fn select_prev(self):
+        if self.selected > 0:
+            self.selected = self.selected - 1
+
+    pub fn selected_index(self) -> u64:
+        return self.selected
+
+    pub fn selected_item(self) -> Option[&MenuItem]:
+        if self.selected < self.items.len():
+            return Some(&self.items[self.selected])
+        return None
+
+    pub fn to_element(self, alloc: fn() -> NodeId) -> Element:
+        let mut root = Element::new(self.id, ElementKind::Box)
+
+        # Add title if present
+        if let Some(title) = &self.title:
+            let title_elem = Element::text(alloc(), title)
+                .with_class("menu-title")
+            root = root.with_child(title_elem)
+
+        # Add menu items
+        for (idx, item) in self.items.iter().enumerate():
+            let mut item_elem = Element::text(alloc(), &item.label)
+                .with_class("menu-item")
+
+            if idx == self.selected:
+                item_elem = item_elem.with_class("selected")
+
+            if not item.enabled:
+                item_elem = item_elem.with_class("disabled")
+
+            if let Some(key) = item.key:
+                item_elem = item_elem.with_attr("data-key", &key.to_string())
+
+            root = root.with_child(item_elem)
+
+        return root
+
+# Dialog widget - modal dialog box
+pub struct Dialog:
+    id: NodeId
+    title: String
+    message: String
+    buttons: Array[String]
+    selected_button: u64
+
+impl Dialog:
+    pub fn new(id: NodeId, title: &str) -> Dialog:
+        return Dialog {
+            id: id,
+            title: title.to_string(),
+            message: "".to_string(),
+            buttons: [],
+            selected_button: 0
+        }
+
+    pub fn with_message(self, msg: &str) -> Dialog:
+        self.message = msg.to_string()
+        return self
+
+    pub fn add_button(self, label: &str) -> Dialog:
+        self.buttons.push(label.to_string())
+        return self
+
+    pub fn ok_cancel(id: NodeId, title: &str, message: &str) -> Dialog:
+        return Dialog::new(id, title)
+            .with_message(message)
+            .add_button("OK")
+            .add_button("Cancel")
+
+    pub fn yes_no(id: NodeId, title: &str, message: &str) -> Dialog:
+        return Dialog::new(id, title)
+            .with_message(message)
+            .add_button("Yes")
+            .add_button("No")
+
+    pub fn select_next_button(self):
+        if self.selected_button < self.buttons.len() - 1:
+            self.selected_button = self.selected_button + 1
+
+    pub fn select_prev_button(self):
+        if self.selected_button > 0:
+            self.selected_button = self.selected_button - 1
+
+    pub fn selected_button_index(self) -> u64:
+        return self.selected_button
+
+    pub fn to_element(self, alloc: fn() -> NodeId) -> Element:
+        let mut root = Element::new(self.id, ElementKind::Box)
+            .with_class("dialog")
+
+        # Title
+        let title_elem = Element::text(alloc(), &self.title)
+            .with_class("dialog-title")
+        root = root.with_child(title_elem)
+
+        # Message
+        if not self.message.is_empty():
+            let msg_elem = Element::text(alloc(), &self.message)
+                .with_class("dialog-message")
+            root = root.with_child(msg_elem)
+
+        # Button row
+        let mut button_row = Element::new(alloc(), ElementKind::Row)
+            .with_class("dialog-buttons")
+
+        for (idx, label) in self.buttons.iter().enumerate():
+            let mut btn = Element::button(alloc(), label)
+            if idx == self.selected_button:
+                btn = btn.with_class("selected")
+            button_row = button_row.with_child(btn)
+
+        root = root.with_child(button_row)
+
+        return root
+
+# Progress bar widget
+pub struct ProgressBar:
+    id: NodeId
+    progress: f64  # 0.0 - 1.0
+    label: Option[String]
+    width: u16
+    filled_char: char
+    empty_char: char
+
+impl ProgressBar:
+    pub fn new(id: NodeId) -> ProgressBar:
+        return ProgressBar {
+            id: id,
+            progress: 0.0,
+            label: None,
+            width: 40,
+            filled_char: '#',
+            empty_char: '-'
+        }
+
+    pub fn with_width(self, width: u16) -> ProgressBar:
+        self.width = width
+        return self
+
+    pub fn with_label(self, label: &str) -> ProgressBar:
+        self.label = Some(label.to_string())
+        return self
+
+    pub fn set_progress(self, progress: f64):
+        self.progress = progress.clamp(0.0, 1.0)
+
+    pub fn increment(self, amount: f64):
+        self.set_progress(self.progress + amount)
+
+    pub fn to_element(self, alloc: fn() -> NodeId) -> Element:
+        let filled_count = ((self.progress * (self.width as f64)) as u16)
+        let empty_count = self.width - filled_count
+
+        let mut bar = String::new()
+        bar.push('[')
+        for _ in 0..filled_count:
+            bar.push(self.filled_char)
+        for _ in 0..empty_count:
+            bar.push(self.empty_char)
+        bar.push(']')
+
+        let percent = ((self.progress * 100.0) as i32)
+        bar.push_str(&f" {percent}%")
+
+        if let Some(label) = &self.label:
+            bar = f"{label}: {bar}"
+
+        return Element::text(self.id, &bar)
+            .with_class("progress-bar")
+
+# Text input widget with cursor
+pub struct TextInput:
+    id: NodeId
+    value: String
+    cursor: u64
+    placeholder: String
+    max_length: Option[u64]
+
+impl TextInput:
+    pub fn new(id: NodeId) -> TextInput:
+        return TextInput {
+            id: id,
+            value: String::new(),
+            cursor: 0,
+            placeholder: "".to_string(),
+            max_length: None
+        }
+
+    pub fn with_placeholder(self, placeholder: &str) -> TextInput:
+        self.placeholder = placeholder.to_string()
+        return self
+
+    pub fn with_max_length(self, max: u64) -> TextInput:
+        self.max_length = Some(max)
+        return self
+
+    pub fn value(self) -> &str:
+        return &self.value
+
+    pub fn set_value(self, value: &str):
+        self.value = value.to_string()
+        self.cursor = self.value.len()
+
+    pub fn insert_char(self, ch: char):
+        if let Some(max) = self.max_length:
+            if self.value.len() >= max:
+                return
+        self.value.insert(self.cursor, ch)
+        self.cursor = self.cursor + 1
+
+    pub fn backspace(self):
+        if self.cursor > 0:
+            self.cursor = self.cursor - 1
+            self.value.remove(self.cursor)
+
+    pub fn delete(self):
+        if self.cursor < self.value.len():
+            self.value.remove(self.cursor)
+
+    pub fn move_left(self):
+        if self.cursor > 0:
+            self.cursor = self.cursor - 1
+
+    pub fn move_right(self):
+        if self.cursor < self.value.len():
+            self.cursor = self.cursor + 1
+
+    pub fn move_home(self):
+        self.cursor = 0
+
+    pub fn move_end(self):
+        self.cursor = self.value.len()
+
+    pub fn to_element(self, alloc: fn() -> NodeId) -> Element:
+        return Element::input(self.id)
+            .with_attr("value", &self.value)
+            .with_attr("placeholder", &self.placeholder)
+            .with_attr("cursor", &self.cursor.to_string())
+
+# Scrollable list widget
+pub struct ScrollList:
+    id: NodeId
+    items: Array[String]
+    selected: u64
+    scroll_offset: u64
+    visible_count: u64
+
+impl ScrollList:
+    pub fn new(id: NodeId, visible_count: u64) -> ScrollList:
+        return ScrollList {
+            id: id,
+            items: [],
+            selected: 0,
+            scroll_offset: 0,
+            visible_count: visible_count
+        }
+
+    pub fn add_item(self, item: &str):
+        self.items.push(item.to_string())
+
+    pub fn clear(self):
+        self.items.clear()
+        self.selected = 0
+        self.scroll_offset = 0
+
+    pub fn select_next(self):
+        if self.selected < self.items.len() - 1:
+            self.selected = self.selected + 1
+            self.ensure_visible()
+
+    pub fn select_prev(self):
+        if self.selected > 0:
+            self.selected = self.selected - 1
+            self.ensure_visible()
+
+    fn ensure_visible():
+        if self.selected < self.scroll_offset:
+            self.scroll_offset = self.selected
+        else if self.selected >= self.scroll_offset + self.visible_count:
+            self.scroll_offset = self.selected - self.visible_count + 1
+
+    pub fn to_element(self, alloc: fn() -> NodeId) -> Element:
+        let mut root = Element::new(self.id, ElementKind::List)
+            .with_class("scroll-list")
+
+        let end = (self.scroll_offset + self.visible_count).min(self.items.len())
+        for idx in self.scroll_offset..end:
+            let mut item_elem = Element::text(alloc(), &self.items[idx])
+                .with_class("list-item")
+            if idx == self.selected:
+                item_elem = item_elem.with_class("selected")
+            root = root.with_child(item_elem)
+
+        # Add scroll indicators
+        if self.scroll_offset > 0:
+            root = root.with_attr("data-scroll-up", "true")
+        if end < self.items.len():
+            root = root.with_attr("data-scroll-down", "true")
+
+        return root

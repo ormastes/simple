@@ -1,0 +1,275 @@
+# Session Management for Language Model Server
+
+import sys
+import protocol
+
+# Session state for a client connection
+pub class Session:
+    id: String
+    workspace_root: Option<String>
+    client_info: Option<protocol.ClientInfo>
+    created_at: Int          # Timestamp in milliseconds
+    last_activity: Int       # Timestamp in milliseconds
+
+    # Create a new session
+    pub fn new() -> Session:
+        let now = sys.time.now_ms()
+        Session {
+            id: generate_session_id(),
+            workspace_root: None,
+            client_info: None,
+            created_at: now,
+            last_activity: now
+        }
+
+    # Update last activity timestamp
+    pub fn touch(mut self):
+        self.last_activity = sys.time.now_ms()
+
+    # Set workspace root
+    pub fn set_workspace_root(mut self, root: String):
+        self.workspace_root = Some(root)
+
+    # Set client information
+    pub fn set_client_info(mut self, info: protocol.ClientInfo):
+        self.client_info = Some(info)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_workspace_root(self) -> Bool:
+        """Check if workspace root is set.
+
+        Returns:
+            true if workspace configured
+
+        Example:
+            session.has_workspace_root()  # → true
+        """
+        return self.workspace_root.is_some()
+
+    pub fn has_client_info(self) -> Bool:
+        """Check if client info is set.
+
+        Returns:
+            true if client info configured
+
+        Example:
+            session.has_client_info()  # → true
+        """
+        return self.client_info.is_some()
+
+    pub fn get_id(self) -> &String:
+        """Get session ID.
+
+        Returns:
+            Session ID string
+
+        Example:
+            session.get_id()  # → "session_1234567890_5678"
+        """
+        return &self.id
+
+    pub fn get_age(self) -> Int:
+        """Get session age in milliseconds.
+
+        Returns:
+            Time since session creation
+
+        Example:
+            session.get_age()  # → 5000
+        """
+        let now = sys.time.now_ms()
+        return now - self.created_at
+
+    pub fn get_idle_time(self) -> Int:
+        """Get idle time in milliseconds.
+
+        Returns:
+            Time since last activity
+
+        Example:
+            session.get_idle_time()  # → 2000
+        """
+        let now = sys.time.now_ms()
+        return now - self.last_activity
+
+    pub fn is_idle(self, threshold_ms: Int) -> Bool:
+        """Check if session is idle.
+
+        Args:
+            threshold_ms: Idle threshold in milliseconds
+
+        Returns:
+            true if idle longer than threshold
+
+        Example:
+            session.is_idle(30000)  # → false
+        """
+        return self.get_idle_time() > threshold_ms
+
+    pub fn summary(self) -> String:
+        """Get session summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            session.summary()
+            # → "Session: id=session_123..., age=5000ms, idle=2000ms, workspace=Some"
+        """
+        let age = self.get_age()
+        let idle = self.get_idle_time()
+        let workspace = if self.has_workspace_root(): "Some" else: "None"
+        return "Session: id={self.id}, age={age}ms, idle={idle}ms, workspace={workspace}"
+
+# Workspace state
+pub class Workspace:
+    root: String
+    files: Set<String>       # Tracked files
+    dirty_files: Set<String> # Modified but not saved
+
+    # Create a new workspace
+    pub fn new(root: String) -> Workspace:
+        Workspace {
+            root: root,
+            files: Set.new(),
+            dirty_files: Set.new()
+        }
+
+    # Track a file
+    pub fn track_file(mut self, path: String):
+        self.files.insert(path)
+
+    # Mark file as dirty
+    pub fn mark_dirty(mut self, path: String):
+        self.dirty_files.insert(path)
+
+    # Mark file as clean
+    pub fn mark_clean(mut self, path: String):
+        self.dirty_files.remove(path)
+
+    # Check if file is tracked
+    pub fn is_tracked(self, path: String) -> Bool:
+        self.files.contains(path)
+
+    # Get all tracked files
+    pub fn get_files(self) -> List<String>:
+        self.files.to_list()
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_files(self) -> Bool:
+        """Check if tracking any files.
+
+        Returns:
+            true if files are tracked
+
+        Example:
+            workspace.has_files()  # → true
+        """
+        return not self.files.is_empty()
+
+    pub fn file_count(self) -> Int:
+        """Get number of tracked files.
+
+        Returns:
+            Count of tracked files
+
+        Example:
+            workspace.file_count()  # → 15
+        """
+        return self.files.size()
+
+    pub fn has_dirty_files(self) -> Bool:
+        """Check if any files are dirty.
+
+        Returns:
+            true if dirty files exist
+
+        Example:
+            workspace.has_dirty_files()  # → true
+        """
+        return not self.dirty_files.is_empty()
+
+    pub fn dirty_count(self) -> Int:
+        """Get number of dirty files.
+
+        Returns:
+            Count of dirty files
+
+        Example:
+            workspace.dirty_count()  # → 3
+        """
+        return self.dirty_files.size()
+
+    pub fn is_dirty(self, path: String) -> Bool:
+        """Check if specific file is dirty.
+
+        Args:
+            path: File path to check
+
+        Returns:
+            true if file is dirty
+
+        Example:
+            workspace.is_dirty("src/main.spl")  # → true
+        """
+        return self.dirty_files.contains(path)
+
+    pub fn get_dirty_files(self) -> List<String>:
+        """Get list of dirty files.
+
+        Returns:
+            List of dirty file paths
+
+        Example:
+            files = workspace.get_dirty_files()
+        """
+        return self.dirty_files.to_list()
+
+    pub fn get_root(self) -> &String:
+        """Get workspace root path.
+
+        Returns:
+            Root path string
+
+        Example:
+            workspace.get_root()  # → "/home/user/project"
+        """
+        return &self.root
+
+    pub fn is_clean(self) -> Bool:
+        """Check if workspace has no dirty files.
+
+        Returns:
+            true if no dirty files
+
+        Example:
+            workspace.is_clean()  # → false
+        """
+        return self.dirty_files.is_empty()
+
+    pub fn summary(self) -> String:
+        """Get workspace summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            workspace.summary()
+            # → "Workspace: root='/project', files=15, dirty=3"
+        """
+        let file_count = self.file_count()
+        let dirty_count = self.dirty_count()
+        return "Workspace: root='{self.root}', files={file_count}, dirty={dirty_count}"
+
+# Generate a unique session ID
+fn generate_session_id() -> String:
+    # Use timestamp + random component
+    let now = sys.time.now_ms()
+    let random = sys.random.random_int()
+    "session_{now}_{random}"

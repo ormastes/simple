@@ -1,0 +1,368 @@
+# Electron System Tray API
+# Create and manage system tray icons
+
+# External FFI declarations
+extern fn electron_tray_create(title: String): i64
+extern fn electron_tray_destroy(tray_id: i64): void
+extern fn electron_tray_set_icon(tray_id: i64, icon_path: String): void
+extern fn electron_tray_set_title(tray_id: i64, title: String): void
+extern fn electron_tray_set_tooltip(tray_id: i64, tooltip: String): void
+extern fn electron_tray_set_menu(tray_id: i64, menu_json: String): void
+extern fn electron_tray_display_balloon(tray_id: i64, title: String, content: String): void
+
+# Tray instance tracker
+let next_tray_id: i64 = 0
+let active_trays: Dict[i64, Tray] = {}
+
+# Menu item type
+pub class MenuItem:
+    pub label: String
+    pub type: String  # "normal", "separator", "checkbox", "radio"
+    pub enabled: bool
+    pub visible: bool
+    pub checked: bool
+    pub callback_id: i64
+
+    pub fn new(label: String, on_click: fn(): void?): MenuItem =
+        """Create a new menu item.
+
+        Example:
+            item = MenuItem.new("Open", fn():
+                print("Clicked Open")
+            )
+        """
+        let callback_id = 0
+        if on_click != none:
+            callback_id = _register_menu_callback(on_click!)
+
+        MenuItem {
+            label: label,
+            type: "normal",
+            enabled: true,
+            visible: true,
+            checked: false,
+            callback_id: callback_id
+        }
+
+    pub fn set_enabled(self, enabled: bool): MenuItem =
+        """Set whether menu item is enabled."""
+        self.enabled = enabled
+        self
+
+    pub fn set_visible(self, visible: bool): MenuItem =
+        """Set whether menu item is visible."""
+        self.visible = visible
+        self
+
+    pub fn set_checked(self, checked: bool): MenuItem =
+        """Set checked state (for checkbox/radio items)."""
+        self.checked = checked
+        self
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_normal(self) -> bool:
+        """Check if menu item type is normal.
+
+        Returns:
+            true if normal type
+
+        Example:
+            item.is_normal()  # → true
+        """
+        return self.type == "normal"
+
+    pub fn is_separator(self) -> bool:
+        """Check if menu item type is separator.
+
+        Returns:
+            true if separator type
+
+        Example:
+            item.is_separator()  # → false
+        """
+        return self.type == "separator"
+
+    pub fn is_checkbox(self) -> bool:
+        """Check if menu item type is checkbox.
+
+        Returns:
+            true if checkbox type
+
+        Example:
+            item.is_checkbox()  # → false
+        """
+        return self.type == "checkbox"
+
+    pub fn is_radio(self) -> bool:
+        """Check if menu item type is radio.
+
+        Returns:
+            true if radio type
+
+        Example:
+            item.is_radio()  # → false
+        """
+        return self.type == "radio"
+
+    pub fn has_callback(self) -> bool:
+        """Check if menu item has callback registered.
+
+        Returns:
+            true if callback ID is valid
+
+        Example:
+            item.has_callback()  # → true
+        """
+        return self.callback_id > 0
+
+    pub fn summary(self) -> String:
+        """Get menu item summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            item.summary()
+            # → "MenuItem: 'Open' (normal, enabled, visible)"
+        """
+        let enabled_str = if self.enabled { "enabled" } else { "disabled" }
+        let visible_str = if self.visible { "visible" } else { "hidden" }
+        let checked_str = if self.checked { ", checked" } else { "" }
+        return "MenuItem: '{self.label}' ({self.type}, {enabled_str}, {visible_str}{checked_str})"
+
+# Menu separator
+pub class MenuSeparator:
+    pub type: String = "separator"
+
+    pub fn new(): MenuSeparator =
+        """Create menu separator."""
+        MenuSeparator {}
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_separator(self) -> bool:
+        """Check if this is a separator (always true).
+
+        Returns:
+            Always true
+
+        Example:
+            sep.is_separator()  # → true
+        """
+        return true
+
+    pub fn summary(self) -> String:
+        """Get menu separator summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            sep.summary()  # → "MenuSeparator"
+        """
+        return "MenuSeparator"
+
+# System Tray
+pub class Tray:
+    pub id: i64
+    pub title: String
+    pub icon: String
+    pub tooltip: String
+    pub menu: List[MenuItem]
+
+    pub fn new(title: String): Tray =
+        """Create a new system tray icon.
+
+        Example:
+            tray = Tray.new("My App")
+            tray.set_icon("icon.png")
+            tray.set_tooltip("App is running")
+        """
+        let tray_id = electron_tray_create(title)
+
+        let tray = Tray {
+            id: tray_id,
+            title: title,
+            icon: "",
+            tooltip: "",
+            menu: []
+        }
+
+        active_trays[tray_id] = tray
+        tray
+
+    pub fn destroy(self):
+        """Destroy the tray icon."""
+        electron_tray_destroy(self.id)
+        active_trays.remove(self.id)
+
+    pub fn set_icon(self, icon_path: String):
+        """Set tray icon image.
+
+        Args:
+            icon_path: Path to image file (PNG recommended)
+
+        Example:
+            tray.set_icon("icon.png")
+            tray.set_icon("/absolute/path/to/icon.png")
+        """
+        self.icon = icon_path
+        electron_tray_set_icon(self.id, icon_path)
+
+    pub fn set_title(self, title: String):
+        """Set tray title (shown next to icon on macOS)."""
+        self.title = title
+        electron_tray_set_title(self.id, title)
+
+    pub fn set_tooltip(self, tooltip: String):
+        """Set tooltip shown on hover."""
+        self.tooltip = tooltip
+        electron_tray_set_tooltip(self.id, tooltip)
+
+    pub fn set_context_menu(self, items: List[MenuItem]):
+        """Set right-click context menu.
+
+        Example:
+            tray.set_context_menu([
+                MenuItem.new("Open", on_open),
+                MenuSeparator.new(),
+                MenuItem.new("Quit", on_quit)
+            ])
+        """
+        self.menu = items
+
+        # Convert menu to JSON
+        menu_json = _serialize_menu(items)
+        electron_tray_set_menu(self.id, menu_json)
+
+    pub fn get_context_menu(self): List[MenuItem] =
+        """Get current context menu."""
+        self.menu
+
+    pub fn display_balloon(self, title: String, content: String):
+        """Display balloon notification (Windows only).
+
+        Args:
+            title: Notification title
+            content: Notification content
+
+        Example:
+            tray.display_balloon("Alert", "Task completed")
+        """
+        electron_tray_display_balloon(self.id, title, content)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_id(self) -> bool:
+        """Check if tray has valid ID.
+
+        Returns:
+            true if ID >= 0
+
+        Example:
+            tray.has_id()  # → true
+        """
+        return self.id >= 0
+
+    pub fn has_icon(self) -> bool:
+        """Check if tray has icon set.
+
+        Returns:
+            true if icon path is not empty
+
+        Example:
+            tray.has_icon()  # → false
+        """
+        return self.icon.len() > 0
+
+    pub fn has_tooltip(self) -> bool:
+        """Check if tray has tooltip set.
+
+        Returns:
+            true if tooltip is not empty
+
+        Example:
+            tray.has_tooltip()  # → false
+        """
+        return self.tooltip.len() > 0
+
+    pub fn has_menu(self) -> bool:
+        """Check if tray has menu items.
+
+        Returns:
+            true if menu is not empty
+
+        Example:
+            tray.has_menu()  # → false
+        """
+        return self.menu.len() > 0
+
+    pub fn menu_count(self) -> usize:
+        """Get number of menu items.
+
+        Returns:
+            Menu item count
+
+        Example:
+            tray.menu_count()  # → 3
+        """
+        return self.menu.len()
+
+    pub fn summary(self) -> String:
+        """Get tray summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            tray.summary()
+            # → "Tray: 'My App', icon set, tooltip set, 3 menu items"
+        """
+        let icon_str = if self.has_icon() { "icon set" } else { "no icon" }
+        let tooltip_str = if self.has_tooltip() { "tooltip set" } else { "no tooltip" }
+        let menu_count = self.menu_count()
+        return "Tray: '{self.title}', {icon_str}, {tooltip_str}, {menu_count} menu items"
+
+# Menu callback registry
+let menu_callbacks: Dict[i64, fn(): void] = {}
+let next_menu_callback_id: i64 = 0
+
+fn _register_menu_callback(callback: fn(): void): i64 =
+    """Register a menu item callback."""
+    let id = next_menu_callback_id
+    next_menu_callback_id = next_menu_callback_id + 1
+    menu_callbacks[id] = callback
+    id
+
+# Called by FFI when menu item clicked
+pub fn _trigger_menu_callback(callback_id: i64):
+    """Internal: Triggered by FFI when menu item clicked."""
+    if menu_callbacks.has_key(callback_id):
+        callback = menu_callbacks[callback_id]
+        callback()
+
+# Serialize menu to JSON
+fn _serialize_menu(items: List[MenuItem]): String =
+    """Convert menu items to JSON for Electron."""
+    let parts: List[String] = []
+
+    for item in items:
+        if item.type == "separator":
+            parts.append('{"type":"separator"}')
+        else:
+            let json = '{"label":"' + item.label + '",'
+            json = json + '"type":"' + item.type + '",'
+            json = json + '"enabled":' + item.enabled.to_string() + ','
+            json = json + '"visible":' + item.visible.to_string() + ','
+            json = json + '"checked":' + item.checked.to_string() + ','
+            json = json + '"callback_id":' + item.callback_id.to_string() + '}'
+            parts.append(json)
+
+    "[" + parts.join(",") + "]"

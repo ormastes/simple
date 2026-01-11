@@ -1,0 +1,390 @@
+# Godot Hot-Reload Support
+#
+# Live code and resource reloading without restarting the game
+#
+# Features:
+# - File watching and change detection
+# - Simple script recompilation
+# - Resource hot-reloading
+# - State preservation during reload
+# - Development mode controls
+#
+# Based on: Simple's watch system + Godot's resource system
+
+import godot.ffi
+import godot.variant
+import godot.node
+import godot.scene
+import godot.resource
+import sys.fs
+import sys.time
+
+mod hotreload
+
+# Hot Reload Watcher
+# Monitors files and triggers reloads on changes
+pub struct HotReloadWatcher:
+    watched_files: Dict[String, f64]  # path -> last_modified_time
+    reload_callbacks: Array[fn(String)]  # Callbacks to call on reload
+    enabled: bool
+    check_interval: f64  # Seconds between checks
+    last_check: f64      # Last check timestamp
+
+impl HotReloadWatcher:
+    # Create new watcher
+    pub fn new(check_interval: f64 = 0.5) -> HotReloadWatcher:
+        return HotReloadWatcher(
+            watched_files: {},
+            reload_callbacks: [],
+            enabled: true,
+            check_interval: check_interval,
+            last_check: 0.0
+        )
+
+    # Watch a file for changes
+    pub fn watch_file(mut self, path: String):
+        # Get current modification time
+        let mod_time = get_file_modified_time(path)
+        self.watched_files[path] = mod_time
+        
+        println("Watching file: {path}")
+
+    # Watch a directory recursively
+    pub fn watch_directory(mut self, dir_path: String, extension: String = ".spl"):
+        # Get all files in directory with extension
+        let files = get_files_recursive(dir_path, extension)
+        
+        for file in files:
+            self.watch_file(file)
+
+    # Add reload callback
+    pub fn on_reload(mut self, callback: fn(String)):
+        self.reload_callbacks.push(callback)
+
+    # Check for file changes (call from _process)
+    pub fn check_for_changes(mut self, current_time: f64):
+        if not self.enabled:
+            return
+
+        # Rate limiting
+        if current_time - self.last_check < self.check_interval:
+            return
+
+        self.last_check = current_time
+
+        # Check each watched file
+        for (path, last_time) in self.watched_files.items():
+            let current_mod_time = get_file_modified_time(path)
+
+            if current_mod_time > last_time:
+                # File was modified
+                println("File changed: {path}")
+                
+                # Update stored time
+                self.watched_files[path] = current_mod_time
+
+                # Trigger reload
+                self.trigger_reload(path)
+
+    # Trigger reload for a file
+    fn trigger_reload(mut self, path: String):
+        println("Hot-reloading: {path}")
+
+        # Call all callbacks
+        for callback in self.reload_callbacks:
+            callback(path)
+
+    # Enable/disable watching
+    pub fn set_enabled(mut self, enabled: bool):
+        self.enabled = enabled
+        
+        if enabled:
+            println("Hot-reload enabled")
+        else:
+            println("Hot-reload disabled")
+
+    # Clear all watched files
+    pub fn clear(mut self):
+        self.watched_files.clear()
+        println("Cleared watch list")
+
+
+# Hot Reload Manager for Godot
+# Integrates file watching with Godot's scene tree
+pub struct HotReloadManager extends godot.node.Node:
+    watcher: HotReloadWatcher
+    simple_compiler_path: String  # Path to Simple compiler
+    scene_tree: godot.scene.SceneTree
+
+    # State preservation
+    preserve_state: bool
+    saved_state: Dict[String, variant.Variant]
+
+    pub fn _ready(mut self):
+        println("Hot-Reload Manager ready!")
+
+        # Initialize watcher
+        self.watcher = HotReloadWatcher::new(0.5)
+        self.scene_tree = godot.scene.SceneTree::get_singleton()
+        self.preserve_state = true
+        self.saved_state = {}
+
+        # Set up reload callback
+        self.watcher.on_reload(|path| {
+            self.on_file_changed(path)
+        })
+
+        # Watch project directories
+        self.watch_project_directories()
+
+        println("Hot-reload enabled. Watching for file changes...")
+
+    # Watch common project directories
+    fn watch_project_directories(mut self):
+        # Watch Simple scripts
+        self.watcher.watch_directory("res://scripts", ".spl")
+        
+        # Watch scenes (for resource reloading)
+        self.watcher.watch_directory("res://scenes", ".tscn")
+
+        println("Watching {self.watcher.watched_files.len()} files")
+
+    # Called every frame
+    pub fn _process(mut self, delta: f64):
+        # Check for file changes
+        let current_time = get_current_time()
+        self.watcher.check_for_changes(current_time)
+
+    # Handle file change event
+    fn on_file_changed(mut self, path: String):
+        if path.ends_with(".spl"):
+            # Simple script changed - recompile
+            self.reload_simple_script(path)
+        elif path.ends_with(".tscn") or path.ends_with(".tres"):
+            # Scene or resource changed - reload
+            self.reload_godot_resource(path)
+
+    # Recompile and reload Simple script
+    fn reload_simple_script(mut self, script_path: String):
+        println("Recompiling Simple script: {script_path}")
+
+        # Save current state if enabled
+        if self.preserve_state:
+            self.save_scene_state()
+
+        # Recompile using Simple compiler
+        let compile_result = self.compile_simple_script(script_path)
+
+        if compile_result.is_ok():
+            println("Successfully recompiled: {script_path}")
+
+            # Reload current scene to use new script
+            let reload_result = self.scene_tree.reload_current_scene()
+
+            if reload_result.is_ok():
+                # Restore state after reload
+                if self.preserve_state:
+                    self.restore_scene_state()
+
+                println("Scene reloaded with new script")
+            else:
+                println("Error reloading scene: {reload_result.unwrap_err()}")
+        else:
+            println("Compilation error: {compile_result.unwrap_err()}")
+
+    # Compile Simple script
+    fn compile_simple_script(self, script_path: String) -> Result[(), String]:
+        # TODO: [stdlib][P3] Call Simple compiler
+        # For now, just simulate compilation
+        
+        # In real implementation:
+        # 1. Call `simple build --hot-reload script_path`
+        # 2. Compiler generates .smf in build/
+        # 3. Return Ok if successful, Err with message if failed
+
+        # Simulate compilation delay
+        # await sleep(0.1)
+
+        return Ok(())
+
+    # Reload Godot resource (scene, texture, etc.)
+    fn reload_godot_resource(mut self, resource_path: String):
+        println("Reloading Godot resource: {resource_path}")
+
+        # Force Godot to reload the resource from disk
+        let loader = godot.resource.ResourceLoader::get_singleton()
+        
+        # Clear from cache
+        # TODO: [stdlib][P3] Add to ResourceLoader
+
+        # If it's the current scene, reload it
+        if resource_path.ends_with(".tscn"):
+            if self.preserve_state:
+                self.save_scene_state()
+
+            let result = self.scene_tree.reload_current_scene()
+
+            if result.is_ok():
+                if self.preserve_state:
+                    self.restore_scene_state()
+                println("Scene hot-reloaded")
+            else:
+                println("Error reloading scene: {result.unwrap_err()}")
+
+    # Save current scene state (for state preservation)
+    fn save_scene_state(mut self):
+        println("Saving scene state...")
+
+        # Get current scene root
+        let current = self.scene_tree.get_current_scene()
+
+        if current.is_none():
+            return
+
+        let root = current.unwrap()
+
+        # TODO: [stdlib][P3] Walk scene tree and save state
+        # For now, just save a simple marker
+        self.saved_state["scene_loaded"] = variant.Variant::from_bool(true)
+
+        println("State saved")
+
+    # Restore scene state (after reload)
+    fn restore_scene_state(mut self):
+        println("Restoring scene state...")
+
+        # TODO: [stdlib][P3] Restore saved state to scene nodes
+        
+        println("State restored")
+
+    # Enable/disable hot-reload
+    pub fn set_enabled(mut self, enabled: bool):
+        self.watcher.set_enabled(enabled)
+
+    # Toggle state preservation
+    pub fn set_preserve_state(mut self, preserve: bool):
+        self.preserve_state = preserve
+
+        if preserve:
+            println("State preservation enabled")
+        else:
+            println("State preservation disabled")
+
+
+# Helper functions (placeholders)
+
+fn get_file_modified_time(path: String) -> f64:
+    # TODO: [stdlib][P1] Implement actual file stat
+    # For now, return current time as placeholder
+    return get_current_time()
+
+fn get_files_recursive(dir: String, ext: String) -> Array[String]:
+    """Recursively find all files with given extension.
+
+    Args:
+        dir: Directory to search
+        ext: File extension to match (without dot)
+
+    Returns:
+        Array of file paths
+    """
+    @extern("runtime", "rt_dir_list")
+    fn _rt_dir_list(path_ptr: &u8, path_len: u64) -> Any
+
+    @extern("runtime", "rt_file_stat")
+    fn _rt_file_stat(
+        path_ptr: &u8,
+        path_len: u64,
+        out_exists: &mut bool,
+        out_is_file: &mut bool,
+        out_is_dir: &mut bool,
+        out_is_readable: &mut bool,
+        out_is_writable: &mut bool,
+        out_size: &mut i64
+    )
+
+    @extern("runtime", "rt_path_ext")
+    fn _rt_path_ext(path_ptr: &u8, path_len: u64) -> String
+
+    var results: Array[String] = []
+
+    # Get directory entries
+    let entries = _rt_dir_list(dir.ptr(), dir.len())
+    if entries.is_nil():
+        return results
+
+    let entry_array = entries as Array[String]
+    for entry_name in entry_array:
+        # Build full path
+        let full_path = "{dir}/{entry_name}"
+
+        # Get file info
+        var exists = false
+        var is_file = false
+        var is_dir = false
+        var is_readable = false
+        var is_writable = false
+        var size: i64 = 0
+
+        _rt_file_stat(
+            full_path.ptr(),
+            full_path.len(),
+            &mut exists,
+            &mut is_file,
+            &mut is_dir,
+            &mut is_readable,
+            &mut is_writable,
+            &mut size
+        )
+
+        if is_dir:
+            # Recursively search subdirectory
+            let sub_results = get_files_recursive(full_path, ext)
+            for sub_path in sub_results:
+                results.push(sub_path)
+        elif is_file:
+            # Check extension
+            let file_ext = _rt_path_ext(full_path.ptr(), full_path.len())
+            if file_ext == ext:
+                results.push(full_path)
+
+    return results
+
+fn get_current_time() -> f64:
+    # TODO: [stdlib][P3] Use actual time API
+    # For now, return placeholder
+    return 0.0
+
+fn sleep(seconds: f64):
+    """Sleep for specified seconds.
+
+    Args:
+        seconds: Number of seconds to sleep
+    """
+    @extern("runtime", "rt_thread_sleep")
+    fn _rt_thread_sleep(millis: i64)
+
+    let millis = (seconds * 1000.0) as i64
+    _rt_thread_sleep(millis)
+
+
+# Dict and Array placeholders
+pub struct Dict[K, V]:
+    dummy: i32
+
+impl[K, V] Dict[K, V]:
+    pub fn clear(mut self):
+        pass
+
+    pub fn len(self) -> i32:
+        return 0
+
+    pub fn items(self) -> Array[(K, V)]:
+        return []
+
+pub struct Array[T]:
+    items: Vec[T]
+
+impl[T] Array[T]:
+    pub fn push(mut self, item: T):
+        pass

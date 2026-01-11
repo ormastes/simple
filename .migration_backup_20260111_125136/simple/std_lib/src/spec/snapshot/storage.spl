@@ -1,0 +1,169 @@
+# Snapshot Testing - Storage
+# Feature #900: Snapshot file I/O and directory management
+
+module std.spec.snapshot.storage:
+    use core.result.{Result, Ok, Err}
+    use core.option.{Option, Some, None}
+    use std.io.{File, Path, read_file, write_file, exists, create_dir_all}
+    use std.time
+
+    # Snapshot file structure
+    pub struct SnapshotFile:
+        # Test file path (e.g., "test/user_service_spec.spl")
+        test_file: String
+
+        # Test function name (e.g., "test_render_user_json")
+        test_name: String
+
+        # Snapshot content
+        content: String
+
+        # Format (text, json, yaml, etc.)
+        format: String
+
+        # Creation timestamp
+        created_at: String
+
+        # Last updated timestamp
+        updated_at: String
+
+    impl SnapshotFile:
+        # Create new snapshot
+        pub fn new(
+            test_file: String,
+            test_name: String,
+            content: String,
+            format: String
+        ) -> SnapshotFile:
+            let now = time.now_iso8601()
+            return SnapshotFile(
+                test_file: test_file,
+                test_name: test_name,
+                content: content,
+                format: format,
+                created_at: now,
+                updated_at: now
+            )
+
+        # Get snapshot file path
+        pub fn get_path(self, snapshot_dir: String) -> String:
+            # Extract base name from test file (remove path and extension)
+            let base_name = self.test_file
+                .split("/").last()
+                .unwrap_or(self.test_file)
+                .replace(".spl", "")
+
+            # Build path: .snapshots/<test_file_name>/<test_name>.snap
+            return "{snapshot_dir}/{base_name}/{self.test_name}.snap"
+
+        # Serialize to snapshot file format
+        pub fn to_file_format(self) -> String:
+            let mut result = ""
+
+            # Add metadata header
+            result += "# Snapshot: {self.test_name}\n"
+            result += "# Created: {self.created_at}\n"
+            result += "# Updated: {self.updated_at}\n"
+            result += "# Format: {self.format}\n"
+            result += "\n"
+
+            # Add content
+            result += self.content
+
+            return result
+
+        # Parse from snapshot file format
+        pub fn from_file_format(
+            content: String,
+            test_file: String,
+            test_name: String
+        ) -> Result<SnapshotFile, String>:
+            let lines = content.split("\n")
+            let mut snapshot_content = ""
+            let mut format = "text"
+            let mut created_at = ""
+            let mut updated_at = ""
+            let mut in_content = false
+
+            for line in lines:
+                if line.starts_with("# Snapshot:"):
+                    continue
+                elif line.starts_with("# Created:"):
+                    created_at = line.replace("# Created: ", "").trim()
+                elif line.starts_with("# Updated:"):
+                    updated_at = line.replace("# Updated: ", "").trim()
+                elif line.starts_with("# Format:"):
+                    format = line.replace("# Format: ", "").trim()
+                elif line.trim().is_empty() and !in_content:
+                    in_content = true
+                elif in_content:
+                    snapshot_content += line + "\n"
+
+            # Remove trailing newline
+            if snapshot_content.ends_with("\n"):
+                snapshot_content = snapshot_content[0..snapshot_content.length()-1]
+
+            return Ok(SnapshotFile(
+                test_file: test_file,
+                test_name: test_name,
+                content: snapshot_content,
+                format: format,
+                created_at: created_at,
+                updated_at: updated_at
+            ))
+
+    # Load snapshot from file
+    pub fn load_snapshot(
+        test_file: String,
+        test_name: String,
+        snapshot_dir: String
+    ) -> Result<SnapshotFile, String>:
+        let snapshot = SnapshotFile.new(test_file, test_name, "", "text")
+        let path = snapshot.get_path(snapshot_dir)
+
+        if !exists(path):
+            return Err("Snapshot not found: {path}")
+
+        let content = read_file(path)?
+        return SnapshotFile.from_file_format(content, test_file, test_name)
+
+    # Save snapshot to file
+    pub fn save_snapshot(
+        snapshot: SnapshotFile,
+        snapshot_dir: String
+    ) -> Result<(), String>:
+        let path = snapshot.get_path(snapshot_dir)
+
+        # Create directory if needed
+        let dir_path = path.rsplit_once("/").map(|(d, _)| d).unwrap_or(".")
+        create_dir_all(dir_path)?
+
+        # Write file
+        let content = snapshot.to_file_format()
+        write_file(path, content)?
+
+        return Ok(())
+
+    # Check if snapshot exists
+    pub fn snapshot_exists(
+        test_file: String,
+        test_name: String,
+        snapshot_dir: String
+    ) -> bool:
+        let snapshot = SnapshotFile.new(test_file, test_name, "", "text")
+        let path = snapshot.get_path(snapshot_dir)
+        return exists(path)
+
+    # Delete snapshot file
+    pub fn delete_snapshot(
+        test_file: String,
+        test_name: String,
+        snapshot_dir: String
+    ) -> Result<(), String>:
+        let snapshot = SnapshotFile.new(test_file, test_name, "", "text")
+        let path = snapshot.get_path(snapshot_dir)
+
+        if exists(path):
+            std.io.remove_file(path)?
+
+        return Ok(())

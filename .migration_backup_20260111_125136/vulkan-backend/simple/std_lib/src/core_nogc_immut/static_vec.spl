@@ -1,0 +1,302 @@
+# Static vector (fixed capacity, stack allocated, immutable API)
+# Returns new vectors instead of mutating
+
+# Static vector error type
+enum StaticVecError:
+    Full
+    IndexOutOfBounds
+
+impl StaticVecError:
+    fn message() -> str:
+        match self:
+            case Full: return "static vector is full"
+            case IndexOutOfBounds: return "index out of bounds"
+
+struct StaticVec[T, const N: usize]:
+    data: [T; N]
+    len: usize
+
+impl StaticVec[T, const N: usize]:
+    fn new() -> StaticVec[T, N]:
+        StaticVec { data: [T; N]::default(), len: 0 }
+
+    fn from_array(arr: [T; N]) -> StaticVec[T, N]:
+        StaticVec { data: arr, len: N }
+
+    fn len() -> usize:
+        self.len
+
+    fn capacity() -> usize:
+        N
+
+    fn is_empty() -> bool:
+        self.len == 0
+
+    fn is_full() -> bool:
+        self.len == N
+
+    fn remaining() -> usize:
+        N - self.len
+
+    fn get(idx: usize) -> Option[T]:
+        if idx < self.len:
+            Some(self.data[idx])
+        else:
+            None
+
+    fn first() -> Option[T]:
+        self.get(0)
+
+    fn last() -> Option[T]:
+        if self.len > 0:
+            self.get(self.len - 1)
+        else:
+            None
+
+    # Returns new vector with element appended
+    fn push(val: T) -> Option[StaticVec[T, N]]:
+        if self.len < N:
+            var new_data = self.data
+            new_data[self.len] = val
+            Some(StaticVec { data: new_data, len: self.len + 1 })
+        else:
+            None
+
+    # Try push with Result
+    fn try_push(val: T) -> Result[StaticVec[T, N], StaticVecError]:
+        match self.push(val):
+            case Some(v): Ok(v)
+            case None: Err(StaticVecError::Full)
+
+    # Returns new vector with last element removed
+    fn pop() -> Option[(T, StaticVec[T, N])]:
+        if self.len > 0:
+            let val = self.data[self.len - 1]
+            Some((val, StaticVec { data: self.data, len: self.len - 1 }))
+        else:
+            None
+
+    # Returns cleared vector
+    fn cleared() -> StaticVec[T, N]:
+        StaticVec { data: self.data, len: 0 }
+
+    # Returns truncated vector
+    fn truncated(new_len: usize) -> StaticVec[T, N]:
+        if new_len < self.len:
+            StaticVec { data: self.data, len: new_len }
+        else:
+            self
+
+    # Returns new vector with element inserted at index
+    fn inserted(index: usize, val: T) -> Option[StaticVec[T, N]]:
+        if self.len >= N or index > self.len:
+            return None
+
+        var new_data = self.data
+        # Shift elements right
+        var i = self.len
+        while i > index:
+            new_data[i] = new_data[i - 1]
+            i = i - 1
+        new_data[index] = val
+        Some(StaticVec { data: new_data, len: self.len + 1 })
+
+    # Returns (removed_value, new_vector)
+    fn removed(index: usize) -> Option[(T, StaticVec[T, N])]:
+        if index >= self.len:
+            return None
+
+        let val = self.data[index]
+        var new_data = self.data
+
+        # Shift elements left
+        for i in index..(self.len - 1):
+            new_data[i] = new_data[i + 1]
+
+        Some((val, StaticVec { data: new_data, len: self.len - 1 }))
+
+    # Swap remove (O(1) but doesn't preserve order)
+    fn swap_removed(index: usize) -> Option[(T, StaticVec[T, N])]:
+        if index >= self.len:
+            return None
+
+        let val = self.data[index]
+        var new_data = self.data
+        let new_len = self.len - 1
+
+        if index != new_len:
+            new_data[index] = new_data[new_len]
+
+        Some((val, StaticVec { data: new_data, len: new_len }))
+
+    # Filter elements matching predicate, returns new vector
+    fn filtered(predicate: fn(&T) -> bool) -> StaticVec[T, N]:
+        var new_data = self.data
+        var write: usize = 0
+        for read in 0..self.len:
+            if predicate(&self.data[read]):
+                new_data[write] = self.data[read]
+                write = write + 1
+        StaticVec { data: new_data, len: write }
+
+    # Find element index
+    fn find(predicate: fn(&T) -> bool) -> Option[usize]:
+        for i in 0..self.len:
+            if predicate(&self.data[i]):
+                return Some(i)
+        None
+
+    # Check if contains element
+    fn contains(predicate: fn(&T) -> bool) -> bool:
+        self.find(predicate).is_some()
+
+    # Get as slice
+    fn as_slice() -> &[T]:
+        &self.data[0..self.len]
+
+    # Extend from slice, returns new vector
+    fn extended(slice: &[T]) -> Option[StaticVec[T, N]] where T: Copy:
+        if self.len + slice.len() > N:
+            return None
+        var new_data = self.data
+        for i in 0..slice.len():
+            new_data[self.len + i] = slice[i]
+        Some(StaticVec { data: new_data, len: self.len + slice.len() })
+
+    # Returns sorted vector (requires Ord)
+    fn sorted() -> StaticVec[T, N] where T: Ord:
+        var new_data = self.data
+        # Simple insertion sort for small fixed arrays
+        for i in 1..self.len:
+            let key = new_data[i]
+            var j = i
+            while j > 0 and new_data[j - 1].gt(&key):
+                new_data[j] = new_data[j - 1]
+                j = j - 1
+            new_data[j] = key
+        StaticVec { data: new_data, len: self.len }
+
+    # Returns reversed vector
+    fn reversed() -> StaticVec[T, N]:
+        var new_data = self.data
+        var left: usize = 0
+        var right = self.len - 1
+        while left < right:
+            let tmp = new_data[left]
+            new_data[left] = new_data[right]
+            new_data[right] = tmp
+            left = left + 1
+            right = right - 1
+        StaticVec { data: new_data, len: self.len }
+
+    # Map function over elements
+    fn map[U](self, f: fn(T) -> U) -> StaticVec[U, N]:
+        var new_data = [U; N]::default()
+        for i in 0..self.len:
+            new_data[i] = f(self.data[i])
+        StaticVec { data: new_data, len: self.len }
+
+# ============================================
+# Trait Implementations
+# ============================================
+
+use core.traits.*
+
+impl Default for StaticVec[T, const N: usize] where T: Default:
+    fn default() -> Self:
+        StaticVec::new()
+
+impl Clone for StaticVec[T, const N: usize] where T: Clone:
+    fn clone() -> Self:
+        var new_data = self.data
+        for i in 0..self.len:
+            new_data[i] = self.data[i].clone()
+        StaticVec { data: new_data, len: self.len }
+
+impl Len for StaticVec[T, const N: usize]:
+    fn len() -> usize:
+        self.len
+
+impl Capacity for StaticVec[T, const N: usize]:
+    fn capacity() -> usize:
+        N
+
+    fn is_full() -> bool:
+        self.len == N
+
+impl AsSlice[T] for StaticVec[T, const N: usize]:
+    fn as_slice() -> &[T]:
+        &self.data[0..self.len]
+
+impl Index[usize] for StaticVec[T, const N: usize]:
+    type Output = T
+    fn index(idx: usize) -> &Self::Output:
+        if idx >= self.len:
+            panic(f"index {idx} out of bounds (len={self.len})")
+        &self.data[idx]
+
+impl IntoIterator for StaticVec[T, const N: usize]:
+    type Item = T
+    type IntoIter = StaticVecIter[T, N]
+    fn into_iter() -> Self::IntoIter:
+        StaticVecIter { vec: self, index: 0 }
+
+# Iterator for StaticVec (immutable, returns copies)
+struct StaticVecIter[T, const N: usize]:
+    vec: StaticVec[T, N]
+    index: usize
+
+impl Iterator for StaticVecIter[T, const N: usize]:
+    type Item = T
+    fn next() -> Option[Self::Item]:
+        if self.index < self.vec.len:
+            let item = self.vec.data[self.index]
+            self.index = self.index + 1
+            Some(item)
+        else:
+            None
+
+impl ExactSizeIterator for StaticVecIter[T, const N: usize]:
+    fn len() -> usize:
+        self.vec.len - self.index
+
+impl DoubleEndedIterator for StaticVecIter[T, const N: usize]:
+    fn next_back() -> Option[Self::Item]:
+        if self.index < self.vec.len:
+            let idx = self.vec.len - 1
+            self.vec = self.vec.truncated(idx)
+            Some(self.vec.data[idx])
+        else:
+            None
+
+impl FromIterator[T] for StaticVec[T, const N: usize] where T: Default:
+    fn from_iter[I: Iterator[Item=T]](iter: I) -> Self:
+        var result = StaticVec::new()
+        for item in iter:
+            match result.push(item):
+                case Some(v): result = v
+                case None: break
+        result
+
+impl Eq for StaticVec[T, const N: usize] where T: Eq:
+    fn eq(other: &Self) -> bool:
+        if self.len != other.len:
+            return false
+        for i in 0..self.len:
+            if not self.data[i].eq(&other.data[i]):
+                return false
+        true
+
+impl Display for StaticVecError:
+    fn fmt() -> str:
+        self.message()
+
+impl Error for StaticVecError
+
+# Common type aliases
+type StaticVec8[T] = StaticVec[T, 8]
+type StaticVec16[T] = StaticVec[T, 16]
+type StaticVec32[T] = StaticVec[T, 32]
+type StaticVec64[T] = StaticVec[T, 64]
+type StaticVec128[T] = StaticVec[T, 128]
+type StaticVec256[T] = StaticVec[T, 256]

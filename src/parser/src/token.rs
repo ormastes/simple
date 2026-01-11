@@ -63,8 +63,11 @@ pub enum TokenKind {
 
     // Keywords
     Fn,
-    Let,
-    Mut,
+    Me,    // Mutable method (modifies self)
+    Let,   // Legacy: use Val instead
+    Mut,   // Legacy: will be removed
+    Val,   // Immutable variable (Scala-style)
+    Var,   // Mutable variable (Scala-style)
     If,
     Elif,
     Else,

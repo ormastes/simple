@@ -1,0 +1,154 @@
+# Property Testing Framework - Shrinking Tests
+# Tests for automatic input minimization
+
+module tests.property.shrinking_spec:
+    use std.spec.{describe, context, it, expect}
+    use std.spec.property.shrinking.{shrink, ShrinkResult, ShrinkConfig, shrink_i64, shrink_list, shrink_string}
+    use std.spec.property.generators as gen
+
+    describe("Shrinking Algorithm"):
+        context("Integer Shrinking"):
+            it("shrinks positive integers towards zero"):
+                let candidates = shrink_i64(100)
+                expect(candidates).to_contain(0)
+                expect(candidates).to_contain(50)
+                expect(candidates).to_contain(99)
+
+            it("shrinks negative integers towards zero"):
+                let candidates = shrink_i64(-100)
+                expect(candidates).to_contain(0)
+                expect(candidates).to_contain(-50)
+                expect(candidates).to_contain(-99)
+
+            it("cannot shrink zero"):
+                let candidates = shrink_i64(0)
+                expect(candidates).to_be_empty()
+
+        context("List Shrinking"):
+            it("shrinks to empty list"):
+                let candidates = shrink_list([1, 2, 3, 4, 5])
+                expect(candidates).to_contain([])
+
+            it("shrinks by removing half"):
+                let candidates = shrink_list([1, 2, 3, 4])
+                # Should have [1, 2] and [3, 4]
+                expect(candidates.length()).to_be_gt(2)
+
+            it("shrinks by removing first element"):
+                let candidates = shrink_list([1, 2, 3])
+                expect(candidates).to_contain([2, 3])
+
+            it("shrinks by removing last element"):
+                let candidates = shrink_list([1, 2, 3])
+                expect(candidates).to_contain([1, 2])
+
+            it("cannot shrink empty list"):
+                let candidates = shrink_list([])
+                expect(candidates).to_be_empty()
+
+        context("String Shrinking"):
+            it("shrinks to empty string"):
+                let candidates = shrink_string("hello")
+                expect(candidates).to_contain("")
+
+            it("shrinks by removing characters"):
+                let candidates = shrink_string("test")
+                expect(candidates.length()).to_be_gt(0)
+
+            it("cannot shrink empty string"):
+                let candidates = shrink_string("")
+                expect(candidates).to_be_empty()
+
+        context("Full Shrinking Process"):
+            it("finds minimal failing case for integers"):
+                let result = shrink(
+                    failing_value: 100,
+                    test_fn: |x| x < 10,
+                    generator: gen.i64(),
+                    config: ShrinkConfig.default()
+                )
+
+                match result:
+                    ShrinkResult.MinimalFailure(value, shrinks) ->
+                        # Should shrink to 10 (first failing value)
+                        expect(value).to_be_lte(100)
+                        expect(value).to_be_gte(10)
+                        expect(shrinks).to_be_gt(0)
+                    _ ->
+                        fail("Expected MinimalFailure")
+
+            it("finds minimal failing case for lists"):
+                let result = shrink(
+                    failing_value: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                    test_fn: |list| list.sum() < 10,
+                    generator: gen.list(gen.i64()),
+                    config: ShrinkConfig.default()
+                )
+
+                match result:
+                    ShrinkResult.MinimalFailure(value, shrinks) ->
+                        # Should find a smaller list that still fails
+                        expect(value.length()).to_be_lte(10)
+                        expect(shrinks).to_be_gt(0)
+                    _ ->
+                        fail("Expected MinimalFailure")
+
+            it("handles max_shrinks limit"):
+                let result = shrink(
+                    failing_value: 1000,
+                    test_fn: |x| x < 10,
+                    generator: gen.i64(),
+                    config: ShrinkConfig(max_shrinks: 5, max_depth: 10)
+                )
+
+                match result:
+                    ShrinkResult.MinimalFailure(_, shrinks) ->
+                        expect(shrinks).to_be_lte(5)
+                    ShrinkResult.MaxShrinksExceeded(_, shrinks) ->
+                        expect(shrinks).to_equal(5)
+                    _ -> pass
+
+            it("handles max_depth limit"):
+                let result = shrink(
+                    failing_value: 1000,
+                    test_fn: |x| x < 10,
+                    generator: gen.i64(),
+                    config: ShrinkConfig(max_shrinks: 1000, max_depth: 3)
+                )
+
+                match result:
+                    ShrinkResult.MinimalFailure(value, _) ->
+                        # Should stop shrinking after 3 levels
+                        expect(value).to_be_instance_of(i64)
+                    _ -> pass
+
+        context("Edge Cases"):
+            it("handles no shrink possible"):
+                let result = shrink(
+                    failing_value: 0,
+                    test_fn: |x| x < 0,
+                    generator: gen.i64(),
+                    config: ShrinkConfig.default()
+                )
+
+                match result:
+                    ShrinkResult.MinimalFailure(value, shrinks) ->
+                        expect(value).to_equal(0)
+                        expect(shrinks).to_equal(0)
+                    ShrinkResult.NoShrinkPossible(value) ->
+                        expect(value).to_equal(0)
+                    _ -> pass
+
+            it("handles all shrinks passing"):
+                let result = shrink(
+                    failing_value: 100,
+                    test_fn: |x| x == 100,  # Only 100 fails
+                    generator: gen.i64(),
+                    config: ShrinkConfig.default()
+                )
+
+                match result:
+                    ShrinkResult.MinimalFailure(value, _) ->
+                        # Should stay at 100 since all shrinks pass
+                        expect(value).to_equal(100)
+                    _ -> pass

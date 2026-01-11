@@ -1,0 +1,379 @@
+# File Staging Examples - Mold-inspired Fast I/O
+#
+# Demonstrates the staging API for high-performance file operations:
+# - Auto-staging on file open
+# - Memory-mapped files (mmap)
+# - Prefetching
+# - Zero-copy file transfers
+# - Varargs staging for multiple files
+
+use host.async_nogc_mut.io.fs.*
+use units.file.*
+use units.size.*
+
+# =============================================================================
+# Example 1: Auto-Staging (Default Behavior)
+# =============================================================================
+#
+# Files are automatically staged when opened in read mode.
+# The staging strategy is adaptive based on file size:
+# - Small files (< 1MB): Prefetch entire file into memory
+# - Large files (>= 1MB): Memory-map for zero-copy access
+
+async fn example_auto_staging():
+    println("=== Auto-Staging Example ===")
+
+    # Open file - auto-staging happens transparently
+    let file = await File::open_read("large_dataset.bin")?
+
+    # Check staging status
+    if file.is_staged():
+        let mode = file.stage_mode()
+        println("File is staged with mode: {:?}", mode)
+
+    # Read operations use optimized path
+    let mut buffer = Bytes::with_capacity(4096)
+    let bytes_read = await file.read(&mut buffer)?
+
+    println("Read {} bytes using staged I/O", bytes_read)
+
+    await file.close()?
+
+
+# =============================================================================
+# Example 2: Explicit Memory-Mapped Files
+# =============================================================================
+#
+# Memory-mapped files provide zero-copy access to file contents.
+# Best for: Large files with random access patterns
+
+async fn example_mmap():
+    println("=== Memory-Mapped File Example ===")
+
+    let file = await File::open_read("database.dat")?
+
+    # Explicitly use memory mapping
+    await file.stage_mmap()?
+
+    # Random access is now very fast (no syscalls)
+    await file.seek(SeekFrom::Start(1_000_000))?  # Seek to 1MB offset
+    let mut chunk = Bytes::with_capacity(1024)
+    await file.read(&mut chunk)?  # Zero-copy read from mmap
+
+    await file.seek(SeekFrom::Start(5_000_000))?  # Another random seek
+    await file.read(&mut chunk)?  # Still fast!
+
+    println("Memory-mapped file allows fast random access")
+
+    await file.close()?  # Automatically unmaps
+
+
+# =============================================================================
+# Example 3: Prefetching Small Files
+# =============================================================================
+#
+# Prefetch entire file into memory for maximum sequential read speed.
+# Best for: Small files read sequentially
+
+async fn example_prefetch():
+    println("=== Prefetch Example ===")
+
+    let file = await File::open_read("config.json")?
+
+    # Prefetch entire file
+    await file.stage_prefetch()?
+
+    # All reads come from in-memory buffer (no I/O)
+    let mut buffer = Bytes::with_capacity(8192)
+    while true:
+        let n = await file.read(&mut buffer)?
+        if (n as u64) == 0:
+            break
+        process_data(&buffer)
+
+    println("All reads served from prefetched buffer")
+
+    await file.close()?
+
+
+# =============================================================================
+# Example 4: Stage Multiple Files Together (Varargs)
+# =============================================================================
+#
+# Stage a group of related files with the same strategy.
+# Useful for: Build systems, compilers, multi-file processing
+
+async fn example_stage_multiple():
+    println("=== Stage Multiple Files Example ===")
+
+    # Open primary file
+    let main_file = await File::open_read("main.spl")?
+
+    # Stage main file + dependencies with same strategy
+    await main_file.stage(
+        StageMode::Prefetch,
+        "module_a.spl"_filepath,
+        "module_b.spl"_filepath,
+        "module_c.spl"_filepath,
+        "utils.spl"_filepath
+    )?
+
+    # All files are now prefetched and ready for fast access
+    println("Staged 5 files together for fast compilation")
+
+    # Process main file
+    let content = await read_all(main_file)?
+    compile(content)
+
+    await main_file.close()?
+
+
+# =============================================================================
+# Example 5: Adaptive Staging
+# =============================================================================
+#
+# Let the library choose the best strategy based on file size
+
+async fn example_adaptive():
+    println("=== Adaptive Staging Example ===")
+
+    let files = [
+        "small.txt"_filepath,      # Will use prefetch
+        "medium.dat"_filepath,     # Will use prefetch
+        "large.bin"_filepath,      # Will use mmap
+        "huge.db"_filepath         # Will use mmap
+    ]
+
+    for path in files:
+        let file = await File::open_read(path)?
+
+        # Adaptive staging chooses optimal strategy
+        await file.stage_auto()?
+
+        let mode = file.stage_mode()
+        println("{}: using {:?}", path, mode)
+
+        await file.close()?
+
+
+# =============================================================================
+# Example 6: Zero-Copy File Transfer
+# =============================================================================
+#
+# Use sendfile() for kernel-level zero-copy transfer.
+# Much faster than read + write for large files.
+
+async fn example_zero_copy():
+    println("=== Zero-Copy Transfer Example ===")
+
+    let src = "source_large.bin"_filepath
+    let dst = "destination.bin"_filepath
+
+    # Traditional copy (userspace buffer)
+    let start = now()
+    let bytes_copied = await copy(src, "temp1.bin"_filepath)?
+    let traditional_time = now() - start
+    println("Traditional copy: {} bytes in {}ms", bytes_copied, traditional_time)
+
+    # Zero-copy (kernel-level transfer, no userspace buffer)
+    let start = now()
+    let bytes_copied = await copy_zero(src, dst)?
+    let zero_copy_time = now() - start
+    println("Zero-copy: {} bytes in {}ms", bytes_copied, zero_copy_time)
+
+    let speedup = traditional_time / zero_copy_time
+    println("Speedup: {:.2}x faster", speedup)
+
+
+# =============================================================================
+# Example 7: Manual Staging Control
+# =============================================================================
+#
+# Fine-grained control over when to stage/unstage files
+
+async fn example_manual_control():
+    println("=== Manual Staging Control ===")
+
+    let file = await File::open_read("data.bin")?
+
+    # Start without staging (normal I/O)
+    file.unstage()
+
+    # Do some initial processing
+    let header = await read_header(file)?
+
+    # Now stage for fast bulk processing
+    if header.size > 10_000_000:
+        await file.stage_mmap()?
+        println("Large file detected, enabled mmap")
+    else:
+        await file.stage_prefetch()?
+        println("Small file detected, prefetched")
+
+    # Process with optimal strategy
+    await process_file(file)?
+
+    # Unstage before close if needed
+    file.unstage()
+
+    await file.close()?
+
+
+# =============================================================================
+# Example 8: Compiler Use Case (Mold-Style)
+# =============================================================================
+#
+# How a compiler/linker can use staging for maximum throughput
+
+async fn example_compiler_staging():
+    println("=== Compiler Staging Example ===")
+
+    # Stage all source files together
+    let main = await File::open_read("src/main.spl")?
+
+    await main.stage(
+        StageMode::Prefetch,
+        "src/parser.spl"_filepath,
+        "src/codegen.spl"_filepath,
+        "src/runtime.spl"_filepath,
+        "src/stdlib.spl"_filepath
+    )?
+
+    # All source files now in memory for fast parsing
+    let sources = await load_all_sources()?
+
+    # Parse everything (cache-friendly, no I/O stalls)
+    let asts = parse_all(sources)
+
+    # Write output with zero-copy if possible
+    let output = await File::create("output.bin")?
+    await write_compiled_output(output, asts)?
+
+    println("Compilation complete with optimized I/O")
+
+
+# =============================================================================
+# Performance Comparison
+# =============================================================================
+
+async fn benchmark_staging():
+    println("\n=== Performance Benchmark ===\n")
+
+    let test_file = "benchmark.dat"_filepath
+    let iterations = 100
+
+    # Benchmark 1: No staging (standard buffered I/O)
+    let start = now()
+    for i in range(iterations):
+        let file = await File::open_read(test_file)?
+        file.unstage()  # Disable staging
+        let _ = await read_all(file)?
+        await file.close()?
+    let no_staging_time = now() - start
+
+    # Benchmark 2: With prefetch staging
+    let start = now()
+    for i in range(iterations):
+        let file = await File::open_read(test_file)?
+        await file.stage_prefetch()?
+        let _ = await read_all(file)?
+        await file.close()?
+    let prefetch_time = now() - start
+
+    # Benchmark 3: With mmap staging
+    let start = now()
+    for i in range(iterations):
+        let file = await File::open_read(test_file)?
+        await file.stage_mmap()?
+        let _ = await read_all(file)?
+        await file.close()?
+    let mmap_time = now() - start
+
+    println("No staging:  {}ms", no_staging_time)
+    println("Prefetch:    {}ms ({:.2}x faster)", prefetch_time, no_staging_time / prefetch_time)
+    println("Mmap:        {}ms ({:.2}x faster)", mmap_time, no_staging_time / mmap_time)
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+async fn main():
+    println("File Staging API - High-Performance I/O\n")
+
+    await example_auto_staging()?
+    println("")
+
+    await example_mmap()?
+    println("")
+
+    await example_prefetch()?
+    println("")
+
+    await example_stage_multiple()?
+    println("")
+
+    await example_adaptive()?
+    println("")
+
+    await example_zero_copy()?
+    println("")
+
+    await example_manual_control()?
+    println("")
+
+    await example_compiler_staging()?
+    println("")
+
+    await benchmark_staging()?
+
+    println("\n✅ All examples completed successfully")
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+async fn read_all(file: File) -> Result[Bytes, IoError]:
+    let size = await file.size()?
+    let mut buffer = Bytes::with_capacity(size as u64)
+    await file.read_exact(&mut buffer)?
+    return Ok(buffer)
+
+async fn read_header(file: File) -> Result[Header, IoError]:
+    # Stub for example
+    return Ok(Header { size: 1000 })
+
+async fn process_file(file: File) -> Result[(), IoError]:
+    # Stub for example
+    return Ok(())
+
+async fn load_all_sources() -> Result[Array[Bytes], IoError]:
+    # Stub for example
+    return Ok([])
+
+fn parse_all(sources: Array[Bytes]) -> Array[AST]:
+    # Stub for example
+    return []
+
+async fn write_compiled_output(file: File, asts: Array[AST]) -> Result[(), IoError]:
+    # Stub for example
+    return Ok(())
+
+fn process_data(data: &Bytes):
+    # Stub for example
+    pass
+
+fn compile(content: Bytes):
+    # Stub for example
+    pass
+
+fn now() -> u64:
+    # Stub - return milliseconds
+    return 0
+
+struct Header:
+    size: u64
+
+struct AST:
+    pass

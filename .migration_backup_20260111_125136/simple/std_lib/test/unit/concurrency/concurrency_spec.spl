@@ -1,0 +1,260 @@
+describe "Concurrency":
+    describe "Generators":
+        describe "Basic generator operations":
+            it "creates and yields single value":
+                let gen = generator(\: yield 42)
+                expect next(gen) == 42
+
+            it "yields multiple values in sequence":
+                let gen = generator(\: [yield 1, yield 2, yield 3])
+                expect next(gen) == 1
+                expect next(gen) == 2
+                expect next(gen) == 3
+
+            it "returns nil when exhausted":
+                let gen = generator(\: yield 10)
+                let first = next(gen)
+                let second = next(gen)
+                expect first == 10
+                expect second == nil
+
+        describe "Generator with captures":
+            it "captures outer variables":
+                let base = 100
+                let gen = generator(\: [yield base, yield (base + 1)])
+                expect next(gen) == 100
+                expect next(gen) == 101
+
+            it "captures multiple variables":
+                let a = 10
+                let b = 20
+                let c = 30
+                let gen = generator(\: [yield a, yield b, yield c])
+                expect next(gen) + next(gen) + next(gen) == 60
+
+        describe "Generator with computation":
+            it "computes values before yield":
+                let val = 2 * 3
+                let gen = generator(\: yield val)
+                expect next(gen) == 6
+
+            it "performs arithmetic in yield":
+                let x = 5
+                let y = 3
+                let gen = generator(\: yield (x * y + x))
+                expect next(gen) == 20
+
+        describe "Generator state machine":
+            it "preserves state across yields":
+                let gen = generator(\: (yield 10, yield 15)[1])
+                let a = next(gen)
+                let b = next(gen)
+                expect a + b == 25
+
+            it "handles nested iteration":
+                let gen = generator(\: [yield 1, yield 2, yield 3, yield 4])
+                let sum = next(gen) + next(gen) + next(gen) + next(gen)
+                expect sum == 10
+
+            it "handles exhaustion with capture":
+                let val = 42
+                let gen = generator(\: yield val)
+                let first = next(gen)
+                let second = next(gen)
+                expect first == 42
+
+    describe "Futures":
+        describe "Basic future operations":
+            it "creates and awaits a value":
+                let f = future(42)
+                expect await f == 42
+
+            it "awaits computation result":
+                let f = future(10 + 20 + 30)
+                expect await f == 60
+
+            it "awaits future-wrapped value":
+                let x = future(42)
+                expect await x == 42
+
+        describe "Multiple futures":
+            it "awaits multiple futures":
+                let f1 = future(10)
+                let f2 = future(20)
+                let f3 = future(30)
+                expect await f1 + await f2 + await f3 == 60
+
+        describe "Future with captures":
+            it "captures outer variable":
+                let base = 40
+                let f = future(base + 2)
+                expect await f == 42
+
+            it "captures multiple variables":
+                let a = 10
+                let b = 20
+                let c = 12
+                let f = future(a + b + c)
+                expect await f == 42
+
+    describe "Interpreter/Codegen Parity":
+        describe "Generators":
+            it "parity: basic sequence":
+                let gen = generator(\: [yield 1, yield 2, yield 3])
+                expect next(gen) + next(gen) + next(gen) == 6
+
+            it "parity: single value":
+                let gen = generator(\: yield 42)
+                expect next(gen) == 42
+
+            it "parity: multiple captures":
+                let a = 10
+                let b = 20
+                let c = 30
+                let gen = generator(\: [yield a, yield b, yield c])
+                expect next(gen) + next(gen) + next(gen) == 60
+
+        describe "Futures":
+            it "parity: basic future":
+                let f = future(42)
+                expect await f == 42
+
+            it "parity: future with capture":
+                let base = 40
+                let f = future(base + 2)
+                expect await f == 42
+
+            it "parity: multiple captures":
+                let a = 10
+                let b = 20
+                let c = 12
+                let f = future(a + b + c)
+                expect await f == 42
+
+    describe "Async Execution Modes":
+        describe "Threaded Mode (default)":
+            it "is in threaded mode by default":
+                let mode = async_mode()
+                expect mode == "threaded"
+
+            it "futures execute in background":
+                let f = future(42)
+                expect await f == 42
+
+            it "multiple concurrent futures":
+                let f1 = future(10)
+                let f2 = future(20)
+                let f3 = future(30)
+                expect await f1 + await f2 + await f3 == 60
+
+            it "futures with computation":
+                let f = future(10 + 20 + 30)
+                expect await f == 60
+
+            it "futures with captures":
+                let base = 40
+                let f = future(base + 2)
+                expect await f == 42
+
+        describe "Resolved and Rejected Futures":
+            it "creates already-resolved future":
+                let f = resolved(100)
+                expect is_ready(f)
+                expect await f == 100
+
+            it "resolved future with different types":
+                let f1 = resolved(42)
+                let f2 = resolved("hello")
+                expect await f1 == 42
+                expect await f2 == "hello"
+
+        describe "is_ready check":
+            it "resolved future is ready immediately":
+                let f = resolved(42)
+                expect is_ready(f)
+
+            it "can check and await":
+                let f = future(42)
+                let result = await f
+                expect is_ready(f)
+                expect result == 42
+
+        describe "Worker Configuration":
+            it "can configure worker count":
+                async_workers(2)
+                let f = future(42)
+                expect await f == 42
+                # Reset to default
+                async_workers(4)
+
+    describe "Isolated Threads":
+        # Note: Full thread tests require interpreter FFI integration
+        # which is implemented at the runtime level. These tests are
+        # placeholders until the interpreter can call rt_thread_* functions.
+        describe "Basic thread operations":
+            skip "reports available parallelism":
+                # Requires FFI: rt_thread_available_parallelism
+                let cores = available_parallelism()
+                expect cores >= 1
+
+            skip "can sleep thread":
+                # Requires FFI: rt_thread_sleep
+                let start = time_now()
+                sleep(10)
+                let elapsed = time_now() - start
+                expect elapsed >= 5
+
+            skip "can yield thread":
+                # Requires FFI: rt_thread_yield
+                yield_thread()
+                expect true
+
+        describe "Thread spawning":
+            skip "spawns isolated thread and joins":
+                # Requires FFI: rt_thread_spawn_isolated2, rt_thread_join
+                let ch = Channel.new()
+                let handle = spawn_isolated2([1, 2, 3], ch) \data, result_ch:
+                    let sum = 0
+                    for x in data:
+                        sum = sum + x
+                    result_ch.send(sum)
+                    return nil
+
+                let result = ch.recv()
+                handle.join()
+                expect result == 6
+
+        describe "Channel FFI":
+            # Channel tests using runtime FFI
+            skip "creates channel":
+                # Requires FFI: rt_channel_new
+                let ch = Channel.new()
+                expect ch != nil
+
+            skip "sends and receives on channel":
+                # Requires FFI: rt_channel_send, rt_channel_try_recv
+                let ch = Channel.new()
+                ch.send(42)
+                let result = ch.try_recv()
+                expect result == 42
+
+            skip "try_recv returns nil on empty channel":
+                let ch = Channel.new()
+                let result = ch.try_recv()
+                expect result == nil
+
+            skip "sends multiple values":
+                let ch = Channel.new()
+                ch.send(1)
+                ch.send(2)
+                ch.send(3)
+                expect ch.try_recv() == 1
+                expect ch.try_recv() == 2
+                expect ch.try_recv() == 3
+
+            skip "closes channel":
+                # Requires FFI: rt_channel_close, rt_channel_is_closed
+                let ch = Channel.new()
+                ch.send(42)
+                ch.close()
+                expect ch.is_closed()

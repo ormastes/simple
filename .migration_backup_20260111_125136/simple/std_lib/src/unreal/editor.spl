@@ -1,0 +1,550 @@
+# Unreal Editor Integration
+#
+# Runtime property inspection and manipulation for Unreal Editor
+#
+# Features:
+# - Property inspector access
+# - Detail panel customization
+# - Editor-only utility functions
+# - Asset browser integration
+# - Level editor access
+#
+# Based on: https://docs.unrealengine.com/5.4/en-US/API/Editor/
+
+import sys.ffi
+import unreal.actor
+import unreal.blueprint
+
+mod editor
+
+# PropertyCategory
+# Property detail categories
+pub enum PropertyCategory:
+    Transform = 0
+    Rendering = 1
+    Physics = 2
+    Collision = 3
+    Navigation = 4
+    Input = 5
+    Tags = 6
+    Actor = 7
+    Custom = 8
+
+impl PropertyCategory:
+    pub fn to_string(self) -> String:
+        if self == PropertyCategory::Transform:
+            return "Transform"
+        elif self == PropertyCategory::Rendering:
+            return "Rendering"
+        elif self == PropertyCategory::Physics:
+            return "Physics"
+        elif self == PropertyCategory::Collision:
+            return "Collision"
+        elif self == PropertyCategory::Navigation:
+            return "Navigation"
+        elif self == PropertyCategory::Input:
+            return "Input"
+        elif self == PropertyCategory::Tags:
+            return "Tags"
+        elif self == PropertyCategory::Actor:
+            return "Actor"
+        else:
+            return "Custom"
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn description(self) -> String:
+        """Get property category description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            PropertyCategory::Transform.description()
+            # → "Transform properties (location, rotation, scale)"
+        """
+        if self == PropertyCategory::Transform:
+            return "Transform properties (location, rotation, scale)"
+        elif self == PropertyCategory::Rendering:
+            return "Rendering properties (materials, visibility)"
+        elif self == PropertyCategory::Physics:
+            return "Physics properties (mass, gravity, constraints)"
+        elif self == PropertyCategory::Collision:
+            return "Collision properties (collision profiles, channels)"
+        elif self == PropertyCategory::Navigation:
+            return "Navigation properties (pathfinding, obstacles)"
+        elif self == PropertyCategory::Input:
+            return "Input properties (bindings, controls)"
+        elif self == PropertyCategory::Tags:
+            return "Tags properties (actor tags, component tags)"
+        elif self == PropertyCategory::Actor:
+            return "Actor properties (general actor settings)"
+        else:
+            return "Custom properties"
+
+    pub fn is_transform(self) -> bool:
+        """Check if category is Transform.
+
+        Returns:
+            True if Transform
+        """
+        return self == PropertyCategory::Transform
+
+    pub fn is_rendering(self) -> bool:
+        """Check if category is Rendering.
+
+        Returns:
+            True if Rendering
+        """
+        return self == PropertyCategory::Rendering
+
+    pub fn is_physics(self) -> bool:
+        """Check if category is Physics.
+
+        Returns:
+            True if Physics
+        """
+        return self == PropertyCategory::Physics
+
+    pub fn is_collision(self) -> bool:
+        """Check if category is Collision.
+
+        Returns:
+            True if Collision
+        """
+        return self == PropertyCategory::Collision
+
+    pub fn is_navigation(self) -> bool:
+        """Check if category is Navigation.
+
+        Returns:
+            True if Navigation
+        """
+        return self == PropertyCategory::Navigation
+
+    pub fn is_input(self) -> bool:
+        """Check if category is Input.
+
+        Returns:
+            True if Input
+        """
+        return self == PropertyCategory::Input
+
+    pub fn is_tags(self) -> bool:
+        """Check if category is Tags.
+
+        Returns:
+            True if Tags
+        """
+        return self == PropertyCategory::Tags
+
+    pub fn is_actor(self) -> bool:
+        """Check if category is Actor.
+
+        Returns:
+            True if Actor
+        """
+        return self == PropertyCategory::Actor
+
+    pub fn is_custom(self) -> bool:
+        """Check if category is Custom.
+
+        Returns:
+            True if Custom
+        """
+        return self == PropertyCategory::Custom
+
+    pub fn is_spatial(self) -> bool:
+        """Check if category is spatial-related (Transform or Navigation).
+
+        Returns:
+            True if Transform or Navigation
+
+        Example:
+            PropertyCategory::Transform.is_spatial()  # → true
+        """
+        return self == PropertyCategory::Transform or self == PropertyCategory::Navigation
+
+    pub fn is_visual(self) -> bool:
+        """Check if category is visual-related (Rendering).
+
+        Returns:
+            True if Rendering
+
+        Example:
+            PropertyCategory::Rendering.is_visual()  # → true
+        """
+        return self == PropertyCategory::Rendering
+
+    pub fn is_simulation(self) -> bool:
+        """Check if category is simulation-related (Physics or Collision).
+
+        Returns:
+            True if Physics or Collision
+
+        Example:
+            PropertyCategory::Physics.is_simulation()  # → true
+        """
+        return self == PropertyCategory::Physics or self == PropertyCategory::Collision
+
+    pub fn summary(self) -> String:
+        """Get property category summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            PropertyCategory::Transform.summary()
+            # → "PropertyCategory: Transform (Transform properties (location, rotation, scale), spatial)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let mut props = []
+
+        if self.is_spatial():
+            props.push("spatial")
+        if self.is_visual():
+            props.push("visual")
+        if self.is_simulation():
+            props.push("simulation")
+
+        if props.len() > 0:
+            let props_str = ", ".join(props)
+            return "PropertyCategory: {name} ({desc}, {props_str})"
+        else:
+            return "PropertyCategory: {name} ({desc})"
+
+# PropertyMetadata
+# Metadata for property display
+pub struct PropertyMetadata:
+    display_name: String
+    category: PropertyCategory
+    tooltip: String
+    min_value: Option[f64]
+    max_value: Option[f64]
+    editable: bool
+
+impl PropertyMetadata:
+    pub fn new(display_name: String, category: PropertyCategory) -> PropertyMetadata:
+        return PropertyMetadata(
+            display_name: display_name,
+            category: category,
+            tooltip: "",
+            min_value: None,
+            max_value: None,
+            editable: true,
+        )
+
+    pub fn tooltip(mut self, tooltip: String) -> PropertyMetadata:
+        self.tooltip = tooltip
+        return self
+
+    pub fn range(mut self, min: f64, max: f64) -> PropertyMetadata:
+        self.min_value = Some(min)
+        self.max_value = Some(max)
+        return self
+
+    pub fn editable(mut self, editable: bool) -> PropertyMetadata:
+        self.editable = editable
+        return self
+
+
+# PropertyInspector
+# Inspect and modify actor properties at runtime
+pub struct PropertyInspector:
+    actor: actor.AActor
+
+impl PropertyInspector:
+    pub fn new(actor: actor.AActor) -> PropertyInspector:
+        return PropertyInspector(actor: actor)
+
+    # Get property value as Blueprint PropertyValue
+    pub fn get_property(self, property_name: String) -> blueprint.PropertyValue:
+        return blueprint.get_blueprint_property(self.actor, property_name)
+
+    # Set property value
+    pub fn set_property(mut self, property_name: String, value: blueprint.PropertyValue):
+        blueprint.set_blueprint_property(self.actor, property_name, value)
+
+    # List all properties
+    pub fn list_properties(self) -> Vec[String]:
+        let count_ptr = ffi.alloc_i32()
+        let names_ptr = unreal_editor_get_property_names(self.actor.as_ptr(), count_ptr)
+        let count = ffi.read_i32(count_ptr)
+
+        let mut properties = Vec::new()
+        for i in 0..count:
+            let name_ptr = ffi.read_array_ptr(names_ptr, i)
+            let name = ffi.string_from_ptr(name_ptr)
+            properties.push(name)
+
+        ffi.free(count_ptr)
+        ffi.free(names_ptr)
+
+        return properties
+
+    # Get property metadata
+    pub fn get_property_metadata(self, property_name: String) -> PropertyMetadata:
+        let display_name_ptr = ffi.alloc_ptr()
+        let category_ptr = ffi.alloc_i32()
+        let tooltip_ptr = ffi.alloc_ptr()
+        let editable_ptr = ffi.alloc_bool()
+
+        unreal_editor_get_property_metadata(
+            self.actor.as_ptr(),
+            property_name,
+            display_name_ptr,
+            category_ptr,
+            tooltip_ptr,
+            editable_ptr
+        )
+
+        let display_name = ffi.string_from_ptr(ffi.read_ptr(display_name_ptr))
+        let category_int = ffi.read_i32(category_ptr)
+        let tooltip = ffi.string_from_ptr(ffi.read_ptr(tooltip_ptr))
+        let editable = ffi.read_bool(editable_ptr)
+
+        ffi.free(display_name_ptr)
+        ffi.free(category_ptr)
+        ffi.free(tooltip_ptr)
+        ffi.free(editable_ptr)
+
+        # Map category int to enum (simplified)
+        let category = if category_int == 0:
+            PropertyCategory::Transform
+        elif category_int == 1:
+            PropertyCategory::Rendering
+        else:
+            PropertyCategory::Custom
+
+        return PropertyMetadata(
+            display_name: display_name,
+            category: category,
+            tooltip: tooltip,
+            min_value: None,
+            max_value: None,
+            editable: editable,
+        )
+
+    # Check if property is editable
+    pub fn is_property_editable(self, property_name: String) -> bool:
+        return unreal_editor_is_property_editable(self.actor.as_ptr(), property_name)
+
+    # Mark property as modified (for undo/redo)
+    pub fn mark_property_modified(mut self, property_name: String):
+        unreal_editor_mark_property_modified(self.actor.as_ptr(), property_name)
+
+
+# DetailCustomization
+# Customize detail panel display
+pub struct DetailCustomization:
+    object_ptr: ffi.VoidPtr
+    customizations: Vec[(String, PropertyMetadata)]
+
+impl DetailCustomization:
+    pub fn new(object_ptr: ffi.VoidPtr) -> DetailCustomization:
+        return DetailCustomization(
+            object_ptr: object_ptr,
+            customizations: [],
+        )
+
+    # Add property customization
+    pub fn customize_property(mut self, property_name: String, metadata: PropertyMetadata):
+        self.customizations.push((property_name, metadata))
+
+        # Apply to editor
+        unreal_editor_customize_property(
+            self.object_ptr,
+            property_name,
+            metadata.display_name,
+            metadata.category.to_string(),
+            metadata.tooltip,
+            metadata.editable
+        )
+
+    # Hide property from detail panel
+    pub fn hide_property(mut self, property_name: String):
+        unreal_editor_hide_property(self.object_ptr, property_name)
+
+    # Show hidden property
+    pub fn show_property(mut self, property_name: String):
+        unreal_editor_show_property(self.object_ptr, property_name)
+
+
+# LevelEditor
+# Access to level editor functionality
+pub struct LevelEditor:
+    editor_ptr: ffi.VoidPtr
+
+impl LevelEditor:
+    pub fn get_instance() -> LevelEditor:
+        let ptr = unreal_editor_get_level_editor()
+        return LevelEditor(editor_ptr: ptr)
+
+    # Get selected actors
+    pub fn get_selected_actors(self) -> Vec[actor.AActor]:
+        let count_ptr = ffi.alloc_i32()
+        let actors_ptr = unreal_editor_get_selected_actors(self.editor_ptr, count_ptr)
+        let count = ffi.read_i32(count_ptr)
+
+        let mut actors = Vec::new()
+        for i in 0..count:
+            let actor_ptr = ffi.read_array_ptr(actors_ptr, i)
+            actors.push(actor.AActor::from_ptr(actor_ptr))
+
+        ffi.free(count_ptr)
+        ffi.free(actors_ptr)
+
+        return actors
+
+    # Select actor
+    pub fn select_actor(mut self, actor_to_select: actor.AActor):
+        unreal_editor_select_actor(self.editor_ptr, actor_to_select.as_ptr())
+
+    # Deselect actor
+    pub fn deselect_actor(mut self, actor_to_deselect: actor.AActor):
+        unreal_editor_deselect_actor(self.editor_ptr, actor_to_deselect.as_ptr())
+
+    # Clear selection
+    pub fn clear_selection(mut self):
+        unreal_editor_clear_selection(self.editor_ptr)
+
+    # Delete selected actors
+    pub fn delete_selected_actors(mut self):
+        unreal_editor_delete_selected_actors(self.editor_ptr)
+
+    # Focus viewport on actor
+    pub fn focus_on_actor(mut self, actor_to_focus: actor.AActor):
+        unreal_editor_focus_on_actor(self.editor_ptr, actor_to_focus.as_ptr())
+
+
+# AssetBrowser
+# Access to content browser and asset management
+pub struct AssetBrowser:
+    browser_ptr: ffi.VoidPtr
+
+impl AssetBrowser:
+    pub fn get_instance() -> AssetBrowser:
+        let ptr = unreal_editor_get_asset_browser()
+        return AssetBrowser(browser_ptr: ptr)
+
+    # Get asset path
+    pub fn get_selected_asset_path(self) -> Option[String]:
+        let path_ptr = unreal_editor_get_selected_asset_path(self.browser_ptr)
+        if ffi.is_null_ptr(path_ptr):
+            return None
+        else:
+            return Some(ffi.string_from_ptr(path_ptr))
+
+    # Select asset in browser
+    pub fn select_asset(mut self, asset_path: String):
+        unreal_editor_select_asset(self.browser_ptr, asset_path)
+
+    # Import asset
+    pub fn import_asset(mut self, file_path: String, destination_path: String) -> bool:
+        return unreal_editor_import_asset(self.browser_ptr, file_path, destination_path)
+
+    # Create new asset
+    pub fn create_asset(mut self, asset_name: String, asset_path: String, asset_class: String) -> bool:
+        return unreal_editor_create_asset(self.browser_ptr, asset_name, asset_path, asset_class)
+
+
+# Utility functions
+
+# Inspect actor properties
+pub fn inspect_actor(actor_to_inspect: actor.AActor) -> PropertyInspector:
+    return PropertyInspector::new(actor_to_inspect)
+
+# Get level editor
+pub fn get_level_editor() -> LevelEditor:
+    return LevelEditor::get_instance()
+
+# Get asset browser
+pub fn get_asset_browser() -> AssetBrowser:
+    return AssetBrowser::get_instance()
+
+# Check if running in editor
+pub fn is_editor() -> bool:
+    return unreal_editor_is_editor()
+
+# Check if PIE (Play In Editor) is active
+pub fn is_pie_active() -> bool:
+    return unreal_editor_is_pie_active()
+
+
+# FFI function declarations
+
+extern "C":
+    # Property inspector functions
+    fn unreal_editor_get_property_names(actor: ffi.VoidPtr, count: ffi.VoidPtr) -> ffi.VoidPtr
+    fn unreal_editor_get_property_metadata(
+        actor: ffi.VoidPtr,
+        property_name: String,
+        display_name: ffi.VoidPtr,
+        category: ffi.VoidPtr,
+        tooltip: ffi.VoidPtr,
+        editable: ffi.VoidPtr
+    )
+    fn unreal_editor_is_property_editable(actor: ffi.VoidPtr, property_name: String) -> bool
+    fn unreal_editor_mark_property_modified(actor: ffi.VoidPtr, property_name: String)
+
+    # Detail customization functions
+    fn unreal_editor_customize_property(
+        object: ffi.VoidPtr,
+        property_name: String,
+        display_name: String,
+        category: String,
+        tooltip: String,
+        editable: bool
+    )
+    fn unreal_editor_hide_property(object: ffi.VoidPtr, property_name: String)
+    fn unreal_editor_show_property(object: ffi.VoidPtr, property_name: String)
+
+    # Level editor functions
+    fn unreal_editor_get_level_editor() -> ffi.VoidPtr
+    fn unreal_editor_get_selected_actors(editor: ffi.VoidPtr, count: ffi.VoidPtr) -> ffi.VoidPtr
+    fn unreal_editor_select_actor(editor: ffi.VoidPtr, actor: ffi.VoidPtr)
+    fn unreal_editor_deselect_actor(editor: ffi.VoidPtr, actor: ffi.VoidPtr)
+    fn unreal_editor_clear_selection(editor: ffi.VoidPtr)
+    fn unreal_editor_delete_selected_actors(editor: ffi.VoidPtr)
+    fn unreal_editor_focus_on_actor(editor: ffi.VoidPtr, actor: ffi.VoidPtr)
+
+    # Asset browser functions
+    fn unreal_editor_get_asset_browser() -> ffi.VoidPtr
+    fn unreal_editor_get_selected_asset_path(browser: ffi.VoidPtr) -> ffi.VoidPtr
+    fn unreal_editor_select_asset(browser: ffi.VoidPtr, asset_path: String)
+    fn unreal_editor_import_asset(browser: ffi.VoidPtr, file_path: String, destination_path: String) -> bool
+    fn unreal_editor_create_asset(browser: ffi.VoidPtr, asset_name: String, asset_path: String, asset_class: String) -> bool
+
+    # Editor state functions
+    fn unreal_editor_is_editor() -> bool
+    fn unreal_editor_is_pie_active() -> bool
+
+
+# Example usage:
+#
+# # Inspect actor properties
+# let inspector = inspect_actor(my_actor)
+# let properties = inspector.list_properties()
+#
+# for prop_name in properties:
+#     let metadata = inspector.get_property_metadata(prop_name)
+#     print("{metadata.display_name} ({metadata.category.to_string()})")
+#
+# # Modify property
+# inspector.set_property("Health", blueprint.PropertyValue::Float(100.0))
+# inspector.mark_property_modified("Health")
+#
+# # Level editor manipulation
+# let editor = get_level_editor()
+# let selected = editor.get_selected_actors()
+# editor.clear_selection()
+# editor.select_actor(my_actor)
+# editor.focus_on_actor(my_actor)
+#
+# # Asset browser
+# let browser = get_asset_browser()
+# let path = browser.get_selected_asset_path()
+# browser.import_asset("/path/to/model.fbx", "/Game/Models/")

@@ -1,0 +1,478 @@
+# Unreal Live Coding Integration
+#
+# Hot-reload support for Simple code in Unreal Engine
+#
+# Features:
+# - Live coding session management
+# - Module recompilation triggering
+# - Change detection and file watching
+# - Hot-reload callbacks
+# - Integration with Simple JIT compiler
+#
+# Based on: https://docs.unrealengine.com/5.4/en-US/using-live-coding-to-recompile-unreal-engine-applications-at-runtime/
+
+import sys.ffi
+
+mod live_coding
+
+# LiveCodingStatus
+# Current status of live coding
+pub enum LiveCodingStatus:
+    Idle = 0
+    Compiling = 1
+    Linking = 2
+    Reloading = 3
+    Success = 4
+    Failed = 5
+
+impl LiveCodingStatus:
+    pub fn to_int(self) -> i32:
+        if self == LiveCodingStatus::Idle:
+            return 0
+        elif self == LiveCodingStatus::Compiling:
+            return 1
+        elif self == LiveCodingStatus::Linking:
+            return 2
+        elif self == LiveCodingStatus::Reloading:
+            return 3
+        elif self == LiveCodingStatus::Success:
+            return 4
+        else:
+            return 5
+
+    pub fn from_int(status: i32) -> LiveCodingStatus:
+        if status == 0:
+            return LiveCodingStatus::Idle
+        elif status == 1:
+            return LiveCodingStatus::Compiling
+        elif status == 2:
+            return LiveCodingStatus::Linking
+        elif status == 3:
+            return LiveCodingStatus::Reloading
+        elif status == 4:
+            return LiveCodingStatus::Success
+        else:
+            return LiveCodingStatus::Failed
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn to_string(self) -> String:
+        """Convert status to string.
+
+        Returns:
+            Status name
+
+        Example:
+            LiveCodingStatus::Compiling.to_string()  # → "Compiling"
+        """
+        if self == LiveCodingStatus::Idle:
+            return "Idle"
+        elif self == LiveCodingStatus::Compiling:
+            return "Compiling"
+        elif self == LiveCodingStatus::Linking:
+            return "Linking"
+        elif self == LiveCodingStatus::Reloading:
+            return "Reloading"
+        elif self == LiveCodingStatus::Success:
+            return "Success"
+        else:
+            return "Failed"
+
+    pub fn description(self) -> String:
+        """Get status description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            LiveCodingStatus::Compiling.description()
+            # → "Compiling code changes"
+        """
+        if self == LiveCodingStatus::Idle:
+            return "Waiting for changes"
+        elif self == LiveCodingStatus::Compiling:
+            return "Compiling code changes"
+        elif self == LiveCodingStatus::Linking:
+            return "Linking compiled modules"
+        elif self == LiveCodingStatus::Reloading:
+            return "Reloading modules into engine"
+        elif self == LiveCodingStatus::Success:
+            return "Live coding completed successfully"
+        else:
+            return "Live coding failed"
+
+    pub fn is_idle(self) -> bool:
+        """Check if status is Idle.
+
+        Returns:
+            True if Idle
+        """
+        return self == LiveCodingStatus::Idle
+
+    pub fn is_compiling(self) -> bool:
+        """Check if status is Compiling.
+
+        Returns:
+            True if Compiling
+        """
+        return self == LiveCodingStatus::Compiling
+
+    pub fn is_linking(self) -> bool:
+        """Check if status is Linking.
+
+        Returns:
+            True if Linking
+        """
+        return self == LiveCodingStatus::Linking
+
+    pub fn is_reloading(self) -> bool:
+        """Check if status is Reloading.
+
+        Returns:
+            True if Reloading
+        """
+        return self == LiveCodingStatus::Reloading
+
+    pub fn is_success(self) -> bool:
+        """Check if status is Success.
+
+        Returns:
+            True if Success
+        """
+        return self == LiveCodingStatus::Success
+
+    pub fn is_failed(self) -> bool:
+        """Check if status is Failed.
+
+        Returns:
+            True if Failed
+        """
+        return self == LiveCodingStatus::Failed
+
+    pub fn is_in_progress(self) -> bool:
+        """Check if live coding is in progress.
+
+        Returns:
+            True if Compiling, Linking, or Reloading
+
+        Example:
+            LiveCodingStatus::Compiling.is_in_progress()  # → true
+            LiveCodingStatus::Idle.is_in_progress()  # → false
+        """
+        return self == LiveCodingStatus::Compiling or self == LiveCodingStatus::Linking or self == LiveCodingStatus::Reloading
+
+    pub fn is_done(self) -> bool:
+        """Check if live coding is done (Success or Failed).
+
+        Returns:
+            True if Success or Failed
+
+        Example:
+            LiveCodingStatus::Success.is_done()  # → true
+        """
+        return self == LiveCodingStatus::Success or self == LiveCodingStatus::Failed
+
+    pub fn is_successful(self) -> bool:
+        """Check if completed successfully.
+
+        Returns:
+            True if Success
+        """
+        return self == LiveCodingStatus::Success
+
+    pub fn summary(self) -> String:
+        """Get live coding status summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            LiveCodingStatus::Compiling.summary()
+            # → "LiveCodingStatus: Compiling (Compiling code changes, in progress)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let state = if self.is_in_progress():
+            "in progress"
+        elif self.is_done():
+            if self.is_successful():
+                "completed successfully"
+            else:
+                "failed"
+        else:
+            "idle"
+        return "LiveCodingStatus: {name} ({desc}, {state})"
+
+# ReloadCallback
+# Callback for reload events
+pub type ReloadCallback = fn(bool) -> ()
+
+# LiveCodingSession
+# Manages a live coding session
+pub struct LiveCodingSession:
+    session_ptr: ffi.VoidPtr
+    on_reload_callbacks: Vec[ReloadCallback]
+
+impl LiveCodingSession:
+    # Create new live coding session
+    pub fn new() -> LiveCodingSession:
+        let ptr = unreal_live_coding_create_session()
+        return LiveCodingSession(
+            session_ptr: ptr,
+            on_reload_callbacks: [],
+        )
+
+    # Start live coding session
+    pub fn start(mut self):
+        unreal_live_coding_start_session(self.session_ptr)
+
+    # Stop live coding session
+    pub fn stop(mut self):
+        unreal_live_coding_stop_session(self.session_ptr)
+
+    # Get current status
+    pub fn get_status(self) -> LiveCodingStatus:
+        let status = unreal_live_coding_get_status(self.session_ptr)
+        return LiveCodingStatus::from_int(status)
+
+    # Trigger manual compile
+    pub fn compile(mut self):
+        unreal_live_coding_compile(self.session_ptr)
+
+    # Enable/disable automatic compilation on file change
+    pub fn set_auto_compile(mut self, enabled: bool):
+        unreal_live_coding_set_auto_compile(self.session_ptr, enabled)
+
+    # Add file watch path
+    pub fn add_watch_path(mut self, path: String):
+        unreal_live_coding_add_watch_path(self.session_ptr, path)
+
+    # Remove file watch path
+    pub fn remove_watch_path(mut self, path: String):
+        unreal_live_coding_remove_watch_path(self.session_ptr, path)
+
+    # Register reload callback
+    pub fn on_reload(mut self, callback: ReloadCallback):
+        self.on_reload_callbacks.push(callback)
+
+    # Internal: Dispatch reload event
+    pub fn _dispatch_reload(mut self, success: bool):
+        for callback in self.on_reload_callbacks:
+            callback(success)
+
+
+# SimpleModuleReloader
+# Handles Simple-specific module reloading via JIT
+pub struct SimpleModuleReloader:
+    module_paths: Vec[String]
+    jit_enabled: bool
+
+impl SimpleModuleReloader:
+    pub fn new() -> SimpleModuleReloader:
+        return SimpleModuleReloader(
+            module_paths: [],
+            jit_enabled: true,
+        )
+
+    # Add Simple module to watch
+    pub fn add_module(mut self, module_path: String):
+        self.module_paths.push(module_path)
+
+    # Enable/disable JIT compilation
+    pub fn set_jit_enabled(mut self, enabled: bool):
+        self.jit_enabled = enabled
+
+    # Reload all watched modules
+    pub fn reload_modules(mut self) -> bool:
+        let mut success = true
+
+        for module_path in self.module_paths:
+            if self.jit_enabled:
+                # Use Simple JIT compiler
+                let result = simple_jit_compile_module(module_path)
+                if not result:
+                    success = false
+            else:
+                # Use AOT compilation
+                let result = simple_aot_compile_module(module_path)
+                if not result:
+                    success = false
+
+        return success
+
+    # Reload specific module
+    pub fn reload_module(mut self, module_path: String) -> bool:
+        if self.jit_enabled:
+            return simple_jit_compile_module(module_path)
+        else:
+            return simple_aot_compile_module(module_path)
+
+
+# LiveCodingManager
+# Global manager for live coding sessions
+pub struct LiveCodingManager:
+    session: Option[LiveCodingSession]
+    simple_reloader: SimpleModuleReloader
+    enabled: bool
+
+impl LiveCodingManager:
+    pub fn new() -> LiveCodingManager:
+        return LiveCodingManager(
+            session: None,
+            simple_reloader: SimpleModuleReloader::new(),
+            enabled: false,
+        )
+
+    # Enable live coding
+    pub fn enable(mut self):
+        if self.enabled:
+            return
+
+        let mut session = LiveCodingSession::new()
+        session.start()
+
+        # Register reload callback
+        let reloader = self.simple_reloader
+        session.on_reload(fn(success: bool):
+            if success:
+                reloader.reload_modules()
+        )
+
+        self.session = Some(session)
+        self.enabled = true
+
+    # Disable live coding
+    pub fn disable(mut self):
+        if not self.enabled:
+            return
+
+        if self.session.is_some():
+            let mut session = self.session.unwrap()
+            session.stop()
+
+        self.session = None
+        self.enabled = false
+
+    # Add Simple module to watch
+    pub fn watch_module(mut self, module_path: String):
+        self.simple_reloader.add_module(module_path)
+
+        # Also add to file watcher if session active
+        if self.session.is_some():
+            let mut session = self.session.unwrap()
+            session.add_watch_path(module_path)
+
+    # Trigger manual compilation
+    pub fn compile(mut self):
+        if self.session.is_some():
+            let mut session = self.session.unwrap()
+            session.compile()
+
+    # Enable/disable auto-compile
+    pub fn set_auto_compile(mut self, enabled: bool):
+        if self.session.is_some():
+            let mut session = self.session.unwrap()
+            session.set_auto_compile(enabled)
+
+    # Enable/disable JIT for Simple modules
+    pub fn set_jit_enabled(mut self, enabled: bool):
+        self.simple_reloader.set_jit_enabled(enabled)
+
+    # Get current status
+    pub fn get_status(self) -> LiveCodingStatus:
+        if self.session.is_some():
+            let session = self.session.unwrap()
+            return session.get_status()
+        else:
+            return LiveCodingStatus::Idle
+
+
+# Global live coding manager
+let mut LIVE_CODING_MANAGER: Option[LiveCodingManager] = None
+
+# Get global manager
+pub fn get_live_coding_manager() -> LiveCodingManager:
+    if LIVE_CODING_MANAGER.is_none():
+        LIVE_CODING_MANAGER = Some(LiveCodingManager::new())
+
+    return LIVE_CODING_MANAGER.unwrap()
+
+
+# Utility functions
+
+# Enable live coding
+pub fn enable_live_coding():
+    let mut manager = get_live_coding_manager()
+    manager.enable()
+
+# Disable live coding
+pub fn disable_live_coding():
+    let mut manager = get_live_coding_manager()
+    manager.disable()
+
+# Watch Simple module for changes
+pub fn watch_simple_module(module_path: String):
+    let mut manager = get_live_coding_manager()
+    manager.watch_module(module_path)
+
+# Trigger manual compilation
+pub fn trigger_compile():
+    let mut manager = get_live_coding_manager()
+    manager.compile()
+
+# Enable/disable auto-compile on file change
+pub fn set_auto_compile(enabled: bool):
+    let mut manager = get_live_coding_manager()
+    manager.set_auto_compile(enabled)
+
+# Enable/disable JIT compilation for Simple modules
+pub fn set_jit_enabled(enabled: bool):
+    let mut manager = get_live_coding_manager()
+    manager.set_jit_enabled(enabled)
+
+# Get current compilation status
+pub fn get_compile_status() -> LiveCodingStatus:
+    let manager = get_live_coding_manager()
+    return manager.get_status()
+
+
+# FFI function declarations
+
+extern "C":
+    # Live coding session functions
+    fn unreal_live_coding_create_session() -> ffi.VoidPtr
+    fn unreal_live_coding_start_session(session: ffi.VoidPtr)
+    fn unreal_live_coding_stop_session(session: ffi.VoidPtr)
+    fn unreal_live_coding_get_status(session: ffi.VoidPtr) -> i32
+    fn unreal_live_coding_compile(session: ffi.VoidPtr)
+    fn unreal_live_coding_set_auto_compile(session: ffi.VoidPtr, enabled: bool)
+    fn unreal_live_coding_add_watch_path(session: ffi.VoidPtr, path: String)
+    fn unreal_live_coding_remove_watch_path(session: ffi.VoidPtr, path: String)
+
+    # Simple JIT/AOT compilation functions
+    fn simple_jit_compile_module(module_path: String) -> bool
+    fn simple_aot_compile_module(module_path: String) -> bool
+
+
+# Example usage:
+#
+# # Enable live coding with JIT
+# enable_live_coding()
+# set_jit_enabled(true)
+# set_auto_compile(true)
+#
+# # Watch Simple modules
+# watch_simple_module("MyGame/Core/Player.spl")
+# watch_simple_module("MyGame/Core/Enemy.spl")
+#
+# # Manual compile
+# trigger_compile()
+#
+# # Check status
+# let status = get_compile_status()
+# if status == LiveCodingStatus::Success:
+#     print("Compilation successful!")
+# elif status == LiveCodingStatus::Failed:
+#     print("Compilation failed!")

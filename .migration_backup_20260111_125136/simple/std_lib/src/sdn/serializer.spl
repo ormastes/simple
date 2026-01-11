@@ -1,0 +1,270 @@
+///
+Module: sdn.serializer
+
+SDN serializer - renders SdnValue back to SDN text format.
+
+Features:
+- Smart formatting (inline vs block form)
+- Proper indentation
+- Escape sequences in strings
+- JSON output support
+
+Usage:
+    import sdn.serializer
+    let sdn_text = to_sdn(value)
+    let json_text = to_json(value)
+///
+
+import value.SdnValue
+
+# Public exports
+export to_sdn, to_json, render_value, render_json
+
+/// Render an SDN value to SDN text format
+fn to_sdn(value: SdnValue) -> String:
+    return render_value(value, 0)
+
+/// Render an SDN value to JSON format
+fn to_json(value: SdnValue) -> String:
+    return render_json(value)
+
+/// Render SDN value to string with indentation
+fn render_value(value: SdnValue, indent: Int) -> String:
+    let prefix = "    ".repeat(indent)
+
+    match value:
+        case SdnValue.Null:
+            return "null"
+
+        case SdnValue.Bool(b):
+            return if b: "true" else: "false"
+
+        case SdnValue.Int(i):
+            return i.to_string()
+
+        case SdnValue.Float(f):
+            return f.to_string()
+
+        case SdnValue.String(s):
+            # Quote if contains whitespace or special chars
+            if needs_quoting(s):
+                return "\"${escape_string(s)}\""
+            else:
+                return s
+
+        case SdnValue.Array(arr):
+            if arr.len == 0:
+                return "[]"
+            elif is_simple_array(arr):
+                # Inline format for simple arrays
+                let mut items = []
+                for v in arr:
+                    items.push(render_value(v, 0))
+                return "[${items.join(\", \")}]"
+            else:
+                # Block format for complex arrays
+                let mut result = ""
+                for v in arr:
+                    result += "\n${prefix}    ${render_value(v, indent + 1)}"
+                return result
+
+        case SdnValue.Dict(dict):
+            if dict.len == 0:
+                return "{}"
+            elif is_simple_dict(dict):
+                # Inline format for simple dicts
+                let mut items = []
+                for (k, v) in dict.items():
+                    items.push("${k}: ${render_value(v, 0)}")
+                return "{${items.join(\", \")}}"
+            else:
+                # Block format for complex dicts
+                let mut result = ""
+                for (k, v) in dict.items():
+                    if is_block_value(v):
+                        result += "\n${prefix}${k}:"
+                        result += render_value(v, indent + 1)
+                    else:
+                        result += "\n${prefix}${k}: ${render_value(v, 0)}"
+                return result
+
+        case SdnValue.Table(fields, _, rows):
+            let mut result = ""
+
+            # Add field headers if named table
+            match fields:
+                case Some(field_list):
+                    result += "|${field_list.join(\", \")}|"
+                case None:
+                    pass
+
+            # Add rows
+            for row in rows:
+                let mut items = []
+                for v in row:
+                    items.push(render_value(v, 0))
+                result += "\n${prefix}    ${items.join(\", \")}"
+
+            return result
+
+### Helper functions for format decisions
+
+fn needs_quoting(s: String) -> Bool:
+    """Check if string needs quotes"""
+    return s.contains(" ") or s.contains(",") or s.contains(":") or s.contains("\"")
+
+fn escape_string(s: String) -> String:
+    """Escape special characters in string"""
+    let mut result = ""
+    for ch in s.chars():
+        match ch:
+            case '\\':
+                result += "\\\\"
+            case '"':
+                result += "\\\""
+            case '\n':
+                result += "\\n"
+            case '\t':
+                result += "\\t"
+            case '\r':
+                result += "\\r"
+            case _:
+                result += ch
+    return result
+
+fn is_simple_array(arr: List[SdnValue]) -> Bool:
+    """Check if array is simple (can be rendered inline)"""
+    if arr.len > 5:
+        return False
+
+    for v in arr:
+        match v:
+            case SdnValue.Null:
+                pass
+            case SdnValue.Bool(_):
+                pass
+            case SdnValue.Int(_):
+                pass
+            case SdnValue.Float(_):
+                pass
+            case SdnValue.String(_):
+                pass
+            case _:
+                return False  # Complex type, not simple
+
+    return True
+
+fn is_simple_dict(dict: Dict[String, SdnValue]) -> Bool:
+    """Check if dict is simple (can be rendered inline)"""
+    if dict.len > 3:
+        return False
+
+    for (_, v) in dict.items():
+        match v:
+            case SdnValue.Null:
+                pass
+            case SdnValue.Bool(_):
+                pass
+            case SdnValue.Int(_):
+                pass
+            case SdnValue.Float(_):
+                pass
+            case SdnValue.String(_):
+                pass
+            case _:
+                return False  # Complex type, not simple
+
+    return True
+
+fn is_block_value(value: SdnValue) -> Bool:
+    """Check if value should be rendered as a block"""
+    match value:
+        case SdnValue.Dict(dict):
+            return not is_simple_dict(dict)
+        case SdnValue.Array(arr):
+            return not is_simple_array(arr)
+        case SdnValue.Table(_, _, _):
+            return True
+        case _:
+            return False
+
+### JSON rendering
+
+fn render_json(value: SdnValue) -> String:
+    """Render SDN value as JSON"""
+    match value:
+        case SdnValue.Null:
+            return "null"
+
+        case SdnValue.Bool(b):
+            return if b: "true" else: "false"
+
+        case SdnValue.Int(i):
+            return i.to_string()
+
+        case SdnValue.Float(f):
+            return f.to_string()
+
+        case SdnValue.String(s):
+            return "\"${escape_json_string(s)}\""
+
+        case SdnValue.Array(arr):
+            let mut items = []
+            for v in arr:
+                items.push(render_json(v))
+            return "[${items.join(\", \")}]"
+
+        case SdnValue.Dict(dict):
+            let mut pairs = []
+            for (k, v) in dict.items():
+                pairs.push("\"${escape_json_string(k)}\": ${render_json(v)}")
+            return "{${pairs.join(\", \")}}"
+
+        case SdnValue.Table(fields, _, rows):
+            # Render table as array of objects (if named) or array of arrays
+            match fields:
+                case Some(field_list):
+                    # Named table → array of objects
+                    let mut objects = []
+                    for row in rows:
+                        let mut pairs = []
+                        for i in 0..field_list.len:
+                            if i < row.len:
+                                let field = field_list[i]
+                                let val = row[i]
+                                pairs.push("\"${escape_json_string(field)}\": ${render_json(val)}")
+                        objects.push("{${pairs.join(\", \")}}")
+                    return "[${objects.join(\", \")}]"
+
+                case None:
+                    # Typed table → array of arrays
+                    let mut arrays = []
+                    for row in rows:
+                        let mut items = []
+                        for v in row:
+                            items.push(render_json(v))
+                        arrays.push("[${items.join(\", \")}]")
+                    return "[${arrays.join(\", \")}]"
+
+fn escape_json_string(s: String) -> String:
+    """Escape string for JSON"""
+    let mut result = ""
+    for ch in s.chars():
+        match ch:
+            case '\\':
+                result += "\\\\"
+            case '"':
+                result += "\\\""
+            case '\n':
+                result += "\\n"
+            case '\t':
+                result += "\\t"
+            case '\r':
+                result += "\\r"
+            case '\b':
+                result += "\\b"
+            case '\f':
+                result += "\\"
+            case _:
+                result += ch
+    return result

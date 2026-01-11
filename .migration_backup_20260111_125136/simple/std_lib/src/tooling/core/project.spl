@@ -1,0 +1,1055 @@
+# Multi-Language Project Detection & Configuration
+# Detects language roots, reads config files, manages project structure
+
+use host.async_nogc_mut.io.fs
+use host.common.io.types.{FileType, DirEntry, FilePath, DirPath}
+use sdn.{SdnDocument, SdnValue}
+use core.result.{Result, Ok, Err}
+
+# Project language type
+pub enum Language:
+    Simple
+    Rust
+    Python
+    JavaScript
+    TypeScript
+    Go
+    C
+    Cpp
+
+    pub fn to_string(self): String =
+        """Convert language to string.
+
+        Returns:
+            Language name
+
+        Example:
+            Language::Rust.to_string()  # → "Rust"
+        """
+        match self:
+            Language::Simple: "Simple"
+            Language::Rust: "Rust"
+            Language::Python: "Python"
+            Language::JavaScript: "JavaScript"
+            Language::TypeScript: "TypeScript"
+            Language::Go: "Go"
+            Language::C: "C"
+            Language::Cpp: "C++"
+
+    fn description(): String =
+        """Get language description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            Language::Rust.description()
+            # → "Systems programming language with memory safety"
+        """
+        match self:
+            Language::Simple: "Simple programming language (this project)"
+            Language::Rust: "Systems programming language with memory safety"
+            Language::Python: "High-level interpreted scripting language"
+            Language::JavaScript: "Dynamic scripting language for web"
+            Language::TypeScript: "Typed superset of JavaScript"
+            Language::Go: "Compiled language with goroutines and channels"
+            Language::C: "Low-level systems programming language"
+            Language::Cpp: "C++ systems programming with object-oriented features"
+
+    pub fn get_extension(self): String =
+        """Get file extension for language.
+
+        Returns:
+            File extension with dot
+
+        Example:
+            Language::Rust.get_extension()  # → ".rs"
+        """
+        match self:
+            Language::Simple: ".spl"
+            Language::Rust: ".rs"
+            Language::Python: ".py"
+            Language::JavaScript: ".js"
+            Language::TypeScript: ".ts"
+            Language::Go: ".go"
+            Language::C: ".c"
+            Language::Cpp: ".cpp"
+
+    pub fn is_compiled(self): bool =
+        """Check if language is compiled.
+
+        Returns:
+            True if compiled language
+
+        Example:
+            Language::Rust.is_compiled()  # → true
+            Language::Python.is_compiled()  # → false
+        """
+        match self:
+            Language::Simple: true
+            Language::Rust: true
+            Language::Go: true
+            Language::C: true
+            Language::Cpp: true
+            Language::Python: false
+            Language::JavaScript: false
+            Language::TypeScript: false  # TypeScript transpiles, not compiles to machine code
+
+    pub fn is_interpreted(self): bool =
+        """Check if language is interpreted.
+
+        Returns:
+            True if interpreted language
+        """
+        not self.is_compiled()
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_simple(self): bool =
+        """Check if language is Simple.
+
+        Returns:
+            True if Simple
+        """
+        match self:
+            Language::Simple: true
+            _: false
+
+    pub fn is_rust(self): bool =
+        """Check if language is Rust.
+
+        Returns:
+            True if Rust
+        """
+        match self:
+            Language::Rust: true
+            _: false
+
+    pub fn is_python(self): bool =
+        """Check if language is Python.
+
+        Returns:
+            True if Python
+        """
+        match self:
+            Language::Python: true
+            _: false
+
+    pub fn is_javascript(self): bool =
+        """Check if language is JavaScript.
+
+        Returns:
+            True if JavaScript
+        """
+        match self:
+            Language::JavaScript: true
+            _: false
+
+    pub fn is_typescript(self): bool =
+        """Check if language is TypeScript.
+
+        Returns:
+            True if TypeScript
+        """
+        match self:
+            Language::TypeScript: true
+            _: false
+
+    pub fn is_go(self): bool =
+        """Check if language is Go.
+
+        Returns:
+            True if Go
+        """
+        match self:
+            Language::Go: true
+            _: false
+
+    pub fn is_c(self): bool =
+        """Check if language is C.
+
+        Returns:
+            True if C
+        """
+        match self:
+            Language::C: true
+            _: false
+
+    pub fn is_cpp(self): bool =
+        """Check if language is C++.
+
+        Returns:
+            True if C++
+        """
+        match self:
+            Language::Cpp: true
+            _: false
+
+    pub fn is_scripting_language(self): bool =
+        """Check if language is a scripting language.
+
+        Returns:
+            True if Python or JavaScript
+        """
+        match self:
+            Language::Python: true
+            Language::JavaScript: true
+            _: false
+
+    pub fn is_systems_language(self): bool =
+        """Check if language is a systems programming language.
+
+        Returns:
+            True if Rust, C, C++, or Go
+        """
+        match self:
+            Language::Rust: true
+            Language::C: true
+            Language::Cpp: true
+            Language::Go: true
+            _: false
+
+    pub fn supports_type_annotations(self): bool =
+        """Check if language supports type annotations.
+
+        Returns:
+            True if language has type system
+        """
+        match self:
+            Language::Simple: true
+            Language::Rust: true
+            Language::TypeScript: true
+            Language::Go: true
+            Language::C: true
+            Language::Cpp: true
+            Language::Python: true  # Python has optional type hints
+            Language::JavaScript: false
+
+    pub fn is_statically_typed(self): bool =
+        """Check if language is statically typed.
+
+        Returns:
+            True if static typing
+        """
+        match self:
+            Language::Simple: true
+            Language::Rust: true
+            Language::TypeScript: true
+            Language::Go: true
+            Language::C: true
+            Language::Cpp: true
+            _: false
+
+    pub fn is_dynamically_typed(self): bool =
+        """Check if language is dynamically typed.
+
+        Returns:
+            True if dynamic typing
+        """
+        not self.is_statically_typed()
+
+    pub fn has_package_manager(self): bool =
+        """Check if language has a standard package manager.
+
+        Returns:
+            True if package manager exists
+        """
+        match self:
+            Language::Simple: true   # spm
+            Language::Rust: true     # cargo
+            Language::Python: true   # pip
+            Language::JavaScript: true  # npm
+            Language::TypeScript: true  # npm
+            Language::Go: true       # go mod
+            _: false
+
+    pub fn get_package_manager(self): String =
+        """Get name of package manager.
+
+        Returns:
+            Package manager name or empty string
+
+        Example:
+            Language::Rust.get_package_manager()  # → "cargo"
+        """
+        match self:
+            Language::Simple: "spm"
+            Language::Rust: "cargo"
+            Language::Python: "pip"
+            Language::JavaScript: "npm"
+            Language::TypeScript: "npm"
+            Language::Go: "go"
+            Language::C: ""
+            Language::Cpp: ""
+
+    pub fn summary(self): String =
+        """Get summary of language.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            Language::Rust.summary()
+            # → "Language: Rust (compiled, static typing, cargo)"
+        """
+        let name = self.to_string()
+        let compilation = if self.is_compiled(): "compiled" else: "interpreted"
+        let typing = if self.is_statically_typed(): "static typing" else: "dynamic typing"
+        let pm = self.get_package_manager()
+        let pm_str = if pm.is_empty(): "" else: ", {pm}"
+        "Language: {name} ({compilation}, {typing}{pm_str})"
+
+# Project configuration
+pub class ProjectConfig:
+    pub name: String
+    pub version: String
+    pub root: String
+    pub languages: List[LanguageConfig]
+    pub build_dir: String
+    pub test_dir: String
+    pub deploy_dir: String
+
+    pub fn new(root: String): ProjectConfig =
+        """Create default project configuration.
+
+        Args:
+            root: Project root directory
+
+        Returns:
+            Default configuration
+        """
+        ProjectConfig {
+            name: "unnamed",
+            version: "0.1.0",
+            root: root,
+            languages: [],
+            build_dir: "target",
+            test_dir: "tests",
+            deploy_dir: "dist"
+        }
+
+    pub fn load_from_file(path: String): Result[ProjectConfig, String] =
+        """Load project config from simple.sdn.
+
+        Args:
+            path: Path to simple.sdn file
+
+        Returns:
+            Loaded configuration or error
+
+        Example simple.sdn format:
+            name: my-project
+            version: 1.0.0
+
+            languages:
+              - language: Simple
+                root: .
+                source_dirs: [src, lib]
+
+              - language: Rust
+                root: ./backend
+                source_dirs: [src]
+                exclude_patterns: [target]
+
+            build_dir: target
+            test_dir: tests
+            deploy_dir: dist
+        """
+        # Try to read the file
+        match fs.read_text_sync(path as FilePath):
+            Ok(content):
+                # Parse SDN
+                match SdnDocument.parse(content):
+                    Ok(doc):
+                        # Extract configuration from SDN document
+                        let config = self.parse_sdn_config(doc, path)
+                        Ok(config)
+                    Err(err):
+                        Err("Failed to parse SDN config: " + err.to_string())
+            Err(_):
+                # File doesn't exist, return default
+                let config = ProjectConfig.new(".")
+                Ok(config)
+
+    fn parse_sdn_config(doc: SdnDocument, path: String): ProjectConfig =
+        """Parse SDN document into project configuration.
+
+        Args:
+            doc: Parsed SDN document
+            path: Original file path for root extraction
+
+        Returns:
+            Project configuration
+        """
+        let root_path = self.get_parent_dir_static(path)
+        let mut config = ProjectConfig.new(root_path)
+
+        # Extract name
+        match doc.get("name"):
+            some(SdnValue::String(name)):
+                config.name = name
+            _:
+                pass
+
+        # Extract version
+        match doc.get("version"):
+            some(SdnValue::String(version)):
+                config.version = version
+            _:
+                pass
+
+        # Extract build_dir
+        match doc.get("build_dir"):
+            some(SdnValue::String(dir)):
+                config.build_dir = dir
+            _:
+                pass
+
+        # Extract test_dir
+        match doc.get("test_dir"):
+            some(SdnValue::String(dir)):
+                config.test_dir = dir
+            _:
+                pass
+
+        # Extract deploy_dir
+        match doc.get("deploy_dir"):
+            some(SdnValue::String(dir)):
+                config.deploy_dir = dir
+            _:
+                pass
+
+        # Extract language configurations
+        match doc.get("languages"):
+            some(SdnValue::Array(langs)):
+                for lang_val in langs:
+                    match self.parse_language_config(lang_val):
+                        some(lang_config):
+                            config.languages.append(lang_config)
+                        none:
+                            pass
+            _:
+                pass
+
+        config
+
+    fn parse_language_config(value: SdnValue): LanguageConfig? =
+        """Parse language configuration from SDN value.
+
+        Args:
+            value: SDN value representing language config
+
+        Returns:
+            Language configuration if valid
+        """
+        match value:
+            SdnValue::Dict(dict):
+                # Get language type
+                let lang_type = match dict.get("language"):
+                    some(SdnValue::String(lang_str)):
+                        self.parse_language_string(lang_str)
+                    _:
+                        return none
+
+                # Get root path
+                let root = match dict.get("root"):
+                    some(SdnValue::String(r)):
+                        r
+                    _:
+                        "."
+
+                # Create config
+                let mut config = LanguageConfig.new(lang_type, root)
+
+                # Get source directories
+                match dict.get("source_dirs"):
+                    some(SdnValue::Array(dirs)):
+                        config.source_dirs = []
+                        for dir_val in dirs:
+                            match dir_val:
+                                SdnValue::String(dir):
+                                    config.source_dirs.append(dir)
+                                _:
+                                    pass
+                    _:
+                        pass
+
+                # Get exclude patterns
+                match dict.get("exclude_patterns"):
+                    some(SdnValue::Array(patterns)):
+                        config.exclude_patterns = []
+                        for pat_val in patterns:
+                            match pat_val:
+                                SdnValue::String(pat):
+                                    config.exclude_patterns.append(pat)
+                                _:
+                                    pass
+                    _:
+                        pass
+
+                # Get compiler flags
+                match dict.get("compiler_flags"):
+                    some(SdnValue::Array(flags)):
+                        config.compiler_flags = []
+                        for flag_val in flags:
+                            match flag_val:
+                                SdnValue::String(flag):
+                                    config.compiler_flags.append(flag)
+                                _:
+                                    pass
+                    _:
+                        pass
+
+                # Get test command
+                match dict.get("test_command"):
+                    some(SdnValue::String(cmd)):
+                        config.test_command = cmd
+                    _:
+                        pass
+
+                some(config)
+            _:
+                none
+
+    fn parse_language_string(lang_str: String): Language =
+        """Parse language string to Language enum.
+
+        Args:
+            lang_str: Language name
+
+        Returns:
+            Language enum value
+        """
+        match lang_str:
+            "Simple": Language::Simple
+            "Rust": Language::Rust
+            "Python": Language::Python
+            "JavaScript": Language::JavaScript
+            "TypeScript": Language::TypeScript
+            "Go": Language::Go
+            "C": Language::C
+            "Cpp": Language::Cpp
+            "C++": Language::Cpp
+            _: Language::Simple  # Default
+
+    fn get_parent_dir_static(path: String): String =
+        """Get parent directory from path (static method).
+
+        Args:
+            path: File path
+
+        Returns:
+            Parent directory
+        """
+        let last_slash = path.rfind("/")
+        if last_slash >= 0:
+            path[0:last_slash]
+        else:
+            "."
+
+    pub fn add_language(self, lang_config: LanguageConfig):
+        """Add language configuration.
+
+        Args:
+            lang_config: Language configuration to add
+        """
+        self.languages.append(lang_config)
+
+    pub fn get_language_config(self, language: Language): LanguageConfig? =
+        """Get configuration for specific language.
+
+        Args:
+            language: Language to get config for
+
+        Returns:
+            Language config if found
+        """
+        for config in self.languages:
+            if config.language == language:
+                return some(config)
+        none
+
+    pub fn has_language(self, language: Language): bool =
+        """Check if project uses specific language.
+
+        Args:
+            language: Language to check
+
+        Returns:
+            True if language is configured
+        """
+        for config in self.languages:
+            if config.language == language:
+                return true
+        false
+
+    pub fn language_count(self): i32 =
+        """Get number of configured languages.
+
+        Returns:
+            Language count
+        """
+        self.languages.len()
+
+    pub fn is_multi_language(self): bool =
+        """Check if project uses multiple languages.
+
+        Returns:
+            True if 2+ languages
+        """
+        self.languages.len() >= 2
+
+    pub fn summary(self): String =
+        """Get project summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            config.summary()
+            # → "my-project v1.0.0 (3 languages: Simple, Rust, Python)"
+        """
+        let lang_names: List[String] = []
+        for config in self.languages:
+            lang_names.append(config.language.to_string())
+
+        "{self.name} v{self.version} ({self.language_count()} languages: {lang_names.join(', ')})"
+
+# Language-specific configuration
+pub class LanguageConfig:
+    pub language: Language
+    pub root: String
+    pub source_dirs: List[String]
+    pub exclude_patterns: List[String]
+    pub compiler_flags: List[String]
+    pub test_command: String
+
+    pub fn new(language: Language, root: String): LanguageConfig =
+        """Create language configuration.
+
+        Args:
+            language: Language type
+            root: Language root directory
+
+        Returns:
+            Default language configuration
+        """
+        LanguageConfig {
+            language: language,
+            root: root,
+            source_dirs: ["src"],
+            exclude_patterns: ["target", "node_modules", "__pycache__", ".git"],
+            compiler_flags: [],
+            test_command: ""
+        }
+
+    pub fn has_compiler_flags(self): bool =
+        """Check if compiler flags are set.
+
+        Returns:
+            True if custom flags exist
+        """
+        self.compiler_flags.len() > 0
+
+    pub fn has_test_command(self): bool =
+        """Check if test command is set.
+
+        Returns:
+            True if test command exists
+        """
+        self.test_command != ""
+
+    pub fn summary(self): String =
+        """Get language config summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            config.summary()
+            # → "Rust at ./backend (src dirs: src, lib)"
+        """
+        "{self.language.to_string()} at {self.root} (src dirs: {self.source_dirs.join(', ')})"
+
+# Project detector - finds language roots in project
+pub class ProjectDetector:
+    pub root: String
+
+    pub fn new(root: String): ProjectDetector =
+        """Create project detector.
+
+        Args:
+            root: Project root directory
+        """
+        ProjectDetector { root: root }
+
+    pub fn detect_all_languages(self): List[LanguageConfig] =
+        """Detect all languages in project.
+
+        Returns:
+            List of detected language configurations
+
+        Example:
+            let detector = ProjectDetector.new(".")
+            let languages = detector.detect_all_languages()
+            for config in languages:
+                print("Found {config.language} at {config.root}")
+        """
+        let configs: List[LanguageConfig] = []
+
+        # Detect Simple
+        if self.has_simple_project():
+            configs.append(LanguageConfig.new(Language::Simple, self.root))
+
+        # Detect Rust
+        let rust_roots = self.find_cargo_projects()
+        for root in rust_roots:
+            configs.append(LanguageConfig.new(Language::Rust, root))
+
+        # Detect Python
+        let python_roots = self.find_python_projects()
+        for root in python_roots:
+            configs.append(LanguageConfig.new(Language::Python, root))
+
+        # Detect JavaScript/TypeScript
+        let js_roots = self.find_javascript_projects()
+        for root in js_roots:
+            if self.has_typescript(root):
+                configs.append(LanguageConfig.new(Language::TypeScript, root))
+            else:
+                configs.append(LanguageConfig.new(Language::JavaScript, root))
+
+        # Detect Go
+        let go_roots = self.find_go_projects()
+        for root in go_roots:
+            configs.append(LanguageConfig.new(Language::Go, root))
+
+        configs
+
+    pub fn has_simple_project(self): bool =
+        """Check if directory contains Simple project.
+
+        Returns:
+            True if simple.sdn or .spl files exist
+        """
+        self.file_exists("simple.sdn") or self.has_files_with_extension(".spl")
+
+    pub fn find_cargo_projects(self): List[String] =
+        """Find all Rust/Cargo projects.
+
+        Returns:
+            List of directories containing Cargo.toml
+        """
+        self.find_files_named("Cargo.toml")
+
+    pub fn find_python_projects(self): List[String] =
+        """Find all Python projects.
+
+        Returns:
+            List of directories containing setup.py, pyproject.toml, or requirements.txt
+        """
+        let roots: List[String] = []
+
+        roots.extend(self.find_files_named("setup.py"))
+        roots.extend(self.find_files_named("pyproject.toml"))
+        roots.extend(self.find_files_named("requirements.txt"))
+
+        # Deduplicate
+        self.deduplicate_paths(roots)
+
+    pub fn find_javascript_projects(self): List[String] =
+        """Find all JavaScript/Node projects.
+
+        Returns:
+            List of directories containing package.json
+        """
+        self.find_files_named("package.json")
+
+    pub fn find_go_projects(self): List[String] =
+        """Find all Go projects.
+
+        Returns:
+            List of directories containing go.mod
+        """
+        self.find_files_named("go.mod")
+
+    pub fn has_typescript(self, root: String): bool =
+        """Check if project uses TypeScript.
+
+        Args:
+            root: Project root to check
+
+        Returns:
+            True if tsconfig.json exists
+        """
+        self.file_exists_in(root, "tsconfig.json")
+
+    # Helper methods - File system operations
+
+    fn file_exists(name: String): bool =
+        """Check if file exists in project root."""
+        let path = self.root + "/" + name
+        fs.exists_sync(path as FilePath)
+
+    fn file_exists_in(dir: String, name: String): bool =
+        """Check if file exists in directory."""
+        let path = dir + "/" + name
+        fs.exists_sync(path as FilePath)
+
+    fn has_files_with_extension(ext: String): bool =
+        """Check if any files with extension exist."""
+        # Recursively search for files with extension
+        self.scan_for_extension(self.root, ext)
+
+    fn scan_for_extension(dir: String, ext: String): bool =
+        """Recursively scan directory for files with extension."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    let name = entry.name() as String
+
+                    # Check if file has the extension
+                    if name.ends_with(ext):
+                        return true
+
+                    # Recursively search subdirectories
+                    if entry.file_type() == FileType::Directory:
+                        let subdir_path = entry.path() as String
+                        if self.scan_for_extension(subdir_path, ext):
+                            return true
+
+                false
+            Err(_):
+                false
+
+    fn find_files_named(name: String): List[String] =
+        """Find all files with given name recursively."""
+        let results: List[String] = []
+        self.find_files_named_recursive(self.root, name, results)
+        results
+
+    fn find_files_named_recursive(dir: String,
+        name: String,
+        results: List[String]
+    ):
+        """Recursively find files with given name."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    let entry_name = entry.name() as String
+
+                    # If this is the file we're looking for, extract its directory
+                    if entry_name == name:
+                        let file_path = entry.path() as String
+                        # Get the directory containing this file
+                        let dir_path = self.get_parent_dir(file_path)
+                        results.append(dir_path)
+
+                    # Recursively search subdirectories
+                    if entry.file_type() == FileType::Directory:
+                        let subdir = entry.path() as String
+                        # Skip common exclude patterns
+                        if not self.should_skip_dir(entry_name):
+                            self.find_files_named_recursive(subdir, name, results)
+            Err(_):
+                # Ignore errors (permission denied, etc.)
+                pass
+
+    fn should_skip_dir(name: String): bool =
+        """Check if directory should be skipped."""
+        name == "node_modules" or
+        name == "target" or
+        name == "__pycache__" or
+        name == ".git" or
+        name == ".venv" or
+        name == "venv" or
+        name.starts_with(".")
+
+    fn get_parent_dir(path: String): String =
+        """Get parent directory from path."""
+        # Find last slash
+        let last_slash = path.rfind("/")
+        if last_slash >= 0:
+            path[0:last_slash]
+        else:
+            "."
+
+    fn deduplicate_paths(paths: List[String]): List[String] =
+        """Remove duplicate paths."""
+        let unique: List[String] = []
+        for path in paths:
+            if not self.contains_path(unique, path):
+                unique.append(path)
+        unique
+
+    fn contains_path(paths: List[String], target: String): bool =
+        """Check if path is in list."""
+        for path in paths:
+            if path == target:
+                return true
+        false
+
+# Project context - unified view of multi-language project
+pub class ProjectContext:
+    pub config: ProjectConfig
+    pub languages: List[LanguageConfig]
+
+    pub fn new(root: String): ProjectContext =
+        """Create project context.
+
+        Args:
+            root: Project root directory
+
+        Returns:
+            Project context with auto-detected languages
+
+        Example:
+            let project = ProjectContext.new(".")
+            for lang_config in project.languages:
+                print("Language: {lang_config.language}")
+                print("Root: {lang_config.root}")
+        """
+        let detector = ProjectDetector.new(root)
+        let languages = detector.detect_all_languages()
+
+        let config = ProjectConfig.new(root)
+        for lang_config in languages:
+            config.add_language(lang_config)
+
+        ProjectContext {
+            config: config,
+            languages: languages
+        }
+
+    pub fn from_config_file(path: String): Result[ProjectContext, String] =
+        """Load project from simple.sdn.
+
+        Args:
+            path: Path to simple.sdn config file
+
+        Returns:
+            Project context or error
+        """
+        match ProjectConfig.load_from_file(path):
+            Ok(config):
+                Ok(ProjectContext {
+                    config: config,
+                    languages: config.languages
+                })
+            Err(err):
+                Err(err)
+
+    pub fn get_build_dir(self): String =
+        """Get build output directory.
+
+        Returns:
+            Build directory path
+        """
+        self.config.build_dir
+
+    pub fn get_test_dir(self): String =
+        """Get test directory.
+
+        Returns:
+            Test directory path
+        """
+        self.config.test_dir
+
+    pub fn get_language_roots(self): Dict[Language, String] =
+        """Get map of languages to their root directories.
+
+        Returns:
+            Dictionary mapping languages to roots
+        """
+        let roots: Dict[Language, String] = {}
+        for lang_config in self.languages:
+            roots[lang_config.language] = lang_config.root
+        roots
+
+    pub fn has_language(self, language: Language): bool =
+        """Check if project uses given language.
+
+        Args:
+            language: Language to check
+
+        Returns:
+            True if language is used in project
+        """
+        for lang_config in self.languages:
+            if lang_config.language == language:
+                return true
+        false
+
+    pub fn get_all_source_files(self, language: Language): List[String] =
+        """Get all source files for given language.
+
+        Args:
+            language: Language to get files for
+
+        Returns:
+            List of source file paths
+        """
+        # Get language configuration
+        match self.config.get_language_config(language):
+            some(lang_config):
+                let files: List[String] = []
+                # Scan each source directory
+                for src_dir in lang_config.source_dirs:
+                    let full_path = lang_config.root + "/" + src_dir
+                    let ext = self.get_extension_for_language(language)
+                    self.collect_files_with_extension(full_path, ext, lang_config.exclude_patterns, files)
+                files
+            none:
+                []
+
+    fn get_extension_for_language(language: Language): String =
+        """Get file extension for language."""
+        match language:
+            Language::Simple: ".spl"
+            Language::Rust: ".rs"
+            Language::Python: ".py"
+            Language::JavaScript: ".js"
+            Language::TypeScript: ".ts"
+            Language::Go: ".go"
+            Language::C: ".c"
+            Language::Cpp: ".cpp"
+
+    fn collect_files_with_extension(dir: String,
+        ext: String,
+        exclude_patterns: List[String],
+        results: List[String]
+    ):
+        """Recursively collect files with given extension."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    let name = entry.name() as String
+                    let path = entry.path() as String
+
+                    # Skip excluded directories
+                    if self.is_excluded(name, exclude_patterns):
+                        continue
+
+                    match entry.file_type():
+                        FileType::File:
+                            # Add file if it matches extension
+                            if name.ends_with(ext):
+                                results.append(path)
+                        FileType::Directory:
+                            # Recursively scan subdirectories
+                            self.collect_files_with_extension(path, ext, exclude_patterns, results)
+                        _:
+                            # Skip symlinks and other types
+                            pass
+            Err(_):
+                # Ignore errors
+                pass
+
+    fn is_excluded(name: String, patterns: List[String]): bool =
+        """Check if name matches any exclusion pattern."""
+        for pattern in patterns:
+            if name == pattern or name.starts_with(pattern):
+                return true
+        false

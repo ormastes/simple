@@ -26,9 +26,30 @@ Skills located in `.claude/skills/`.
 
 - **LLM-Friendly**: IR export, context packs, lint framework (70% complete)
 - **Pattern Matching Safety**: Exhaustiveness checking (5/5 complete)
+- **Scala-Style Syntax**: `val`/`var` variables, implicit `self` in methods
 - Memory model: Reference capabilities (`mut T`, `iso T`, `T`)
 - Formatter/linter: `simple/app/`
 - AOP & Unified Predicates: 19/51 features, 611 tests
+
+---
+
+## Syntax Quick Reference
+
+**Variables:**
+```simple
+val name = "Alice"    # Immutable (preferred)
+var count = 0         # Mutable
+```
+
+**Methods (LL(1)-friendly, implicit self):**
+```simple
+impl MyStruct:
+    static fn new() -> MyStruct:        # Static method (no self)
+    fn get_value() -> i32:              # Immutable method (self implicit)
+    me set_value(v: i32):               # Mutable method ('me' keyword, self implicit)
+```
+
+See `/coding` skill for full details.
 
 ---
 

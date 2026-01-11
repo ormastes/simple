@@ -1,0 +1,430 @@
+# Terminal I/O - Immutable Variant
+# Functional style terminal operations with full feature parity
+
+use units.size.*
+
+# Terminal handle type
+unit TermHandle: i64 as handle
+
+# Terminal size
+struct TermSize:
+    rows: u16
+    cols: u16
+
+impl TermSize:
+    fn rows() -> u16:
+        self.rows
+
+    fn cols() -> u16:
+        self.cols
+
+    fn area() -> u32:
+        (self.rows as u32) * (self.cols as u32)
+
+# Cursor position
+struct CursorPos:
+    row: u16
+    col: u16
+
+impl CursorPos:
+    fn row() -> u16:
+        self.row
+
+    fn col() -> u16:
+        self.col
+
+# Terminal error type
+enum TermError:
+    Io(i32)
+    NotTty
+    InvalidResponse
+    Eof
+    Timeout
+    Interrupted
+    Unknown
+
+impl TermError:
+    fn from_code(code: i32) -> TermError:
+        match code:
+            case -1: TermError::Eof
+            case -2: TermError::NotTty
+            case -3: TermError::Timeout
+            case -4: TermError::Interrupted
+            case _: TermError::Io(code)
+
+    fn message() -> str:
+        match self:
+            case Io(code): f"I/O error: {code}"
+            case NotTty: "not a tty"
+            case InvalidResponse: "invalid terminal response"
+            case Eof: "end of file"
+            case Timeout: "operation timed out"
+            case Interrupted: "operation interrupted"
+            case Unknown: "unknown error"
+
+# Terminal state (immutable wrapper)
+struct Terminal:
+    stdin: TermHandle
+    stdout: TermHandle
+    stderr: TermHandle
+    is_tty: bool
+    raw_mode: bool
+    size: Option[TermSize]
+
+impl Terminal:
+    # Get the default terminal
+    pub fn default() -> Terminal:
+        let stdin = native_stdin()_handle
+        let stdout = native_stdout()_handle
+        let stderr = native_stderr()_handle
+        let is_tty = native_is_tty(stdout as i64)
+        let size = if is_tty: get_term_size(stdout) else: None
+        Terminal {
+            stdin: stdin,
+            stdout: stdout,
+            stderr: stderr,
+            is_tty: is_tty,
+            raw_mode: false,
+            size: size
+        }
+
+    fn is_tty() -> bool:
+        self.is_tty
+
+    fn is_raw_mode() -> bool:
+        self.raw_mode
+
+    fn size() -> Option[TermSize]:
+        self.size
+
+    # Refresh terminal info, return updated Terminal
+    fn refresh() -> Terminal:
+        let is_tty = native_is_tty(self.stdout as i64)
+        let size = if is_tty: get_term_size(self.stdout) else: None
+        Terminal {
+            stdin: self.stdin,
+            stdout: self.stdout,
+            stderr: self.stderr,
+            is_tty: is_tty,
+            raw_mode: self.raw_mode,
+            size: size
+        }
+
+    # Enable raw mode, returns new Terminal state
+    pub fn enable_raw_mode(self) -> Result[Terminal, TermError]:
+        if self.raw_mode:
+            return Ok(self)
+        match native_enable_raw_mode(self.stdin as i64):
+            case 0:
+                Ok(Terminal {
+                    stdin: self.stdin,
+                    stdout: self.stdout,
+                    stderr: self.stderr,
+                    is_tty: self.is_tty,
+                    raw_mode: true,
+                    size: self.size
+                })
+            case e: Err(TermError::from_code(e))
+
+    # Disable raw mode, returns new Terminal state
+    pub fn disable_raw_mode(self) -> Result[Terminal, TermError]:
+        if not self.raw_mode:
+            return Ok(self)
+        match native_disable_raw_mode(self.stdin as i64):
+            case 0:
+                Ok(Terminal {
+                    stdin: self.stdin,
+                    stdout: self.stdout,
+                    stderr: self.stderr,
+                    is_tty: self.is_tty,
+                    raw_mode: false,
+                    size: self.size
+                })
+            case e: Err(TermError::from_code(e))
+
+    # Write string to stdout
+    pub fn write(self, s: str) -> Result[ByteCount, TermError]:
+        let written = native_term_write(self.stdout as i64, s, s.len() as i64)
+        if written < 0:
+            Err(TermError::from_code(written as i32))
+        else:
+            Ok((written as u64)_bytes)
+
+    # Write line to stdout (with newline)
+    pub fn writeln(self, s: str) -> Result[ByteCount, TermError]:
+        let n1 = self.write(s)?
+        let n2 = self.write("\n")?
+        Ok(n1 + n2)
+
+    # Write to stderr
+    pub fn write_stderr(self, s: str) -> Result[ByteCount, TermError]:
+        let written = native_term_write(self.stderr as i64, s, s.len() as i64)
+        if written < 0:
+            Err(TermError::from_code(written as i32))
+        else:
+            Ok((written as u64)_bytes)
+
+    # Flush stdout
+    pub fn flush(self) -> Result[(), TermError]:
+        match native_term_flush(self.stdout as i64):
+            case 0: Ok(())
+            case e: Err(TermError::from_code(e))
+
+    # Read line from stdin
+    pub fn read_line(self) -> Result[str, TermError]:
+        let buf = native_term_read(self.stdin as i64, 4096)
+        if buf.len() > 0:
+            Ok(buf.to_string())
+        else:
+            Err(TermError::Eof)
+
+    # Read with timeout (returns None on timeout)
+    pub fn read_line_timeout(self, timeout_ms: u64) -> Option[str]:
+        let buf = native_term_read_timeout(self.stdin as i64, 4096, timeout_ms as i64)
+        if buf.len() > 0:
+            Some(buf.to_string())
+        else:
+            None
+
+    # Poll for input availability
+    pub fn has_input(self, timeout_ms: u64) -> bool:
+        native_term_poll(self.stdin as i64, timeout_ms as i64)
+
+    # ===================================
+    # Cursor and Screen Operations
+    # ===================================
+
+    # Clear screen
+    pub fn clear(self) -> Result[(), TermError]:
+        self.write("\x1b[2J\x1b[H").map(|_| ())
+
+    # Clear line
+    pub fn clear_line(self) -> Result[(), TermError]:
+        self.write("\x1b[2K").map(|_| ())
+
+    # Move cursor to position (1-indexed)
+    pub fn move_to(self, row: u16, col: u16) -> Result[(), TermError]:
+        self.write(f"\x1b[{row};{col}H").map(|_| ())
+
+    # Move cursor up
+    pub fn move_up(self, n: u16) -> Result[(), TermError]:
+        if n > 0:
+            self.write(f"\x1b[{n}A").map(|_| ())
+        else:
+            Ok(())
+
+    # Move cursor down
+    pub fn move_down(self, n: u16) -> Result[(), TermError]:
+        if n > 0:
+            self.write(f"\x1b[{n}B").map(|_| ())
+        else:
+            Ok(())
+
+    # Move cursor right
+    pub fn move_right(self, n: u16) -> Result[(), TermError]:
+        if n > 0:
+            self.write(f"\x1b[{n}C").map(|_| ())
+        else:
+            Ok(())
+
+    # Move cursor left
+    pub fn move_left(self, n: u16) -> Result[(), TermError]:
+        if n > 0:
+            self.write(f"\x1b[{n}D").map(|_| ())
+        else:
+            Ok(())
+
+    # Hide cursor
+    pub fn hide_cursor(self) -> Result[(), TermError]:
+        self.write("\x1b[?25l").map(|_| ())
+
+    # Show cursor
+    pub fn show_cursor(self) -> Result[(), TermError]:
+        self.write("\x1b[?25h").map(|_| ())
+
+    # Save cursor position
+    pub fn save_cursor(self) -> Result[(), TermError]:
+        self.write("\x1b[s").map(|_| ())
+
+    # Restore cursor position
+    pub fn restore_cursor(self) -> Result[(), TermError]:
+        self.write("\x1b[u").map(|_| ())
+
+    # Set terminal title
+    pub fn set_title(self, title: str) -> Result[(), TermError]:
+        self.write(f"\x1b]0;{title}\x07").map(|_| ())
+
+    # Ring bell
+    pub fn bell(self) -> Result[(), TermError]:
+        self.write("\x07").map(|_| ())
+
+fn get_term_size(handle: TermHandle) -> Option[TermSize]:
+    let result = native_get_term_size(handle as i64)
+    if result.len() == 2 and result[0] >= 0 and result[1] >= 0:
+        Some(TermSize { rows: result[0] as u16, cols: result[1] as u16 })
+    else:
+        None
+
+# ===================================
+# Keyboard Input
+# ===================================
+
+# Key event
+struct KeyEvent:
+    code: KeyCode
+    modifiers: KeyModifiers
+
+# Key codes
+enum KeyCode:
+    Char(char)
+    Enter
+    Escape
+    Backspace
+    Tab
+    Delete
+    Insert
+    Home
+    End
+    PageUp
+    PageDown
+    Up
+    Down
+    Left
+    Right
+    F(u8)
+    Null
+
+# Key modifiers
+struct KeyModifiers:
+    shift: bool
+    ctrl: bool
+    alt: bool
+
+impl KeyModifiers:
+    fn none() -> KeyModifiers:
+        KeyModifiers { shift: false, ctrl: false, alt: false }
+
+    fn shift() -> KeyModifiers:
+        KeyModifiers { shift: true, ctrl: false, alt: false }
+
+    fn ctrl() -> KeyModifiers:
+        KeyModifiers { shift: false, ctrl: true, alt: false }
+
+    fn alt() -> KeyModifiers:
+        KeyModifiers { shift: false, ctrl: false, alt: true }
+
+# ===================================
+# Print Functions
+# ===================================
+
+# Print to stdout (no newline)
+pub fn print(s: str):
+    let stdout = native_stdout()
+    native_term_write(stdout, s, s.len() as i64)
+    native_term_flush(stdout)
+
+# Print line to stdout
+pub fn println(s: str):
+    let stdout = native_stdout()
+    native_term_write(stdout, s, s.len() as i64)
+    native_term_write(stdout, "\n", 1)
+    native_term_flush(stdout)
+
+# Print to stderr (no newline)
+pub fn eprint(s: str):
+    let stderr = native_stderr()
+    native_term_write(stderr, s, s.len() as i64)
+    native_term_flush(stderr)
+
+# Print line to stderr
+pub fn eprintln(s: str):
+    let stderr = native_stderr()
+    native_term_write(stderr, s, s.len() as i64)
+    native_term_write(stderr, "\n", 1)
+    native_term_flush(stderr)
+
+# Read line from stdin (like Python's input())
+pub fn input(prompt: str) -> str:
+    if prompt.len() > 0:
+        print(prompt)
+    let stdin = native_stdin()
+    let buf = native_term_read(stdin, 4096)
+    buf.to_string().trim_end()
+
+# ===================================
+# Native function declarations
+# ===================================
+
+extern fn native_stdin() -> i64
+extern fn native_stdout() -> i64
+extern fn native_stderr() -> i64
+extern fn native_is_tty(handle: i64) -> bool
+extern fn native_get_term_size(handle: i64) -> Array[i64]
+extern fn native_term_write(handle: i64, data: str, len: i64) -> i64
+extern fn native_term_read(handle: i64, max_len: i64) -> Bytes
+extern fn native_term_read_timeout(handle: i64, max_len: i64, timeout_ms: i64) -> Bytes
+extern fn native_term_flush(handle: i64) -> i32
+extern fn native_term_poll(handle: i64, timeout_ms: i64) -> bool
+extern fn native_enable_raw_mode(handle: i64) -> i32
+extern fn native_disable_raw_mode(handle: i64) -> i32
+
+# ============================================
+# Trait Implementations
+# ============================================
+
+use core.traits.*
+
+impl Default for Terminal:
+    fn default() -> Self:
+        Terminal::default()
+
+impl Display for TermError:
+    fn fmt() -> str:
+        self.message()
+
+impl Error for TermError
+
+impl Display for KeyCode:
+    fn fmt() -> str:
+        match self:
+            case Char(c): f"'{c}'"
+            case Enter: "Enter"
+            case Escape: "Escape"
+            case Backspace: "Backspace"
+            case Tab: "Tab"
+            case Delete: "Delete"
+            case Insert: "Insert"
+            case Home: "Home"
+            case End: "End"
+            case PageUp: "PageUp"
+            case PageDown: "PageDown"
+            case Up: "Up"
+            case Down: "Down"
+            case Left: "Left"
+            case Right: "Right"
+            case F(n): f"F{n}"
+            case Null: "Null"
+
+impl Default for KeyModifiers:
+    fn default() -> Self:
+        KeyModifiers::none()
+
+impl Eq for KeyModifiers:
+    fn eq(other: &Self) -> bool:
+        self.shift == other.shift and self.ctrl == other.ctrl and self.alt == other.alt
+
+impl Display for TermSize:
+    fn fmt() -> str:
+        f"{self.cols}x{self.rows}"
+
+impl Eq for TermSize:
+    fn eq(other: &Self) -> bool:
+        self.rows == other.rows and self.cols == other.cols
+
+impl Display for CursorPos:
+    fn fmt() -> str:
+        f"({self.row}, {self.col})"
+
+impl Eq for CursorPos:
+    fn eq(other: &Self) -> bool:
+        self.row == other.row and self.col == other.col

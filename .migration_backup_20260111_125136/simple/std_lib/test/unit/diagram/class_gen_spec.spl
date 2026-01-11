@@ -1,0 +1,171 @@
+# BDD Tests for ClassDiagramGenerator
+# Feature: Diagram Generation - Class Diagrams
+#
+# Tests the Mermaid class diagram generator that extracts
+# classes and relationships from call event sequences.
+
+import std.spec
+import diagram.{CallEvent, CallEventRecorder, CallType}
+import diagram.{ClassDiagramGenerator, generate_class_diagram, to_mermaid_class}
+import diagram.{DiagramConfig}
+
+describe "ClassDiagramGenerator":
+    context "Basic structure":
+        it "should generate mermaid header":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("method", Some("MyClass"), [], CallType.Method)
+
+            let output = to_mermaid_class(rec)
+
+            expect output.contains("```mermaid") == true
+            expect output.contains("classDiagram") == true
+            expect output.contains("```") == true
+
+    context "Class extraction":
+        it "should extract class from method call":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("doWork", Some("UserService"), [], CallType.Method)
+
+            let output = to_mermaid_class(rec)
+
+            expect output.contains("class UserService") == true
+
+        it "should extract multiple classes":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("methodA", Some("ClassA"), [], CallType.Method)
+            rec.record_call("methodB", Some("ClassB"), [], CallType.Method)
+            rec.record_call("methodC", Some("ClassC"), [], CallType.Method)
+
+            let output = to_mermaid_class(rec)
+
+            expect output.contains("class ClassA") == true
+            expect output.contains("class ClassB") == true
+            expect output.contains("class ClassC") == true
+
+        it "should not duplicate classes":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("method1", Some("Service"), [], CallType.Method)
+            rec.record_call("method2", Some("Service"), [], CallType.Method)
+            rec.record_call("method3", Some("Service"), [], CallType.Method)
+
+            let output = to_mermaid_class(rec)
+
+            # Should only have one class declaration
+            let count = output.split("class Service").len() - 1
+            expect count == 1
+
+        it "should ignore non-method calls":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("standalone_fn", None, [], CallType.Direct)
+
+            let output = to_mermaid_class(rec)
+
+            # Should not have any class declarations for function calls
+            expect output.contains("class standalone_fn") == false
+
+    context "Method extraction":
+        it "should list methods in class":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("getUser", Some("UserService"), [], CallType.Method)
+            rec.record_call("saveUser", Some("UserService"), [], CallType.Method)
+
+            let output = to_mermaid_class(rec)
+
+            expect output.contains("getUser()") == true
+            expect output.contains("saveUser()") == true
+
+        it "should show public visibility":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("publicMethod", Some("MyClass"), [], CallType.Method)
+
+            let output = to_mermaid_class(rec)
+
+            expect output.contains("+publicMethod()") == true
+
+    context "Relationship extraction":
+        it "should detect uses relationship":
+            let rec = CallEventRecorder.new("test")
+            # ClassA calls ClassB
+            rec.record_call("methodA", Some("ClassA"), [], CallType.Method)
+            rec.record_call("methodB", Some("ClassB"), [], CallType.Method)
+
+            let output = to_mermaid_class(rec)
+
+            expect output.contains("ClassA --> ClassB") == true
+            expect output.contains("uses") == true
+
+        it "should not create self-relationship":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("method1", Some("Same"), [], CallType.Method)
+            rec.record_call("method2", Some("Same"), [], CallType.Method)
+
+            let output = to_mermaid_class(rec)
+
+            expect output.contains("Same --> Same") == false
+
+        it "should not duplicate relationships":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("a", Some("ClassA"), [], CallType.Method)
+            rec.record_call("b1", Some("ClassB"), [], CallType.Method)
+            rec.record_return(None)
+            rec.record_call("b2", Some("ClassB"), [], CallType.Method)
+
+            let output = to_mermaid_class(rec)
+
+            # Should only have one relationship declaration
+            let count = output.split("ClassA --> ClassB").len() - 1
+            expect count == 1
+
+    context "Filtering":
+        it "should apply include filter":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("m", Some("UserService"), [], CallType.Method)
+            rec.record_call("m", Some("InternalHelper"), [], CallType.Method)
+
+            let config = DiagramConfig.new()
+                .with_class_diagram()
+                .with_include("*Service")
+
+            let output = generate_class_diagram(rec, config)
+
+            expect output.contains("UserService") == true
+            expect output.contains("InternalHelper") == false
+
+        it "should apply exclude filter":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("m", Some("UserService"), [], CallType.Method)
+            rec.record_call("m", Some("DebugHelper"), [], CallType.Method)
+
+            let config = DiagramConfig.new()
+                .with_class_diagram()
+                .with_exclude("*Helper,*Debug*")
+
+            let output = generate_class_diagram(rec, config)
+
+            expect output.contains("UserService") == true
+            expect output.contains("DebugHelper") == false
+
+describe "ClassInfo":
+    context "Method tracking":
+        it "should track unique methods":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("method1", Some("Class"), [], CallType.Method)
+            rec.record_call("method1", Some("Class"), [], CallType.Method)
+            rec.record_call("method2", Some("Class"), [], CallType.Method)
+
+            let output = to_mermaid_class(rec)
+
+            # Should have both methods listed once each
+            expect output.contains("method1()") == true
+            expect output.contains("method2()") == true
+
+describe "RelationType":
+    context "Arrow formatting":
+        it "should use arrow for uses relationship":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("caller_method", Some("Caller"), [], CallType.Method)
+            rec.record_call("callee_method", Some("Callee"), [], CallType.Method)
+
+            let output = to_mermaid_class(rec)
+
+            expect output.contains("-->") == true

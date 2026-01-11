@@ -1,0 +1,279 @@
+# Godot Tilemap System
+#
+# Type-safe wrappers for Godot's tilemap system
+#
+# Features:
+# - TileMap (grid-based tile placement)
+# - TileSet (tile atlas and collision)
+# - Layer management
+# - Terrain and autotiling
+#
+# Based on: https://docs.godotengine.org/en/stable/classes/class_tilemap.html
+
+import godot.ffi
+import godot.variant
+import godot.node2d
+import godot.resource
+
+mod tilemap
+
+# TileSet Resource
+# Defines available tiles and their properties
+pub struct TileSet:
+    resource: resource.Resource
+
+impl TileSet:
+    # Create from resource
+    pub fn from_resource(res: resource.Resource) -> TileSet:
+        return TileSet(resource: res)
+
+    # Load from file
+    pub fn load(path: String) -> Result[TileSet, String]:
+        let loader = resource.ResourceLoader::get_singleton()
+        let result = loader.load(path)
+        
+        if result.is_ok():
+            return Ok(TileSet::from_resource(result.unwrap()))
+        else:
+            return Err(result.unwrap_err())
+
+    # Get tile size
+    pub fn get_tile_size(self) -> (i32, i32):
+        let obj = self.resource.as_object()
+        let result = obj.call0("get_tile_size")
+        # TODO: [stdlib][P2] Parse Vector2i from result
+        return (16, 16)  # Placeholder
+
+    # Set tile size
+    pub fn set_tile_size(mut self, width: i32, height: i32):
+        let obj = self.resource.as_object()
+        # TODO: [stdlib][P3] Create Vector2i variant
+        # obj.call1("set_tile_size", size_var)
+
+
+# TileMap Layer
+# Single layer in a tilemap
+pub struct TileMapLayer:
+    tilemap_ptr: ffi.GDExtensionObjectPtr
+    layer_id: i32
+
+impl TileMapLayer:
+    # Create layer reference
+    pub fn new(tilemap_ptr: ffi.GDExtensionObjectPtr, layer_id: i32) -> TileMapLayer:
+        return TileMapLayer(tilemap_ptr: tilemap_ptr, layer_id: layer_id)
+
+    # Set cell (place tile)
+    pub fn set_cell(mut self, x: i32, y: i32, source_id: i32, atlas_coords_x: i32, atlas_coords_y: i32):
+        let obj = variant.Object::from_ptr(self.tilemap_ptr)
+        let layer_var = variant.Variant::from_int(self.layer_id as i64)
+        let x_var = variant.Variant::from_int(x as i64)
+        let y_var = variant.Variant::from_int(y as i64)
+        let source_var = variant.Variant::from_int(source_id as i64)
+        # TODO: [stdlib][P3] Create Vector2i for atlas coords
+        # obj.call5("set_cell", layer_var, x_var, y_var, source_var, atlas_var)
+
+    # Get cell (read tile)
+    pub fn get_cell_source_id(self, x: i32, y: i32) -> i32:
+        let obj = variant.Object::from_ptr(self.tilemap_ptr)
+        let layer_var = variant.Variant::from_int(self.layer_id as i64)
+        let x_var = variant.Variant::from_int(x as i64)
+        let y_var = variant.Variant::from_int(y as i64)
+        let result = obj.call3("get_cell_source_id", layer_var, x_var, y_var)
+        return result.as_int() as i32
+
+    # Erase cell (remove tile)
+    pub fn erase_cell(mut self, x: i32, y: i32):
+        let obj = variant.Object::from_ptr(self.tilemap_ptr)
+        let layer_var = variant.Variant::from_int(self.layer_id as i64)
+        let x_var = variant.Variant::from_int(x as i64)
+        let y_var = variant.Variant::from_int(y as i64)
+        obj.call3("erase_cell", layer_var, x_var, y_var)
+
+    # Set layer enabled
+    pub fn set_enabled(mut self, enabled: bool):
+        let obj = variant.Object::from_ptr(self.tilemap_ptr)
+        let layer_var = variant.Variant::from_int(self.layer_id as i64)
+        let enabled_var = variant.Variant::from_bool(enabled)
+        obj.call2("set_layer_enabled", layer_var, enabled_var)
+
+    # Set layer modulate (tint)
+    pub fn set_modulate(mut self, r: f32, g: f32, b: f32, a: f32):
+        let obj = variant.Object::from_ptr(self.tilemap_ptr)
+        let layer_var = variant.Variant::from_int(self.layer_id as i64)
+        # TODO: [stdlib][P3] Create Color variant
+        # obj.call2("set_layer_modulate", layer_var, color_var)
+
+    # Set layer z-index
+    pub fn set_z_index(mut self, z: i32):
+        let obj = variant.Object::from_ptr(self.tilemap_ptr)
+        let layer_var = variant.Variant::from_int(self.layer_id as i64)
+        let z_var = variant.Variant::from_int(z as i64)
+        obj.call2("set_layer_z_index", layer_var, z_var)
+
+
+# TileMap Node
+# Grid-based tile placement
+pub struct TileMap extends godot.node2d.Node2D:
+
+impl TileMap:
+    # Create from Godot object pointer
+    pub fn from_ptr(ptr: ffi.GDExtensionObjectPtr) -> TileMap:
+        return TileMap(base: godot.node2d.Node2D::from_ptr(ptr))
+
+    # Set tile set
+    pub fn set_tileset(mut self, tileset: TileSet):
+        let obj = self.base.as_node().as_object()
+        let tileset_var = variant.Variant::from_object(tileset.resource.as_object())
+        obj.call1("set_tileset", tileset_var)
+
+    # Get tile set
+    pub fn get_tileset(self) -> Option[TileSet]:
+        let obj = self.base.as_node().as_object()
+        let result = obj.call0("get_tileset")
+
+        if result.is_null():
+            return None
+        else:
+            let res = resource.Resource::from_ptr(result.as_object().ptr())
+            return Some(TileSet::from_resource(res))
+
+    # Get number of layers
+    pub fn get_layers_count(self) -> i32:
+        let obj = self.base.as_node().as_object()
+        let result = obj.call0("get_layers_count")
+        return result.as_int() as i32
+
+    # Add a layer
+    pub fn add_layer(mut self, to_position: i32 = -1):
+        let obj = self.base.as_node().as_object()
+        let pos_var = variant.Variant::from_int(to_position as i64)
+        obj.call1("add_layer", pos_var)
+
+    # Remove a layer
+    pub fn remove_layer(mut self, layer: i32):
+        let obj = self.base.as_node().as_object()
+        let layer_var = variant.Variant::from_int(layer as i64)
+        obj.call1("remove_layer", layer_var)
+
+    # Get layer reference
+    pub fn get_layer(self, layer_id: i32) -> TileMapLayer:
+        return TileMapLayer::new(self.base.as_node().ptr(), layer_id)
+
+    # Set cell (convenience method for layer 0)
+    pub fn set_cell(mut self, x: i32, y: i32, source_id: i32, atlas_x: i32 = 0, atlas_y: i32 = 0):
+        let mut layer = self.get_layer(0)
+        layer.set_cell(x, y, source_id, atlas_x, atlas_y)
+
+    # Get cell (convenience method for layer 0)
+    pub fn get_cell_source_id(self, x: i32, y: i32) -> i32:
+        let layer = self.get_layer(0)
+        return layer.get_cell_source_id(x, y)
+
+    # Erase cell (convenience method for layer 0)
+    pub fn erase_cell(mut self, x: i32, y: i32):
+        let mut layer = self.get_layer(0)
+        layer.erase_cell(x, y)
+
+    # Clear all cells in all layers
+    pub fn clear(mut self):
+        let obj = self.base.as_node().as_object()
+        obj.call0("clear")
+
+    # Clear cells in specific layer
+    pub fn clear_layer(mut self, layer_id: i32):
+        let obj = self.base.as_node().as_object()
+        let layer_var = variant.Variant::from_int(layer_id as i64)
+        obj.call1("clear_layer", layer_var)
+
+    # Convert world position to map coordinates
+    pub fn local_to_map(self, x: f64, y: f64) -> (i32, i32):
+        let obj = self.base.as_node().as_object()
+        # TODO: [stdlib][P2] Create Vector2 variant and parse Vector2i result
+        # let pos_var = create_vector2(x, y)
+        # let result = obj.call1("local_to_map", pos_var)
+        return (0, 0)  # Placeholder
+
+    # Convert map coordinates to world position
+    pub fn map_to_local(self, x: i32, y: i32) -> (f64, f64):
+        let obj = self.base.as_node().as_object()
+        # TODO: [stdlib][P2] Create Vector2i variant and parse Vector2 result
+        # let map_var = create_vector2i(x, y)
+        # let result = obj.call1("map_to_local", map_var)
+        return (0.0, 0.0)  # Placeholder
+
+    # Get used cells in layer
+    pub fn get_used_cells(self, layer_id: i32) -> Array[(i32, i32)]:
+        let obj = self.base.as_node().as_object()
+        let layer_var = variant.Variant::from_int(layer_id as i64)
+        let result = obj.call1("get_used_cells", layer_var)
+        # TODO: [stdlib][P2] Parse Array[Vector2i] from result
+        return []  # Placeholder
+
+    # Set cell alternative tile (for autotiling variants)
+    pub fn set_cell_alternative_tile(mut self, layer: i32, x: i32, y: i32, alternative_id: i32):
+        let obj = self.base.as_node().as_object()
+        let layer_var = variant.Variant::from_int(layer as i64)
+        let x_var = variant.Variant::from_int(x as i64)
+        let y_var = variant.Variant::from_int(y as i64)
+        let alt_var = variant.Variant::from_int(alternative_id as i64)
+        # obj.call4("set_cell_alternative_tile", layer_var, coords_var, ..., alt_var)
+
+
+# TileMap Builder Helper
+# Fluent API for creating tilemaps
+pub struct TileMapBuilder:
+    cells: Array[CellData]
+    layers: i32
+
+impl TileMapBuilder:
+    # Create new builder
+    pub fn new() -> TileMapBuilder:
+        return TileMapBuilder(cells: [], layers: 1)
+
+    # Set number of layers
+    pub fn with_layers(mut self, count: i32) -> TileMapBuilder:
+        self.layers = count
+        return self
+
+    # Add cell
+    pub fn cell(mut self, layer: i32, x: i32, y: i32, tile_id: i32) -> TileMapBuilder:
+        let data = CellData(layer: layer, x: x, y: y, tile_id: tile_id, atlas_x: 0, atlas_y: 0)
+        self.cells.push(data)
+        return self
+
+    # Add cell with atlas coords
+    pub fn cell_atlas(mut self, layer: i32, x: i32, y: i32, tile_id: i32, atlas_x: i32, atlas_y: i32) -> TileMapBuilder:
+        let data = CellData(layer: layer, x: x, y: y, tile_id: tile_id, atlas_x: atlas_x, atlas_y: atlas_y)
+        self.cells.push(data)
+        return self
+
+    # Apply to tilemap
+    pub fn apply(self, mut tilemap: TileMap):
+        # Add layers if needed
+        let current_layers = tilemap.get_layers_count()
+        for i in range(current_layers, self.layers):
+            tilemap.add_layer(-1)
+
+        # Set all cells
+        for cell in self.cells:
+            let mut layer = tilemap.get_layer(cell.layer)
+            layer.set_cell(cell.x, cell.y, cell.tile_id, cell.atlas_x, cell.atlas_y)
+
+
+# Cell data for builder
+struct CellData:
+    layer: i32
+    x: i32
+    y: i32
+    tile_id: i32
+    atlas_x: i32
+    atlas_y: i32
+
+
+# Array placeholder
+pub struct Array[T]:
+    items: Vec[T]
+
+impl[T] Array[T]:
+    pub fn push(mut self, item: T):
+        pass

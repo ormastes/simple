@@ -27,6 +27,20 @@ impl Parser<'_> {
         self.parse_let_impl(start_span, mutability, StorageClass::Auto, false)
     }
 
+    /// Parse val: `val name = value` (immutable variable, Scala-style)
+    pub(crate) fn parse_val(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Val)?;
+        self.parse_let_impl(start_span, Mutability::Immutable, StorageClass::Auto, false)
+    }
+
+    /// Parse var: `var name = value` (mutable variable, Scala-style)
+    pub(crate) fn parse_var(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Var)?;
+        self.parse_let_impl(start_span, Mutability::Mutable, StorageClass::Auto, false)
+    }
+
     /// Parse shared let: `shared let name: [T; N]`
     /// GPU work-group shared memory declaration
     pub(crate) fn parse_shared_let(&mut self) -> Result<Node, ParseError> {

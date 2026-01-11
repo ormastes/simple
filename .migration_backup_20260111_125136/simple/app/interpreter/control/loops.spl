@@ -1,0 +1,153 @@
+# Loop Statements
+#
+# for, while, loop evaluation with break/continue.
+
+import ..core.{Interpreter, Value, InterpreterError}
+import ..expr.{evaluate}
+
+export eval_for, eval_while, eval_loop
+
+# Control flow signals
+enum ControlFlow:
+    Continue
+    Break(Value)
+    Return(Value)
+
+# Evaluate a for loop
+fn eval_for(interp: &Interpreter, binding: &str, iterable: &Expr, body: &Block) -> Result[Value, InterpreterError]:
+    # Evaluate the iterable
+    let iter_val = evaluate(interp, iterable)?
+
+    # Get iterator from value
+    let items = get_iterable(iter_val)?
+
+    # Create new scope for loop variable
+    interp.env.push_scope()
+
+    let result = Value::nil()
+
+    for item in items:
+        # Bind loop variable
+        interp.env.define(binding.to_string(), item)
+
+        # Execute body
+        match eval_loop_body(interp, body):
+            case Ok(ControlFlow::Continue):
+                continue
+            case Ok(ControlFlow::Break(val)):
+                result = val
+                break
+            case Ok(ControlFlow::Return(val)):
+                interp.env.pop_scope()
+                # Propagate return
+                return Err(InterpreterError::Return(val))
+            case Err(e):
+                interp.env.pop_scope()
+                return Err(e)
+
+    interp.env.pop_scope()
+    return Ok(result)
+
+# Evaluate a while loop
+fn eval_while(interp: &Interpreter, condition: &Expr, body: &Block) -> Result[Value, InterpreterError]:
+    let result = Value::nil()
+
+    loop:
+        # Check condition
+        let cond_val = evaluate(interp, condition)?
+        if not cond_val.is_truthy():
+            break
+
+        # Execute body
+        match eval_loop_body(interp, body):
+            case Ok(ControlFlow::Continue):
+                continue
+            case Ok(ControlFlow::Break(val)):
+                result = val
+                break
+            case Ok(ControlFlow::Return(val)):
+                return Err(InterpreterError::Return(val))
+            case Err(e):
+                return Err(e)
+
+    return Ok(result)
+
+# Evaluate an infinite loop
+fn eval_loop(interp: &Interpreter, body: &Block) -> Result[Value, InterpreterError]:
+    let result = Value::nil()
+
+    loop:
+        match eval_loop_body(interp, body):
+            case Ok(ControlFlow::Continue):
+                continue
+            case Ok(ControlFlow::Break(val)):
+                result = val
+                break
+            case Ok(ControlFlow::Return(val)):
+                return Err(InterpreterError::Return(val))
+            case Err(e):
+                return Err(e)
+
+    return Ok(result)
+
+# Execute loop body and handle break/continue
+fn eval_loop_body(interp: &Interpreter, body: &Block) -> Result[ControlFlow, InterpreterError]:
+    for stmt in body.statements:
+        match interp.eval_statement(&stmt):
+            case Ok(_):
+                continue
+            case Err(InterpreterError::Break(val)):
+                return Ok(ControlFlow::Break(val))
+            case Err(InterpreterError::Continue):
+                return Ok(ControlFlow::Continue)
+            case Err(InterpreterError::Return(val)):
+                return Ok(ControlFlow::Return(val))
+            case Err(e):
+                return Err(e)
+
+    return Ok(ControlFlow::Continue)
+
+# Convert a value to an iterable sequence
+fn get_iterable(val: Value) -> Result[Array[Value], InterpreterError]:
+    match val.data:
+        case RuntimeValue::Array(arr):
+            return Ok(arr)
+
+        case RuntimeValue::Tuple(items):
+            return Ok(items)
+
+        case RuntimeValue::String(s):
+            # Iterate over characters
+            let chars: Array[Value] = s.chars().map(|c| Value::string(c.to_string())).collect()
+            return Ok(chars)
+
+        case RuntimeValue::Dict(d):
+            # Iterate over keys
+            let keys: Array[Value] = d.keys().cloned().collect()
+            return Ok(keys)
+
+        case RuntimeValue::Int(n):
+            # Range iteration: 0..n
+            if n < 0:
+                return Err(InterpreterError::ValueError("negative range".to_string()))
+            let range: Array[Value] = (0..n).map(|i| Value::int(i)).collect()
+            return Ok(range)
+
+        case _:
+            return Err(InterpreterError::TypeError("not iterable".to_string()))
+
+# Evaluate a range expression (start..end)
+fn eval_range(interp: &Interpreter, start: &Expr, end: &Expr, inclusive: bool) -> Result[Value, InterpreterError]:
+    let start_val = evaluate(interp, start)?
+    let end_val = evaluate(interp, end)?
+
+    match (start_val.as_int(), end_val.as_int()):
+        case (Some(s), Some(e)):
+            let items: Array[Value] = if inclusive:
+                (s..=e).map(|i| Value::int(i)).collect()
+            else:
+                (s..e).map(|i| Value::int(i)).collect()
+            return Ok(Value::array(items))
+
+        case _:
+            return Err(InterpreterError::TypeError("range requires integers".to_string()))

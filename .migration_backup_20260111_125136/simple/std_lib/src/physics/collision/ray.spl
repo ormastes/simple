@@ -1,0 +1,247 @@
+# Physics Collision - Ray Casting
+#
+# Ray casting and intersection tests for physics queries.
+#
+# ## Classes
+# - `Ray`: Ray with origin and direction for casting operations
+# - `RayHit`: Result of a ray intersection test
+#
+# ## Common Uses
+# - Shooting/line-of-sight tests in games
+# - Object picking (mouse clicks)
+# - Pathfinding and navigation
+# - Weapon hit detection
+#
+# ## Example
+# ```simple
+# import physics.collision as collision
+# import physics.core as core
+#
+# # Create ray from camera toward mouse click
+# let ray = collision.Ray(
+#     origin=camera_pos,
+#     direction=click_direction.normalize()
+# )
+#
+# # Test against sphere
+# let hit = ray.intersect_sphere(sphere_center, sphere_radius)
+# if hit is not None:
+#     print("Hit at distance: {hit.distance}")
+#     print("Hit point: {hit.point}")
+#     print("Surface normal: {hit.normal}")
+#
+# # Test against AABB
+# let box = collision.AABB::from_center_size(
+#     core.Vector3(5, 0, 0),
+#     core.Vector3(2, 2, 2)
+# )
+# let box_hit = ray.intersect_aabb(box)
+# if box_hit is not None:
+#     print("Ray hit the box!")
+# ```
+
+export Ray, RayHit
+
+import ..core as core
+from .aabb import AABB
+
+
+# ============================================================================
+# Ray Casting
+# ============================================================================
+
+class Ray:
+    """Ray for ray casting and intersection tests.
+
+    Represents a ray with origin and direction, commonly used for:
+    - Shooting/line-of-sight in games
+    - Object picking (mouse clicks)
+    - Pathfinding and navigation
+
+    Example:
+        ```simple
+        # Create ray from camera toward mouse click
+        let ray = Ray(
+            origin=camera_pos,
+            direction=click_direction.normalize()
+        )
+
+        # Test against sphere
+        let hit = ray.intersect_sphere(sphere_center, sphere_radius)
+        if hit is not None:
+            print("Hit at distance: {hit.distance}")
+        ```
+    """
+    origin: core.Vector3
+    direction: core.Vector3
+
+    fn __init__(origin: core.Vector3, direction: core.Vector3):
+        """Initialize ray.
+
+        Args:
+            origin: Ray starting point
+            direction: Ray direction (will be normalized)
+        """
+        self.origin = origin
+        self.direction = direction.normalize()
+
+    fn at(t: f64) -> core.Vector3:
+        """Get point along ray at distance t.
+
+        Args:
+            t: Distance along ray
+
+        Returns:
+            Point at origin + t * direction
+        """
+        return self.origin.add(self.direction.scale(t))
+
+    fn intersect_sphere(center: core.Vector3, radius: f64) -> RayHit:
+        """Ray-sphere intersection test.
+
+        Uses analytic solution to ray-sphere intersection equation.
+
+        Args:
+            center: Sphere center
+            radius: Sphere radius
+
+        Returns:
+            RayHit if intersection exists, None otherwise
+        """
+        let oc = self.origin.sub(center)
+        let a = self.direction.dot(self.direction)
+        let b = 2.0 * oc.dot(self.direction)
+        let c = oc.dot(oc) - radius * radius
+        let discriminant = b * b - 4.0 * a * c
+
+        if discriminant < 0.0:
+            return None  # No intersection
+
+        # Find nearest intersection point
+        let t = (-b - discriminant ** 0.5) / (2.0 * a)
+        if t < 0.0:
+            # Ray starts inside sphere, use far intersection
+            t = (-b + discriminant ** 0.5) / (2.0 * a)
+            if t < 0.0:
+                return None  # Both intersections behind ray
+
+        let point = self.at(t)
+        let normal = point.sub(center).normalize()
+
+        return RayHit(
+            hit=true,
+            distance=t,
+            point=point,
+            normal=normal
+        )
+
+    fn intersect_aabb(aabb: AABB) -> RayHit:
+        """Ray-AABB intersection test (slab method).
+
+        Args:
+            aabb: Axis-aligned bounding box
+
+        Returns:
+            RayHit if intersection exists, None otherwise
+        """
+        let mut tmin = 0.0
+        let mut tmax = 1e10  # Large number
+
+        # Test each axis
+        for i in range(3):
+            let axis_min = if i == 0: aabb.min.x elif i == 1: aabb.min.y else: aabb.min.z
+            let axis_max = if i == 0: aabb.max.x elif i == 1: aabb.max.y else: aabb.max.z
+            let origin_i = if i == 0: self.origin.x elif i == 1: self.origin.y else: self.origin.z
+            let dir_i = if i == 0: self.direction.x elif i == 1: self.direction.y else: self.direction.z
+
+            if dir_i.abs() > 0.0001:  # Not parallel
+                let t1 = (axis_min - origin_i) / dir_i
+                let t2 = (axis_max - origin_i) / dir_i
+
+                let tmin_axis = if t1 < t2: t1 else: t2
+                let tmax_axis = if t1 < t2: t2 else: t1
+
+                tmin = if tmin_axis > tmin: tmin_axis else: tmin
+                tmax = if tmax_axis < tmax: tmax_axis else: tmax
+
+                if tmax < tmin:
+                    return None  # No intersection
+            else:
+                # Ray parallel to axis - check if origin is within bounds
+                if origin_i < axis_min or origin_i > axis_max:
+                    return None
+
+        if tmin < 0.0:
+            tmin = tmax
+            if tmin < 0.0:
+                return None  # Box behind ray
+
+        let point = self.at(tmin)
+        # Compute normal (which face was hit)
+        let center = aabb.center()
+        let normal = point.sub(center).normalize()
+
+        return RayHit(
+            hit=true,
+            distance=tmin,
+            point=point,
+            normal=normal
+        )
+
+    fn intersect_plane(point_on_plane: core.Vector3, plane_normal: core.Vector3) -> RayHit:
+        """Ray-plane intersection test.
+
+        Args:
+            point_on_plane: Any point on the plane
+            plane_normal: Plane normal vector (will be normalized)
+
+        Returns:
+            RayHit if intersection exists, None otherwise
+        """
+        let n = plane_normal.normalize()
+        let denom = self.direction.dot(n)
+
+        if denom.abs() < 0.0001:
+            return None  # Ray parallel to plane
+
+        let t = point_on_plane.sub(self.origin).dot(n) / denom
+        if t < 0.0:
+            return None  # Intersection behind ray
+
+        let point = self.at(t)
+
+        return RayHit(
+            hit=true,
+            distance=t,
+            point=point,
+            normal=n
+        )
+
+
+class RayHit:
+    """Result of a ray intersection test.
+
+    Attributes:
+        hit: Whether ray hit something
+        distance: Distance from ray origin to hit point
+        point: 3D point where ray intersected
+        normal: Surface normal at hit point
+    """
+    hit: bool
+    distance: f64
+    point: core.Vector3
+    normal: core.Vector3
+
+    fn __init__(hit: bool, distance: f64, point: core.Vector3, normal: core.Vector3):
+        """Initialize ray hit result.
+
+        Args:
+            hit: True if ray hit something
+            distance: Distance to hit point
+            point: Hit point in 3D space
+            normal: Surface normal at hit point
+        """
+        self.hit = hit
+        self.distance = distance
+        self.point = point
+        self.normal = normal

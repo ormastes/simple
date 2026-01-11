@@ -1,0 +1,399 @@
+# 2D RPG Demo (Godot Engine)
+#
+# Demonstrates Godot Engine-specific features:
+# - Node system and scene tree
+# - Signal system for events
+# - Resource loading
+# - TileMap for level design
+# - AnimationPlayer for character animations
+# - UI system with themes
+
+import godot.node
+import godot.scene
+import godot.resource
+import godot.signals
+import godot.rendering
+import godot.ui
+import godot.animation
+import game_engine.actor_model
+import game_engine.input
+import game_engine.assets
+import sys.ffi
+
+# Player Character
+struct RPGPlayer:
+    node: node.Node2D
+    sprite: node.Node2D
+    animation: node.Node
+    position: (f64, f64)
+    direction: Direction
+    stats: PlayerStats
+    inventory: Inventory
+    quest_log: QuestLog
+
+enum Direction:
+    North
+    South
+    East
+    West
+
+struct PlayerStats:
+    level: i32
+    health: i32
+    max_health: i32
+    mana: i32
+    max_mana: i32
+    experience: i32
+    strength: i32
+    intelligence: i32
+    defense: i32
+
+impl RPGPlayer:
+    fn new(node_ptr: ffi.VoidPtr) -> RPGPlayer:
+        let player_node = node.Node2D::from_ptr(node_ptr)
+
+        # Get child nodes
+        let sprite_node = player_node.get_child_by_name("Sprite")
+        let anim_node = player_node.get_child_by_name("AnimationPlayer")
+
+        return RPGPlayer(
+            node: player_node,
+            sprite: sprite_node,
+            animation: anim_node,
+            position: (0.0, 0.0),
+            direction: Direction::South,
+            stats: PlayerStats(
+                level: 1,
+                health: 100,
+                max_health: 100,
+                mana: 50,
+                max_mana: 50,
+                experience: 0,
+                strength: 10,
+                intelligence: 10,
+                defense: 5
+            ),
+            inventory: Inventory::new(),
+            quest_log: QuestLog::new()
+        )
+
+    fn update(mut self, delta: f64, input: RPGInput):
+        # Movement
+        let move_speed = 100.0
+        let (mut x, mut y) = self.position
+
+        if input.up:
+            y = y - move_speed * delta
+            self.direction = Direction::North
+            self.play_animation("walk_north")
+        elif input.down:
+            y = y + move_speed * delta
+            self.direction = Direction::South
+            self.play_animation("walk_south")
+        elif input.left:
+            x = x - move_speed * delta
+            self.direction = Direction::West
+            self.play_animation("walk_west")
+        elif input.right:
+            x = x + move_speed * delta
+            self.direction = Direction::East
+            self.play_animation("walk_east")
+        else:
+            self.play_animation("idle")
+
+        self.position = (x, y)
+        self.node.set_position(x, y)
+
+        # Actions
+        if input.action:
+            self.interact()
+
+        if input.attack:
+            self.attack()
+
+        if input.magic:
+            self.cast_spell()
+
+    fn play_animation(anim_name: String):
+        # Use Godot's AnimationPlayer
+        # animation.play(anim_name)
+        pass
+
+    fn interact(mut self):
+        # Check for interactable objects nearby
+        # (NPCs, chests, doors, etc.)
+        pass
+
+    fn attack(mut self):
+        # Physical attack
+        if self.stats.mana >= 10:
+            self.stats.mana = self.stats.mana - 10
+            # Spawn attack effect
+            # Deal damage to enemies in range
+
+    fn cast_spell(mut self):
+        # Magic attack
+        if self.stats.mana >= 20:
+            self.stats.mana = self.stats.mana - 20
+            # Spawn spell effect
+            # Deal magic damage
+
+    fn take_damage(mut self, amount: i32):
+        let actual_damage = amount - self.stats.defense
+        if actual_damage < 0:
+            actual_damage = 0
+
+        self.stats.health = self.stats.health - actual_damage
+
+        if self.stats.health <= 0:
+            self.stats.health = 0
+            self.on_death()
+
+    fn gain_experience(mut self, xp: i32):
+        self.stats.experience = self.stats.experience + xp
+
+        # Check for level up
+        let xp_needed = self.stats.level * 100
+        if self.stats.experience >= xp_needed:
+            self.level_up()
+
+    fn level_up(mut self):
+        self.stats.level = self.stats.level + 1
+        self.stats.max_health = self.stats.max_health + 20
+        self.stats.max_mana = self.stats.max_mana + 10
+        self.stats.health = self.stats.max_health
+        self.stats.mana = self.stats.max_mana
+        self.stats.strength = self.stats.strength + 2
+        self.stats.intelligence = self.stats.intelligence + 2
+        self.stats.defense = self.stats.defense + 1
+
+        # Emit level up signal
+        self.emit_level_up_signal()
+
+    fn emit_level_up_signal():
+        # Use Godot's signal system
+        # self.node.emit_signal("level_up", self.stats.level)
+        pass
+
+    fn on_death():
+        # Emit death signal
+        # self.node.emit_signal("player_died")
+        pass
+
+# NPC System
+struct NPC:
+    node: node.Node2D
+    name: String
+    dialogue: Vec[String]
+    quest_giver: bool
+    merchant: bool
+    inventory: Option[Inventory]
+
+impl NPC:
+    fn interact(player: RPGPlayer) -> DialogueResult:
+        if self.quest_giver:
+            return DialogueResult::QuestOffered("Collect 5 potions")
+        elif self.merchant:
+            return DialogueResult::ShopOpened
+        else:
+            return DialogueResult::Dialogue(self.dialogue)
+
+enum DialogueResult:
+    Dialogue(Vec[String])
+    QuestOffered(String)
+    ShopOpened
+    None
+
+# Inventory System
+struct Inventory:
+    items: Vec[Item]
+    max_size: i32
+
+impl Inventory:
+    fn new() -> Inventory:
+        return Inventory(items: [], max_size: 20)
+
+    fn add_item(mut self, item: Item) -> bool:
+        if self.items.len() >= self.max_size:
+            return false
+
+        self.items.push(item)
+        return true
+
+    fn remove_item(mut self, item_id: i32):
+        let mut new_items = Vec::new()
+        for item in self.items:
+            if item.id != item_id:
+                new_items.push(item)
+        self.items = new_items
+
+    fn has_item(item_id: i32) -> bool:
+        for item in self.items:
+            if item.id == item_id:
+                return true
+        return false
+
+# Item System
+struct Item:
+    id: i32
+    name: String
+    description: String
+    item_type: ItemType
+    value: i32
+
+enum ItemType:
+    Weapon
+    Armor
+    Potion
+    Key
+    QuestItem
+
+# Quest System
+struct QuestLog:
+    active_quests: Vec[Quest]
+    completed_quests: Vec[i32]
+
+impl QuestLog:
+    fn new() -> QuestLog:
+        return QuestLog(active_quests: [], completed_quests: [])
+
+    fn add_quest(mut self, quest: Quest):
+        self.active_quests.push(quest)
+
+    fn complete_quest(mut self, quest_id: i32):
+        self.completed_quests.push(quest_id)
+
+        # Remove from active
+        let mut new_active = Vec::new()
+        for quest in self.active_quests:
+            if quest.id != quest_id:
+                new_active.push(quest)
+        self.active_quests = new_active
+
+struct Quest:
+    id: i32
+    title: String
+    description: String
+    objectives: Vec[QuestObjective]
+    rewards: QuestRewards
+
+struct QuestObjective:
+    description: String
+    completed: bool
+
+struct QuestRewards:
+    experience: i32
+    gold: i32
+    items: Vec[Item]
+
+# UI System using Godot's Control nodes
+struct GameUI:
+    root: node.Node
+    health_bar: node.Node
+    mana_bar: node.Node
+    inventory_panel: node.Node
+    quest_panel: node.Node
+    dialogue_box: node.Node
+
+impl GameUI:
+    fn new(ui_root: ffi.VoidPtr) -> GameUI:
+        let root_node = node.Node::from_ptr(ui_root)
+
+        return GameUI(
+            root: root_node,
+            health_bar: root_node.get_child_by_name("HealthBar"),
+            mana_bar: root_node.get_child_by_name("ManaBar"),
+            inventory_panel: root_node.get_child_by_name("Inventory"),
+            quest_panel: root_node.get_child_by_name("QuestLog"),
+            dialogue_box: root_node.get_child_by_name("DialogueBox")
+        )
+
+    fn update_health_bar(current: i32, max: i32):
+        let percentage = (current as f64) / (max as f64)
+        # Set progress bar value
+        # health_bar.set_value(percentage)
+
+    fn update_mana_bar(current: i32, max: i32):
+        let percentage = (current as f64) / (max as f64)
+        # mana_bar.set_value(percentage)
+
+    fn show_dialogue(text: String):
+        # Set label text
+        # dialogue_box.set_text(text)
+        # dialogue_box.show()
+        pass
+
+    fn hide_dialogue():
+        # dialogue_box.hide()
+        pass
+
+# Input State
+struct RPGInput:
+    up: bool
+    down: bool
+    left: bool
+    right: bool
+    action: bool
+    attack: bool
+    magic: bool
+    inventory: bool
+    quest_log: bool
+
+# Resource Loading
+fn load_game_resources():
+    # Load player sprite
+    let player_sprite = resource.load_resource("res://sprites/player.png")
+
+    # Load tileset
+    let tileset = resource.load_resource("res://tilesets/dungeon.tres")
+
+    # Load sound effects
+    let attack_sound = resource.load_resource("res://sounds/attack.wav")
+
+    # Load music
+    let bgm = resource.load_resource("res://music/town_theme.ogg")
+
+# Signal Connections
+fn setup_signals(player: RPGPlayer):
+    # Connect player signals
+    # player.node.connect("level_up", on_level_up)
+    # player.node.connect("player_died", on_player_death)
+    # player.node.connect("item_collected", on_item_collected)
+    pass
+
+fn on_level_up(level: i32):
+    print("Level Up! Now level {level}")
+
+fn on_player_death():
+    print("Game Over!")
+
+fn on_item_collected(item_name: String):
+    print("Collected: {item_name}")
+
+# Main
+fn main():
+    print("RPG Demo (Godot Engine)")
+    print("=======================")
+    print("")
+    print("Features Demonstrated:")
+    print("  - Node system")
+    print("  - Resource loading")
+    print("  - Signals and events")
+    print("  - Animation system")
+    print("  - UI with themes")
+    print("  - Inventory system")
+    print("  - Quest system")
+    print("")
+
+    # Load resources
+    load_game_resources()
+
+    print("Game initialized!")
+    print("")
+    print("Controls:")
+    print("  Arrow Keys: Move")
+    print("  Z: Action/Interact")
+    print("  X: Attack")
+    print("  C: Magic")
+    print("  I: Inventory")
+    print("  Q: Quest Log")

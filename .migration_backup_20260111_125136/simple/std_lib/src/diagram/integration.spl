@@ -1,0 +1,152 @@
+# Diagram Integration Module
+# Integrates diagram recording with the test framework
+#
+# Usage:
+# 1. Import this module in your test file
+# 2. Call with_diagrams() around your test execution
+# 3. Or use @seq_diagram annotation on specific tests
+
+import core.{Option, Path}
+import diagram.{CallEventRecorder, DiagramConfig, DiagramFilter}
+import diagram.{generate_sequence, generate_class_diagram, generate_arch_diagram}
+import io.{write_file, create_dir_all}
+
+# Current diagram context
+let _diagram_recorder: Option[CallEventRecorder] = None
+let _diagram_config: Option[DiagramConfig] = None
+
+# Start diagram recording for a test
+fn start_diagram_recording(test_name: String, config: DiagramConfig) -> Void:
+    let recorder = CallEventRecorder.new(test_name)
+    _diagram_recorder = Some(recorder)
+    _diagram_config = Some(config)
+
+# Stop recording and generate diagrams
+fn stop_diagram_recording() -> Void:
+    match (_diagram_recorder, _diagram_config):
+        case (Some(recorder), Some(config)):
+            recorder.stop()
+            generate_and_save_diagrams(recorder, config)
+            _diagram_recorder = None
+            _diagram_config = None
+        case _:
+            pass
+
+# Generate all configured diagrams and save to files
+fn generate_and_save_diagrams(recorder: CallEventRecorder, config: DiagramConfig) -> Void:
+    let output_dir = config.output_dir
+    create_dir_all(output_dir)
+
+    let test_name = recorder.test_name
+
+    # Generate sequence diagram
+    if config.types.sequence:
+        let content = generate_sequence(recorder, config)
+        let path = output_dir.join("${test_name}_sequence.md")
+        write_file(path, content)
+
+    # Generate class diagram
+    if config.types.class_diagram:
+        let content = generate_class_diagram(recorder, config)
+        let path = output_dir.join("${test_name}_class.md")
+        write_file(path, content)
+
+    # Generate architecture diagram
+    if config.types.architecture:
+        let content = generate_arch_diagram(recorder, config)
+        let path = output_dir.join("${test_name}_arch.md")
+        write_file(path, content)
+
+# Get current recorder (for manual recording)
+fn get_current_recorder() -> Option[CallEventRecorder]:
+    return _diagram_recorder
+
+# Check if recording is active
+fn is_recording() -> Bool:
+    return _diagram_recorder.is_some()
+
+# Wrapper to run a test with diagram recording
+fn with_diagrams(test_name: String, config: DiagramConfig, block: fn() -> Void) -> Void:
+    start_diagram_recording(test_name, config)
+    block()
+    stop_diagram_recording()
+
+# Simplified wrapper with default config
+fn with_sequence_diagram(test_name: String, block: fn() -> Void) -> Void:
+    let config = DiagramConfig.new().with_sequence()
+    with_diagrams(test_name, config, block)
+
+fn with_class_diagram(test_name: String, block: fn() -> Void) -> Void:
+    let config = DiagramConfig.new().with_class_diagram()
+    with_diagrams(test_name, config, block)
+
+fn with_arch_diagram(test_name: String, block: fn() -> Void) -> Void:
+    let config = DiagramConfig.new().with_architecture()
+    with_diagrams(test_name, config, block)
+
+fn with_all_diagrams(test_name: String, block: fn() -> Void) -> Void:
+    let config = DiagramConfig.new().with_all()
+    with_diagrams(test_name, config, block)
+
+# Annotation support for tests
+# These can be used as decorators or attributes on test functions
+
+# Mark a test to generate sequence diagram
+# Usage: @seq_diagram
+#        it "should do something": ...
+fn seq_diagram_for(description: String, block: fn() -> Void) -> Void:
+    let config = DiagramConfig.new().with_sequence()
+    with_diagrams(description, config, block)
+
+# Mark a test to generate class diagram
+# Usage: @class_diagram
+#        it "should do something": ...
+fn class_diagram_for(description: String, block: fn() -> Void) -> Void:
+    let config = DiagramConfig.new().with_class_diagram()
+    with_diagrams(description, config, block)
+
+# Mark a test to generate architecture diagram
+# Usage: @arch_diagram
+#        it "should do something": ...
+fn arch_diagram_for(description: String, block: fn() -> Void) -> Void:
+    let config = DiagramConfig.new().with_architecture()
+    with_diagrams(description, config, block)
+
+# Mark an entity as architectural
+fn mark_architectural(entity: String) -> Void:
+    match _diagram_recorder:
+        case Some(rec):
+            rec.mark_architectural(entity)
+        case None:
+            pass
+
+# Record a call (for instrumented code)
+fn trace_call(callee: String, args: List[String]) -> Void:
+    match _diagram_recorder:
+        case Some(rec):
+            rec.record_call(callee, None, args, diagram.CallType.Direct)
+        case None:
+            pass
+
+# Record a method call (for instrumented code)
+fn trace_method(class_name: String, method: String, args: List[String]) -> Void:
+    match _diagram_recorder:
+        case Some(rec):
+            rec.record_call(method, Some(class_name), args, diagram.CallType.Method)
+        case None:
+            pass
+
+# Record a return (for instrumented code)
+fn trace_return(value: Option[String]) -> Void:
+    match _diagram_recorder:
+        case Some(rec):
+            rec.record_return(value)
+        case None:
+            pass
+
+# Exports
+export start_diagram_recording, stop_diagram_recording, generate_and_save_diagrams
+export get_current_recorder, is_recording
+export with_diagrams, with_sequence_diagram, with_class_diagram, with_arch_diagram, with_all_diagrams
+export seq_diagram_for, class_diagram_for, arch_diagram_for
+export mark_architectural, trace_call, trace_method, trace_return

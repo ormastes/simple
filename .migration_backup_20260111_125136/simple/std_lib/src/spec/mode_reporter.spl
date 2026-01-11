@@ -1,0 +1,212 @@
+# Mode-Aware Reporting (#2054)
+# Enhanced reporting with mode labels, diagnostics, and performance comparison
+
+import execution_mode.{ExecutionMode, mode_to_string}
+import mode_runner.{ModeExecutionResult, TestResult, TestStatus}
+
+## Report Formatter
+# Formats test results with mode information
+
+struct ModeReporter:
+    results: List[ModeExecutionResult]
+    verbose: Bool
+
+    fn new(verbose: Bool) -> ModeReporter:
+        ModeReporter {
+            results: [],
+            verbose: verbose
+        }
+
+    # Add test results
+    me add_results(results: List[ModeExecutionResult]) -> ModeReporter:
+        for result in results:
+            self.results.push(result)
+        self
+
+    # Generate formatted report
+    fn generate_report() -> String:
+        let mut output = []
+
+        # Group results by test
+        for exec_result in self.results:
+            output.push(self.format_test_result(exec_result))
+
+        # Add summary
+        output.push(self.format_summary())
+
+        join_lines(output)
+
+    # Format a single test's multi-mode results
+    fn format_test_result(exec_result: ModeExecutionResult) -> String:
+        let mut lines = []
+
+        # Test header
+        lines.push("\n{exec_result.test_name}:")
+
+        # Results for each mode
+        for result in exec_result.results:
+            let status_symbol = match result.status:
+                case TestStatus.Passed => "✓"
+                case TestStatus.Failed => "✗"
+                case TestStatus.Skipped => "⊘"
+
+            let mode_name = mode_to_string(result.mode)
+            let duration = "{result.duration_ms}ms"
+
+            let line = "  {status_symbol} {mode_name} ({duration})"
+
+            # Add error message if failed
+            match result.error:
+                case Some(err) =>
+                    lines.push(line)
+                    if self.verbose:
+                        lines.push("      Error: {err}")
+                        lines.push("      Config source: {result.config_source}")
+                case None =>
+                    lines.push(line)
+
+        join_lines(lines)
+
+    # Format summary statistics
+    fn format_summary() -> String:
+        let mut total_tests = 0
+        let mut total_modes = 0
+        let mut passed_modes = 0
+        let mut failed_modes = 0
+        let mut skipped_modes = 0
+
+        for exec_result in self.results:
+            total_tests = total_tests + 1
+            total_modes = total_modes + exec_result.total_modes
+            passed_modes = passed_modes + exec_result.passed_modes
+            failed_modes = failed_modes + exec_result.failed_modes
+            skipped_modes = skipped_modes + exec_result.skipped_modes
+
+        let summary = "\n\nSummary: {passed_modes} passed, {failed_modes} failed, {skipped_modes} skipped"
+        let detail = "({total_modes} mode executions across {total_tests} tests)"
+
+        "{summary}\n{detail}"
+
+## Performance Comparison
+# Compare execution times across modes
+
+struct PerformanceComparison:
+    test_name: String
+    mode_timings: List[ModeTiming]
+
+struct ModeTiming:
+    mode: ExecutionMode
+    duration_ms: Int
+
+    fn new(mode: ExecutionMode, duration_ms: Int) -> ModeTiming:
+        ModeTiming {
+            mode: mode,
+            duration_ms: duration_ms
+        }
+
+# Generate performance comparison from test results
+export fn compare_performance(exec_result: ModeExecutionResult) -> PerformanceComparison:
+    let mut timings = []
+
+    for result in exec_result.results:
+        if result.status == TestStatus.Passed:
+            timings.push(ModeTiming.new(result.mode, result.duration_ms))
+
+    PerformanceComparison {
+        test_name: exec_result.test_name,
+        mode_timings: timings
+    }
+
+# Format performance comparison as a table
+export fn format_performance_table(comparisons: List[PerformanceComparison]) -> String:
+    let mut lines = []
+
+    lines.push("\nPerformance Comparison:")
+    lines.push("------------------------")
+
+    for comparison in comparisons:
+        lines.push("\n{comparison.test_name}:")
+
+        # Sort timings by duration
+        let sorted_timings = sort_timings(comparison.mode_timings)
+
+        for timing in sorted_timings:
+            let mode_name = mode_to_string(timing.mode)
+            let duration = "{timing.duration_ms}ms"
+            lines.push("  {mode_name}: {duration}")
+
+    join_lines(lines)
+
+# Sort timings by duration (fastest first)
+fn sort_timings(timings: List[ModeTiming]) -> List[ModeTiming]:
+    """Sort timings by duration using insertion sort (fastest first)."""
+    if timings.len() <= 1:
+        return timings
+
+    # Create mutable copy for sorting
+    var sorted = timings.clone()
+
+    # Insertion sort - simple and efficient for small lists
+    for i in 1..sorted.len():
+        let key = sorted[i]
+        var j = i - 1
+
+        # Move elements that are slower than key to the right
+        while j >= 0 and sorted[j].duration_ms > key.duration_ms:
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+
+        sorted[j + 1] = key
+
+    sorted
+
+## Mode Availability Report
+# Show which modes are available/unavailable
+
+export fn format_mode_availability() -> String:
+    let mut lines = []
+
+    lines.push("\nMode Availability:")
+    lines.push("------------------")
+
+    let modes = [
+        ExecutionMode.Interpreter,
+        ExecutionMode.JIT,
+        ExecutionMode.SMF_Cranelift,
+        ExecutionMode.SMF_LLVM
+    ]
+
+    for mode in modes:
+        let mode_name = mode_to_string(mode)
+        let status = if is_mode_available(mode):
+            "✓ Available"
+        else:
+            "✗ Not implemented"
+
+        lines.push("{mode_name}: {status}")
+
+    join_lines(lines)
+
+## Helper Functions
+
+# Join lines with newlines
+fn join_lines(lines: List[String]) -> String:
+    let mut result = ""
+    let mut first = true
+
+    for line in lines:
+        if first:
+            result = line
+            first = false
+        else:
+            result = "{result}\n{line}"
+
+    result
+
+# Import is_mode_available from execution_mode (forward reference)
+import execution_mode.is_mode_available
+
+## Exports
+export ModeReporter
+export PerformanceComparison
+export ModeTiming

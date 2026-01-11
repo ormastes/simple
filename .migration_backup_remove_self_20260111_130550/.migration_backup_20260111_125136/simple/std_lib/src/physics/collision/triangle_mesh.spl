@@ -1,0 +1,201 @@
+# Physics Collision - Triangle Mesh Collision Detection
+#
+# Triangle mesh collision detection for complex geometry.
+# Supports collision testing between triangle meshes and spheres.
+#
+# ## Classes
+# - `TriangleMesh`: Triangle mesh with AABB for broad-phase culling
+#
+# ## Functions
+# - `triangle_sphere_collision`: Test sphere-triangle collision
+# - `mesh_sphere_collision`: Test sphere-mesh collision with broad/narrow phase
+#
+# ## Example
+# ```simple
+# import physics.collision.triangle_mesh as mesh
+# import physics.core as core
+#
+# # Create mesh from vertices and indices
+# let vertices = [
+#     core.Vector3(0.0, 0.0, 0.0),
+#     core.Vector3(10.0, 0.0, 0.0),
+#     core.Vector3(0.0, 10.0, 0.0)
+# ]
+# let indices = [0, 1, 2]
+# let triangle_mesh = mesh.TriangleMesh(vertices, indices)
+#
+# # Test sphere collision
+# let sphere = mesh.SphereShape(core.Vector3(5.0, 5.0, 1.0), 2.0)
+# if mesh.mesh_sphere_collision(triangle_mesh, sphere):
+#     print("Collision detected!")
+# ```
+
+export TriangleMesh, triangle_sphere_collision, mesh_sphere_collision
+
+import ..core as core
+from .aabb import AABB
+from .gjk import SphereShape
+
+
+# ============================================================================
+# Triangle Mesh Collision
+# ============================================================================
+
+class TriangleMesh:
+    """Triangle mesh for collision detection.
+
+    Attributes:
+        vertices: Vertex positions
+        indices: Triangle indices (groups of 3)
+        aabb: Bounding box for broad-phase
+    """
+    vertices: [core.Vector3]
+    indices: [i64]
+    aabb: AABB
+
+    fn __init__(self, vertices: [core.Vector3], indices: [i64]):
+        self.vertices = vertices
+        self.indices = indices
+
+        # Compute AABB
+        if vertices.len() > 0:
+            let mut min_point = vertices[0]
+            let mut max_point = vertices[0]
+
+            for vertex in vertices:
+                min_point = core.Vector3(
+                    min(min_point.x, vertex.x),
+                    min(min_point.y, vertex.y),
+                    min(min_point.z, vertex.z)
+                )
+                max_point = core.Vector3(
+                    max(max_point.x, vertex.x),
+                    max(max_point.y, vertex.y),
+                    max(max_point.z, vertex.z)
+                )
+
+            self.aabb = AABB(min_point, max_point)
+        else:
+            self.aabb = AABB(core.Vector3(0.0, 0.0, 0.0), core.Vector3(0.0, 0.0, 0.0))
+
+    fn num_triangles(self) -> i64:
+        """Get number of triangles in mesh."""
+        return self.indices.len() / 3
+
+    fn get_triangle(self, index: i64) -> [core.Vector3]:
+        """Get triangle vertices by index.
+
+        Args:
+            index: Triangle index (0 to num_triangles-1)
+
+        Returns:
+            Array of 3 vertices
+        """
+        let i = index * 3
+        let i0 = self.indices[i]
+        let i1 = self.indices[i + 1]
+        let i2 = self.indices[i + 2]
+
+        return [self.vertices[i0], self.vertices[i1], self.vertices[i2]]
+
+
+fn triangle_sphere_collision(
+    triangle: [core.Vector3],
+    sphere_center: core.Vector3,
+    sphere_radius: f64
+) -> bool:
+    """Test if sphere collides with triangle.
+
+    Args:
+        triangle: Three vertices of triangle
+        sphere_center: Center of sphere
+        sphere_radius: Radius of sphere
+
+    Returns:
+        True if collision, False otherwise
+    """
+    # Find closest point on triangle to sphere center
+    let v0 = triangle[0]
+    let v1 = triangle[1]
+    let v2 = triangle[2]
+
+    # Compute triangle normal
+    let edge1 = v1.sub(v0)
+    let edge2 = v2.sub(v0)
+    let normal = edge1.cross(edge2).normalize()
+
+    # Project sphere center onto triangle plane
+    let to_sphere = sphere_center.sub(v0)
+    let distance_to_plane = to_sphere.dot(normal)
+
+    # If distance > radius, no collision
+    if distance_to_plane > sphere_radius or distance_to_plane < -sphere_radius:
+        return false
+
+    # Project sphere center onto plane
+    let plane_point = sphere_center.sub(normal.scale(distance_to_plane))
+
+    # Check if point is inside triangle (barycentric coordinates)
+    let v0_to_point = plane_point.sub(v0)
+    let dot00 = edge1.dot(edge1)
+    let dot01 = edge1.dot(edge2)
+    let dot02 = edge1.dot(v0_to_point)
+    let dot11 = edge2.dot(edge2)
+    let dot12 = edge2.dot(v0_to_point)
+
+    let inv_denom = 1.0 / (dot00 * dot11 - dot01 * dot01)
+    let u = (dot11 * dot02 - dot01 * dot12) * inv_denom
+    let v = (dot00 * dot12 - dot01 * dot02) * inv_denom
+
+    # Check if point is in triangle
+    if u >= 0.0 and v >= 0.0 and u + v <= 1.0:
+        return true
+
+    # Check edges and vertices
+    # (Simplified - in practice would check closest point on edges)
+    return false
+
+
+fn mesh_sphere_collision(mesh: TriangleMesh, sphere: SphereShape) -> bool:
+    """Test if sphere collides with triangle mesh.
+
+    Args:
+        mesh: Triangle mesh
+        sphere: Sphere shape
+
+    Returns:
+        True if any triangle collides with sphere
+
+    Example:
+        ```simple
+        # Load mesh
+        let vertices = [
+            core.Vector3(0.0, 0.0, 0.0),
+            core.Vector3(10.0, 0.0, 0.0),
+            core.Vector3(0.0, 10.0, 0.0)
+        ]
+        let indices = [0, 1, 2]
+        let mesh = TriangleMesh(vertices, indices)
+
+        # Test collision
+        let sphere = SphereShape(core.Vector3(5.0, 5.0, 1.0), 2.0)
+        if mesh_sphere_collision(mesh, sphere):
+            print("Collision detected!")
+        ```
+    """
+    # Broad-phase: Check AABB first
+    let sphere_aabb = AABB(
+        sphere.position.sub(core.Vector3(sphere.radius, sphere.radius, sphere.radius)),
+        sphere.position.add(core.Vector3(sphere.radius, sphere.radius, sphere.radius))
+    )
+
+    if not mesh.aabb.intersects(sphere_aabb):
+        return false
+
+    # Narrow-phase: Check each triangle
+    for i in range(mesh.num_triangles()):
+        let triangle = mesh.get_triangle(i)
+        if triangle_sphere_collision(triangle, sphere.position, sphere.radius):
+            return true
+
+    return false

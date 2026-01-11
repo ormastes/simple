@@ -1,0 +1,206 @@
+# Sequence Diagram Generator
+# Generates Mermaid sequence diagrams from call events
+#
+# Output format: Mermaid sequenceDiagram syntax
+# Features:
+# - Ordered call/return arrows
+# - Activation bars for method execution
+# - Timing annotations (optional)
+# - Argument and return value display
+
+import core.{Option, List, Set, Dict, String}
+import recorder.{CallEvent, CallEventRecorder}
+import filter.{DiagramFilter}
+import config.{DiagramConfig}
+
+# Participant in the sequence diagram
+struct Participant:
+    name: String              # Display name
+    alias: String             # Short alias for diagram
+    is_class: Bool            # True if represents a class
+    activation_count: i32     # Current activation depth
+
+    fn new(name: String) -> Participant:
+        # Create alias by taking first letter of each word or abbreviating
+        let alias = create_alias(name)
+        return Participant {
+            name: name,
+            alias: alias,
+            is_class: name.chars()[0].is_uppercase(),
+            activation_count: 0,
+        }
+
+# Create short alias from name
+fn create_alias(name: String) -> String:
+    # Use first 3 chars or camelCase abbreviation
+    if name.len() <= 8:
+        return name
+
+    # Try to create abbreviation from uppercase letters
+    let result = ""
+    for c in name.chars():
+        if c.is_uppercase():
+            result = result + c
+
+    if result.len() >= 2:
+        return result
+
+    # Fall back to first 6 chars
+    return name.substring(0, 6)
+
+# Sequence diagram generator
+class SequenceGenerator:
+    events: List[CallEvent]
+    filter: DiagramFilter
+    config: DiagramConfig
+    participants: Dict[String, Participant]
+    output: String
+
+    fn new(config: DiagramConfig) -> SequenceGenerator:
+        return SequenceGenerator {
+            events: [],
+            filter: config.filter,
+            config: config,
+            participants: Dict.new(),
+            output: "",
+        }
+
+    # Generate diagram from recorder
+    me generate(recorder: CallEventRecorder) -> String:
+        self.events = recorder.get_events()
+        return self.generate_from_events(self.events)
+
+    # Generate diagram from event list
+    me generate_from_events(events: List[CallEvent]) -> String:
+        # Filter events if filter is configured
+        let filtered = if self.filter.is_empty():
+            events
+        else:
+            self.filter.filter_events(events)
+
+        # Apply max events limit
+        let limited = if self.config.max_events > 0 and filtered.len() > self.config.max_events as u64:
+            filtered.take(self.config.max_events as u64)
+        else:
+            filtered
+
+        # Collect participants
+        self.collect_participants(limited)
+
+        # Generate output
+        self.output = ""
+        self.emit_header()
+        self.emit_participants()
+        self.emit_events(limited)
+
+        return self.output
+
+    # Collect unique participants from events
+    me collect_participants(events: List[CallEvent]) -> Void:
+        self.participants = Dict.new()
+
+        for event in events:
+            let caller = event.get_caller_participant()
+            let callee = event.get_callee_participant()
+
+            if not self.participants.contains(caller):
+                self.participants.insert(caller, Participant.new(caller))
+            if not self.participants.contains(callee):
+                self.participants.insert(callee, Participant.new(callee))
+
+    # Emit diagram header
+    me emit_header() -> Void:
+        self.output = self.output + "```mermaid\n"
+        self.output = self.output + "sequenceDiagram\n"
+        self.output = self.output + "    autonumber\n"
+
+    # Emit participant declarations
+    me emit_participants() -> Void:
+        for (name, participant) in self.participants:
+            if participant.is_class:
+                self.output = self.output + "    participant ${participant.alias} as ${name}\n"
+            else:
+                self.output = self.output + "    participant ${participant.alias} as ${name}\n"
+
+        self.output = self.output + "\n"
+
+    # Emit all events
+    me emit_events(events: List[CallEvent]) -> Void:
+        for event in events:
+            self.emit_event(event)
+
+        self.output = self.output + "```\n"
+
+    # Emit single event
+    me emit_event(event: CallEvent) -> Void:
+        let caller = event.get_caller_participant()
+        let callee = event.get_callee_participant()
+
+        let caller_alias = match self.participants.get(caller):
+            case Some(p):
+                p.alias
+            case None:
+                caller
+
+        let callee_alias = match self.participants.get(callee):
+            case Some(p):
+                p.alias
+            case None:
+                callee
+
+        if event.is_return:
+            self.emit_return(caller_alias, callee_alias, event)
+        else:
+            self.emit_call(caller_alias, callee_alias, event)
+
+    # Emit call arrow
+    me emit_call(caller: String, callee: String, event: CallEvent) -> Void:
+        # Format: caller->>callee: method(args)
+        let label = if self.config.include_args:
+            event.format_call()
+        else:
+            event.callee
+
+        # Add timing as note if enabled
+        if self.config.include_timing:
+            self.output = self.output + "    Note over ${caller}: ${event.timestamp_us}us\n"
+
+        # Emit call arrow
+        self.output = self.output + "    ${caller}->>${callee}: ${label}\n"
+
+        # Activate callee
+        self.output = self.output + "    activate ${callee}\n"
+
+    # Emit return arrow
+    me emit_return(caller: String, callee: String, event: CallEvent) -> Void:
+        # Format: callee-->>caller: return_value
+        let label = if self.config.include_returns:
+            event.format_return()
+        else:
+            ""
+
+        # Deactivate callee (which is the returning function)
+        self.output = self.output + "    deactivate ${callee}\n"
+
+        # Emit return arrow
+        if not label.is_empty():
+            self.output = self.output + "    ${callee}-->>${caller}: ${label}\n"
+
+# Generate sequence diagram from recorder
+fn generate_sequence(recorder: CallEventRecorder, config: DiagramConfig) -> String:
+    let gen = SequenceGenerator.new(config)
+    return gen.generate(recorder)
+
+# Generate sequence diagram from events
+fn generate_sequence_from_events(events: List[CallEvent], config: DiagramConfig) -> String:
+    let gen = SequenceGenerator.new(config)
+    return gen.generate_from_events(events)
+
+# Simple generation with defaults
+fn to_mermaid_sequence(recorder: CallEventRecorder) -> String:
+    let config = DiagramConfig.new().with_sequence()
+    return generate_sequence(recorder, config)
+
+# Exports
+export Participant, SequenceGenerator
+export create_alias, generate_sequence, generate_sequence_from_events, to_mermaid_sequence

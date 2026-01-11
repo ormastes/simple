@@ -1,0 +1,553 @@
+# Unreal Blueprint Integration
+#
+# Runtime support for Blueprint-Simple interop
+#
+# Features:
+# - Call Simple functions from Blueprint
+# - Call Blueprint functions from Simple
+# - Property synchronization (UPROPERTY)
+# - Event dispatching and handling
+# - Blueprint implementable events
+#
+# Based on: https://docs.unrealengine.org/5.4/en-US/blueprints-visual-scripting-in-unreal-engine/
+
+import sys.ffi
+import unreal.actor
+
+mod blueprint
+
+# PropertyValue
+# Runtime value for Blueprint properties
+pub enum PropertyValue:
+    Bool(bool)
+    Int(i32)
+    Float(f32)
+    String(String)
+    Object(ffi.VoidPtr)
+    Vector(f64, f64, f64)
+    Rotator(f64, f64, f64)
+
+impl PropertyValue:
+    # Extract bool value
+    pub fn as_bool(self) -> bool:
+        if self is PropertyValue::Bool(value):
+            return value
+        else:
+            return false
+
+    # Extract int value
+    pub fn as_int(self) -> i32:
+        if self is PropertyValue::Int(value):
+            return value
+        else:
+            return 0
+
+    # Extract float value
+    pub fn as_float(self) -> f32:
+        if self is PropertyValue::Float(value):
+            return value
+        else:
+            return 0.0
+
+    # Extract string value
+    pub fn as_string(self) -> String:
+        if self is PropertyValue::String(value):
+            return value
+        else:
+            return ""
+
+    # Extract object pointer
+    pub fn as_object(self) -> ffi.VoidPtr:
+        if self is PropertyValue::Object(ptr):
+            return ptr
+        else:
+            return ffi.null_ptr()
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn to_string(self) -> String:
+        """Convert property value type to string.
+
+        Returns:
+            Type name
+
+        Example:
+            PropertyValue::Bool(true).to_string()  # → "bool"
+        """
+        if self is PropertyValue::Bool(_):
+            return "bool"
+        elif self is PropertyValue::Int(_):
+            return "int"
+        elif self is PropertyValue::Float(_):
+            return "float"
+        elif self is PropertyValue::String(_):
+            return "string"
+        elif self is PropertyValue::Object(_):
+            return "object"
+        elif self is PropertyValue::Vector(_, _, _):
+            return "vector"
+        else:
+            return "rotator"
+
+    pub fn description(self) -> String:
+        """Get property value description.
+
+        Returns:
+            Human-readable description with value
+
+        Example:
+            PropertyValue::Bool(true).description()  # → "Boolean: true"
+        """
+        if self is PropertyValue::Bool(value):
+            return "Boolean: {value}"
+        elif self is PropertyValue::Int(value):
+            return "Integer: {value}"
+        elif self is PropertyValue::Float(value):
+            return "Float: {value}"
+        elif self is PropertyValue::String(value):
+            return "String: \"{value}\""
+        elif self is PropertyValue::Object(ptr):
+            return "Object pointer"
+        elif self is PropertyValue::Vector(x, y, z):
+            return "Vector: ({x}, {y}, {z})"
+        else:  # Rotator
+            if self is PropertyValue::Rotator(pitch, yaw, roll):
+                return "Rotator: (pitch={pitch}, yaw={yaw}, roll={roll})"
+            else:
+                return "Rotator"
+
+    pub fn is_bool(self) -> bool:
+        """Check if value is Bool.
+
+        Returns:
+            True if Bool variant
+        """
+        return self is PropertyValue::Bool(_)
+
+    pub fn is_int(self) -> bool:
+        """Check if value is Int.
+
+        Returns:
+            True if Int variant
+        """
+        return self is PropertyValue::Int(_)
+
+    pub fn is_float(self) -> bool:
+        """Check if value is Float.
+
+        Returns:
+            True if Float variant
+        """
+        return self is PropertyValue::Float(_)
+
+    pub fn is_string(self) -> bool:
+        """Check if value is String.
+
+        Returns:
+            True if String variant
+        """
+        return self is PropertyValue::String(_)
+
+    pub fn is_object(self) -> bool:
+        """Check if value is Object.
+
+        Returns:
+            True if Object variant
+        """
+        return self is PropertyValue::Object(_)
+
+    pub fn is_vector(self) -> bool:
+        """Check if value is Vector.
+
+        Returns:
+            True if Vector variant
+        """
+        return self is PropertyValue::Vector(_, _, _)
+
+    pub fn is_rotator(self) -> bool:
+        """Check if value is Rotator.
+
+        Returns:
+            True if Rotator variant
+        """
+        return self is PropertyValue::Rotator(_, _, _)
+
+    pub fn is_numeric(self) -> bool:
+        """Check if value is numeric (Int or Float).
+
+        Returns:
+            True if Int or Float
+
+        Example:
+            PropertyValue::Int(42).is_numeric()  # → true
+        """
+        return self.is_int() or self.is_float()
+
+    pub fn is_spatial(self) -> bool:
+        """Check if value is spatial type (Vector or Rotator).
+
+        Returns:
+            True if Vector or Rotator
+
+        Example:
+            PropertyValue::Vector(1.0, 2.0, 3.0).is_spatial()  # → true
+        """
+        return self.is_vector() or self.is_rotator()
+
+    pub fn is_primitive(self) -> bool:
+        """Check if value is primitive type (Bool, Int, Float, String).
+
+        Returns:
+            True if primitive type
+
+        Example:
+            PropertyValue::Bool(true).is_primitive()  # → true
+            PropertyValue::Object(ptr).is_primitive()  # → false
+        """
+        return self.is_bool() or self.is_int() or self.is_float() or self.is_string()
+
+    pub fn summary(self) -> String:
+        """Get property value summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            PropertyValue::Int(42).summary()
+            # → "PropertyValue: int (Integer: 42, numeric, primitive)"
+        """
+        let type_name = self.to_string()
+        let desc = self.description()
+        let mut props = []
+
+        if self.is_numeric():
+            props.push("numeric")
+        if self.is_spatial():
+            props.push("spatial")
+        if self.is_primitive():
+            props.push("primitive")
+
+        if props.len() > 0:
+            let props_str = ", ".join(props)
+            return "PropertyValue: {type_name} ({desc}, {props_str})"
+        else:
+            return "PropertyValue: {type_name} ({desc})"
+
+
+# BlueprintFunctionCall
+# Represents a call to a Blueprint function
+pub struct BlueprintFunctionCall:
+    object_ptr: ffi.VoidPtr
+    function_name: String
+    parameters: Vec[PropertyValue]
+
+impl BlueprintFunctionCall:
+    # Create new function call
+    pub fn new(object_ptr: ffi.VoidPtr, function_name: String) -> BlueprintFunctionCall:
+        return BlueprintFunctionCall(
+            object_ptr: object_ptr,
+            function_name: function_name,
+            parameters: [],
+        )
+
+    # Add boolean parameter
+    pub fn with_bool(mut self, value: bool) -> BlueprintFunctionCall:
+        self.parameters.push(PropertyValue::Bool(value))
+        return self
+
+    # Add integer parameter
+    pub fn with_int(mut self, value: i32) -> BlueprintFunctionCall:
+        self.parameters.push(PropertyValue::Int(value))
+        return self
+
+    # Add float parameter
+    pub fn with_float(mut self, value: f32) -> BlueprintFunctionCall:
+        self.parameters.push(PropertyValue::Float(value))
+        return self
+
+    # Add string parameter
+    pub fn with_string(mut self, value: String) -> BlueprintFunctionCall:
+        self.parameters.push(PropertyValue::String(value))
+        return self
+
+    # Add object parameter
+    pub fn with_object(mut self, value: ffi.VoidPtr) -> BlueprintFunctionCall:
+        self.parameters.push(PropertyValue::Object(value))
+        return self
+
+    # Execute the function call
+    pub fn execute(self) -> PropertyValue:
+        # Marshal parameters to FFI
+        let param_count = self.parameters.len()
+        let param_types = ffi.alloc_array_i32(param_count)
+        let param_values = ffi.alloc_array_ptr(param_count)
+
+        for i in 0..param_count:
+            let param = self.parameters[i]
+
+            # Set parameter type and value based on variant
+            if param is PropertyValue::Bool(value):
+                ffi.write_array_i32(param_types, i, 0)  # Type: Bool
+                let bool_ptr = ffi.alloc_bool()
+                ffi.write_bool(bool_ptr, value)
+                ffi.write_array_ptr(param_values, i, bool_ptr)
+            elif param is PropertyValue::Int(value):
+                ffi.write_array_i32(param_types, i, 1)  # Type: Int
+                let int_ptr = ffi.alloc_i32()
+                ffi.write_i32(int_ptr, value)
+                ffi.write_array_ptr(param_values, i, int_ptr)
+            elif param is PropertyValue::Float(value):
+                ffi.write_array_i32(param_types, i, 2)  # Type: Float
+                let float_ptr = ffi.alloc_f32()
+                ffi.write_f32(float_ptr, value)
+                ffi.write_array_ptr(param_values, i, float_ptr)
+            elif param is PropertyValue::String(value):
+                ffi.write_array_i32(param_types, i, 3)  # Type: String
+                let str_ptr = ffi.string_to_ptr(value)
+                ffi.write_array_ptr(param_values, i, str_ptr)
+            elif param is PropertyValue::Object(ptr):
+                ffi.write_array_i32(param_types, i, 4)  # Type: Object
+                ffi.write_array_ptr(param_values, i, ptr)
+
+        # Call the Blueprint function via FFI
+        let result_type = ffi.alloc_i32()
+        let result_value = ffi.alloc_ptr()
+
+        unreal_blueprint_call_function(
+            self.object_ptr,
+            self.function_name,
+            param_count as i32,
+            param_types,
+            param_values,
+            result_type,
+            result_value
+        )
+
+        # Parse result
+        let ret_type = ffi.read_i32(result_type)
+        let ret_val = ffi.read_ptr(result_value)
+
+        let result = if ret_type == 0:
+            PropertyValue::Bool(ffi.read_bool(ret_val))
+        elif ret_type == 1:
+            PropertyValue::Int(ffi.read_i32(ret_val))
+        elif ret_type == 2:
+            PropertyValue::Float(ffi.read_f32(ret_val))
+        elif ret_type == 3:
+            PropertyValue::String(ffi.string_from_ptr(ret_val))
+        elif ret_type == 4:
+            PropertyValue::Object(ret_val)
+        else:
+            PropertyValue::Bool(false)
+
+        # Cleanup
+        for i in 0..param_count:
+            let param_ptr = ffi.read_array_ptr(param_values, i)
+            ffi.free(param_ptr)
+
+        ffi.free(param_types)
+        ffi.free(param_values)
+        ffi.free(result_type)
+        ffi.free(result_value)
+
+        return result
+
+
+# BlueprintProperty
+# Access Blueprint properties from Simple
+pub struct BlueprintProperty:
+    object_ptr: ffi.VoidPtr
+    property_name: String
+
+impl BlueprintProperty:
+    pub fn new(object_ptr: ffi.VoidPtr, property_name: String) -> BlueprintProperty:
+        return BlueprintProperty(
+            object_ptr: object_ptr,
+            property_name: property_name,
+        )
+
+    # Get property value
+    pub fn get(self) -> PropertyValue:
+        let value_type = ffi.alloc_i32()
+        let value_ptr = ffi.alloc_ptr()
+
+        unreal_blueprint_get_property(
+            self.object_ptr,
+            self.property_name,
+            value_type,
+            value_ptr
+        )
+
+        let prop_type = ffi.read_i32(value_type)
+        let prop_val = ffi.read_ptr(value_ptr)
+
+        let result = if prop_type == 0:
+            PropertyValue::Bool(ffi.read_bool(prop_val))
+        elif prop_type == 1:
+            PropertyValue::Int(ffi.read_i32(prop_val))
+        elif prop_type == 2:
+            PropertyValue::Float(ffi.read_f32(prop_val))
+        elif prop_type == 3:
+            PropertyValue::String(ffi.string_from_ptr(prop_val))
+        elif prop_type == 4:
+            PropertyValue::Object(prop_val)
+        else:
+            PropertyValue::Bool(false)
+
+        ffi.free(value_type)
+        ffi.free(value_ptr)
+
+        return result
+
+    # Set property value
+    pub fn set(mut self, value: PropertyValue):
+        let value_type: i32
+        let value_ptr: ffi.VoidPtr
+
+        if value is PropertyValue::Bool(v):
+            value_type = 0
+            let bool_ptr = ffi.alloc_bool()
+            ffi.write_bool(bool_ptr, v)
+            value_ptr = bool_ptr
+        elif value is PropertyValue::Int(v):
+            value_type = 1
+            let int_ptr = ffi.alloc_i32()
+            ffi.write_i32(int_ptr, v)
+            value_ptr = int_ptr
+        elif value is PropertyValue::Float(v):
+            value_type = 2
+            let float_ptr = ffi.alloc_f32()
+            ffi.write_f32(float_ptr, v)
+            value_ptr = float_ptr
+        elif value is PropertyValue::String(v):
+            value_type = 3
+            value_ptr = ffi.string_to_ptr(v)
+        elif value is PropertyValue::Object(ptr):
+            value_type = 4
+            value_ptr = ptr
+        else:
+            value_type = 0
+            value_ptr = ffi.null_ptr()
+
+        unreal_blueprint_set_property(
+            self.object_ptr,
+            self.property_name,
+            value_type,
+            value_ptr
+        )
+
+        ffi.free(value_ptr)
+
+
+# BlueprintEvent
+# Dispatch events to Blueprint
+pub struct BlueprintEvent:
+    dispatcher_ptr: ffi.VoidPtr
+
+impl BlueprintEvent:
+    pub fn new(object_ptr: ffi.VoidPtr, event_name: String) -> BlueprintEvent:
+        let dispatcher_ptr = unreal_blueprint_get_event_dispatcher(object_ptr, event_name)
+        return BlueprintEvent(dispatcher_ptr: dispatcher_ptr)
+
+    # Broadcast event with no parameters
+    pub fn broadcast(self):
+        unreal_blueprint_broadcast_event(self.dispatcher_ptr, 0, ffi.null_ptr(), ffi.null_ptr())
+
+    # Broadcast event with parameters
+    pub fn broadcast_with_params(self, params: Vec[PropertyValue]):
+        let param_count = params.len()
+        let param_types = ffi.alloc_array_i32(param_count)
+        let param_values = ffi.alloc_array_ptr(param_count)
+
+        for i in 0..param_count:
+            let param = params[i]
+
+            if param is PropertyValue::Bool(value):
+                ffi.write_array_i32(param_types, i, 0)
+                let bool_ptr = ffi.alloc_bool()
+                ffi.write_bool(bool_ptr, value)
+                ffi.write_array_ptr(param_values, i, bool_ptr)
+            elif param is PropertyValue::Int(value):
+                ffi.write_array_i32(param_types, i, 1)
+                let int_ptr = ffi.alloc_i32()
+                ffi.write_i32(int_ptr, value)
+                ffi.write_array_ptr(param_values, i, int_ptr)
+            elif param is PropertyValue::Float(value):
+                ffi.write_array_i32(param_types, i, 2)
+                let float_ptr = ffi.alloc_f32()
+                ffi.write_f32(float_ptr, value)
+                ffi.write_array_ptr(param_values, i, float_ptr)
+            elif param is PropertyValue::String(value):
+                ffi.write_array_i32(param_types, i, 3)
+                let str_ptr = ffi.string_to_ptr(value)
+                ffi.write_array_ptr(param_values, i, str_ptr)
+            elif param is PropertyValue::Object(ptr):
+                ffi.write_array_i32(param_types, i, 4)
+                ffi.write_array_ptr(param_values, i, ptr)
+
+        unreal_blueprint_broadcast_event(self.dispatcher_ptr, param_count as i32, param_types, param_values)
+
+        # Cleanup
+        for i in 0..param_count:
+            let param_ptr = ffi.read_array_ptr(param_values, i)
+            ffi.free(param_ptr)
+
+        ffi.free(param_types)
+        ffi.free(param_values)
+
+
+# Helper functions
+
+# Call Blueprint function on actor
+pub fn call_blueprint_function(actor: actor.AActor, function_name: String) -> PropertyValue:
+    return BlueprintFunctionCall::new(actor.as_ptr(), function_name).execute()
+
+# Get Blueprint property from actor
+pub fn get_blueprint_property(actor: actor.AActor, property_name: String) -> PropertyValue:
+    return BlueprintProperty::new(actor.as_ptr(), property_name).get()
+
+# Set Blueprint property on actor
+pub fn set_blueprint_property(actor: actor.AActor, property_name: String, value: PropertyValue):
+    BlueprintProperty::new(actor.as_ptr(), property_name).set(value)
+
+
+# FFI function declarations
+
+extern "C":
+    fn unreal_blueprint_call_function(
+        object: ffi.VoidPtr,
+        function_name: String,
+        param_count: i32,
+        param_types: ffi.VoidPtr,
+        param_values: ffi.VoidPtr,
+        result_type: ffi.VoidPtr,
+        result_value: ffi.VoidPtr
+    )
+
+    fn unreal_blueprint_get_property(
+        object: ffi.VoidPtr,
+        property_name: String,
+        value_type: ffi.VoidPtr,
+        value_ptr: ffi.VoidPtr
+    )
+
+    fn unreal_blueprint_set_property(
+        object: ffi.VoidPtr,
+        property_name: String,
+        value_type: i32,
+        value_ptr: ffi.VoidPtr
+    )
+
+    fn unreal_blueprint_get_event_dispatcher(
+        object: ffi.VoidPtr,
+        event_name: String
+    ) -> ffi.VoidPtr
+
+    fn unreal_blueprint_broadcast_event(
+        dispatcher: ffi.VoidPtr,
+        param_count: i32,
+        param_types: ffi.VoidPtr,
+        param_values: ffi.VoidPtr
+    )

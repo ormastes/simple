@@ -1,0 +1,735 @@
+# Common Physics Abstraction
+#
+# Engine-agnostic physics interface
+# Works with both Godot Physics and Unreal Chaos/PhysX
+#
+# Features:
+# - Rigidbody simulation
+# - Collision detection
+# - Ray casting
+# - Physics materials
+# - Constraints and joints
+
+import sys.ffi
+
+mod physics
+
+# RigidBodyType
+# Type of rigidbody simulation
+pub enum RigidBodyType:
+    Static = 0      # Does not move
+    Kinematic = 1   # Moves via script, no physics
+    Dynamic = 2     # Full physics simulation
+
+impl RigidBodyType:
+    pub fn to_int(self) -> i32:
+        if self == RigidBodyType::Static:
+            return 0
+        elif self == RigidBodyType::Kinematic:
+            return 1
+        else:
+            return 2
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn to_string(self) -> String:
+        """Convert rigid body type to string.
+
+        Returns:
+            Type name
+
+        Example:
+            RigidBodyType::Dynamic.to_string()  # → "dynamic"
+        """
+        match self:
+            case Static: "static"
+            case Kinematic: "kinematic"
+            case Dynamic: "dynamic"
+
+    pub fn description(self) -> String:
+        """Get rigid body type description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            RigidBodyType::Dynamic.description()
+            # → "Full physics simulation"
+        """
+        match self:
+            case Static: "Does not move"
+            case Kinematic: "Moves via script, no physics"
+            case Dynamic: "Full physics simulation"
+
+    pub fn is_static(self) -> bool:
+        """Check if type is Static."""
+        match self:
+            case Static: true
+            case _: false
+
+    pub fn is_kinematic(self) -> bool:
+        """Check if type is Kinematic."""
+        match self:
+            case Kinematic: true
+            case _: false
+
+    pub fn is_dynamic(self) -> bool:
+        """Check if type is Dynamic."""
+        match self:
+            case Dynamic: true
+            case _: false
+
+    pub fn is_movable(self) -> bool:
+        """Check if body can move.
+
+        Returns:
+            true for Kinematic or Dynamic
+
+        Example:
+            RigidBodyType::Static.is_movable()  # → false
+            RigidBodyType::Dynamic.is_movable()  # → true
+        """
+        match self:
+            case Static: false
+            case _: true
+
+    pub fn is_physics_driven(self) -> bool:
+        """Check if body is driven by physics.
+
+        Returns:
+            true for Dynamic only
+
+        Example:
+            RigidBodyType::Dynamic.is_physics_driven()  # → true
+        """
+        match self:
+            case Dynamic: true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get rigid body type summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            RigidBodyType::Dynamic.summary()
+            # → "RigidBodyType: dynamic (Full physics simulation, movable, physics-driven)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let mut props = []
+
+        if self.is_movable():
+            props.push("movable")
+        else:
+            props.push("static")
+
+        if self.is_physics_driven():
+            props.push("physics-driven")
+
+        let props_str = props.join(", ")
+        return "RigidBodyType: {name} ({desc}, {props_str})"
+
+
+# CollisionShape
+# Common collision shape types
+pub enum CollisionShape:
+    Box(f32, f32, f32)          # Half extents
+    Sphere(f32)                 # Radius
+    Capsule(f32, f32)          # Radius, height
+    Cylinder(f32, f32)         # Radius, height
+    Mesh(ffi.VoidPtr)          # Mesh pointer
+
+impl CollisionShape:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn to_string(self) -> String:
+        """Convert collision shape to string.
+
+        Returns:
+            Shape type name
+
+        Example:
+            CollisionShape::Sphere(1.0).to_string()  # → "sphere"
+        """
+        match self:
+            case Box(_, _, _): "box"
+            case Sphere(_): "sphere"
+            case Capsule(_, _): "capsule"
+            case Cylinder(_, _): "cylinder"
+            case Mesh(_): "mesh"
+
+    pub fn description(self) -> String:
+        """Get collision shape description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            CollisionShape::Box(1.0, 2.0, 3.0).description()
+            # → "Box collision shape (half extents: 1.0, 2.0, 3.0)"
+        """
+        match self:
+            case Box(x, y, z): "Box collision shape (half extents: {x}, {y}, {z})"
+            case Sphere(r): "Sphere collision shape (radius: {r})"
+            case Capsule(r, h): "Capsule collision shape (radius: {r}, height: {h})"
+            case Cylinder(r, h): "Cylinder collision shape (radius: {r}, height: {h})"
+            case Mesh(_): "Mesh collision shape (custom geometry)"
+
+    pub fn is_box(self) -> bool:
+        """Check if shape is Box."""
+        match self:
+            case Box(_, _, _): true
+            case _: false
+
+    pub fn is_sphere(self) -> bool:
+        """Check if shape is Sphere."""
+        match self:
+            case Sphere(_): true
+            case _: false
+
+    pub fn is_capsule(self) -> bool:
+        """Check if shape is Capsule."""
+        match self:
+            case Capsule(_, _): true
+            case _: false
+
+    pub fn is_cylinder(self) -> bool:
+        """Check if shape is Cylinder."""
+        match self:
+            case Cylinder(_, _): true
+            case _: false
+
+    pub fn is_mesh(self) -> bool:
+        """Check if shape is Mesh."""
+        match self:
+            case Mesh(_): true
+            case _: false
+
+    pub fn is_primitive(self) -> bool:
+        """Check if shape is a primitive (not mesh).
+
+        Returns:
+            true for box, sphere, capsule, cylinder
+
+        Example:
+            CollisionShape::Sphere(1.0).is_primitive()  # → true
+        """
+        match self:
+            case Mesh(_): false
+            case _: true
+
+    pub fn is_convex(self) -> bool:
+        """Check if shape is guaranteed to be convex.
+
+        Returns:
+            true for all primitives, false for mesh
+
+        Example:
+            CollisionShape::Sphere(1.0).is_convex()  # → true
+        """
+        return self.is_primitive()
+
+    pub fn summary(self) -> String:
+        """Get collision shape summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            CollisionShape::Sphere(5.0).summary()
+            # → "CollisionShape: sphere (Sphere collision shape (radius: 5.0), primitive, convex)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let mut props = []
+
+        if self.is_primitive():
+            props.push("primitive")
+        if self.is_convex():
+            props.push("convex")
+
+        let props_str = props.join(", ")
+        return "CollisionShape: {name} ({desc}, {props_str})"
+
+
+# RaycastHit
+# Result of a raycast query
+pub struct RaycastHit:
+    hit: bool
+    position: (f32, f32, f32)
+    normal: (f32, f32, f32)
+    distance: f32
+    collider_ptr: ffi.VoidPtr
+
+impl RaycastHit:
+    pub fn did_hit(self) -> bool:
+        return self.hit
+
+    pub fn get_position(self) -> (f32, f32, f32):
+        return self.position
+
+    pub fn get_normal(self) -> (f32, f32, f32):
+        return self.normal
+
+    pub fn get_distance(self) -> f32:
+        return self.distance
+
+    pub fn get_collider(self) -> ffi.VoidPtr:
+        return self.collider_ptr
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_hit(self) -> bool:
+        """Check if raycast hit something (alias for did_hit).
+
+        Returns:
+            true if hit
+
+        Example:
+            hit.has_hit()  # → true
+        """
+        return self.did_hit()
+
+    pub fn has_collider(self) -> bool:
+        """Check if has valid collider pointer.
+
+        Returns:
+            true if collider pointer is not null
+
+        Example:
+            hit.has_collider()  # → true
+        """
+        return not ffi.is_null_ptr(self.collider_ptr)
+
+    pub fn get_hit_distance(self) -> f32:
+        """Get hit distance (alias for get_distance).
+
+        Returns:
+            Distance to hit point
+
+        Example:
+            hit.get_hit_distance()  # → 5.5
+        """
+        return self.get_distance()
+
+    pub fn summary(self) -> String:
+        """Get raycast hit summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            hit.summary()
+            # → "RaycastHit: hit at distance 5.5, normal=(0.0, 1.0, 0.0)"
+        """
+        if not self.hit:
+            return "RaycastHit: no hit"
+        let dist = self.distance
+        let (nx, ny, nz) = self.normal
+        return "RaycastHit: hit at distance {dist}, normal=({nx}, {ny}, {nz})"
+
+
+# RigidBody trait
+# Common interface for rigidbodies
+pub trait RigidBody:
+    # Type and state
+    fn get_body_type() -> RigidBodyType
+    me set_body_type(body_type: RigidBodyType)
+    fn is_sleeping() -> bool
+    me wake_up()
+
+    # Mass and inertia
+    fn get_mass() -> f32
+    me set_mass(mass: f32)
+
+    # Velocity
+    fn get_linear_velocity() -> (f32, f32, f32)
+    me set_linear_velocity(vx: f32, vy: f32, vz: f32)
+    fn get_angular_velocity() -> (f32, f32, f32)
+    me set_angular_velocity(wx: f32, wy: f32, wz: f32)
+
+    # Forces
+    me apply_force(fx: f32, fy: f32, fz: f32)
+    me apply_impulse(ix: f32, iy: f32, iz: f32)
+    me apply_torque(tx: f32, ty: f32, tz: f32)
+
+    # Damping
+    fn get_linear_damping() -> f32
+    me set_linear_damping(damping: f32)
+    fn get_angular_damping() -> f32
+    me set_angular_damping(damping: f32)
+
+    # Gravity
+    fn uses_gravity() -> bool
+    me set_use_gravity(use_gravity: bool)
+
+
+# PhysicsWorld trait
+# Common interface for physics simulation
+pub trait PhysicsWorld:
+    # Simulation
+    me step(delta: f32)
+    fn get_gravity() -> (f32, f32, f32)
+    me set_gravity(gx: f32, gy: f32, gz: f32)
+
+    # Raycasting
+    fn raycast(from_x: f32, from_y: f32, from_z: f32, to_x: f32, to_y: f32, to_z: f32) -> RaycastHit
+    fn raycast_all(from_x: f32, from_y: f32, from_z: f32, to_x: f32, to_y: f32, to_z: f32) -> Vec[RaycastHit]
+
+    # Overlap queries
+    fn overlap_sphere(x: f32, y: f32, z: f32, radius: f32) -> Vec[ffi.VoidPtr]
+    fn overlap_box(x: f32, y: f32, z: f32, hx: f32, hy: f32, hz: f32) -> Vec[ffi.VoidPtr]
+
+
+# GodotRigidBodyAdapter
+# Adapts Godot RigidBody3D to RigidBody trait
+pub struct GodotRigidBodyAdapter:
+    body_ptr: ffi.VoidPtr
+
+impl GodotRigidBodyAdapter:
+    pub fn new(body_ptr: ffi.VoidPtr) -> GodotRigidBodyAdapter:
+        return GodotRigidBodyAdapter(body_ptr: body_ptr)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_body_ptr(self) -> ffi.VoidPtr:
+        """Get rigidbody pointer.
+
+        Returns:
+            Body pointer
+
+        Example:
+            adapter.get_body_ptr()
+        """
+        return self.body_ptr
+
+    pub fn has_body(self) -> bool:
+        """Check if has valid body pointer.
+
+        Returns:
+            true if pointer is not null
+
+        Example:
+            adapter.has_body()  # → true
+        """
+        return not ffi.is_null_ptr(self.body_ptr)
+
+    pub fn is_awake(self) -> bool:
+        """Check if body is awake (not sleeping).
+
+        Returns:
+            true if awake
+
+        Example:
+            adapter.is_awake()  # → true
+        """
+        return not self.is_sleeping()
+
+    pub fn summary(self) -> String:
+        """Get Godot rigidbody adapter summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            adapter.summary()
+            # → "GodotRigidBodyAdapter: dynamic, mass=10.0, awake"
+        """
+        let body_type = self.get_body_type().to_string()
+        let mass = self.get_mass()
+        let sleep_state = if self.is_sleeping() { "sleeping" } else { "awake" }
+        return "GodotRigidBodyAdapter: {body_type}, mass={mass}, {sleep_state}"
+
+impl RigidBody for GodotRigidBodyAdapter:
+    fn get_body_type() -> RigidBodyType:
+        let type_int = godot_rigidbody_get_mode(self.body_ptr)
+        if type_int == 0:
+            return RigidBodyType::Static
+        elif type_int == 1:
+            return RigidBodyType::Kinematic
+        else:
+            return RigidBodyType::Dynamic
+
+    me set_body_type(body_type: RigidBodyType):
+        godot_rigidbody_set_mode(self.body_ptr, body_type.to_int())
+
+    fn is_sleeping() -> bool:
+        return godot_rigidbody_is_sleeping(self.body_ptr)
+
+    me wake_up():
+        godot_rigidbody_set_sleeping(self.body_ptr, false)
+
+    fn get_mass() -> f32:
+        return godot_rigidbody_get_mass(self.body_ptr)
+
+    me set_mass(mass: f32):
+        godot_rigidbody_set_mass(self.body_ptr, mass)
+
+    fn get_linear_velocity() -> (f32, f32, f32):
+        let x = ffi.alloc_f32()
+        let y = ffi.alloc_f32()
+        let z = ffi.alloc_f32()
+        godot_rigidbody_get_linear_velocity(self.body_ptr, x, y, z)
+        let result = (ffi.read_f32(x), ffi.read_f32(y), ffi.read_f32(z))
+        ffi.free(x)
+        ffi.free(y)
+        ffi.free(z)
+        return result
+
+    me set_linear_velocity(vx: f32, vy: f32, vz: f32):
+        godot_rigidbody_set_linear_velocity(self.body_ptr, vx, vy, vz)
+
+    fn get_angular_velocity() -> (f32, f32, f32):
+        let x = ffi.alloc_f32()
+        let y = ffi.alloc_f32()
+        let z = ffi.alloc_f32()
+        godot_rigidbody_get_angular_velocity(self.body_ptr, x, y, z)
+        let result = (ffi.read_f32(x), ffi.read_f32(y), ffi.read_f32(z))
+        ffi.free(x)
+        ffi.free(y)
+        ffi.free(z)
+        return result
+
+    me set_angular_velocity(wx: f32, wy: f32, wz: f32):
+        godot_rigidbody_set_angular_velocity(self.body_ptr, wx, wy, wz)
+
+    me apply_force(fx: f32, fy: f32, fz: f32):
+        godot_rigidbody_apply_central_force(self.body_ptr, fx, fy, fz)
+
+    me apply_impulse(ix: f32, iy: f32, iz: f32):
+        godot_rigidbody_apply_central_impulse(self.body_ptr, ix, iy, iz)
+
+    me apply_torque(tx: f32, ty: f32, tz: f32):
+        godot_rigidbody_apply_torque(self.body_ptr, tx, ty, tz)
+
+    fn get_linear_damping() -> f32:
+        return godot_rigidbody_get_linear_damp(self.body_ptr)
+
+    me set_linear_damping(damping: f32):
+        godot_rigidbody_set_linear_damp(self.body_ptr, damping)
+
+    fn get_angular_damping() -> f32:
+        return godot_rigidbody_get_angular_damp(self.body_ptr)
+
+    me set_angular_damping(damping: f32):
+        godot_rigidbody_set_angular_damp(self.body_ptr, damping)
+
+    fn uses_gravity() -> bool:
+        return godot_rigidbody_get_gravity_scale(self.body_ptr) > 0.0
+
+    me set_use_gravity(use_gravity: bool):
+        if use_gravity:
+            godot_rigidbody_set_gravity_scale(self.body_ptr, 1.0)
+        else:
+            godot_rigidbody_set_gravity_scale(self.body_ptr, 0.0)
+
+
+# UnrealRigidBodyAdapter
+# Adapts Unreal UPrimitiveComponent to RigidBody trait
+pub struct UnrealRigidBodyAdapter:
+    component_ptr: ffi.VoidPtr
+
+impl UnrealRigidBodyAdapter:
+    pub fn new(component_ptr: ffi.VoidPtr) -> UnrealRigidBodyAdapter:
+        return UnrealRigidBodyAdapter(component_ptr: component_ptr)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_component_ptr(self) -> ffi.VoidPtr:
+        """Get component pointer.
+
+        Returns:
+            Component pointer
+
+        Example:
+            adapter.get_component_ptr()
+        """
+        return self.component_ptr
+
+    pub fn has_component(self) -> bool:
+        """Check if has valid component pointer.
+
+        Returns:
+            true if pointer is not null
+
+        Example:
+            adapter.has_component()  # → true
+        """
+        return not ffi.is_null_ptr(self.component_ptr)
+
+    pub fn is_awake(self) -> bool:
+        """Check if body is awake (not sleeping).
+
+        Returns:
+            true if awake
+
+        Example:
+            adapter.is_awake()  # → true
+        """
+        return not self.is_sleeping()
+
+    pub fn summary(self) -> String:
+        """Get Unreal rigidbody adapter summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            adapter.summary()
+            # → "UnrealRigidBodyAdapter: dynamic, mass=15.0, awake"
+        """
+        let body_type = self.get_body_type().to_string()
+        let mass = self.get_mass()
+        let sleep_state = if self.is_sleeping() { "sleeping" } else { "awake" }
+        return "UnrealRigidBodyAdapter: {body_type}, mass={mass}, {sleep_state}"
+
+impl RigidBody for UnrealRigidBodyAdapter:
+    fn get_body_type() -> RigidBodyType:
+        if unreal_primitive_is_simulating_physics(self.component_ptr):
+            return RigidBodyType::Dynamic
+        else:
+            return RigidBodyType::Static
+
+    me set_body_type(body_type: RigidBodyType):
+        if body_type == RigidBodyType::Dynamic:
+            unreal_primitive_set_simulate_physics(self.component_ptr, true)
+        else:
+            unreal_primitive_set_simulate_physics(self.component_ptr, false)
+
+    fn is_sleeping() -> bool:
+        return unreal_primitive_is_sleeping(self.component_ptr)
+
+    me wake_up():
+        unreal_primitive_wake_rigid_body(self.component_ptr)
+
+    fn get_mass() -> f32:
+        return unreal_primitive_get_mass(self.component_ptr)
+
+    me set_mass(mass: f32):
+        unreal_primitive_set_mass_override(self.component_ptr, mass)
+
+    fn get_linear_velocity() -> (f32, f32, f32):
+        let x = ffi.alloc_f32()
+        let y = ffi.alloc_f32()
+        let z = ffi.alloc_f32()
+        unreal_primitive_get_physics_linear_velocity(self.component_ptr, x, y, z)
+        let result = (ffi.read_f32(x), ffi.read_f32(y), ffi.read_f32(z))
+        ffi.free(x)
+        ffi.free(y)
+        ffi.free(z)
+        return result
+
+    me set_linear_velocity(vx: f32, vy: f32, vz: f32):
+        unreal_primitive_set_physics_linear_velocity(self.component_ptr, vx, vy, vz)
+
+    fn get_angular_velocity() -> (f32, f32, f32):
+        let x = ffi.alloc_f32()
+        let y = ffi.alloc_f32()
+        let z = ffi.alloc_f32()
+        unreal_primitive_get_physics_angular_velocity_in_degrees(self.component_ptr, x, y, z)
+        let result = (ffi.read_f32(x), ffi.read_f32(y), ffi.read_f32(z))
+        ffi.free(x)
+        ffi.free(y)
+        ffi.free(z)
+        return result
+
+    me set_angular_velocity(wx: f32, wy: f32, wz: f32):
+        unreal_primitive_set_physics_angular_velocity_in_degrees(self.component_ptr, wx, wy, wz)
+
+    me apply_force(fx: f32, fy: f32, fz: f32):
+        unreal_primitive_add_force(self.component_ptr, fx, fy, fz)
+
+    me apply_impulse(ix: f32, iy: f32, iz: f32):
+        unreal_primitive_add_impulse(self.component_ptr, ix, iy, iz)
+
+    me apply_torque(tx: f32, ty: f32, tz: f32):
+        unreal_primitive_add_torque_in_radians(self.component_ptr, tx, ty, tz)
+
+    fn get_linear_damping() -> f32:
+        return unreal_primitive_get_linear_damping(self.component_ptr)
+
+    me set_linear_damping(damping: f32):
+        unreal_primitive_set_linear_damping(self.component_ptr, damping)
+
+    fn get_angular_damping() -> f32:
+        return unreal_primitive_get_angular_damping(self.component_ptr)
+
+    me set_angular_damping(damping: f32):
+        unreal_primitive_set_angular_damping(self.component_ptr, damping)
+
+    fn uses_gravity() -> bool:
+        return unreal_primitive_is_gravity_enabled(self.component_ptr)
+
+    me set_use_gravity(use_gravity: bool):
+        unreal_primitive_set_enable_gravity(self.component_ptr, use_gravity)
+
+
+# FFI declarations for Godot
+extern "C":
+    fn godot_rigidbody_get_mode(body: ffi.VoidPtr) -> i32
+    fn godot_rigidbody_set_mode(body: ffi.VoidPtr, mode: i32)
+    fn godot_rigidbody_is_sleeping(body: ffi.VoidPtr) -> bool
+    fn godot_rigidbody_set_sleeping(body: ffi.VoidPtr, sleeping: bool)
+    fn godot_rigidbody_get_mass(body: ffi.VoidPtr) -> f32
+    fn godot_rigidbody_set_mass(body: ffi.VoidPtr, mass: f32)
+    fn godot_rigidbody_get_linear_velocity(body: ffi.VoidPtr, x: ffi.VoidPtr, y: ffi.VoidPtr, z: ffi.VoidPtr)
+    fn godot_rigidbody_set_linear_velocity(body: ffi.VoidPtr, x: f32, y: f32, z: f32)
+    fn godot_rigidbody_get_angular_velocity(body: ffi.VoidPtr, x: ffi.VoidPtr, y: ffi.VoidPtr, z: ffi.VoidPtr)
+    fn godot_rigidbody_set_angular_velocity(body: ffi.VoidPtr, x: f32, y: f32, z: f32)
+    fn godot_rigidbody_apply_central_force(body: ffi.VoidPtr, x: f32, y: f32, z: f32)
+    fn godot_rigidbody_apply_central_impulse(body: ffi.VoidPtr, x: f32, y: f32, z: f32)
+    fn godot_rigidbody_apply_torque(body: ffi.VoidPtr, x: f32, y: f32, z: f32)
+    fn godot_rigidbody_get_linear_damp(body: ffi.VoidPtr) -> f32
+    fn godot_rigidbody_set_linear_damp(body: ffi.VoidPtr, damp: f32)
+    fn godot_rigidbody_get_angular_damp(body: ffi.VoidPtr) -> f32
+    fn godot_rigidbody_set_angular_damp(body: ffi.VoidPtr, damp: f32)
+    fn godot_rigidbody_get_gravity_scale(body: ffi.VoidPtr) -> f32
+    fn godot_rigidbody_set_gravity_scale(body: ffi.VoidPtr, scale: f32)
+
+# FFI declarations for Unreal
+extern "C":
+    fn unreal_primitive_is_simulating_physics(component: ffi.VoidPtr) -> bool
+    fn unreal_primitive_set_simulate_physics(component: ffi.VoidPtr, simulate: bool)
+    fn unreal_primitive_is_sleeping(component: ffi.VoidPtr) -> bool
+    fn unreal_primitive_wake_rigid_body(component: ffi.VoidPtr)
+    fn unreal_primitive_get_mass(component: ffi.VoidPtr) -> f32
+    fn unreal_primitive_set_mass_override(component: ffi.VoidPtr, mass: f32)
+    fn unreal_primitive_get_physics_linear_velocity(component: ffi.VoidPtr, x: ffi.VoidPtr, y: ffi.VoidPtr, z: ffi.VoidPtr)
+    fn unreal_primitive_set_physics_linear_velocity(component: ffi.VoidPtr, x: f32, y: f32, z: f32)
+    fn unreal_primitive_get_physics_angular_velocity_in_degrees(component: ffi.VoidPtr, x: ffi.VoidPtr, y: ffi.VoidPtr, z: ffi.VoidPtr)
+    fn unreal_primitive_set_physics_angular_velocity_in_degrees(component: ffi.VoidPtr, x: f32, y: f32, z: f32)
+    fn unreal_primitive_add_force(component: ffi.VoidPtr, x: f32, y: f32, z: f32)
+    fn unreal_primitive_add_impulse(component: ffi.VoidPtr, x: f32, y: f32, z: f32)
+    fn unreal_primitive_add_torque_in_radians(component: ffi.VoidPtr, x: f32, y: f32, z: f32)
+    fn unreal_primitive_get_linear_damping(component: ffi.VoidPtr) -> f32
+    fn unreal_primitive_set_linear_damping(component: ffi.VoidPtr, damping: f32)
+    fn unreal_primitive_get_angular_damping(component: ffi.VoidPtr) -> f32
+    fn unreal_primitive_set_angular_damping(component: ffi.VoidPtr, damping: f32)
+    fn unreal_primitive_is_gravity_enabled(component: ffi.VoidPtr) -> bool
+    fn unreal_primitive_set_enable_gravity(component: ffi.VoidPtr, enable: bool)
+
+
+# Example usage:
+#
+# # Create rigidbody (Godot)
+# let mut rigidbody = GodotRigidBodyAdapter::new(godot_body_ptr)
+# rigidbody.set_mass(10.0)
+# rigidbody.set_linear_velocity(0.0, 5.0, 0.0)
+# rigidbody.apply_force(100.0, 0.0, 0.0)
+#
+# # Create rigidbody (Unreal)
+# let mut unreal_body = UnrealRigidBodyAdapter::new(unreal_primitive_ptr)
+# unreal_body.set_body_type(RigidBodyType::Dynamic)
+# unreal_body.apply_impulse(0.0, 0.0, 1000.0)

@@ -12,9 +12,9 @@ Core Principles:
 
 Basic Usage:
 ```sdoctest
->>> let data = [1, 2, 3]
->>> let ch = Channel.new()
->>> let handle = spawn_isolated(data, ch) \copied_data, chan:
+>>> val data = [1, 2, 3]
+>>> val ch = Channel.new()
+>>> val handle = spawn_isolated(data, ch) \copied_data, chan:
 ...     chan.send(copied_data.sum())
 >>> ch.recv()
 6
@@ -44,37 +44,37 @@ struct ThreadHandle:
     Wait for the thread to complete and get its result.
 
     ```sdoctest
-    >>> let handle = spawn_isolated(42) \x: x * 2
+    >>> val handle = spawn_isolated(42) \x: x * 2
     >>> handle.join()
     84
     ```
     */
-    fn join(self) -> Any:
+    fn join() -> Any:
         return rt_thread_join(self._handle)
 
     /**
     Check if the thread has completed without blocking.
 
     ```sdoctest
-    >>> let handle = spawn_isolated(42) \x: x
+    >>> val handle = spawn_isolated(42) \x: x
     >>> handle.is_done()  # May be true or false
     ...
     ```
     */
-    fn is_done(self) -> Bool:
+    fn is_done() -> Bool:
         return rt_thread_is_done(self._handle) == 1
 
     /**
     Get the unique ID of this thread.
     */
-    fn id(self) -> i64:
+    fn id() -> i64:
         return rt_thread_id(self._handle)
 
     /**
     Free the thread handle.
     If the thread hasn't been joined, it will be detached.
     */
-    fn free(self):
+    fn free():
         rt_thread_free(self._handle)
 
 /**
@@ -91,30 +91,30 @@ Returns:
 A ThreadHandle that can be used to join the thread.
 
 ```sdoctest
->>> let result_channel = Channel.new()
->>> let handle = spawn_isolated([1, 2, 3], result_channel) \data, chan:
+>>> val result_channel = Channel.new()
+>>> val handle = spawn_isolated([1, 2, 3], result_channel) \data, chan:
 ...     chan.send(data.sum())
 >>> result_channel.recv()
 6
 ```
 */
 fn spawn_isolated(data: Any, closure: fn(Any) -> Any) -> ThreadHandle:
-    let handle = rt_thread_spawn_isolated(closure as i64, data)
+    val handle = rt_thread_spawn_isolated(closure as i64, data)
     return ThreadHandle(_handle: handle)
 
 /**
 Spawn an isolated thread with two data arguments (e.g., data + channel).
 
 ```sdoctest
->>> let ch = Channel.new()
->>> let handle = spawn_isolated2([1, 2, 3], ch) \data, chan:
+>>> val ch = Channel.new()
+>>> val handle = spawn_isolated2([1, 2, 3], ch) \data, chan:
 ...     chan.send(data.sum())
 >>> ch.recv()
 6
 ```
 */
 fn spawn_isolated2(data1: Any, data2: Any, closure: fn(Any, Any) -> Any) -> ThreadHandle:
-    let handle = rt_thread_spawn_isolated2(closure as i64, data1, data2)
+    val handle = rt_thread_spawn_isolated2(closure as i64, data1, data2)
     return ThreadHandle(_handle: handle)
 
 /**
@@ -160,19 +160,19 @@ Divides work into chunks and processes them in parallel.
 Returns results in order.
 
 ```sdoctest
->>> let data = [1, 2, 3, 4, 5, 6, 7, 8]
->>> let results = parallel_map(data, \x: x * 2, 4)
+>>> val data = [1, 2, 3, 4, 5, 6, 7, 8]
+>>> val results = parallel_map(data, \x: x * 2, 4)
 >>> results
 [2, 4, 6, 8, 10, 12, 14, 16]
 ```
 */
 fn parallel_map[T, R](items: List[T], func: fn(T) -> R, num_threads: i64) -> List[R]:
-    let n = len(items)
+    val n = len(items)
     if n == 0:
         return []
 
     # Use available parallelism if not specified
-    let threads = if num_threads <= 0:
+    val threads = if num_threads <= 0:
         available_parallelism()
     else:
         num_threads
@@ -182,30 +182,30 @@ fn parallel_map[T, R](items: List[T], func: fn(T) -> R, num_threads: i64) -> Lis
         return items.map(func)
 
     # Divide work into chunks
-    let chunk_size = (n + threads - 1) / threads
-    let result_channels = []
-    let handles = []
+    val chunk_size = (n + threads - 1) / threads
+    val result_channels = []
+    val handles = []
 
     for i in range(threads):
-        let start = i * chunk_size
-        let end = min(start + chunk_size, n)
+        val start = i * chunk_size
+        val end = min(start + chunk_size, n)
         if start >= n:
             break
 
-        let chunk = items[start:end]
-        let ch = Channel.new()
+        val chunk = items[start:end]
+        val ch = Channel.new()
         result_channels.push(ch)
 
-        let handle = spawn_isolated2(chunk, ch) \data, result_ch:
-            let results = data.map(func)
+        val handle = spawn_isolated2(chunk, ch) \data, result_ch:
+            val results = data.map(func)
             result_ch.send(results)
             return nil
         handles.push(handle)
 
     # Collect results
-    let results = []
+    val results = []
     for ch in result_channels:
-        let chunk_results = ch.recv()
+        val chunk_results = ch.recv()
         results.extend(chunk_results)
 
     # Clean up handles
@@ -219,46 +219,46 @@ fn parallel_map[T, R](items: List[T], func: fn(T) -> R, num_threads: i64) -> Lis
 Execute a reduction in parallel across multiple isolated threads.
 
 ```sdoctest
->>> let data = [1, 2, 3, 4, 5, 6, 7, 8]
->>> let sum = parallel_reduce(data, \a, b: a + b, 0, 4)
+>>> val data = [1, 2, 3, 4, 5, 6, 7, 8]
+>>> val sum = parallel_reduce(data, \a, b: a + b, 0, 4)
 >>> sum
 36
 ```
 */
 fn parallel_reduce[T, R](items: List[T], reducer: fn(R, T) -> R, initial: R, num_threads: i64) -> R:
-    let n = len(items)
+    val n = len(items)
     if n == 0:
         return initial
 
-    let threads = if num_threads <= 0:
+    val threads = if num_threads <= 0:
         available_parallelism()
     else:
         num_threads
 
     # For small workloads, do it sequentially
     if n <= threads:
-        let result = initial
+        val result = initial
         for item in items:
             result = reducer(result, item)
         return result
 
     # Divide work into chunks
-    let chunk_size = (n + threads - 1) / threads
-    let result_channels = []
-    let handles = []
+    val chunk_size = (n + threads - 1) / threads
+    val result_channels = []
+    val handles = []
 
     for i in range(threads):
-        let start = i * chunk_size
-        let end = min(start + chunk_size, n)
+        val start = i * chunk_size
+        val end = min(start + chunk_size, n)
         if start >= n:
             break
 
-        let chunk = items[start:end]
-        let ch = Channel.new()
+        val chunk = items[start:end]
+        val ch = Channel.new()
         result_channels.push(ch)
 
-        let handle = spawn_isolated2(chunk, ch) \data, result_ch:
-            let partial = initial
+        val handle = spawn_isolated2(chunk, ch) \data, result_ch:
+            val partial = initial
             for item in data:
                 partial = reducer(partial, item)
             result_ch.send(partial)
@@ -266,9 +266,9 @@ fn parallel_reduce[T, R](items: List[T], reducer: fn(R, T) -> R, initial: R, num
         handles.push(handle)
 
     # Combine partial results
-    let result = initial
+    val result = initial
     for ch in result_channels:
-        let partial = ch.recv()
+        val partial = ch.recv()
         result = reducer(result, partial)
 
     # Clean up handles

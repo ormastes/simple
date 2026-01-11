@@ -1,0 +1,160 @@
+# Distributed Data Parallel
+#
+# DDP wrapper for multi-GPU training with automatic gradient synchronization.
+
+export DistributedDataParallel
+
+import ml.torch as torch
+import ml.torch.tensor_class.{Tensor}
+import process_group.{ProcessGroup, _global_process_group}
+import ffi.{rt_torch_dist_ddp_new, rt_torch_dist_ddp_free, rt_torch_dist_ddp_set_sync}
+
+# ============================================================================
+# Distributed Data Parallel
+# ============================================================================
+
+class DistributedDataParallel:
+    """Distributed data parallel training wrapper.
+
+    Wraps a model for multi-GPU training with automatic gradient synchronization.
+    Gradients are averaged across all processes during backward pass.
+
+    Attributes:
+        module: The wrapped model
+        device_ids: GPU devices to use
+        output_device: Device for model outputs
+        broadcast_buffers: Whether to sync buffers (batch norm stats)
+        find_unused_parameters: Detect unused parameters for gradient sync
+        gradient_as_bucket_view: Optimize memory by using bucket views
+    """
+    handle: u64
+    module: any  # nn.Module
+    device_ids: [i64]
+    output_device: i64
+    broadcast_buffers: bool
+    find_unused_parameters: bool
+    gradient_as_bucket_view: bool
+
+    fn __init__(module: any,
+        device_ids: [i64] = None,
+        output_device: i64 = 0,
+        broadcast_buffers: bool = true,
+        process_group: ProcessGroup = None,
+        bucket_cap_mb: i64 = 25,
+        find_unused_parameters: bool = false,
+        check_reduction: bool = false,
+        gradient_as_bucket_view: bool = false
+    ):
+        """Initialize DistributedDataParallel wrapper.
+
+        Args:
+            module: Model to wrap (nn.Module)
+            device_ids: GPU device IDs to use (default: [current_rank])
+            output_device: Device for outputs (default: 0)
+            broadcast_buffers: Sync buffers (batch norm stats) (default: true)
+            process_group: Process group (default: global group)
+            bucket_cap_mb: Gradient bucketing size in MB (default: 25)
+            find_unused_parameters: Enable unused param detection (default: false)
+            check_reduction: Verify gradient reduction (default: false)
+            gradient_as_bucket_view: Use bucket views for memory efficiency (default: false)
+        """
+        let pg = process_group if process_group is not None else _global_process_group
+
+        if pg is None:
+            panic("Process group not initialized. Call init_process_group() first.")
+
+        let mut dev_ids = device_ids
+        if dev_ids is None:
+            dev_ids = [pg.rank]
+
+        self.module = module
+        self.device_ids = dev_ids
+        self.output_device = output_device
+        self.broadcast_buffers = broadcast_buffers
+        self.find_unused_parameters = find_unused_parameters
+        self.gradient_as_bucket_view = gradient_as_bucket_view
+
+        let module_handle = module.handle if hasattr(module, "handle") else 0u64
+
+        let mut ddp_handle = 0u64
+
+        @rt_torch_dist_ddp_new(
+            module_handle,
+            dev_ids.data_ptr(),
+            dev_ids.len() as i32,
+            output_device,
+            broadcast_buffers as i32,
+            pg.handle,
+            bucket_cap_mb,
+            find_unused_parameters as i32,
+            check_reduction as i32,
+            gradient_as_bucket_view as i32,
+            &ddp_handle
+        )
+
+        if ddp_handle == 0:
+            panic("Failed to create DistributedDataParallel wrapper")
+
+        self.handle = ddp_handle
+
+    fn __del__():
+        """Cleanup DDP resources."""
+        if self.handle != 0:
+            @rt_torch_dist_ddp_free(self.handle)
+
+    fn forward(*args, **kwargs) -> any:
+        """Forward pass through wrapped module."""
+        return self.module.forward(*args, **kwargs)
+
+    fn __call__(*args, **kwargs) -> any:
+        """Call forward pass."""
+        return self.forward(*args, **kwargs)
+
+    fn parameters() -> [Tensor]:
+        """Get model parameters."""
+        return self.module.parameters()
+
+    fn named_parameters() -> [(str, Tensor)]:
+        """Get named model parameters."""
+        return self.module.named_parameters()
+
+    fn state_dict() -> {str: any}:
+        """Get model state dictionary."""
+        return self.module.state_dict()
+
+    fn load_state_dict(state_dict: {str: any}):
+        """Load model state dictionary."""
+        self.module.load_state_dict(state_dict)
+
+    fn train(mode: bool = true):
+        """Set training mode."""
+        self.module.train(mode)
+
+    fn eval():
+        """Set evaluation mode."""
+        self.module.eval()
+
+    fn to(device: torch.Device) -> DistributedDataParallel:
+        """Move model to device."""
+        self.module = self.module.to(device)
+        return self
+
+    fn no_sync():
+        """Context manager to disable gradient synchronization."""
+        return _NoSyncContext(self)
+
+
+class _NoSyncContext:
+    """Context manager for disabling gradient sync."""
+    ddp: DistributedDataParallel
+
+    fn __init__(ddp: DistributedDataParallel):
+        self.ddp = ddp
+
+    fn __enter__():
+        """Enter context - disable sync."""
+        @rt_torch_dist_ddp_set_sync(self.ddp.handle, 0)
+
+    fn __exit__(exc_type, exc_val, exc_tb):
+        """Exit context - re-enable sync."""
+        @rt_torch_dist_ddp_set_sync(self.ddp.handle, 1)

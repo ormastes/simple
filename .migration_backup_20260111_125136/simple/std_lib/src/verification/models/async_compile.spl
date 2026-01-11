@@ -1,0 +1,405 @@
+# Async Compile Model
+#
+# Formal model for effect tracking in async code.
+# Mirrors: verification/async_compile/src/AsyncCompile.lean
+#
+# Effect System:
+#   - Pure: No effects
+#   - IO: May perform I/O
+#   - Async: May suspend
+#   - Unsafe: May have undefined behavior
+
+# Effect kinds
+enum Effect:
+    Pure
+    IO
+    Async
+    Unsafe
+
+    fn to_lean() -> String:
+        match self:
+            case Pure: return "Effect.Pure"
+            case IO: return "Effect.IO"
+            case Async: return "Effect.Async"
+            case Unsafe: return "Effect.Unsafe"
+
+    # Check if this effect is compatible with (can be used in) another effect context
+    fn compatible_with(other: Effect) -> Bool:
+        match (self, other):
+            case (Pure, _): return True  # Pure works everywhere
+            case (_, Unsafe): return True  # Unsafe accepts everything
+            case (IO, IO): return True
+            case (IO, Async): return True  # IO can be used in Async
+            case (Async, Async): return True
+            case _: return False
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_pure() -> Bool:
+        """Check if this is Pure effect.
+
+        Returns:
+            true for Pure
+
+        Example:
+            Effect.Pure.is_pure()  # → true
+        """
+        match self:
+            case Pure: true
+            case _: false
+
+    fn is_io() -> Bool:
+        """Check if this is IO effect.
+
+        Returns:
+            true for IO
+
+        Example:
+            Effect.IO.is_io()  # → true
+        """
+        match self:
+            case IO: true
+            case _: false
+
+    fn is_async() -> Bool:
+        """Check if this is Async effect.
+
+        Returns:
+            true for Async
+
+        Example:
+            Effect.Async.is_async()  # → true
+        """
+        match self:
+            case Async: true
+            case _: false
+
+    fn is_unsafe() -> Bool:
+        """Check if this is Unsafe effect.
+
+        Returns:
+            true for Unsafe
+
+        Example:
+            Effect.Unsafe.is_unsafe()  # → true
+        """
+        match self:
+            case Unsafe: true
+            case _: false
+
+    fn has_side_effects() -> Bool:
+        """Check if effect allows side effects.
+
+        Returns:
+            false for Pure, true otherwise
+
+        Example:
+            Effect.Pure.has_side_effects()  # → false
+            Effect.IO.has_side_effects()  # → true
+        """
+        not self.is_pure()
+
+    fn can_suspend() -> Bool:
+        """Check if effect can suspend execution.
+
+        Returns:
+            true for Async or Unsafe
+
+        Example:
+            Effect.Async.can_suspend()  # → true
+        """
+        match self:
+            case Async: true
+            case Unsafe: true
+            case _: false
+
+    fn can_do_io() -> Bool:
+        """Check if effect can perform I/O.
+
+        Returns:
+            true for IO, Async, or Unsafe
+
+        Example:
+            Effect.IO.can_do_io()  # → true
+            Effect.Pure.can_do_io()  # → false
+        """
+        match self:
+            case IO: true
+            case Async: true
+            case Unsafe: true
+            case _: false
+
+    fn is_safe() -> Bool:
+        """Check if effect is safe.
+
+        Returns:
+            false only for Unsafe
+
+        Example:
+            Effect.Pure.is_safe()  # → true
+            Effect.Unsafe.is_safe()  # → false
+        """
+        not self.is_unsafe()
+
+    fn to_string() -> String:
+        """Convert effect to string.
+
+        Returns:
+            Effect name
+
+        Example:
+            Effect.Async.to_string()  # → "async"
+        """
+        match self:
+            case Pure: "pure"
+            case IO: "io"
+            case Async: "async"
+            case Unsafe: "unsafe"
+
+    fn description() -> String:
+        """Get effect description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            Effect.Async.description()
+            # → "May suspend execution"
+        """
+        match self:
+            case Pure: "No effects"
+            case IO: "May perform I/O"
+            case Async: "May suspend execution"
+            case Unsafe: "May have undefined behavior"
+
+    fn summary() -> String:
+        """Get summary of effect.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            Effect.Async.summary()
+            # → "Effect: async (suspendable, I/O capable, safe)"
+        """
+        let name = self.to_string()
+        let mut attrs: List<String> = []
+
+        if self.has_side_effects():
+            attrs.push("side effects")
+
+        if self.can_suspend():
+            attrs.push("suspendable")
+
+        if self.can_do_io():
+            attrs.push("I/O capable")
+
+        if self.is_safe():
+            attrs.push("safe")
+        else:
+            attrs.push("unsafe")
+
+        let attrs_str = attrs.join(", ")
+        return "Effect: {name} ({attrs_str})"
+
+# Effect annotations on functions
+class EffectAnnotation:
+    effect: Effect
+    is_explicit: Bool  # True if user-provided, False if inferred
+
+    fn create(effect: Effect, is_explicit: Bool = False) -> EffectAnnotation:
+        return EffectAnnotation(effect, is_explicit)
+
+    fn to_lean() -> String:
+        explicit = "false"
+        if self.is_explicit:
+            explicit = "true"
+        return "{{ effect := " + self.effect.to_lean() + ", isExplicit := " + explicit + " }}"
+
+# Async context for effect checking
+class AsyncContext:
+    current_effect: Effect
+    in_async_block: Bool
+    in_unsafe_block: Bool
+
+    fn create() -> AsyncContext:
+        return AsyncContext(Effect.Pure, False, False)
+
+    fn enter_async() -> AsyncContext:
+        return AsyncContext(Effect.Async, True, self.in_unsafe_block)
+
+    fn enter_unsafe() -> AsyncContext:
+        return AsyncContext(Effect.Unsafe, self.in_async_block, True)
+
+    fn can_perform(effect: Effect) -> Bool:
+        return effect.compatible_with(self.current_effect)
+
+# Await expression requirements
+class AwaitRequirement:
+    must_be_in_async: Bool
+    awaited_effect: Effect
+
+    fn create() -> AwaitRequirement:
+        return AwaitRequirement(True, Effect.Async)
+
+# Effect inference result
+enum EffectResult:
+    Inferred(effect: Effect)
+    Error(message: String)
+
+    fn to_lean() -> String:
+        match self:
+            case Inferred(e): return "EffectResult.ok " + e.to_lean()
+            case Error(m): return "EffectResult.error \"" + m + "\""
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_inferred() -> Bool:
+        """Check if this is Inferred result.
+
+        Returns:
+            true for Inferred
+
+        Example:
+            EffectResult.Inferred(Effect.Pure).is_inferred()  # → true
+        """
+        match self:
+            case Inferred(_): true
+            case _: false
+
+    fn is_error() -> Bool:
+        """Check if this is Error result.
+
+        Returns:
+            true for Error
+
+        Example:
+            EffectResult.Error("msg").is_error()  # → true
+        """
+        match self:
+            case Error(_): true
+            case _: false
+
+    fn is_ok() -> Bool:
+        """Check if result is successful.
+
+        Returns:
+            true for Inferred
+
+        Example:
+            EffectResult.Inferred(Effect.Pure).is_ok()  # → true
+        """
+        self.is_inferred()
+
+    fn get_effect() -> Option[Effect]:
+        """Get inferred effect if successful.
+
+        Returns:
+            Some(effect) for Inferred, None for Error
+
+        Example:
+            EffectResult.Inferred(Effect.IO).get_effect()  # → Some(Effect.IO)
+        """
+        match self:
+            case Inferred(e): Some(e)
+            case Error(_): None
+
+    fn get_error() -> Option[String]:
+        """Get error message if failed.
+
+        Returns:
+            Some(message) for Error, None for Inferred
+
+        Example:
+            EffectResult.Error("msg").get_error()  # → Some("msg")
+        """
+        match self:
+            case Error(m): Some(m)
+            case Inferred(_): None
+
+    fn to_string() -> String:
+        """Convert result to string.
+
+        Returns:
+            Result representation
+
+        Example:
+            EffectResult.Inferred(Effect.Pure).to_string()  # → "ok: pure"
+        """
+        match self:
+            case Inferred(e): "ok: {e.to_string()}"
+            case Error(m): "error: {m}"
+
+    fn description() -> String:
+        """Get result description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            EffectResult.Error("not allowed").description()
+            # → "Effect inference failed: not allowed"
+        """
+        match self:
+            case Inferred(e): "Effect inferred: {e.to_string()}"
+            case Error(m): "Effect inference failed: {m}"
+
+    fn summary() -> String:
+        """Get summary of effect result.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            EffectResult.Inferred(Effect.Async).summary()
+            # → "EffectResult: ok (effect: async, safe)"
+        """
+        match self:
+            case Inferred(e):
+                let effect_str = e.to_string()
+                let safe = if e.is_safe(): "safe" else: "unsafe"
+                return "EffectResult: ok (effect: {effect_str}, {safe})"
+            case Error(m):
+                return "EffectResult: error ({m})"
+
+# Combine effects (join in effect lattice)
+fn combine_effects(e1: Effect, e2: Effect) -> Effect:
+    match (e1, e2):
+        case (Effect.Unsafe, _): return Effect.Unsafe
+        case (_, Effect.Unsafe): return Effect.Unsafe
+        case (Effect.Async, _): return Effect.Async
+        case (_, Effect.Async): return Effect.Async
+        case (Effect.IO, _): return Effect.IO
+        case (_, Effect.IO): return Effect.IO
+        case _: return Effect.Pure
+
+# Check if an effect can be used in a context
+fn check_effect_usage(ctx: AsyncContext, effect: Effect) -> EffectResult:
+    if ctx.can_perform(effect):
+        return EffectResult.Inferred(effect)
+    else:
+        match effect:
+            case Effect.Async:
+                if not ctx.in_async_block:
+                    return EffectResult.Error("await can only be used in async functions")
+            case Effect.IO:
+                if ctx.current_effect == Effect.Pure:
+                    return EffectResult.Error("IO effect not allowed in pure context")
+            case _:
+                pass
+        return EffectResult.Error("effect mismatch")
+
+# Specification functions
+
+fn effect_safety_spec() -> String:
+    return "theorem effect_safety : ∀ ctx expr, check_effect ctx expr = ok e → can_evaluate ctx expr"
+
+fn async_containment_spec() -> String:
+    return "theorem async_containment : ∀ fn, has_await fn → fn.effect = Async ∨ fn.effect = Unsafe"
+
+fn pure_no_effects_spec() -> String:
+    return "theorem pure_no_effects : ∀ fn, fn.effect = Pure → ¬has_io fn ∧ ¬has_await fn"

@@ -1,0 +1,475 @@
+# String Operations - Internal helpers, mutation, search, transform
+use core.traits.*
+use core.collections.*
+
+# ============================================
+# Internal helpers
+# ============================================
+
+impl String:
+    fn reserve(additional: usize):
+        let required = self.len + additional
+        if required <= self.cap:
+            return
+
+        var new_cap = if self.cap == 0: 16 else: self.cap * 2
+        while new_cap < required:
+            new_cap = new_cap * 2
+
+        let new_data = alloc[u8](new_cap)
+        if self.data != nil:
+            danger:
+                copy_mem(new_data, self.data, self.len)
+                dealloc(self.data)
+        self.data = new_data
+        self.cap = new_cap
+
+    fn push_byte(b: u8):
+        self.reserve(1)
+        danger:
+            self.data.offset(self.len as isize).write(b)
+        self.len = self.len + 1
+
+# ============================================
+# Len trait (byte length)
+# ============================================
+
+impl Len for String:
+    fn len() -> usize:
+        self.len
+
+# ============================================
+# String-specific size methods
+# ============================================
+
+impl String:
+    # Number of Unicode characters
+    fn char_count() -> usize:
+        var count: usize = 0
+        var i: usize = 0
+        while i < self.len:
+            danger:
+                let b = self.data.offset(i as isize).read()
+                if b < 0x80:
+                    i = i + 1
+                else if b < 0xE0:
+                    i = i + 2
+                else if b < 0xF0:
+                    i = i + 3
+                else:
+                    i = i + 4
+            count = count + 1
+        count
+
+    # Byte length (same as len())
+    fn byte_len() -> usize:
+        self.len
+
+# ============================================
+# Iterable trait (iterates over chars)
+# ============================================
+
+impl Iterable[char] for String:
+    type Iter = StringCharIter
+
+    fn iter() -> Self::Iter:
+        StringCharIter { string: self, byte_index: 0 }
+
+    fn into_iter() -> Self::Iter:
+        self.iter()
+
+# ============================================
+# Collection trait
+# ============================================
+
+impl Collection[char] for String
+
+# ============================================
+# Sequence trait (character access)
+# ============================================
+
+impl Sequence[char] for String:
+    fn get(idx: usize) -> Option[char]:
+        # Get character at character index (not byte index)
+        var char_idx: usize = 0
+        var byte_idx: usize = 0
+        while byte_idx < self.len:
+            if char_idx == idx:
+                return Some(self.char_at_byte(byte_idx))
+            byte_idx = byte_idx + self.char_width_at(byte_idx)
+            char_idx = char_idx + 1
+        None
+
+    fn slice(start: usize, end: usize) -> Slice[u8]:
+        # Slice by byte indices
+        if start > end or end > self.len:
+            Slice::empty()
+        else:
+            danger:
+                Slice::new(self.data.offset(start as isize), end - start)
+
+# ============================================
+# ImmutSequence trait (strings are immutable-style)
+# ============================================
+
+impl ImmutSequence[char] for String:
+    type Output = String
+
+    fn with_index(idx: usize, value: char) -> Option[Self::Output]:
+        # Replace character at index
+        var new_str = String::new()
+        var char_idx: usize = 0
+        for c in self.iter():
+            if char_idx == idx:
+                new_str.push(value)
+            else:
+                new_str.push(c)
+            char_idx = char_idx + 1
+        if char_idx <= idx:
+            None
+        else:
+            Some(new_str)
+
+    fn sorted() -> Self::Output:
+        # Sort characters
+        var chars = List[char]::new()
+        for c in self.iter():
+            chars.push(c)
+        chars.sort()
+        var result = String::new()
+        for c in chars:
+            result.push(c)
+        result
+
+    fn reversed() -> Self::Output:
+        var chars = List[char]::new()
+        for c in self.iter():
+            chars.push(c)
+        chars.reverse()
+        var result = String::new()
+        for c in chars:
+            result.push(c)
+        result
+
+    fn filtered(predicate: fn(&char) -> bool) -> Self::Output:
+        var result = String::new()
+        for c in self.iter():
+            if predicate(&c):
+                result.push(c)
+        result
+
+    fn mapped[U](self, f: fn(char) -> U) -> List[U]:
+        var result = List::new()
+        for c in self.iter():
+            result.push(f(c))
+        result
+
+    fn appended(item: char) -> Self::Output:
+        var result = self.clone()
+        result.push(item)
+        result
+
+    fn prepended(item: char) -> Self::Output:
+        var result = String::new()
+        result.push(item)
+        result.push_str(self.as_str())
+        result
+
+    fn taken(n: usize) -> Self::Output:
+        var result = String::new()
+        var count: usize = 0
+        for c in self.iter():
+            if count >= n:
+                break
+            result.push(c)
+            count = count + 1
+        result
+
+    fn dropped(n: usize) -> Self::Output:
+        var result = String::new()
+        var count: usize = 0
+        for c in self.iter():
+            if count >= n:
+                result.push(c)
+            count = count + 1
+        result
+
+    fn taken_while(predicate: fn(&char) -> bool) -> Self::Output:
+        var result = String::new()
+        for c in self.iter():
+            if not predicate(&c):
+                break
+            result.push(c)
+        result
+
+    fn dropped_while(predicate: fn(&char) -> bool) -> Self::Output:
+        var result = String::new()
+        var dropping = true
+        for c in self.iter():
+            if dropping and predicate(&c):
+                continue
+            dropping = false
+            result.push(c)
+        result
+
+# ============================================
+# Sliceable trait (byte slices)
+# ============================================
+
+impl Sliceable[u8] for String:
+    fn as_slice() -> Slice[u8]:
+        danger:
+            Slice::new(self.data, self.len)
+
+# ============================================
+# String mutation methods
+# ============================================
+
+impl String:
+    # Push single character
+    fn push(c: char):
+        let width = c.len_utf8()
+        self.reserve(width)
+        danger:
+            c.encode_utf8_to(self.data.offset(self.len as isize))
+        self.len = self.len + width
+
+    # Push string slice
+    fn push_str(s: &str):
+        self.reserve(s.len())
+        danger:
+            copy_mem(self.data.offset(self.len as isize), s.as_ptr(), s.len())
+        self.len = self.len + s.len()
+
+    # Pop last character
+    fn pop() -> Option[char]:
+        if self.len == 0:
+            return None
+        # Find start of last character
+        var i = self.len - 1
+        danger:
+            while i > 0 and (self.data.offset(i as isize).read() & 0xC0) == 0x80:
+                i = i - 1
+        let c = self.char_at_byte(i)
+        self.len = i
+        Some(c)
+
+    # Clear string
+    fn clear():
+        self.len = 0
+
+    # Truncate to byte length
+    fn truncate(new_len: usize):
+        if new_len < self.len:
+            self.len = new_len
+
+# ============================================
+# String search methods
+# ============================================
+
+impl String:
+    fn contains(needle: &str) -> bool:
+        self.find_str(needle).is_some()
+
+    fn starts_with(prefix: &str) -> bool:
+        if prefix.len() > self.len:
+            return false
+        danger:
+            for i in 0..prefix.len():
+                if self.data.offset(i as isize).read() != prefix.as_ptr().offset(i as isize).read():
+                    return false
+        true
+
+    fn ends_with(suffix: &str) -> bool:
+        if suffix.len() > self.len:
+            return false
+        let offset = self.len - suffix.len()
+        danger:
+            for i in 0..suffix.len():
+                if self.data.offset((offset + i) as isize).read() != suffix.as_ptr().offset(i as isize).read():
+                    return false
+        true
+
+    fn find_str(needle: &str) -> Option[usize]:
+        if needle.len() > self.len or needle.is_empty():
+            return None
+        let end = self.len - needle.len() + 1
+        for i in 0..end:
+            var found = true
+            danger:
+                for j in 0..needle.len():
+                    if self.data.offset((i + j) as isize).read() != needle.as_ptr().offset(j as isize).read():
+                        found = false
+                        break
+            if found:
+                return Some(i)
+        None
+
+# ============================================
+# String transformation methods (return new)
+# ============================================
+
+impl String:
+    fn trimmed() -> String:
+        var start: usize = 0
+        var end = self.len
+        danger:
+            while start < end and is_whitespace(self.data.offset(start as isize).read()):
+                start = start + 1
+            while end > start and is_whitespace(self.data.offset((end - 1) as isize).read()):
+                end = end - 1
+        self.substring(start, end)
+
+    fn trim_start() -> String:
+        var start: usize = 0
+        danger:
+            while start < self.len and is_whitespace(self.data.offset(start as isize).read()):
+                start = start + 1
+        self.substring(start, self.len)
+
+    fn trim_end() -> String:
+        var end = self.len
+        danger:
+            while end > 0 and is_whitespace(self.data.offset((end - 1) as isize).read()):
+                end = end - 1
+        self.substring(0, end)
+
+    fn uppercased() -> String:
+        var result = String::with_capacity(self.len)
+        danger:
+            for i in 0..self.len:
+                let b = self.data.offset(i as isize).read()
+                if b >= 'a' as u8 and b <= 'z' as u8:
+                    result.push_byte(b - 32)
+                else:
+                    result.push_byte(b)
+        result
+
+    fn lowercased() -> String:
+        var result = String::with_capacity(self.len)
+        danger:
+            for i in 0..self.len:
+                let b = self.data.offset(i as isize).read()
+                if b >= 'A' as u8 and b <= 'Z' as u8:
+                    result.push_byte(b + 32)
+                else:
+                    result.push_byte(b)
+        result
+
+    fn replaced(old: &str, new: &str) -> String:
+        if old.is_empty():
+            return self.clone()
+        var result = String::new()
+        var i: usize = 0
+        while i < self.len:
+            match self.find_str_from(old, i):
+                case Some(pos):
+                    result.push_str(self.substring(i, pos).as_str())
+                    result.push_str(new)
+                    i = pos + old.len()
+                case None:
+                    result.push_str(self.substring(i, self.len).as_str())
+                    break
+        result
+
+    fn substring(start: usize, end: usize) -> String:
+        if start >= end or start >= self.len:
+            return String::new()
+        let actual_end = if end > self.len: self.len else: end
+        let len = actual_end - start
+        var result = String::with_capacity(len)
+        danger:
+            copy_mem(result.data, self.data.offset(start as isize), len)
+        result.len = len
+        result
+
+# ============================================
+# String split methods
+# ============================================
+
+impl String:
+    fn split(sep: &str) -> List[String]:
+        var result = List::new()
+        if sep.is_empty():
+            # Split into characters
+            for c in self.iter():
+                var s = String::new()
+                s.push(c)
+                result.push(s)
+            return result
+
+        var start: usize = 0
+        while start < self.len:
+            match self.find_str_from(sep, start):
+                case Some(pos):
+                    result.push(self.substring(start, pos))
+                    start = pos + sep.len()
+                case None:
+                    result.push(self.substring(start, self.len))
+                    break
+        result
+
+    fn split_once(sep: &str) -> Option[(String, String)]:
+        match self.find_str(sep):
+            case Some(pos):
+                Some((self.substring(0, pos), self.substring(pos + sep.len(), self.len)))
+            case None:
+                None
+
+    fn lines() -> List[String]:
+        self.split("\n")
+
+# ============================================
+# Internal helper methods
+# ============================================
+
+impl String:
+    fn char_at_byte(byte_idx: usize) -> char:
+        danger:
+            let b0 = self.data.offset(byte_idx as isize).read()
+            if b0 < 0x80:
+                return b0 as char
+            else if b0 < 0xE0:
+                let b1 = self.data.offset((byte_idx + 1) as isize).read()
+                return (((b0 & 0x1F) as u32 << 6) | ((b1 & 0x3F) as u32)) as char
+            else if b0 < 0xF0:
+                let b1 = self.data.offset((byte_idx + 1) as isize).read()
+                let b2 = self.data.offset((byte_idx + 2) as isize).read()
+                return (((b0 & 0x0F) as u32 << 12) | ((b1 & 0x3F) as u32 << 6) | ((b2 & 0x3F) as u32)) as char
+            else:
+                let b1 = self.data.offset((byte_idx + 1) as isize).read()
+                let b2 = self.data.offset((byte_idx + 2) as isize).read()
+                let b3 = self.data.offset((byte_idx + 3) as isize).read()
+                return (((b0 & 0x07) as u32 << 18) | ((b1 & 0x3F) as u32 << 12) | ((b2 & 0x3F) as u32 << 6) | ((b3 & 0x3F) as u32)) as char
+
+    fn char_width_at(byte_idx: usize) -> usize:
+        danger:
+            let b = self.data.offset(byte_idx as isize).read()
+            if b < 0x80: 1
+            else if b < 0xE0: 2
+            else if b < 0xF0: 3
+            else: 4
+
+    fn find_str_from(needle: &str, start: usize) -> Option[usize]:
+        if needle.len() > self.len - start or needle.is_empty():
+            return None
+        let end = self.len - needle.len() + 1
+        for i in start..end:
+            var found = true
+            danger:
+                for j in 0..needle.len():
+                    if self.data.offset((i + j) as isize).read() != needle.as_ptr().offset(j as isize).read():
+                        found = false
+                        break
+            if found:
+                return Some(i)
+        None
+
+    fn as_str() -> &str:
+        danger:
+            &*(self.data as *str)
+
+    fn as_bytes() -> Slice[u8]:
+        danger:
+            Slice::new(self.data, self.len)
+

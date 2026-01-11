@@ -1,0 +1,337 @@
+# MCP-MCP Tooling Integration
+#
+# Integration with compile, test, and deploy tools through MCP protocol.
+# Provides tools for build automation, test execution, and deployment.
+
+use core.*
+use mcp.core.protocol.*
+
+# Tooling integration manager
+pub struct McpTooling:
+    workspace_root: String
+    task_manager: TaskManager
+
+# Task manager for running commands
+struct TaskManager:
+    running_tasks: Dict[String, Task]
+    task_logs: Dict[String, Array[String]]
+
+struct Task:
+    id: String
+    kind: TaskKind
+    status: TaskStatus
+    start_time: u64
+
+enum TaskKind:
+    Compile
+    Test
+    Deploy
+    Custom
+
+impl TaskKind:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_compile() -> bool:
+        """Check if task is compilation."""
+        match self:
+            case Compile: true
+            case _: false
+
+    fn is_test() -> bool:
+        """Check if task is testing."""
+        match self:
+            case Test: true
+            case _: false
+
+    fn is_deploy() -> bool:
+        """Check if task is deployment."""
+        match self:
+            case Deploy: true
+            case _: false
+
+    fn is_custom() -> bool:
+        """Check if task is custom."""
+        match self:
+            case Custom: true
+            case _: false
+
+    fn is_build_task() -> bool:
+        """Check if task is build-related (compile or test)."""
+        match self:
+            case Compile: true
+            case Test: true
+            case _: false
+
+    fn requires_compilation() -> bool:
+        """Check if task requires prior compilation."""
+        match self:
+            case Test: true
+            case Deploy: true
+            case _: false
+
+    fn name() -> String:
+        """Get task kind name."""
+        match self:
+            case Compile: "compile"
+            case Test: "test"
+            case Deploy: "deploy"
+            case Custom: "custom"
+
+    fn summary() -> String:
+        """Get summary of task kind."""
+        let name = self.name()
+        return "TaskKind: {name}"
+
+enum TaskStatus:
+    Running
+    Completed
+    Failed
+
+impl TaskStatus:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_running() -> bool:
+        """Check if task is currently running."""
+        match self:
+            case Running: true
+            case _: false
+
+    fn is_completed() -> bool:
+        """Check if task completed successfully."""
+        match self:
+            case Completed: true
+            case _: false
+
+    fn is_failed() -> bool:
+        """Check if task failed."""
+        match self:
+            case Failed: true
+            case _: false
+
+    fn is_finished() -> bool:
+        """Check if task has finished (completed or failed)."""
+        match self:
+            case Completed: true
+            case Failed: true
+            case _: false
+
+    fn is_successful() -> bool:
+        """Alias for is_completed()."""
+        return self.is_completed()
+
+    fn is_active() -> bool:
+        """Check if task is still active (running)."""
+        return self.is_running()
+
+    fn name() -> String:
+        """Get status name."""
+        match self:
+            case Running: "running"
+            case Completed: "completed"
+            case Failed: "failed"
+
+    fn summary() -> String:
+        """Get summary of task status."""
+        let name = self.name()
+        let state = if self.is_finished(): "finished" else: "active"
+        return "TaskStatus: {name} ({state})"
+
+impl McpTooling:
+    pub fn new(workspace_root: &str) -> McpTooling:
+        return McpTooling {
+            workspace_root: workspace_root.to_string(),
+            task_manager: TaskManager {
+                running_tasks: Dict::new(),
+                task_logs: Dict::new()
+            }
+        }
+
+    # #1260: run_compile(target, flags)
+    pub fn run_compile(self, target: &str, flags: Array[String]) -> Result[TaskId, ToolingError]:
+        let task_id = self.generate_task_id()
+        let task = Task {
+            id: task_id.clone(),
+            kind: TaskKind::Compile,
+            status: TaskStatus::Running,
+            start_time: current_timestamp()
+        }
+
+        self.task_manager.running_tasks.insert(task_id.clone(), task)
+        # TODO: [stdlib][P3] Execute compilation command
+        return Ok(task_id)
+
+    # #1261: run_test(filter, parallel)
+    pub fn run_test(self, filter: &str, parallel: bool) -> Result[TaskId, ToolingError]:
+        let task_id = self.generate_task_id()
+        let task = Task {
+            id: task_id.clone(),
+            kind: TaskKind::Test,
+            status: TaskStatus::Running,
+            start_time: current_timestamp()
+        }
+
+        self.task_manager.running_tasks.insert(task_id.clone(), task)
+        # TODO: [stdlib][P3] Execute tests
+        return Ok(task_id)
+
+    # #1262: run_deploy(target, config)
+    pub fn run_deploy(self, target: &str, config: &str) -> Result[TaskId, ToolingError]:
+        let task_id = self.generate_task_id()
+        let task = Task {
+            id: task_id.clone(),
+            kind: TaskKind::Deploy,
+            status: TaskStatus::Running,
+            start_time: current_timestamp()
+        }
+
+        self.task_manager.running_tasks.insert(task_id.clone(), task)
+        # TODO: [stdlib][P3] Execute deployment
+        return Ok(task_id)
+
+    # #1263: read_task_log(task_id, group)
+    pub fn read_task_log(self, task_id: &str, group: &str) -> Result[Array[String], ToolingError]:
+        if let Some(logs) = self.task_manager.task_logs.get(task_id):
+            return Ok(logs.clone())
+        return Err(ToolingError::TaskNotFound(task_id.to_string()))
+
+    # #1264: Task progress monitoring
+    pub fn get_task_progress(self, task_id: &str) -> Result[TaskProgress, ToolingError]:
+        if let Some(task) = self.task_manager.running_tasks.get(task_id):
+            return Ok(TaskProgress {
+                task_id: task_id.to_string(),
+                status: task.status,
+                elapsed: current_timestamp() - task.start_time,
+                percentage: 0  # TODO: [stdlib][P3] Calculate actual progress
+            })
+        return Err(ToolingError::TaskNotFound(task_id.to_string()))
+
+    # #1265: Build artifact inspection
+    pub fn inspect_artifacts(self, build_id: &str) -> Result[Array[Artifact], ToolingError]:
+        # TODO: [stdlib][P3] List build artifacts
+        return Ok([])
+
+    # #1266: Test result visualization
+    pub fn visualize_test_results(self, test_run_id: &str) -> Result[TestVisualization, ToolingError]:
+        # TODO: [stdlib][P3] Generate test result visualization
+        return Ok(TestVisualization {
+            total: 0,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 0
+        })
+
+    # #1267: Deployment status tracking
+    pub fn get_deployment_status(self, deployment_id: &str) -> Result[DeploymentStatus, ToolingError]:
+        # TODO: [stdlib][P3] Get deployment status
+        return Ok(DeploymentStatus {
+            id: deployment_id.to_string(),
+            stage: "Deployed".to_string(),
+            health: "Healthy".to_string()
+        })
+
+    # #1268: Error recovery & retry
+    pub fn retry_task(self, task_id: &str) -> Result[TaskId, ToolingError]:
+        # TODO: [stdlib][P3] Retry failed task
+        return self.generate_task_id_result()
+
+    # #1269: Pipeline configuration
+    pub fn configure_pipeline(self, config: PipelineConfig) -> Result[(), ToolingError]:
+        # TODO: [stdlib][P3] Configure CI/CD pipeline
+        return Ok(())
+
+    # #1270-1279: Additional tooling features
+    fn generate_task_id() -> TaskId:
+        return format!("task_{}", current_timestamp())
+
+    fn generate_task_id_result() -> Result[TaskId, ToolingError]:
+        return Ok(self.generate_task_id())
+
+type TaskId = String
+
+struct TaskProgress:
+    task_id: String
+    status: TaskStatus
+    elapsed: u64
+    percentage: u8
+
+struct Artifact:
+    name: String
+    path: String
+    size: u64
+
+struct TestVisualization:
+    total: u32
+    passed: u32
+    failed: u32
+    skipped: u32
+    duration_ms: u64
+
+struct DeploymentStatus:
+    id: String
+    stage: String
+    health: String
+
+struct PipelineConfig:
+    stages: Array[String]
+    triggers: Array[String]
+
+enum ToolingError:
+    TaskNotFound(String)
+    ExecutionFailed(String)
+    ConfigError(String)
+
+impl ToolingError:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_task_not_found() -> bool:
+        """Check if error is task not found."""
+        match self:
+            case TaskNotFound(_): true
+            case _: false
+
+    fn is_execution_failed() -> bool:
+        """Check if error is execution failure."""
+        match self:
+            case ExecutionFailed(_): true
+            case _: false
+
+    fn is_config_error() -> bool:
+        """Check if error is configuration error."""
+        match self:
+            case ConfigError(_): true
+            case _: false
+
+    fn is_recoverable() -> bool:
+        """Check if error might be recoverable."""
+        match self:
+            case ExecutionFailed(_): true
+            case ConfigError(_): true
+            case _: false
+
+    fn message() -> String:
+        """Get error message."""
+        match self:
+            case TaskNotFound(id): "task not found: {id}"
+            case ExecutionFailed(msg): "execution failed: {msg}"
+            case ConfigError(msg): "configuration error: {msg}"
+
+    fn summary() -> String:
+        """Get summary of error."""
+        let msg = self.message()
+        match self:
+            case TaskNotFound(_): "ToolingError: not_found ({msg})"
+            case ExecutionFailed(_): "ToolingError: execution ({msg})"
+            case ConfigError(_): "ToolingError: config ({msg})"
+
+fn current_timestamp() -> u64:
+    """Get current Unix timestamp in microseconds."""
+    @extern("runtime", "rt_time_now_unix_micros")
+    fn _rt_time_now_unix_micros() -> i64
+    return _rt_time_now_unix_micros() as u64

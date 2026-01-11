@@ -1,0 +1,615 @@
+/**
+Parallel Iterators
+
+Data-parallel operations for high-performance computing.
+
+Features:
+- ParIter trait: Interface for parallel iteration
+- par_map: Parallel transformation
+- par_filter: Parallel filtering
+- par_reduce: Parallel reduction
+- par_for_each: Parallel side effects
+
+```sdoctest
+>>> let data = [1, 2, 3, 4, 5, 6, 7, 8]
+>>> data.par_map(\x: x * 2)
+[2, 4, 6, 8, 10, 12, 14, 16]
+```
+*/
+
+# Import thread operations from concurrency module
+use concurrency.threads.{
+    spawn_isolated2,
+    available_parallelism,
+    ThreadHandle
+}
+use concurrency.channels.Channel
+
+/**
+Parallel iterator trait.
+
+Provides data-parallel operations on collections.
+*/
+trait ParIter[T]:
+    /**
+    Apply a function in parallel to each element.
+    */
+    fn par_map[R](self, f: fn(T) -> R) -> [R]
+
+    /**
+    Filter elements in parallel.
+    */
+    fn par_filter(self, predicate: fn(T) -> Bool) -> [T]
+
+    /**
+    Reduce elements in parallel.
+    */
+    fn par_reduce[R](self, initial: R, reducer: fn(R, T) -> R) -> R
+
+    /**
+    Apply a function for side effects in parallel.
+    */
+    fn par_for_each(self, f: fn(T))
+
+/**
+Parallel map over a list.
+
+Divides work across multiple threads.
+
+```sdoctest
+>>> let data = [1, 2, 3, 4, 5, 6, 7, 8]
+>>> par_map(data, \x: x * x)
+[1, 4, 9, 16, 25, 36, 49, 64]
+```
+*/
+fn par_map[T, R](items: [T], func: fn(T) -> R, num_threads: i64 = 0) -> [R]:
+    let n = len(items)
+    if n == 0:
+        return []
+
+    let threads = if num_threads <= 0:
+        available_parallelism()
+    else:
+        num_threads
+
+    # For small workloads, run sequentially
+    if n <= threads:
+        let results = []
+        for item in items:
+            results.push(func(item))
+        return results
+
+    # Divide into chunks
+    let chunk_size = (n + threads - 1) / threads
+    let result_channels = []
+    let handles = []
+
+    for i in range(threads):
+        let start = i * chunk_size
+        let end = min(start + chunk_size, n)
+        if start >= n:
+            break
+
+        let chunk = items[start:end]
+        let ch = Channel.new()
+        result_channels.push(ch)
+
+        let handle = spawn_isolated2(chunk, ch) \data, result_ch:
+            let results = []
+            for item in data:
+                results.push(func(item))
+            result_ch.send(results)
+            return nil
+        handles.push(handle)
+
+    # Collect results
+    let results = []
+    for ch in result_channels:
+        let chunk_results = ch.recv()
+        results.extend(chunk_results)
+
+    # Cleanup
+    for handle in handles:
+        handle.join()
+        handle.free()
+
+    return results
+
+/**
+Parallel filter over a list.
+
+```sdoctest
+>>> let data = [1, 2, 3, 4, 5, 6, 7, 8]
+>>> par_filter(data, \x: x % 2 == 0)
+[2, 4, 6, 8]
+```
+*/
+fn par_filter[T](items: [T], predicate: fn(T) -> Bool, num_threads: i64 = 0) -> [T]:
+    let n = len(items)
+    if n == 0:
+        return []
+
+    let threads = if num_threads <= 0:
+        available_parallelism()
+    else:
+        num_threads
+
+    if n <= threads:
+        let results = []
+        for item in items:
+            if predicate(item):
+                results.push(item)
+        return results
+
+    let chunk_size = (n + threads - 1) / threads
+    let result_channels = []
+    let handles = []
+
+    for i in range(threads):
+        let start = i * chunk_size
+        let end = min(start + chunk_size, n)
+        if start >= n:
+            break
+
+        let chunk = items[start:end]
+        let ch = Channel.new()
+        result_channels.push(ch)
+
+        let handle = spawn_isolated2(chunk, ch) \data, result_ch:
+            let filtered = []
+            for item in data:
+                if predicate(item):
+                    filtered.push(item)
+            result_ch.send(filtered)
+            return nil
+        handles.push(handle)
+
+    let results = []
+    for ch in result_channels:
+        let chunk_results = ch.recv()
+        results.extend(chunk_results)
+
+    for handle in handles:
+        handle.join()
+        handle.free()
+
+    return results
+
+/**
+Parallel reduce over a list.
+
+```sdoctest
+>>> let data = [1, 2, 3, 4, 5, 6, 7, 8]
+>>> par_reduce(data, 0, \a, b: a + b)
+36
+```
+*/
+fn par_reduce[T, R](
+    items: [T],
+    initial: R,
+    reducer: fn(R, T) -> R,
+    num_threads: i64 = 0
+) -> R:
+    let n = len(items)
+    if n == 0:
+        return initial
+
+    let threads = if num_threads <= 0:
+        available_parallelism()
+    else:
+        num_threads
+
+    if n <= threads:
+        let result = initial
+        for item in items:
+            result = reducer(result, item)
+        return result
+
+    let chunk_size = (n + threads - 1) / threads
+    let result_channels = []
+    let handles = []
+
+    for i in range(threads):
+        let start = i * chunk_size
+        let end = min(start + chunk_size, n)
+        if start >= n:
+            break
+
+        let chunk = items[start:end]
+        let ch = Channel.new()
+        result_channels.push(ch)
+
+        let handle = spawn_isolated2(chunk, ch) \data, result_ch:
+            let partial = initial
+            for item in data:
+                partial = reducer(partial, item)
+            result_ch.send(partial)
+            return nil
+        handles.push(handle)
+
+    # Combine partial results
+    let result = initial
+    for ch in result_channels:
+        let partial = ch.recv()
+        result = reducer(result, partial)
+
+    for handle in handles:
+        handle.join()
+        handle.free()
+
+    return result
+
+/**
+Parallel for_each over a list.
+
+Executes function for side effects.
+
+```sdoctest
+>>> let counter = AtomicInt.new(0)
+>>> let data = [1, 2, 3, 4, 5]
+>>> par_for_each(data, \x: counter.fetch_add(x))
+>>> counter.load()
+15
+```
+*/
+fn par_for_each[T](items: [T], func: fn(T), num_threads: i64 = 0):
+    let n = len(items)
+    if n == 0:
+        return
+
+    let threads = if num_threads <= 0:
+        available_parallelism()
+    else:
+        num_threads
+
+    if n <= threads:
+        for item in items:
+            func(item)
+        return
+
+    let chunk_size = (n + threads - 1) / threads
+    let handles = []
+
+    for i in range(threads):
+        let start = i * chunk_size
+        let end = min(start + chunk_size, n)
+        if start >= n:
+            break
+
+        let chunk = items[start:end]
+        let ch = Channel.new()
+
+        let handle = spawn_isolated2(chunk, ch) \data, _:
+            for item in data:
+                func(item)
+            return nil
+        handles.push(handle)
+
+    for handle in handles:
+        handle.join()
+        handle.free()
+
+/**
+Parallel find - find first element matching predicate.
+
+Note: Returns first found, not necessarily first in order.
+*/
+fn par_find[T](items: [T], predicate: fn(T) -> Bool, num_threads: i64 = 0) -> Option[T]:
+    let n = len(items)
+    if n == 0:
+        return Option.None
+
+    # For simplicity, just filter and take first
+    let matching = par_filter(items, predicate, num_threads)
+    if matching.is_empty():
+        return Option.None
+    return Option.Some(matching[0])
+
+/**
+Parallel any - check if any element matches.
+*/
+fn par_any[T](items: [T], predicate: fn(T) -> Bool, num_threads: i64 = 0) -> Bool:
+    return par_find(items, predicate, num_threads).is_some()
+
+/**
+Parallel all - check if all elements match.
+*/
+fn par_all[T](items: [T], predicate: fn(T) -> Bool, num_threads: i64 = 0) -> Bool:
+    let non_matching = par_find(items, \x: not predicate(x), num_threads)
+    return non_matching.is_none()
+
+/**
+Parallel count - count elements matching predicate.
+*/
+fn par_count[T](items: [T], predicate: fn(T) -> Bool, num_threads: i64 = 0) -> i64:
+    return par_reduce(
+        items,
+        0,
+        \acc, x: acc + (if predicate(x): 1 else: 0),
+        num_threads
+    )
+
+/**
+Parallel sum.
+*/
+fn par_sum(items: [i64], num_threads: i64 = 0) -> i64:
+    return par_reduce(items, 0, \a, b: a + b, num_threads)
+
+/**
+Parallel product.
+*/
+fn par_product(items: [i64], num_threads: i64 = 0) -> i64:
+    return par_reduce(items, 1, \a, b: a * b, num_threads)
+
+/**
+Parallel min.
+*/
+fn par_min(items: [i64], num_threads: i64 = 0) -> Option[i64]:
+    if items.is_empty():
+        return Option.None
+    let result = par_reduce(items, items[0], \a, b: if a < b: a else: b, num_threads)
+    return Option.Some(result)
+
+/**
+Parallel max.
+*/
+fn par_max(items: [i64], num_threads: i64 = 0) -> Option[i64]:
+    if items.is_empty():
+        return Option.None
+    let result = par_reduce(items, items[0], \a, b: if a > b: a else: b, num_threads)
+    return Option.Some(result)
+
+/**
+Parallel chunk processing.
+
+Process items in chunks with a single function.
+*/
+fn par_chunks[T, R](
+    items: [T],
+    chunk_size: i64,
+    processor: fn([T]) -> R,
+    num_threads: i64 = 0
+) -> [R]:
+    let n = len(items)
+    if n == 0:
+        return []
+
+    let chunks = []
+    for i in range(0, n, chunk_size):
+        let end = min(i + chunk_size, n)
+        chunks.push(items[i:end])
+
+    return par_map(chunks, processor, num_threads)
+
+/**
+Parallel flat map.
+
+Map and flatten results.
+*/
+fn par_flat_map[T, R](items: [T], func: fn(T) -> [R], num_threads: i64 = 0) -> [R]:
+    let mapped = par_map(items, func, num_threads)
+    let results = []
+    for sub in mapped:
+        results.extend(sub)
+    return results
+
+/**
+Parallel partition.
+
+Split into two lists based on predicate.
+*/
+fn par_partition[T](items: [T], predicate: fn(T) -> Bool, num_threads: i64 = 0) -> ([T], [T]):
+    let matching = par_filter(items, predicate, num_threads)
+    let not_matching = par_filter(items, \x: not predicate(x), num_threads)
+    return (matching, not_matching)
+
+/**
+Parallel configuration.
+*/
+struct ParallelConfig:
+    num_threads: i64
+    chunk_size: i64
+    ordered: Bool
+
+    fn default() -> ParallelConfig:
+        return ParallelConfig(
+            num_threads: 0,  # Auto-detect
+            chunk_size: 1000,
+            ordered: true
+        )
+
+    fn with_threads(n: i64) -> ParallelConfig:
+        return ParallelConfig(
+            num_threads: n,
+            chunk_size: 1000,
+            ordered: true
+        )
+
+    fn unordered() -> ParallelConfig:
+        return ParallelConfig(
+            num_threads: 0,
+            chunk_size: 1000,
+            ordered: false
+        )
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_auto_threads(self) -> Bool:
+        """Check if using auto-detected thread count.
+
+        Returns:
+            true if num_threads is 0 (auto-detect)
+
+        Example:
+            config.is_auto_threads()  # → true
+        """
+        return self.num_threads <= 0
+
+    pub fn is_ordered(self) -> Bool:
+        """Check if results should be ordered.
+
+        Returns:
+            true if ordered mode enabled
+
+        Example:
+            config.is_ordered()  # → true
+        """
+        return self.ordered
+
+    pub fn is_unordered(self) -> Bool:
+        """Check if results can be unordered.
+
+        Returns:
+            true if unordered mode
+
+        Example:
+            config.is_unordered()  # → false
+        """
+        return not self.ordered
+
+    pub fn get_thread_count(self) -> i64:
+        """Get effective thread count.
+
+        Returns:
+            Configured threads or auto-detected count
+
+        Example:
+            config.get_thread_count()  # → 8
+        """
+        if self.num_threads <= 0:
+            return available_parallelism()
+        return self.num_threads
+
+    pub fn get_chunk_size(self) -> i64:
+        """Get chunk size for work distribution.
+
+        Returns:
+            Chunk size in elements
+
+        Example:
+            config.get_chunk_size()  # → 1000
+        """
+        return self.chunk_size
+
+    pub fn set_threads(mut self, n: i64) -> ParallelConfig:
+        """Set number of threads.
+
+        Args:
+            n: Thread count (0 for auto)
+
+        Returns:
+            self for chaining
+
+        Example:
+            config.set_threads(4)
+        """
+        self.num_threads = n
+        return self
+
+    pub fn set_chunk_size(mut self, size: i64) -> ParallelConfig:
+        """Set chunk size.
+
+        Args:
+            size: Chunk size in elements
+
+        Returns:
+            self for chaining
+
+        Example:
+            config.set_chunk_size(500)
+        """
+        self.chunk_size = size
+        return self
+
+    pub fn set_ordered(mut self, ordered: Bool) -> ParallelConfig:
+        """Set ordering requirement.
+
+        Args:
+            ordered: Whether results must be ordered
+
+        Returns:
+            self for chaining
+
+        Example:
+            config.set_ordered(false)
+        """
+        self.ordered = ordered
+        return self
+
+    pub fn with_chunk_size(self, size: i64) -> ParallelConfig:
+        """Create config with different chunk size.
+
+        Args:
+            size: New chunk size
+
+        Returns:
+            New config with specified chunk size
+
+        Example:
+            new_config = config.with_chunk_size(2000)
+        """
+        return ParallelConfig(
+            num_threads: self.num_threads,
+            chunk_size: size,
+            ordered: self.ordered
+        )
+
+    pub fn with_ordering(self, ordered: Bool) -> ParallelConfig:
+        """Create config with different ordering.
+
+        Args:
+            ordered: Ordering requirement
+
+        Returns:
+            New config with specified ordering
+
+        Example:
+            new_config = config.with_ordering(false)
+        """
+        return ParallelConfig(
+            num_threads: self.num_threads,
+            chunk_size: self.chunk_size,
+            ordered: ordered
+        )
+
+    pub fn is_valid(self) -> Bool:
+        """Check if configuration is valid.
+
+        Returns:
+            true if all settings are valid
+
+        Example:
+            config.is_valid()  # → true
+        """
+        return self.chunk_size > 0
+
+    pub fn clone(self) -> ParallelConfig:
+        """Clone the configuration.
+
+        Returns:
+            Copy of this config
+
+        Example:
+            new_config = config.clone()
+        """
+        return ParallelConfig(
+            num_threads: self.num_threads,
+            chunk_size: self.chunk_size,
+            ordered: self.ordered
+        )
+
+    pub fn summary(self) -> String:
+        """Get configuration summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            config.summary()
+            # → "ParallelConfig: 8 threads, chunk_size=1000, ordered"
+        """
+        let threads = self.get_thread_count()
+        let order_str = if self.ordered: "ordered" else: "unordered"
+        return "ParallelConfig: {threads} threads, chunk_size={self.chunk_size}, {order_str}"

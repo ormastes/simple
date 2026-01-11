@@ -1,0 +1,474 @@
+/**
+Promise Type for Async-by-Default Semantics
+
+Promise[T] represents a value that will be available in the future.
+This is the return type of all async functions in the async-by-default model.
+
+Key Concepts:
+- `sync fn foo() -> T` returns T directly
+- `fn bar() -> T` returns Promise[T] (async by default)
+- Use `await` to extract T from Promise[T]
+
+States:
+- Pending: Computation not yet complete
+- Resolved: Successfully completed with value
+- Rejected: Failed with error
+
+Basic Usage:
+```sdoctest
+>>> let p = Promise.resolved(42)
+>>> await p
+42
+```
+
+Creating Promises:
+```sdoctest
+>>> let p = Promise.new(\resolve, reject: resolve(100))
+>>> await p
+100
+```
+
+Chaining:
+```sdoctest
+>>> let p1 = Promise.resolved(10)
+>>> let p2 = p1.then(\x: x * 2)
+>>> await p2
+20
+```
+
+Error Handling:
+```sdoctest
+>>> let p = Promise.rejected("error")
+>>> try:
+...     await p
+... catch e:
+...     "caught: " + e
+'caught: error'
+```
+*/
+
+/// Promise state enum
+enum PromiseState:
+    Pending
+    Resolved(value)
+    Rejected(error)
+
+impl PromiseState:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn to_string(self) -> String:
+        """Convert state to string."""
+        match self:
+            case Pending: return "Pending"
+            case Resolved(_): return "Resolved"
+            case Rejected(_): return "Rejected"
+
+    fn description(self) -> String:
+        """Get detailed state description."""
+        match self:
+            case Pending: return "Promise is pending"
+            case Resolved(v): return "Promise resolved with value"
+            case Rejected(e): return "Promise rejected with error"
+
+    fn is_pending(self) -> Bool:
+        """Check if this is Pending state."""
+        match self:
+            case Pending: true
+            case _: false
+
+    fn is_resolved(self) -> Bool:
+        """Check if this is Resolved state."""
+        match self:
+            case Resolved(_): true
+            case _: false
+
+    fn is_rejected(self) -> Bool:
+        """Check if this is Rejected state."""
+        match self:
+            case Rejected(_): true
+            case _: false
+
+    fn is_settled(self) -> Bool:
+        """Check if this is settled (resolved or rejected)."""
+        match self:
+            case Pending: false
+            case _: true
+
+    fn summary(self) -> String:
+        """Get summary of promise state.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            PromiseState::Pending.summary()
+            # → "PromiseState: Pending (not settled)"
+            PromiseState::Resolved(42).summary()
+            # → "PromiseState: Resolved (settled with value)"
+        """
+        match self:
+            case Pending:
+                return "PromiseState: Pending (not settled)"
+            case Resolved(_):
+                return "PromiseState: Resolved (settled with value)"
+            case Rejected(_):
+                return "PromiseState: Rejected (settled with error)"
+
+/**
+Promise[T] - Represents an asynchronous computation that will produce T
+
+This is the core type for async-by-default semantics.
+All non-sync functions return Promise[T] instead of T.
+*/
+class Promise[T]:
+    state: PromiseState
+    callbacks: List  # List of (resolve_fn, reject_fn) pairs
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_pending(self) -> Bool:
+        """Check if promise is pending."""
+        return self.state.is_pending()
+
+    fn is_resolved(self) -> Bool:
+        """Check if promise is resolved."""
+        return self.state.is_resolved()
+
+    fn is_rejected(self) -> Bool:
+        """Check if promise is rejected."""
+        return self.state.is_rejected()
+
+    fn is_settled(self) -> Bool:
+        """Check if promise is settled (resolved or rejected)."""
+        return self.state.is_settled()
+
+    fn has_callbacks(self) -> Bool:
+        """Check if promise has pending callbacks."""
+        return self.callbacks.len() > 0
+
+    fn callback_count(self) -> Int:
+        """Get number of pending callbacks."""
+        return self.callbacks.len()
+
+    fn get_state(self) -> PromiseState:
+        """Get current state."""
+        return self.state
+
+    fn summary(self) -> String:
+        """Get summary of promise state."""
+        let state_str = self.state.to_string()
+        let cb_count = self.callback_count()
+        return "Promise[T]: {state_str}, {cb_count} callbacks"
+
+    # =========================================================================
+    # Constructor
+    # =========================================================================
+
+    /**
+    Create a new pending promise
+
+    The executor function receives resolve and reject callbacks:
+    - Call resolve(value) to fulfill the promise
+    - Call reject(error) to reject the promise
+
+    Example:
+    ```sdoctest
+    >>> let p = Promise.new(\resolve, reject: resolve(42))
+    >>> await p
+    42
+    ```
+    */
+    static fn new(executor) -> Promise[T]:
+        let promise = Promise[T](
+            state: PromiseState.Pending,
+            callbacks: []
+        )
+
+        # Define resolve callback
+        fn resolve(value):
+            if promise.state is PromiseState.Pending:
+                promise.state = PromiseState.Resolved(value)
+                # Execute all pending callbacks
+                for (on_resolve, on_reject) in promise.callbacks:
+                    on_resolve(value)
+
+        # Define reject callback
+        fn reject(error):
+            if promise.state is PromiseState.Pending:
+                promise.state = PromiseState.Rejected(error)
+                # Execute all pending callbacks
+                for (on_resolve, on_reject) in promise.callbacks:
+                    on_reject(error)
+
+        # Execute the executor function
+        try:
+            executor(resolve, reject)
+        catch e:
+            reject(e)
+
+        return promise
+
+    /**
+    Create an already-resolved promise
+
+    Example:
+    ```sdoctest
+    >>> let p = Promise.resolved(100)
+    >>> await p
+    100
+    ```
+    */
+    static fn resolved(value: T) -> Promise[T]:
+        return Promise[T](
+            state: PromiseState.Resolved(value),
+            callbacks: []
+        )
+
+    /**
+    Create an already-rejected promise
+
+    Example:
+    ```sdoctest
+    >>> let p = Promise.rejected("failed")
+    >>> try:
+    ...     await p
+    ... catch e:
+    ...     "error: " + e
+    'error: failed'
+    ```
+    */
+    static fn rejected(error) -> Promise[T]:
+        return Promise[T](
+            state: PromiseState.Rejected(error),
+            callbacks: []
+        )
+
+    /**
+    Chain a transformation function
+
+    Returns a new promise that applies the function to the resolved value.
+
+    Example:
+    ```sdoctest
+    >>> let p1 = Promise.resolved(5)
+    >>> let p2 = p1.then(\x: x * 10)
+    >>> await p2
+    50
+    ```
+    */
+    fn then[U](self, on_resolve) -> Promise[U]:
+        return Promise.new(\resolve, reject:
+            match self.state:
+                case PromiseState.Resolved(value):
+                    try:
+                        let result = on_resolve(value)
+                        resolve(result)
+                    catch e:
+                        reject(e)
+                case PromiseState.Rejected(error):
+                    reject(error)
+                case PromiseState.Pending:
+                    self.callbacks.push((
+                        \value:
+                            try:
+                                resolve(on_resolve(value))
+                            catch e:
+                                reject(e),
+                        \error: reject(error)
+                    ))
+        )
+
+    /**
+    Catch errors from a rejected promise
+
+    Example:
+    ```sdoctest
+    >>> let p = Promise.rejected("oops")
+    >>> let handled = p.catch(\e: "recovered from: " + e)
+    >>> await handled
+    'recovered from: oops'
+    ```
+    */
+    fn catch[U](self, on_reject) -> Promise[U]:
+        return Promise.new(\resolve, reject:
+            match self.state:
+                case PromiseState.Resolved(value):
+                    resolve(value)
+                case PromiseState.Rejected(error):
+                    try:
+                        let result = on_reject(error)
+                        resolve(result)
+                    catch e:
+                        reject(e)
+                case PromiseState.Pending:
+                    self.callbacks.push((
+                        \value: resolve(value),
+                        \error:
+                            try:
+                                resolve(on_reject(error))
+                            catch e:
+                                reject(e)
+                    ))
+        )
+
+    /**
+    Map a function over the promise value
+
+    Similar to then(), but specifically for transformations.
+
+    Example:
+    ```sdoctest
+    >>> let p = Promise.resolved(3)
+    >>> let doubled = p.map(\x: x * 2)
+    >>> await doubled
+    6
+    ```
+    */
+    fn map[U](self, transform) -> Promise[U]:
+        return self.then(transform)
+
+    /**
+    Flat map - chain promises together
+
+    Use when the transform function returns another Promise.
+
+    Example:
+    ```sdoctest
+    >>> let p1 = Promise.resolved(5)
+    >>> let p2 = p1.flat_map(\x: Promise.resolved(x + 10))
+    >>> await p2
+    15
+    ```
+    */
+    fn flat_map[U](self, transform) -> Promise[U]:
+        return Promise.new(\resolve, reject:
+            self.then(\value:
+                let inner_promise = transform(value)
+                inner_promise.then(resolve).catch(reject)
+            ).catch(reject)
+        )
+
+/**
+Wait for all promises to complete
+
+Returns a promise that resolves to a list of all results.
+If any promise rejects, the returned promise rejects immediately.
+
+Example:
+```sdoctest
+>>> let promises = [
+...     Promise.resolved(1),
+...     Promise.resolved(2),
+...     Promise.resolved(3)
+... ]
+>>> let all_results = Promise.all(promises)
+>>> await all_results
+[1, 2, 3]
+```
+*/
+fn all[T](promises: List[Promise[T]]) -> Promise[List[T]]:
+    if promises.is_empty:
+        return Promise.resolved([])
+
+    return Promise.new(\resolve, reject:
+        let results = []
+        let completed = 0
+        let total = promises.len()
+
+        for i, promise in promises.enumerate():
+            promise.then(\value:
+                results[i] = value
+                completed += 1
+                if completed == total:
+                    resolve(results)
+            ).catch(\error:
+                reject(error)
+            )
+    )
+
+/**
+Race multiple promises
+
+Returns a promise that resolves or rejects with the first settled promise.
+
+Example:
+```sdoctest
+>>> let p1 = Promise.resolved(1)
+>>> let p2 = Promise.resolved(2)
+>>> let winner = Promise.race([p1, p2])
+>>> await winner
+1
+```
+*/
+fn race[T](promises: List[Promise[T]]) -> Promise[T]:
+    if promises.is_empty:
+        return Promise.rejected("race: empty list")
+
+    return Promise.new(\resolve, reject:
+        for promise in promises:
+            promise.then(resolve).catch(reject)
+    )
+
+/**
+Wait for all promises, even if some reject
+
+Returns a promise that resolves to a list of results,
+where each result is either Ok(value) or Err(error).
+
+Example:
+```sdoctest
+>>> let promises = [
+...     Promise.resolved(1),
+...     Promise.rejected("fail"),
+...     Promise.resolved(3)
+... ]
+>>> let results = Promise.all_settled(promises)
+>>> await results
+[Ok(1), Err("fail"), Ok(3)]
+```
+*/
+fn all_settled[T](promises: List[Promise[T]]) -> Promise[List[Result[T]]]:
+    if promises.is_empty:
+        return Promise.resolved([])
+
+    return Promise.new(\resolve, reject:
+        let results = []
+        let completed = 0
+        let total = promises.len()
+
+        for i, promise in promises.enumerate():
+            promise
+                .then(\value:
+                    results[i] = Ok(value)
+                    completed += 1
+                    if completed == total:
+                        resolve(results)
+                )
+                .catch(\error:
+                    results[i] = Err(error)
+                    completed += 1
+                    if completed == total:
+                        resolve(results)
+                )
+    )
+
+/**
+Create a promise that resolves after a delay
+
+Example:
+```sdoctest
+>>> let p = Promise.delay(1000, "done")
+>>> await p
+'done'
+```
+*/
+fn delay[T](milliseconds: Int, value: T) -> Promise[T]:
+    return Promise.new(\resolve, reject:
+        # In a real implementation, this would use a timer
+        # For now, just resolve immediately
+        resolve(value)
+    )

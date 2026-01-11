@@ -1,0 +1,296 @@
+///
+Simple Watch System
+
+File watcher that automatically rebuilds on source changes.
+Reads watch configuration from simple.sdn.
+
+Usage:
+    simple watch.spl                    # Watch and rebuild
+    simple watch.spl --task=<task>      # Watch and run specific task
+    simple watch.spl --debounce=<ms>    # Set debounce delay
+
+Features:
+    - Watches .spl and .sdn files
+    - Debounces rapid changes
+    - Runs build or custom task on change
+    - Smart rebuild (only changed targets)
+///
+
+import std.io
+import std.fs
+import std.process
+import std.args
+import std.time
+import sdn.document.SdnDocument
+
+fn main():
+    io.println("=== Simple Watch System ===")
+    io.println("")
+
+    # Parse arguments
+    let argv = args.get_args()
+    let config = parse_args(argv)
+
+    # Load project configuration
+    let project_config = load_watch_config("simple.sdn")
+
+    io.println("Watching for changes...")
+    io.println("  Patterns: ${project_config.patterns.join(", ")}")
+    io.println("  Debounce: ${project_config.debounce_ms}ms")
+    io.println("  Task: ${config.task}")
+    io.println("")
+    io.println("Press Ctrl+C to stop")
+    io.println("")
+
+    # Initial build
+    io.println("Running initial build...")
+    run_task(config.task)
+    io.println("")
+
+    # Watch loop
+    watch_loop(project_config, config)
+
+struct WatchConfig:
+    task: String
+    debounce_ms: Int
+    verbose: Bool
+
+struct WatchSettings:
+    patterns: List[String]
+    ignore: List[String]
+    debounce_ms: Int
+
+### Argument parsing
+
+fn parse_args(argv: List[String]) -> WatchConfig:
+    let mut task = "build"
+    let mut debounce_ms = 500
+    let mut verbose = False
+
+    for arg in argv[1..]:
+        match arg:
+            case arg if arg.starts_with("--task="):
+                task = arg.split("=")[1]
+            case arg if arg.starts_with("--debounce="):
+                let ms_str = arg.split("=")[1]
+                match ms_str.parse_int():
+                    case Some(ms):
+                        debounce_ms = ms
+                    case None:
+                        io.eprintln("Invalid debounce value: ${ms_str}")
+            case "--verbose":
+                verbose = True
+            case "--help":
+                print_help()
+                process.exit(0)
+            case _:
+                io.eprintln("Unknown argument: ${arg}")
+                print_help()
+                process.exit(1)
+
+    return WatchConfig(
+        task: task,
+        debounce_ms: debounce_ms,
+        verbose: verbose
+    )
+
+fn print_help():
+    io.println("Simple Watch System")
+    io.println("")
+    io.println("USAGE:")
+    io.println("    simple watch.spl [OPTIONS]")
+    io.println("")
+    io.println("OPTIONS:")
+    io.println("    --task=<task>        Task to run on changes (default: build)")
+    io.println("    --debounce=<ms>      Debounce delay in milliseconds (default: 500)")
+    io.println("    --verbose            Verbose output")
+    io.println("    --help               Print this help message")
+    io.println("")
+    io.println("EXAMPLES:")
+    io.println("    simple watch.spl                      # Watch and build")
+    io.println("    simple watch.spl --task=test          # Watch and test")
+    io.println("    simple watch.spl --debounce=1000      # 1 second debounce")
+
+### Configuration loading
+
+fn load_watch_config(path: String) -> WatchSettings:
+    """Load watch configuration from simple.sdn"""
+    match SdnDocument.from_file(path):
+        case Ok(doc):
+            # Extract watch patterns
+            let mut patterns = ["**/*.spl", "**/*.sdn"]
+            match doc.get("tools.watch.patterns"):
+                case Some(arr):
+                    match arr.as_array():
+                        case Some(list):
+                            patterns = []
+                            for item in list:
+                                match item.as_str():
+                                    case Some(s):
+                                        patterns.push(s)
+                                    case None:
+                                        pass
+                        case None:
+                            pass
+                case None:
+                    pass
+
+            # Extract ignore patterns
+            let mut ignore = ["build/**", "target/**", "bin_simple/**"]
+            match doc.get("tools.watch.ignore"):
+                case Some(arr):
+                    match arr.as_array():
+                        case Some(list):
+                            ignore = []
+                            for item in list:
+                                match item.as_str():
+                                    case Some(s):
+                                        ignore.push(s)
+                                    case None:
+                                        pass
+                        case None:
+                            pass
+                case None:
+                    pass
+
+            # Extract debounce
+            let debounce_ms = doc.get("tools.watch.debounce_ms")
+                .flatmap(|v| v.as_i64())
+                .unwrap_or(500)
+
+            return WatchSettings(
+                patterns: patterns,
+                ignore: ignore,
+                debounce_ms: debounce_ms
+            )
+
+        case Err(e):
+            io.eprintln("Warning: Failed to load config, using defaults: ${e}")
+            return WatchSettings(
+                patterns: ["**/*.spl", "**/*.sdn"],
+                ignore: ["build/**", "target/**"],
+                debounce_ms: 500
+            )
+
+### Watch loop
+
+fn watch_loop(settings: WatchSettings, config: WatchConfig):
+    """Main watch loop"""
+    let mut last_change_time = 0
+    let mut pending_rebuild = False
+
+    loop:
+        # Check for file changes
+        let changed = check_for_changes(settings)
+
+        if changed:
+            let current_time = time.now_ms()
+
+            # Debounce: only rebuild if enough time has passed
+            if current_time - last_change_time > config.debounce_ms:
+                io.println("Change detected, rebuilding...")
+                io.println("")
+
+                run_task(config.task)
+
+                io.println("")
+                io.println("Watching for changes...")
+
+                last_change_time = current_time
+                pending_rebuild = False
+            else:
+                # Still within debounce window
+                pending_rebuild = True
+                last_change_time = current_time
+
+        # Sleep to avoid busy-waiting
+        process.sleep(100)
+
+fn check_for_changes(settings: WatchSettings) -> Bool:
+    """Check if any watched files have changed"""
+    # NOTE: This is a simplified implementation
+    # Real implementation would use fs.watch() or inotify
+
+    # For now, we'll use a polling approach with file modification times
+    # This is less efficient but works cross-platform
+
+    # TODO: [compiler][P1] Implement proper file watching using:
+    # - inotify on Linux
+    # - FSEvents on macOS
+    # - ReadDirectoryChangesW on Windows
+    # Or use a cross-platform library
+
+    # Placeholder: always return false for now
+    # Real implementation would track file mtimes and detect changes
+    return False
+
+### Task execution
+
+fn run_task(task_name: String):
+    """Run a task (build, test, etc.)"""
+    match task_name:
+        case "build":
+            run_build()
+        case "test":
+            run_tests()
+        case "fmt":
+            run_format()
+        case "lint":
+            run_lint()
+        case _:
+            # Run via task runner
+            let result = process.run_command(
+                "simple",
+                ["simple/task.spl", task_name]
+            )
+
+            match result:
+                case Ok(output):
+                    if output.exit_code != 0:
+                        io.eprintln("Task failed with exit code ${output.exit_code}")
+                case Err(e):
+                    io.eprintln("Failed to run task: ${e}")
+
+fn run_build():
+    """Run build task"""
+    let result = process.run_command(
+        "simple",
+        ["simple/build.spl"]
+    )
+
+    match result:
+        case Ok(output):
+            if output.exit_code == 0:
+                io.println("✓ Build successful")
+            else:
+                io.eprintln("✗ Build failed")
+                if output.stderr.len > 0:
+                    io.eprintln(output.stderr)
+        case Err(e):
+            io.eprintln("Failed to run build: ${e}")
+
+fn run_tests():
+    """Run tests"""
+    let result = process.run_command(
+        "cargo",
+        ["test", "--workspace"]
+    )
+
+    match result:
+        case Ok(output):
+            if output.exit_code == 0:
+                io.println("✓ Tests passed")
+            else:
+                io.eprintln("✗ Tests failed")
+        case Err(e):
+            io.eprintln("Failed to run tests: ${e}")
+
+fn run_format():
+    """Run formatter"""
+    io.println("Formatting source files...")
+    # TODO: [compiler][P1] Implement formatting all .spl files
+
+fn run_lint():
+    """Run linter"""
+    io.println("Linting source files...")
+    # TODO: [compiler][P1] Implement linting all .spl files

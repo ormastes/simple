@@ -1,0 +1,257 @@
+# Physics - GPU-Accelerated Physics Engine
+#
+# Provides real-time physics simulation with GPU acceleration via PyTorch.
+# Supports rigid body dynamics, collision detection, and constraints.
+#
+# ## Modules
+# - `core`: Vector/matrix math (GPU-accelerated)
+# - `dynamics`: Rigid body physics and integration
+# - `collision`: Collision detection and response
+# - `constraints`: Joint constraints and solvers
+#
+# ## Classes
+# - `World`: Physics world/scene manager
+# - `RigidBody`: Rigid body with mass, velocity, forces
+# - `Vector2`, `Vector3`: 2D/3D vectors
+# - `Matrix3`, `Matrix4`: Transformation matrices
+#
+# ## Example
+# ```simple
+# import physics
+#
+# # Create physics world on GPU
+# let world = physics.World(gravity=physics.Vector3(0, -9.81, 0), device="cuda")
+#
+# # Add rigid bodies
+# for i in range(1000):
+#     let body = physics.RigidBody(
+#         mass=1.0,
+#         position=physics.Vector3(randn(), randn(), randn())
+#     )
+#     world.add_body(body)
+#
+# # Run simulation (60 FPS)
+# for step in range(1000):
+#     world.step(dt=0.016)
+#     # Render or process physics results
+# ```
+
+export World
+export core, dynamics, collision, constraints, gpu_batch
+
+import core
+import dynamics
+import collision
+import constraints
+import gpu_batch
+
+# Re-export commonly used types
+export Vector2, Vector3, Matrix3, Matrix4 from core
+export RigidBody, Force from dynamics
+export AABB, Shape from collision
+
+
+import ml.torch as torch
+
+
+# ============================================================================
+# Physics World
+# ============================================================================
+
+class World:
+    """Physics world for managing simulation.
+
+    Manages rigid bodies, collision detection, and physics integration.
+    All computations are batched on GPU for performance.
+
+    Attributes:
+        gravity: Gravitational acceleration vector
+        device: Compute device (CPU or CUDA)
+        bodies: List of rigid bodies in the world
+        dt: Time step for integration
+
+    Example:
+        ```simple
+        # Create world on GPU
+        let world = physics.World(
+            gravity=physics.Vector3(0, -9.81, 0),
+            device=torch.Device::CUDA(0)
+        )
+
+        # Add bodies
+        let body1 = physics.RigidBody(mass=1.0, position=physics.Vector3(0, 10, 0))
+        world.add_body(body1)
+
+        # Simulate
+        world.step(dt=0.016)  # 60 FPS
+        print("Position: {body1.position}")
+        ```
+    """
+    gravity: core.Vector3
+    device: torch.Device
+    bodies: [dynamics.RigidBody]
+    time: f64
+    substeps: i32
+
+    fn __init__(gravity: core.Vector3 = core.Vector3(0.0, -9.81, 0.0),
+        device: torch.Device = torch.Device::CPU,
+        substeps: i32 = 1
+    ):
+        """Initialize physics world.
+
+        Args:
+            gravity: Gravitational acceleration (default: Earth gravity)
+            device: Compute device for GPU acceleration (default: CPU)
+            substeps: Number of substeps per step for stability (default: 1)
+        """
+        self.gravity = gravity
+        self.device = device
+        self.bodies = []
+        self.time = 0.0
+        self.substeps = substeps
+
+    fn add_body(body: dynamics.RigidBody):
+        """Add rigid body to world.
+
+        Args:
+            body: Rigid body to add
+        """
+        # Transfer body tensors to world device
+        body.to_device(self.device)
+        self.bodies.append(body)
+
+    fn remove_body(body: dynamics.RigidBody):
+        """Remove rigid body from world.
+
+        Args:
+            body: Rigid body to remove
+        """
+        # Filter out the body to remove
+        let mut new_bodies: [dynamics.RigidBody] = []
+        for b in self.bodies:
+            # TODO: This assumes RigidBody has identity comparison
+            # In practice, we'd need a unique ID or pointer comparison
+            if b != body:
+                new_bodies.append(b)
+
+        self.bodies = new_bodies
+
+    fn step(dt: f64):
+        """Advance simulation by one time step.
+
+        Performs physics integration, collision detection, and response.
+
+        Args:
+            dt: Time step in seconds (e.g., 0.016 for 60 FPS)
+        """
+        let sub_dt = dt / self.substeps as f64
+
+        for _ in range(self.substeps):
+            # Apply gravity to all bodies
+            self._apply_gravity()
+
+            # Integrate forces/velocities (semi-implicit Euler)
+            for body in self.bodies:
+                body.integrate(sub_dt)
+
+            # Detect collisions
+            let collisions = self._detect_collisions()
+
+            # Resolve collisions
+            self._resolve_collisions(collisions)
+
+        self.time += dt
+
+    fn _apply_gravity():
+        """Apply gravitational force to all bodies."""
+        for body in self.bodies:
+            if body.mass > 0:  # Don't apply to static bodies (infinite mass)
+                body.add_force(self.gravity.scale(body.mass))
+
+    fn _detect_collisions() -> [(i32, i32)]:
+        """Detect collisions between bodies.
+
+        Returns:
+            List of (body_i, body_j) collision pairs
+        """
+        let mut collisions = []
+
+        # Broad phase: AABB tests
+        for i in range(self.bodies.len()):
+            for j in range(i + 1, self.bodies.len()):
+                if self._check_collision(self.bodies[i], self.bodies[j]):
+                    collisions.append((i as i32, j as i32))
+
+        return collisions
+
+    fn _check_collision(a: dynamics.RigidBody, b: dynamics.RigidBody) -> bool:
+        """Check if two bodies collide.
+
+        Args:
+            a: First body
+            b: Second body
+
+        Returns:
+            True if bodies collide
+        """
+        # Simple sphere-sphere collision for now
+        let distance = a.position.distance(b.position)
+        let sum_radii = a.radius + b.radius
+        return distance < sum_radii
+
+    fn _resolve_collisions(collisions: [(i32, i32)]):
+        """Resolve detected collisions.
+
+        Args:
+            collisions: List of collision pairs
+        """
+        for (i, j) in collisions:
+            let a = self.bodies[i as usize]
+            let b = self.bodies[j as usize]
+
+            # Simple elastic collision response
+            self._resolve_collision_pair(a, b)
+
+    fn _resolve_collision_pair(a: dynamics.RigidBody, b: dynamics.RigidBody):
+        """Resolve collision between two bodies.
+
+        Args:
+            a: First body
+            b: Second body
+        """
+        # Collision normal (from a to b)
+        let normal = b.position.sub(a.position).normalize()
+
+        # Relative velocity
+        let rel_vel = b.velocity.sub(a.velocity)
+
+        # Velocity along normal
+        let vel_along_normal = rel_vel.dot(normal)
+
+        # Don't resolve if bodies are separating
+        if vel_along_normal > 0:
+            return
+
+        # Coefficient of restitution (bounciness)
+        let restitution = 0.8
+
+        # Calculate impulse scalar
+        let j = -(1.0 + restitution) * vel_along_normal
+        let j = j / (1.0 / a.mass + 1.0 / b.mass)
+
+        # Apply impulse
+        let impulse = normal.scale(j)
+
+        if a.mass > 0:  # Not static
+            a.velocity = a.velocity.sub(impulse.scale(1.0 / a.mass))
+
+        if b.mass > 0:  # Not static
+            b.velocity = b.velocity.add(impulse.scale(1.0 / b.mass))
+
+    fn get_stats() -> str:
+        """Get simulation statistics.
+
+        Returns:
+            Statistics string
+        """
+        return "Bodies: {self.bodies.len()}, Time: {self.time:.2f}s, Device: {self.device}"

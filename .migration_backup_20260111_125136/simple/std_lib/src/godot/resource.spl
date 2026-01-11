@@ -1,0 +1,369 @@
+# Godot Resource System
+#
+# Resources are data containers that can be saved/loaded.
+# Includes reference counting (Ref<T>) and async loading support.
+#
+# Reference: https://docs.godotengine.org/en/stable/classes/class_resource.html
+
+import godot.ffi
+import godot.variant
+import godot.object
+
+# Resource wrapper
+pub struct Resource:
+    base: object.Object
+
+impl Resource:
+    # Wrap an existing Resource pointer
+    pub fn from_ptr(ptr: ffi.GDExtensionObjectPtr) -> Resource:
+        return Resource(base: object.Object::from_ptr(ptr))
+
+    # Load a resource from file (sync)
+    pub fn load(path: String) -> Result[Resource, String]:
+        let loader = ResourceLoader::get_singleton()
+        return loader.load(path)
+
+    # Get resource path
+    pub fn get_path(self) -> String:
+        let result = self.base.call0("get_path")
+        return result.as_string()
+
+    # Set resource path
+    pub fn set_path(mut self, path: String):
+        let path_var = variant.Variant::from_string(path)
+        self.base.call1("set_path", path_var)
+
+    # Duplicate this resource
+    pub fn duplicate(self, deep: bool) -> Resource:
+        let deep_var = variant.Variant::from_bool(deep)
+        let result = self.base.call1("duplicate", deep_var)
+        return Resource::from_ptr(result.as_object())
+
+    # Get base object
+    pub fn as_object(self) -> object.Object:
+        return self.base
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn has_path() -> bool:
+        """Check if resource has a file path assigned.
+
+        Returns:
+            true if path is not empty
+
+        Example:
+            resource.has_path()  # → true
+        """
+        return self.get_path().len() > 0
+
+    fn is_anonymous() -> bool:
+        """Check if resource is anonymous (no file path).
+
+        Returns:
+            true if path is empty
+
+        Example:
+            resource.is_anonymous()  # → false
+        """
+        return not self.has_path()
+
+    fn shallow_copy() -> Resource:
+        """Create a shallow copy of the resource.
+
+        Returns:
+            Shallow duplicate
+
+        Example:
+            copy = resource.shallow_copy()
+        """
+        return self.duplicate(false)
+
+    fn deep_copy() -> Resource:
+        """Create a deep copy of the resource.
+
+        Returns:
+            Deep duplicate
+
+        Example:
+            copy = resource.deep_copy()
+        """
+        return self.duplicate(true)
+
+    fn summary() -> String:
+        """Get resource summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            resource.summary()
+            # → "Resource: path=res://texture.png"
+        """
+        if self.has_path():
+            let path = self.get_path()
+            return "Resource: path={path}"
+        else:
+            return "Resource: anonymous"
+
+# Ref<T> - Reference-counted resource handle
+# Provides automatic memory management for Godot resources
+pub struct Ref[T]:
+    resource: Option[T]
+    ref_count: *mut i32  # Shared reference counter
+
+impl[T] Ref[T]:
+    # Create a new Ref from a resource
+    pub fn new(resource: T) -> Ref[T]:
+        let ref_count = runtime_allocate_ref_counter()
+        unsafe:
+            *ref_count = 1
+        return Ref(resource: Some(resource), ref_count: ref_count)
+
+    # Create a null Ref
+    pub fn null() -> Ref[T]:
+        return Ref(resource: None, ref_count: null)
+
+    # Check if ref is valid
+    pub fn is_valid(self) -> bool:
+        return self.resource.is_some()
+
+    # Get the resource (panics if null)
+    pub fn get(self) -> &T:
+        return self.resource.as_ref().unwrap()
+
+    # Get mutable reference (panics if null)
+    pub fn get_mut(mut self) -> &mut T:
+        return self.resource.as_mut().unwrap()
+
+    # Clone the ref (increment reference count)
+    pub fn clone(self) -> Ref[T]:
+        if self.ref_count != null:
+            unsafe:
+                *self.ref_count += 1
+        return Ref(resource: self.resource, ref_count: self.ref_count)
+
+    # Destructor (decrement reference count)
+    pub fn drop(mut self):
+        if self.ref_count != null:
+            unsafe:
+                *self.ref_count -= 1
+                if *self.ref_count == 0:
+                    runtime_free_ref_counter(self.ref_count)
+                    self.resource = None
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_null() -> bool:
+        """Check if ref is null (no resource).
+
+        Returns:
+            true if null
+
+        Example:
+            ref.is_null()  # → false
+        """
+        return not self.is_valid()
+
+    fn try_get() -> Option[&T]:
+        """Try to get the resource (returns None if null).
+
+        Returns:
+            Option containing reference to resource
+
+        Example:
+            if let Some(res) = ref.try_get():
+                # Use res
+        """
+        return self.resource.as_ref()
+
+    me try_get_mut() -> Option[&mut T]:
+        """Try to get mutable reference (returns None if null).
+
+        Returns:
+            Option containing mutable reference
+
+        Example:
+            if let Some(res) = ref.try_get_mut():
+                # Modify res
+        """
+        return self.resource.as_mut()
+
+    fn get_ref_count() -> i32:
+        """Get current reference count.
+
+        Returns:
+            Reference count (0 if null)
+
+        Example:
+            ref.get_ref_count()  # → 1
+        """
+        if self.ref_count == null:
+            return 0
+        unsafe:
+            return *self.ref_count
+
+    fn is_unique() -> bool:
+        """Check if this is the only reference.
+
+        Returns:
+            true if ref count is 1
+
+        Example:
+            ref.is_unique()  # → true
+        """
+        return self.get_ref_count() == 1
+
+    fn is_shared() -> bool:
+        """Check if resource is shared (multiple refs).
+
+        Returns:
+            true if ref count > 1
+
+        Example:
+            ref.is_shared()  # → false
+        """
+        return self.get_ref_count() > 1
+
+    fn summary() -> String:
+        """Get ref summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            ref.summary()
+            # → "Ref: valid, count=2"
+        """
+        if self.is_null():
+            return "Ref: null"
+        else:
+            let count = self.get_ref_count()
+            return "Ref: valid, count={count}"
+
+# ResourceLoader singleton
+pub struct ResourceLoader:
+    singleton_ptr: ffi.GDExtensionObjectPtr
+
+impl ResourceLoader:
+    # Get the ResourceLoader singleton
+    pub fn get_singleton() -> ResourceLoader:
+        let ptr = godot_get_singleton("ResourceLoader")
+        return ResourceLoader(singleton_ptr: ptr)
+
+    # Load a resource from file
+    pub fn load(self, path: String) -> Result[Resource, String]:
+        let path_var = variant.Variant::from_string(path)
+        let obj = object.Object::from_ptr(self.singleton_ptr)
+        let result = obj.call1("load", path_var)
+
+        let res_ptr = result.as_object()
+        if res_ptr == 0:
+            return Err("Failed to load resource: {path}")
+
+        return Ok(Resource::from_ptr(res_ptr))
+
+    # Load a resource asynchronously
+    pub async fn load_async(self, path: String) -> Result[Resource, String]:
+        # Start async load
+        let path_var = variant.Variant::from_string(path)
+        let use_sub_threads = variant.Variant::from_bool(true)
+        
+        let obj = object.Object::from_ptr(self.singleton_ptr)
+        obj.call2("load_threaded_request", path_var, use_sub_threads)
+
+        # Poll until loaded
+        loop:
+            let status = obj.call1("load_threaded_get_status", path_var)
+            let status_int = status.as_int()
+
+            if status_int == 3:  # THREAD_LOAD_LOADED
+                let result = obj.call1("load_threaded_get", path_var)
+                let res_ptr = result.as_object()
+                if res_ptr == 0:
+                    return Err("Failed to load resource: {path}")
+                return Ok(Resource::from_ptr(res_ptr))
+            elif status_int == 2:  # THREAD_LOAD_FAILED
+                return Err("Failed to load resource: {path}")
+
+            # Wait a bit before polling again
+            await sleep(0.1)
+
+    # Check if resource exists
+    pub fn exists(self, path: String) -> bool:
+        let path_var = variant.Variant::from_string(path)
+        let obj = object.Object::from_ptr(self.singleton_ptr)
+        let result = obj.call1("exists", path_var)
+        return result.as_bool()
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn has_resource(path: String) -> bool:
+        """Check if resource exists (alias for exists).
+
+        Args:
+            path: Resource file path
+
+        Returns:
+            true if resource exists
+
+        Example:
+            loader.has_resource("res://icon.png")  # → true
+        """
+        return self.exists(path)
+
+    fn is_missing(path: String) -> bool:
+        """Check if resource does not exist.
+
+        Args:
+            path: Resource file path
+
+        Returns:
+            true if resource doesn't exist
+
+        Example:
+            loader.is_missing("res://missing.png")  # → true
+        """
+        return not self.exists(path)
+
+    fn try_load(path: String) -> Option[Resource]:
+        """Try to load a resource, returning None on failure.
+
+        Args:
+            path: Resource file path
+
+        Returns:
+            Option containing resource or None
+
+        Example:
+            if let Some(res) = loader.try_load("res://icon.png"):
+                # Use res
+        """
+        let result = self.load(path)
+        if result.is_ok():
+            return Some(result.unwrap())
+        else:
+            return None
+
+    fn summary() -> String:
+        """Get resource loader summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            loader.summary()
+            # → "ResourceLoader: ready"
+        """
+        return "ResourceLoader: ready"
+
+# Helper functions
+extern "C" fn runtime_allocate_ref_counter() -> *mut i32
+extern "C" fn runtime_free_ref_counter(ptr: *mut i32)
+extern "C" fn godot_get_singleton(name: String) -> ffi.GDExtensionObjectPtr
+extern "C" fn sleep(seconds: f64) -> Future[()]

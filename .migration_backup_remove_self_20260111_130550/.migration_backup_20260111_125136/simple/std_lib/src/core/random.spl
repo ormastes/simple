@@ -1,0 +1,271 @@
+# Random - Random number generation for Simple
+# Provides random integers, floats, and choice operations
+
+# Extern declaration for time FFI
+extern fn rt_time_now_seconds() -> Float
+
+# Linear Congruential Generator (LCG) state
+class RandomState:
+    seed: Int
+
+    fn new(seed: Int) -> RandomState:
+        return RandomState {
+            seed: seed
+        }
+
+    # Generate next random number using LCG
+    # Parameters from Numerical Recipes: a=1664525, c=1013904223, m=2^32
+    fn next(self) -> Int:
+        let a = 1664525
+        let c = 1013904223
+        let m = 4294967296  # 2^32
+
+        self.seed = (a * self.seed + c) % m
+        return self.seed
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_seed(self) -> Int:
+        """Get current seed value.
+
+        Returns:
+            Current seed state
+
+        Example:
+            state = RandomState.new(42)
+            state.get_seed()  # → 42
+        """
+        return self.seed
+
+    fn set_seed(self, new_seed: Int):
+        """Set seed to specific value.
+
+        Args:
+            new_seed: New seed value
+
+        Example:
+            state = RandomState.new(42)
+            state.set_seed(100)
+            state.get_seed()  # → 100
+        """
+        self.seed = new_seed
+
+    fn reset(self, original_seed: Int):
+        """Reset state to original seed.
+
+        Args:
+            original_seed: Seed to reset to
+
+        Example:
+            state = RandomState.new(42)
+            state.next()  # Advances state
+            state.reset(42)  # Back to original
+        """
+        self.seed = original_seed
+
+    fn clone(self) -> RandomState:
+        """Clone random state.
+
+        Returns:
+            New RandomState with same seed
+
+        Example:
+            state1 = RandomState.new(42)
+            state2 = state1.clone()
+            state1.next() == state2.next()  # → true
+        """
+        return RandomState.new(self.seed)
+
+    fn is_initialized(self) -> Bool:
+        """Check if state has non-zero seed.
+
+        Returns:
+            true if seed is non-zero
+
+        Example:
+            state = RandomState.new(0)
+            state.is_initialized()  # → false
+            state = RandomState.new(42)
+            state.is_initialized()  # → true
+        """
+        return self.seed != 0
+
+    fn summary(self) -> String:
+        """Get summary of random state.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            state.summary()
+            # → "RandomState: seed=42"
+        """
+        let seed = self.seed
+        return "RandomState: seed={seed}"
+
+# Global random state
+let mut _global_random_state = None
+
+# Initialize random state with seed
+pub fn seed(s: Int):
+    _global_random_state = Some(RandomState.new(s))
+
+# Get or initialize random state
+fn get_random_state() -> RandomState:
+    if _global_random_state.is_none():
+        # Default seed based on current time
+        let time_seed = (rt_time_now_seconds() * 1000000.0) as Int
+        _global_random_state = Some(RandomState.new(time_seed))
+
+    return _global_random_state.unwrap()
+
+# Generate random integer in range [0, n)
+pub fn randint(a: Int, b: Int) -> Int:
+    let state = get_random_state()
+    let rand_val = state.next()
+
+    # Map to range [a, b]
+    let range = b - a + 1
+    return a + (rand_val % range)
+
+# Generate random float in range [0.0, 1.0)
+pub fn random() -> Float:
+    let state = get_random_state()
+    let rand_val = state.next()
+
+    # Normalize to [0.0, 1.0)
+    return (rand_val as Float) / 4294967296.0
+
+# Generate random float in range [a, b)
+pub fn uniform(a: Float, b: Float) -> Float:
+    let r = random()
+    return a + r * (b - a)
+
+# Choose random element from list
+pub fn choice(items: List) -> Option:
+    if items.len() == 0:
+        return None
+
+    let index = randint(0, items.len() - 1)
+    return Some(items[index])
+
+# Choose N random elements from list (with replacement)
+pub fn choices(items: List, k: Int) -> List:
+    let mut result = []
+
+    for _ in 0..k:
+        let item_opt = choice(items)
+        if item_opt.is_some():
+            result.append(item_opt.unwrap())
+
+    return result
+
+# Shuffle list in place
+pub fn shuffle(items: List):
+    let n = items.len()
+
+    # Fisher-Yates shuffle
+    for i in (n - 1)..0.step(-1):
+        let j = randint(0, i)
+
+        # Swap items[i] and items[j]
+        let temp = items[i]
+        items[i] = items[j]
+        items[j] = temp
+
+# Sample N elements without replacement
+pub fn sample(items: List, k: Int) -> List:
+    if k > items.len():
+        return items  # Can't sample more than available
+
+    # Create a copy and shuffle
+    let mut copy = []
+    for item in items:
+        copy.append(item)
+
+    shuffle(copy)
+
+    # Take first k elements
+    return copy[0..k]
+
+# Generate random bytes
+pub fn randbytes(n: Int) -> List[Int]:
+    let mut result = []
+
+    for _ in 0..n:
+        result.append(randint(0, 255))
+
+    return result
+
+# Random boolean
+pub fn randbool() -> Bool:
+    return randint(0, 1) == 1
+
+# Random from normal distribution (Box-Muller transform)
+pub fn gauss(mu: Float, sigma: Float) -> Float:
+    # Box-Muller transform
+    let u1 = random()
+    let u2 = random()
+
+    # Avoid log(0)
+    let u1_safe = if u1 < 0.000001: 0.000001 else: u1
+
+    let z0 = math.sqrt(-2.0 * math.log(u1_safe)) * math.cos(2.0 * math.PI * u2)
+
+    return mu + z0 * sigma
+
+# Random from exponential distribution
+pub fn expovariate(lambd: Float) -> Float:
+    let u = random()
+
+    # Avoid log(0)
+    let u_safe = if u < 0.000001: 0.000001 else: u
+
+    return -math.log(u_safe) / lambd
+
+# Generate random range
+pub fn randrange(start: Int, stop: Int, step: Int = 1) -> Int:
+    if step == 1:
+        return randint(start, stop - 1)
+
+    let n = (stop - start) / step
+    let index = randint(0, n - 1)
+    return start + index * step
+
+# Random seed from bytes
+pub fn seed_bytes(bytes: List[Int]):
+    # Combine bytes into integer seed
+    let mut s = 0
+    for b in bytes:
+        s = (s * 256 + b) % 4294967296
+
+    seed(s)
+
+# Get random state for saving/restoring
+pub fn getstate() -> Int:
+    let state = get_random_state()
+    return state.seed
+
+# Restore random state
+pub fn setstate(state: Int):
+    seed(state)
+
+# Export all functions
+export seed
+export randint
+export random
+export uniform
+export choice
+export choices
+export shuffle
+export sample
+export randbytes
+export randbool
+export gauss
+export expovariate
+export randrange
+export seed_bytes
+export getstate
+export setstate

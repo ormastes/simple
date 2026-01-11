@@ -1,0 +1,478 @@
+# Fixed-Size Vector - Stack-allocated array with dynamic length
+# No heap allocation, fixed maximum capacity
+
+# Fixed-capacity vector (stack allocated)
+pub struct FixedVec[T, const N: u64]:
+    data: [T; N]
+    len: u64
+
+impl FixedVec[T, const N: u64]:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_content(self) -> bool:
+        """Check if vector has content (not empty)."""
+        self.len > 0
+
+    pub fn available(self) -> u64:
+        """Get available capacity (alias for remaining)."""
+        self.remaining()
+
+    pub fn utilization(self) -> f64:
+        """Calculate vector utilization (0.0 to 1.0)."""
+        if N > 0:
+            (self.len as f64) / (N as f64)
+        else:
+            0.0
+
+    pub fn can_push(self) -> bool:
+        """Check if can push one more element."""
+        self.len < N
+
+    pub fn can_insert(self) -> bool:
+        """Check if can insert one more element (alias for can_push)."""
+        self.can_push()
+
+    pub fn first_mut(self) -> Option[&mut T]:
+        """Get mutable reference to first element."""
+        if self.len == 0:
+            return None
+        return Some(&mut self.data[0])
+
+    pub fn last_mut(self) -> Option[&mut T]:
+        """Get mutable reference to last element."""
+        if self.len == 0:
+            return None
+        return Some(&mut self.data[self.len - 1])
+
+    pub fn is_sorted(self) -> bool where T: Ord:
+        """Check if vector is sorted in ascending order."""
+        for i in 1..self.len:
+            if self.data[i - 1].gt(&self.data[i]):
+                return false
+        return true
+
+    pub fn count(self, predicate: fn(&T) -> bool) -> u64:
+        """Count elements matching predicate."""
+        let mut count: u64 = 0
+        for i in 0..self.len:
+            if predicate(&self.data[i]):
+                count = count + 1
+        return count
+
+    pub fn is_sorted_descending(self) -> bool where T: Ord:
+        """Check if vector is sorted in descending order."""
+        for i in 1..self.len:
+            if self.data[i - 1].lt(&self.data[i]):
+                return false
+        return true
+
+    pub fn summary(self) -> String:
+        """Get summary of fixed vector state."""
+        let util = (self.utilization() * 100.0) as u64
+        return "FixedVec[T, {N}]: {self.len} items, {util}% full"
+
+    # =========================================================================
+    # Constructor
+    # =========================================================================
+
+    # Create empty fixed vector
+    pub fn new() -> FixedVec[T, N]:
+        return FixedVec {
+            data: [T::default(); N],
+            len: 0
+        }
+
+    # Create from array
+    pub fn from_array(arr: [T; N]) -> FixedVec[T, N]:
+        return FixedVec {
+            data: arr,
+            len: N
+        }
+
+    # Get capacity
+    pub fn capacity(self) -> u64:
+        return N
+
+    # Get current length
+    pub fn len(self) -> u64:
+        return self.len
+
+    # Check if empty
+    pub fn is_empty(self) -> bool:
+        return self.len == 0
+
+    # Check if full
+    pub fn is_full(self) -> bool:
+        return self.len == N
+
+    # Get remaining capacity
+    pub fn remaining(self) -> u64:
+        return N - self.len
+
+    # Push element (returns false if full)
+    pub fn push(self, value: T) -> bool:
+        if self.len >= N:
+            return false
+        self.data[self.len] = value
+        self.len = self.len + 1
+        return true
+
+    # Try push with Result
+    pub fn try_push(self, value: T) -> Result[(), FixedVecError]:
+        if self.len >= N:
+            return Err(FixedVecError::Full)
+        self.data[self.len] = value
+        self.len = self.len + 1
+        return Ok(())
+
+    # Pop element
+    pub fn pop(self) -> Option[T]:
+        if self.len == 0:
+            return None
+        self.len = self.len - 1
+        return Some(self.data[self.len])
+
+    # Get element at index
+    pub fn get(self, index: u64) -> Option[&T]:
+        if index >= self.len:
+            return None
+        return Some(&self.data[index])
+
+    # Get mutable element at index
+    pub fn get_mut(self, index: u64) -> Option[&mut T]:
+        if index >= self.len:
+            return None
+        return Some(&mut self.data[index])
+
+    # Index operator (panics on out of bounds)
+    pub fn index(self, index: u64) -> &T:
+        if index >= self.len:
+            panic("index {index} out of bounds (len={self.len})")
+        return &self.data[index]
+
+    # Mutable index operator
+    pub fn index_mut(self, index: u64) -> &mut T:
+        if index >= self.len:
+            panic("index {index} out of bounds (len={self.len})")
+        return &mut self.data[index]
+
+    # First element
+    pub fn first(self) -> Option[&T]:
+        return self.get(0)
+
+    # Last element
+    pub fn last(self) -> Option[&T]:
+        if self.len == 0:
+            return None
+        return self.get(self.len - 1)
+
+    # Clear all elements
+    pub fn clear(self):
+        self.len = 0
+
+    # Truncate to length
+    pub fn truncate(self, len: u64):
+        if len < self.len:
+            self.len = len
+
+    # Insert at index (shifts elements right)
+    pub fn insert(self, index: u64, value: T) -> bool:
+        if self.len >= N or index > self.len:
+            return false
+
+        # Shift elements right
+        let mut i = self.len
+        while i > index:
+            self.data[i] = self.data[i - 1]
+            i = i - 1
+
+        self.data[index] = value
+        self.len = self.len + 1
+        return true
+
+    # Remove at index (shifts elements left)
+    pub fn remove(self, index: u64) -> Option[T]:
+        if index >= self.len:
+            return None
+
+        let value = self.data[index]
+
+        # Shift elements left
+        for i in index..(self.len - 1):
+            self.data[i] = self.data[i + 1]
+
+        self.len = self.len - 1
+        return Some(value)
+
+    # Swap remove (O(1) but doesn't preserve order)
+    pub fn swap_remove(self, index: u64) -> Option[T]:
+        if index >= self.len:
+            return None
+
+        let value = self.data[index]
+        self.len = self.len - 1
+
+        if index != self.len:
+            self.data[index] = self.data[self.len]
+
+        return Some(value)
+
+    # Retain elements matching predicate
+    pub fn retain(self, predicate: fn(&T) -> bool):
+        let mut write = 0
+        for read in 0..self.len:
+            if predicate(&self.data[read]):
+                if write != read:
+                    self.data[write] = self.data[read]
+                write = write + 1
+        self.len = write
+
+    # Find element index
+    pub fn find(self, predicate: fn(&T) -> bool) -> Option[u64]:
+        for i in 0..self.len:
+            if predicate(&self.data[i]):
+                return Some(i)
+        return None
+
+    # Check if contains element
+    pub fn contains(self, predicate: fn(&T) -> bool) -> bool:
+        return self.find(predicate).is_some()
+
+    # Get as slice
+    pub fn as_slice(self) -> &[T]:
+        return &self.data[0..self.len]
+
+    # Get as mutable slice
+    pub fn as_mut_slice(self) -> &mut [T]:
+        return &mut self.data[0..self.len]
+
+    # Extend from slice (returns number added)
+    pub fn extend_from_slice(self, slice: &[T]) -> u64 where T: Copy:
+        let mut added: u64 = 0
+        for item in slice:
+            if not self.push(*item):
+                break
+            added = added + 1
+        return added
+
+    # Sort (requires Ord)
+    pub fn sort(self) where T: Ord:
+        # Simple insertion sort for small fixed arrays
+        for i in 1..self.len:
+            let key = self.data[i]
+            let mut j = i
+            while j > 0 and self.data[j - 1].gt(&key):
+                self.data[j] = self.data[j - 1]
+                j = j - 1
+            self.data[j] = key
+
+    # Reverse in place
+    pub fn reverse(self):
+        let mut left: u64 = 0
+        let mut right = self.len - 1
+        while left < right:
+            let tmp = self.data[left]
+            self.data[left] = self.data[right]
+            self.data[right] = tmp
+            left = left + 1
+            right = right - 1
+
+# Fixed vector error type
+enum FixedVecError:
+    Full
+    IndexOutOfBounds
+
+impl FixedVecError:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn to_string(self) -> String:
+        """Convert error to string."""
+        match self:
+            case Full: return "Full"
+            case IndexOutOfBounds: return "IndexOutOfBounds"
+
+    pub fn description(self) -> String:
+        """Get detailed error description."""
+        return self.message().to_string()
+
+    pub fn is_full(self) -> bool:
+        """Check if this is a Full error."""
+        match self:
+            case Full: true
+            case _: false
+
+    pub fn is_index_out_of_bounds(self) -> bool:
+        """Check if this is an IndexOutOfBounds error."""
+        match self:
+            case IndexOutOfBounds: true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get summary of fixed vector error.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            FixedVecError::Full.summary()
+            # → "FixedVecError: Full (fixed vector is full)"
+        """
+        let name = self.to_string()
+        let desc = self.message()
+        return "FixedVecError: {name} ({desc})"
+
+    # =========================================================================
+    # Existing Methods
+    # =========================================================================
+
+    fn message(self) -> str:
+        match self:
+            case Full: return "fixed vector is full"
+            case IndexOutOfBounds: return "index out of bounds"
+
+# ============================================
+# Trait Implementations
+# ============================================
+
+use core.traits.*
+
+impl Default for FixedVec[T, const N: u64] where T: Default:
+    fn default() -> Self:
+        FixedVec::new()
+
+impl Clone for FixedVec[T, const N: u64] where T: Clone:
+    fn clone(self) -> Self:
+        var result = FixedVec::new()
+        for i in 0..self.len:
+            result.push(self.data[i].clone())
+        result
+
+impl Len for FixedVec[T, const N: u64]:
+    fn len(self) -> usize:
+        self.len as usize
+
+impl Capacity for FixedVec[T, const N: u64]:
+    fn capacity(self) -> usize:
+        N as usize
+
+    fn is_full(self) -> bool:
+        self.len == N
+
+impl Clear for FixedVec[T, const N: u64]:
+    fn clear(self):
+        self.len = 0
+
+impl AsSlice[T] for FixedVec[T, const N: u64]:
+    fn as_slice(self) -> &[T]:
+        &self.data[0..self.len]
+
+impl AsMutSlice[T] for FixedVec[T, const N: u64]:
+    fn as_mut_slice(self) -> &mut [T]:
+        &mut self.data[0..self.len]
+
+impl Index[u64] for FixedVec[T, const N: u64]:
+    type Output = T
+    fn index(self, idx: u64) -> &Self::Output:
+        if idx >= self.len:
+            panic("index {idx} out of bounds (len={self.len})")
+        &self.data[idx]
+
+impl IndexMut[u64] for FixedVec[T, const N: u64]:
+    fn index_mut(self, idx: u64) -> &mut Self::Output:
+        if idx >= self.len:
+            panic("index {idx} out of bounds (len={self.len})")
+        &mut self.data[idx]
+
+impl Extend[T] for FixedVec[T, const N: u64]:
+    fn extend[I: IntoIterator[Item=T]](self, iter: I):
+        for item in iter:
+            if not self.push(item):
+                break
+
+impl IntoIterator for FixedVec[T, const N: u64]:
+    type Item = T
+    type IntoIter = FixedVecIter[T, N]
+    fn into_iter(self) -> Self::IntoIter:
+        FixedVecIter { vec: self, index: 0 }
+
+# Iterator for FixedVec
+struct FixedVecIter[T, const N: u64]:
+    vec: FixedVec[T, N]
+    index: u64
+
+impl FixedVecIter[T, const N: u64]:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_remaining(self) -> bool:
+        """Check if iterator has remaining items."""
+        self.index < self.vec.len
+
+    pub fn remaining(self) -> u64:
+        """Get remaining items count."""
+        if self.index < self.vec.len:
+            self.vec.len - self.index
+        else:
+            0
+
+    pub fn is_done(self) -> bool:
+        """Check if iteration is complete."""
+        self.index >= self.vec.len
+
+    pub fn current_index(self) -> u64:
+        """Get current iteration index."""
+        self.index
+
+    pub fn summary(self) -> String:
+        """Get summary of iterator state."""
+        return "FixedVecIter: index={self.index}/{self.vec.len}, {self.remaining()} remaining"
+
+impl Iterator for FixedVecIter[T, const N: u64]:
+    type Item = T
+    fn next(self) -> Option[Self::Item]:
+        if self.index < self.vec.len:
+            let item = self.vec.data[self.index]
+            self.index = self.index + 1
+            Some(item)
+        else:
+            None
+
+impl ExactSizeIterator for FixedVecIter[T, const N: u64]:
+    fn len(self) -> usize:
+        (self.vec.len - self.index) as usize
+
+impl FromIterator[T] for FixedVec[T, const N: u64] where T: Default:
+    fn from_iter[I: Iterator[Item=T]](iter: I) -> Self:
+        var result = FixedVec::new()
+        for item in iter:
+            if not result.push(item):
+                break
+        result
+
+impl Eq for FixedVec[T, const N: u64] where T: Eq:
+    fn eq(self, other: &Self) -> bool:
+        if self.len != other.len:
+            return false
+        for i in 0..self.len:
+            if not self.data[i].eq(&other.data[i]):
+                return false
+        true
+
+impl Display for FixedVecError:
+    fn fmt(self) -> str:
+        self.message()
+
+impl Error for FixedVecError
+
+# Common type aliases
+type FixedVec8[T] = FixedVec[T, 8]
+type FixedVec16[T] = FixedVec[T, 16]
+type FixedVec32[T] = FixedVec[T, 32]
+type FixedVec64[T] = FixedVec[T, 64]
+type FixedVec128[T] = FixedVec[T, 128]
+type FixedVec256[T] = FixedVec[T, 256]

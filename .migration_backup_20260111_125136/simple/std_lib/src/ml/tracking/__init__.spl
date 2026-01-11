@@ -1,0 +1,518 @@
+# Experiment Tracking System
+#
+# Local-first ML experiment tracking inspired by W&B.
+# Stores all data locally with optional remote sync.
+#
+# ## Features
+# - Run lifecycle management with context managers
+# - Scalar, histogram, image logging
+# - Offline mode (full functionality without network)
+# - Artifact versioning with lineage tracking
+# - Local storage in .simple/runs/
+#
+# ## Example
+# ```simple
+# import ml.tracking.Track
+#
+# with Track.run(project="cifar10", config=cfg) as run:
+#     for epoch in 0..num_epochs:
+#         loss = train_epoch(model, dataloader)
+#         run.log({"train/loss": loss, "epoch": epoch}, step=epoch)
+#
+#     # Save model artifact
+#     artifact = Track.Artifact("model-v1", type="model")
+#     artifact.add_file("checkpoint.pt")
+#     run.log_artifact(artifact)
+# ```
+
+export Run, Artifact, TrackMode, run, set_mode, set_dir
+
+# TODO: Add imports when available:
+# import sdn.{SdnDocument}
+# import json
+# import time
+# import random
+# import fs
+
+
+# ============================================================================
+# Enums
+# ============================================================================
+
+# Tracking mode:
+# - Online: Real-time sync to remote server
+# - Offline: Local storage only
+# - Disabled: No-op for all operations
+enum TrackMode:
+    Online
+    Offline
+    Disabled
+
+impl TrackMode:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_online() -> bool:
+        """Check if this is Online mode.
+
+        Returns:
+            true for Online
+
+        Example:
+            TrackMode::Online.is_online()  # → true
+        """
+        match self:
+            case Online: true
+            case _: false
+
+    fn is_offline() -> bool:
+        """Check if this is Offline mode.
+
+        Returns:
+            true for Offline
+
+        Example:
+            TrackMode::Offline.is_offline()  # → true
+        """
+        match self:
+            case Offline: true
+            case _: false
+
+    fn is_disabled() -> bool:
+        """Check if this is Disabled mode.
+
+        Returns:
+            true for Disabled
+
+        Example:
+            TrackMode::Disabled.is_disabled()  # → true
+        """
+        match self:
+            case Disabled: true
+            case _: false
+
+    fn is_enabled() -> bool:
+        """Check if tracking is enabled (Online or Offline).
+
+        Returns:
+            true for Online or Offline, false for Disabled
+
+        Example:
+            TrackMode::Online.is_enabled()  # → true
+            TrackMode::Disabled.is_enabled()  # → false
+        """
+        match self:
+            case Disabled: false
+            case _: true
+
+    fn requires_network() -> bool:
+        """Check if mode requires network connection.
+
+        Returns:
+            true for Online, false for Offline and Disabled
+
+        Example:
+            TrackMode::Online.requires_network()  # → true
+            TrackMode::Offline.requires_network()  # → false
+        """
+        match self:
+            case Online: true
+            case _: false
+
+    fn stores_locally() -> bool:
+        """Check if mode stores data locally.
+
+        Returns:
+            true for Online and Offline, false for Disabled
+
+        Example:
+            TrackMode::Offline.stores_locally()  # → true
+        """
+        match self:
+            case Online: true
+            case Offline: true
+            case Disabled: false
+
+    fn to_string() -> String:
+        """Convert mode to string.
+
+        Returns:
+            Mode name
+
+        Example:
+            TrackMode::Online.to_string()  # → "online"
+        """
+        match self:
+            case Online: "online"
+            case Offline: "offline"
+            case Disabled: "disabled"
+
+    fn summary() -> String:
+        """Get summary of tracking mode.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            TrackMode::Online.summary()
+            # → "TrackMode: online (enabled, network required, stores locally)"
+        """
+        let name = self.to_string()
+        let status = if self.is_enabled(): "enabled" else: "disabled"
+        let network = if self.requires_network(): "network required" else: "no network"
+        let storage = if self.stores_locally(): "stores locally" else: "no storage"
+        return "TrackMode: {name} ({status}, {network}, {storage})"
+
+
+# ============================================================================
+# Run Class
+# ============================================================================
+
+class Run:
+    """Experiment run with metrics logging.
+
+    Represents a single training run with unique ID.
+    Stores metrics, config, and artifacts locally.
+
+    Attributes:
+        id: Unique run ID
+        name: Human-readable name
+        project: Project name
+        dir: Local run directory
+        config: Run configuration
+        summary: Final metrics summary
+        tags: List of tags
+        start_time: Run start timestamp
+        end_time: Run end timestamp (null if running)
+        _metrics_file: JSONL file for metrics
+        _step: Current step counter
+    """
+    id: str
+    name: str
+    project: str
+    dir: str
+    config: any
+    summary: any
+    tags: any
+    start_time: i64
+    end_time: i64
+    _metrics_file: str
+    _step: i64
+
+    fn __init__(id: str,
+        name: str,
+        project: str,
+        dir: str,
+        config: any,
+        tags: [str]
+    ):
+        """Initialize run.
+
+        Args:
+            id: Unique run ID
+            name: Run name
+            project: Project name
+            dir: Run directory
+            config: Configuration dict
+            tags: List of tags
+        """
+        self.id = id
+        self.name = name
+        self.project = project
+        self.dir = dir
+        self.config = config
+        self.summary = {}
+        self.tags = tags
+        self.start_time = 0
+        self.end_time = 0
+        self._step = 0
+
+        # Create run directory
+        fs.makedirs(self.dir, exist_ok=true)
+        fs.makedirs(f"{self.dir}/media", exist_ok=true)
+        fs.makedirs(f"{self.dir}/artifacts", exist_ok=true)
+
+        # Metrics file (JSONL)
+        self._metrics_file = f"{self.dir}/metrics.jsonl"
+
+        # Save metadata
+        self._save_metadata()
+
+    fn log(metrics: any, step: i64):
+        """Log metrics for current step.
+
+        Args:
+            metrics: Dictionary of metric values
+            step: Step number
+
+        Example:
+            ```simple
+            run.log({"train/loss": 0.5, "train/acc": 0.92}, step=100)
+            ```
+        """
+        self._step = step
+
+        # TODO: Create metric entry and append to JSONL file
+        # Stubbed out to avoid dict operations
+        let _ = metrics  # Suppress unused warning
+
+    fn log_histogram(name: str, values: any, bins: i32, step: i64):
+        """Log histogram of values.
+
+        Args:
+            name: Metric name
+            values: List of values
+            bins: Number of histogram bins
+            step: Step number
+        """
+        # TODO: Compute histogram
+        # For now, just log summary stats
+        if values.len() > 0:
+            let mean = sum(values) / values.len()
+            let min_val = min(values)
+            let max_val = max(values)
+
+            self.log({
+                f"{name}/mean": mean,
+                f"{name}/min": min_val,
+                f"{name}/max": max_val
+            }, step=step)
+
+    fn log_image(name: str, image_path: str, caption: str, step: i64):
+        """Log image file.
+
+        Args:
+            name: Image name
+            image_path: Path to image file
+            caption: Optional caption
+            step: Step number
+        """
+        # Copy image to media directory
+        let media_dir = f"{self.dir}/media/images"
+        fs.makedirs(media_dir, exist_ok=true)
+
+        let filename = f"{name}_{step}.png"
+        let dest = f"{media_dir}/{filename}"
+        fs.copy(image_path, dest)
+
+        # Log metadata
+        self.log({
+            f"{name}/image": filename,
+            f"{name}/caption": caption
+        }, step=step)
+
+    fn finish():
+        """Finish the run.
+
+        Saves final summary and marks run as complete.
+        """
+        self.end_time = self._step
+
+        # TODO: Update metadata when SDN and fs available
+        # self._save_metadata()
+
+    fn log_artifact(artifact: Artifact, aliases: any):
+        """Log artifact as output.
+
+        Args:
+            artifact: Artifact to log
+            aliases: Version aliases (e.g., ["latest", "v1"])
+        """
+        # Copy artifact to run artifacts directory
+        let artifact_dir = f"{self.dir}/artifacts/{artifact.name}"
+        fs.makedirs(artifact_dir, exist_ok=true)
+
+        # Copy files
+        for file_path in artifact._files:
+            let filename = fs.basename(file_path)
+            fs.copy(file_path, f"{artifact_dir}/{filename}")
+
+        # Save artifact metadata
+        let metadata = {
+            "name": artifact.name,
+            "type": artifact.type,
+            "description": artifact.description,
+            "metadata": artifact.metadata,
+            "files": [fs.basename(f) for f in artifact._files],
+            "aliases": aliases
+        }
+
+        let metadata_path = f"{artifact_dir}/metadata.sdn"
+        SdnDocument.from_dict(metadata).write_file(metadata_path)
+
+    # ========================================================================
+    # Helper Methods
+    # ========================================================================
+
+    fn _save_metadata():
+        """Save run metadata to SDN file."""
+        let metadata = {
+            "id": self.id,
+            "name": self.name,
+            "project": self.project,
+            "tags": self.tags,
+            "created_at": self.start_time,
+            "finished_at": self.end_time,
+            "config": self.config,
+            "summary": self.summary
+        }
+
+        let metadata_path = f"{self.dir}/metadata.sdn"
+        SdnDocument.from_dict(metadata).write_file(metadata_path)
+
+    fn _append_jsonl(path: str, data: any):
+        """Append JSON line to file.
+
+        Args:
+            path: File path
+            data: Data to append as JSON
+        """
+        let json_str = json.dumps(data)
+        let file = fs.open(path, mode="a")
+        file.write(json_str + "\n")
+        file.close()
+
+
+# ============================================================================
+# Artifact Class
+# ============================================================================
+
+class Artifact:
+    """Artifact for versioning datasets/models.
+
+    Attributes:
+        name: Artifact name
+        type: Artifact type (dataset, model, result)
+        description: Description
+        metadata: Additional metadata
+        _files: List of file paths
+    """
+    name: str
+    type: str
+    description: str
+    metadata: any
+    _files: [str]
+
+    fn __init__(name: str, type: str, description: str, metadata: any):
+        """Initialize artifact.
+
+        Args:
+            name: Artifact name
+            type: Artifact type
+            description: Description
+            metadata: Additional metadata
+        """
+        self.name = name
+        self.type = type
+        self.description = description
+        self.metadata = metadata
+        self._files = []
+
+    fn add_file(path: str, name: str):
+        """Add file to artifact.
+
+        Args:
+            path: File path
+            name: Optional name (default: basename)
+        """
+        self._files.append(path)
+
+    fn add_dir(path: str, name: str):
+        """Add directory to artifact.
+
+        Args:
+            path: Directory path
+            name: Optional name
+        """
+        # TODO: Recursively add all files in directory
+        # For now, just mark the directory
+        self._files.append(path)
+
+
+# ============================================================================
+# Module-level tracking functions
+# ============================================================================
+
+fn run(project: str, name: str, config: any, tags: any) -> Run:
+    """Create new tracking run.
+
+    Args:
+        project: Project name
+        name: Run name
+        config: Configuration dict
+        tags: List of tags
+
+    Returns:
+        Run object
+
+    Example:
+        import ml.tracking
+        let my_run = tracking.run(
+            project="cifar10",
+            name="baseline",
+            config={"lr": 0.001},
+            tags=["baseline"]
+        )
+        my_run.log({"loss": 0.5}, step=0)
+        my_run.finish()
+    """
+    # Generate run ID
+    let run_id = _generate_id()
+
+    # Create run directory
+    let runs_dir = ".simple/runs"
+    let run_dir = f"{runs_dir}/{project}/{run_id}"
+
+    # Create run
+    return Run(
+        id=run_id,
+        name=name,
+        project=project,
+        dir=run_dir,
+        config=config,
+        tags=tags
+    )
+
+
+fn set_mode(mode: str):
+    """Set tracking mode.
+
+    Args:
+        mode: Mode string ("online", "offline", "disabled")
+    """
+    # TODO: Store mode in global state
+    let _ = mode  # Suppress unused warning
+
+
+fn set_dir(path: str):
+    """Set runs directory.
+
+    Args:
+        path: Directory path
+    """
+    # TODO: Store runs dir in global state
+    let _ = path  # Suppress unused warning
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn _generate_id() -> str:
+    """Generate unique run ID.
+
+    Returns:
+        Random hex string
+    """
+    # TODO: Use better random ID generation
+    # For now, return a simple constant ID
+    return "run-001"
+
+
+# ============================================================================
+# Context Manager Support
+# ============================================================================
+
+# TODO: Add __enter__ and __exit__ methods to Run for context manager support
+# For now, users must call run.finish() manually

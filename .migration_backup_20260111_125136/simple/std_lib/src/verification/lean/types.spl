@@ -1,0 +1,206 @@
+# Lean Type Translation
+#
+# Translates Simple types to Lean 4 syntax.
+# - class -> structure
+# - enum -> inductive
+
+import verification.lean.emitter as emit
+
+# Simple type representation for translation
+enum SimpleType:
+    IntType
+    BoolType
+    StringType
+    UnitType
+    ListType(elem: SimpleType)
+    OptionType(inner: SimpleType)
+    TupleType(elems: List[SimpleType])
+    FunctionType(params: List[SimpleType], ret: SimpleType)
+    NamedType(name: String)
+
+    fn to_lean() -> String:
+        match self:
+            case IntType:
+                return "Int"
+            case BoolType:
+                return "Bool"
+            case StringType:
+                return "String"
+            case UnitType:
+                return "Unit"
+            case ListType(e):
+                return "List (" + e.to_lean() + ")"
+            case OptionType(i):
+                return "Option (" + i.to_lean() + ")"
+            case TupleType(es):
+                let mut parts = []
+                for e in es:
+                    parts.append(e.to_lean())
+                "(" + parts.join(" × ") + ")"
+            case FunctionType(ps, r):
+                let mut p_strs = []
+                for p in ps:
+                    p_strs.append(p.to_lean())
+                p_strs.append(r.to_lean())
+                p_strs.join(" → ")
+            case NamedType(n):
+                return n
+
+# Field definition
+class FieldDef:
+    name: String
+    field_type: SimpleType
+    default_value: Option[String]
+
+    fn create(name: String, field_type: SimpleType, default_value: Option[String] = None) -> FieldDef:
+        return FieldDef(name, field_type, default_value)
+
+    fn to_lean_decl() -> String:
+        return self.name + " : " + self.field_type.to_lean()
+
+# Class definition (translates to structure)
+class ClassDef:
+    name: String
+    fields: List[FieldDef]
+    deriving: List[String]
+
+    fn create(name: String, fields: List[FieldDef] = [], deriving: List[String] = ["Repr"]) -> ClassDef:
+        return ClassDef(name, fields, deriving)
+
+    fn add_field(field: FieldDef) -> ClassDef:
+        new_fields = self.fields.append(field)
+        return ClassDef(self.name, new_fields, self.deriving)
+
+    fn with_deriving(deriving: List[String]) -> ClassDef:
+        return ClassDef(self.name, self.fields, deriving)
+
+    fn emit(builder: emit.LeanBuilder) -> emit.LeanBuilder:
+        let mut field_pairs = []
+        for f in self.fields:
+            field_pairs.append((f.name, f.field_type.to_lean()))
+        emit.emit_structure_full(builder, self.name, field_pairs, self.deriving)
+
+# Enum variant
+class EnumVariant:
+    name: String
+    params: List[(String, SimpleType)]
+
+    fn create(name: String, params: List[(String, SimpleType)] = []) -> EnumVariant:
+        return EnumVariant(name, params)
+
+    fn to_lean_params() -> List[(String, String)]:
+        let mut result = []
+        for (n, t) in self.params:
+            result.append((n, t.to_lean()))
+        result
+
+# Enum definition (translates to inductive)
+class EnumDef:
+    name: String
+    variants: List[EnumVariant]
+    deriving: List[String]
+
+    fn create(name: String, variants: List[EnumVariant] = [], deriving: List[String] = ["DecidableEq", "Repr"]) -> EnumDef:
+        return EnumDef(name, variants, deriving)
+
+    fn add_variant(variant: EnumVariant) -> EnumDef:
+        new_variants = self.variants.append(variant)
+        return EnumDef(self.name, new_variants, self.deriving)
+
+    fn with_deriving(deriving: List[String]) -> EnumDef:
+        return EnumDef(self.name, self.variants, deriving)
+
+    fn emit(builder: emit.LeanBuilder) -> emit.LeanBuilder:
+        let mut constructors = []
+        for v in self.variants:
+            constructors.append((v.name, v.to_lean_params()))
+        return emit.emit_inductive_full(builder, self.name, constructors, self.deriving)
+
+# Function parameter
+class ParamDef:
+    name: String
+    param_type: SimpleType
+
+    fn create(name: String, param_type: SimpleType) -> ParamDef:
+        return ParamDef(name, param_type)
+
+    fn to_lean() -> (String, String):
+        return (self.name, self.param_type.to_lean())
+
+# Function definition
+class FunctionDef:
+    name: String
+    params: List[ParamDef]
+    return_type: SimpleType
+    body: String
+    is_partial: Bool
+
+    fn create(name: String, params: List[ParamDef], return_type: SimpleType, body: String, is_partial: Bool = false) -> FunctionDef:
+        return FunctionDef(name, params, return_type, body, is_partial)
+
+    fn emit(builder: emit.LeanBuilder) -> emit.LeanBuilder:
+        let mut param_pairs = []
+        for p in self.params:
+            param_pairs.append(p.to_lean())
+        prefix = ""
+        if self.is_partial:
+            prefix = "partial "
+        # Build manually since we need partial prefix
+        let mut param_strs = []
+        for (n, t) in param_pairs:
+            param_strs.append("(" + n + " : " + t + ")")
+        params_str = param_strs.join(" ")
+        sig = prefix + "def " + self.name
+        if self.params.len() > 0:
+            sig = sig + " " + params_str
+        sig = sig + " : " + self.return_type.to_lean() + " :="
+        b = builder.line(sig)
+        b = b.push_indent()
+        for line in self.body.split("\n"):
+            b = b.line(line)
+        b = b.pop_indent()
+        return b
+
+# Type abbreviation
+class AbbrevDef:
+    name: String
+    type_expr: String
+
+    fn create(name: String, type_expr: String) -> AbbrevDef:
+        return AbbrevDef(name, type_expr)
+
+    fn emit(builder: emit.LeanBuilder) -> emit.LeanBuilder:
+        return emit.emit_abbrev(builder, self.name, self.type_expr)
+
+# Emit structure from ClassDef
+fn emit_class_as_structure(builder: emit.LeanBuilder, cls: ClassDef) -> emit.LeanBuilder:
+    return cls.emit(builder)
+
+# Emit inductive from EnumDef
+fn emit_enum_as_inductive(builder: emit.LeanBuilder, enum_def: EnumDef) -> emit.LeanBuilder:
+    return enum_def.emit(builder)
+
+# Emit function definition
+fn emit_function(builder: emit.LeanBuilder, func: FunctionDef) -> emit.LeanBuilder:
+    return func.emit(builder)
+
+# Convenience functions for creating SimpleType instances
+# (These are in types.spl so they can access SimpleType enum variants directly)
+
+fn make_simple_type(name: String) -> SimpleType:
+    return SimpleType.NamedType(name)
+
+fn make_int_type() -> SimpleType:
+    return SimpleType.IntType
+
+fn make_bool_type() -> SimpleType:
+    return SimpleType.BoolType
+
+fn make_string_type() -> SimpleType:
+    return SimpleType.StringType
+
+fn make_list_type(elem: SimpleType) -> SimpleType:
+    return SimpleType.ListType(elem)
+
+fn make_option_type(inner: SimpleType) -> SimpleType:
+    return SimpleType.OptionType(inner)

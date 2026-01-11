@@ -19,17 +19,17 @@ impl File:
     # Open file with mode (auto-staging enabled by default)
     pub async fn open(path: FilePath, mode: OpenMode) -> Result[File, IoError]:
         # Resolve relative paths to absolute paths
-        let resolved_path = native_path_resolve(path)?
+        val resolved_path = native_path_resolve(path)?
 
         # Check file existence for read/write modes
         if mode == OpenMode::Read or mode == OpenMode::Write:
-            let file_exists = await exists(resolved_path)
+            val file_exists = await exists(resolved_path)
             if not file_exists and mode == OpenMode::Read:
                 return Err(IoError::NotFound)
 
         # Open file handle
-        let handle = native_fs_open(resolved_path, mode)?
-        let mut file = File {
+        val handle = native_fs_open(resolved_path, mode)?
+        var file = File {
             handle: handle,
             path: resolved_path,
             mode: mode,
@@ -54,7 +54,7 @@ impl File:
 
     # Wait for staging to complete if in progress
     async fn wait_for_staging(self):
-        if let Some(state) = self.stage_state:
+        if val Some(state) = self.stage_state:
             while state.status == StagingStatus::Staging:
                 await async_yield()
 
@@ -62,22 +62,22 @@ impl File:
     pub async fn read(self, buf: &mut Bytes) -> Result[ByteCount, IoError]:
         await self.wait_for_staging()
 
-        if let Some(state) = self.stage_state:
+        if val Some(state) = self.stage_state:
             match state.mode:
                 case StageMode::Mmap | StageMode::MmapShared:
-                    let pos_result = await self.position()?
-                    let pos = pos_result as u64
-                    let to_read = buf.len().min(state.mmap_size - pos)
+                    val pos_result = await self.position()?
+                    val pos = pos_result as u64
+                    val to_read = buf.len().min(state.mmap_size - pos)
                     if to_read > 0:
                         native_mmap_read(state.mmap_ptr, pos, buf, to_read)
                         await self.seek(SeekFrom::Current(to_read as i64))?
                     return Ok(to_read_bytes)
 
                 case StageMode::Prefetch:
-                    if let Some(prefetch) = state.prefetch_buf:
-                        let pos_result = await self.position()?
-                        let pos = pos_result as u64
-                        let to_read = buf.len().min(prefetch.len() - pos)
+                    if val Some(prefetch) = state.prefetch_buf:
+                        val pos_result = await self.position()?
+                        val pos = pos_result as u64
+                        val to_read = buf.len().min(prefetch.len() - pos)
                         if to_read > 0:
                             buf.copy_from(&prefetch.slice(pos, pos + to_read), 0, to_read)
                             await self.seek(SeekFrom::Current(to_read as i64))?
@@ -90,12 +90,12 @@ impl File:
 
     # Read exact number of bytes
     pub async fn read_exact(self, buf: &mut Bytes) -> Result[(), IoError]:
-        let mut read_total: u64 = 0
-        let target = buf.len()
+        var read_total: u64 = 0
+        val target = buf.len()
         while read_total < target:
-            let remaining = target - read_total
-            let slice = buf.slice_mut(read_total, target)
-            let n = await self.read(&mut slice)?
+            val remaining = target - read_total
+            val slice = buf.slice_mut(read_total, target)
+            val n = await self.read(&mut slice)?
             if (n as u64) == 0:
                 return Err(IoError::UnexpectedEof)
             read_total = read_total + (n as u64)
@@ -108,11 +108,11 @@ impl File:
 
     # Write all bytes
     pub async fn write_all(self, data: &Bytes) -> Result[(), IoError]:
-        let mut written: u64 = 0
-        let total = data.len()
+        var written: u64 = 0
+        val total = data.len()
         while written < total:
-            let slice = data.slice(written, total)
-            let n = await self.write(&slice)?
+            val slice = data.slice(written, total)
+            val n = await self.write(&slice)?
             written = written + (n as u64)
         return Ok(())
 
@@ -131,8 +131,8 @@ impl File:
 
     # Get file size
     pub async fn size(self) -> Result[ByteCount, IoError]:
-        let current = await self.position()?
-        let end = await self.seek(SeekFrom::End(0))?
+        val current = await self.position()?
+        val end = await self.seek(SeekFrom::End(0))?
         await self.seek(SeekFrom::Start(current as u64))?
         return Ok(end)
 
@@ -142,7 +142,7 @@ impl File:
 
     # Close file
     pub async fn close(self) -> Result[(), IoError]:
-        if let Some(state) = self.stage_state:
+        if val Some(state) = self.stage_state:
             if state.mode == StageMode::Mmap and state.mmap_ptr != 0:
                 native_mmap_unmap(state.mmap_ptr, state.mmap_size)
         return native_file_close(self.handle)
@@ -161,15 +161,15 @@ impl File:
             staged_files: Array[FilePath]::new()
         })
 
-        let size = await self.size()?
-        let size_u64 = size as u64
+        val size = await self.size()?
+        val size_u64 = size as u64
 
         if size_u64 > 1_048_576:  # 1MB threshold
             return self.stage_mmap()
         elif size_u64 > 0:
             return self.stage_prefetch()
         else:
-            if let Some(state) = self.stage_state:
+            if val Some(state) = self.stage_state:
                 state.status = StagingStatus::Staged
             return Ok(())
 
@@ -183,15 +183,15 @@ impl File:
             staged_files: Array[FilePath]::new()
         })
 
-        let size = await self.size()?
-        let size_u64 = size as u64
+        val size = await self.size()?
+        val size_u64 = size as u64
 
         if size_u64 == 0:
-            if let Some(state) = self.stage_state:
+            if val Some(state) = self.stage_state:
                 state.status = StagingStatus::Staged
             return Ok(())
 
-        let mmap_ptr = native_mmap_create(self.handle, size_u64)?
+        val mmap_ptr = native_mmap_create(self.handle, size_u64)?
 
         self.stage_state = Some(StageState {
             mode: StageMode::Mmap,
@@ -212,15 +212,15 @@ impl File:
             staged_files: Array[FilePath]::new()
         })
 
-        let size = await self.size()?
-        let size_u64 = size as u64
+        val size = await self.size()?
+        val size_u64 = size as u64
 
         if size_u64 == 0:
-            if let Some(state) = self.stage_state:
+            if val Some(state) = self.stage_state:
                 state.status = StagingStatus::Staged
             return Ok(())
 
-        let mmap_ptr = native_mmap_create_shared(self.handle, size_u64)?
+        val mmap_ptr = native_mmap_create_shared(self.handle, size_u64)?
 
         self.stage_state = Some(StageState {
             mode: StageMode::MmapShared,
@@ -241,16 +241,16 @@ impl File:
             staged_files: Array[FilePath]::new()
         })
 
-        let size = await self.size()?
-        let size_u64 = size as u64
+        val size = await self.size()?
+        val size_u64 = size as u64
 
         if size_u64 == 0:
-            if let Some(state) = self.stage_state:
+            if val Some(state) = self.stage_state:
                 state.status = StagingStatus::Staged
             return Ok(())
 
         await self.seek(SeekFrom::Start(0))?
-        let mut buffer = Bytes::with_capacity(size_u64)
+        var buffer = Bytes::with_capacity(size_u64)
         await self.read_exact(&mut buffer)?
         await self.seek(SeekFrom::Start(0))?
 
@@ -285,7 +285,7 @@ impl File:
     # Open file (sync, blocking)
     pub fn open_sync(path: FilePath, mode: OpenMode) -> Result[File, IoError]:
         # Resolve relative paths to absolute paths
-        let resolved_path = native_path_resolve(path)?
+        val resolved_path = native_path_resolve(path)?
 
         # Check file existence for read mode
         if mode == OpenMode::Read:
@@ -293,8 +293,8 @@ impl File:
                 return Err(IoError::NotFound)
 
         # Open file handle
-        let handle = native_fs_open(resolved_path, mode)?
-        let file = File {
+        val handle = native_fs_open(resolved_path, mode)?
+        val file = File {
             handle: handle,
             path: resolved_path,
             mode: mode,
@@ -319,11 +319,11 @@ impl File:
 
     # Read exact bytes (sync)
     pub fn read_exact_sync(self, buf: &mut Bytes) -> Result[(), IoError]:
-        let mut read_total: u64 = 0
-        let target = buf.len()
+        var read_total: u64 = 0
+        val target = buf.len()
         while read_total < target:
-            let slice = buf.slice_mut(read_total, target)
-            let n = self.read_sync(&mut slice)?
+            val slice = buf.slice_mut(read_total, target)
+            val n = self.read_sync(&mut slice)?
             if (n as u64) == 0:
                 return Err(IoError::UnexpectedEof)
             read_total = read_total + (n as u64)
@@ -351,8 +351,8 @@ impl File:
 
     # Get file size (sync)
     pub fn size_sync(self) -> Result[ByteCount, IoError]:
-        let current = self.position_sync()?
-        let end = self.seek_sync(SeekFrom::End(0))?
+        val current = self.position_sync()?
+        val end = self.seek_sync(SeekFrom::End(0))?
         self.seek_sync(SeekFrom::Start(current as u64))?
         return Ok(end)
 
@@ -382,27 +382,27 @@ impl File:
 
     # Stage file with mmap preload (sync, for use before parallel processing)
     pub fn stage_mmap_sync(self) -> Result[(), IoError]:
-        let size = self.size_sync()?
+        val size = self.size_sync()?
         self.stage_state = Some(stage_mmap_sync_impl(self.handle, size as u64)?)
         return Ok(())
 
     # Stage file with shared mmap (sync, for multi-process access)
     pub fn stage_mmap_shared_sync(self) -> Result[(), IoError]:
-        let size = self.size_sync()?
+        val size = self.size_sync()?
         self.stage_state = Some(stage_mmap_shared_sync_impl(self.handle, size as u64)?)
         return Ok(())
 
     # Stage file by prefetching entire content (sync)
     pub fn stage_prefetch_sync(self) -> Result[(), IoError]:
-        let size = self.size_sync()?
-        let size_u64 = size as u64
+        val size = self.size_sync()?
+        val size_u64 = size as u64
 
         if size_u64 == 0:
             self.stage_state = Some(create_empty_staged_state(StageMode::Prefetch, false))
             return Ok(())
 
         self.seek_sync(SeekFrom::Start(0))?
-        let mut buffer = Bytes::with_capacity(size_u64)
+        var buffer = Bytes::with_capacity(size_u64)
         self.read_exact_sync(&mut buffer)?
         self.seek_sync(SeekFrom::Start(0))?
 

@@ -1,0 +1,651 @@
+/// Doctest README Parser
+///
+/// Parses README.md files for doctest configuration following the spec
+/// at doc/spec/doctest_readme.md
+///
+/// Format:
+/// ```markdown
+/// <!--doctest:exclude
+/// drafts/
+/// archive/**
+/// -->
+///
+/// <!--doctest:config
+/// lang: simple
+/// timeout: 5000
+/// -->
+///
+/// # Title
+///
+/// ## Subdirectory
+///
+/// - [Spec](spec/)
+/// - [Guides](guides/)
+///
+/// ## Files
+///
+/// - [API](api.md)
+/// - [Index](index.md)
+/// ```
+
+/// Configuration parsed from README.md front matter
+struct ReadmeConfig:
+    /// Patterns to exclude from doctest discovery
+    excludes: List[String]
+    /// Default language for untagged code blocks
+    lang: String
+    /// Timeout in milliseconds per doctest
+    timeout: Int
+    /// Whether doctests are disabled in this scope
+    disabled: Bool
+    /// Whether to inherit parent config
+    inherit: Bool
+
+    fn default() -> ReadmeConfig:
+        return ReadmeConfig(
+            excludes: [],
+            lang: "simple",
+            timeout: 5000,
+            disabled: False,
+            inherit: True
+        )
+
+    /// Merge with parent config
+    fn merge_with(parent: ReadmeConfig) -> ReadmeConfig:
+        if not self.inherit:
+            return self
+
+        merged_excludes = parent.excludes.clone()
+        merged_excludes.extend(self.excludes)
+
+        return ReadmeConfig(
+            excludes: merged_excludes,
+            lang: if self.lang != "simple" then self.lang else parent.lang,
+            timeout: if self.timeout != 5000 then self.timeout else parent.timeout,
+            disabled: self.disabled or parent.disabled,
+            inherit: self.inherit
+        )
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_disabled() -> Bool:
+        """Check if doctests are disabled.
+
+        Returns:
+            true if disabled
+
+        Example:
+            config.is_disabled()  # → false
+        """
+        return self.disabled
+
+    fn is_enabled() -> Bool:
+        """Check if doctests are enabled.
+
+        Returns:
+            true if not disabled
+
+        Example:
+            config.is_enabled()  # → true
+        """
+        return not self.disabled
+
+    fn should_inherit() -> Bool:
+        """Check if config inherits from parent.
+
+        Returns:
+            true if inherit is enabled
+
+        Example:
+            config.should_inherit()  # → true
+        """
+        return self.inherit
+
+    fn get_language() -> String:
+        """Get default language.
+
+        Returns:
+            Default language for code blocks
+
+        Example:
+            config.get_language()  # → "simple"
+        """
+        return self.lang
+
+    fn get_timeout() -> Int:
+        """Get timeout in milliseconds.
+
+        Returns:
+            Timeout for each doctest
+
+        Example:
+            config.get_timeout()  # → 5000
+        """
+        return self.timeout
+
+    fn has_excludes() -> Bool:
+        """Check if config has exclude patterns.
+
+        Returns:
+            true if excludes exist
+
+        Example:
+            config.has_excludes()  # → false
+        """
+        return self.excludes.len() > 0
+
+    fn summary() -> String:
+        """Get config summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            config.summary()
+            # → "ReadmeConfig: lang=simple, timeout=5000ms, 0 excludes, enabled"
+        """
+        let exclude_count = self.excludes.len()
+        let status = if self.disabled { "disabled" } else { "enabled" }
+        return "ReadmeConfig: lang={self.lang}, timeout={self.timeout}ms, {exclude_count} excludes, {status}"
+
+/// Link extracted from ## Subdirectory or ## Files section
+struct ReadmeLink:
+    /// Display name
+    name: String
+    /// Path (relative to README.md location)
+    path: String
+    /// Whether this is a directory (ends with /)
+    is_dir: Bool
+
+    fn from_markdown(text: String, href: String) -> ReadmeLink:
+        return ReadmeLink(
+            name: text,
+            path: href.trim_end("/"),
+            is_dir: href.ends_with("/")
+        )
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_name() -> String:
+        """Get link display name.
+
+        Returns:
+            Display name
+
+        Example:
+            link.get_name()  # → "API Documentation"
+        """
+        return self.name
+
+    fn get_path() -> String:
+        """Get link path.
+
+        Returns:
+            Relative path
+
+        Example:
+            link.get_path()  # → "api"
+        """
+        return self.path
+
+    fn is_directory() -> Bool:
+        """Check if link points to a directory.
+
+        Returns:
+            true if directory link
+
+        Example:
+            link.is_directory()  # → true
+        """
+        return self.is_dir
+
+    fn is_file() -> Bool:
+        """Check if link points to a file.
+
+        Returns:
+            true if file link
+
+        Example:
+            link.is_file()  # → false
+        """
+        return not self.is_dir
+
+    fn summary() -> String:
+        """Get link summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            link.summary()
+            # → "ReadmeLink: API Documentation -> api (directory)"
+        """
+        let type_str = if self.is_dir { "directory" } else { "file" }
+        return "ReadmeLink: {self.name} -> {self.path} ({type_str})"
+
+/// Parsed README.md result
+struct ParsedReadme:
+    /// Configuration from front matter
+    config: ReadmeConfig
+    /// Subdirectory links from ## Subdirectory section
+    subdirs: List[ReadmeLink]
+    /// File links from ## Files section
+    files: List[ReadmeLink]
+    /// Raw content after front matter (for code block extraction)
+    content: String
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_config() -> ReadmeConfig:
+        """Get configuration.
+
+        Returns:
+            ReadmeConfig from front matter
+
+        Example:
+            readme.get_config()
+        """
+        return self.config
+
+    fn get_content() -> String:
+        """Get content after front matter.
+
+        Returns:
+            Raw markdown content
+
+        Example:
+            readme.get_content()
+        """
+        return self.content
+
+    fn subdir_count() -> Int:
+        """Get number of subdirectory links.
+
+        Returns:
+            Number of subdirectories
+
+        Example:
+            readme.subdir_count()  # → 3
+        """
+        return self.subdirs.len()
+
+    fn file_count() -> Int:
+        """Get number of file links.
+
+        Returns:
+            Number of files
+
+        Example:
+            readme.file_count()  # → 5
+        """
+        return self.files.len()
+
+    fn has_subdirs() -> Bool:
+        """Check if README has subdirectory links.
+
+        Returns:
+            true if subdirs exist
+
+        Example:
+            readme.has_subdirs()  # → true
+        """
+        return self.subdirs.len() > 0
+
+    fn has_files() -> Bool:
+        """Check if README has file links.
+
+        Returns:
+            true if files exist
+
+        Example:
+            readme.has_files()  # → true
+        """
+        return self.files.len() > 0
+
+    fn summary() -> String:
+        """Get parsed README summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            readme.summary()
+            # → "ParsedReadme: 3 subdirs, 5 files"
+        """
+        let sdir_count = self.subdir_count()
+        let file_count = self.file_count()
+        return "ParsedReadme: {sdir_count} subdirs, {file_count} files"
+
+// ============================================================================
+// Parser Implementation
+// ============================================================================
+
+/// Parse a README.md file for doctest configuration
+fn parse_readme(content: String) -> ParsedReadme:
+    let config = ReadmeConfig.default()
+    let subdirs: List[ReadmeLink] = []
+    let files: List[ReadmeLink] = []
+
+    let lines = content.split("\n")
+    let i = 0
+    let content_start = 0
+
+    # Phase 1: Parse front matter (exclude and config blocks)
+    while i < lines.len():
+        let line = lines[i].trim()
+
+        if line.starts_with("<!--doctest:exclude"):
+            # Parse exclude block
+            i = i + 1
+            while i < lines.len() and not lines[i].trim().starts_with("-->"):
+                let exclude_line = lines[i].trim()
+                if exclude_line.len() > 0 and not exclude_line.starts_with("#"):
+                    config.excludes.push(exclude_line)
+                i = i + 1
+            i = i + 1
+            continue
+
+        if line.starts_with("<!--doctest:config"):
+            # Parse config block
+            i = i + 1
+            while i < lines.len() and not lines[i].trim().starts_with("-->"):
+                let config_line = lines[i].trim()
+                if config_line.contains(":"):
+                    let parts = config_line.split(":")
+                    if parts.len() >= 2:
+                        let key = parts[0].trim()
+                        let value = parts[1].trim()
+
+                        if key == "lang":
+                            config.lang = value
+                        elif key == "timeout":
+                            config.timeout = parse_int(value)
+                        elif key == "disabled":
+                            config.disabled = value == "true"
+                        elif key == "inherit":
+                            config.inherit = value == "true"
+                i = i + 1
+            i = i + 1
+            continue
+
+        # Shorthand: <!--doctest:lang simple-->
+        if line.starts_with("<!--doctest:") and line.ends_with("-->"):
+            let inner = line[12:-3].trim()  # Remove <!--doctest: and -->
+            if inner.starts_with("lang "):
+                config.lang = inner[5:].trim()
+            elif inner.starts_with("timeout "):
+                config.timeout = parse_int(inner[8:].trim())
+            elif inner == "disabled":
+                config.disabled = True
+            i = i + 1
+            continue
+
+        # Not front matter - start of content
+        if line.len() > 0 and not line.starts_with("<!--"):
+            content_start = i
+            break
+
+        i = i + 1
+
+    # Phase 2: Parse ## Subdirectory and ## Files sections
+    let current_section = ""
+
+    while i < lines.len():
+        let line = lines[i]
+        let trimmed = line.trim()
+
+        # Check for section headers
+        if trimmed == "## Subdirectory" or trimmed == "## Subdirectories":
+            current_section = "subdirs"
+            i = i + 1
+            continue
+
+        if trimmed == "## Files" or trimmed == "## File":
+            current_section = "files"
+            i = i + 1
+            continue
+
+        # Check for section termination
+        if trimmed == "---":
+            break
+
+        if trimmed.starts_with("## ") and current_section != "":
+            # New section that's not Subdirectory or Files - stop parsing
+            break
+
+        # Parse links in current section
+        if current_section != "" and trimmed.starts_with("- ["):
+            let link = parse_markdown_link(trimmed)
+            if link.path.len() > 0:
+                # Skip external URLs and anchors
+                if not link.path.starts_with("http") and not link.path.starts_with("#"):
+                    if current_section == "subdirs":
+                        subdirs.push(link)
+                    elif current_section == "files":
+                        files.push(link)
+
+        i = i + 1
+
+    # Build content after front matter
+    let content_lines: List[String] = []
+    let j = content_start
+    while j < lines.len():
+        content_lines.push(lines[j])
+        j = j + 1
+
+    return ParsedReadme(
+        config: config,
+        subdirs: subdirs,
+        files: files,
+        content: content_lines.join("\n")
+    )
+
+/// Parse a markdown link: - [Text](path)
+fn parse_markdown_link(line: String) -> ReadmeLink:
+    # Pattern: - [text](path) or * [text](path)
+    let trimmed = line.trim()
+
+    # Find [
+    let bracket_start = trimmed.find("[")
+    if bracket_start < 0:
+        return ReadmeLink(name: "", path: "", is_dir: False)
+
+    # Find ]
+    let bracket_end = trimmed.find("]", bracket_start)
+    if bracket_end < 0:
+        return ReadmeLink(name: "", path: "", is_dir: False)
+
+    # Find (
+    let paren_start = trimmed.find("(", bracket_end)
+    if paren_start < 0:
+        return ReadmeLink(name: "", path: "", is_dir: False)
+
+    # Find )
+    let paren_end = trimmed.find(")", paren_start)
+    if paren_end < 0:
+        return ReadmeLink(name: "", path: "", is_dir: False)
+
+    let text = trimmed[bracket_start + 1 : bracket_end]
+    let href = trimmed[paren_start + 1 : paren_end]
+
+    return ReadmeLink.from_markdown(text, href)
+
+/// Parse integer from string
+fn parse_int(s: String) -> Int:
+    let result = 0
+    for c in s:
+        if c >= '0' and c <= '9':
+            result = result * 10 + (c.to_int() - '0'.to_int())
+    return result
+
+// ============================================================================
+// Code Block Extraction
+// ============================================================================
+
+/// Code block extracted from markdown
+struct MarkdownCodeBlock:
+    /// Language tag (or empty for untagged)
+    lang: String
+    /// Modifiers like :skip, :ignore-output
+    modifiers: List[String]
+    /// Code content
+    code: String
+    /// Line number in source file
+    line: Int
+    /// Source file path
+    source: String
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn should_skip() -> Bool:
+        return self.modifiers.contains("skip")
+
+    fn should_ignore_output() -> Bool:
+        return self.modifiers.contains("ignore-output")
+
+    fn should_fail() -> Bool:
+        return self.modifiers.contains("should-fail")
+
+    fn get_language() -> String:
+        """Get language tag.
+
+        Returns:
+            Language identifier
+
+        Example:
+            block.get_language()  # → "simple"
+        """
+        return self.lang
+
+    fn get_code() -> String:
+        """Get code content.
+
+        Returns:
+            Code as string
+
+        Example:
+            block.get_code()
+        """
+        return self.code
+
+    fn get_source() -> String:
+        """Get source file path.
+
+        Returns:
+            Source file path
+
+        Example:
+            block.get_source()  # → "README.md"
+        """
+        return self.source
+
+    fn get_line() -> Int:
+        """Get line number in source file.
+
+        Returns:
+            Line number
+
+        Example:
+            block.get_line()  # → 42
+        """
+        return self.line
+
+    fn has_modifiers() -> Bool:
+        """Check if block has any modifiers.
+
+        Returns:
+            true if modifiers exist
+
+        Example:
+            block.has_modifiers()  # → true
+        """
+        return self.modifiers.len() > 0
+
+    fn is_simple() -> Bool:
+        """Check if block is Simple language.
+
+        Returns:
+            true if lang is \"simple\" or empty
+
+        Example:
+            block.is_simple()  # → true
+        """
+        return self.lang == "simple" or self.lang == ""
+
+    fn summary() -> String:
+        """Get code block summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            block.summary()
+            # → "MarkdownCodeBlock: simple at README.md:42, 5 lines, 1 modifier"
+        """
+        let line_count = self.code.split("\n").len()
+        let mod_count = self.modifiers.len()
+        return "MarkdownCodeBlock: {self.lang} at {self.source}:{self.line}, {line_count} lines, {mod_count} modifiers"
+
+/// Extract code blocks from markdown content
+fn extract_code_blocks(content: String, source: String, default_lang: String = "simple") -> List[MarkdownCodeBlock]:
+    let blocks: List[MarkdownCodeBlock] = []
+    let lines = content.split("\n")
+    let i = 0
+
+    while i < lines.len():
+        let line = lines[i]
+
+        if line.trim().starts_with("```"):
+            let fence_line = line.trim()
+            let lang_part = fence_line[3:].trim()  # After ```
+
+            # Parse language and modifiers
+            let lang = default_lang
+            let modifiers: List[String] = []
+
+            if lang_part.len() > 0:
+                # Handle lang:modifier syntax
+                if lang_part.contains(":"):
+                    let parts = lang_part.split(":")
+                    lang = parts[0]
+                    let j = 1
+                    while j < parts.len():
+                        modifiers.push(parts[j])
+                        j = j + 1
+                else:
+                    lang = lang_part
+
+            # Collect code until closing ```
+            let code_lines: List[String] = []
+            let start_line = i + 1
+            i = i + 1
+
+            while i < lines.len() and not lines[i].trim().starts_with("```"):
+                code_lines.push(lines[i])
+                i = i + 1
+
+            # Only include Simple code blocks (or default lang)
+            if lang == "simple" or lang == default_lang or lang == "":
+                blocks.push(MarkdownCodeBlock(
+                    lang: lang,
+                    modifiers: modifiers,
+                    code: code_lines.join("\n"),
+                    line: start_line + 1,  # 1-indexed
+                    source: source
+                ))
+
+        i = i + 1
+
+    return blocks
+
+/// Check if code block contains doctest marker (# doctest)
+fn has_doctest_marker(code: String) -> Bool:
+    return code.contains("# doctest") or code.contains("#doctest")

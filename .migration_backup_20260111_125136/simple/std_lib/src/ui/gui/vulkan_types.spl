@@ -1,0 +1,1035 @@
+# Vulkan Core Types - Phase 1 Implementation
+#
+# Foundational Vulkan types for the async renderer.
+# Follows builder pattern with smart defaults from vulkan_dsl.md research.
+#
+# Implementation Status: Phase 1 - Core Initialization
+# - VulkanDevice: Device selection and initialization
+# - Swapchain: Swapchain creation and management
+# - RenderPass: Render pass configuration
+# - Supporting types and utilities
+
+use core.*
+use concurrency.*
+
+# =============================================================================
+# Vulkan Device - Smart Device Selection and Initialization
+# =============================================================================
+
+pub struct VulkanDevice:
+    # Core Vulkan handles (FFI)
+    instance: VkInstance                # Vulkan instance
+    physical_device: VkPhysicalDevice   # Selected GPU
+    device: VkDevice                    # Logical device
+
+    # Queues
+    graphics_queue: VkQueue             # Graphics queue
+    present_queue: VkQueue              # Present queue (may be same as graphics)
+
+    # Queue family indices
+    graphics_family: u32
+    present_family: u32
+
+    # Device properties
+    properties: VkPhysicalDeviceProperties
+    features: VkPhysicalDeviceFeatures
+    memory_properties: VkPhysicalDeviceMemoryProperties
+
+impl VulkanDevice:
+    # Create device with smart defaults (auto-selects best GPU)
+    pub fn new(window_handle: i64) -> Result[VulkanDevice, String]:
+        # TODO: [ui][P3] Create Vulkan instance
+        # - Application info (name, version)
+        # - Required extensions (VK_KHR_surface, platform-specific surface)
+        # - Validation layers (in debug mode)
+        let instance = vulkan_create_instance("Simple UI", 1)?
+
+        # TODO: [ui][P3] Enumerate physical devices
+        let physical_devices = vulkan_enumerate_physical_devices(instance)?
+        if physical_devices.is_empty():
+            return Err("No Vulkan-capable GPU found")
+
+        # TODO: [ui][P3] Select best device (prefer discrete GPU)
+        let (physical_device, graphics_family, present_family) =
+            Self::select_best_device(instance, window_handle, &physical_devices)?
+
+        # TODO: [ui][P3] Create logical device
+        let device = vulkan_create_device(physical_device, graphics_family, present_family)?
+
+        # TODO: [ui][P1] Get queue handles
+        let graphics_queue = vulkan_get_device_queue(device, graphics_family, 0)
+        let present_queue = vulkan_get_device_queue(device, present_family, 0)
+
+        # TODO: [ui][P3] Query device properties
+        let properties = vulkan_get_physical_device_properties(physical_device)
+        let features = vulkan_get_physical_device_features(physical_device)
+        let memory_properties = vulkan_get_physical_device_memory_properties(physical_device)
+
+        return Ok(VulkanDevice {
+            instance: instance,
+            physical_device: physical_device,
+            device: device,
+            graphics_queue: graphics_queue,
+            present_queue: present_queue,
+            graphics_family: graphics_family,
+            present_family: present_family,
+            properties: properties,
+            features: features,
+            memory_properties: memory_properties
+        })
+
+    # Select best GPU (prefer discrete, check queue families)
+    fn select_best_device(instance: VkInstance, window: i64, devices: &Array[VkPhysicalDevice])
+        -> Result[(VkPhysicalDevice, u32, u32), String]:
+
+        # Score devices and pick best
+        let mut best_device = None
+        let mut best_score = 0
+        let mut best_graphics_family = 0
+        let mut best_present_family = 0
+
+        for device in devices:
+            # TODO: [ui][P3] Query queue families
+            let queue_families = vulkan_get_physical_device_queue_families(device)
+
+            # Find graphics and present queues
+            let graphics_family = Self::find_queue_family(
+                &queue_families,
+                QueueFamilyFlags::Graphics
+            )
+            let present_family = Self::find_present_queue_family(
+                device,
+                window,
+                &queue_families
+            )
+
+            if graphics_family.is_none() or present_family.is_none():
+                continue  # Skip devices without required queues
+
+            # TODO: [ui][P3] Score device
+            let score = Self::score_device(device)
+
+            if score > best_score:
+                best_score = score
+                best_device = Some(device)
+                best_graphics_family = graphics_family.unwrap()
+                best_present_family = present_family.unwrap()
+
+        match best_device:
+            case Some(device):
+                return Ok((device, best_graphics_family, best_present_family))
+            case None:
+                return Err("No suitable GPU found")
+
+    # Score device (prefer discrete GPU, more VRAM)
+    fn score_device(device: VkPhysicalDevice) -> i32:
+        let properties = vulkan_get_physical_device_properties(device)
+
+        let mut score = 0
+
+        # Discrete GPU gets huge bonus
+        if properties.device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+            score += 1000
+
+        # Integrated GPU gets smaller bonus
+        if properties.device_type == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+            score += 100
+
+        # More VRAM is better (simplified - would need to query heap sizes)
+        score += properties.limits.max_image_dimension_2d as i32 / 1000
+
+        return score
+
+    # Find queue family with specific flags
+    fn find_queue_family(families: &Array[VkQueueFamilyProperties], flags: QueueFamilyFlags)
+        -> Option[u32]:
+        for (i, family) in families.enumerate():
+            if (family.queue_flags & flags.bits()) != 0:
+                return Some(i as u32)
+        return None
+
+    # Find queue family that supports present
+    fn find_present_queue_family(device: VkPhysicalDevice, window: i64,
+                                  families: &Array[VkQueueFamilyProperties])
+        -> Option[u32]:
+        for (i, _family) in families.enumerate():
+            # TODO: [ui][P3] Check if this queue family supports present to the surface
+            let supports_present = vulkan_queue_family_supports_present(
+                device,
+                i as u32,
+                window
+            )
+            if supports_present:
+                return Some(i as u32)
+        return None
+
+    # Async wait for device to be idle
+    pub async fn wait_idle_async(self) -> Future[()]:
+        # TODO: [ui][P3] vkDeviceWaitIdle (can spawn as blocking task)
+        await spawn_blocking(|| {
+            vulkan_device_wait_idle(self.device)
+        })
+        return Future::ready(())
+
+    # Async fence operations
+    pub async fn wait_for_fence_async(self, fence: i64) -> Future[()]:
+        # TODO: [ui][P3] vkWaitForFences (can be async)
+        await spawn_blocking(|| {
+            vulkan_wait_for_fence(self.device, fence, u64::MAX)
+        })
+        return Future::ready(())
+
+    pub fn reset_fence(self, fence: i64):
+        # TODO: [ui][P3] vkResetFences
+        vulkan_reset_fence(self.device, fence)
+
+    pub fn reset_command_buffer(self, cmd_buf: i64):
+        # TODO: [ui][P3] vkResetCommandBuffer
+        vulkan_reset_command_buffer(cmd_buf)
+
+    # Create future that completes when fence is signaled
+    pub fn create_fence_future(self, fence: i64) -> Future[GpuSubmitResult]:
+        # Return async operation that polls fence
+        return async {
+            await self.wait_for_fence_async(fence)
+            return GpuSubmitResult { success: true }
+        }
+
+    # Async present
+    pub async fn queue_present_async(self, present_info: VkPresentInfo)
+        -> Future[Result[(), SwapchainError]]:
+        # TODO: [ui][P3] vkQueuePresentKHR
+        let result = vulkan_queue_present(self.present_queue, &present_info)
+
+        match result:
+            case VK_SUCCESS:
+                return Future::ready(Ok(()))
+            case VK_ERROR_OUT_OF_DATE_KHR | VK_SUBOPTIMAL_KHR:
+                return Future::ready(Err(SwapchainError::OutOfDate))
+            case _:
+                return Future::ready(Err(SwapchainError::DeviceLost))
+
+    pub fn get_device(self) -> VkDevice:
+        """Get logical device handle.
+
+        Returns:
+            Device handle
+
+        Example:
+            let vk = VulkanDevice::new(window)?
+            let device = vk.get_device()
+        """
+        self.device
+
+    pub fn get_graphics_queue(self) -> VkQueue:
+        """Get graphics queue handle.
+
+        Returns:
+            Graphics queue
+
+        Example:
+            let vk = VulkanDevice::new(window)?
+            let queue = vk.get_graphics_queue()
+        """
+        self.graphics_queue
+
+    pub fn get_graphics_family(self) -> u32:
+        """Get graphics queue family index.
+
+        Returns:
+            Queue family index
+
+        Example:
+            let vk = VulkanDevice::new(window)?
+            let family = vk.get_graphics_family()
+        """
+        self.graphics_family
+
+    pub fn has_same_queue_families(self) -> bool:
+        """Check if graphics and present queues are the same.
+
+        Returns:
+            True if same family
+
+        Example:
+            let vk = VulkanDevice::new(window)?
+            if vk.has_same_queue_families():
+                print("Single queue family for graphics+present")
+        """
+        self.graphics_family == self.present_family
+
+    pub fn is_discrete_gpu(self) -> bool:
+        """Check if using discrete GPU.
+
+        Returns:
+            True if discrete GPU
+
+        Example:
+            let vk = VulkanDevice::new(window)?
+            if vk.is_discrete_gpu():
+                print("Using dedicated graphics card")
+        """
+        self.properties.device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
+
+    pub fn is_integrated_gpu(self) -> bool:
+        """Check if using integrated GPU.
+
+        Returns:
+            True if integrated GPU
+
+        Example:
+            let vk = VulkanDevice::new(window)?
+            if vk.is_integrated_gpu():
+                print("Using integrated graphics")
+        """
+        self.properties.device_type == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
+
+    pub fn get_device_name(self) -> &String:
+        """Get GPU device name.
+
+        Returns:
+            Device name
+
+        Example:
+            let vk = VulkanDevice::new(window)?
+            print("GPU: {}", vk.get_device_name())
+        """
+        &self.properties.device_name
+
+    pub fn summary(self) -> String:
+        """Get Vulkan device summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            let vk = VulkanDevice::new(window)?
+            print(vk.summary())
+        """
+        let gpu_type = if self.is_discrete_gpu(): "discrete" else if self.is_integrated_gpu(): "integrated" else: "other"
+        return "VulkanDevice: {self.properties.device_name} ({gpu_type} GPU), graphics_family={self.graphics_family}"
+
+# =============================================================================
+# Swapchain - Image Presentation
+# =============================================================================
+
+pub struct Swapchain:
+    swapchain: VkSwapchainKHR
+    images: Array[VkImage]
+    image_views: Array[VkImageView]
+    format: VkSurfaceFormatKHR
+    extent: VkExtent2D
+    device: VulkanDevice  # Reference to device
+
+impl Swapchain:
+    # Create swapchain with smart defaults
+    pub fn new(device: &VulkanDevice, width: u32, height: u32) -> Result[Swapchain, String]:
+        # TODO: [ui][P3] Query surface capabilities
+        let capabilities = vulkan_get_surface_capabilities(
+            device.physical_device,
+            device.surface
+        )?
+
+        # TODO: [ui][P3] Choose best surface format (prefer SRGB)
+        let surface_formats = vulkan_get_surface_formats(
+            device.physical_device,
+            device.surface
+        )?
+        let format = Self::choose_surface_format(&surface_formats)
+
+        # TODO: [ui][P3] Choose present mode (prefer Mailbox, fallback to Fifo)
+        let present_modes = vulkan_get_surface_present_modes(
+            device.physical_device,
+            device.surface
+        )?
+        let present_mode = Self::choose_present_mode(&present_modes)
+
+        # TODO: [ui][P3] Choose extent (clamp to surface capabilities)
+        let extent = Self::choose_extent(&capabilities, width, height)
+
+        # TODO: [ui][P3] Choose image count (prefer triple buffering: 3)
+        let image_count = Self::choose_image_count(&capabilities)
+
+        # TODO: [ui][P3] Create swapchain
+        let swapchain = vulkan_create_swapchain(
+            device.device,
+            device.surface,
+            &format,
+            &extent,
+            image_count,
+            present_mode,
+            device.graphics_family,
+            device.present_family
+        )?
+
+        # TODO: [ui][P3] Get swapchain images
+        let images = vulkan_get_swapchain_images(device.device, swapchain)?
+
+        # TODO: [ui][P3] Create image views
+        let image_views = images.map(|image| {
+            vulkan_create_image_view(device.device, image, format.format)
+        })
+
+        return Ok(Swapchain {
+            swapchain: swapchain,
+            images: images,
+            image_views: image_views,
+            format: format,
+            extent: extent,
+            device: device.clone()
+        })
+
+    # Choose best surface format (prefer BGRA8_SRGB)
+    fn choose_surface_format(formats: &Array[VkSurfaceFormatKHR]) -> VkSurfaceFormatKHR:
+        # Prefer SRGB format
+        for format in formats:
+            if format.format == VK_FORMAT_B8G8R8A8_SRGB and
+               format.color_space == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR:
+                return format
+
+        # Fallback to first available
+        return formats[0]
+
+    # Choose present mode (prefer Mailbox for triple buffering)
+    fn choose_present_mode(modes: &Array[VkPresentModeKHR]) -> VkPresentModeKHR:
+        # Prefer Mailbox (triple buffering, no tearing)
+        if modes.contains(&VK_PRESENT_MODE_MAILBOX_KHR):
+            return VK_PRESENT_MODE_MAILBOX_KHR
+
+        # Fallback to Fifo (guaranteed available, vsync)
+        return VK_PRESENT_MODE_FIFO_KHR
+
+    # Choose extent (window size, clamped to capabilities)
+    fn choose_extent(capabilities: &VkSurfaceCapabilitiesKHR, width: u32, height: u32)
+        -> VkExtent2D:
+        # If current extent is not special value, use it
+        if capabilities.current_extent.width != 0xFFFFFFFF:
+            return capabilities.current_extent
+
+        # Otherwise, clamp requested size to capabilities
+        let actual_width = clamp(
+            width,
+            capabilities.min_image_extent.width,
+            capabilities.max_image_extent.width
+        )
+        let actual_height = clamp(
+            height,
+            capabilities.min_image_extent.height,
+            capabilities.max_image_extent.height
+        )
+
+        return VkExtent2D {
+            width: actual_width,
+            height: actual_height
+        }
+
+    # Choose image count (prefer 3 for triple buffering)
+    fn choose_image_count(capabilities: &VkSurfaceCapabilitiesKHR) -> u32:
+        let desired = 3  # Triple buffering
+
+        # Clamp to min/max
+        let mut count = desired
+        if count < capabilities.min_image_count:
+            count = capabilities.min_image_count
+        if capabilities.max_image_count > 0 and count > capabilities.max_image_count:
+            count = capabilities.max_image_count
+
+        return count
+
+    # Acquire next swapchain image (async)
+    pub async fn acquire_next_image_async(self, semaphore: i64)
+        -> Future[Result[u32, SwapchainError]]:
+        # TODO: [ui][P3] vkAcquireNextImageKHR
+        let result = await spawn_blocking(|| {
+            vulkan_acquire_next_image(
+                self.device.device,
+                self.swapchain,
+                u64::MAX,  # Timeout
+                semaphore,
+                VK_NULL_HANDLE  # No fence
+            )
+        })
+
+        match result:
+            case Ok(index):
+                return Future::ready(Ok(index))
+            case Err(VK_ERROR_OUT_OF_DATE_KHR):
+                return Future::ready(Err(SwapchainError::OutOfDate))
+            case Err(_):
+                return Future::ready(Err(SwapchainError::DeviceLost))
+
+    pub fn get_extent(self) -> VkExtent2D:
+        """Get swapchain extent (width/height).
+
+        Returns:
+            Swapchain dimensions
+
+        Example:
+            let swapchain = Swapchain::new(&device, 800, 600)?
+            let extent = swapchain.get_extent()
+        """
+        self.extent
+
+    pub fn get_width(self) -> u32:
+        """Get swapchain width.
+
+        Returns:
+            Width in pixels
+
+        Example:
+            let swapchain = Swapchain::new(&device, 800, 600)?
+            assert(swapchain.get_width() == 800)
+        """
+        self.extent.width
+
+    pub fn get_height(self) -> u32:
+        """Get swapchain height.
+
+        Returns:
+            Height in pixels
+
+        Example:
+            let swapchain = Swapchain::new(&device, 800, 600)?
+            assert(swapchain.get_height() == 600)
+        """
+        self.extent.height
+
+    pub fn image_count(self) -> usize:
+        """Get number of swapchain images.
+
+        Returns:
+            Number of images
+
+        Example:
+            let swapchain = Swapchain::new(&device, 800, 600)?
+            let count = swapchain.image_count()
+        """
+        self.images.len()
+
+    pub fn is_triple_buffered(self) -> bool:
+        """Check if using triple buffering (3 images).
+
+        Returns:
+            True if 3 images
+
+        Example:
+            let swapchain = Swapchain::new(&device, 800, 600)?
+            if swapchain.is_triple_buffered():
+                print("Triple buffering enabled")
+        """
+        self.images.len() == 3
+
+    pub fn is_double_buffered(self) -> bool:
+        """Check if using double buffering (2 images).
+
+        Returns:
+            True if 2 images
+
+        Example:
+            let swapchain = Swapchain::new(&device, 800, 600)?
+            if swapchain.is_double_buffered():
+                print("Double buffering")
+        """
+        self.images.len() == 2
+
+    pub fn aspect_ratio(self) -> f64:
+        """Calculate swapchain aspect ratio.
+
+        Returns:
+            Width / height ratio
+
+        Example:
+            let swapchain = Swapchain::new(&device, 1920, 1080)?
+            assert(swapchain.aspect_ratio() > 1.7)
+        """
+        (self.extent.width as f64) / (self.extent.height as f64)
+
+    pub fn summary(self) -> String:
+        """Get swapchain summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            let swapchain = Swapchain::new(&device, 800, 600)?
+            print(swapchain.summary())
+        """
+        return "Swapchain: {self.extent.width}x{self.extent.height}, {self.images.len()} images"
+
+# =============================================================================
+# Render Pass - Render Pass Configuration
+# =============================================================================
+
+pub struct RenderPass:
+    render_pass: VkRenderPass
+    device: VulkanDevice
+
+impl RenderPass:
+    # Create render pass from swapchain (infer configuration)
+    pub fn new(device: &VulkanDevice, swapchain: &Swapchain) -> Result[RenderPass, String]:
+        # TODO: [ui][P3] Create render pass
+        # - Color attachment (swapchain format)
+        # - Load op: Clear
+        # - Store op: Store
+        # - Initial layout: Undefined
+        # - Final layout: PresentSrc
+
+        let render_pass = vulkan_create_render_pass(
+            device.device,
+            swapchain.format.format
+        )?
+
+        return Ok(RenderPass {
+            render_pass: render_pass,
+            device: device.clone()
+        })
+
+    pub fn get_render_pass(self) -> VkRenderPass:
+        """Get Vulkan render pass handle.
+
+        Returns:
+            Render pass handle
+
+        Example:
+            let rp = RenderPass::new(&device, &swapchain)?
+            let handle = rp.get_render_pass()
+        """
+        self.render_pass
+
+    pub fn is_valid(self) -> bool:
+        """Check if render pass is valid.
+
+        Returns:
+            True if handle is non-zero
+
+        Example:
+            let rp = RenderPass::new(&device, &swapchain)?
+            assert(rp.is_valid())
+        """
+        self.render_pass != 0
+
+    pub fn summary(self) -> String:
+        """Get render pass summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            let rp = RenderPass::new(&device, &swapchain)?
+            print(rp.summary())
+        """
+        return "RenderPass: handle={self.render_pass}"
+
+# =============================================================================
+# Frame Data - Per-Frame Resources (Triple Buffering)
+# =============================================================================
+
+pub struct FrameData:
+    command_buffer: i64
+    fence: i64
+    image_available: i64
+    render_finished: i64
+
+impl FrameData:
+    pub fn new(device: &VulkanDevice) -> FrameData:
+        # TODO: [ui][P3] Allocate command buffer
+        let command_buffer = vulkan_allocate_command_buffer(device.device, device.command_pool)
+
+        # TODO: [ui][P3] Create fence (signaled initially)
+        let fence = vulkan_create_fence(device.device, true)
+
+        # TODO: [ui][P3] Create semaphores
+        let image_available = vulkan_create_semaphore(device.device)
+        let render_finished = vulkan_create_semaphore(device.device)
+
+        return FrameData {
+            command_buffer: command_buffer,
+            fence: fence,
+            image_available: image_available,
+            render_finished: render_finished
+        }
+
+# =============================================================================
+# Supporting Structures
+# =============================================================================
+
+pub struct GpuSubmitResult:
+    success: bool
+
+impl GpuSubmitResult:
+    pub fn is_success(self) -> bool:
+        """Check if GPU submit succeeded.
+
+        Returns:
+            True if successful
+
+        Example:
+            let result = GpuSubmitResult { success: true }
+            assert(result.is_success())
+        """
+        self.success
+
+    pub fn is_failure(self) -> bool:
+        """Check if GPU submit failed.
+
+        Returns:
+            True if failed
+
+        Example:
+            let result = GpuSubmitResult { success: false }
+            assert(result.is_failure())
+        """
+        not self.success
+
+    pub fn summary(self) -> String:
+        """Get submit result summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            let result = GpuSubmitResult { success: true }
+            print(result.summary())
+        """
+        let status = if self.success: "success" else: "failure"
+        return "GpuSubmitResult: {status}"
+
+pub enum SwapchainError:
+    OutOfDate
+    DeviceLost
+
+impl SwapchainError:
+    pub fn to_string(self) -> String:
+        """Convert error to string.
+
+        Returns:
+            String representation
+
+        Example:
+            let err = SwapchainError::OutOfDate
+            assert(err.to_string() == "out_of_date")
+        """
+        match self:
+            case OutOfDate: return "out_of_date"
+            case DeviceLost: return "device_lost"
+
+    pub fn description(self) -> String:
+        """Get detailed error description.
+
+        Returns:
+            Human-readable description
+
+        Example:
+            let err = SwapchainError::OutOfDate
+            print(err.description())
+        """
+        match self:
+            case OutOfDate: return "Swapchain is out of date (window resized or other change)"
+            case DeviceLost: return "Vulkan device lost (GPU reset or driver issue)"
+
+    pub fn is_out_of_date(self) -> bool:
+        """Check if error is out of date.
+
+        Returns:
+            True if out of date
+
+        Example:
+            let err = SwapchainError::OutOfDate
+            assert(err.is_out_of_date())
+        """
+        match self:
+            case OutOfDate: return true
+            case _: return false
+
+    pub fn is_device_lost(self) -> bool:
+        """Check if error is device lost.
+
+        Returns:
+            True if device lost
+
+        Example:
+            let err = SwapchainError::DeviceLost
+            assert(err.is_device_lost())
+        """
+        match self:
+            case DeviceLost: return true
+            case _: return false
+
+    pub fn is_recoverable(self) -> bool:
+        """Check if error is recoverable.
+
+        Returns:
+            True if can recreate swapchain
+
+        Example:
+            let err = SwapchainError::OutOfDate
+            assert(err.is_recoverable())
+        """
+        match self:
+            case OutOfDate: return true
+            case DeviceLost: return false
+
+    pub fn summary(self) -> String:
+        """Get swapchain error summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            let err = SwapchainError::OutOfDate
+            print(err.summary())
+            # → "SwapchainError: out_of_date (Swapchain is out of date (window resized or other change), recoverable)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let status = if self.is_recoverable(): "recoverable" else: "fatal"
+        return "SwapchainError: {name} ({desc}, {status})"
+
+pub struct VkSubmitInfo:
+    wait_semaphores: Array[i64]
+    wait_stages: Array[u32]
+    command_buffers: Array[i64]
+    signal_semaphores: Array[i64]
+    fence: i64
+
+pub struct VkPresentInfo:
+    wait_semaphores: Array[i64]
+    swapchains: Array[i64]
+    image_indices: Array[u32]
+
+pub struct VkExtent2D:
+    width: u32
+    height: u32
+
+impl VkExtent2D:
+    pub fn get_width(self) -> u32:
+        """Get extent width.
+
+        Returns:
+            Width in pixels
+
+        Example:
+            let extent = VkExtent2D { width: 800, height: 600 }
+            assert(extent.get_width() == 800)
+        """
+        self.width
+
+    pub fn get_height(self) -> u32:
+        """Get extent height.
+
+        Returns:
+            Height in pixels
+
+        Example:
+            let extent = VkExtent2D { width: 800, height: 600 }
+            assert(extent.get_height() == 600)
+        """
+        self.height
+
+    pub fn area(self) -> u64:
+        """Calculate total area.
+
+        Returns:
+            Area in pixels
+
+        Example:
+            let extent = VkExtent2D { width: 800, height: 600 }
+            assert(extent.area() == 480000)
+        """
+        (self.width as u64) * (self.height as u64)
+
+    pub fn aspect_ratio(self) -> f64:
+        """Calculate aspect ratio.
+
+        Returns:
+            Width / height ratio
+
+        Example:
+            let extent = VkExtent2D { width: 1920, height: 1080 }
+            assert(extent.aspect_ratio() > 1.7)
+        """
+        (self.width as f64) / (self.height as f64)
+
+    pub fn is_landscape(self) -> bool:
+        """Check if landscape orientation.
+
+        Returns:
+            True if width > height
+
+        Example:
+            let extent = VkExtent2D { width: 1920, height: 1080 }
+            assert(extent.is_landscape())
+        """
+        self.width > self.height
+
+    pub fn is_portrait(self) -> bool:
+        """Check if portrait orientation.
+
+        Returns:
+            True if height > width
+
+        Example:
+            let extent = VkExtent2D { width: 600, height: 800 }
+            assert(extent.is_portrait())
+        """
+        self.height > self.width
+
+    pub fn is_square(self) -> bool:
+        """Check if square.
+
+        Returns:
+            True if width == height
+
+        Example:
+            let extent = VkExtent2D { width: 800, height: 800 }
+            assert(extent.is_square())
+        """
+        self.width == self.height
+
+    pub fn summary(self) -> String:
+        """Get extent summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            let extent = VkExtent2D { width: 800, height: 600 }
+            print(extent.summary())
+        """
+        let orientation = if self.is_landscape(): "landscape" else if self.is_portrait(): "portrait" else: "square"
+        return "VkExtent2D: {self.width}x{self.height} ({orientation})"
+
+pub struct VkSurfaceFormatKHR:
+    format: u32
+    color_space: u32
+
+pub struct VkSurfaceCapabilitiesKHR:
+    min_image_count: u32
+    max_image_count: u32
+    current_extent: VkExtent2D
+    min_image_extent: VkExtent2D
+    max_image_extent: VkExtent2D
+    current_transform: u32
+
+pub struct VkQueueFamilyProperties:
+    queue_flags: u32
+    queue_count: u32
+
+pub struct VkPhysicalDeviceProperties:
+    device_name: String
+    device_type: u32
+    limits: VkPhysicalDeviceLimits
+
+pub struct VkPhysicalDeviceLimits:
+    max_image_dimension_2d: u32
+
+pub struct VkPhysicalDeviceFeatures:
+    geometry_shader: bool
+    tessellation_shader: bool
+
+pub struct VkPhysicalDeviceMemoryProperties:
+    memory_type_count: u32
+
+pub struct QueueFamilyFlags:
+    pass
+
+impl QueueFamilyFlags:
+    const Graphics: u32 = 0x01
+    const Compute: u32 = 0x02
+    const Transfer: u32 = 0x04
+
+    fn bits() -> u32:
+        return 0  # TODO: [ui][P1] implement
+
+# Vulkan constants
+const VK_SUCCESS: i32 = 0
+const VK_ERROR_OUT_OF_DATE_KHR: i32 = -1000001004
+const VK_SUBOPTIMAL_KHR: i32 = 1000001003
+const VK_NULL_HANDLE: i64 = 0
+
+const VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: u32 = 1
+const VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: u32 = 2
+
+const VK_FORMAT_B8G8R8A8_SRGB: u32 = 50
+const VK_COLOR_SPACE_SRGB_NONLINEAR_KHR: u32 = 0
+
+const VK_PRESENT_MODE_IMMEDIATE_KHR: u32 = 0
+const VK_PRESENT_MODE_MAILBOX_KHR: u32 = 1
+const VK_PRESENT_MODE_FIFO_KHR: u32 = 2
+
+# =============================================================================
+# FFI Declarations (To Be Implemented in Rust)
+# =============================================================================
+
+# Instance and device creation
+extern fn vulkan_create_instance(app_name: &str, version: u32) -> Result[VkInstance, String]
+extern fn vulkan_enumerate_physical_devices(instance: VkInstance) -> Result[Array[VkPhysicalDevice], String]
+extern fn vulkan_create_device(physical_device: VkPhysicalDevice, graphics_family: u32,
+                                present_family: u32) -> Result[VkDevice, String]
+extern fn vulkan_get_device_queue(device: VkDevice, family: u32, index: u32) -> VkQueue
+
+# Device queries
+extern fn vulkan_get_physical_device_properties(device: VkPhysicalDevice) -> VkPhysicalDeviceProperties
+extern fn vulkan_get_physical_device_features(device: VkPhysicalDevice) -> VkPhysicalDeviceFeatures
+extern fn vulkan_get_physical_device_memory_properties(device: VkPhysicalDevice) -> VkPhysicalDeviceMemoryProperties
+extern fn vulkan_get_physical_device_queue_families(device: VkPhysicalDevice) -> Array[VkQueueFamilyProperties]
+extern fn vulkan_queue_family_supports_present(device: VkPhysicalDevice, family: u32, window: i64) -> bool
+
+# Surface operations
+extern fn vulkan_get_surface_capabilities(device: VkPhysicalDevice, surface: i64)
+    -> Result[VkSurfaceCapabilitiesKHR, String]
+extern fn vulkan_get_surface_formats(device: VkPhysicalDevice, surface: i64)
+    -> Result[Array[VkSurfaceFormatKHR], String]
+extern fn vulkan_get_surface_present_modes(device: VkPhysicalDevice, surface: i64)
+    -> Result[Array[u32], String]
+
+# Swapchain operations
+extern fn vulkan_create_swapchain(device: VkDevice, surface: i64, format: &VkSurfaceFormatKHR,
+                                   extent: &VkExtent2D, image_count: u32, present_mode: u32,
+                                   graphics_family: u32, present_family: u32)
+    -> Result[VkSwapchainKHR, String]
+extern fn vulkan_get_swapchain_images(device: VkDevice, swapchain: VkSwapchainKHR)
+    -> Result[Array[VkImage], String]
+extern fn vulkan_create_image_view(device: VkDevice, image: VkImage, format: u32) -> VkImageView
+extern fn vulkan_acquire_next_image(device: VkDevice, swapchain: VkSwapchainKHR, timeout: u64,
+                                     semaphore: i64, fence: i64) -> Result[u32, i32]
+
+# Render pass operations
+extern fn vulkan_create_render_pass(device: VkDevice, format: u32) -> Result[VkRenderPass, String]
+
+# Synchronization
+extern fn vulkan_device_wait_idle(device: VkDevice)
+extern fn vulkan_wait_for_fence(device: VkDevice, fence: i64, timeout: u64)
+extern fn vulkan_reset_fence(device: VkDevice, fence: i64)
+extern fn vulkan_create_fence(device: VkDevice, signaled: bool) -> i64
+extern fn vulkan_create_semaphore(device: VkDevice) -> i64
+
+# Command buffer operations
+extern fn vulkan_allocate_command_buffer(device: VkDevice, pool: i64) -> i64
+extern fn vulkan_reset_command_buffer(cmd_buf: i64)
+
+# Queue operations
+extern fn vulkan_queue_present(queue: VkQueue, present_info: &VkPresentInfo) -> i32
+
+# Type aliases for Vulkan handles
+type VkInstance = i64
+type VkPhysicalDevice = i64
+type VkDevice = i64
+type VkQueue = i64
+type VkSwapchainKHR = i64
+type VkImage = i64
+type VkImageView = i64
+type VkRenderPass = i64
+
+# Utility functions
+fn clamp(value: u32, min: u32, max: u32) -> u32:
+    if value < min:
+        return min
+    if value > max:
+        return max
+    return value
+
+fn spawn_blocking<T>(f: fn() -> T) -> Future[T]:
+    # TODO: [ui][P1] Implement blocking task spawning
+    # For now, just execute synchronously
+    return Future::ready(f())

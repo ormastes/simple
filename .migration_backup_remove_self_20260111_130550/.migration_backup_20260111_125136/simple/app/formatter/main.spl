@@ -1,0 +1,657 @@
+# Simple Language Canonical Formatter
+# Complete formatter with intelligent line breaking and method chaining
+# Usage: simple_fmt <file.spl> [--check] [--write] [--diff]
+
+# Native file I/O functions
+extern fn native_fs_read_string(path: String) -> Any
+extern fn native_fs_write_string(path: String, content: String) -> Any
+extern fn native_fs_exists(path: String) -> Bool
+
+# Async file I/O wrappers
+async fn read_file(path: String) -> Result[String, String]:
+    let file_content = native_fs_read_string(path)
+    match file_content:
+        case Ok(content):
+            return Ok(content)
+        case Err(e):
+            return Err("Failed to read: " + e.to_string())
+
+async fn write_file(path: String, content: String) -> Result[Int, String]:
+    let write_status = native_fs_write_string(path, content)
+    match write_status:
+        case Ok(n):
+            return Ok(n)
+        case Err(e):
+            return Err("Failed to write: " + e.to_string())
+
+class FormatConfig:
+    indent_size: Int
+    max_line_length: Int
+    use_tabs: Bool
+    blank_lines_between_items: Int
+    continuation_indent: Int
+
+    fn new() -> FormatConfig:
+        let config = FormatConfig(
+            indent_size: 4,
+            max_line_length: 100,
+            use_tabs: false,
+            blank_lines_between_items: 2,
+            continuation_indent: 8
+        )
+        return config
+
+class Formatter:
+    config: FormatConfig
+    indent_level: Int
+
+    fn new(config: FormatConfig) -> Formatter:
+        let f = Formatter(config: config, indent_level: 0)
+        return f
+
+    async fn format_file(self, path: String) -> Result[String, String]:
+        # Read file using async file I/O
+        let source_content = await read_file(path)
+        match source_content:
+            case Ok(content):
+                let formatted = self.format_source(content)
+                return formatted
+            case Err(e):
+                return Err(e)
+
+    fn format_source(self, source: String) -> Result[String, String]:
+        let lines = source.split("\n")
+
+        # Separate imports from other content
+        let mut imports = []
+        let mut other_lines = []
+        let mut in_import_section = true
+
+        for line in lines:
+            let trimmed = line.trim()
+
+            if trimmed.starts_with("import "):
+                imports.push(trimmed)
+            elif trimmed.is_empty() and in_import_section:
+                # Skip blank lines in import section
+                continue
+            else:
+                if not trimmed.is_empty():
+                    in_import_section = false
+                other_lines.push(line)
+
+        # Sort imports alphabetically
+        imports.sort()
+
+        # Format non-import code
+        let formatted_code = self.format_code_lines(other_lines)
+        match formatted_code:
+            case Err(e):
+                return Err(e)
+            case Ok(code):
+                # Combine sorted imports + blank lines + formatted code
+                let mut result = []
+
+                if imports.len() > 0:
+                    for imp in imports:
+                        result.push(imp)
+
+                    # Add blank lines between imports and code
+                    if other_lines.len() > 0:
+                        let mut i = 0
+                        while i < self.config.blank_lines_between_items:
+                            result.push("")
+                            i = i + 1
+
+                result.extend(code)
+
+                return Ok(result.join("\n"))
+
+    fn format_code_lines(self, lines: List[String]) -> Result[List[String], String]:
+        let mut result = []
+        let mut last_was_def = false
+        let mut blank_line_count = 0
+
+        for line in lines:
+            let trimmed = line.trim()
+
+            # Skip empty lines but track them
+            if trimmed.is_empty():
+                blank_line_count = blank_line_count + 1
+                if blank_line_count <= self.config.blank_lines_between_items:
+                    result.push("")
+                continue
+
+            # Reset blank line counter
+            blank_line_count = 0
+
+            # Calculate source indentation level from leading spaces
+            let source_indent = self.count_leading_spaces(line) / self.config.indent_size
+
+            # Add blank lines before top-level definitions
+            if source_indent == 0 and self.is_definition(trimmed) and last_was_def:
+                let mut i = 0
+                while i < self.config.blank_lines_between_items:
+                    result.push("")
+                    i = i + 1
+
+            # Format line with source-derived indent
+            let formatted_lines = self.format_line(trimmed, source_indent)
+
+            # Add all formatted lines (may be multiple if line breaking occurred)
+            for fmt_line in formatted_lines:
+                result.push(fmt_line)
+
+            # Track if this was a definition
+            last_was_def = source_indent == 0 and self.is_definition(trimmed)
+
+        return Ok(result)
+
+    fn count_leading_spaces(self, line: String) -> Int:
+        let mut count = 0
+        for char in line:
+            if char == ' ':
+                count = count + 1
+            elif char == '\t':
+                count = count + self.config.indent_size
+            else:
+                break
+        return count
+
+    fn is_definition(self, line: String) -> Bool:
+        if line.starts_with("fn "):
+            return true
+        if line.starts_with("class "):
+            return true
+        if line.starts_with("struct "):
+            return true
+        if line.starts_with("enum "):
+            return true
+        if line.starts_with("trait "):
+            return true
+        if line.starts_with("impl "):
+            return true
+        return false
+
+    fn format_line(self, line: String, indent: Int) -> List[String]:
+        # Apply indentation
+        let indent_str = " ".repeat(indent * self.config.indent_size)
+
+        # Apply expression spacing
+        let spaced = self.add_expression_spacing(line)
+
+        # Check if line needs breaking
+        let full_line = indent_str + spaced
+
+        if full_line.len() > self.config.max_line_length:
+            # Line too long - apply intelligent breaking
+            return self.break_long_line(spaced, indent)
+        else:
+            return [full_line]
+
+    fn break_long_line(self, line: String, base_indent: Int) -> List[String]:
+        let indent_str = " ".repeat(base_indent * self.config.indent_size)
+        let continuation_str = " ".repeat((base_indent * self.config.indent_size) + self.config.continuation_indent)
+
+        # Check for method chaining (contains multiple dots)
+        if self.is_method_chain(line):
+            return self.break_method_chain(line, indent_str, continuation_str)
+
+        # Check for function signature (contains "fn " and "->")
+        if line.starts_with("fn ") and line.contains("->"):
+            return self.break_function_signature(line, indent_str, continuation_str)
+
+        # Check for function call with many arguments
+        if line.contains("(") and line.contains(")"):
+            return self.break_function_call(line, indent_str, continuation_str)
+
+        # Check for list/dict literal
+        let has_brackets = line.contains("[") or line.contains(r"{")
+        let has_close = line.contains("]") or line.contains(r"}")
+        if has_brackets and has_close:
+            return self.break_collection(line, indent_str, continuation_str)
+
+        # Default: break at logical operators
+        return self.break_at_operators(line, indent_str, continuation_str)
+
+    fn is_method_chain(self, line: String) -> Bool:
+        # Check if line has multiple dots (method chaining)
+        let mut dot_count = 0
+        for char in line:
+            if char == '.':
+                dot_count = dot_count + 1
+
+        return dot_count >= 2
+
+    fn break_method_chain(self, line: String, indent_str: String, continuation_str: String) -> List[String]:
+        # Break method chains so each method call is on its own line
+        let mut result = []
+        let parts = line.split(".")
+        let mut first = true
+
+        for part in parts:
+            if first:
+                result.push(indent_str + part)
+                first = false
+            else:
+                result.push(continuation_str + "." + part.trim())
+
+        return result
+
+    fn break_function_signature(self, line: String, indent_str: String, continuation_str: String) -> List[String]:
+        # Break function signature at parameter list
+        if not line.contains("(") or not line.contains(")"):
+            return [indent_str + line]
+
+        let paren_start_opt = line.index_of("(")
+        let paren_end_opt = line.index_of(")")
+
+        match paren_start_opt:
+            case None:
+                return [indent_str + line]
+            case Some(paren_start):
+                match paren_end_opt:
+                    case None:
+                        return [indent_str + line]
+                    case Some(paren_end):
+                        let before_params = line.substring(0, paren_start + 1)
+                        let params_str = line.substring(paren_start + 1, paren_end)
+                        let after_params = line.substring(paren_end, line.len())
+
+                        # Check if parameters fit on one line
+                        let params_line = indent_str + before_params + params_str + after_params
+                        if params_line.len() <= self.config.max_line_length:
+                            return [params_line]
+
+                        # Break parameters across multiple lines
+                        let mut result = []
+                        result.push(indent_str + before_params)
+
+                        let params = params_str.split(",")
+                        for param in params:
+                            result.push(continuation_str + param.trim() + ",")
+
+                        # Remove trailing comma from last parameter
+                        if result.len() > 1:
+                            let last_idx = result.len() - 1
+                            let last_line = result[last_idx]
+                            if last_line.ends_with(","):
+                                let new_last = last_line.substring(0, last_line.len() - 1)
+                                result[last_idx] = new_last
+
+                        result.push(indent_str + after_params)
+                        return result
+
+    fn break_function_call(self, line: String, indent_str: String, continuation_str: String) -> List[String]:
+        # Break long function calls across multiple lines
+        if not line.contains("("):
+            return [indent_str + line]
+
+        let paren_start_opt = line.index_of("(")
+        let paren_end_opt = line.rindex_of(")")
+
+        match paren_start_opt:
+            case None:
+                return [indent_str + line]
+            case Some(paren_start):
+                match paren_end_opt:
+                    case None:
+                        return [indent_str + line]
+                    case Some(paren_end):
+                        if paren_end < paren_start:
+                            return [indent_str + line]
+
+                        let before_args = line.substring(0, paren_start + 1)
+                        let args_str = line.substring(paren_start + 1, paren_end)
+                        let after_args = line.substring(paren_end, line.len())
+
+                        # Check if it fits on one line
+                        let one_line = indent_str + before_args + args_str + after_args
+                        if one_line.len() <= self.config.max_line_length:
+                            return [one_line]
+
+                        # Break arguments
+                        let mut result = []
+                        result.push(indent_str + before_args)
+
+                        let args = args_str.split(",")
+                        for arg in args:
+                            let trimmed = arg.trim()
+                            if not trimmed.is_empty():
+                                result.push(continuation_str + trimmed + ",")
+
+                        # Remove trailing comma
+                        if result.len() > 1:
+                            let last_idx = result.len() - 1
+                            let last_line = result[last_idx]
+                            if last_line.ends_with(","):
+                                let new_last = last_line.substring(0, last_line.len() - 1)
+                                result[last_idx] = new_last
+
+                        result.push(indent_str + after_args)
+                        return result
+
+    fn break_collection(self, line: String, indent_str: String, continuation_str: String) -> List[String]:
+        # Break collections (lists, dicts, arrays) across multiple lines
+        let mut open_bracket = "["
+        let mut close_bracket = "]"
+        if line.contains(r"{"):
+            open_bracket = r"{"
+            close_bracket = r"}"
+
+        let bracket_start_opt = line.index_of(open_bracket)
+        let bracket_end_opt = line.rindex_of(close_bracket)
+
+        match bracket_start_opt:
+            case None:
+                return [indent_str + line]
+            case Some(bracket_start):
+                match bracket_end_opt:
+                    case None:
+                        return [indent_str + line]
+                    case Some(bracket_end):
+                        if bracket_end < bracket_start:
+                            return [indent_str + line]
+
+                        let before = line.substring(0, bracket_start + 1)
+                        let content = line.substring(bracket_start + 1, bracket_end)
+                        let after = line.substring(bracket_end, line.len())
+
+                        # Check if it fits
+                        let one_line = indent_str + before + content + after
+                        if one_line.len() <= self.config.max_line_length:
+                            return [one_line]
+
+                        # Break items
+                        let mut result = []
+                        result.push(indent_str + before)
+
+                        let items = content.split(",")
+                        for item in items:
+                            let trimmed = item.trim()
+                            if not trimmed.is_empty():
+                                result.push(continuation_str + trimmed + ",")
+
+                        # Remove trailing comma
+                        if result.len() > 1:
+                            let last_idx = result.len() - 1
+                            let last_line = result[last_idx]
+                            if last_line.ends_with(","):
+                                let new_last = last_line.substring(0, last_line.len() - 1)
+                                result[last_idx] = new_last
+
+                        result.push(indent_str + close_bracket + after)
+                        return result
+
+    fn break_at_operators(self, line: String, indent_str: String, continuation_str: String) -> List[String]:
+        # Default line breaking: break at logical operators
+        let operators = [" and ", " or ", " + ", " - ", " * ", " / "]
+        let mut best_break = -1
+        let mut best_op = ""
+
+        for op in operators:
+            if line.contains(op):
+                let idx_opt = line.rindex_of(op)
+                match idx_opt:
+                    case Some(idx):
+                        if idx > best_break:
+                            best_break = idx
+                            best_op = op
+                    case None:
+                        pass
+
+        if best_break > 0:
+            let first_part = line.substring(0, best_break)
+            let second_part = line.substring(best_break + best_op.len(), line.len())
+
+            return [
+                indent_str + first_part + best_op,
+                continuation_str + second_part
+            ]
+
+        # No good break point found - return as is
+        return [indent_str + line]
+
+    fn add_expression_spacing(self, line: String) -> String:
+        # Add spaces around binary operators
+        let mut result = line
+
+        # First, protect multi-character operators by replacing them with placeholders
+        result = result.replace("->", "@ARROW@")
+        result = result.replace("=>", "@FATARROW@")
+        result = result.replace("==", "@EQ@")
+        result = result.replace("!=", "@NE@")
+        result = result.replace("<=", "@LE@")
+        result = result.replace(">=", "@GE@")
+
+        # Now process single-char operators safely
+        let operators = ["+", "-", "*", "/", "%", "<", ">"]
+        for op in operators:
+            result = result.replace(op, " " + op + " ")
+
+        # Restore multi-character operators with proper spacing
+        result = result.replace("@ARROW@", " -> ")
+        result = result.replace("@FATARROW@", " => ")
+        result = result.replace("@EQ@", " == ")
+        result = result.replace("@NE@", " != ")
+        result = result.replace("@LE@", " <= ")
+        result = result.replace("@GE@", " >= ")
+
+        # Clean up multiple spaces
+        while result.contains("  "):
+            result = result.replace("  ", " ")
+
+        # Clean up spaces in specific contexts
+        result = result.replace("( ", "(")
+        result = result.replace(" )", ")")
+        result = result.replace("[ ", "[")
+        result = result.replace(" ]", "]")
+        result = result.replace(" ,", ",")
+        result = result.replace(", ", ",")
+        result = result.replace(",", ", ")
+
+        # Clean up function signatures (colon spacing)
+        result = result.replace(" :", ":")
+
+        # Clean up dots (no spaces around dots in method calls)
+        result = result.replace(" .", ".")
+        result = result.replace(". ", ".")
+
+        return result.trim()
+
+    fn is_indent_line(self, line: String) -> Bool:
+        # Check if line should increase indent level
+        if line.ends_with(":"):
+            return true
+        if line.ends_with(r"{"):
+            return true
+        if line.ends_with("("):
+            return true
+        if line.ends_with("["):
+            return true
+        return false
+
+    fn is_dedent_line(self, line: String) -> Bool:
+        # Check if line should decrease indent level
+        if line.starts_with(r"}"):
+            return true
+        if line.starts_with(")"):
+            return true
+        if line.starts_with("]"):
+            return true
+        if line.starts_with("else"):
+            return true
+        if line.starts_with("elif"):
+            return true
+        if line.starts_with("except"):
+            return true
+        if line.starts_with("finally"):
+            return true
+        return false
+
+async fn format_file_inplace(path: String) -> Result[String, String]:
+    let fmt_config = FormatConfig.new()
+    let fmt_instance = Formatter.new(fmt_config)
+
+    let format_output = await fmt_instance.format_file(path)
+    match format_output:
+        case Err(e):
+            return Err(e)
+        case Ok(formatted):
+            let write_status = await write_file(path, formatted)
+            match write_status:
+                case Ok(_):
+                    return Ok("Formatted successfully")
+                case Err(e):
+                    return Err(e)
+
+async fn check_formatting(path: String) -> Result[Bool, String]:
+    let check_config = FormatConfig.new()
+    let check_formatter = Formatter.new(check_config)
+
+    let original_content = await read_file(path)
+    match original_content:
+        case Err(e):
+            return Err(e)
+        case Ok(original):
+            let formatted_output = check_formatter.format_source(original)
+            match formatted_output:
+                case Err(e):
+                    return Err(e)
+                case Ok(formatted):
+                    return Ok(original == formatted)
+
+fn print_diff(original: String, formatted: String, file_path: String):
+    """Print unified diff between original and formatted code"""
+    print("--- " + file_path + " (original)")
+    print("+++ " + file_path + " (formatted)")
+    print("")
+
+    let orig_lines = original.split("\n")
+    let fmt_lines = formatted.split("\n")
+
+    let max_len = orig_lines.len()
+    if fmt_lines.len() > max_len:
+        max_len = fmt_lines.len()
+
+    let mut i = 0
+    while i < max_len:
+        if i < orig_lines.len() and i < fmt_lines.len():
+            if orig_lines[i] != fmt_lines[i]:
+                let line_num = i + 1
+                print("@@ Line " + line_num.to_string() + " @@")
+                print("-" + orig_lines[i])
+                print("+" + fmt_lines[i])
+        elif i < orig_lines.len():
+            let line_num = i + 1
+            print("@@ Line " + line_num.to_string() + " @@")
+            print("-" + orig_lines[i])
+        else:
+            let line_num = i + 1
+            print("@@ Line " + line_num.to_string() + " @@")
+            print("+" + fmt_lines[i])
+        i = i + 1
+
+extern fn sys_get_args() -> List[String]
+
+async fn main() -> Int:
+    let args = sys_get_args()
+
+    if args.len() < 2:
+        print("Simple Language Canonical Formatter")
+        print("=====================================")
+        print("")
+        print("Usage: simple_fmt <file.spl> [OPTIONS]")
+        print("")
+        print("Options:")
+        print("  --check     Check if file is formatted (exit 1 if not)")
+        print("  --write     Format file in place")
+        print("  --diff      Show formatting diff")
+        print("  --stdout    Print formatted output to stdout (default)")
+        print("")
+        print("Features:")
+        print("  - Automatic import sorting (alphabetical)")
+        print("  - Expression spacing (x + y, not x+y)")
+        print("  - Blank lines between definitions (2 lines)")
+        print("  - Consistent indentation (4 spaces)")
+        print("  - Intelligent line breaking (100 char limit)")
+        print("  - Method chaining alignment")
+        print("  - Function signature formatting")
+        print("  - Collection formatting (arrays, dicts)")
+        return 1
+
+    let file_path = args[1]
+    let check_mode = args.contains("--check")
+    let write_mode = args.contains("--write")
+    let diff_mode = args.contains("--diff")
+
+    # Verify file exists
+    if not native_fs_exists(file_path):
+        print("Error: File not found: " + file_path)
+        return 1
+
+    if check_mode:
+        # Check mode: verify formatting
+        let check_result = await check_formatting(file_path)
+        match check_result:
+            case Ok(is_formatted):
+                if is_formatted:
+                    print("OK " + file_path + " is formatted")
+                    return 0
+                else:
+                    print("FAIL " + file_path + " needs formatting")
+                    return 1
+            case Err(error):
+                print("Error: " + error)
+                return 1
+
+    elif write_mode:
+        # Write mode: format in place
+        let inplace_result = await format_file_inplace(file_path)
+        match inplace_result:
+            case Ok(_):
+                print("OK Formatted " + file_path)
+                return 0
+            case Err(error):
+                print("Error: " + error)
+                return 1
+
+    elif diff_mode:
+        # Diff mode: show formatting diff
+        let diff_config = FormatConfig.new()
+        let diff_formatter = Formatter.new(diff_config)
+
+        let diff_read = await read_file(file_path)
+        match diff_read:
+            case Err(e):
+                print("Error reading file: " + e)
+                return 1
+            case Ok(original):
+                let diff_format = diff_formatter.format_source(original)
+                match diff_format:
+                    case Err(e):
+                        print("Error: " + e)
+                        return 1
+                    case Ok(formatted):
+                        if original == formatted:
+                            print("OK " + file_path + " is correctly formatted")
+                            return 0
+                        else:
+                            print_diff(original, formatted, file_path)
+                            return 1
+
+    else:
+        # Default/stdout mode: print to stdout
+        let stdout_config = FormatConfig.new()
+        let stdout_formatter = Formatter.new(stdout_config)
+
+        let stdout_result = await stdout_formatter.format_file(file_path)
+        match stdout_result:
+            case Ok(formatted):
+                print(formatted)
+                return 0
+            case Err(error):
+                print("Error: " + error)
+                return 1
+
+    return 0

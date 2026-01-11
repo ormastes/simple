@@ -1,0 +1,128 @@
+# UDP Networking - Immutable Variant
+# Functional style UDP with immutable socket state
+
+use units.net.*
+use units.size.*
+use host.common.io.error.IoError
+
+# UDP socket state (immutable)
+struct UdpSocket:
+    handle: i64
+    local_addr: SocketAddr
+    packets_sent: u64
+    packets_received: u64
+
+impl UdpSocket:
+    # Bind to local address
+    pub async fn bind(addr: SocketAddr) -> Result[UdpSocket, IoError]:
+        let handle = native_udp_bind(addr)?
+        return Ok(UdpSocket {
+            handle: handle,
+            local_addr: addr,
+            packets_sent: 0,
+            packets_received: 0
+        })
+
+    fn local_addr() -> SocketAddr:
+        self.local_addr
+
+    fn packets_sent() -> u64:
+        self.packets_sent
+
+    fn packets_received() -> u64:
+        self.packets_received
+
+    # Send datagram, return (bytes_sent, new_socket_state)
+    pub async fn send_to(
+        self,
+        data: Bytes,
+        addr: SocketAddr
+    ) -> Result[(ByteCount, UdpSocket), IoError]:
+        let n = native_udp_send_to(self.handle, &data, addr)?
+        return Ok((n, UdpSocket {
+            handle: self.handle,
+            local_addr: self.local_addr,
+            packets_sent: self.packets_sent + 1,
+            packets_received: self.packets_received
+        }))
+
+    # Receive datagram, return ((data, sender), new_socket_state)
+    pub async fn recv_from(
+        self,
+        max_bytes: ByteCount
+    ) -> Result[((Bytes, SocketAddr), UdpSocket), IoError]:
+        let (data, sender) = native_udp_recv_from(self.handle, max_bytes)?
+        return Ok(((data, sender), UdpSocket {
+            handle: self.handle,
+            local_addr: self.local_addr,
+            packets_sent: self.packets_sent,
+            packets_received: self.packets_received + 1
+        }))
+
+    # Close socket
+    pub async fn close(self) -> Result[(), IoError]:
+        return native_udp_close(self.handle)
+
+# Connected UDP socket (for repeated sends to same address)
+struct ConnectedUdpSocket:
+    handle: i64
+    local_addr: SocketAddr
+    peer_addr: SocketAddr
+    packets_sent: u64
+    packets_received: u64
+
+impl ConnectedUdpSocket:
+    # Connect UDP socket to remote address
+    pub async fn connect(socket: UdpSocket, addr: SocketAddr) -> Result[ConnectedUdpSocket, IoError]:
+        native_udp_connect(socket.handle, addr)?
+        return Ok(ConnectedUdpSocket {
+            handle: socket.handle,
+            local_addr: socket.local_addr,
+            peer_addr: addr,
+            packets_sent: socket.packets_sent,
+            packets_received: socket.packets_received
+        })
+
+    fn local_addr() -> SocketAddr:
+        self.local_addr
+
+    fn peer_addr() -> SocketAddr:
+        self.peer_addr
+
+    # Send to connected peer, return (bytes_sent, new_state)
+    pub async fn send(self, data: Bytes) -> Result[(ByteCount, ConnectedUdpSocket), IoError]:
+        let n = native_udp_send(self.handle, &data)?
+        return Ok((n, ConnectedUdpSocket {
+            handle: self.handle,
+            local_addr: self.local_addr,
+            peer_addr: self.peer_addr,
+            packets_sent: self.packets_sent + 1,
+            packets_received: self.packets_received
+        }))
+
+    # Receive from connected peer, return (data, new_state)
+    pub async fn recv(self, max_bytes: ByteCount) -> Result[(Bytes, ConnectedUdpSocket), IoError]:
+        let data = native_udp_recv(self.handle, max_bytes)?
+        return Ok((data, ConnectedUdpSocket {
+            handle: self.handle,
+            local_addr: self.local_addr,
+            peer_addr: self.peer_addr,
+            packets_sent: self.packets_sent,
+            packets_received: self.packets_received + 1
+        }))
+
+    # Close socket
+    pub async fn close(self) -> Result[(), IoError]:
+        return native_udp_close(self.handle)
+
+# ===============================
+# Native function declarations
+# ===============================
+
+extern fn native_udp_bind(addr: SocketAddr) -> Result[i64, IoError]
+extern fn native_udp_connect(handle: i64, addr: SocketAddr) -> Result[(), IoError]
+extern fn native_udp_send_to(handle: i64, data: &Bytes, addr: SocketAddr) -> Result[ByteCount, IoError]
+extern fn native_udp_recv_from(handle: i64, max: ByteCount) -> Result[(Bytes, SocketAddr), IoError]
+extern fn native_udp_send(handle: i64, data: &Bytes) -> Result[ByteCount, IoError]
+extern fn native_udp_recv(handle: i64, max: ByteCount) -> Result[Bytes, IoError]
+extern fn native_udp_close(handle: i64) -> Result[(), IoError]

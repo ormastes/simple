@@ -1,0 +1,178 @@
+///
+Module: sdn.error
+
+SDN error types with span information for diagnostics.
+
+Provides:
+- Span: Source location tracking (line, column, start, end)
+- SdnError: Error variants for parsing and document operations
+- Helper functions for creating errors
+///
+
+# Public exports
+export Span, SdnError
+export syntax_error, syntax_error_with_span, unexpected_token
+
+/// Source location in SDN document
+struct Span:
+    start: Int
+    end: Int
+    line: Int
+    column: Int
+
+    fn new(start: Int, end: Int, line: Int, column: Int) -> Span:
+        return Span(
+            start: start,
+            end: end,
+            line: line,
+            column: column
+        )
+
+    fn merge(self, other: Span) -> Span:
+        """Merge two spans into one covering both"""
+        let min_start = if self.start < other.start:
+            self.start
+        else:
+            other.start
+
+        let max_end = if self.end > other.end:
+            self.end
+        else:
+            other.end
+
+        return Span(
+            start: min_start,
+            end: max_end,
+            line: self.line,
+            column: self.column
+        )
+
+    fn default() -> Span:
+        """Default span at line 1, column 1"""
+        return Span.new(0, 0, 1, 1)
+
+    fn to_string(self) -> String:
+        return "${self.line}:${self.column}"
+
+/// SDN parse and document errors
+enum SdnError:
+    SyntaxError:
+        message: String
+        line: Int
+        column: Int
+        span: Option[Span]
+
+    UnexpectedToken:
+        expected: String
+        found: String
+        span: Span
+
+    UnexpectedEof:
+        span: Option[Span]
+
+    InvalidNumber:
+        literal: String
+
+    UnclosedString:
+        span: Option[Span]
+
+    InvalidIndentation:
+        line: Int
+
+    InvalidEscape:
+        sequence: String
+
+    PathNotFound:
+        path: String
+
+    TypeMismatch:
+        expected: String
+        found: String
+
+    InvalidTableRow:
+        expected: Int
+        found: Int
+
+    IoError:
+        message: String
+
+impl SdnError:
+    fn to_string(self) -> String:
+        """Format error as human-readable message"""
+        match self:
+            case SyntaxError(msg, line, col, _):
+                return "Syntax error at ${line}:${col}: ${msg}"
+
+            case UnexpectedToken(exp, found, span):
+                return "Unexpected token at ${span.to_string()}: expected ${exp}, found ${found}"
+
+            case UnexpectedEof(_):
+                return "Unexpected end of file"
+
+            case InvalidNumber(lit):
+                return "Invalid number literal: ${lit}"
+
+            case UnclosedString(_):
+                return "Unclosed string literal"
+
+            case InvalidIndentation(line):
+                return "Invalid indentation at line ${line}"
+
+            case InvalidEscape(seq):
+                return "Invalid escape sequence: ${seq}"
+
+            case PathNotFound(path):
+                return "Path not found: ${path}"
+
+            case TypeMismatch(exp, found):
+                return "Type mismatch: expected ${exp}, found ${found}"
+
+            case InvalidTableRow(exp, found):
+                return "Invalid table row: expected ${exp} columns, found ${found}"
+
+            case IoError(msg):
+                return "I/O error: ${msg}"
+
+    fn span(self) -> Option[Span]:
+        """Get the span associated with this error, if any"""
+        match self:
+            case SyntaxError(_, _, _, span):
+                return span
+
+            case UnexpectedToken(_, _, span):
+                return Some(span)
+
+            case UnclosedString(span):
+                return span
+
+            case UnexpectedEof(span):
+                return span
+
+            case _:
+                return None
+
+/// Create a syntax error with line and column
+fn syntax_error(message: String, line: Int, column: Int) -> SdnError:
+    return SdnError.SyntaxError(
+        message: message,
+        line: line,
+        column: column,
+        span: None
+    )
+
+/// Create a syntax error with a span
+fn syntax_error_with_span(message: String, span: Span) -> SdnError:
+    return SdnError.SyntaxError(
+        message: message,
+        line: span.line,
+        column: span.column,
+        span: Some(span)
+    )
+
+/// Create an unexpected token error
+fn unexpected_token(expected: String, found: String, span: Span) -> SdnError:
+    return SdnError.UnexpectedToken(
+        expected: expected,
+        found: found,
+        span: span
+    )

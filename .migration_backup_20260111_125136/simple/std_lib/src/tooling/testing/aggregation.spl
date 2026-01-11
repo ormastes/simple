@@ -1,0 +1,363 @@
+# Test Result Aggregation
+# Combine test results from multiple languages
+
+use tooling.core.project.Language
+use tooling.testing.runner.{TestRunResult, TestFailure}
+
+# Test result summary
+pub class TestSummary:
+    pub passed: i32
+    pub failed: i32
+    pub skipped: i32
+    pub total_duration_ms: i64
+
+    pub fn new(): TestSummary =
+        """Create empty test summary."""
+        TestSummary {
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            total_duration_ms: 0
+        }
+
+    pub fn total_tests(self): i32 =
+        """Get total test count.
+
+        Returns:
+            Total tests
+        """
+        self.passed + self.failed + self.skipped
+
+    pub fn pass_rate(self): f64 =
+        """Get pass rate percentage."""
+        if self.total_tests() == 0:
+            return 0.0
+        ((self.passed as f64) / (self.total_tests() as f64)) * 100.0
+
+    pub fn fail_rate(self): f64 =
+        """Get fail rate percentage."""
+        if self.total_tests() == 0:
+            return 0.0
+        ((self.failed as f64) / (self.total_tests() as f64)) * 100.0
+
+    pub fn has_failures(self): bool =
+        """Check if has failures."""
+        self.failed > 0
+
+    pub fn is_all_passed(self): bool =
+        """Check if all passed."""
+        self.total_tests() > 0 and self.failed == 0
+
+    pub fn summary(self): String =
+        """Get summary."""
+        "{self.passed}/{self.total_tests()} passed ({self.pass_rate():.1f}%)"
+
+# Flaky test detection
+pub class FlakyTest:
+    pub test_name: String
+    pub language: Language
+    pub pass_count: i32
+    pub fail_count: i32
+
+    pub fn new(test_name: String, language: Language): FlakyTest =
+        """Create flaky test record."""
+        FlakyTest {
+            test_name: test_name,
+            language: language,
+            pass_count: 0,
+            fail_count: 0
+        }
+
+    pub fn is_flaky(self): bool =
+        """Check if test is flaky.
+
+        Returns:
+            True if both passed and failed
+        """
+        self.pass_count > 0 and self.fail_count > 0
+
+    pub fn total_runs(self): i32 =
+        """Get total runs."""
+        self.pass_count + self.fail_count
+
+    pub fn flakiness_rate(self): f64 =
+        """Get flakiness rate."""
+        if self.total_runs() == 0:
+            return 0.0
+        let min_count = if self.pass_count < self.fail_count: self.pass_count else: self.fail_count
+        ((min_count as f64) / (self.total_runs() as f64)) * 100.0
+
+    pub fn summary(self): String =
+        """Get summary."""
+        "{self.test_name}: {self.pass_count} passed, {self.fail_count} failed ({self.flakiness_rate():.1f}% flaky)"
+
+# Test aggregator
+pub class TestAggregator:
+    pub results: List[TestRunResult]
+    pub test_history: Dict[String, FlakyTest]
+
+    pub fn new(): TestAggregator =
+        """Create test aggregator.
+
+        Returns:
+            Empty aggregator
+
+        Example:
+            let aggregator = TestAggregator.new()
+
+            aggregator.add_simple_results(simple_tests)
+            aggregator.add_rust_results(cargo_output)
+            aggregator.add_python_results(pytest_output)
+
+            let summary = aggregator.get_summary()
+            print("{summary.passed} passed, {summary.failed} failed")
+        """
+        TestAggregator {
+            results: [],
+            test_history: {}
+        }
+
+    pub fn add_result(self, result: TestRunResult):
+        """Add test result.
+
+        Args:
+            result: Test run result
+        """
+        self.results.append(result)
+
+    pub fn has_results(self): bool =
+        """Check if has results."""
+        self.results.len() > 0
+
+    pub fn get_result_count(self): i32 =
+        """Get result count."""
+        self.results.len()
+
+    pub fn has_flaky_tests(self): bool =
+        """Check if has flaky tests."""
+        self.detect_flaky_tests().len() > 0
+
+    pub fn summary(self): String =
+        """Get aggregator summary."""
+        let sum = self.get_summary()
+        "TestAggregator: {sum.total_tests()} tests ({sum.passed} passed, {sum.failed} failed, {sum.skipped} skipped)"
+
+    pub fn add_simple_results(self, result: TestRunResult):
+        """Add Simple test results.
+
+        Args:
+            result: Simple test result
+        """
+        self.add_result(result)
+
+    pub fn add_rust_results(self, cargo_output: String):
+        """Add Rust test results from cargo output.
+
+        Args:
+            cargo_output: Cargo test output
+        """
+        # TODO: [stdlib][P2] Parse cargo output
+        pass
+
+    pub fn add_python_results(self, pytest_output: String):
+        """Add Python test results from pytest output.
+
+        Args:
+            pytest_output: Pytest JSON output
+        """
+        # TODO: [stdlib][P2] Parse pytest JSON
+        pass
+
+    pub fn get_summary(self): TestSummary =
+        """Get aggregated test summary.
+
+        Returns:
+            Combined summary across all results
+
+        Example:
+            let summary = aggregator.get_summary()
+            print("Total: {summary.total_tests()}")
+            print("Passed: {summary.passed}")
+            print("Failed: {summary.failed}")
+        """
+        let summary = TestSummary.new()
+
+        for result in self.results:
+            summary.passed += result.passed
+            summary.failed += result.failed
+            summary.skipped += result.skipped
+            summary.total_duration_ms += result.duration_ms
+
+        summary
+
+    pub fn export_junit_xml(self, output_file: String):
+        """Export results as JUnit XML.
+
+        Args:
+            output_file: Output file path
+
+        JUnit XML format is used by CI systems like Jenkins.
+
+        Example:
+            aggregator.export_junit_xml("test-results.xml")
+        """
+        # TODO: [stdlib][P3] Generate JUnit XML
+        let xml = self.generate_junit_xml()
+        # TODO: [stdlib][P3] Write to file
+
+    fn generate_junit_xml(): String =
+        """Generate JUnit XML string.
+
+        Returns:
+            XML string
+
+        Format:
+        <?xml version="1.0" encoding="UTF-8"?>
+        <testsuites>
+          <testsuite name="..." tests="10" failures="1" time="1.234">
+            <testcase name="test_example" time="0.123"/>
+            <testcase name="test_failing" time="0.234">
+              <failure message="assertion failed">...</failure>
+            </testcase>
+          </testsuite>
+        </testsuites>
+        """
+        let mut xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        xml += "<testsuites>\n"
+
+        # Generate test suite for each result
+        for result in self.results:
+            xml += self.generate_testsuite_xml(result)
+
+        xml += "</testsuites>\n"
+        xml
+
+    fn generate_testsuite_xml(result: TestRunResult): String =
+        """Generate XML for single test suite.
+
+        Args:
+            result: Test run result
+
+        Returns:
+            XML string
+        """
+        let mut xml = "  <testsuite"
+        xml += " name=\"{self.escape_xml(result.suite_name)}\""
+        xml += " tests=\"{result.passed + result.failed + result.skipped}\""
+        xml += " failures=\"{result.failed}\""
+        xml += " skipped=\"{result.skipped}\""
+        xml += " time=\"{self.ms_to_seconds(result.duration_ms)}\""
+        xml += ">\n"
+
+        # Add test cases
+        for failure in result.failures:
+            xml += self.generate_testcase_xml(failure.test_name, false, failure.message, result.duration_ms)
+
+        # Add passed tests (estimate one per passed count)
+        let avg_time_ms = if result.passed > 0:
+            result.duration_ms / (result.passed as i64)
+        else:
+            0
+
+        let i = 0
+        while i < result.passed:
+            xml += self.generate_testcase_xml("test_{i}", true, "", avg_time_ms)
+            i += 1
+
+        xml += "  </testsuite>\n"
+        xml
+
+    fn generate_testcase_xml(name: String, passed: bool, message: String, time_ms: i64): String =
+        """Generate XML for single test case.
+
+        Args:
+            name: Test case name
+            passed: True if passed
+            message: Failure message (if failed)
+            time_ms: Execution time in milliseconds
+
+        Returns:
+            XML string
+        """
+        let mut xml = "    <testcase"
+        xml += " name=\"{self.escape_xml(name)}\""
+        xml += " time=\"{self.ms_to_seconds(time_ms)}\""
+
+        if passed:
+            xml += "/>\n"
+        else:
+            xml += ">\n"
+            xml += "      <failure message=\"{self.escape_xml(message)}\"/>\n"
+            xml += "    </testcase>\n"
+
+        xml
+
+    fn escape_xml(text: String): String =
+        """Escape XML special characters.
+
+        Args:
+            text: Text to escape
+
+        Returns:
+            Escaped text
+        """
+        let mut result = text
+        result = result.replace("&", "&amp;")
+        result = result.replace("<", "&lt;")
+        result = result.replace(">", "&gt;")
+        result = result.replace("\"", "&quot;")
+        result = result.replace("'", "&apos;")
+        result
+
+    fn ms_to_seconds(ms: i64): String =
+        """Convert milliseconds to seconds string.
+
+        Args:
+            ms: Milliseconds
+
+        Returns:
+            Seconds as string with 3 decimal places
+
+        Example:
+            ms_to_seconds(1234) → "1.234"
+        """
+        let seconds = (ms as f64) / 1000.0
+        "{seconds:.3f}"
+
+    pub fn detect_flaky_tests(self): List[FlakyTest] =
+        """Detect flaky tests from history.
+
+        Returns:
+            List of flaky tests
+
+        Example:
+            let flaky = aggregator.detect_flaky_tests()
+            for test in flaky:
+                print("Warning: flaky test {test.test_name}")
+                print("  Passed: {test.pass_count}, Failed: {test.fail_count}")
+        """
+        let flaky: List[FlakyTest] = []
+
+        for (_, test) in self.test_history.items():
+            if test.is_flaky():
+                flaky.append(test)
+
+        flaky
+
+    pub fn record_test_result(self, test_name: String, language: Language, passed: bool):
+        """Record test result for flaky detection.
+
+        Args:
+            test_name: Test name
+            language: Test language
+            passed: True if passed
+        """
+        if not self.test_history.contains_key(test_name):
+            self.test_history[test_name] = FlakyTest.new(test_name, language)
+
+        let flaky_test = self.test_history[test_name]
+
+        if passed:
+            flaky_test.pass_count += 1
+        else:
+            flaky_test.fail_count += 1

@@ -1,0 +1,172 @@
+# Physics Collision - Contact Information and Resolution
+#
+# Contact information from collision detection and impulse-based collision response.
+#
+# ## Classes
+# - `Contact`: Collision contact information
+# - `ContactResolver`: Impulse-based collision response with friction and restitution
+#
+# ## Example
+# ```simple
+# import physics.collision as collision
+# import physics.dynamics as dynamics
+# import physics.core as core
+#
+# # Create contact information
+# let contact = collision.Contact(
+#     point=core.Vector3(0.5, 0, 0),
+#     normal=core.Vector3(1, 0, 0),
+#     penetration=0.1,
+#     body1_index=0,
+#     body2_index=1
+# )
+#
+# # Resolve collision with material properties
+# let body1 = dynamics.RigidBody(mass=1.0, position=core.Vector3(0, 0, 0))
+# let body2 = dynamics.RigidBody(mass=1.0, position=core.Vector3(1, 0, 0))
+# let rubber = collision.Material::rubber()
+# let metal = collision.Material::metal()
+# collision.ContactResolver::resolve_contact(body1, body2, contact, rubber, metal)
+# ```
+
+export Contact, ContactResolver
+
+import ..core as core
+import ..dynamics as dynamics
+from . import Material
+
+
+# ============================================================================
+# Contact - Collision Contact Information
+# ============================================================================
+
+class Contact:
+    """Contact information from a collision.
+
+    Attributes:
+        point: Contact point in world space
+        normal: Contact normal (from body1 to body2)
+        penetration: Penetration depth
+        body1_index: Index of first body
+        body2_index: Index of second body
+    """
+    point: core.Vector3
+    normal: core.Vector3
+    penetration: f64
+    body1_index: i32
+    body2_index: i32
+
+    fn __init__(point: core.Vector3,
+        normal: core.Vector3,
+        penetration: f64,
+        body1_index: i32,
+        body2_index: i32
+    ):
+        """Initialize contact.
+
+        Args:
+            point: Contact point
+            normal: Contact normal
+            penetration: Penetration depth
+            body1_index: First body index
+            body2_index: Second body index
+        """
+        self.point = point
+        self.normal = normal
+        self.penetration = penetration
+        self.body1_index = body1_index
+        self.body2_index = body2_index
+
+
+# ============================================================================
+# ContactResolver - Collision Response
+# ============================================================================
+
+class ContactResolver:
+    """Resolves collisions with friction and restitution."""
+
+    @staticmethod
+    fn resolve_contact(
+        body1: dynamics.RigidBody,
+        body2: dynamics.RigidBody,
+        contact: Contact,
+        material1: Material,
+        material2: Material
+    ):
+        """Resolve a collision contact between two bodies.
+
+        Applies impulse-based collision response with friction and restitution.
+
+        Args:
+            body1: First rigid body
+            body2: Second rigid body
+            contact: Contact information
+            material1: Material of first body
+            material2: Material of second body
+        """
+        # Skip if both bodies are static
+        if body1.is_static() and body2.is_static():
+            return
+
+        # Calculate relative velocity at contact point
+        let rel_velocity = body2.velocity.sub(body1.velocity)
+        let velocity_along_normal = rel_velocity.dot(contact.normal)
+
+        # Don't resolve if bodies are separating
+        if velocity_along_normal > 0:
+            return
+
+        # Calculate combined restitution (min for more realistic behavior)
+        let restitution = material1.restitution.min(material2.restitution)
+
+        # Calculate impulse magnitude
+        let inv_mass1 = 0.0 if body1.is_static() else 1.0 / body1.mass
+        let inv_mass2 = 0.0 if body2.is_static() else 1.0 / body2.mass
+        let inv_mass_sum = inv_mass1 + inv_mass2
+
+        if inv_mass_sum == 0:
+            return
+
+        let impulse_magnitude = -(1.0 + restitution) * velocity_along_normal / inv_mass_sum
+
+        # Apply normal impulse
+        let impulse = contact.normal.scale(impulse_magnitude)
+        body1.apply_impulse(impulse.scale(-1.0))
+        body2.apply_impulse(impulse)
+
+        # Calculate friction
+        let friction = (material1.friction + material2.friction) * 0.5
+
+        # Get tangent direction (perpendicular to normal)
+        let tangent_velocity = rel_velocity.sub(
+            contact.normal.scale(velocity_along_normal)
+        )
+        let tangent_magnitude = tangent_velocity.magnitude()
+
+        if tangent_magnitude > 0.0001:
+            let tangent = tangent_velocity.scale(1.0 / tangent_magnitude)
+
+            # Friction impulse (Coulomb friction)
+            let friction_magnitude = -tangent_velocity.magnitude() / inv_mass_sum
+            let max_friction = impulse_magnitude.abs() * friction
+
+            # Clamp friction to Coulomb limit
+            if friction_magnitude.abs() > max_friction:
+                friction_magnitude = max_friction * friction_magnitude.sign()
+
+            let friction_impulse = tangent.scale(friction_magnitude)
+            body1.apply_impulse(friction_impulse.scale(-1.0))
+            body2.apply_impulse(friction_impulse)
+
+        # Position correction to resolve penetration
+        let correction_percent = 0.8  # How much to correct (0.2-0.8 typical)
+        let slop = 0.01  # Penetration allowance (prevent jitter)
+
+        if contact.penetration > slop:
+            let correction = contact.normal.scale(
+                (contact.penetration - slop) / inv_mass_sum * correction_percent
+            )
+            if not body1.is_static():
+                body1.position = body1.position.sub(correction.scale(inv_mass1))
+            if not body2.is_static():
+                body2.position = body2.position.add(correction.scale(inv_mass2))

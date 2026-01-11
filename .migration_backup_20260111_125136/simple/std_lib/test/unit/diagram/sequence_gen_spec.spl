@@ -1,0 +1,208 @@
+# BDD Tests for SequenceGenerator
+# Feature: Diagram Generation - Sequence Diagrams
+#
+# Tests the Mermaid sequence diagram generator including
+# call/return arrows, activation bars, and formatting.
+
+import std.spec
+import diagram.{CallEvent, CallEventRecorder, CallType}
+import diagram.{SequenceGenerator, generate_sequence, to_mermaid_sequence}
+import diagram.{DiagramConfig}
+
+describe "SequenceGenerator":
+    context "Basic structure":
+        it "should generate mermaid header":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("target", None, [], CallType.Direct)
+
+            let output = to_mermaid_sequence(rec)
+
+            expect output.contains("```mermaid") == true
+            expect output.contains("sequenceDiagram") == true
+            expect output.contains("```") == true
+
+        it "should include autonumber":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("target", None, [], CallType.Direct)
+
+            let output = to_mermaid_sequence(rec)
+
+            expect output.contains("autonumber") == true
+
+    context "Participant generation":
+        it "should declare participants":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("methodA", Some("ClassA"), [], CallType.Method)
+            rec.record_call("methodB", Some("ClassB"), [], CallType.Method)
+
+            let output = to_mermaid_sequence(rec)
+
+            expect output.contains("participant") == true
+            expect output.contains("ClassA") == true
+            expect output.contains("ClassB") == true
+
+        it "should create aliases for long names":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("method", Some("VeryLongClassName"), [], CallType.Method)
+
+            let config = DiagramConfig.new().with_sequence()
+            let output = generate_sequence(rec, config)
+
+            # Should have alias declaration
+            expect output.contains("participant") == true
+            expect output.contains("VeryLongClassName") == true
+
+    context "Call arrows":
+        it "should generate call arrow":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("doWork", Some("Service"), [], CallType.Method)
+
+            let output = to_mermaid_sequence(rec)
+
+            expect output.contains("->>") == true
+            expect output.contains("doWork") == true
+
+        it "should include arguments in call":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("process", Some("Handler"), ["data", "42"], CallType.Method)
+
+            let config = DiagramConfig.new().with_sequence()
+            let output = generate_sequence(rec, config)
+
+            expect output.contains("process(data, 42)") == true
+
+        it "should activate callee on call":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("target", Some("Target"), [], CallType.Method)
+
+            let output = to_mermaid_sequence(rec)
+
+            expect output.contains("activate") == true
+
+    context "Return arrows":
+        it "should generate return arrow":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("getValue", Some("Store"), [], CallType.Method)
+            rec.record_return(Some("42"))
+
+            let output = to_mermaid_sequence(rec)
+
+            expect output.contains("-->>") == true
+
+        it "should include return value":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("calculate", Some("Calculator"), [], CallType.Method)
+            rec.record_return(Some("Result(100)"))
+
+            let config = DiagramConfig.new().with_sequence()
+            let output = generate_sequence(rec, config)
+
+            expect output.contains("Result(100)") == true
+
+        it "should deactivate on return":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("target", Some("Target"), [], CallType.Method)
+            rec.record_return(None)
+
+            let output = to_mermaid_sequence(rec)
+
+            expect output.contains("deactivate") == true
+
+    context "Nested calls":
+        it "should handle nested call sequence":
+            let rec = CallEventRecorder.new("test")
+
+            rec.record_call("handleRequest", Some("Controller"), [], CallType.Method)
+            rec.record_call("validateInput", Some("Validator"), ["input"], CallType.Method)
+            rec.record_return(Some("true"))
+            rec.record_call("processData", Some("Service"), ["data"], CallType.Method)
+            rec.record_return(Some("result"))
+            rec.record_return(Some("response"))
+
+            let output = to_mermaid_sequence(rec)
+
+            expect output.contains("Controller") == true
+            expect output.contains("Validator") == true
+            expect output.contains("Service") == true
+
+    context "Configuration options":
+        it "should omit timing when disabled":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("fn", None, [], CallType.Direct)
+
+            let config = DiagramConfig.new().with_sequence().without_timing()
+            let output = generate_sequence(rec, config)
+
+            expect output.contains("Note over") == false
+
+        it "should omit args when disabled":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("fn", None, ["arg1", "arg2"], CallType.Direct)
+
+            let config = DiagramConfig.new().with_sequence().without_args()
+            let output = generate_sequence(rec, config)
+
+            expect output.contains("arg1") == false
+            expect output.contains("arg2") == false
+
+        it "should respect max events limit":
+            let rec = CallEventRecorder.new("test")
+            for i in 0..10:
+                rec.record_call("fn${i}", None, [], CallType.Direct)
+
+            let config = DiagramConfig.new().with_sequence().with_max_events(3)
+            let output = generate_sequence(rec, config)
+
+            # Should only have first 3 events
+            expect output.contains("fn0") == true
+            expect output.contains("fn1") == true
+            expect output.contains("fn2") == true
+            expect output.contains("fn9") == false
+
+    context "Filtering":
+        it "should apply include filter":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("method", Some("UserService"), [], CallType.Method)
+            rec.record_call("method", Some("DebugHelper"), [], CallType.Method)
+            rec.record_call("method", Some("AuthService"), [], CallType.Method)
+
+            let config = DiagramConfig.new()
+                .with_sequence()
+                .with_include("*Service")
+
+            let output = generate_sequence(rec, config)
+
+            expect output.contains("UserService") == true
+            expect output.contains("AuthService") == true
+            expect output.contains("DebugHelper") == false
+
+        it "should apply exclude filter":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("method", Some("UserService"), [], CallType.Method)
+            rec.record_call("method", Some("InternalHelper"), [], CallType.Method)
+
+            let config = DiagramConfig.new()
+                .with_sequence()
+                .with_exclude("*Helper,*Internal*")
+
+            let output = generate_sequence(rec, config)
+
+            expect output.contains("UserService") == true
+            expect output.contains("InternalHelper") == false
+
+describe "Participant":
+    context "Alias creation":
+        it "should create short alias for long name":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("m", Some("VeryLongServiceName"), [], CallType.Method)
+
+            let output = to_mermaid_sequence(rec)
+            # Should have abbreviated alias
+            expect output.contains("participant") == true
+
+        it "should use name as alias for short names":
+            let rec = CallEventRecorder.new("test")
+            rec.record_call("m", Some("User"), [], CallType.Method)
+
+            let output = to_mermaid_sequence(rec)
+            expect output.contains("User") == true
