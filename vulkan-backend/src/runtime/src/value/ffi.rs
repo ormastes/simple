@@ -499,6 +499,8 @@ thread_local! {
     static STDOUT_CAPTURE: RefCell<Option<String>> = const { RefCell::new(None) };
     /// Captured stderr buffer (when capture mode is enabled)
     static STDERR_CAPTURE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Mock stdin buffer (for testing - reads from this instead of real stdin)
+    static STDIN_BUFFER: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Enable stdout capture mode. All print output will be buffered instead of printed.
@@ -564,6 +566,64 @@ pub fn rt_is_stdout_capturing() -> bool {
 /// Check if stderr capture is currently enabled.
 pub fn rt_is_stderr_capturing() -> bool {
     STDERR_CAPTURE.with(|buf| buf.borrow().is_some())
+}
+
+// ============================================================================
+// Mock Stdin Functions (for testing)
+// ============================================================================
+
+/// Set mock stdin content. When set, input() reads from this instead of real stdin.
+/// Pass empty string to clear the buffer and revert to real stdin.
+pub fn rt_set_stdin(content: &str) {
+    STDIN_BUFFER.with(|buf| {
+        if content.is_empty() {
+            *buf.borrow_mut() = None;
+        } else {
+            *buf.borrow_mut() = Some(content.to_string());
+        }
+    });
+}
+
+/// Read a line from mock stdin buffer, or None if buffer is empty/not set.
+/// Removes the line from the buffer (including the newline).
+fn read_stdin_line_internal() -> Option<String> {
+    STDIN_BUFFER.with(|buf| {
+        let mut guard = buf.borrow_mut();
+        if let Some(ref mut content) = *guard {
+            if content.is_empty() {
+                return None;
+            }
+            // Find the first newline
+            if let Some(pos) = content.find('\n') {
+                let line = content[..pos].to_string();
+                *content = content[pos + 1..].to_string();
+                Some(line)
+            } else {
+                // No newline - return remaining content and clear buffer
+                let line = std::mem::take(content);
+                Some(line)
+            }
+        } else {
+            None
+        }
+    })
+}
+
+/// Public wrapper for reading from mock stdin (for tests).
+pub fn rt_read_stdin_line() -> Option<String> {
+    read_stdin_line_internal()
+}
+
+/// Check if mock stdin is currently active.
+pub fn rt_has_mock_stdin() -> bool {
+    STDIN_BUFFER.with(|buf| buf.borrow().is_some())
+}
+
+/// Clear mock stdin buffer.
+pub fn rt_clear_stdin() {
+    STDIN_BUFFER.with(|buf| {
+        *buf.borrow_mut() = None;
+    });
 }
 
 // ============================================================================
@@ -3139,6 +3199,7 @@ pub extern "C" fn rt_tls_clear(handle: i64) {
 pub extern "C" fn rt_tls_free(handle: i64) {
     TLS_MAP.lock().unwrap().remove(&handle);
 }
+
 // ============================================================================
 // Hash Functions
 // ============================================================================
@@ -3167,9 +3228,16 @@ pub unsafe extern "C" fn rt_fnv_hash(data_ptr: *const u8, data_len: u64) -> u64 
 
 use std::io::{self, BufRead};
 
-/// Read a line from stdin
-#[no_mangle]
-pub extern "C" fn rt_read_stdin_line() -> RuntimeValue {
+/// Read a line from stdin (checks mock first, then real stdin)
+#[export_name = "rt_read_stdin_line"]
+pub extern "C" fn rt_read_stdin_line_ffi() -> RuntimeValue {
+    // First try mock stdin for testing
+    if let Some(line) = read_stdin_line_internal() {
+        let bytes = line.as_bytes();
+        return unsafe { super::rt_string_new(bytes.as_ptr(), bytes.len() as u64) };
+    }
+
+    // Fall back to real stdin
     let stdin = io::stdin();
     let mut line = String::new();
 
@@ -3188,17 +3256,3 @@ pub extern "C" fn rt_read_stdin_line() -> RuntimeValue {
         Err(_) => RuntimeValue::NIL,
     }
 }
-
-// ============================================================================
-// Mutex Operations (std::sync::Mutex wrapper)
-// ============================================================================
-
-use std::sync::Mutex as StdMutex2;
-
-struct MutexWrapper {
-    data: StdMutex2<RuntimeValue>,
-}
-
-impl MutexWrapper {
-    fn new(value: RuntimeValue) -> Self {
-        Self {

@@ -586,7 +586,7 @@ pub fn rt_set_stdin(content: &str) {
 
 /// Read a line from mock stdin buffer, or None if buffer is empty/not set.
 /// Removes the line from the buffer (including the newline).
-pub fn rt_read_stdin_line() -> Option<String> {
+fn read_stdin_line_internal() -> Option<String> {
     STDIN_BUFFER.with(|buf| {
         let mut guard = buf.borrow_mut();
         if let Some(ref mut content) = *guard {
@@ -607,6 +607,11 @@ pub fn rt_read_stdin_line() -> Option<String> {
             None
         }
     })
+}
+
+/// Public wrapper for reading from mock stdin (for tests).
+pub fn rt_read_stdin_line() -> Option<String> {
+    read_stdin_line_internal()
 }
 
 /// Check if mock stdin is currently active.
@@ -3239,9 +3244,16 @@ pub unsafe extern "C" fn rt_fnv_hash(data_ptr: *const u8, data_len: u64) -> u64 
 
 use std::io::{self, BufRead};
 
-/// Read a line from stdin
-#[no_mangle]
-pub extern "C" fn rt_read_stdin_line() -> RuntimeValue {
+/// Read a line from stdin (checks mock first, then real stdin)
+#[export_name = "rt_read_stdin_line"]
+pub extern "C" fn rt_read_stdin_line_ffi() -> RuntimeValue {
+    // First try mock stdin for testing
+    if let Some(line) = read_stdin_line_internal() {
+        let bytes = line.as_bytes();
+        return unsafe { super::rt_string_new(bytes.as_ptr(), bytes.len() as u64) };
+    }
+
+    // Fall back to real stdin
     let stdin = io::stdin();
     let mut line = String::new();
 
