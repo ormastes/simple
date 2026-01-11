@@ -1,0 +1,245 @@
+# BDD Registry - Core types and global state for spec framework
+#
+# This module provides the core data structures used by the BDD framework:
+# - ExampleGroup: Hierarchical test organization (describe/context blocks)
+# - Example: Individual test cases (it blocks)
+# - Hook: Lifecycle hooks (before_each, after_each, etc.)
+# - ContextDefinition: Reusable context definitions
+# - Given: Setup blocks for contexts
+# - SharedExampleDefinition: Shared example groups
+#
+# The registry maintains global state for registered groups, contexts, and
+# shared examples, allowing the DSL functions to coordinate test execution.
+
+# ============================================================================
+# Core Types
+# ============================================================================
+
+# Hook - Lifecycle callback for test setup and teardown
+enum Hook:
+    BeforeEach(block: fn() -> Void)   # Run before each example
+    AfterEach(block: fn() -> Void)    # Run after each example
+    BeforeAll(block: fn() -> Void)    # Run once before all examples in group
+    AfterAll(block: fn() -> Void)     # Run once after all examples in group
+
+# Given - Setup block for context definitions
+enum Given:
+    Lazy(name: Symbol, block: fn() -> Any)   # Lazy evaluated on first access
+    Eager(block: fn() -> Void)                # Eagerly evaluated before each
+
+# Example - Individual test case
+class Example:
+    description: String
+    block: fn() -> Void
+    is_skipped: Bool
+
+    fn new(description: String, block: fn() -> Void) -> Example:
+        return Example(
+            description: description,
+            block: block,
+            is_skipped: false
+        )
+
+    fn skip(self) -> Example:
+        """Mark this example as skipped/pending."""
+        self.is_skipped = true
+        return self
+
+    fn is_pending(self) -> Bool:
+        """Check if this example is pending/skipped."""
+        return self.is_skipped
+
+    fn run(self) -> Void:
+        """Execute the example block (unless skipped)."""
+        if not self.is_skipped:
+            self.block()
+
+# ExampleGroup - Hierarchical container for examples (describe/context blocks)
+class ExampleGroup:
+    description: String
+    parent: Option[ExampleGroup]
+    children: List[ExampleGroup]
+    examples: List[Example]
+    hooks: List[Hook]
+
+    fn new(description: String, parent: Option[ExampleGroup]) -> ExampleGroup:
+        return ExampleGroup(
+            description: description,
+            parent: parent,
+            children: [],
+            examples: [],
+            hooks: []
+        )
+
+    fn add_child(self, child: ExampleGroup) -> Void:
+        """Add a nested example group (context)."""
+        self.children.push(child)
+
+    fn add_example(self, example: Example) -> Void:
+        """Add a test example (it block)."""
+        self.examples.push(example)
+
+    fn add_hook(self, hook: Hook) -> Void:
+        """Add a lifecycle hook."""
+        self.hooks.push(hook)
+
+    fn get_before_each_hooks(self) -> List[fn() -> Void]:
+        """Extract all before_each hook blocks."""
+        let blocks: List[fn() -> Void] = []
+        for hook in self.hooks:
+            match hook:
+                case Hook.BeforeEach(block):
+                    blocks.push(block)
+                case _:
+                    pass
+        return blocks
+
+    fn get_after_each_hooks(self) -> List[fn() -> Void]:
+        """Extract all after_each hook blocks."""
+        let blocks: List[fn() -> Void] = []
+        for hook in self.hooks:
+            match hook:
+                case Hook.AfterEach(block):
+                    blocks.push(block)
+                case _:
+                    pass
+        return blocks
+
+    fn get_before_all_hooks(self) -> List[fn() -> Void]:
+        """Extract all before_all hook blocks."""
+        let blocks: List[fn() -> Void] = []
+        for hook in self.hooks:
+            match hook:
+                case Hook.BeforeAll(block):
+                    blocks.push(block)
+                case _:
+                    pass
+        return blocks
+
+    fn get_after_all_hooks(self) -> List[fn() -> Void]:
+        """Extract all after_all hook blocks."""
+        let blocks: List[fn() -> Void] = []
+        for hook in self.hooks:
+            match hook:
+                case Hook.AfterAll(block):
+                    blocks.push(block)
+                case _:
+                    pass
+        return blocks
+
+    fn full_description(self) -> String:
+        """Get the full hierarchical description path."""
+        match self.parent:
+            case Some(parent):
+                return parent.full_description() + " " + self.description
+            case None:
+                return self.description
+
+    fn example_count(self) -> Int:
+        """Count total examples in this group and children."""
+        let mut count = self.examples.len()
+        for child in self.children:
+            count = count + child.example_count()
+        return count
+
+# ContextDefinition - Reusable context with setup blocks
+class ContextDefinition:
+    name: Symbol
+    givens: List[Given]
+
+    fn new(name: Symbol) -> ContextDefinition:
+        return ContextDefinition(
+            name: name,
+            givens: []
+        )
+
+    fn add_given(self, given: Given) -> Void:
+        """Add a setup block to this context."""
+        self.givens.push(given)
+
+# SharedExampleDefinition - Reusable example group
+class SharedExampleDefinition:
+    name: String
+    block: fn() -> Void
+    description: Option[String]
+
+    fn new(name: String, block: fn() -> Void) -> SharedExampleDefinition:
+        return SharedExampleDefinition(
+            name: name,
+            block: block,
+            description: None
+        )
+
+    fn with_description(self, desc: String) -> SharedExampleDefinition:
+        """Add a description to this shared example group."""
+        self.description = Some(desc)
+        return self
+
+# ============================================================================
+# Global Registry State
+# ============================================================================
+
+# Top-level example groups (from describe blocks)
+let registered_groups: List[ExampleGroup] = []
+
+# Context definitions (from context_def blocks)
+let context_registry: Dict[String, ContextDefinition] = {}
+
+# Shared example definitions (from shared_examples blocks)
+let shared_examples_registry: Dict[String, SharedExampleDefinition] = {}
+
+# ============================================================================
+# Registry Functions
+# ============================================================================
+
+fn register_group(group: ExampleGroup) -> Void:
+    """Register a top-level example group."""
+    registered_groups.push(group)
+
+fn get_all_groups() -> List[ExampleGroup]:
+    """Get all registered top-level groups."""
+    return registered_groups
+
+fn clear_groups() -> Void:
+    """Clear all registered groups (for testing)."""
+    registered_groups.clear()
+
+fn register_context(name: Symbol, def: ContextDefinition) -> Void:
+    """Register a reusable context definition."""
+    context_registry.insert(name.to_string(), def)
+
+fn get_context(name: Symbol) -> Option[ContextDefinition]:
+    """Get a registered context definition by name."""
+    return context_registry.get(name.to_string())
+
+fn clear_contexts() -> Void:
+    """Clear all registered contexts (for testing)."""
+    context_registry.clear()
+
+fn register_shared_examples(name: String, def: SharedExampleDefinition) -> Void:
+    """Register a shared example group."""
+    shared_examples_registry.insert(name, def)
+
+fn get_shared_examples(name: String) -> Option[SharedExampleDefinition]:
+    """Get a registered shared example group by name."""
+    return shared_examples_registry.get(name)
+
+fn clear_shared_examples() -> Void:
+    """Clear all registered shared examples (for testing)."""
+    shared_examples_registry.clear()
+
+fn reset_registry() -> Void:
+    """Clear all registry state (groups, contexts, shared examples)."""
+    clear_groups()
+    clear_contexts()
+    clear_shared_examples()
+
+# ============================================================================
+# Export All Public Types and Functions
+# ============================================================================
+
+export Hook, Given, Example, ExampleGroup, ContextDefinition, SharedExampleDefinition
+export register_group, get_all_groups, clear_groups
+export register_context, get_context, clear_contexts
+export register_shared_examples, get_shared_examples, clear_shared_examples
+export reset_registry
