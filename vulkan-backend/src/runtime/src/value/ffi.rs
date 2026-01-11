@@ -1611,3 +1611,135 @@ fn ymd_to_timestamp_days(year: i32, month: i32, day: i32) -> i64 {
 
     days
 }
+
+// ============================================================================
+// Path Manipulation FFI Functions
+// ============================================================================
+
+/// Get basename (filename) from path
+#[no_mangle]
+pub unsafe extern "C" fn rt_path_basename(
+    path_ptr: *const u8,
+    path_len: u64,
+) -> RuntimeValue {
+    if path_ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return RuntimeValue::NIL,
+    };
+
+    let path = Path::new(path_str);
+    match path.file_name() {
+        Some(name) => {
+            let name_str = name.to_string_lossy();
+            let bytes = name_str.as_bytes();
+            super::rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+        }
+        None => {
+            let bytes = b"";
+            super::rt_string_new(bytes.as_ptr(), 0)
+        }
+    }
+}
+
+/// Get dirname (parent directory) from path
+#[no_mangle]
+pub unsafe extern "C" fn rt_path_dirname(
+    path_ptr: *const u8,
+    path_len: u64,
+) -> RuntimeValue {
+    if path_ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return RuntimeValue::NIL,
+    };
+
+    let path = Path::new(path_str);
+    match path.parent() {
+        Some(parent) => {
+            let parent_str = parent.to_string_lossy();
+            let bytes = parent_str.as_bytes();
+            super::rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+        }
+        None => {
+            let bytes = b".";
+            super::rt_string_new(bytes.as_ptr(), 1)
+        }
+    }
+}
+
+/// Get file extension from path
+#[no_mangle]
+pub unsafe extern "C" fn rt_path_ext(
+    path_ptr: *const u8,
+    path_len: u64,
+) -> RuntimeValue {
+    if path_ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return RuntimeValue::NIL,
+    };
+
+    let path = Path::new(path_str);
+    match path.extension() {
+        Some(ext) => {
+            let ext_str = ext.to_string_lossy();
+            let bytes = ext_str.as_bytes();
+            super::rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+        }
+        None => {
+            let bytes = b"";
+            super::rt_string_new(bytes.as_ptr(), 0)
+        }
+    }
+}
+
+/// Convert path to absolute path
+#[no_mangle]
+pub unsafe extern "C" fn rt_path_absolute(
+    path_ptr: *const u8,
+    path_len: u64,
+) -> RuntimeValue {
+    if path_ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return RuntimeValue::NIL,
+    };
+
+    let path = Path::new(path_str);
+    match path.canonicalize() {
+        Ok(abs_path) => {
+            let abs_str = abs_path.to_string_lossy();
+            let bytes = abs_str.as_bytes();
+            super::rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+        }
+        Err(_) => {
+            // If canonicalize fails, try to make it absolute manually
+            match std::env::current_dir() {
+                Ok(cwd) => {
+                    let abs_path = cwd.join(path);
+                    let abs_str = abs_path.to_string_lossy();
+                    let bytes = abs_str.as_bytes();
+                    super::rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+                }
+                Err(_) => RuntimeValue::NIL,
+            }
+        }
+    }
+}

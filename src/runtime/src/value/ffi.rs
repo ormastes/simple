@@ -1498,6 +1498,15 @@ pub extern "C" fn rt_time_now_unix_micros() -> i64 {
     }
 }
 
+/// Get current Unix timestamp as float seconds since epoch
+#[no_mangle]
+pub extern "C" fn rt_time_now_seconds() -> f64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs_f64(),
+        Err(_) => 0.0,
+    }
+}
+
 /// Convert Unix timestamp (microseconds) to year
 #[no_mangle]
 pub extern "C" fn rt_timestamp_get_year(micros: i64) -> i32 {

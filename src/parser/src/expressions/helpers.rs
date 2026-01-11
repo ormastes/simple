@@ -251,11 +251,40 @@ impl<'a> Parser<'a> {
 
         // Check if body is an indented block or inline expression
         let body = if self.check(&TokenKind::Newline) {
-            // Peek ahead to see if we have a newline + indent (block body)
-            if self.peek_is(&TokenKind::Indent) {
-                // Parse as block
-                let block = self.parse_block()?;
-                Expr::DoBlock(block.statements)
+            // Consume the newline
+            self.advance();
+
+            // Check if we have an indent (block body)
+            if self.check(&TokenKind::Indent) {
+                self.advance(); // consume Indent
+
+                // Parse statements until dedent
+                let mut statements = Vec::new();
+                while !self.check(&TokenKind::Dedent) && !self.check(&TokenKind::Eof) {
+                    // Skip newlines between statements
+                    while self.check(&TokenKind::Newline) {
+                        self.advance();
+                    }
+
+                    if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
+                        break;
+                    }
+
+                    let stmt = self.parse_item()?;
+                    statements.push(stmt);
+
+                    // Skip trailing newlines
+                    while self.check(&TokenKind::Newline) {
+                        self.advance();
+                    }
+                }
+
+                // Consume dedent if present
+                if self.check(&TokenKind::Dedent) {
+                    self.advance();
+                }
+
+                Expr::DoBlock(statements)
             } else {
                 // Just a newline, parse next expression
                 self.parse_expression()?
