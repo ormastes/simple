@@ -1957,3 +1957,10 @@ pub extern "C" fn rt_file_msync(addr: *mut u8, length: u64, flags: i32) -> i32 {
         -1
     }
 }
+
+/// Wrapper for native_msync - stdlib compatibility
+/// Returns 0 on success, -1 on error
+#[no_mangle]
+pub extern "C" fn native_msync(addr: *mut u8, length: u64, flags: i32) -> i32 {
+    rt_file_msync(addr, length, flags)
+}
