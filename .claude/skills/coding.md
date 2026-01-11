@@ -107,9 +107,14 @@ fn traced_function() {
 
 ## Simple Language Conventions
 
+### Type Names
+- **No `Int` type** - use `i32`, `i64`, `u32`, `u64`, etc.
+- **No `Float` type** - use `f32` or `f64`
+- Use specific-width integer types: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`
+
 ### Contracts
 ```simple
-fn safe_divide(a: Int, b: Int) -> Int:
+fn safe_divide(a: i32, b: i32) -> i32:
     in: b != 0, "divisor must be non-zero"
     out(ret): ret * b == a or a % b != 0
     return a / b
@@ -123,14 +128,15 @@ fn safe_divide(a: Int, b: Int) -> Int:
 ### Function Visibility
 - Functions are **public by default**
 - Prefix with underscore (`_`) for private functions
+- **Do NOT use `pub fn`** - just use `fn` (public is default)
 
 ```simple
 # Public function (default)
-fn calculate(x: Int) -> Int:
+fn calculate(x: i32) -> i32:
     return _helper(x) * 2
 
 # Private function (underscore prefix)
-fn _helper(x: Int) -> Int:
+fn _helper(x: i32) -> i32:
     return x + 1
 ```
 
