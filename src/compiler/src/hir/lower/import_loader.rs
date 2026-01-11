@@ -118,7 +118,20 @@ impl Lowerer {
                         }
                     }
                 }
-                // TODO: [compiler][P2] Handle other exportable items (constants, etc.)
+                Node::TypeAlias(type_alias) => {
+                    if self.should_import_symbol(&type_alias.name, target) {
+                        // Register type alias using existing type registration
+                        self.register_type_alias(type_alias)?;
+                    }
+                }
+                Node::Trait(trait_def) => {
+                    if self.should_import_symbol(&trait_def.name, target) {
+                        // Register trait using existing trait registration
+                        self.register_trait(trait_def)?;
+                    }
+                }
+                // TODO: [compiler][P2] Handle constants when HIR lowering supports them
+                // Currently, Node::Const is not handled during HIR lowering phase
                 _ => {}
             }
         }
