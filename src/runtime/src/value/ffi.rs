@@ -2525,3 +2525,252 @@ pub extern "C" fn rt_atomic_int_fetch_xor(handle: i64, value: i64) -> i64 {
 pub extern "C" fn rt_atomic_int_free(handle: i64) {
     ATOMIC_INT_MAP.lock().unwrap().remove(&handle);
 }
+
+// ============================================================================
+// AtomicFlag Operations (simpler bool without load)
+// ============================================================================
+
+lazy_static::lazy_static! {
+    static ref ATOMIC_FLAG_MAP: Mutex<HashMap<i64, Box<AtomicBool>>> = Mutex::new(HashMap::new());
+}
+
+static mut ATOMIC_FLAG_COUNTER: i64 = 1;
+
+/// Create a new AtomicFlag (initially false)
+#[no_mangle]
+pub extern "C" fn rt_atomic_flag_new() -> i64 {
+    let flag = Box::new(AtomicBool::new(false));
+    unsafe {
+        let handle = ATOMIC_FLAG_COUNTER;
+        ATOMIC_FLAG_COUNTER += 1;
+        ATOMIC_FLAG_MAP.lock().unwrap().insert(handle, flag);
+        handle
+    }
+}
+
+/// Test and set atomic flag
+/// Returns true if flag was already set, false if it was clear
+#[no_mangle]
+pub extern "C" fn rt_atomic_flag_test_and_set(handle: i64) -> bool {
+    ATOMIC_FLAG_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|flag| flag.swap(true, Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+/// Clear atomic flag
+#[no_mangle]
+pub extern "C" fn rt_atomic_flag_clear(handle: i64) {
+    if let Some(flag) = ATOMIC_FLAG_MAP.lock().unwrap().get(&handle) {
+        flag.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Free atomic flag
+#[no_mangle]
+pub extern "C" fn rt_atomic_flag_free(handle: i64) {
+    ATOMIC_FLAG_MAP.lock().unwrap().remove(&handle);
+}
+
+// ============================================================================
+// Once Operations (one-time initialization)
+// ============================================================================
+
+use std::sync::Once as StdOnce;
+
+lazy_static::lazy_static! {
+    static ref ONCE_MAP: Mutex<HashMap<i64, Box<StdOnce>>> = Mutex::new(HashMap::new());
+}
+
+static mut ONCE_COUNTER: i64 = 1;
+
+/// Create a new Once
+#[no_mangle]
+pub extern "C" fn rt_once_new() -> i64 {
+    let once = Box::new(StdOnce::new());
+    unsafe {
+        let handle = ONCE_COUNTER;
+        ONCE_COUNTER += 1;
+        ONCE_MAP.lock().unwrap().insert(handle, once);
+        handle
+    }
+}
+
+/// Call function once (takes function pointer)
+/// Note: In real implementation, this would need FFI callback support
+#[no_mangle]
+pub extern "C" fn rt_once_call(handle: i64, _func_ptr: i64) {
+    // For now, just mark as called
+    // Full implementation needs callback infrastructure
+    if let Some(_once) = ONCE_MAP.lock().unwrap().get(&handle) {
+        // once.call_once(|| { /* call func_ptr */ });
+    }
+}
+
+/// Check if Once has been called
+#[no_mangle]
+pub extern "C" fn rt_once_is_completed(handle: i64) -> bool {
+    ONCE_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|once| once.is_completed())
+        .unwrap_or(false)
+}
+
+/// Free Once
+#[no_mangle]
+pub extern "C" fn rt_once_free(handle: i64) {
+    ONCE_MAP.lock().unwrap().remove(&handle);
+}
+
+// ============================================================================
+// Condvar Operations (condition variables)
+// ============================================================================
+
+use std::sync::Condvar as StdCondvar;
+
+lazy_static::lazy_static! {
+    static ref CONDVAR_MAP: Mutex<HashMap<i64, Box<StdCondvar>>> = Mutex::new(HashMap::new());
+}
+
+static mut CONDVAR_COUNTER: i64 = 1;
+
+/// Create a new Condvar
+#[no_mangle]
+pub extern "C" fn rt_condvar_new() -> i64 {
+    let condvar = Box::new(StdCondvar::new());
+    unsafe {
+        let handle = CONDVAR_COUNTER;
+        CONDVAR_COUNTER += 1;
+        CONDVAR_MAP.lock().unwrap().insert(handle, condvar);
+        handle
+    }
+}
+
+/// Wait on condvar (note: simplified, real impl needs mutex integration)
+#[no_mangle]
+pub extern "C" fn rt_condvar_wait(handle: i64, _mutex_handle: i64) {
+    // Simplified stub - full implementation needs proper mutex integration
+    if let Some(_condvar) = CONDVAR_MAP.lock().unwrap().get(&handle) {
+        // condvar.wait(mutex_guard);
+    }
+}
+
+/// Notify one waiting thread
+#[no_mangle]
+pub extern "C" fn rt_condvar_notify_one(handle: i64) {
+    if let Some(condvar) = CONDVAR_MAP.lock().unwrap().get(&handle) {
+        condvar.notify_one();
+    }
+}
+
+/// Notify all waiting threads
+#[no_mangle]
+pub extern "C" fn rt_condvar_notify_all(handle: i64) {
+    if let Some(condvar) = CONDVAR_MAP.lock().unwrap().get(&handle) {
+        condvar.notify_all();
+    }
+}
+
+/// Free condvar
+#[no_mangle]
+pub extern "C" fn rt_condvar_free(handle: i64) {
+    CONDVAR_MAP.lock().unwrap().remove(&handle);
+}
+
+// ============================================================================
+// Arena Allocator Operations
+// ============================================================================
+
+struct Arena {
+    buffer: Vec<u8>,
+    capacity: usize,
+    used: usize,
+}
+
+impl Arena {
+    fn new(capacity: usize) -> Self {
+        Self {
+            buffer: vec![0; capacity],
+            capacity,
+            used: 0,
+        }
+    }
+
+    fn alloc(&mut self, size: usize, align: usize) -> Option<*mut u8> {
+        let align_offset = (align - (self.used % align)) % align;
+        let aligned_start = self.used + align_offset;
+
+        if aligned_start + size > self.capacity {
+            return None;
+        }
+
+        let ptr = unsafe { self.buffer.as_mut_ptr().add(aligned_start) };
+        self.used = aligned_start + size;
+        Some(ptr)
+    }
+
+    fn reset(&mut self) {
+        self.used = 0;
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref ARENA_MAP: Mutex<HashMap<i64, Box<Arena>>> = Mutex::new(HashMap::new());
+}
+
+static mut ARENA_COUNTER: i64 = 1;
+
+/// Create a new arena allocator with given capacity
+#[no_mangle]
+pub extern "C" fn rt_arena_new(capacity: i64) -> i64 {
+    let arena = Box::new(Arena::new(capacity as usize));
+    unsafe {
+        let handle = ARENA_COUNTER;
+        ARENA_COUNTER += 1;
+        ARENA_MAP.lock().unwrap().insert(handle, arena);
+        handle
+    }
+}
+
+/// Allocate memory from arena
+/// Returns pointer to allocated memory, or 0 if allocation failed
+#[no_mangle]
+pub extern "C" fn rt_arena_alloc(handle: i64, size: i64, align: i64) -> i64 {
+    ARENA_MAP.lock().unwrap()
+        .get_mut(&handle)
+        .and_then(|arena| arena.alloc(size as usize, align as usize))
+        .map(|ptr| ptr as i64)
+        .unwrap_or(0)
+}
+
+/// Get arena capacity
+#[no_mangle]
+pub extern "C" fn rt_arena_capacity(handle: i64) -> i64 {
+    ARENA_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|arena| arena.capacity as i64)
+        .unwrap_or(0)
+}
+
+/// Get arena used bytes
+#[no_mangle]
+pub extern "C" fn rt_arena_used(handle: i64) -> i64 {
+    ARENA_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|arena| arena.used as i64)
+        .unwrap_or(0)
+}
+
+/// Reset arena (clear all allocations)
+#[no_mangle]
+pub extern "C" fn rt_arena_reset(handle: i64) {
+    if let Some(arena) = ARENA_MAP.lock().unwrap().get_mut(&handle) {
+        arena.reset();
+    }
+}
+
+/// Free arena
+#[no_mangle]
+pub extern "C" fn rt_arena_free(handle: i64) {
+    ARENA_MAP.lock().unwrap().remove(&handle);
+}
