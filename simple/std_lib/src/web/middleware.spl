@@ -20,6 +20,61 @@ pub enum MiddlewareResult:
     Next                    # Continue to next middleware/handler
     Response(HttpResponse)  # Short-circuit with response
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_next(self) -> bool:
+        """Check if result is Next.
+
+        Returns:
+            true if Next variant
+
+        Example:
+            result.is_next()  # → true
+        """
+        match self:
+            case Next: return true
+            case _: return false
+
+    pub fn is_response(self) -> bool:
+        """Check if result is Response (short-circuit).
+
+        Returns:
+            true if Response variant
+
+        Example:
+            result.is_response()  # → false
+        """
+        match self:
+            case Response { .. }: return true
+            case _: return false
+
+    pub fn should_continue(self) -> bool:
+        """Check if middleware should continue (alias for is_next).
+
+        Returns:
+            true if Next
+
+        Example:
+            result.should_continue()  # → true
+        """
+        return self.is_next()
+
+    pub fn summary(self) -> String:
+        """Get result summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            result.summary()
+            # → "Next" or "Response: short-circuit"
+        """
+        match self:
+            case Next: return "Next"
+            case Response { .. }: return "Response: short-circuit"
+
 # Middleware trait
 pub trait Middleware:
     # Called before handler
@@ -55,6 +110,45 @@ impl MiddlewareChain:
     pub async fn run_after(self, ctx: &Context, response: &mut HttpResponse):
         for mw in self.middlewares.iter().rev():
             await mw.after(ctx, response)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_middlewares(self) -> bool:
+        """Check if chain has any middlewares.
+
+        Returns:
+            true if middlewares exist
+
+        Example:
+            chain.has_middlewares()  # → true
+        """
+        return not self.middlewares.is_empty()
+
+    pub fn middleware_count(self) -> u64:
+        """Get number of middlewares in chain.
+
+        Returns:
+            Count of middlewares
+
+        Example:
+            chain.middleware_count()  # → 3
+        """
+        return self.middlewares.len()
+
+    pub fn summary(self) -> String:
+        """Get chain summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            chain.summary()
+            # → "MiddlewareChain: 3 middlewares"
+        """
+        let count = self.middleware_count()
+        return "MiddlewareChain: {count} middlewares"
 
 # ============================================================================
 # Built-in Middlewares
@@ -128,6 +222,56 @@ impl CorsMiddleware:
     pub fn allow_credentials(self, allow: bool) -> CorsMiddleware:
         self.allow_credentials = allow
         return self
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_permissive(self) -> bool:
+        """Check if allowing all origins.
+
+        Returns:
+            true if allow_origin is "*"
+
+        Example:
+            cors.is_permissive()  # → true
+        """
+        return self.allow_origin == "*"
+
+    pub fn has_credentials(self) -> bool:
+        """Check if credentials are allowed.
+
+        Returns:
+            true if allow_credentials is true
+
+        Example:
+            cors.has_credentials()  # → false
+        """
+        return self.allow_credentials
+
+    pub fn get_max_age(self) -> u32:
+        """Get max age in seconds.
+
+        Returns:
+            Max age value
+
+        Example:
+            cors.get_max_age()  # → 86400
+        """
+        return self.max_age
+
+    pub fn summary(self) -> String:
+        """Get CORS middleware summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            cors.summary()
+            # → "CorsMiddleware: origin=*, credentials=false"
+        """
+        let creds = if self.allow_credentials { "true" } else { "false" }
+        return "CorsMiddleware: origin={self.allow_origin}, credentials={creds}"
 
 impl Middleware for CorsMiddleware:
     async fn before(self, ctx: &mut Context) -> MiddlewareResult:
@@ -218,6 +362,58 @@ impl RateLimitMiddleware:
     fn get_client_id(ctx: &Context) -> str:
         return ctx.request().remote_addr().to_str()
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_max_requests(self) -> u32:
+        """Get max requests per window.
+
+        Returns:
+            Max request count
+
+        Example:
+            limiter.get_max_requests()  # → 100
+        """
+        return self.max_requests
+
+    pub fn get_window_seconds(self) -> u32:
+        """Get window size in seconds.
+
+        Returns:
+            Window duration
+
+        Example:
+            limiter.get_window_seconds()  # → 60
+        """
+        return self.window_seconds
+
+    pub fn tracked_clients(self) -> u64:
+        """Get number of tracked clients.
+
+        Returns:
+            Count of tracked IPs
+
+        Example:
+            limiter.tracked_clients()  # → 25
+        """
+        return self.requests.len()
+
+    pub fn summary(self) -> String:
+        """Get rate limiter summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            limiter.summary()
+            # → "RateLimitMiddleware: 100 req/60s, tracking 25 clients"
+        """
+        let max = self.max_requests
+        let window = self.window_seconds
+        let tracked = self.tracked_clients()
+        return "RateLimitMiddleware: {max} req/{window}s, tracking {tracked} clients"
+
 impl Middleware for RateLimitMiddleware:
     async fn before(self, ctx: &mut Context) -> MiddlewareResult:
         let client_id = RateLimitMiddleware::get_client_id(ctx)
@@ -294,6 +490,63 @@ impl CompressionMiddleware:
     pub fn min_size(self, size: usize) -> CompressionMiddleware:
         self.min_size = size
         return self
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_min_size(self) -> usize:
+        """Get minimum size for compression.
+
+        Returns:
+            Min size in bytes
+
+        Example:
+            comp.get_min_size()  # → 1024
+        """
+        return self.min_size
+
+    pub fn allowed_types_count(self) -> u64:
+        """Get number of allowed content types.
+
+        Returns:
+            Count of content types
+
+        Example:
+            comp.allowed_types_count()  # → 5
+        """
+        return self.content_types.len()
+
+    pub fn supports_type(self, content_type: &str) -> bool:
+        """Check if content type is supported.
+
+        Args:
+            content_type: Content type to check
+
+        Returns:
+            true if type is in allowed list
+
+        Example:
+            comp.supports_type("text/html")  # → true
+        """
+        for allowed in &self.content_types:
+            if content_type.starts_with(allowed):
+                return true
+        return false
+
+    pub fn summary(self) -> String:
+        """Get compression middleware summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            comp.summary()
+            # → "CompressionMiddleware: min=1024 bytes, 5 types"
+        """
+        let min = self.min_size
+        let types = self.allowed_types_count()
+        return "CompressionMiddleware: min={min} bytes, {types} types"
 
 impl Middleware for CompressionMiddleware:
     async fn before(self, ctx: &mut Context) -> MiddlewareResult:
