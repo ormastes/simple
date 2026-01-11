@@ -2789,9 +2789,9 @@ pub extern "C" fn rt_arena_free(handle: i64) {
 // Concurrent Data Structures
 // ============================================================================
 
+use std::collections::BTreeMap;
 use std::collections::HashMap as StdHashMap;
 use std::collections::VecDeque;
-use std::collections::BTreeMap;
 
 // Concurrent Map
 struct ConcurrentMap {
