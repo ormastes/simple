@@ -1,0 +1,359 @@
+# Arena Allocator - Region-based memory allocation
+# All allocations are freed together when the arena is dropped
+
+use units.size.*
+
+# Arena allocator for bulk allocations
+pub struct Arena:
+    chunks: Array[ArenaChunk]
+    current_chunk: u64
+    offset: u64
+    default_chunk_size: ByteCount
+
+# Internal chunk storage
+struct ArenaChunk:
+    data: *mut u8
+    size: ByteCount
+    used: ByteCount
+
+impl ArenaChunk:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_full(self) -> bool:
+        """Check if chunk is full."""
+        self.used >= self.size
+
+    pub fn available(self) -> ByteCount:
+        """Get available bytes in chunk."""
+        if self.size > self.used:
+            (self.size as u64 - self.used as u64)_bytes
+        else:
+            0_bytes
+
+    pub fn utilization(self) -> f64:
+        """Calculate chunk utilization (0.0 to 1.0)."""
+        if self.size as u64 > 0:
+            (self.used as u64) as f64 / (self.size as u64) as f64
+        else:
+            0.0
+
+    pub fn is_empty(self) -> bool:
+        """Check if chunk is empty."""
+        self.used as u64 == 0
+
+    pub fn summary(self) -> String:
+        """Get summary of chunk."""
+        let util = (self.utilization() * 100.0) as u64
+        return "ArenaChunk: {self.used}/{self.size} ({util}% used)"
+
+impl Arena:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_chunks(self) -> bool:
+        """Check if arena has any chunks."""
+        self.chunks.len() > 0
+
+    pub fn chunk_count(self) -> usize:
+        """Get number of chunks."""
+        self.chunks.len()
+
+    pub fn is_empty(self) -> bool:
+        """Check if arena is empty (no used memory)."""
+        self.used() as u64 == 0
+
+    pub fn utilization(self) -> f64:
+        """Calculate overall arena utilization (0.0 to 1.0)."""
+        let total = self.allocated() as u64
+        if total > 0:
+            (self.used() as u64) as f64 / total as f64
+        else:
+            0.0
+
+    pub fn wasted(self) -> ByteCount:
+        """Get wasted (allocated but unused) bytes."""
+        let alloc = self.allocated() as u64
+        let used = self.used() as u64
+        if alloc > used:
+            (alloc - used)_bytes
+        else:
+            0_bytes
+
+    pub fn summary(self) -> String:
+        """Get summary of arena state."""
+        let util = (self.utilization() * 100.0) as u64
+        return "Arena: {self.used()}/{self.allocated()} ({util}% used), {self.chunk_count()} chunks"
+
+    # =========================================================================
+    # Constructor
+    # =========================================================================
+
+    # Create new arena with default chunk size (64 KiB)
+    pub fn new() -> Arena:
+        return Arena::with_chunk_size(64_kib.to_bytes())
+
+    # Create arena with custom chunk size
+    pub fn with_chunk_size(size: ByteCount) -> Arena:
+        let arena = Arena {
+            chunks: [],
+            current_chunk: 0,
+            offset: 0,
+            default_chunk_size: size
+        }
+        arena.grow(size)
+        return arena
+
+    # Allocate memory from arena
+    pub fn alloc(self, size: ByteCount, align: u64) -> *mut u8:
+        let aligned_offset = self.align_offset(align)
+        let required = aligned_offset + (size as u64)
+
+        # Check if current chunk has space
+        if self.current_chunk < self.chunks.len():
+            let chunk = &self.chunks[self.current_chunk]
+            if required <= (chunk.size as u64):
+                let ptr = chunk.data.offset(aligned_offset as isize)
+                self.offset = required
+                return ptr
+
+        # Need new chunk
+        let chunk_size = size.max(self.default_chunk_size)
+        self.grow(chunk_size)
+        return self.alloc(size, align)
+
+    # Allocate and zero memory
+    pub fn alloc_zeroed(self, size: ByteCount, align: u64) -> *mut u8:
+        let ptr = self.alloc(size, align)
+        native_memset(ptr, 0, size as u64)
+        return ptr
+
+    # Allocate typed value
+    pub fn alloc_val[T](self) -> *mut T:
+        let size = size_of[T]()_bytes
+        let align = align_of[T]()
+        return self.alloc(size, align) as *mut T
+
+    # Allocate array of typed values
+    pub fn alloc_array[T](self, count: u64) -> *mut T:
+        let size = (size_of[T]() * count)_bytes
+        let align = align_of[T]()
+        return self.alloc(size, align) as *mut T
+
+    # Allocate and copy value
+    pub fn alloc_copy[T: Copy](self, value: &T) -> *mut T:
+        let ptr = self.alloc_val[T]()
+        *ptr = *value
+        return ptr
+
+    # Allocate string
+    pub fn alloc_str(self, s: &str) -> ArenaStr:
+        let len = s.len()
+        let ptr = self.alloc((len + 1)_bytes, 1)
+        native_memcpy(ptr, s.as_ptr(), len)
+        ptr.offset(len as isize).write(0_u8)  # null terminator
+        return ArenaStr { ptr: ptr, len: len }
+
+    # Reset arena (reuse memory without freeing)
+    pub fn reset(self):
+        self.current_chunk = 0
+        self.offset = 0
+        for chunk in &mut self.chunks:
+            chunk.used = 0_bytes
+
+    # Get total allocated bytes
+    pub fn allocated(self) -> ByteCount:
+        let mut total: u64 = 0
+        for chunk in &self.chunks:
+            total = total + (chunk.size as u64)
+        return total_bytes
+
+    # Get used bytes
+    pub fn used(self) -> ByteCount:
+        let mut total: u64 = 0
+        for i in 0..self.current_chunk:
+            total = total + (self.chunks[i].used as u64)
+        total = total + self.offset
+        return total_bytes
+
+    # Internal: grow arena with new chunk
+    fn grow(self, min_size: ByteCount):
+        let size = min_size.max(self.default_chunk_size)
+        let data = native_alloc(size as u64, 16)
+        let chunk = ArenaChunk {
+            data: data,
+            size: size,
+            used: 0_bytes
+        }
+        self.chunks.push(chunk)
+        self.current_chunk = self.chunks.len() - 1
+        self.offset = 0
+
+    # Internal: align offset
+    fn align_offset(self, align: u64) -> u64:
+        let mask = align - 1
+        return (self.offset + mask) & ~mask
+
+    # Drop - free all chunks
+    fn drop(self):
+        for chunk in &self.chunks:
+            native_free(chunk.data)
+
+# Arena-allocated string (null-terminated)
+pub struct ArenaStr:
+    ptr: *const u8
+    len: u64
+
+impl ArenaStr:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_content(self) -> bool:
+        """Check if string has content (not empty)."""
+        self.len > 0
+
+    pub fn size_bytes(self) -> u64:
+        """Get size in bytes (including null terminator)."""
+        self.len + 1
+
+    pub fn summary(self) -> String:
+        """Get summary of arena string."""
+        return "ArenaStr: {self.len} bytes"
+
+    # =========================================================================
+    # Existing Methods
+    # =========================================================================
+
+    pub fn as_str(self) -> &str:
+        return str::from_raw_parts(self.ptr, self.len)
+
+    pub fn len(self) -> u64:
+        return self.len
+
+    pub fn is_empty(self) -> bool:
+        return self.len == 0
+
+    pub fn as_ptr(self) -> *const u8:
+        return self.ptr
+
+# Typed arena for single type allocations
+pub struct TypedArena[T]:
+    arena: Arena
+    count: u64
+
+impl TypedArena[T]:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_empty(self) -> bool:
+        """Check if arena is empty."""
+        self.count == 0
+
+    pub fn has_allocations(self) -> bool:
+        """Check if arena has any allocations."""
+        self.count > 0
+
+    pub fn allocated(self) -> ByteCount:
+        """Get total allocated bytes."""
+        self.arena.allocated()
+
+    pub fn used(self) -> ByteCount:
+        """Get used bytes."""
+        self.arena.used()
+
+    pub fn summary(self) -> String:
+        """Get summary of typed arena."""
+        return "TypedArena[T]: {self.count} items, {self.used()}/{self.allocated()}"
+
+    # =========================================================================
+    # Methods
+    # =========================================================================
+
+    pub fn new() -> TypedArena[T]:
+        return TypedArena {
+            arena: Arena::new(),
+            count: 0
+        }
+
+    pub fn with_capacity(capacity: u64) -> TypedArena[T]:
+        let size = (size_of[T]() * capacity)_bytes
+        return TypedArena {
+            arena: Arena::with_chunk_size(size),
+            count: 0
+        }
+
+    pub fn alloc(self) -> *mut T:
+        self.count = self.count + 1
+        return self.arena.alloc_val[T]()
+
+    pub fn alloc_copy(self, value: &T) -> *mut T where T: Copy:
+        self.count = self.count + 1
+        return self.arena.alloc_copy(value)
+
+    pub fn len(self) -> u64:
+        return self.count
+
+    pub fn reset(self):
+        self.arena.reset()
+        self.count = 0
+
+# Scoped arena - automatically resets on scope exit
+pub struct ScopedArena:
+    arena: &mut Arena
+    saved_chunk: u64
+    saved_offset: u64
+
+impl ScopedArena:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn get_saved_chunk(self) -> u64:
+        """Get saved chunk index (will be restored on drop)."""
+        self.saved_chunk
+
+    pub fn get_saved_offset(self) -> u64:
+        """Get saved offset (will be restored on drop)."""
+        self.saved_offset
+
+    pub fn current_usage(self) -> ByteCount:
+        """Get current arena usage."""
+        self.arena.used()
+
+    pub fn summary(self) -> String:
+        """Get summary of scoped arena."""
+        return "ScopedArena: will restore to chunk={self.saved_chunk}, offset={self.saved_offset}"
+
+    # =========================================================================
+    # Methods
+    # =========================================================================
+
+    pub fn new(arena: &mut Arena) -> ScopedArena:
+        return ScopedArena {
+            arena: arena,
+            saved_chunk: arena.current_chunk,
+            saved_offset: arena.offset
+        }
+
+    pub fn alloc(self, size: ByteCount, align: u64) -> *mut u8:
+        return self.arena.alloc(size, align)
+
+    pub fn alloc_val[T](self) -> *mut T:
+        return self.arena.alloc_val[T]()
+
+    fn drop(self):
+        # Restore arena state
+        self.arena.current_chunk = self.saved_chunk
+        self.arena.offset = self.saved_offset
+
+# Native function declarations
+extern fn native_alloc(size: u64, align: u64) -> *mut u8
+extern fn native_free(ptr: *mut u8)
+extern fn native_memset(ptr: *mut u8, value: u8, size: u64)
+extern fn native_memcpy(dst: *mut u8, src: *const u8, size: u64)
+extern fn size_of[T]() -> u64
+extern fn align_of[T]() -> u64

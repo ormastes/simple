@@ -1,0 +1,554 @@
+# Shadow Mapping - Real-time shadow rendering
+#
+# Implements cascaded shadow maps (CSM) for directional lights and
+# shadow atlases for point/spot lights with PCF filtering.
+#
+# Based on: doc/spec/graphics_3d.md (Part 5.2: Shadow Mapping)
+
+use core.*
+use graphics.math.*
+use graphics.scene.*
+use graphics.render.*
+
+# =============================================================================
+# Shadow Map Configuration
+# =============================================================================
+
+pub struct ShadowMapConfig:
+    # Resolution per cascade/light
+    cascade_resolution: i32      # Default: 2048
+    point_light_resolution: i32  # Default: 1024
+    spot_light_resolution: i32   # Default: 1024
+
+    # Cascaded Shadow Maps (CSM)
+    num_cascades: i32           # Default: 4
+    cascade_split_lambda: f32   # Default: 0.5 (logarithmic split)
+
+    # Filtering
+    pcf_kernel_size: i32        # Default: 3 (3x3 PCF)
+    pcf_radius: f32             # Default: 1.5
+
+    # Bias to prevent shadow acne
+    depth_bias: f32             # Default: 0.005
+    normal_bias: f32            # Default: 0.01
+
+impl ShadowMapConfig:
+    pub fn default() -> ShadowMapConfig:
+        return ShadowMapConfig {
+            cascade_resolution: 2048,
+            point_light_resolution: 1024,
+            spot_light_resolution: 1024,
+            num_cascades: 4,
+            cascade_split_lambda: 0.5,
+            pcf_kernel_size: 3,
+            pcf_radius: 1.5,
+            depth_bias: 0.005,
+            normal_bias: 0.01
+        }
+
+    pub fn high_quality() -> ShadowMapConfig:
+        return ShadowMapConfig {
+            cascade_resolution: 4096,
+            point_light_resolution: 2048,
+            spot_light_resolution: 2048,
+            num_cascades: 4,
+            cascade_split_lambda: 0.75,
+            pcf_kernel_size: 5,
+            pcf_radius: 2.0,
+            depth_bias: 0.003,
+            normal_bias: 0.015
+        }
+
+    pub fn low_quality() -> ShadowMapConfig:
+        return ShadowMapConfig {
+            cascade_resolution: 1024,
+            point_light_resolution: 512,
+            spot_light_resolution: 512,
+            num_cascades: 2,
+            cascade_split_lambda: 0.5,
+            pcf_kernel_size: 2,
+            pcf_radius: 1.0,
+            depth_bias: 0.01,
+            normal_bias: 0.02
+        }
+
+# =============================================================================
+# Shadow Cascade Data
+# =============================================================================
+
+pub struct ShadowCascade:
+    # Light space matrices
+    view_matrix: Mat4
+    projection_matrix: Mat4
+    view_proj_matrix: Mat4
+
+    # Cascade frustum in world space
+    near_plane: f32
+    far_plane: f32
+
+    # Shadow map allocation in atlas
+    atlas_offset_x: i32
+    atlas_offset_y: i32
+    atlas_size: i32
+
+    # Depth texture handle
+    depth_texture_id: u64
+
+impl ShadowCascade:
+    pub fn new() -> ShadowCascade:
+        return ShadowCascade {
+            view_matrix: Mat4::identity(),
+            projection_matrix: Mat4::identity(),
+            view_proj_matrix: Mat4::identity(),
+            near_plane: 0.0,
+            far_plane: 0.0,
+            atlas_offset_x: 0,
+            atlas_offset_y: 0,
+            atlas_size: 0,
+            depth_texture_id: 0
+        }
+
+    # Get texture coordinates in atlas (0-1 range)
+    pub fn get_atlas_uv_transform(self) -> Mat4:
+        let scale = self.atlas_size as f32 / 4096.0  # Assume 4096 atlas
+        let offset_x = self.atlas_offset_x as f32 / 4096.0
+        let offset_y = self.atlas_offset_y as f32 / 4096.0
+
+        # UV transform: scale then offset
+        return Mat4::new(
+            scale, 0.0,   0.0, offset_x,
+            0.0,   scale, 0.0, offset_y,
+            0.0,   0.0,   1.0, 0.0,
+            0.0,   0.0,   0.0, 1.0
+        )
+
+# =============================================================================
+# Cascaded Shadow Map Manager
+# =============================================================================
+
+pub struct CSMManager:
+    config: ShadowMapConfig
+    cascades: Array[ShadowCascade]
+    cascade_splits: Array[f32]  # Frustum split distances
+
+    # Shadow atlas texture
+    atlas_texture_id: u64
+    atlas_framebuffer_id: u64
+    atlas_size: i32
+
+impl CSMManager:
+    pub fn new(config: ShadowMapConfig) -> CSMManager:
+        let mut cascades = Array::new()
+        for i in 0..config.num_cascades:
+            cascades.push(ShadowCascade::new())
+
+        return CSMManager {
+            config: config,
+            cascades: cascades,
+            cascade_splits: Array::new(),
+            atlas_texture_id: 0,
+            atlas_framebuffer_id: 0,
+            atlas_size: 4096
+        }
+
+    # Initialize shadow atlas texture
+    pub fn init_atlas(mut self):
+        # Create depth texture (single channel, 32-bit float)
+        self.atlas_texture_id = extern_create_depth_texture(
+            self.atlas_size,
+            self.atlas_size
+        )
+
+        # Create framebuffer for rendering
+        self.atlas_framebuffer_id = extern_create_framebuffer(
+            self.atlas_texture_id
+        )
+
+        # Allocate cascade regions in atlas (2x2 grid for 4 cascades)
+        let cascade_size = self.config.cascade_resolution
+        let cascades_per_row = 2
+
+        for i in 0..self.config.num_cascades:
+            let row = i / cascades_per_row
+            let col = i % cascades_per_row
+
+            self.cascades[i].atlas_offset_x = col * cascade_size
+            self.cascades[i].atlas_offset_y = row * cascade_size
+            self.cascades[i].atlas_size = cascade_size
+            self.cascades[i].depth_texture_id = self.atlas_texture_id
+
+    # Calculate cascade split distances using practical split scheme
+    # Combines linear and logarithmic splits for better quality distribution
+    pub fn calculate_cascade_splits(
+        mut self,
+        camera_near: f32,
+        camera_far: f32
+    ):
+        self.cascade_splits.clear()
+        self.cascade_splits.push(camera_near)
+
+        let lambda = self.config.cascade_split_lambda
+
+        for i in 1..self.config.num_cascades:
+            let p = i as f32 / self.config.num_cascades as f32
+
+            # Linear split
+            let c_linear = camera_near + (camera_far - camera_near) * p
+
+            # Logarithmic split
+            let c_log = camera_near * pow(camera_far / camera_near, p)
+
+            # Interpolate between linear and logarithmic
+            let split = lambda * c_log + (1.0 - lambda) * c_linear
+
+            self.cascade_splits.push(split)
+
+        self.cascade_splits.push(camera_far)
+
+        # Update cascade near/far planes
+        for i in 0..self.config.num_cascades:
+            self.cascades[i].near_plane = self.cascade_splits[i]
+            self.cascades[i].far_plane = self.cascade_splits[i + 1]
+
+    # Update shadow matrices for a directional light
+    pub fn update_directional_light(
+        mut self,
+        light_direction: Vec3,
+        camera: Camera,
+        scene_bounds: AABB
+    ):
+        self.calculate_cascade_splits(camera.near, camera.far)
+
+        for i in 0..self.config.num_cascades:
+            self.update_cascade(
+                i,
+                light_direction,
+                camera,
+                self.cascades[i].near_plane,
+                self.cascades[i].far_plane,
+                scene_bounds
+            )
+
+    # Update a single cascade
+    me update_cascade(self, cascade_index: i32,
+        light_direction: Vec3,
+        camera: Camera,
+        near_plane: f32,
+        far_plane: f32,
+        scene_bounds: AABB
+    ):
+        # Calculate frustum corners for this cascade
+        let frustum_corners = self.calculate_frustum_corners(
+            camera,
+            near_plane,
+            far_plane
+        )
+
+        # Calculate frustum center
+        let mut center = Vec3::zero()
+        for corner in frustum_corners:
+            center = center + corner
+        center = center / 8.0
+
+        # Light view matrix (look at frustum center from light direction)
+        let light_pos = center - light_direction.normalize() * 100.0
+        let view_matrix = Mat4::look_at(light_pos, center, Vec3::new(0.0, 1.0, 0.0))
+
+        # Transform frustum corners to light space
+        let mut min_bounds = Vec3::new(f32::MAX, f32::MAX, f32::MAX)
+        let mut max_bounds = Vec3::new(f32::MIN, f32::MIN, f32::MIN)
+
+        for corner in frustum_corners:
+            let light_space_corner = view_matrix.transform_point(corner)
+            min_bounds = min_vec3(min_bounds, light_space_corner)
+            max_bounds = max_vec3(max_bounds, light_space_corner)
+
+        # Extend Z range to include scene bounds (prevent clipping)
+        let scene_min = view_matrix.transform_point(scene_bounds.min)
+        let scene_max = view_matrix.transform_point(scene_bounds.max)
+        min_bounds.z = min(min_bounds.z, scene_min.z)
+        max_bounds.z = max(max_bounds.z, scene_max.z)
+
+        # Orthographic projection for directional light
+        let projection_matrix = Mat4::orthographic(
+            min_bounds.x, max_bounds.x,
+            min_bounds.y, max_bounds.y,
+            min_bounds.z, max_bounds.z
+        )
+
+        # Stabilize shadow edges by snapping to texel grid
+        let shadow_matrix = projection_matrix * view_matrix
+        let shadow_origin = shadow_matrix.transform_point(Vec3::zero())
+
+        let texel_size = 2.0 / self.config.cascade_resolution as f32
+        let rounded_x = round(shadow_origin.x / texel_size) * texel_size
+        let rounded_y = round(shadow_origin.y / texel_size) * texel_size
+
+        let offset_x = rounded_x - shadow_origin.x
+        let offset_y = rounded_y - shadow_origin.y
+
+        let mut projection_matrix_stabilized = projection_matrix
+        projection_matrix_stabilized.m[0][3] = projection_matrix_stabilized.m[0][3] + offset_x
+        projection_matrix_stabilized.m[1][3] = projection_matrix_stabilized.m[1][3] + offset_y
+
+        # Store matrices
+        self.cascades[cascade_index].view_matrix = view_matrix
+        self.cascades[cascade_index].projection_matrix = projection_matrix_stabilized
+        self.cascades[cascade_index].view_proj_matrix = projection_matrix_stabilized * view_matrix
+
+    # Calculate 8 corners of camera frustum for a given near/far range
+    fn calculate_frustum_corners(
+        self,
+        camera: Camera,
+        near_plane: f32,
+        far_plane: f32
+    ) -> Array[Vec3]:
+        let inv_view_proj = (camera.get_projection_matrix() * camera.get_view_matrix()).inverse()
+
+        let mut corners = Array::new()
+
+        # NDC cube corners
+        let ndc_coords = [
+            Vec3::new(-1.0, -1.0, -1.0),  # Near bottom-left
+            Vec3::new( 1.0, -1.0, -1.0),  # Near bottom-right
+            Vec3::new(-1.0,  1.0, -1.0),  # Near top-left
+            Vec3::new( 1.0,  1.0, -1.0),  # Near top-right
+            Vec3::new(-1.0, -1.0,  1.0),  # Far bottom-left
+            Vec3::new( 1.0, -1.0,  1.0),  # Far bottom-right
+            Vec3::new(-1.0,  1.0,  1.0),  # Far top-left
+            Vec3::new( 1.0,  1.0,  1.0)   # Far top-right
+        ]
+
+        # Transform to world space
+        for ndc in ndc_coords:
+            let world_pos = inv_view_proj.transform_point(ndc)
+            corners.push(world_pos)
+
+        # Scale near/far planes to match requested distances
+        let camera_pos = camera.get_position()
+        let camera_forward = camera.get_forward()
+
+        for i in 0..4:
+            # Near plane corners
+            let dir = (corners[i] - camera_pos).normalize()
+            corners[i] = camera_pos + dir * near_plane / dir.dot(camera_forward)
+
+            # Far plane corners
+            let dir_far = (corners[i + 4] - camera_pos).normalize()
+            corners[i + 4] = camera_pos + dir_far * far_plane / dir_far.dot(camera_forward)
+
+        return corners
+
+    # Render shadow maps for all cascades
+    pub fn render_shadows(self, scene: Scene):
+        # Bind shadow atlas framebuffer
+        extern_bind_framebuffer(self.atlas_framebuffer_id)
+
+        # Clear entire atlas
+        extern_clear_depth(1.0)
+
+        # Render each cascade
+        for i in 0..self.config.num_cascades:
+            let cascade = self.cascades[i]
+
+            # Set viewport to cascade region
+            extern_set_viewport(
+                cascade.atlas_offset_x,
+                cascade.atlas_offset_y,
+                cascade.atlas_size,
+                cascade.atlas_size
+            )
+
+            # Render scene from light's perspective (depth-only)
+            self.render_depth_pass(scene, cascade.view_proj_matrix)
+
+        # Unbind framebuffer
+        extern_bind_framebuffer(0)
+
+    # Render depth-only pass
+    fn render_depth_pass(self, scene: Scene, light_view_proj: Mat4):
+        # Use depth-only shader pipeline
+        extern_use_shader_pipeline("shadow_depth")
+
+        # Render all shadow-casting meshes
+        for node in scene.get_all_nodes():
+            if node.has_component("MeshRenderer"):
+                let mesh_renderer = node.get_component("MeshRenderer")
+
+                if mesh_renderer.cast_shadows:
+                    let world_transform = node.get_world_transform()
+                    let mvp = light_view_proj * world_transform
+
+                    # Set uniforms
+                    extern_set_uniform_mat4("u_MVP", mvp)
+                    extern_set_uniform_float("u_DepthBias", self.config.depth_bias)
+
+                    # Draw mesh
+                    extern_draw_mesh(mesh_renderer.mesh_id)
+
+    # Get cascade index for a world position (based on camera distance)
+    pub fn get_cascade_index(self, world_pos: Vec3, camera_pos: Vec3) -> i32:
+        let distance = (world_pos - camera_pos).length()
+
+        for i in 0..self.config.num_cascades:
+            if distance < self.cascade_splits[i + 1]:
+                return i
+
+        return self.config.num_cascades - 1
+
+# =============================================================================
+# Shadow Sampling (used in fragment shader)
+# =============================================================================
+
+# Sample shadow map with PCF filtering
+pub fn sample_shadow_map_pcf(
+    shadow_map: u64,
+    shadow_coord: Vec3,    # Light space position (NDC)
+    cascade_uv_transform: Mat4,
+    pcf_kernel_size: i32,
+    pcf_radius: f32
+) -> f32:
+    # Transform to shadow atlas UV coordinates
+    let atlas_uv = cascade_uv_transform.transform_point(Vec3::new(
+        shadow_coord.x * 0.5 + 0.5,
+        shadow_coord.y * 0.5 + 0.5,
+        0.0
+    ))
+
+    let shadow_depth = shadow_coord.z
+
+    # PCF filtering
+    let mut shadow_factor = 0.0
+    let texel_size = pcf_radius / 2048.0  # Cascade resolution
+
+    let kernel_range = pcf_kernel_size / 2
+    let sample_count = pcf_kernel_size * pcf_kernel_size
+
+    for y in -kernel_range..=kernel_range:
+        for x in -kernel_range..=kernel_range:
+            let offset_uv = Vec2::new(
+                atlas_uv.x + x as f32 * texel_size,
+                atlas_uv.y + y as f32 * texel_size
+            )
+
+            let sampled_depth = extern_sample_depth_texture(shadow_map, offset_uv)
+
+            # Compare depths (1.0 = lit, 0.0 = shadowed)
+            shadow_factor = shadow_factor + if shadow_depth <= sampled_depth: 1.0 else: 0.0
+
+    return shadow_factor / sample_count as f32
+
+# =============================================================================
+# Point Light Shadow Mapping (Omnidirectional)
+# =============================================================================
+
+pub struct PointLightShadow:
+    light_position: Vec3
+    light_range: f32
+
+    # Cubemap shadow map (6 faces)
+    cubemap_texture_id: u64
+    cubemap_resolution: i32
+
+    # View matrices for 6 faces (+X, -X, +Y, -Y, +Z, -Z)
+    face_view_matrices: [Mat4; 6]
+    projection_matrix: Mat4
+
+impl PointLightShadow:
+    pub fn new(position: Vec3, range: f32, resolution: i32) -> PointLightShadow:
+        let mut shadow = PointLightShadow {
+            light_position: position,
+            light_range: range,
+            cubemap_texture_id: 0,
+            cubemap_resolution: resolution,
+            face_view_matrices: [Mat4::identity(); 6],
+            projection_matrix: Mat4::identity()
+        }
+
+        shadow.init()
+        return shadow
+
+    me init(self):
+        # Create cubemap depth texture
+        self.cubemap_texture_id = extern_create_cubemap_depth_texture(
+            self.cubemap_resolution
+        )
+
+        # Perspective projection (90 degree FOV for each face)
+        self.projection_matrix = Mat4::perspective(
+            90.0_deg.to_rad(),
+            1.0,  # Aspect ratio
+            0.1,  # Near
+            self.light_range  # Far
+        )
+
+        # View matrices for each cube face
+        let pos = self.light_position
+
+        self.face_view_matrices[0] = Mat4::look_at(pos, pos + Vec3::new( 1.0,  0.0,  0.0), Vec3::new(0.0, -1.0,  0.0))  # +X
+        self.face_view_matrices[1] = Mat4::look_at(pos, pos + Vec3::new(-1.0,  0.0,  0.0), Vec3::new(0.0, -1.0,  0.0))  # -X
+        self.face_view_matrices[2] = Mat4::look_at(pos, pos + Vec3::new( 0.0,  1.0,  0.0), Vec3::new(0.0,  0.0,  1.0))  # +Y
+        self.face_view_matrices[3] = Mat4::look_at(pos, pos + Vec3::new( 0.0, -1.0,  0.0), Vec3::new(0.0,  0.0, -1.0))  # -Y
+        self.face_view_matrices[4] = Mat4::look_at(pos, pos + Vec3::new( 0.0,  0.0,  1.0), Vec3::new(0.0, -1.0,  0.0))  # +Z
+        self.face_view_matrices[5] = Mat4::look_at(pos, pos + Vec3::new( 0.0,  0.0, -1.0), Vec3::new(0.0, -1.0,  0.0))  # -Z
+
+    pub fn render_shadows(self, scene: Scene):
+        # Render to each cubemap face
+        for face in 0..6:
+            extern_bind_cubemap_face(self.cubemap_texture_id, face)
+            extern_clear_depth(1.0)
+
+            let view_proj = self.projection_matrix * self.face_view_matrices[face]
+            extern_render_depth_pass(scene, view_proj)
+
+        extern_bind_framebuffer(0)
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+fn min(a: f32, b: f32) -> f32:
+    return if a < b: a else: b
+
+fn max(a: f32, b: f32) -> f32:
+    return if a > b: a else: b
+
+fn min_vec3(a: Vec3, b: Vec3) -> Vec3:
+    return Vec3::new(
+        min(a.x, b.x),
+        min(a.y, b.y),
+        min(a.z, b.z)
+    )
+
+fn max_vec3(a: Vec3, b: Vec3) -> Vec3:
+    return Vec3::new(
+        max(a.x, b.x),
+        max(a.y, b.y),
+        max(a.z, b.z)
+    )
+
+fn round(x: f32) -> f32:
+    # Would use math library
+    return 0.0  # Placeholder
+
+fn pow(base: f32, exp: f32) -> f32:
+    # Would use math library
+    return 0.0  # Placeholder
+
+# =============================================================================
+# External FFI Functions (Vulkan backend)
+# =============================================================================
+
+extern fn extern_create_depth_texture(width: i32, height: i32) -> u64
+extern fn extern_create_cubemap_depth_texture(resolution: i32) -> u64
+extern fn extern_create_framebuffer(depth_texture_id: u64) -> u64
+extern fn extern_bind_framebuffer(framebuffer_id: u64)
+extern fn extern_bind_cubemap_face(cubemap_id: u64, face: i32)
+extern fn extern_clear_depth(value: f32)
+extern fn extern_set_viewport(x: i32, y: i32, width: i32, height: i32)
+extern fn extern_use_shader_pipeline(pipeline_name: *u8)
+extern fn extern_set_uniform_mat4(name: *u8, matrix: Mat4)
+extern fn extern_set_uniform_float(name: *u8, value: f32)
+extern fn extern_draw_mesh(mesh_id: u64)
+extern fn extern_sample_depth_texture(texture_id: u64, uv: Vec2) -> f32
+extern fn extern_render_depth_pass(scene: Scene, view_proj: Mat4)

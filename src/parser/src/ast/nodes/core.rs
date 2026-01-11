@@ -414,6 +414,7 @@ pub enum Expr {
         move_mode: MoveMode,
     },
     If {
+        let_pattern: Option<Pattern>,
         condition: Box<Expr>,
         then_branch: Box<Expr>,
         else_branch: Option<Box<Expr>>,

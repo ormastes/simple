@@ -301,10 +301,12 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
             index: *index,
         },
         Expr::If {
+            let_pattern,
             condition,
             then_branch,
             else_branch,
         } => Expr::If {
+            let_pattern: let_pattern.clone(),
             condition: Box::new(substitute_expr_templates(condition, const_bindings)),
             then_branch: Box::new(substitute_expr_templates(then_branch, const_bindings)),
             else_branch: else_branch

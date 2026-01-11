@@ -248,6 +248,7 @@ pub fn to_simple_expr(expr: &Expr) -> Option<LeanExpr> {
             condition,
             then_branch,
             else_branch,
+            ..
         } => {
             let c = to_simple_expr(condition)?;
             let t = to_simple_expr(then_branch)?;

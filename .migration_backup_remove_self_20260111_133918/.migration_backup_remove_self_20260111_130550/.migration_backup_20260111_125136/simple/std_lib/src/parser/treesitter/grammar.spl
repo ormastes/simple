@@ -1,0 +1,364 @@
+# Grammar rules for Simple language
+# Minimal subset for Phase 1: functions, expressions, basic statements
+
+import core.{Option, Result}
+import parser.treesitter.tree.{Span}
+
+# Token kinds (simplified subset from src/parser/src/token.rs)
+enum TokenKind:
+    # Keywords
+    Fn, Let, Mut, Return, If, Else, Elif
+    Struct, Class, Enum, Trait, Impl
+    Match, Case, For, While, Loop, Break, Continue
+
+    # Literals
+    Integer(i64)
+    Float(f64)
+    String(str)
+    Bool(bool)
+    Nil
+
+    # Identifiers
+    Identifier(str)
+    TypeIdentifier(str)
+
+    # Operators
+    Plus, Minus, Star, Slash, Percent
+    Eq, NotEq, Lt, Gt, LtEq, GtEq
+    And, Or, Not
+    Assign, Arrow
+
+    # Delimiters
+    LParen, RParen
+    LBrace, RBrace
+    LBracket, RBracket
+    Comma, Colon, Semicolon, Dot
+
+    # Special (indentation-based blocks)
+    Indent, Dedent, Newline
+
+    # Meta
+    Eof
+    Error(str)
+
+impl TokenKind:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_keyword(self) -> bool:
+        """Check if this is a keyword token."""
+        match self:
+            case Fn | Let | Mut | Return | If | Else | Elif: true
+            case Struct | Class | Enum | Trait | Impl: true
+            case Match | Case | For | While | Loop | Break | Continue: true
+            case _: false
+
+    fn is_literal(self) -> bool:
+        """Check if this is a literal value."""
+        match self:
+            case Integer(_) | Float(_) | String(_) | Bool(_) | Nil: true
+            case _: false
+
+    fn is_identifier(self) -> bool:
+        """Check if this is an identifier."""
+        match self:
+            case Identifier(_) | TypeIdentifier(_): true
+            case _: false
+
+    fn is_operator(self) -> bool:
+        """Check if this is an operator."""
+        match self:
+            case Plus | Minus | Star | Slash | Percent: true
+            case Eq | NotEq | Lt | Gt | LtEq | GtEq: true
+            case And | Or | Not | Assign | Arrow: true
+            case _: false
+
+    fn is_delimiter(self) -> bool:
+        """Check if this is a delimiter."""
+        match self:
+            case LParen | RParen | LBrace | RBrace | LBracket | RBracket: true
+            case Comma | Colon | Semicolon | Dot: true
+            case _: false
+
+    fn is_special(self) -> bool:
+        """Check if this is special whitespace token."""
+        match self:
+            case Indent | Dedent | Newline: true
+            case _: false
+
+    fn to_string(self) -> String:
+        """Convert token kind to string."""
+        match self:
+            case Fn: "fn"
+            case Let: "let"
+            case Integer(n): n.to_string()
+            case Identifier(s): s
+            case Plus: "+"
+            case Eof: "EOF"
+            case _: "token"
+
+    fn summary(self) -> String:
+        """Get summary of token kind."""
+        let category = if self.is_keyword(): "keyword"
+                       else if self.is_literal(): "literal"
+                       else if self.is_identifier(): "identifier"
+                       else if self.is_operator(): "operator"
+                       else if self.is_delimiter(): "delimiter"
+                       else: "special"
+        return "TokenKind: {category}"
+
+struct Token:
+    kind: TokenKind
+    text: str
+    span: Span
+
+# Grammar rule representation (PEG-style)
+enum GrammarRule:
+    # Terminals
+    TokenRule(TokenKind)          # Match specific token
+
+    # Combinators
+    Seq([GrammarRule])            # Sequence: A B C
+    Choice([GrammarRule])         # Ordered choice: A / B / C
+    Optional(GrammarRule)         # Zero or one: A?
+    ZeroOrMore(GrammarRule)       # Repetition: A*
+    OneOrMore(GrammarRule)        # Non-empty: A+
+
+    # Named rules (for CST nodes)
+    Named(str, GrammarRule)       # Create node with name
+    Field(str, GrammarRule)       # Named field for node
+
+impl GrammarRule:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_terminal(self) -> bool:
+        """Check if this is a terminal rule (TokenRule)."""
+        match self:
+            case TokenRule(_): true
+            case _: false
+
+    fn is_combinator(self) -> bool:
+        """Check if this is a combinator rule."""
+        match self:
+            case Seq(_) | Choice(_) | Optional(_): true
+            case ZeroOrMore(_) | OneOrMore(_): true
+            case _: false
+
+    fn is_repetition(self) -> bool:
+        """Check if this is a repetition rule (*/+)."""
+        match self:
+            case ZeroOrMore(_) | OneOrMore(_): true
+            case _: false
+
+    fn is_named(self) -> bool:
+        """Check if this rule creates a named node."""
+        match self:
+            case Named(_, _) | Field(_, _): true
+            case _: false
+
+    fn is_sequence(self) -> bool:
+        """Check if this is a sequence rule."""
+        match self:
+            case Seq(_): true
+            case _: false
+
+    fn is_choice(self) -> bool:
+        """Check if this is a choice rule."""
+        match self:
+            case Choice(_): true
+            case _: false
+
+    fn is_optional(self) -> bool:
+        """Check if this is an optional rule."""
+        match self:
+            case Optional(_): true
+            case _: false
+
+    fn has_children(self) -> bool:
+        """Check if rule contains sub-rules."""
+        match self:
+            case TokenRule(_): false
+            case _: true
+
+    fn to_string(self) -> String:
+        """Convert rule to string."""
+        match self:
+            case TokenRule(_): "token_rule"
+            case Seq(_): "sequence"
+            case Choice(_): "choice"
+            case Optional(_): "optional"
+            case ZeroOrMore(_): "zero_or_more"
+            case OneOrMore(_): "one_or_more"
+            case Named(_, _): "named"
+            case Field(_, _): "field"
+
+    fn summary(self) -> String:
+        """Get summary of grammar rule."""
+        let name = self.to_string()
+        let kind = if self.is_terminal(): "terminal"
+                   else if self.is_repetition(): "repetition"
+                   else if self.is_named(): "named"
+                   else: "combinator"
+        return "GrammarRule: {name} ({kind})"
+
+# Grammar definition
+struct Grammar:
+    rules: {str: GrammarRule}
+    entry_point: str
+
+# Build Simple language grammar (minimal subset)
+fn build_simple_grammar() -> Grammar:
+    return Grammar(
+        entry_point: "module",
+        rules: {
+            # Entry point
+            "module": GrammarRule.ZeroOrMore(
+                GrammarRule.Named("statement", statement_rule())
+            ),
+
+            # Statements
+            "statement": statement_rule(),
+            "function_def": function_def_rule(),
+            "let_stmt": let_stmt_rule(),
+            "return_stmt": return_stmt_rule(),
+            "expression_stmt": expression_stmt_rule(),
+
+            # Expressions
+            "expression": expression_rule(),
+            "binary_expr": binary_expr_rule(),
+            "primary_expr": primary_expr_rule(),
+
+            # Types
+            "type_expr": type_expr_rule(),
+        }
+    )
+
+fn statement_rule() -> GrammarRule:
+    return GrammarRule.Choice([
+        GrammarRule.Named("function_def", function_def_rule()),
+        GrammarRule.Named("let_stmt", let_stmt_rule()),
+        GrammarRule.Named("return_stmt", return_stmt_rule()),
+        GrammarRule.Named("expression_stmt", expression_stmt_rule()),
+    ])
+
+fn function_def_rule() -> GrammarRule:
+    # fn name(params) -> return_type: body
+    return GrammarRule.Seq([
+        GrammarRule.TokenRule(TokenKind.Fn),
+        GrammarRule.Field("name",
+            GrammarRule.Named("identifier", identifier_rule())),
+        GrammarRule.TokenRule(TokenKind.LParen),
+        GrammarRule.Field("params",
+            GrammarRule.Optional(parameter_list_rule())),
+        GrammarRule.TokenRule(TokenKind.RParen),
+        GrammarRule.Optional(GrammarRule.Seq([
+            GrammarRule.TokenRule(TokenKind.Arrow),
+            GrammarRule.Field("return_type", type_expr_rule())
+        ])),
+        GrammarRule.TokenRule(TokenKind.Colon),
+        GrammarRule.Field("body", block_rule())
+    ])
+
+fn parameter_list_rule() -> GrammarRule:
+    return GrammarRule.Seq([
+        parameter_rule(),
+        GrammarRule.ZeroOrMore(GrammarRule.Seq([
+            GrammarRule.TokenRule(TokenKind.Comma),
+            parameter_rule()
+        ]))
+    ])
+
+fn parameter_rule() -> GrammarRule:
+    # name: type
+    return GrammarRule.Named("parameter", GrammarRule.Seq([
+        GrammarRule.Field("name", identifier_rule()),
+        GrammarRule.TokenRule(TokenKind.Colon),
+        GrammarRule.Field("type", type_expr_rule())
+    ]))
+
+fn block_rule() -> GrammarRule:
+    # Indented block: NEWLINE INDENT statements DEDENT
+    return GrammarRule.Named("block", GrammarRule.Seq([
+        GrammarRule.TokenRule(TokenKind.Newline),
+        GrammarRule.TokenRule(TokenKind.Indent),
+        GrammarRule.OneOrMore(statement_rule()),
+        GrammarRule.TokenRule(TokenKind.Dedent)
+    ]))
+
+fn let_stmt_rule() -> GrammarRule:
+    # let name: type = value
+    return GrammarRule.Seq([
+        GrammarRule.TokenRule(TokenKind.Let),
+        GrammarRule.Optional(GrammarRule.TokenRule(TokenKind.Mut)),
+        GrammarRule.Field("name", identifier_rule()),
+        GrammarRule.Optional(GrammarRule.Seq([
+            GrammarRule.TokenRule(TokenKind.Colon),
+            GrammarRule.Field("type", type_expr_rule())
+        ])),
+        GrammarRule.TokenRule(TokenKind.Assign),
+        GrammarRule.Field("value", expression_rule())
+    ])
+
+fn return_stmt_rule() -> GrammarRule:
+    return GrammarRule.Seq([
+        GrammarRule.TokenRule(TokenKind.Return),
+        GrammarRule.Optional(GrammarRule.Field("value", expression_rule()))
+    ])
+
+fn expression_stmt_rule() -> GrammarRule:
+    return expression_rule()
+
+fn expression_rule() -> GrammarRule:
+    # For Phase 1: simple precedence (just binary expressions)
+    return binary_expr_rule()
+
+fn binary_expr_rule() -> GrammarRule:
+    # Simplified: primary (op primary)*
+    return GrammarRule.Named("binary_expr", GrammarRule.Seq([
+        primary_expr_rule(),
+        GrammarRule.ZeroOrMore(GrammarRule.Seq([
+            GrammarRule.Field("op", binary_op_rule()),
+            primary_expr_rule()
+        ]))
+    ]))
+
+fn binary_op_rule() -> GrammarRule:
+    return GrammarRule.Choice([
+        GrammarRule.TokenRule(TokenKind.Plus),
+        GrammarRule.TokenRule(TokenKind.Minus),
+        GrammarRule.TokenRule(TokenKind.Star),
+        GrammarRule.TokenRule(TokenKind.Slash),
+        GrammarRule.TokenRule(TokenKind.Eq),
+        GrammarRule.TokenRule(TokenKind.NotEq),
+        GrammarRule.TokenRule(TokenKind.Lt),
+        GrammarRule.TokenRule(TokenKind.Gt),
+    ])
+
+fn primary_expr_rule() -> GrammarRule:
+    return GrammarRule.Choice([
+        integer_literal_rule(),
+        identifier_rule(),
+        paren_expr_rule(),
+    ])
+
+fn integer_literal_rule() -> GrammarRule:
+    return GrammarRule.Named("integer",
+        GrammarRule.TokenRule(TokenKind.Integer(0)))
+
+fn identifier_rule() -> GrammarRule:
+    return GrammarRule.TokenRule(TokenKind.Identifier(""))
+
+fn paren_expr_rule() -> GrammarRule:
+    return GrammarRule.Seq([
+        GrammarRule.TokenRule(TokenKind.LParen),
+        expression_rule(),
+        GrammarRule.TokenRule(TokenKind.RParen)
+    ])
+
+fn type_expr_rule() -> GrammarRule:
+    # For Phase 1: just identifiers
+    return GrammarRule.Named("type_identifier",
+        GrammarRule.TokenRule(TokenKind.TypeIdentifier("")))

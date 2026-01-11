@@ -256,6 +256,7 @@ impl SymbolUsageAnalyzer {
                 condition,
                 then_branch,
                 else_branch,
+                ..
             } => {
                 self.collect_usage_from_expr(condition, usage);
                 self.collect_usage_from_expr(then_branch, usage);

@@ -365,10 +365,12 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
             }
         }
         Expr::If {
+            let_pattern,
             condition,
             then_branch,
             else_branch,
         } => Expr::If {
+            let_pattern: let_pattern.clone(),
             condition: Box::new(apply_macro_hygiene_expr(condition, ctx)),
             then_branch: Box::new(apply_macro_hygiene_expr(then_branch, ctx)),
             else_branch: else_branch

@@ -1,0 +1,537 @@
+# SUI Vulkan Integration - GPU-Accelerated SUI Framework
+#
+# Integrates the SUI (Simple UI) declarative framework with Vulkan rendering
+# for hardware-accelerated GUI applications.
+#
+# Key Features:
+#   - GPU-accelerated rendering of SUI views
+#   - Hardware-accelerated text rendering
+#   - Smooth animations and transitions
+#   - High-performance layout calculations
+#   - 60+ FPS reactive UI updates
+#   - Native window management
+#
+# Architecture:
+#   ┌─────────────────────────────────────┐
+#   │      SUI Application Code           │
+#   │  (declarative views with State)     │
+#   └─────────────────────────────────────┘
+#                │
+#                ▼
+#   ┌─────────────────────────────────────┐
+#   │        SUI Runtime Layer            │
+#   │  • State change detection           │
+#   │  • Element tree diffing             │
+#   │  • Layout calculation               │
+#   └─────────────────────────────────────┘
+#                │
+#                ▼
+#   ┌─────────────────────────────────────┐
+#   │    SUIVulkanRenderer (this file)    │
+#   │  • Translates SUI to Vulkan calls   │
+#   │  • Manages GPU resources            │
+#   │  • Handles window/input events      │
+#   └─────────────────────────────────────┘
+#                │
+#       ┌────────┴────────┐
+#       ▼                 ▼
+#   ┌─────────┐    ┌──────────────┐
+#   │ Vulkan  │    │   Window     │
+#   │ Backend │    │  Management  │
+#   └─────────┘    └──────────────┘
+#
+# Usage:
+#   import ui.sui.*
+#   import ui.sui_vulkan.*
+#
+#   struct MyApp:
+#       count: State[i32]
+#
+#   impl View for MyApp:
+#       fn body(self) -> Element:
+#           return VStack([
+#               Text("Count: {self.count.get()}"),
+#               Button("Click", on_click: || {
+#                   self.count.set(self.count.get() + 1)
+#               })
+#           ])
+#
+#   async fn main():
+#       # Create Vulkan-powered SUI app
+#       let app = SUIVulkanApp::new(
+#           title: "My App",
+#           width: 1280,
+#           height: 720
+#       )?
+#
+#       # Run with root view
+#       await app.run(MyApp { count: State::new(0) })
+
+use core.*
+use concurrency.*
+use ui.element.*
+use ui.renderer.*
+use ui.sui.*
+use ui.gui.vulkan_types.*
+use ui.gui.vulkan_renderer.*
+use ui.gui.vulkan_window.*
+
+# =============================================================================
+# SUI Vulkan Renderer
+# =============================================================================
+
+pub struct SUIVulkanRenderer:
+    # Vulkan rendering backend
+    vulkan_renderer: VulkanAsyncRenderer
+    window: Window
+
+    # SUI state tracking
+    current_tree: Option[Element]
+    previous_tree: Option[Element]
+    state_version: u64
+
+    # Layout cache
+    layout_cache: Dict[u64, LayoutRect]
+
+    # Event handling
+    event_queue: Array[Event]
+    focused_element: Option[u64]
+
+    # Performance settings
+    enable_vsync: bool
+    target_fps: u32
+
+    # State
+    initialized: bool
+
+impl SUIVulkanRenderer:
+    # Create a new SUI Vulkan renderer
+    #
+    # Args:
+    #   width: Window width in pixels
+    #   height: Window height in pixels
+    #   title: Window title
+    #
+    # Example:
+    #   let renderer = SUIVulkanRenderer::new(1280, 720, "My SUI App")?
+    pub fn new(width: u32, height: u32, title: &str) -> Result[SUIVulkanRenderer, RenderError]:
+        # Create Vulkan window
+        let window = match Window::new(width, height, title):
+            case Ok(w): w
+            case Err(e):
+                return Err(RenderError::IoError("Failed to create window: {e}"))
+
+        # Create Vulkan renderer
+        let vulkan_renderer = VulkanAsyncRenderer::new(&window)?
+
+        return Ok(SUIVulkanRenderer {
+            vulkan_renderer: vulkan_renderer,
+            window: window,
+            current_tree: None,
+            previous_tree: None,
+            state_version: 0,
+            layout_cache: Dict::new(),
+            event_queue: Array::new(),
+            focused_element: None,
+            enable_vsync: true,
+            target_fps: 60,
+            initialized: false
+        })
+
+    # Initialize the renderer
+    pub async fn init(self) -> Result[(), RenderError]:
+        if self.initialized:
+            return Err(RenderError::AlreadyInitialized)
+
+        # Initialize Vulkan renderer
+        await self.vulkan_renderer.init()
+
+        # Set VSync
+        self.vulkan_renderer.set_vsync(self.enable_vsync)
+
+        self.initialized = true
+        return Ok(())
+
+    # Render a SUI view
+    pub async fn render_view[V: View](self, view: V) -> Result[(), RenderError]:
+        if not self.initialized:
+            return Err(RenderError::NotInitialized)
+
+        # Get element tree from view
+        let elem_tree = view.body()
+
+        # Check if tree changed (optimization)
+        if let Some(prev) = &self.previous_tree:
+            if elem_tree == prev:
+                # No changes, skip render
+                return Ok(())
+
+        # Store current tree
+        self.previous_tree = self.current_tree.clone()
+        self.current_tree = Some(elem_tree.clone())
+
+        # Calculate layout
+        self.calculate_layout(&elem_tree)
+
+        # Render using Vulkan
+        await self.vulkan_renderer.render(&elem_tree)
+
+        # Increment state version
+        self.state_version += 1
+
+        return Ok(())
+
+    # Calculate layout for element tree
+    fn calculate_layout(self, elem: &Element):
+        # Clear layout cache
+        self.layout_cache.clear()
+
+        # Get window dimensions
+        let (width, height) = self.window.get_size()
+
+        # Recursively calculate layout
+        let root_rect = LayoutRect::new(0, 0, width, height)
+        self.layout_element(elem, root_rect)
+
+    # Layout a single element
+    fn layout_element(self, elem: &Element, rect: LayoutRect):
+        # Store layout for this element
+        self.layout_cache.insert(elem.id, rect)
+
+        # Layout children based on container type
+        if elem.classes.contains(&"vstack".to_string()):
+            self.layout_vstack(elem, rect)
+        elif elem.classes.contains(&"hstack".to_string()):
+            self.layout_hstack(elem, rect)
+        elif elem.classes.contains(&"zstack".to_string()):
+            self.layout_zstack(elem, rect)
+        else:
+            # Default: layout children in vertical stack
+            self.layout_vstack(elem, rect)
+
+    # Layout children in vertical stack
+    fn layout_vstack(self, elem: &Element, rect: LayoutRect):
+        let child_count = elem.children.len()
+        if child_count == 0:
+            return
+
+        let child_height = rect.height / (child_count as u32)
+        let mut y = rect.y
+
+        for child in &elem.children:
+            let child_rect = LayoutRect::new(
+                rect.x,
+                y,
+                rect.width,
+                child_height
+            )
+            self.layout_element(child, child_rect)
+            y += child_height
+
+    # Layout children in horizontal stack
+    fn layout_hstack(self, elem: &Element, rect: LayoutRect):
+        let child_count = elem.children.len()
+        if child_count == 0:
+            return
+
+        let child_width = rect.width / (child_count as u32)
+        let mut x = rect.x
+
+        for child in &elem.children:
+            let child_rect = LayoutRect::new(
+                x,
+                rect.y,
+                child_width,
+                rect.height
+            )
+            self.layout_element(child, child_rect)
+            x += child_width
+
+    # Layout children in z-stack (overlapping)
+    fn layout_zstack(self, elem: &Element, rect: LayoutRect):
+        # All children get the same rect
+        for child in &elem.children:
+            self.layout_element(child, rect)
+
+    # Handle window events
+    pub fn poll_events(self):
+        # Poll window events
+        while let Some(event) = self.window.poll_event():
+            match event:
+                case WindowEvent::CloseRequested:
+                    self.event_queue.push(Event::CloseRequested)
+                case WindowEvent::Resized(w, h):
+                    self.event_queue.push(Event::Resize(w, h))
+                case WindowEvent::KeyPressed(key):
+                    self.event_queue.push(Event::Key(KeyEvent {
+                        code: key,
+                        modifiers: KeyModifiers::default()
+                    }))
+                case WindowEvent::MouseMoved(x, y):
+                    self.event_queue.push(Event::Mouse(MouseEvent {
+                        x: x,
+                        y: y,
+                        button: MouseButton::None
+                    }))
+                case WindowEvent::MousePressed(button, x, y):
+                    # Check if click hit any element
+                    if let Some(elem_id) = self.hit_test(x, y):
+                        # Dispatch click event to element
+                        self.handle_click(elem_id)
+                case _: pass
+
+    # Hit test: find element at position
+    fn hit_test(self, x: f32, y: f32) -> Option[u64]:
+        # Check layout cache to find element at position
+        for (elem_id, rect) in &self.layout_cache:
+            if rect.contains(x as u32, y as u32):
+                return Some(elem_id)
+        return None
+
+    # Handle click on element
+    fn handle_click(self, elem_id: u64):
+        # Find element in current tree
+        if let Some(tree) = &self.current_tree:
+            if let Some(elem) = self.find_element_by_id(tree, elem_id):
+                # Execute click handler if present
+                if let Some(handler) = elem.attrs.get("on_click"):
+                    # Call handler
+                    # (In full implementation, would deserialize and call function)
+                }
+            }
+        }
+
+    # Find element by ID
+    fn find_element_by_id(self, elem: &Element, id: u64) -> Option[&Element]:
+        if elem.id == id:
+            return Some(elem)
+        for child in &elem.children:
+            if let Some(found) = self.find_element_by_id(child, id):
+                return Some(found)
+        return None
+
+    # Get next event from queue
+    pub fn next_event(self) -> Option[Event]:
+        if self.event_queue.is_empty():
+            return None
+        return Some(self.event_queue.remove(0))
+
+    # Configure performance settings
+    pub fn set_vsync(self, enabled: bool):
+        self.enable_vsync = enabled
+        if self.initialized:
+            self.vulkan_renderer.set_vsync(enabled)
+
+    pub fn set_target_fps(self, fps: u32):
+        self.target_fps = fps
+
+# Layout rectangle
+struct LayoutRect:
+    x: u32
+    y: u32
+    width: u32
+    height: u32
+
+impl LayoutRect:
+    fn new(x: u32, y: u32, width: u32, height: u32) -> LayoutRect:
+        return LayoutRect {
+            x: x,
+            y: y,
+            width: width,
+            height: height
+        }
+
+    fn contains(self, px: u32, py: u32) -> bool:
+        return px >= self.x and px < self.x + self.width and
+               py >= self.y and py < self.y + self.height
+
+# =============================================================================
+# SUI Vulkan Application
+# =============================================================================
+
+pub struct SUIVulkanApp:
+    renderer: SUIVulkanRenderer
+    root_view: Option[Box[View]]
+
+impl SUIVulkanApp:
+    # Create a new SUI Vulkan application
+    #
+    # Example:
+    #   let app = SUIVulkanApp::new(
+    #       title: "My App",
+    #       width: 1280,
+    #       height: 720
+    #   )?
+    pub fn new(title: &str, width: u32, height: u32) -> Result[SUIVulkanApp, RenderError]:
+        let renderer = SUIVulkanRenderer::new(width, height, title)?
+        return Ok(SUIVulkanApp {
+            renderer: renderer,
+            root_view: None
+        })
+
+    # Run the application with a root view
+    #
+    # Example:
+    #   await app.run(MyView { count: State::new(0) })
+    pub async fn run[V: View](self, root_view: V) -> Result[(), RenderError]:
+        # Initialize renderer
+        await self.renderer.init()
+
+        # Store root view
+        self.root_view = Some(Box::new(root_view))
+
+        # Main event loop
+        loop:
+            # Render current view
+            if let Some(view) = &self.root_view:
+                await self.renderer.render_view(view.as_ref())?
+            }
+
+            # Poll events
+            self.renderer.poll_events()
+
+            # Process events
+            loop:
+                match self.renderer.next_event():
+                    case Some(Event::CloseRequested):
+                        # Exit application
+                        await self.renderer.vulkan_renderer.shutdown()
+                        return Ok(())
+                    case Some(event):
+                        # Handle other events
+                        # (State changes will trigger re-renders)
+                        pass
+                    case None:
+                        break
+
+            # Frame rate limiting
+            let frame_time = 1000 / self.renderer.target_fps
+            await Future::delay(frame_time as u64)
+
+        return Ok(())
+
+# =============================================================================
+# RenderBackend Implementation (for compatibility)
+# =============================================================================
+
+impl RenderBackend for SUIVulkanRenderer:
+    async fn init(self) -> Future[Result[(), RenderError]]:
+        return Future::ready(self.init().await)
+
+    async fn render(self, root: &Element) -> Future[Result[(), RenderError]]:
+        if not self.initialized:
+            return Future::ready(Err(RenderError::NotInitialized))
+
+        # Store as current tree
+        self.current_tree = Some(root.clone())
+
+        # Calculate layout
+        self.calculate_layout(root)
+
+        # Render using Vulkan
+        return self.vulkan_renderer.render(root)
+
+    async fn shutdown(self) -> Future[Result[(), RenderError]]:
+        return self.vulkan_renderer.shutdown()
+
+# =============================================================================
+# Example Application
+# =============================================================================
+
+# Example: Full-featured SUI app with Vulkan
+#
+# import ui.sui.*
+# import ui.sui_vulkan.*
+#
+# struct CounterApp:
+#     count: State[i32]
+#     theme: State[Theme]
+#
+# impl View for CounterApp:
+#     fn body(self) -> Element:
+#         let bg = if self.theme.get() == Theme::Dark {
+#             "#1e1e1e"
+#         } else {
+#             "#ffffff"
+#         }
+#
+#         let fg = if self.theme.get() == Theme::Dark {
+#             "#ffffff"
+#         } else {
+#             "#000000"
+#         }
+#
+#         return VStack([
+#             # Title
+#             Text("SUI Counter with Vulkan")
+#                 |> font_size(32.0)
+#                 |> bold()
+#                 |> foreground(fg),
+#
+#             # Count display
+#             Text("Count: {self.count.get()}")
+#                 |> font_size(48.0)
+#                 |> foreground(fg),
+#
+#             # Buttons
+#             HStack([
+#                 Button("-", on_click: || {
+#                     self.count.set(self.count.get() - 1)
+#                 })
+#                 |> Padding(10.0)
+#                 |> background("#ff4444")
+#                 |> corner_radius(8.0),
+#
+#                 Spacer(),
+#
+#                 Button("Reset", on_click: || {
+#                     self.count.set(0)
+#                 })
+#                 |> Padding(10.0)
+#                 |> background("#4444ff")
+#                 |> corner_radius(8.0),
+#
+#                 Spacer(),
+#
+#                 Button("+", on_click: || {
+#                     self.count.set(self.count.get() + 1)
+#                 })
+#                 |> Padding(10.0)
+#                 |> background("#44ff44")
+#                 |> corner_radius(8.0)
+#             ]),
+#
+#             # Theme toggle
+#             Toggle_new(
+#                 "Dark Mode",
+#                 State::new(self.theme.get() == Theme::Dark),
+#                 |dark| {
+#                     self.theme.set(if dark { Theme::Dark } else { Theme::Light })
+#                 }
+#             ).body()
+#         ])
+#         |> Padding(40.0)
+#         |> background(bg)
+#         |> Frame(width: Some(600.0), height: Some(400.0))
+#
+# enum Theme:
+#     Light
+#     Dark
+#
+# async fn main():
+#     # Create Vulkan-powered SUI app
+#     let app = SUIVulkanApp::new(
+#         title: "SUI Counter",
+#         width: 800,
+#         height: 600
+#     )?
+#
+#     # Configure performance
+#     app.renderer.set_vsync(true)
+#     app.renderer.set_target_fps(60)
+#
+#     # Run application
+#     await app.run(CounterApp {
+#         count: State::new(0),
+#         theme: State::new(Theme::Light)
+#     })
