@@ -1880,3 +1880,29 @@ pub extern "C" fn rt_file_madvise(addr: *mut u8, length: u64, advice: i32) -> i3
         -1
     }
 }
+
+/// Synchronize memory-mapped file with storage
+/// Returns 0 on success, -1 on error
+#[no_mangle]
+pub extern "C" fn rt_file_msync(addr: *mut u8, length: u64, flags: i32) -> i32 {
+    #[cfg(unix)]
+    {
+        use libc::msync;
+
+        unsafe {
+            msync(addr as *mut libc::c_void, length as usize, flags)
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        -1
+    }
+}
+
+/// Wrapper for native_msync - stdlib compatibility
+/// Returns 0 on success, -1 on error
+#[no_mangle]
+pub extern "C" fn native_msync(addr: *mut u8, length: u64, flags: i32) -> i32 {
+    rt_file_msync(addr, length, flags)
+}
