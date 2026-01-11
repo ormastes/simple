@@ -6,9 +6,9 @@
 use simple_parser::ast::{ImportTarget, ModulePath, Node};
 use std::path::PathBuf;
 
+use super::super::types::{HirType, TypeId};
 use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
-use super::super::types::{HirType, TypeId};
 use crate::CompileError;
 
 impl Lowerer {
@@ -53,13 +53,14 @@ impl Lowerer {
 
         // Prevent circular imports
         if self.loaded_modules.contains(&resolved.path) {
-            return Ok(());  // Already loaded
+            return Ok(()); // Already loaded
         }
         self.loaded_modules.insert(resolved.path.clone());
 
         // Read and parse the module file
-        let source = std::fs::read_to_string(&resolved.path)
-            .map_err(|e| LowerError::ModuleResolution(format!("Failed to read module file: {}", e)))?;
+        let source = std::fs::read_to_string(&resolved.path).map_err(|e| {
+            LowerError::ModuleResolution(format!("Failed to read module file: {}", e))
+        })?;
 
         let mut parser = simple_parser::Parser::new(&source);
         let imported_module = parser
@@ -135,13 +136,13 @@ impl Lowerer {
     /// true if the symbol should be imported
     fn should_import_symbol(&self, name: &str, target: &ImportTarget) -> bool {
         match target {
-            ImportTarget::Glob => true,  // Import everything
-            ImportTarget::Single(n) => n == name,  // Import if matches
+            ImportTarget::Glob => true,           // Import everything
+            ImportTarget::Single(n) => n == name, // Import if matches
             ImportTarget::Group(targets) => {
                 // Check if any target in the group matches
                 targets.iter().any(|t| self.should_import_symbol(name, t))
             }
-            ImportTarget::Aliased { name: n, .. } => n == name,  // Import if matches (will be aliased later)
+            ImportTarget::Aliased { name: n, .. } => n == name, // Import if matches (will be aliased later)
         }
     }
 }

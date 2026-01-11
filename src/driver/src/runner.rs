@@ -118,7 +118,8 @@ impl Runner {
         out: &Path,
         options: &crate::CompileOptions,
     ) -> Result<(), String> {
-        self.core.compile_file_with_options(source_path, out, options)
+        self.core
+            .compile_file_with_options(source_path, out, options)
     }
 
     /// Compile source to an SMF at the given path for a specific target architecture.

@@ -17,9 +17,9 @@ pub use parallel::{
 };
 
 use super::types::HirModule;
+use crate::module_resolver::ModuleResolver;
 use simple_parser::Module;
 use std::path::Path;
-use crate::module_resolver::ModuleResolver;
 
 /// Convenience function to lower an AST module to HIR
 pub fn lower(module: &Module) -> LowerResult<HirModule> {
@@ -42,8 +42,7 @@ pub fn lower_with_context(module: &Module, current_file: &Path) -> LowerResult<H
     // Create a module resolver for this compilation
     let module_resolver = ModuleResolver::single_file(current_file);
 
-    Lowerer::with_module_resolver(module_resolver, current_file.to_path_buf())
-        .lower_module(module)
+    Lowerer::with_module_resolver(module_resolver, current_file.to_path_buf()).lower_module(module)
 }
 
 #[cfg(test)]

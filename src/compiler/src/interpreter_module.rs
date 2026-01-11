@@ -715,7 +715,10 @@ pub(super) fn evaluate_module_exports(
             }
         }
     }
-    trace!(total_exports = exports.len(), "Finished processing bare exports");
+    trace!(
+        total_exports = exports.len(),
+        "Finished processing bare exports"
+    );
 
     Ok((env, exports))
 }

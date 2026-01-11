@@ -224,7 +224,8 @@ impl CompilerPipeline {
     #[instrument(skip(self, source_path, out))]
     pub fn compile_native(&mut self, source_path: &Path, out: &Path) -> Result<(), CompileError> {
         let module = load_module_with_imports(source_path, &mut HashSet::new())?;
-        let smf_bytes = self.compile_module_to_memory_native_with_context(module, Some(source_path))?;
+        let smf_bytes =
+            self.compile_module_to_memory_native_with_context(module, Some(source_path))?;
         fs::write(out, smf_bytes).map_err(|e| CompileError::Io(format!("{e}")))
     }
 
