@@ -136,6 +136,22 @@ struct Sha1Hasher:
     fn free(self):
         rt_sha1_free(self._handle)
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn summary(self) -> String:
+        """Get summary of hasher.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            hasher.summary()
+            # → "Sha1Hasher: 160-bit cryptographic hash"
+        """
+        return "Sha1Hasher: 160-bit cryptographic hash"
+
 /**
 SHA-256 cryptographic hasher.
 
@@ -192,6 +208,22 @@ struct Sha256Hasher:
     fn free(self):
         rt_sha256_free(self._handle)
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn summary(self) -> String:
+        """Get summary of hasher.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            hasher.summary()
+            # → "Sha256Hasher: 256-bit cryptographic hash"
+        """
+        return "Sha256Hasher: 256-bit cryptographic hash"
+
 /**
 xxHash fast hasher (XXH3).
 
@@ -241,6 +273,22 @@ struct XxHasher:
 
     fn free(self):
         rt_xxhash_free(self._handle)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn summary(self) -> String:
+        """Get summary of hasher.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            hasher.summary()
+            # → "XxHasher: fast non-cryptographic hash"
+        """
+        return "XxHasher: fast non-cryptographic hash"
 
 /**
 FNV-1a hash (one-shot).
@@ -293,6 +341,49 @@ struct FnvHasher:
     fn reset(self):
         self._state = 14695981039346656037
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_initialized(self) -> Bool:
+        """Check if hasher is in initial state (not yet written to).
+
+        Returns:
+            true if state equals FNV offset basis
+
+        Example:
+            let hasher = FnvHasher.new()
+            hasher.is_initialized()  # → true
+            hasher.write_str("data")
+            hasher.is_initialized()  # → false
+        """
+        return self._state == 14695981039346656037
+
+    fn get_state(self) -> u64:
+        """Get current hash state.
+
+        Returns:
+            Current internal state value
+
+        Example:
+            hasher.get_state()
+            # → 14695981039346656037 (if uninitialized)
+        """
+        return self._state
+
+    fn summary(self) -> String:
+        """Get summary of hasher.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            hasher.summary()
+            # → "FnvHasher: state=14695981039346656037"
+        """
+        let state = self._state
+        return "FnvHasher: state={state}"
+
 /**
 SipHash hasher.
 
@@ -332,6 +423,62 @@ struct SipHasher:
     fn reset(self):
         self._state = 0
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_keyed(self) -> Bool:
+        """Check if hasher uses non-zero keys.
+
+        Returns:
+            true if either key is non-zero
+
+        Example:
+            let hasher = SipHasher.new()
+            hasher.is_keyed()  # → false
+            let keyed = SipHasher.with_keys(123, 456)
+            keyed.is_keyed()  # → true
+        """
+        return self._key0 != 0 or self._key1 != 0
+
+    fn has_default_keys(self) -> Bool:
+        """Check if hasher uses default (zero) keys.
+
+        Returns:
+            true if both keys are zero
+
+        Example:
+            let hasher = SipHasher.new()
+            hasher.has_default_keys()  # → true
+        """
+        return self._key0 == 0 and self._key1 == 0
+
+    fn get_state(self) -> u64:
+        """Get current hash state.
+
+        Returns:
+            Current internal state value
+
+        Example:
+            hasher.get_state()
+            # → 0 (if not yet written to)
+        """
+        return self._state
+
+    fn summary(self) -> String:
+        """Get summary of hasher.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            hasher.summary()
+            # → "SipHasher: keyed=true, state=1234567890"
+        """
+        let keyed = if self.is_keyed(): "true" else: "false"
+        let state = self._state
+        return "SipHasher: keyed={keyed}, state={state}"
+
 /**
 Hash builder for creating hashers.
 
@@ -349,6 +496,62 @@ struct HashBuilder[H]:
     fn build_hasher(self) -> H:
         # Would create hasher of type H with seed
         return H.new()
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn has_seed(self) -> Bool:
+        """Check if builder has a non-zero seed.
+
+        Returns:
+            true if seed is non-zero
+
+        Example:
+            let builder = HashBuilder.new()
+            builder.has_seed()  # → false
+            let seeded = HashBuilder.with_seed(42)
+            seeded.has_seed()  # → true
+        """
+        return self._seed != 0
+
+    fn get_seed(self) -> u64:
+        """Get configured seed value.
+
+        Returns:
+            Seed value
+
+        Example:
+            builder.get_seed()
+            # → 0 (default) or configured seed
+        """
+        return self._seed
+
+    fn is_default(self) -> Bool:
+        """Check if builder uses default configuration (no seed).
+
+        Returns:
+            true if seed is zero
+
+        Example:
+            let builder = HashBuilder.new()
+            builder.is_default()  # → true
+        """
+        return self._seed == 0
+
+    fn summary(self) -> String:
+        """Get summary of hash builder.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            builder.summary()
+            # → "HashBuilder: seed=0 (default)" or "HashBuilder: seed=42"
+        """
+        let seed = self._seed
+        let suffix = if self.is_default(): " (default)" else: ""
+        return "HashBuilder: seed={seed}{suffix}"
 
 /**
 Hash configuration for collections.
@@ -371,6 +574,100 @@ struct HashConfig:
     fn siphash(key0: u64, key1: u64) -> HashConfig:
         # Encode keys in seed (simplified)
         return HashConfig(hasher_type: "siphash", seed: key0)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_xxhash(self) -> Bool:
+        """Check if configuration is for xxHash.
+
+        Returns:
+            true if hasher type is "xxhash"
+
+        Example:
+            let config = HashConfig.xxhash()
+            config.is_xxhash()  # → true
+        """
+        return self.hasher_type == "xxhash"
+
+    fn is_fnv(self) -> Bool:
+        """Check if configuration is for FNV hash.
+
+        Returns:
+            true if hasher type is "fnv"
+
+        Example:
+            let config = HashConfig.fnv()
+            config.is_fnv()  # → true
+        """
+        return self.hasher_type == "fnv"
+
+    fn is_siphash(self) -> Bool:
+        """Check if configuration is for SipHash.
+
+        Returns:
+            true if hasher type is "siphash"
+
+        Example:
+            let config = HashConfig.siphash(123, 456)
+            config.is_siphash()  # → true
+        """
+        return self.hasher_type == "siphash"
+
+    fn has_seed(self) -> Bool:
+        """Check if configuration has a non-zero seed.
+
+        Returns:
+            true if seed is non-zero
+
+        Example:
+            let config = HashConfig.xxhash()
+            config.has_seed()  # → false
+            let seeded = HashConfig.xxhash_with_seed(42)
+            seeded.has_seed()  # → true
+        """
+        return self.seed != 0
+
+    fn get_hasher_type(self) -> String:
+        """Get hasher type name.
+
+        Returns:
+            Hasher type string ("xxhash", "fnv", or "siphash")
+
+        Example:
+            config.get_hasher_type()
+            # → "xxhash"
+        """
+        return self.hasher_type
+
+    fn get_seed(self) -> u64:
+        """Get seed value.
+
+        Returns:
+            Configured seed value
+
+        Example:
+            config.get_seed()
+            # → 0 or configured seed
+        """
+        return self.seed
+
+    fn summary(self) -> String:
+        """Get summary of hash configuration.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            config.summary()
+            # → "HashConfig: xxhash, seed=0"
+            # → "HashConfig: fnv, seed=0"
+            # → "HashConfig: siphash, seed=123"
+        """
+        let hasher_type = self.hasher_type
+        let seed = self.seed
+        return "HashConfig: {hasher_type}, seed={seed}"
 
 /**
 Convert bytes to hex string.
