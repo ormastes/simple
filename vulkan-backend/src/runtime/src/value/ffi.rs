@@ -1752,3 +1752,189 @@ pub unsafe extern "C" fn rt_path_absolute(
         }
     }
 }
+
+// ============================================================================
+// File I/O FFI Functions
+// ============================================================================
+
+/// Open file and return file descriptor
+/// Returns -1 on error
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_open(
+    path_ptr: *const u8,
+    path_len: u64,
+    mode: i32, // 0=ReadOnly, 1=ReadWrite, 2=WriteOnly
+) -> i32 {
+    if path_ptr.is_null() {
+        return -1;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path_str = match std::str::from_utf8(path_bytes) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    use std::fs::OpenOptions;
+
+    let result = match mode {
+        0 => OpenOptions::new().read(true).open(path_str),
+        1 => OpenOptions::new().read(true).write(true).open(path_str),
+        2 => OpenOptions::new().write(true).open(path_str),
+        _ => return -1,
+    };
+
+    match result {
+        Ok(file) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+                let fd = file.as_raw_fd();
+                // Leak the file to keep it open
+                std::mem::forget(file);
+                fd
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::AsRawHandle;
+                let handle = file.as_raw_handle();
+                std::mem::forget(file);
+                handle as i32
+            }
+        }
+        Err(_) => -1,
+    }
+}
+
+/// Get file size from file descriptor
+/// Returns 0 on error
+#[no_mangle]
+pub extern "C" fn rt_file_get_size(fd: i32) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::FromRawFd;
+
+        unsafe {
+            // Temporarily wrap fd in File to get metadata
+            let file = std::fs::File::from_raw_fd(fd);
+            let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+            // Don't drop the file, just forget to avoid closing fd
+            std::mem::forget(file);
+            size
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::FromRawHandle;
+
+        unsafe {
+            let file = std::fs::File::from_raw_handle(fd as *mut _);
+            let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+            std::mem::forget(file);
+            size
+        }
+    }
+}
+
+/// Close file descriptor
+#[no_mangle]
+pub extern "C" fn rt_file_close(fd: i32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::FromRawFd;
+
+        unsafe {
+            // Wrap fd in File and let it drop to close
+            let _file = std::fs::File::from_raw_fd(fd);
+            // File is closed when dropped
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::FromRawHandle;
+
+        unsafe {
+            let _file = std::fs::File::from_raw_handle(fd as *mut _);
+        }
+    }
+}
+
+/// Memory map a file
+/// Returns null pointer on error
+#[no_mangle]
+pub extern "C" fn rt_file_mmap(
+    _addr: *mut u8,
+    length: u64,
+    prot: i32,
+    flags: i32,
+    fd: i32,
+    offset: u64,
+) -> *mut u8 {
+    #[cfg(unix)]
+    {
+        use libc::mmap;
+
+        unsafe {
+            let addr = mmap(
+                std::ptr::null_mut(),
+                length as usize,
+                prot,
+                flags,
+                fd,
+                offset as i64,
+            );
+
+            if addr == libc::MAP_FAILED {
+                std::ptr::null_mut()
+            } else {
+                addr as *mut u8
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        // Non-Unix platforms not supported for mmap
+        std::ptr::null_mut()
+    }
+}
+
+/// Unmap memory region
+/// Returns 0 on success, -1 on error
+#[no_mangle]
+pub extern "C" fn rt_file_munmap(addr: *mut u8, length: u64) -> i32 {
+    #[cfg(unix)]
+    {
+        use libc::munmap;
+
+        unsafe {
+            munmap(addr as *mut libc::c_void, length as usize)
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        -1
+    }
+}
+
+/// Advise kernel on memory access pattern
+/// Returns 0 on success, -1 on error
+#[no_mangle]
+pub extern "C" fn rt_file_madvise(addr: *mut u8, length: u64, advice: i32) -> i32 {
+    #[cfg(unix)]
+    {
+        use libc::madvise;
+
+        unsafe {
+            madvise(addr as *mut libc::c_void, length as usize, advice)
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        -1
+    }
+}
