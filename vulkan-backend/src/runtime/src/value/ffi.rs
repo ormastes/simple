@@ -2175,3 +2175,58 @@ pub unsafe extern "C" fn rt_process_execute(
         Err(_) => -1,
     }
 }
+
+// ============================================================================
+// Program Arguments FFI Functions
+// ============================================================================
+
+use std::sync::OnceLock;
+
+/// Global storage for program arguments
+static PROGRAM_ARGS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Set program arguments (called by runtime initialization)
+#[no_mangle]
+pub extern "C" fn rt_set_args(args: RuntimeValue) {
+    // Extract arguments from RuntimeValue array
+    let args_len = super::collections::rt_array_len(args);
+    let mut arg_vec = Vec::new();
+    
+    unsafe {
+        for i in 0..args_len {
+            let arg_val = super::collections::rt_array_get(args, i);
+            if arg_val.is_heap() {
+                let ptr = arg_val.as_heap_ptr();
+                if (*ptr).object_type == HeapObjectType::String {
+                    let str_obj = ptr as *const RuntimeString;
+                    let data = (str_obj.add(1)) as *const u8;
+                    let slice = std::slice::from_raw_parts(data, (*str_obj).len as usize);
+                    if let Ok(s) = String::from_utf8(slice.to_vec()) {
+                        arg_vec.push(s);
+                    }
+                }
+            }
+        }
+    }
+    
+    let _ = PROGRAM_ARGS.set(arg_vec);
+}
+
+/// Get program arguments
+/// Returns List[String] of command line arguments
+#[no_mangle]
+pub unsafe extern "C" fn rt_get_args() -> RuntimeValue {
+    // Get arguments from global storage
+    let args = PROGRAM_ARGS.get().map(|v| v.as_slice()).unwrap_or(&[]);
+    
+    // Create array to hold arguments
+    let arr = super::collections::rt_array_new(args.len() as u64);
+    
+    // Add each argument to the array
+    for (i, arg) in args.iter().enumerate() {
+        let arg_val = super::rt_string_new(arg.as_ptr(), arg.len() as u64);
+        super::collections::rt_array_push(arr, arg_val);
+    }
+    
+    arr
+}
