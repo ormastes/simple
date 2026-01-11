@@ -374,9 +374,27 @@ impl WindowManager {
                     Some(Fullscreen::Borderless(state.window.current_monitor()))
                 }
                 FullscreenMode::Exclusive => {
-                    // For now, treat as borderless
-                    // TODO: [runtime][P1] Implement exclusive fullscreen with mode selection
-                    Some(Fullscreen::Borderless(state.window.current_monitor()))
+                    // Get the current monitor and its video modes
+                    if let Some(monitor) = state.window.current_monitor() {
+                        // Get all available video modes for the monitor
+                        let video_modes: Vec<_> = monitor.video_modes().collect();
+
+                        if let Some(video_mode) = video_modes.first() {
+                            // Use the first video mode (typically the native/current mode)
+                            // In the future, could allow selection of specific resolution/refresh rate
+                            Some(Fullscreen::Exclusive(video_mode.clone()))
+                        } else {
+                            // No video modes available, fall back to borderless
+                            tracing::warn!(
+                                "No video modes available for exclusive fullscreen, using borderless"
+                            );
+                            Some(Fullscreen::Borderless(Some(monitor)))
+                        }
+                    } else {
+                        // No monitor detected, fall back to borderless on primary monitor
+                        tracing::warn!("No monitor detected for exclusive fullscreen");
+                        Some(Fullscreen::Borderless(None))
+                    }
                 }
             };
 
