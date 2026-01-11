@@ -2298,227 +2298,168 @@ pub unsafe extern "C" fn rt_dir_glob(
 }
 
 // ============================================================================
-// Path Manipulation FFI Functions
+// Atomic Operations FFI
 // ============================================================================
 
-/// Get basename (filename) from path
-/// Returns the final component of the path
-#[no_mangle]
-pub unsafe extern "C" fn rt_path_basename(
-    path_ptr: *const u8,
-    path_len: u64,
-) -> RuntimeValue {
-    use std::path::Path;
-    
-    if path_ptr.is_null() {
-        return super::rt_string_new(b"".as_ptr(), 0);
-    }
-    
-    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
-    let path_str = match std::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return super::rt_string_new(b"".as_ptr(), 0),
-    };
-    
-    let path = Path::new(path_str);
-    let basename = path.file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    
-    super::rt_string_new(basename.as_ptr(), basename.len() as u64)
-}
-
-/// Get dirname (directory) from path
-/// Returns the directory component of the path
-#[no_mangle]
-pub unsafe extern "C" fn rt_path_dirname(
-    path_ptr: *const u8,
-    path_len: u64,
-) -> RuntimeValue {
-    use std::path::Path;
-    
-    if path_ptr.is_null() {
-        return super::rt_string_new(b"".as_ptr(), 0);
-    }
-    
-    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
-    let path_str = match std::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return super::rt_string_new(b"".as_ptr(), 0),
-    };
-    
-    let path = Path::new(path_str);
-    let dirname = path.parent()
-        .and_then(|p| p.to_str())
-        .unwrap_or("");
-    
-    super::rt_string_new(dirname.as_ptr(), dirname.len() as u64)
-}
-
-/// Get file extension from path
-/// Returns the extension without the leading dot
-#[no_mangle]
-pub unsafe extern "C" fn rt_path_ext(
-    path_ptr: *const u8,
-    path_len: u64,
-) -> RuntimeValue {
-    use std::path::Path;
-    
-    if path_ptr.is_null() {
-        return super::rt_string_new(b"".as_ptr(), 0);
-    }
-    
-    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
-    let path_str = match std::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return super::rt_string_new(b"".as_ptr(), 0),
-    };
-    
-    let path = Path::new(path_str);
-    let ext = path.extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    
-    super::rt_string_new(ext.as_ptr(), ext.len() as u64)
-}
-
-/// Convert path to absolute path
-/// Returns the canonicalized absolute path
-#[no_mangle]
-pub unsafe extern "C" fn rt_path_absolute(
-    path_ptr: *const u8,
-    path_len: u64,
-) -> RuntimeValue {
-    use std::path::Path;
-    
-    if path_ptr.is_null() {
-        return super::rt_string_new(b"".as_ptr(), 0);
-    }
-    
-    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
-    let path_str = match std::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return super::rt_string_new(b"".as_ptr(), 0),
-    };
-    
-    let path = Path::new(path_str);
-    
-    // Try to canonicalize (resolve symlinks and make absolute)
-    // If that fails, try to make it absolute without resolving symlinks
-    let absolute = if let Ok(canonical) = path.canonicalize() {
-        canonical.to_str().unwrap_or(path_str).to_string()
-    } else {
-        // Fallback: join with current directory
-        match std::env::current_dir() {
-            Ok(cwd) => {
-                let abs_path = if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    cwd.join(path)
-                };
-                abs_path.to_str().unwrap_or(path_str).to_string()
-            }
-            Err(_) => path_str.to_string(),
-        }
-    };
-    
-    super::rt_string_new(absolute.as_ptr(), absolute.len() as u64)
-}
-
-// ----------------------------------------------------------------------------
-// Arena Allocator Operations
-// ----------------------------------------------------------------------------
-
-struct Arena {
-    buffer: Vec<u8>,
-    capacity: usize,
-    used: usize,
-}
-
-impl Arena {
-    fn new(capacity: usize) -> Self {
-        Self {
-            buffer: vec![0; capacity],
-            capacity,
-            used: 0,
-        }
-    }
-
-    fn alloc(&mut self, size: usize, align: usize) -> Option<*mut u8> {
-        let align_offset = (align - (self.used % align)) % align;
-        let aligned_start = self.used + align_offset;
-        
-        if aligned_start + size > self.capacity {
-            return None;
-        }
-        
-        let ptr = unsafe { self.buffer.as_mut_ptr().add(aligned_start) };
-        self.used = aligned_start + size;
-        Some(ptr)
-    }
-
-    fn reset(&mut self) {
-        self.used = 0;
-    }
-}
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 lazy_static::lazy_static! {
-    static ref ARENA_MAP: Mutex<HashMap<i64, Box<Arena>>> = Mutex::new(HashMap::new());
+    static ref ATOMIC_BOOL_MAP: Mutex<HashMap<i64, Box<AtomicBool>>> = Mutex::new(HashMap::new());
+    static ref ATOMIC_INT_MAP: Mutex<HashMap<i64, Box<AtomicI64>>> = Mutex::new(HashMap::new());
 }
 
-static mut ARENA_COUNTER: i64 = 1;
+static mut ATOMIC_BOOL_COUNTER: i64 = 1;
+static mut ATOMIC_INT_COUNTER: i64 = 1;
 
-/// Create a new arena allocator with given capacity
+// ============================================================================
+// AtomicBool Operations
+// ============================================================================
+
+/// Create a new AtomicBool with initial value
 #[no_mangle]
-pub extern "C" fn rt_arena_new(capacity: i64) -> i64 {
-    let arena = Box::new(Arena::new(capacity as usize));
+pub extern "C" fn rt_atomic_bool_new(initial: bool) -> i64 {
+    let atomic = Box::new(AtomicBool::new(initial));
     unsafe {
-        let handle = ARENA_COUNTER;
-        ARENA_COUNTER += 1;
-        ARENA_MAP.lock().unwrap().insert(handle, arena);
+        let handle = ATOMIC_BOOL_COUNTER;
+        ATOMIC_BOOL_COUNTER += 1;
+        ATOMIC_BOOL_MAP.lock().unwrap().insert(handle, atomic);
         handle
     }
 }
 
-/// Allocate memory from arena
-/// Returns pointer to allocated memory, or 0 if allocation failed
+/// Load value from AtomicBool
 #[no_mangle]
-pub extern "C" fn rt_arena_alloc(handle: i64, size: i64, align: i64) -> i64 {
-    ARENA_MAP.lock().unwrap()
-        .get_mut(&handle)
-        .and_then(|arena| arena.alloc(size as usize, align as usize))
-        .map(|ptr| ptr as i64)
-        .unwrap_or(0)
-}
-
-/// Get arena capacity
-#[no_mangle]
-pub extern "C" fn rt_arena_capacity(handle: i64) -> i64 {
-    ARENA_MAP.lock().unwrap()
+pub extern "C" fn rt_atomic_bool_load(handle: i64) -> bool {
+    ATOMIC_BOOL_MAP.lock().unwrap()
         .get(&handle)
-        .map(|arena| arena.capacity as i64)
-        .unwrap_or(0)
+        .map(|atomic| atomic.load(Ordering::SeqCst))
+        .unwrap_or(false)
 }
 
-/// Get arena used bytes
+/// Store value to AtomicBool
 #[no_mangle]
-pub extern "C" fn rt_arena_used(handle: i64) -> i64 {
-    ARENA_MAP.lock().unwrap()
-        .get(&handle)
-        .map(|arena| arena.used as i64)
-        .unwrap_or(0)
-}
-
-/// Reset arena (clear all allocations)
-#[no_mangle]
-pub extern "C" fn rt_arena_reset(handle: i64) {
-    if let Some(arena) = ARENA_MAP.lock().unwrap().get_mut(&handle) {
-        arena.reset();
+pub extern "C" fn rt_atomic_bool_store(handle: i64, value: bool) {
+    if let Some(atomic) = ATOMIC_BOOL_MAP.lock().unwrap().get(&handle) {
+        atomic.store(value, Ordering::SeqCst);
     }
 }
 
-/// Free arena
+/// Swap value in AtomicBool, returning old value
 #[no_mangle]
-pub extern "C" fn rt_arena_free(handle: i64) {
-    ARENA_MAP.lock().unwrap().remove(&handle);
+pub extern "C" fn rt_atomic_bool_swap(handle: i64, value: bool) -> bool {
+    ATOMIC_BOOL_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.swap(value, Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+/// Free AtomicBool
+#[no_mangle]
+pub extern "C" fn rt_atomic_bool_free(handle: i64) {
+    ATOMIC_BOOL_MAP.lock().unwrap().remove(&handle);
+}
+
+// ============================================================================
+// AtomicInt Operations
+// ============================================================================
+
+/// Create a new AtomicInt with initial value
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_new(initial: i64) -> i64 {
+    let atomic = Box::new(AtomicI64::new(initial));
+    unsafe {
+        let handle = ATOMIC_INT_COUNTER;
+        ATOMIC_INT_COUNTER += 1;
+        ATOMIC_INT_MAP.lock().unwrap().insert(handle, atomic);
+        handle
+    }
+}
+
+/// Load value from AtomicInt
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_load(handle: i64) -> i64 {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.load(Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Store value to AtomicInt
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_store(handle: i64, value: i64) {
+    if let Some(atomic) = ATOMIC_INT_MAP.lock().unwrap().get(&handle) {
+        atomic.store(value, Ordering::SeqCst);
+    }
+}
+
+/// Swap value in AtomicInt, returning old value
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_swap(handle: i64, value: i64) -> i64 {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.swap(value, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Compare and exchange for AtomicInt
+/// Returns true if exchange succeeded
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_compare_exchange(handle: i64, current: i64, new: i64) -> bool {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| {
+            atomic.compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+        })
+        .unwrap_or(false)
+}
+
+/// Fetch and add for AtomicInt, returning old value
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_fetch_add(handle: i64, value: i64) -> i64 {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.fetch_add(value, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Fetch and subtract for AtomicInt, returning old value
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_fetch_sub(handle: i64, value: i64) -> i64 {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.fetch_sub(value, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Fetch and bitwise AND for AtomicInt, returning old value
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_fetch_and(handle: i64, value: i64) -> i64 {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.fetch_and(value, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Fetch and bitwise OR for AtomicInt, returning old value
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_fetch_or(handle: i64, value: i64) -> i64 {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.fetch_or(value, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Fetch and bitwise XOR for AtomicInt, returning old value
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_fetch_xor(handle: i64, value: i64) -> i64 {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.fetch_xor(value, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Free atomic integer
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_free(handle: i64) {
+    ATOMIC_INT_MAP.lock().unwrap().remove(&handle);
 }
