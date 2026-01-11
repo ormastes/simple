@@ -33,7 +33,7 @@
 | Struct init with `:` syntax | ✅ FIXED | Medium |
 | `@async` blocking `print` test | ✅ FIXED | Low |
 | Test harness module resolution | 🔍 INVESTIGATING | Medium |
-| Nested Method Mutations Not Persisting | 🐛 OPEN | Critical |
+| Nested Method Mutations Not Persisting | ✅ FIXED | Critical |
 | Method Chaining Drops Mutations | 🐛 OPEN | Critical |
 | Enum Method `self` Match Fails | 🐛 OPEN | High |
 | String `>=` `<=` Comparison Unsupported | 🔄 WORKAROUND | Medium |
@@ -42,7 +42,7 @@
 | Exported Enum Scope Loss Across Tests | ✅ FIXED | Critical |
 | Multi-Mode Feature Parse Errors | ✅ FIXED | Critical |
 
-**Summary:** 30 fixed, 4 open, 1 investigating, 3 workarounds
+**Summary:** 31 fixed, 3 open, 1 investigating, 3 workarounds
 
 ---
 
@@ -1785,11 +1785,12 @@ use host.common.io.fs_types.*  # Works - "common" is just a directory name
 
 ---
 
-## Nested Method Mutations Not Persisting 🐛 OPEN
+## Nested Method Mutations Not Persisting ✅ FIXED
 
 **Type:** Bug
 **Priority:** Critical
 **Discovered:** 2026-01-05
+**Resolved:** 2026-01-11
 **Component:** Interpreter (method dispatch)
 
 ### Description
@@ -1801,13 +1802,13 @@ When a method calls another method on `self`, the mutations made by the inner me
 ```simple
 class Counter:
     value: i64
-    
+
     fn new() -> Counter:
         return Counter { value: 0 }
-    
+
     fn increment(self):
         self.value = self.value + 1
-    
+
     fn double_increment(self):
         self.increment()  # This mutation is lost!
         self.increment()  # Only this mutation persists
@@ -1817,16 +1818,63 @@ c.double_increment()
 print(c.value.to_string())  # Expected: 2, Actual: 1
 ```
 
-### Impact
+### Status
 
-This breaks any code that uses helper methods that modify object state, including:
+✅ **FIXED** (2026-01-11)
+
+**Verification:** Comprehensive testing on 2026-01-11 showed the bug does NOT reproduce in current version. All mutations persist correctly:
+
+**Test Results:**
+```
+=== Test 1: Single increment ===
+  increment: value now = 1
+Final value: 1
+✅ PASS
+
+=== Test 2: Double increment ===
+double_increment start: value = 0
+  increment: value now = 1
+after first increment: value = 1
+  increment: value now = 2
+after second increment: value = 2
+double_increment end: value = 2
+Final value: 2
+✅ PASS - Produces value=2, not value=1!
+
+=== Test 3: Add five ===
+add_five start: value = 0
+  add(5): value now = 5
+add_five end: value = 5
+Final value: 5
+✅ PASS
+
+=== Test 4: Manual double ===
+  increment: value now = 1
+  increment: value now = 2
+Final value: 2
+✅ PASS
+```
+
+**Test Variations:**
+- ✅ Nested method calls with `mut self` - works correctly
+- ✅ Nested method calls without `mut self` - works correctly
+- ✅ Multiple levels of nesting - works correctly
+- ✅ Methods with intermediate statements - works correctly
+
+**Conclusion:** The bug was likely fixed in a previous commit. The exact reproduction case from the bug report now correctly produces value=2.
+
+**Files tested:**
+- `/tmp/test_exact_bug.spl` - Exact reproduction from bug report
+- `/tmp/test_mutation_comprehensive.spl` - Comprehensive test suite
+- `/tmp/test_with_read.spl` - With intermediate reads
+- `/tmp/test_with_noop.spl` - With intermediate statements
+
+### Impact (When Bug Existed)
+
+This would have broken any code that uses helper methods that modify object state, including:
 - JSON parser (parse_value calls parse_number, parse_string, etc.)
 - Symbol table (add_symbol, add_reference methods)
 - Any class with modular/composable methods
-
-### Workaround
-
-Inline all mutation logic into a single method, or restructure to avoid nested method calls on self.
 
 ---
 
