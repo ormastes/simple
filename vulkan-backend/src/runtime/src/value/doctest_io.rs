@@ -6,6 +6,7 @@
 use super::core::RuntimeValue;
 use std::fs;
 use std::path::Path;
+use glob::Pattern;
 
 // ============================================================================
 // Helper functions
@@ -108,31 +109,97 @@ pub extern "C" fn doctest_is_dir(path_val: RuntimeValue) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn doctest_walk_directory(
     root_val: RuntimeValue,
-    _include_patterns_val: RuntimeValue,
-    _exclude_patterns_val: RuntimeValue,
+    include_patterns_val: RuntimeValue,
+    exclude_patterns_val: RuntimeValue,
 ) -> RuntimeValue {
     unsafe {
         let Some(root) = runtime_value_to_string(root_val) else {
             return RuntimeValue::NIL;
         };
 
-        // Simple implementation: just walk and collect all files
-        // TODO: Implement glob pattern matching
-        let mut files = Vec::new();
+        // Extract include patterns from array
+        let include_patterns = extract_string_array(include_patterns_val);
 
+        // Extract exclude patterns from array
+        let exclude_patterns = extract_string_array(exclude_patterns_val);
+
+        // Walk directory tree
+        let mut files = Vec::new();
         if let Ok(entries) = walk_dir_recursive(&root) {
             files = entries;
         }
 
+        // Filter files by glob patterns
+        let filtered_files = filter_by_glob_patterns(&files, &include_patterns, &exclude_patterns);
+
         // Convert Vec<String> to RuntimeArray
-        let array_val = super::collections::rt_array_new(files.len() as u64);
-        for file_path in files {
+        let array_val = super::collections::rt_array_new(filtered_files.len() as u64);
+        for file_path in filtered_files {
             let path_str_val = string_to_runtime_value(&file_path);
             super::collections::rt_array_push(array_val, path_str_val);
         }
 
         array_val
     }
+}
+
+/// Extract array of strings from RuntimeValue array
+unsafe fn extract_string_array(array_val: RuntimeValue) -> Vec<String> {
+    let mut patterns = Vec::new();
+
+    if !array_val.is_heap() {
+        return patterns;
+    }
+
+    // Get array length
+    let len = super::collections::rt_array_len(array_val) as usize;
+
+    // Extract each string from array
+    for i in 0..len {
+        let elem_val = super::collections::rt_array_get(array_val, i as i64);
+        if let Some(s) = runtime_value_to_string(elem_val) {
+            patterns.push(s);
+        }
+    }
+
+    patterns
+}
+
+/// Filter files by glob patterns
+fn filter_by_glob_patterns(
+    files: &[String],
+    include_patterns: &[String],
+    exclude_patterns: &[String],
+) -> Vec<String> {
+    // Compile include patterns
+    let include_compiled: Vec<Pattern> = include_patterns
+        .iter()
+        .filter_map(|p| Pattern::new(p).ok())
+        .collect();
+
+    // Compile exclude patterns
+    let exclude_compiled: Vec<Pattern> = exclude_patterns
+        .iter()
+        .filter_map(|p| Pattern::new(p).ok())
+        .collect();
+
+    files
+        .iter()
+        .filter(|file| {
+            // If no include patterns, include all files
+            let included = if include_compiled.is_empty() {
+                true
+            } else {
+                include_compiled.iter().any(|pattern| pattern.matches(file))
+            };
+
+            // Check exclude patterns
+            let excluded = exclude_compiled.iter().any(|pattern| pattern.matches(file));
+
+            included && !excluded
+        })
+        .cloned()
+        .collect()
 }
 
 /// Recursive directory walker helper
