@@ -118,7 +118,7 @@ impl Lowerer {
                         }
                     }
                 }
-                // TODO: Handle other exportable items (constants, etc.)
+                // TODO: [compiler][P2] Handle other exportable items (constants, etc.)
                 _ => {}
             }
         }
