@@ -111,7 +111,7 @@ fn test_gpu_local_size() {
 fn test_gpu_atomic_add() {
     // Test GPU atomic_add intrinsic - uses i64 as raw address
     let module = parse_and_lower(
-        "fn test_atomic_add(addr: i64, val: i64) -> i64:\n    return gpu.atomic_add(addr, val)\n",
+        "fn test_atomic_add(addr: i64, value: i64) -> i64:\n    return gpu.atomic_add(addr, value)\n",
     )
     .unwrap();
 
@@ -132,7 +132,7 @@ fn test_gpu_atomic_add() {
 fn test_gpu_atomic_sub() {
     // Test GPU atomic_sub intrinsic
     let module = parse_and_lower(
-        "fn test_atomic_sub(addr: i64, val: i64) -> i64:\n    return gpu.atomic_sub(addr, val)\n",
+        "fn test_atomic_sub(addr: i64, value: i64) -> i64:\n    return gpu.atomic_sub(addr, value)\n",
     )
     .unwrap();
 
@@ -153,7 +153,7 @@ fn test_gpu_atomic_sub() {
 fn test_gpu_atomic_min_max() {
     // Test GPU atomic_min intrinsic
     let module = parse_and_lower(
-        "fn test_atomic_min(addr: i64, val: i64) -> i64:\n    return gpu.atomic_min(addr, val)\n",
+        "fn test_atomic_min(addr: i64, value: i64) -> i64:\n    return gpu.atomic_min(addr, value)\n",
     )
     .unwrap();
 
@@ -174,7 +174,7 @@ fn test_gpu_atomic_min_max() {
 fn test_gpu_atomic_bitwise() {
     // Test GPU atomic_and intrinsic
     let module = parse_and_lower(
-        "fn test_atomic_and(addr: i64, val: i64) -> i64:\n    return gpu.atomic_and(addr, val)\n",
+        "fn test_atomic_and(addr: i64, value: i64) -> i64:\n    return gpu.atomic_and(addr, value)\n",
     )
     .unwrap();
 
@@ -195,7 +195,7 @@ fn test_gpu_atomic_bitwise() {
 fn test_gpu_atomic_exchange() {
     // Test GPU atomic_exchange intrinsic
     let module = parse_and_lower(
-        "fn test_atomic_xchg(addr: i64, val: i64) -> i64:\n    return gpu.atomic_exchange(addr, val)\n",
+        "fn test_atomic_xchg(addr: i64, value: i64) -> i64:\n    return gpu.atomic_exchange(addr, value)\n",
     )
     .unwrap();
 

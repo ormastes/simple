@@ -68,8 +68,8 @@ impl<'a> super::Lexer<'a> {
         match name.as_str() {
             "fn" => TokenKind::Fn,
             "me" => TokenKind::Me,
-            "let" => TokenKind::Let,   // Legacy
-            "mut" => TokenKind::Mut,   // Legacy
+            "let" => TokenKind::Let, // Legacy
+            "mut" => TokenKind::Mut, // Legacy
             "val" => TokenKind::Val,
             "var" => TokenKind::Var,
             "if" => TokenKind::If,
