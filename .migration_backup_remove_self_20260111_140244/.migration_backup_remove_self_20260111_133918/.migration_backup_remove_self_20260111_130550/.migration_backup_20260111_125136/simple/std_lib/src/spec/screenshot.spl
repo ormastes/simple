@@ -1,0 +1,731 @@
+# Screenshot Capture Module for SSpec
+#
+# Provides screenshot capture functionality for GUI tests.
+# Supports TUI (terminal), Vulkan framebuffer, and ANSI buffer capture.
+#
+# Usage:
+#   # @gui
+#   describe "TUI Widget":
+#       it "renders button correctly":
+#           with_screenshot "button_render":
+#               let button = Button.new("Click Me")
+#               button.render()
+#               # Screenshot is automatically captured
+
+import std.io.fs
+import std.core.json
+
+# ============================================================================
+# FFI Declarations - Runtime Screenshot Functions
+# ============================================================================
+
+# Control functions
+extern fn rt_screenshot_enable() -> Void
+extern fn rt_screenshot_disable() -> Void
+extern fn rt_screenshot_is_enabled() -> Bool
+extern fn rt_screenshot_set_refresh(refresh: Bool) -> Void
+extern fn rt_screenshot_is_refresh() -> Bool
+
+# Output directory
+extern fn rt_screenshot_set_output_dir(dir: String) -> Void
+extern fn rt_screenshot_get_output_dir() -> String
+
+# Test context
+extern fn rt_screenshot_set_context(test_file: String, test_name: String) -> Void
+extern fn rt_screenshot_clear_context() -> Void
+
+# Capture functions
+extern fn rt_screenshot_capture_before_terminal(buffer: String) -> Bool
+extern fn rt_screenshot_capture_after_terminal(buffer: String) -> Bool
+
+# Query functions
+extern fn rt_screenshot_exists(capture_type: Int) -> Bool
+extern fn rt_screenshot_get_path(capture_type: Int) -> String
+extern fn rt_screenshot_capture_count() -> Int
+
+# Clear functions
+extern fn rt_screenshot_clear_captures() -> Void
+
+# Memory management
+extern fn rt_screenshot_free_string(s: String) -> Void
+
+# ============================================================================
+# FFI Wrapper Functions
+# ============================================================================
+
+fn enable_ffi_screenshots() -> Void:
+    rt_screenshot_enable()
+
+fn disable_ffi_screenshots() -> Void:
+    rt_screenshot_disable()
+
+fn is_ffi_screenshots_enabled() -> Bool:
+    return rt_screenshot_is_enabled()
+
+fn set_ffi_refresh(refresh: Bool) -> Void:
+    rt_screenshot_set_refresh(refresh)
+
+fn set_ffi_output_dir(dir: String) -> Void:
+    rt_screenshot_set_output_dir(dir)
+
+fn set_ffi_test_context(test_file: String, test_name: String) -> Void:
+    rt_screenshot_set_context(test_file, test_name)
+
+fn clear_ffi_test_context() -> Void:
+    rt_screenshot_clear_context()
+
+fn capture_before_ffi(buffer: String) -> Bool:
+    return rt_screenshot_capture_before_terminal(buffer)
+
+fn capture_after_ffi(buffer: String) -> Bool:
+    return rt_screenshot_capture_after_terminal(buffer)
+
+# CaptureType enum values matching Rust FFI
+let CAPTURE_TYPE_BEFORE = 0
+let CAPTURE_TYPE_AFTER = 1
+let CAPTURE_TYPE_ON_CHANGE = 2
+
+fn screenshot_exists_ffi(capture_type: Int) -> Bool:
+    return rt_screenshot_exists(capture_type)
+
+fn get_screenshot_path_ffi(capture_type: Int) -> String:
+    return rt_screenshot_get_path(capture_type)
+
+fn clear_ffi_captures() -> Void:
+    rt_screenshot_clear_captures()
+
+# ============================================================================
+
+# Screenshot capture mode
+enum CaptureMode:
+    Before       # Capture before test execution
+    After        # Capture after test execution
+    Both         # Capture both before and after
+    OnChange     # Capture only when content changes
+
+impl CaptureMode:
+    fn is_before(self) -> Bool:
+        """Check if this is Before capture mode.
+        Returns: true for Before
+        Example: CaptureMode.Before.is_before()  # → true
+        """
+        match self:
+            case CaptureMode.Before: true
+            case _: false
+
+    fn is_after(self) -> Bool:
+        """Check if this is After capture mode.
+        Returns: true for After
+        Example: CaptureMode.After.is_after()  # → true
+        """
+        match self:
+            case CaptureMode.After: true
+            case _: false
+
+    fn is_both(self) -> Bool:
+        """Check if this is Both capture mode.
+        Returns: true for Both
+        Example: CaptureMode.Both.is_both()  # → true
+        """
+        match self:
+            case CaptureMode.Both: true
+            case _: false
+
+    fn is_on_change(self) -> Bool:
+        """Check if this is OnChange capture mode.
+        Returns: true for OnChange
+        Example: CaptureMode.OnChange.is_on_change()  # → true
+        """
+        match self:
+            case CaptureMode.OnChange: true
+            case _: false
+
+    fn captures_before(self) -> Bool:
+        """Check if mode captures before execution.
+        Returns: true for Before or Both
+        Example: CaptureMode.Both.captures_before()  # → true
+        """
+        match self:
+            case CaptureMode.Before: true
+            case CaptureMode.Both: true
+            case _: false
+
+    fn captures_after(self) -> Bool:
+        """Check if mode captures after execution.
+        Returns: true for After or Both
+        Example: CaptureMode.After.captures_after()  # → true
+        """
+        match self:
+            case CaptureMode.After: true
+            case CaptureMode.Both: true
+            case _: false
+
+    fn is_conditional(self) -> Bool:
+        """Check if mode is conditional (OnChange).
+        Returns: true for OnChange
+        Example: CaptureMode.OnChange.is_conditional()  # → true
+        """
+        match self:
+            case CaptureMode.OnChange: true
+            case _: false
+
+    fn to_string(self) -> String:
+        """Convert CaptureMode to string representation.
+        Returns: lowercase mode name
+        Example: CaptureMode.Both.to_string()  # → "both"
+        """
+        match self:
+            case CaptureMode.Before: "before"
+            case CaptureMode.After: "after"
+            case CaptureMode.Both: "both"
+            case CaptureMode.OnChange: "on-change"
+
+    fn description(self) -> String:
+        """Get human-readable description of the capture mode.
+        Returns: descriptive explanation
+        Example: CaptureMode.Both.description()
+                # → "Capture screenshots both before and after test execution"
+        """
+        match self:
+            case CaptureMode.Before: "Capture screenshot before test execution"
+            case CaptureMode.After: "Capture screenshot after test execution"
+            case CaptureMode.Both: "Capture screenshots both before and after test execution"
+            case CaptureMode.OnChange: "Capture screenshot only when content changes"
+
+    fn summary(self) -> String:
+        """Get comprehensive summary of the capture mode.
+        Returns: summary with mode name, description, and timing
+        Example: CaptureMode.Both.summary()
+                # → "CaptureMode: both (Capture screenshots both before and after test execution, before + after)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let mut timing = []
+
+        if self.captures_before():
+            timing.push("before")
+        if self.captures_after():
+            timing.push("after")
+        if self.is_conditional():
+            timing.push("conditional")
+
+        let timing_str = if timing.len() > 0:
+            ", " + timing.join(" + ")
+        else:
+            ""
+
+        "CaptureMode: {name} ({desc}{timing_str})"
+
+# Image format for screenshots
+enum ImageFormat:
+    PNG
+    JPEG
+    ANSI         # Raw ANSI text capture (for terminal)
+
+impl ImageFormat:
+    fn is_png(self) -> Bool:
+        """Check if this is PNG format.
+        Returns: true for PNG
+        Example: ImageFormat.PNG.is_png()  # → true
+        """
+        match self:
+            case ImageFormat.PNG: true
+            case _: false
+
+    fn is_jpeg(self) -> Bool:
+        """Check if this is JPEG format.
+        Returns: true for JPEG
+        Example: ImageFormat.JPEG.is_jpeg()  # → true
+        """
+        match self:
+            case ImageFormat.JPEG: true
+            case _: false
+
+    fn is_ansi(self) -> Bool:
+        """Check if this is ANSI format.
+        Returns: true for ANSI
+        Example: ImageFormat.ANSI.is_ansi()  # → true
+        """
+        match self:
+            case ImageFormat.ANSI: true
+            case _: false
+
+    fn is_image_format(self) -> Bool:
+        """Check if format is a standard image format.
+        Returns: true for PNG or JPEG
+        Example: ImageFormat.PNG.is_image_format()  # → true
+        """
+        match self:
+            case ImageFormat.PNG: true
+            case ImageFormat.JPEG: true
+            case ImageFormat.ANSI: false
+
+    fn is_text_format(self) -> Bool:
+        """Check if format is text-based (ANSI).
+        Returns: true for ANSI
+        Example: ImageFormat.ANSI.is_text_format()  # → true
+        """
+        match self:
+            case ImageFormat.ANSI: true
+            case _: false
+
+    fn supports_transparency(self) -> Bool:
+        """Check if format supports alpha channel transparency.
+        Returns: true for PNG
+        Example: ImageFormat.PNG.supports_transparency()  # → true
+        """
+        match self:
+            case ImageFormat.PNG: true
+            case _: false
+
+    fn uses_compression(self) -> Bool:
+        """Check if format uses lossy compression.
+        Returns: true for JPEG
+        Example: ImageFormat.JPEG.uses_compression()  # → true
+        """
+        match self:
+            case ImageFormat.JPEG: true
+            case _: false
+
+    fn file_extension(self) -> String:
+        """Get typical file extension for this format.
+        Returns: file extension with dot
+        Example: ImageFormat.PNG.file_extension()  # → ".png"
+        """
+        match self:
+            case ImageFormat.PNG: ".png"
+            case ImageFormat.JPEG: ".jpg"
+            case ImageFormat.ANSI: ".txt"
+
+    fn to_string(self) -> String:
+        """Convert ImageFormat to string representation.
+        Returns: lowercase format name
+        Example: ImageFormat.PNG.to_string()  # → "png"
+        """
+        match self:
+            case ImageFormat.PNG: "png"
+            case ImageFormat.JPEG: "jpeg"
+            case ImageFormat.ANSI: "ansi"
+
+    fn description(self) -> String:
+        """Get human-readable description of the image format.
+        Returns: descriptive explanation
+        Example: ImageFormat.PNG.description()
+                # → "PNG: Portable Network Graphics with lossless compression"
+        """
+        match self:
+            case ImageFormat.PNG: "PNG: Portable Network Graphics with lossless compression"
+            case ImageFormat.JPEG: "JPEG: Joint Photographic Experts Group with lossy compression"
+            case ImageFormat.ANSI: "ANSI: Raw terminal text capture with escape codes"
+
+    fn summary(self) -> String:
+        """Get comprehensive summary of the image format.
+        Returns: summary with format name, description, and properties
+        Example: ImageFormat.PNG.summary()
+                # → "ImageFormat: png (PNG: Portable Network Graphics with lossless compression, image, transparent, ext=.png)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let ext = self.file_extension()
+        let mut props = []
+
+        if self.is_image_format():
+            props.push("image")
+        if self.is_text_format():
+            props.push("text")
+        if self.supports_transparency():
+            props.push("transparent")
+        if self.uses_compression():
+            props.push("lossy")
+
+        props.push("ext={ext}")
+
+        let props_str = props.join(", ")
+        "ImageFormat: {name} ({desc}, {props_str})"
+
+# Screenshot configuration
+struct ScreenshotConfig:
+    output_dir: String
+    format: ImageFormat
+    capture_mode: CaptureMode
+    prefix: String
+    include_timestamp: Bool
+
+    @static
+    fn default() -> ScreenshotConfig:
+        return ScreenshotConfig(
+            output_dir="doc/spec/image",
+            format=ImageFormat.PNG,
+            capture_mode=CaptureMode.Both,
+            prefix="",
+            include_timestamp=false
+        )
+
+    fn with_output_dir(self, dir: String) -> ScreenshotConfig:
+        return ScreenshotConfig(
+            output_dir=dir,
+            format=self.format,
+            capture_mode=self.capture_mode,
+            prefix=self.prefix,
+            include_timestamp=self.include_timestamp
+        )
+
+    fn with_format(self, format: ImageFormat) -> ScreenshotConfig:
+        return ScreenshotConfig(
+            output_dir=self.output_dir,
+            format=format,
+            capture_mode=self.capture_mode,
+            prefix=self.prefix,
+            include_timestamp=self.include_timestamp
+        )
+
+    fn with_capture_mode(self, mode: CaptureMode) -> ScreenshotConfig:
+        return ScreenshotConfig(
+            output_dir=self.output_dir,
+            format=self.format,
+            capture_mode=mode,
+            prefix=self.prefix,
+            include_timestamp=self.include_timestamp
+        )
+
+# Screenshot result
+struct ScreenshotResult:
+    success: Bool
+    before_path: Option<String>
+    after_path: Option<String>
+    error: Option<String>
+    is_new: Bool
+    changed: Bool
+
+# Screenshot metadata stored alongside images
+struct ScreenshotMetadata:
+    test_name: String
+    test_file: String
+    capture_time: String
+    content_hash: String
+    format: String
+
+# Global screenshot context
+let _screenshot_context: Option<ScreenshotContext> = None
+
+struct ScreenshotContext:
+    config: ScreenshotConfig
+    test_name: String
+    test_file: String
+    before_buffer: Option<String>
+    after_buffer: Option<String>
+
+# Initialize screenshot capture for a test
+fn init_screenshot_context(test_name: String, test_file: String, config: ScreenshotConfig) -> Void:
+    _screenshot_context = Some(ScreenshotContext(
+        config=config,
+        test_name=test_name,
+        test_file=test_file,
+        before_buffer=None,
+        after_buffer=None
+    ))
+
+# Capture screenshot before test
+fn capture_before() -> Void:
+    match _screenshot_context:
+        case Some(ctx):
+            let buffer = _capture_current_state()
+            ctx.before_buffer = Some(buffer)
+            # Also capture via FFI if enabled
+            if is_ffi_screenshots_enabled():
+                capture_before_ffi(buffer)
+        case None:
+            pass
+
+# Capture screenshot after test
+fn capture_after() -> Void:
+    match _screenshot_context:
+        case Some(ctx):
+            let buffer = _capture_current_state()
+            ctx.after_buffer = Some(buffer)
+            # Also capture via FFI if enabled
+            if is_ffi_screenshots_enabled():
+                capture_after_ffi(buffer)
+        case None:
+            pass
+
+# Save captured screenshots
+fn save_screenshots() -> ScreenshotResult:
+    match _screenshot_context:
+        case Some(ctx):
+            let result = _save_context_screenshots(ctx)
+            _screenshot_context = None
+            # Clear FFI context
+            if is_ffi_screenshots_enabled():
+                clear_ffi_test_context()
+            return result
+        case None:
+            return ScreenshotResult(
+                success=false,
+                before_path=None,
+                after_path=None,
+                error=Some("No screenshot context initialized"),
+                is_new=false,
+                changed=false
+            )
+
+# Context manager for screenshot capture
+fn with_screenshot(name: String, block: fn() -> Void) -> ScreenshotResult:
+    let config = ScreenshotConfig.default()
+    return with_screenshot_config(name, config, block)
+
+fn with_screenshot_config(name: String, config: ScreenshotConfig, block: fn() -> Void) -> ScreenshotResult:
+    # Get test context from registry
+    let test_file = runtime.get_current_test_file().unwrap_or("unknown")
+
+    init_screenshot_context(name, test_file, config)
+
+    # Set FFI context if FFI screenshots are enabled
+    if is_ffi_screenshots_enabled():
+        set_ffi_output_dir(config.output_dir)
+        set_ffi_test_context(test_file, name)
+
+    # Capture before state if needed
+    match config.capture_mode:
+        case CaptureMode.Before:
+            capture_before()
+        case CaptureMode.Both:
+            capture_before()
+        case CaptureMode.OnChange:
+            capture_before()
+        case _:
+            pass
+
+    # Execute the test block
+    block()
+
+    # Capture after state if needed
+    match config.capture_mode:
+        case CaptureMode.After:
+            capture_after()
+        case CaptureMode.Both:
+            capture_after()
+        case CaptureMode.OnChange:
+            capture_after()
+        case _:
+            pass
+
+    # Save and return result
+    return save_screenshots()
+
+# Internal: Capture current terminal/GUI state
+fn _capture_current_state() -> String:
+    # Try different capture methods in order of preference
+
+    # 1. Try Vulkan framebuffer capture
+    if _has_vulkan_context():
+        return _capture_vulkan_framebuffer()
+
+    # 2. Try TUI buffer capture
+    if _has_tui_context():
+        return _capture_tui_buffer()
+
+    # 3. Try PTY buffer capture
+    if _has_pty_session():
+        return _capture_pty_buffer()
+
+    # 4. Fallback to empty capture
+    return ""
+
+# Internal: Check for Vulkan context
+fn _has_vulkan_context() -> Bool:
+    return runtime.has_vulkan_context()
+
+# Internal: Capture Vulkan framebuffer
+fn _capture_vulkan_framebuffer() -> String:
+    # This will be implemented by FFI to runtime
+    return runtime.capture_vulkan_framebuffer()
+
+# Internal: Check for TUI context
+fn _has_tui_context() -> Bool:
+    return runtime.has_tui_context()
+
+# Internal: Capture TUI buffer
+fn _capture_tui_buffer() -> String:
+    return runtime.capture_tui_buffer()
+
+# Internal: Check for PTY session
+fn _has_pty_session() -> Bool:
+    return runtime.has_pty_session()
+
+# Internal: Capture PTY buffer
+fn _capture_pty_buffer() -> String:
+    return runtime.capture_pty_buffer()
+
+# Internal: Save screenshots from context
+fn _save_context_screenshots(ctx: ScreenshotContext) -> ScreenshotResult:
+    let output_dir = _compute_output_path(ctx.config.output_dir, ctx.test_file)
+
+    # Ensure output directory exists
+    fs.create_dir_all(output_dir)
+
+    let before_path: Option<String> = None
+    let after_path: Option<String> = None
+    let is_new = false
+    let changed = false
+
+    # Save before screenshot
+    match ctx.before_buffer:
+        case Some(buffer):
+            let path = _get_screenshot_path(output_dir, ctx.test_name, "before", ctx.config.format)
+            let (saved_path, new, diff) = _save_screenshot(path, buffer, ctx.config)
+            before_path = Some(saved_path)
+            is_new = is_new or new
+            changed = changed or diff
+        case None:
+            pass
+
+    # Save after screenshot
+    match ctx.after_buffer:
+        case Some(buffer):
+            let path = _get_screenshot_path(output_dir, ctx.test_name, "after", ctx.config.format)
+            let (saved_path, new, diff) = _save_screenshot(path, buffer, ctx.config)
+            after_path = Some(saved_path)
+            is_new = is_new or new
+            changed = changed or diff
+        case None:
+            pass
+
+    return ScreenshotResult(
+        success=true,
+        before_path=before_path,
+        after_path=after_path,
+        error=None,
+        is_new=is_new,
+        changed=changed
+    )
+
+# Internal: Compute output path from test file path
+fn _compute_output_path(base_dir: String, test_file: String) -> String:
+    # Convert test file path to relative directory structure
+    # e.g., simple/std_lib/test/unit/ui/tui/widgets_spec.spl
+    #    -> doc/spec/image/unit/ui/tui/widgets_spec/
+
+    let path = test_file
+        .replace("simple/std_lib/test/", "")
+        .replace("test/", "")
+        .replace("_spec.spl", "")
+        .replace("_test.spl", "")
+        .replace(".spl", "")
+
+    return base_dir + "/" + path
+
+# Internal: Get screenshot file path
+fn _get_screenshot_path(dir: String, name: String, suffix: String, format: ImageFormat) -> String:
+    let ext = match format:
+        case ImageFormat.PNG:
+            ".png"
+        case ImageFormat.JPEG:
+            ".jpg"
+        case ImageFormat.ANSI:
+            ".ansi"
+
+    let safe_name = name.replace(" ", "_").replace("/", "_").to_lowercase()
+    return dir + "/" + safe_name + "_" + suffix + ext
+
+# Internal: Save screenshot to disk
+fn _save_screenshot(path: String, buffer: String, config: ScreenshotConfig) -> (String, Bool, Bool):
+    let is_new = not fs.exists(path)
+    let changed = false
+
+    if not is_new:
+        # Check if content changed by comparing hashes
+        let existing_content = fs.read_string(path).unwrap_or("")
+        let existing_hash = _compute_hash(existing_content)
+        let new_hash = _compute_hash(buffer)
+        changed = existing_hash != new_hash
+
+        # Only overwrite if refresh is enabled or content changed
+        # Note: refresh_gui_images is checked at runner level, not here
+
+    # Convert buffer to appropriate format and save
+    match config.format:
+        case ImageFormat.PNG:
+            _save_as_png(path, buffer)
+        case ImageFormat.JPEG:
+            _save_as_jpeg(path, buffer)
+        case ImageFormat.ANSI:
+            fs.write_string(path, buffer)
+
+    # Save metadata
+    let metadata = ScreenshotMetadata(
+        test_name=path,
+        test_file="",
+        capture_time=runtime.now_iso(),
+        content_hash=_compute_hash(buffer),
+        format=config.format.to_string()
+    )
+    _save_metadata(path, metadata)
+
+    return (path, is_new, changed)
+
+# Internal: Compute hash of content
+fn _compute_hash(content: String) -> String:
+    return runtime.sha256(content)
+
+# Internal: Save buffer as PNG image
+fn _save_as_png(path: String, buffer: String) -> Void:
+    # Convert ANSI text to PNG image
+    # This calls into the runtime FFI
+    runtime.ansi_to_png(buffer, path)
+
+# Internal: Save buffer as JPEG image
+fn _save_as_jpeg(path: String, buffer: String) -> Void:
+    runtime.ansi_to_jpeg(buffer, path)
+
+# Internal: Save metadata alongside screenshot
+fn _save_metadata(screenshot_path: String, metadata: ScreenshotMetadata) -> Void:
+    let meta_path = screenshot_path + ".meta.json"
+    let json = json.encode(metadata)
+    fs.write_string(meta_path, json)
+
+# Check if screenshot exists for a test
+fn screenshot_exists(test_name: String, test_file: String, suffix: String = "after") -> Bool:
+    let config = ScreenshotConfig.default()
+    let output_dir = _compute_output_path(config.output_dir, test_file)
+    let path = _get_screenshot_path(output_dir, test_name, suffix, config.format)
+    return fs.exists(path)
+
+# Get screenshot path for a test
+fn get_screenshot_path(test_name: String, test_file: String, suffix: String = "after") -> Option<String>:
+    let config = ScreenshotConfig.default()
+    let output_dir = _compute_output_path(config.output_dir, test_file)
+    let path = _get_screenshot_path(output_dir, test_name, suffix, config.format)
+    if fs.exists(path):
+        return Some(path)
+    else:
+        return None
+
+# Generate markdown for screenshot with placeholder
+fn screenshot_markdown(test_name: String, test_file: String, suffix: String = "after") -> String:
+    match get_screenshot_path(test_name, test_file, suffix):
+        case Some(path):
+            # Convert absolute path to relative for markdown
+            let rel_path = path.replace("doc/spec/", "../")
+            return "![${test_name} ${suffix}](${rel_path})"
+        case None:
+            let cmd = "simple test --refresh-gui-image ${test_file}"
+            return "> **Screenshot not available**\n>\n> To generate: `${cmd}`"
+
+# Export public API
+export ScreenshotConfig, ScreenshotResult, ScreenshotMetadata
+export CaptureMode, ImageFormat
+export with_screenshot, with_screenshot_config
+export capture_before, capture_after, save_screenshots
+export screenshot_exists, get_screenshot_path, screenshot_markdown
+
+# Export FFI control functions
+export enable_ffi_screenshots, disable_ffi_screenshots, is_ffi_screenshots_enabled
+export set_ffi_refresh, set_ffi_output_dir
+export set_ffi_test_context, clear_ffi_test_context
+export capture_before_ffi, capture_after_ffi
+export screenshot_exists_ffi, get_screenshot_path_ffi
+export clear_ffi_captures
+
+# Export FFI capture type constants
+export CAPTURE_TYPE_BEFORE, CAPTURE_TYPE_AFTER, CAPTURE_TYPE_ON_CHANGE

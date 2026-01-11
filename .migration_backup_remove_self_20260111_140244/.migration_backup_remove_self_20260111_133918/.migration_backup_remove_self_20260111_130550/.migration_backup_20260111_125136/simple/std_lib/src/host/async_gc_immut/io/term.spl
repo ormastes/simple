@@ -1,0 +1,426 @@
+# Terminal I/O - Immutable Variant
+# Functional style terminal operations with full feature parity
+
+use units.size.*
+use host.common.io.term_types.*
+use host.common.io.term_ffi.*
+
+# Terminal handle type
+unit TermHandle: i64 as handle
+
+# Terminal state (immutable wrapper)
+struct Terminal:
+    stdin: TermHandle
+    stdout: TermHandle
+    stderr: TermHandle
+    is_tty: bool
+    raw_mode: bool
+    size: Option<TermSize>
+
+impl Terminal:
+    # Get the default terminal
+    pub fn default() -> Terminal:
+        let stdin = native_stdin()_handle
+        let stdout = native_stdout()_handle
+        let stderr = native_stderr()_handle
+        let is_tty = native_is_tty(stdout as i64)
+        let size = if is_tty: get_term_size(stdout) else: None
+        Terminal {
+            stdin: stdin,
+            stdout: stdout,
+            stderr: stderr,
+            is_tty: is_tty,
+            raw_mode: false,
+            size: size
+        }
+
+    fn is_tty(self) -> bool:
+        self.is_tty
+
+    fn is_raw_mode(self) -> bool:
+        self.raw_mode
+
+    fn size(self) -> Option<TermSize>:
+        self.size
+
+    # Refresh terminal info, return updated Terminal
+    fn refresh(self) -> Terminal:
+        let is_tty = native_is_tty(self.stdout as i64)
+        let size = if is_tty: get_term_size(self.stdout) else: None
+        Terminal {
+            stdin: self.stdin,
+            stdout: self.stdout,
+            stderr: self.stderr,
+            is_tty: is_tty,
+            raw_mode: self.raw_mode,
+            size: size
+        }
+
+    # Enable raw mode, returns new Terminal state
+    pub fn enable_raw_mode(self) -> Result<Terminal, TermError>:
+        if self.raw_mode:
+            return Ok(self)
+        match native_enable_raw_mode(self.stdin as i64):
+            case 0:
+                Ok(Terminal {
+                    stdin: self.stdin,
+                    stdout: self.stdout,
+                    stderr: self.stderr,
+                    is_tty: self.is_tty,
+                    raw_mode: true,
+                    size: self.size
+                })
+            case e: Err(TermError::from_code(e))
+
+    # Disable raw mode, returns new Terminal state
+    pub fn disable_raw_mode(self) -> Result<Terminal, TermError>:
+        if not self.raw_mode:
+            return Ok(self)
+        match native_disable_raw_mode(self.stdin as i64):
+            case 0:
+                Ok(Terminal {
+                    stdin: self.stdin,
+                    stdout: self.stdout,
+                    stderr: self.stderr,
+                    is_tty: self.is_tty,
+                    raw_mode: false,
+                    size: self.size
+                })
+            case e: Err(TermError::from_code(e))
+
+    # Write string to stdout
+    pub fn write(self, s: str) -> Result<ByteCount, TermError>:
+        let written = native_term_write(self.stdout as i64, s, s.len() as i64)
+        if written < 0:
+            Err(TermError::from_code(written as i32))
+        else:
+            Ok((written as u64)_bytes)
+
+    # Write line to stdout (with newline)
+    pub fn writeln(self, s: str) -> Result<ByteCount, TermError>:
+        let n1 = self.write(s)?
+        let n2 = self.write("\n")?
+        Ok(n1 + n2)
+
+    # Write to stderr
+    pub fn write_stderr(self, s: str) -> Result<ByteCount, TermError>:
+        let written = native_term_write(self.stderr as i64, s, s.len() as i64)
+        if written < 0:
+            Err(TermError::from_code(written as i32))
+        else:
+            Ok((written as u64)_bytes)
+
+    # Flush stdout
+    pub fn flush(self) -> Result<(), TermError>:
+        match native_term_flush(self.stdout as i64):
+            case 0: Ok(())
+            case e: Err(TermError::from_code(e))
+
+    # Read line from stdin
+    pub fn read_line(self) -> Result<str, TermError>:
+        let buf = native_term_read(self.stdin as i64, 4096)
+        if buf.len() > 0:
+            Ok(buf.to_string())
+        else:
+            Err(TermError::Eof)
+
+    # Read with timeout (returns None on timeout)
+    pub fn read_line_timeout(self, timeout_ms: u64) -> Option<str>:
+        let buf = native_term_read_timeout(self.stdin as i64, 4096, timeout_ms as i64)
+        if buf.len() > 0:
+            Some(buf.to_string())
+        else:
+            None
+
+    # Poll for input availability
+    pub fn has_input(self, timeout_ms: u64) -> bool:
+        native_term_poll(self.stdin as i64, timeout_ms as i64)
+
+    # ===================================
+    # Cursor and Screen Operations
+    # ===================================
+
+    # Clear screen
+    pub fn clear(self) -> Result<(), TermError>:
+        self.write("\x1b[2J\x1b[H").map(|_| ())
+
+    # Clear line
+    pub fn clear_line(self) -> Result<(), TermError>:
+        self.write("\x1b[2K").map(|_| ())
+
+    # Move cursor to position (1-indexed)
+    pub fn move_to(self, row: u16, col: u16) -> Result<(), TermError>:
+        self.write("\x1b[{row};{col}H").map(|_| ())
+
+    # Move cursor up
+    pub fn move_up(self, n: u16) -> Result<(), TermError>:
+        if n > 0:
+            self.write("\x1b[{n}A").map(|_| ())
+        else:
+            Ok(())
+
+    # Move cursor down
+    pub fn move_down(self, n: u16) -> Result<(), TermError>:
+        if n > 0:
+            self.write("\x1b[{n}B").map(|_| ())
+        else:
+            Ok(())
+
+    # Move cursor right
+    pub fn move_right(self, n: u16) -> Result<(), TermError>:
+        if n > 0:
+            self.write("\x1b[{n}C").map(|_| ())
+        else:
+            Ok(())
+
+    # Move cursor left
+    pub fn move_left(self, n: u16) -> Result<(), TermError>:
+        if n > 0:
+            self.write("\x1b[{n}D").map(|_| ())
+        else:
+            Ok(())
+
+    # Hide cursor
+    pub fn hide_cursor(self) -> Result<(), TermError>:
+        self.write("\x1b[?25l").map(|_| ())
+
+    # Show cursor
+    pub fn show_cursor(self) -> Result<(), TermError>:
+        self.write("\x1b[?25h").map(|_| ())
+
+    # Save cursor position
+    pub fn save_cursor(self) -> Result<(), TermError>:
+        self.write("\x1b[s").map(|_| ())
+
+    # Restore cursor position
+    pub fn restore_cursor(self) -> Result<(), TermError>:
+        self.write("\x1b[u").map(|_| ())
+
+    # Set terminal title
+    pub fn set_title(self, title: str) -> Result<(), TermError>:
+        self.write("\x1b]0;{title}\x07").map(|_| ())
+
+    # Ring bell
+    pub fn bell(self) -> Result<(), TermError>:
+        self.write("\x07").map(|_| ())
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_interactive(self) -> bool:
+        """Check if terminal is interactive (alias for is_tty).
+
+        Returns:
+            true if terminal is TTY
+
+        Example:
+            term.is_interactive()  # → true
+        """
+        return self.is_tty()
+
+    fn has_raw_mode(self) -> bool:
+        """Check if raw mode is enabled (alias for is_raw_mode).
+
+        Returns:
+            true if raw mode enabled
+
+        Example:
+            term.has_raw_mode()  # → false
+        """
+        return self.is_raw_mode()
+
+    fn can_use_ansi(self) -> bool:
+        """Check if terminal supports ANSI escape codes.
+
+        Returns:
+            true if ANSI supported
+
+        Example:
+            term.can_use_ansi()  # → true
+        """
+        return self.is_tty
+
+    fn is_piped(self) -> bool:
+        """Check if output is piped (not a TTY).
+
+        Returns:
+            true if piped
+
+        Example:
+            term.is_piped()  # → false
+        """
+        return not self.is_tty
+
+    fn supports_color(self) -> bool:
+        """Check if terminal likely supports color output.
+
+        Returns:
+            true if color supported
+
+        Example:
+            term.supports_color()  # → true
+        """
+        return self.is_tty
+
+    fn width(self) -> Option<u16>:
+        """Get terminal width in columns.
+
+        Returns:
+            Column count if available
+
+        Example:
+            term.width()  # → Some(80)
+        """
+        return self.size.map(|s| s.cols)
+
+    fn height(self) -> Option<u16>:
+        """Get terminal height in rows.
+
+        Returns:
+            Row count if available
+
+        Example:
+            term.height()  # → Some(24)
+        """
+        return self.size.map(|s| s.rows)
+
+    fn has_size(self) -> bool:
+        """Check if terminal size is available.
+
+        Returns:
+            true if size known
+
+        Example:
+            term.has_size()  # → true
+        """
+        return self.size.is_some()
+
+    fn area(self) -> Option<u32>:
+        """Get terminal area (width * height).
+
+        Returns:
+            Total character cells if size available
+
+        Example:
+            term.area()  # → Some(1920)
+        """
+        return self.size.map(|s| (s.rows as u32) * (s.cols as u32))
+
+    fn print(self, s: str) -> Result<(), TermError>:
+        """Print string to stdout and flush (convenience method).
+
+        Args:
+            s: String to print
+
+        Returns:
+            Ok on success
+
+        Example:
+            term.print("Hello")
+        """
+        self.write(s)?
+        return self.flush()
+
+    fn print_err(self, s: str) -> Result<(), TermError>:
+        """Print string to stderr (convenience method).
+
+        Args:
+            s: String to print
+
+        Returns:
+            Ok on success
+
+        Example:
+            term.print_err("Error message")
+        """
+        return self.write_stderr(s).map(|_| ())
+
+    fn summary(self) -> String:
+        """Get terminal summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            term.summary()
+            # → "Terminal: tty, raw_mode=false, 80x24"
+        """
+        let tty_str = if self.is_tty { "tty" } else { "piped" }
+        let raw_str = if self.raw_mode { "true" } else { "false" }
+        let size_str = match self.size:
+            case Some(s): "{s.cols}x{s.rows}"
+            case None: "unknown"
+        return "Terminal: {tty_str}, raw_mode={raw_str}, {size_str}"
+
+fn get_term_size(handle: TermHandle) -> Option<TermSize>:
+    let result = native_get_term_size(handle as i64)
+    if result.len() == 2 and result[0] >= 0 and result[1] >= 0:
+        Some(TermSize { rows: result[0] as u16, cols: result[1] as u16 })
+    else:
+        None
+
+# ===================================
+# Print Functions
+# ===================================
+
+# Print to stdout (no newline)
+pub fn print(s: str):
+    let stdout = native_stdout()
+    native_term_write(stdout, s, s.len() as i64)
+    native_term_flush(stdout)
+
+# Print line to stdout
+pub fn println(s: str):
+    let stdout = native_stdout()
+    native_term_write(stdout, s, s.len() as i64)
+    native_term_write(stdout, "\n", 1)
+    native_term_flush(stdout)
+
+# Print to stderr (no newline)
+pub fn eprint(s: str):
+    let stderr = native_stderr()
+    native_term_write(stderr, s, s.len() as i64)
+    native_term_flush(stderr)
+
+# Print line to stderr
+pub fn eprintln(s: str):
+    let stderr = native_stderr()
+    native_term_write(stderr, s, s.len() as i64)
+    native_term_write(stderr, "\n", 1)
+    native_term_flush(stderr)
+
+# Read line from stdin (like Python's input())
+pub fn input(prompt: str) -> str:
+    if prompt.len() > 0:
+        print(prompt)
+    let stdin = native_stdin()
+    let buf = native_term_read(stdin, 4096)
+    buf.to_string().trim_end()
+
+# ===================================
+# Native function declarations
+# ===================================
+
+extern fn native_stdin() -> i64
+extern fn native_stdout() -> i64
+extern fn native_stderr() -> i64
+extern fn native_is_tty(handle: i64) -> bool
+extern fn native_get_term_size(handle: i64) -> Array<i64>
+extern fn native_term_write(handle: i64, data: str, len: i64) -> i64
+extern fn native_term_read(handle: i64, max_len: i64) -> Bytes
+extern fn native_term_read_timeout(handle: i64, max_len: i64, timeout_ms: i64) -> Bytes
+extern fn native_term_flush(handle: i64) -> i32
+extern fn native_term_poll(handle: i64, timeout_ms: i64) -> bool
+extern fn native_enable_raw_mode(handle: i64) -> i32
+extern fn native_disable_raw_mode(handle: i64) -> i32
+
+# ============================================
+# Trait Implementations
+# ============================================
+
+use core.traits.*
+
+impl Default for Terminal:
+    fn default() -> Self:
+        Terminal::default()

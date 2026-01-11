@@ -1,0 +1,803 @@
+# Hot Reload Support for GUI Applications
+#
+# Provides hot module reloading for GUI applications without losing state.
+# Monitors source files for changes and reloads UI components on the fly.
+#
+# Key Features:
+#   - File watching: Detects changes to .spl and .sui files
+#   - State preservation: Maintains application state across reloads
+#   - Incremental updates: Only reloads changed components
+#   - Error recovery: Graceful handling of compilation errors
+#   - Socket-based communication: Live connection to dev server
+#
+# Usage:
+#   let hot_reload = HotReload::new("./src")
+#   hot_reload.watch()?
+#
+#   loop:
+#       if let Some(update) = hot_reload.poll_update():
+#           app.apply_update(update)
+#       app.render()
+
+use core.*
+use concurrency.*
+use host.async_nogc_mut.io.fs.*
+use host.async_nogc_mut.net.tcp.*
+
+# =============================================================================
+# Hot Reload Manager
+# =============================================================================
+
+pub struct HotReload:
+    # Watch configuration
+    watch_paths: Array<String>
+    ignore_patterns: Array<String>
+
+    # File system monitoring
+    file_watcher: FileWatcher
+    last_modified: Dict<String, u64>  # path -> timestamp
+
+    # Update queue
+    pending_updates: Array<HotUpdate>
+
+    # State preservation
+    state_snapshot: Option<StateSnapshot>
+    preserve_state: bool
+
+    # Socket connection to dev server
+    dev_server: Option<TcpClient>
+    server_addr: String
+
+    # Status
+    watching: bool
+    last_error: Option<String>
+
+impl HotReload:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_watching(self) -> bool:
+        """Check if currently watching files."""
+        self.watching
+
+    pub fn has_pending_updates(self) -> bool:
+        """Check if there are pending updates."""
+        self.pending_updates.len() > 0
+
+    pub fn pending_update_count(self) -> usize:
+        """Get number of pending updates."""
+        self.pending_updates.len()
+
+    pub fn has_state_snapshot(self) -> bool:
+        """Check if state snapshot exists."""
+        match self.state_snapshot:
+            case Some(_): true
+            case None: false
+
+    pub fn is_state_preserved(self) -> bool:
+        """Check if state preservation is enabled."""
+        self.preserve_state
+
+    pub fn has_dev_server(self) -> bool:
+        """Check if dev server connection exists."""
+        match self.dev_server:
+            case Some(_): true
+            case None: false
+
+    pub fn has_error(self) -> bool:
+        """Check if there's a last error."""
+        match self.last_error:
+            case Some(_): true
+            case None: false
+
+    pub fn watch_path_count(self) -> usize:
+        """Get number of watched paths."""
+        self.watch_paths.len()
+
+    pub fn ignore_pattern_count(self) -> usize:
+        """Get number of ignore patterns."""
+        self.ignore_patterns.len()
+
+    pub fn tracked_file_count(self) -> usize:
+        """Get number of tracked files."""
+        self.last_modified.len()
+
+    pub fn summary(self) -> String:
+        """Get summary of hot reload state."""
+        let status = if self.watching: "watching" else: "stopped"
+        return "HotReload: {status}, {self.watch_path_count()} paths, {self.tracked_file_count()} files, {self.pending_update_count()} pending"
+
+# Hot reload update
+pub struct HotUpdate:
+    kind: UpdateKind
+    file_path: String
+    content: Option<String>
+    timestamp: u64
+
+impl HotUpdate:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_content(self) -> bool:
+        """Check if content is loaded."""
+        match self.content:
+            case Some(_): true
+            case None: false
+
+    pub fn is_component_reload(self) -> bool:
+        """Check if this is a component reload."""
+        match self.kind:
+            case UpdateKind::ComponentReload: true
+            case _: false
+
+    pub fn is_module_reload(self) -> bool:
+        """Check if this is a module reload."""
+        match self.kind:
+            case UpdateKind::ModuleReload: true
+            case _: false
+
+    pub fn is_style_update(self) -> bool:
+        """Check if this is a style update."""
+        match self.kind:
+            case UpdateKind::StyleUpdate: true
+            case _: false
+
+    pub fn is_asset_update(self) -> bool:
+        """Check if this is an asset update."""
+        match self.kind:
+            case UpdateKind::AssetUpdate: true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get summary of hot update."""
+        let has_content = if self.has_content(): "with content" else: "no content"
+        return "HotUpdate: {self.kind.to_string()} '{self.file_path}' ({has_content})"
+
+pub enum UpdateKind:
+    ComponentReload  # UI component (.sui)
+    ModuleReload     # Code module (.spl)
+    StyleUpdate      # Style changes (CSS/theme)
+    AssetUpdate      # Asset file (image, font, etc.)
+
+impl UpdateKind:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn to_string(self) -> String:
+        """Convert to string representation."""
+        match self:
+            case ComponentReload: return "ComponentReload"
+            case ModuleReload: return "ModuleReload"
+            case StyleUpdate: return "StyleUpdate"
+            case AssetUpdate: return "AssetUpdate"
+
+    pub fn description(self) -> String:
+        """Get description of update kind."""
+        match self:
+            case ComponentReload: return "UI component reload (.sui)"
+            case ModuleReload: return "Code module reload (.spl)"
+            case StyleUpdate: return "Style changes (CSS/theme)"
+            case AssetUpdate: return "Asset file update (image, font, etc.)"
+
+    pub fn is_component_reload(self) -> bool:
+        """Check if this is component reload."""
+        match self:
+            case ComponentReload: true
+            case _: false
+
+    pub fn is_module_reload(self) -> bool:
+        """Check if this is module reload."""
+        match self:
+            case ModuleReload: true
+            case _: false
+
+    pub fn is_code_change(self) -> bool:
+        """Check if this is a code change (component or module)."""
+        match self:
+            case ComponentReload: true
+            case ModuleReload: true
+            case _: false
+
+    pub fn summary(self) -> String:
+        """Get update kind summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            UpdateKind::ComponentReload.summary()
+            # → "UpdateKind: ComponentReload (UI component reload (.sui), code change)"
+        """
+        let name = self.to_string()
+        let desc = self.description()
+        let category = if self.is_code_change(): "code change" else: "asset change"
+        return "UpdateKind: {name} ({desc}, {category})"
+
+# State snapshot for preservation
+struct StateSnapshot:
+    component_states: Dict<String, ComponentState>
+    global_state: Dict<String, Any>
+    timestamp: u64
+
+impl StateSnapshot:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_component_states(self) -> bool:
+        """Check if any component states exist."""
+        self.component_states.len() > 0
+
+    pub fn has_global_state(self) -> bool:
+        """Check if any global state exists."""
+        self.global_state.len() > 0
+
+    pub fn component_count(self) -> usize:
+        """Get number of component states."""
+        self.component_states.len()
+
+    pub fn summary(self) -> String:
+        """Get summary of state snapshot."""
+        return "StateSnapshot: {self.component_count()} components, timestamp={self.timestamp}"
+
+struct ComponentState:
+    component_id: String
+    props: Dict<String, Any>
+    local_state: Dict<String, Any>
+
+impl ComponentState:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn has_props(self) -> bool:
+        """Check if component has props."""
+        self.props.len() > 0
+
+    pub fn has_local_state(self) -> bool:
+        """Check if component has local state."""
+        self.local_state.len() > 0
+
+    pub fn summary(self) -> String:
+        """Get summary of component state."""
+        return "ComponentState: id='{self.component_id}', {self.props.len()} props, {self.local_state.len()} local state"
+
+# File watcher
+struct FileWatcher:
+    watched_files: Dict<String, FileMetadata>
+    poll_interval_ms: u64
+
+impl FileWatcher:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn file_count(self) -> usize:
+        """Get number of watched files."""
+        self.watched_files.len()
+
+    pub fn has_files(self) -> bool:
+        """Check if any files are watched."""
+        self.watched_files.len() > 0
+
+    pub fn summary(self) -> String:
+        """Get summary of file watcher."""
+        return "FileWatcher: {self.file_count()} files, poll interval={self.poll_interval_ms}ms"
+
+struct FileMetadata:
+    path: String
+    size: u64
+    modified: u64
+    hash: u64
+
+impl FileMetadata:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn summary(self) -> String:
+        """Get summary of file metadata."""
+        return "FileMetadata: '{self.path}', size={self.size}, modified={self.modified}"
+
+# TCP client for dev server
+struct TcpClient:
+    socket: TcpStream
+    connected: bool
+
+impl TcpClient:
+    # =========================================================================
+    # Helper Methods (before existing methods)
+    # =========================================================================
+
+    pub fn is_connected(self) -> bool:
+        """Check if client is connected."""
+        self.connected
+
+    pub fn summary(self) -> String:
+        """Get summary of TCP client."""
+        let status = if self.connected: "connected" else: "disconnected"
+        return "TcpClient: {status}"
+
+# =============================================================================
+# Hot Reload Implementation
+# =============================================================================
+
+impl HotReload:
+    # Create new hot reload manager
+    pub fn new(watch_path: &str) -> HotReload:
+        return HotReload {
+            watch_paths: [watch_path.to_string()],
+            ignore_patterns: [
+                "target/".to_string(),
+                "build/".to_string(),
+                ".git/".to_string(),
+                "node_modules/".to_string()
+            ],
+            file_watcher: FileWatcher::new(),
+            last_modified: Dict::new(),
+            pending_updates: [],
+            state_snapshot: None,
+            preserve_state: true,
+            dev_server: None,
+            server_addr: "127.0.0.1:3030".to_string(),
+            watching: false,
+            last_error: None
+        }
+
+    # Add watch path
+    pub fn add_watch_path(self, path: &str):
+        self.watch_paths.push(path.to_string())
+
+    # Add ignore pattern
+    pub fn ignore(self, pattern: &str):
+        self.ignore_patterns.push(pattern.to_string())
+
+    # Start watching files
+    pub fn watch(self) -> Result<(), HotReloadError>:
+        if self.watching:
+            return Err(HotReloadError::AlreadyWatching)
+
+        # Scan initial files
+        self.scan_files()?
+
+        # Connect to dev server (optional)
+        self.connect_dev_server().ok()  # Ignore connection errors
+
+        self.watching = true
+        return Ok(())
+
+    # Stop watching
+    pub fn stop(self):
+        self.watching = false
+        if let Some(server) = &mut self.dev_server:
+            server.disconnect()
+
+    # Poll for updates
+    pub fn poll_update(self) -> Option<HotUpdate>:
+        if not self.watching:
+            return None
+
+        # Check file system changes
+        self.check_file_changes()
+
+        # Check dev server messages
+        self.check_server_messages()
+
+        # Return next pending update
+        if not self.pending_updates.is_empty():
+            return Some(self.pending_updates.remove(0))
+
+        return None
+
+    # Preserve current application state
+    pub fn preserve_state(self, snapshot: StateSnapshot):
+        self.state_snapshot = Some(snapshot)
+
+    # Restore preserved state
+    pub fn restore_state(self) -> Option<StateSnapshot>:
+        return self.state_snapshot.take()
+
+    # Enable/disable state preservation
+    pub fn set_preserve_state(self, enabled: bool):
+        self.preserve_state = enabled
+
+# =============================================================================
+# File System Monitoring
+# =============================================================================
+
+impl HotReload:
+    # Scan all watched files
+    fn scan_files(self) -> Result<(), HotReloadError>:
+        for watch_path in &self.watch_paths:
+            self.scan_directory(watch_path)?
+
+        return Ok(())
+
+    # Recursively scan directory
+    fn scan_directory(self, path: &str) -> Result<(), HotReloadError>:
+        let entries = list_directory(path)?
+
+        for entry in entries:
+            # Skip ignored patterns
+            if self.should_ignore(&entry.path):
+                continue
+
+            if entry.is_dir:
+                self.scan_directory(&entry.path)?
+            else:
+                self.add_file(&entry.path, entry.modified)
+
+        return Ok(())
+
+    # Add file to watch list
+    fn add_file(self, path: &str, modified: u64):
+        if self.should_watch(path):
+            self.last_modified.insert(path.to_string(), modified)
+
+    # Check if file should be ignored
+    fn should_ignore(self, path: &str) -> bool:
+        for pattern in &self.ignore_patterns:
+            if path.contains(pattern):
+                return true
+        return false
+
+    # Check if file should be watched
+    fn should_watch(self, path: &str) -> bool:
+        return path.ends_with(".spl")
+            or path.ends_with(".sui")
+            or path.ends_with(".css")
+
+    # Check for file changes
+    fn check_file_changes(self):
+        let mut changed_files: Array<String> = []
+
+        for (path, last_mod) in &self.last_modified:
+            if let Ok(metadata) = get_file_metadata(path):
+                if metadata.modified > *last_mod:
+                    changed_files.push(path.clone())
+                    self.last_modified.insert(path.clone(), metadata.modified)
+
+        # Generate updates for changed files
+        for path in changed_files:
+            if let Some(update) = self.create_update(&path):
+                self.pending_updates.push(update)
+
+    # Create update from file path
+    fn create_update(self, path: &str) -> Option<HotUpdate>:
+        let kind = if path.ends_with(".sui"):
+            UpdateKind::ComponentReload
+        else if path.ends_with(".spl"):
+            UpdateKind::ModuleReload
+        else if path.ends_with(".css"):
+            UpdateKind::StyleUpdate
+        else:
+            UpdateKind::AssetUpdate
+
+        # Read file content
+        let content = read_file_to_string(path).ok()
+
+        return Some(HotUpdate {
+            kind: kind,
+            file_path: path.to_string(),
+            content: content,
+            timestamp: get_current_timestamp()
+        })
+
+# =============================================================================
+# Dev Server Communication
+# =============================================================================
+
+impl HotReload:
+    # Connect to development server
+    fn connect_dev_server(self) -> Result<(), HotReloadError>:
+        let socket = TcpStream::connect(&self.server_addr)?
+        self.dev_server = Some(TcpClient {
+            socket: socket,
+            connected: true
+        })
+        return Ok(())
+
+    # Check for messages from dev server
+    fn check_server_messages(self):
+        if let Some(server) = &mut self.dev_server:
+            if let Some(message) = server.poll_message():
+                self.handle_server_message(message)
+
+    # Handle message from dev server
+    fn handle_server_message(self, message: String):
+        # Parse message and create update
+        # Format: "UPDATE <kind> <path>"
+        let parts: Array<&str> = message.split(' ').collect()
+        if parts.len() >= 3 and parts[0] == "UPDATE":
+            let kind = match parts[1]:
+                case "component": UpdateKind::ComponentReload
+                case "module": UpdateKind::ModuleReload
+                case "style": UpdateKind::StyleUpdate
+                case "asset": UpdateKind::AssetUpdate
+                case _: return
+
+            let path = parts[2].to_string()
+            if let Some(update) = self.create_update(&path):
+                self.pending_updates.push(update)
+
+# =============================================================================
+# TCP Client Implementation
+# =============================================================================
+
+impl TcpClient:
+    fn poll_message(self) -> Option<String>:
+        if not self.connected:
+            return None
+
+        # Non-blocking read
+        let mut buffer = [0u8; 4096]
+        match self.socket.read_timeout(&mut buffer, 0):
+            case Ok(n):
+                if n > 0:
+                    return Some(String::from_utf8_lossy(&buffer[0..n]).to_string())
+            case Err(_):
+                pass
+
+        return None
+
+    fn disconnect(self):
+        self.socket.shutdown()
+        self.connected = false
+
+# =============================================================================
+# File System Helpers
+# =============================================================================
+
+# Directory entry
+struct DirEntry:
+    path: String
+    is_dir: bool
+    modified: u64
+
+impl DirEntry:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_directory(self) -> bool:
+        """Check if this is a directory."""
+        self.is_dir
+
+    pub fn is_file(self) -> bool:
+        """Check if this is a file."""
+        not self.is_dir
+
+    pub fn summary(self) -> String:
+        """Get summary of directory entry."""
+        let kind = if self.is_dir: "directory" else: "file"
+        return "DirEntry: '{self.path}' ({kind})"
+
+# List directory contents
+fn list_directory(path: &str) -> Result<Array<DirEntry>, HotReloadError>:
+    # TODO: [ui][P1] Implement using FFI to readdir
+    let mut entries: Array<DirEntry> = []
+    return Ok(entries)
+
+# Get file metadata
+struct FileMetadataInfo:
+    modified: u64
+    size: u64
+
+impl FileMetadataInfo:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_empty(self) -> bool:
+        """Check if file is empty."""
+        self.size == 0
+
+    pub fn has_size(self) -> bool:
+        """Check if file has non-zero size."""
+        self.size > 0
+
+    pub fn summary(self) -> String:
+        """Get summary of file metadata."""
+        return "FileMetadataInfo: size={self.size}, modified={self.modified}"
+
+fn get_file_metadata(path: &str) -> Result<FileMetadataInfo, HotReloadError>:
+    # TODO: [ui][P1] Implement using FFI to stat
+    return Err(HotReloadError::IoError("Not implemented".to_string()))
+
+# Read file to string
+fn read_file_to_string(path: &str) -> Result<String, HotReloadError>:
+    # TODO: [ui][P1] Implement using File::read_to_string
+    return Err(HotReloadError::IoError("Not implemented".to_string()))
+
+# Get current timestamp (milliseconds since epoch)
+fn get_current_timestamp() -> u64:
+    # TODO: [ui][P1] Implement using system time
+    return 0
+
+# =============================================================================
+# Error Types
+# =============================================================================
+
+pub enum HotReloadError:
+    AlreadyWatching
+    NotWatching
+    IoError(String)
+    ParseError(String)
+    ConnectionError(String)
+
+impl HotReloadError:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_already_watching(self) -> bool:
+        """Check if error is already watching."""
+        match self:
+            case AlreadyWatching: true
+            case _: false
+
+    pub fn is_not_watching(self) -> bool:
+        """Check if error is not watching."""
+        match self:
+            case NotWatching: true
+            case _: false
+
+    pub fn is_io_error(self) -> bool:
+        """Check if error is an IO error."""
+        match self:
+            case IoError(_): true
+            case _: false
+
+    pub fn is_parse_error(self) -> bool:
+        """Check if error is a parse error."""
+        match self:
+            case ParseError(_): true
+            case _: false
+
+    pub fn is_connection_error(self) -> bool:
+        """Check if error is a connection error."""
+        match self:
+            case ConnectionError(_): true
+            case _: false
+
+    pub fn description(self) -> String:
+        """Get description of error."""
+        match self:
+            case AlreadyWatching: return "File watcher is already active"
+            case NotWatching: return "File watcher is not active"
+            case IoError(_): return "IO operation failed"
+            case ParseError(_): return "Failed to parse file"
+            case ConnectionError(_): return "Dev server connection failed"
+
+    pub fn summary(self) -> String:
+        """Get comprehensive error summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            HotReloadError::IoError("disk full").summary()
+            # → "HotReloadError: io-error (IO operation failed): IO error: disk full"
+        """
+        let name = match self:
+            case AlreadyWatching: "already-watching"
+            case NotWatching: "not-watching"
+            case IoError(_): "io-error"
+            case ParseError(_): "parse-error"
+            case ConnectionError(_): "connection-error"
+
+        let desc = self.description()
+        let msg = self.to_string()
+        return "HotReloadError: {name} ({desc}): {msg}"
+
+    # =========================================================================
+    # Existing Methods
+    # =========================================================================
+
+    pub fn to_string(self) -> String:
+        match self:
+            case HotReloadError::AlreadyWatching:
+                return "Already watching files".to_string()
+            case HotReloadError::NotWatching:
+                return "Not currently watching".to_string()
+            case HotReloadError::IoError(msg):
+                return format("IO error: {}", msg)
+            case HotReloadError::ParseError(msg):
+                return format("Parse error: {}", msg)
+            case HotReloadError::ConnectionError(msg):
+                return format("Connection error: {}", msg)
+
+# =============================================================================
+# File Watcher Implementation
+# =============================================================================
+
+impl FileWatcher:
+    fn new() -> FileWatcher:
+        return FileWatcher {
+            watched_files: Dict::new(),
+            poll_interval_ms: 200  # Poll every 200ms
+        }
+
+# =============================================================================
+# Placeholder Any Type
+# =============================================================================
+
+enum Any:
+    String(String)
+    Int(i64)
+    Float(f64)
+    Bool(bool)
+    Array(Array<Any>)
+    Dict(Dict<String, Any>)
+
+impl Any:
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    pub fn is_string(self) -> bool:
+        """Check if this is a string value."""
+        match self:
+            case String(_): true
+            case _: false
+
+    pub fn is_int(self) -> bool:
+        """Check if this is an integer value."""
+        match self:
+            case Int(_): true
+            case _: false
+
+    pub fn is_float(self) -> bool:
+        """Check if this is a float value."""
+        match self:
+            case Float(_): true
+            case _: false
+
+    pub fn is_bool(self) -> bool:
+        """Check if this is a boolean value."""
+        match self:
+            case Bool(_): true
+            case _: false
+
+    pub fn is_array(self) -> bool:
+        """Check if this is an array value."""
+        match self:
+            case Array(_): true
+            case _: false
+
+    pub fn is_dict(self) -> bool:
+        """Check if this is a dict value."""
+        match self:
+            case Dict(_): true
+            case _: false
+
+    pub fn is_numeric(self) -> bool:
+        """Check if this is a numeric value (int or float)."""
+        self.is_int() or self.is_float()
+
+    pub fn is_container(self) -> bool:
+        """Check if this is a container (array or dict)."""
+        self.is_array() or self.is_dict()
+
+    pub fn to_string(self) -> String:
+        """Convert to string representation."""
+        match self:
+            case String(s): return s
+            case Int(i): return i.to_string()
+            case Float(f): return f.to_string()
+            case Bool(b): return if b: "true" else: "false"
+            case Array(_): return "[Array]"
+            case Dict(_): return "{Dict}"
+
+    pub fn description(self) -> String:
+        """Get description of value type."""
+        match self:
+            case String(_): return "String value"
+            case Int(_): return "Integer value"
+            case Float(_): return "Float value"
+            case Bool(_): return "Boolean value"
+            case Array(_): return "Array value"
+            case Dict(_): return "Dictionary value"

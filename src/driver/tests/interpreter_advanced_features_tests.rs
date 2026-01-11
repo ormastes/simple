@@ -231,8 +231,8 @@ fn may_fail(x) -> Result[int, str]:
     return Ok(x * 2)
 
 fn caller(x):
-    val = may_fail(x)?  # If Err, early return with the error
-    return Ok(val + 1)
+    result = may_fail(x)?  # If Err, early return with the error
+    return Ok(result + 1)
 
 res = caller(5)
 main = res.unwrap()
@@ -252,8 +252,8 @@ fn may_fail(x) -> Result[int, str]:
     return Ok(x * 2)
 
 fn caller(x):
-    val = may_fail(x)?
-    return Ok(val + 1)
+    result = may_fail(x)?
+    return Ok(result + 1)
 
 res = caller(-5)  # Will return Err("negative")
 main = res.unwrap_or(-99)
@@ -410,8 +410,8 @@ fn interpreter_if_let_ok() {
     let code = r#"
 res = Ok(100)
 output = 0
-if let Ok(val) = res:
-    output = val
+if let Ok(value) = res:
+    output = value
 main = output
 "#;
     let result = run_code(code, &[], "").unwrap();
@@ -429,8 +429,8 @@ fn next_item(n):
 
 counter = 3
 sum = 0
-while let Some(val) = next_item(counter):
-    sum = sum + val
+while let Some(value) = next_item(counter):
+    sum = sum + value
     counter = counter - 1
 main = sum  # 3 + 2 + 1 = 6
 "#;

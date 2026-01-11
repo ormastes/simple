@@ -1,0 +1,336 @@
+# UDP Networking - Immutable Variant
+# Functional style UDP with immutable socket state
+
+use units.net.*
+use units.size.*
+use host.common.io.error.IoError
+
+# UDP socket state (immutable)
+struct UdpSocket:
+    handle: i64
+    local_addr: SocketAddr
+    packets_sent: u64
+    packets_received: u64
+
+impl UdpSocket:
+    # Bind to local address
+    pub async fn bind(addr: SocketAddr) -> Result<UdpSocket, IoError>:
+        let handle = native_udp_bind(addr)?
+        return Ok(UdpSocket {
+            handle: handle,
+            local_addr: addr,
+            packets_sent: 0,
+            packets_received: 0
+        })
+
+    fn local_addr(self) -> SocketAddr:
+        self.local_addr
+
+    fn packets_sent(self) -> u64:
+        self.packets_sent
+
+    fn packets_received(self) -> u64:
+        self.packets_received
+
+    # Send datagram, return (bytes_sent, new_socket_state)
+    pub async fn send_to(
+        self,
+        data: Bytes,
+        addr: SocketAddr
+    ) -> Result<(ByteCount, UdpSocket), IoError>:
+        let n = native_udp_send_to(self.handle, &data, addr)?
+        return Ok((n, UdpSocket {
+            handle: self.handle,
+            local_addr: self.local_addr,
+            packets_sent: self.packets_sent + 1,
+            packets_received: self.packets_received
+        }))
+
+    # Receive datagram, return ((data, sender), new_socket_state)
+    pub async fn recv_from(
+        self,
+        max_bytes: ByteCount
+    ) -> Result<((Bytes, SocketAddr), UdpSocket), IoError>:
+        let (data, sender) = native_udp_recv_from(self.handle, max_bytes)?
+        return Ok(((data, sender), UdpSocket {
+            handle: self.handle,
+            local_addr: self.local_addr,
+            packets_sent: self.packets_sent,
+            packets_received: self.packets_received + 1
+        }))
+
+    # Close socket
+    pub async fn close(self) -> Result<(), IoError>:
+        return native_udp_close(self.handle)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_handle(self) -> i64:
+        """Get socket handle.
+
+        Returns:
+            Socket handle identifier
+
+        Example:
+            socket.get_handle()  # → 42
+        """
+        return self.handle
+
+    fn get_local_addr(self) -> SocketAddr:
+        """Get local socket address (alias for local_addr).
+
+        Returns:
+            Local socket address
+
+        Example:
+            socket.get_local_addr()
+        """
+        return self.local_addr()
+
+    fn get_packets_sent(self) -> u64:
+        """Get number of packets sent (alias for packets_sent).
+
+        Returns:
+            Packet count
+
+        Example:
+            socket.get_packets_sent()  # → 42
+        """
+        return self.packets_sent()
+
+    fn get_packets_received(self) -> u64:
+        """Get number of packets received (alias for packets_received).
+
+        Returns:
+            Packet count
+
+        Example:
+            socket.get_packets_received()  # → 100
+        """
+        return self.packets_received()
+
+    fn has_sent_packets(self) -> bool:
+        """Check if socket has sent any packets.
+
+        Returns:
+            true if packets sent
+
+        Example:
+            socket.has_sent_packets()  # → true
+        """
+        return self.packets_sent > 0
+
+    fn has_received_packets(self) -> bool:
+        """Check if socket has received any packets.
+
+        Returns:
+            true if packets received
+
+        Example:
+            socket.has_received_packets()  # → true
+        """
+        return self.packets_received > 0
+
+    fn is_active(self) -> bool:
+        """Check if socket has sent or received packets.
+
+        Returns:
+            true if any activity
+
+        Example:
+            socket.is_active()  # → true
+        """
+        return self.has_sent_packets() or self.has_received_packets()
+
+    fn summary(self) -> String:
+        """Get socket summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            socket.summary()
+            # → "UdpSocket: bound to 0.0.0.0:8080, sent=42, recv=100"
+        """
+        return "UdpSocket: bound to {self.local_addr}, sent={self.packets_sent}, recv={self.packets_received}"
+
+# Connected UDP socket (for repeated sends to same address)
+struct ConnectedUdpSocket:
+    handle: i64
+    local_addr: SocketAddr
+    peer_addr: SocketAddr
+    packets_sent: u64
+    packets_received: u64
+
+impl ConnectedUdpSocket:
+    # Connect UDP socket to remote address
+    pub async fn connect(socket: UdpSocket, addr: SocketAddr) -> Result<ConnectedUdpSocket, IoError>:
+        native_udp_connect(socket.handle, addr)?
+        return Ok(ConnectedUdpSocket {
+            handle: socket.handle,
+            local_addr: socket.local_addr,
+            peer_addr: addr,
+            packets_sent: socket.packets_sent,
+            packets_received: socket.packets_received
+        })
+
+    fn local_addr(self) -> SocketAddr:
+        self.local_addr
+
+    fn peer_addr(self) -> SocketAddr:
+        self.peer_addr
+
+    # Send to connected peer, return (bytes_sent, new_state)
+    pub async fn send(self, data: Bytes) -> Result<(ByteCount, ConnectedUdpSocket), IoError>:
+        let n = native_udp_send(self.handle, &data)?
+        return Ok((n, ConnectedUdpSocket {
+            handle: self.handle,
+            local_addr: self.local_addr,
+            peer_addr: self.peer_addr,
+            packets_sent: self.packets_sent + 1,
+            packets_received: self.packets_received
+        }))
+
+    # Receive from connected peer, return (data, new_state)
+    pub async fn recv(self, max_bytes: ByteCount) -> Result<(Bytes, ConnectedUdpSocket), IoError>:
+        let data = native_udp_recv(self.handle, max_bytes)?
+        return Ok((data, ConnectedUdpSocket {
+            handle: self.handle,
+            local_addr: self.local_addr,
+            peer_addr: self.peer_addr,
+            packets_sent: self.packets_sent,
+            packets_received: self.packets_received + 1
+        }))
+
+    # Close socket
+    pub async fn close(self) -> Result<(), IoError>:
+        return native_udp_close(self.handle)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_handle(self) -> i64:
+        """Get socket handle.
+
+        Returns:
+            Socket handle identifier
+
+        Example:
+            socket.get_handle()  # → 42
+        """
+        return self.handle
+
+    fn get_local_addr(self) -> SocketAddr:
+        """Get local socket address (alias for local_addr).
+
+        Returns:
+            Local socket address
+
+        Example:
+            socket.get_local_addr()
+        """
+        return self.local_addr()
+
+    fn get_peer_addr(self) -> SocketAddr:
+        """Get peer socket address (alias for peer_addr).
+
+        Returns:
+            Peer socket address
+
+        Example:
+            socket.get_peer_addr()
+        """
+        return self.peer_addr()
+
+    fn get_packets_sent(self) -> u64:
+        """Get number of packets sent.
+
+        Returns:
+            Packet count
+
+        Example:
+            socket.get_packets_sent()  # → 42
+        """
+        return self.packets_sent
+
+    fn get_packets_received(self) -> u64:
+        """Get number of packets received.
+
+        Returns:
+            Packet count
+
+        Example:
+            socket.get_packets_received()  # → 100
+        """
+        return self.packets_received
+
+    fn has_sent_packets(self) -> bool:
+        """Check if socket has sent any packets.
+
+        Returns:
+            true if packets sent
+
+        Example:
+            socket.has_sent_packets()  # → true
+        """
+        return self.packets_sent > 0
+
+    fn has_received_packets(self) -> bool:
+        """Check if socket has received any packets.
+
+        Returns:
+            true if packets received
+
+        Example:
+            socket.has_received_packets()  # → true
+        """
+        return self.packets_received > 0
+
+    fn is_active(self) -> bool:
+        """Check if socket has sent or received packets.
+
+        Returns:
+            true if any activity
+
+        Example:
+            socket.is_active()  # → true
+        """
+        return self.has_sent_packets() or self.has_received_packets()
+
+    fn is_connected(self) -> bool:
+        """Check if socket is connected (always true for ConnectedUdpSocket).
+
+        Returns:
+            true (always)
+
+        Example:
+            socket.is_connected()  # → true
+        """
+        return true
+
+    fn summary(self) -> String:
+        """Get connected socket summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            socket.summary()
+            # → "ConnectedUdpSocket: 127.0.0.1:8080 -> 127.0.0.1:9000, sent=42, recv=100"
+        """
+        return "ConnectedUdpSocket: {self.local_addr} -> {self.peer_addr}, sent={self.packets_sent}, recv={self.packets_received}"
+
+# ===============================
+# Native function declarations
+# ===============================
+
+extern fn native_udp_bind(addr: SocketAddr) -> Result<i64, IoError>
+extern fn native_udp_connect(handle: i64, addr: SocketAddr) -> Result<(), IoError>
+extern fn native_udp_send_to(handle: i64, data: &Bytes, addr: SocketAddr) -> Result<ByteCount, IoError>
+extern fn native_udp_recv_from(handle: i64, max: ByteCount) -> Result<(Bytes, SocketAddr), IoError>
+extern fn native_udp_send(handle: i64, data: &Bytes) -> Result<ByteCount, IoError>
+extern fn native_udp_recv(handle: i64, max: ByteCount) -> Result<Bytes, IoError>
+extern fn native_udp_close(handle: i64) -> Result<(), IoError>

@@ -1,0 +1,200 @@
+# Lean Emitter
+# Low-level Lean 4 syntax emission.
+
+# Note: This module provides low-level Lean emission.
+# It accepts simple data structures to avoid circular imports with codegen.
+
+# Lean syntax emitter
+class LeanEmitter:
+    output: String
+    indent_level: Int
+    indent_str: String
+
+    fn new() -> LeanEmitter:
+        LeanEmitter(
+            output: "",
+            indent_level: 0,
+            indent_str: "  "
+        )
+
+    fn indent(mut self):
+        self.indent_level = self.indent_level + 1
+
+    fn dedent(mut self):
+        if self.indent_level > 0:
+            self.indent_level = self.indent_level - 1
+
+    fn get_indent(self) -> String:
+        let mut result = ""
+        for _ in 0..self.indent_level:
+            result = result + self.indent_str
+        result
+
+    fn emit(mut self, text: String):
+        self.output = self.output + text
+
+    fn emit_line(mut self, line: String):
+        self.output = self.output + self.get_indent() + line + "\n"
+
+    fn emit_blank(mut self):
+        self.output = self.output + "\n"
+
+    # Emit a Lean structure definition
+    # structure: object with .name, .fields (list of tuples), .deriving (list of strings)
+    fn emit_structure_data(mut self, name: String, fields: List<(String, String)>, deriving: List<String>):
+        self.emit_line("structure {name} where")
+        self.indent()
+
+        for (field_name, ty) in fields:
+            self.emit_line("{field_name} : {ty}")
+
+        self.dedent()
+
+        if deriving.len() > 0:
+            let derives = deriving.join(", ")
+            self.emit_line("  deriving {derives}")
+
+    # Emit a Lean inductive definition
+    # constructors: list of (name, param_types list)
+    fn emit_inductive_data(mut self, name: String, constructors: List<(String, List<String>)>, deriving: List<String>):
+        self.emit_line("inductive {name} where")
+        self.indent()
+
+        for (ctor_name, params) in constructors:
+            if params.len() == 0:
+                self.emit_line("| {ctor_name}")
+            else:
+                let params_str = params.join(" → ")
+                self.emit_line("| {ctor_name} : {params_str} → {name}")
+
+        self.dedent()
+
+        if deriving.len() > 0:
+            let derives = deriving.join(", ")
+            self.emit_line("  deriving {derives}")
+
+    # Emit a Lean function definition
+    fn emit_function_data(mut self, name: String, params: List<(String, String)>, return_type: String, body: String, is_partial: Bool, termination_measure: Option<String>, use_sorry: Bool):
+        # Build signature
+        let mut sig = ""
+        if is_partial:
+            sig = sig + "partial "
+        sig = sig + "def {name}"
+
+        # Parameters
+        for (param_name, ty) in params:
+            sig = sig + " ({param_name} : {ty})"
+
+        sig = sig + " : {return_type}"
+
+        # Termination measure clause
+        match termination_measure:
+            case Some(expr):
+                self.emit_line(sig)
+                self.emit_line("  decreases {expr}")
+                self.emit_line("  := {body}")
+            case None:
+                self.emit_line("{sig} :=")
+                self.indent()
+                self.emit_line(body)
+                self.dedent()
+
+    # Emit a Lean theorem
+    fn emit_theorem_data(mut self, name: String, params: List<(String, String)>, statement: String, proof: Option<String>, use_sorry: Bool):
+        # Build signature
+        let mut sig = "theorem {name}"
+
+        # Parameters
+        for (param_name, ty) in params:
+            sig = sig + " ({param_name} : {ty})"
+
+        sig = sig + " : {statement}"
+
+        self.emit_line("{sig} := by")
+        self.indent()
+
+        match proof:
+            case Some(p):
+                self.emit_line(p)
+            case None:
+                if use_sorry:
+                    self.emit_line("sorry")
+                else:
+                    self.emit_line("-- TODO: prove this")
+                    self.emit_line("sorry")
+
+        self.dedent()
+
+    # Emit a proposition (for invariants)
+    fn emit_prop(mut self, name: String, ty: String, body: String):
+        self.emit_line("def {name} : {ty} → Prop :=")
+        self.indent()
+        self.emit_line("fun x => {body}")
+        self.dedent()
+
+    # Emit axiom (for trusted functions)
+    fn emit_axiom(mut self, name: String, statement: String):
+        self.emit_line("axiom {name} : {statement}")
+
+    # Emit constant
+    fn emit_constant(mut self, name: String, ty: String, value: String):
+        self.emit_line("def {name} : {ty} := {value}")
+
+    # Emit section
+    fn emit_section(mut self, name: String):
+        self.emit_line("section {name}")
+        self.indent()
+
+    fn emit_end_section(mut self, name: String):
+        self.dedent()
+        self.emit_line("end {name}")
+
+    # Emit variable declaration
+    fn emit_variable(mut self, name: String, ty: String):
+        self.emit_line("variable ({name} : {ty})")
+
+    # Emit comment
+    fn emit_comment(mut self, comment: String):
+        self.emit_line("-- {comment}")
+
+    # Emit doc comment
+    fn emit_doc_comment(mut self, doc: String):
+        self.emit_line("/-- {doc} -/")
+
+    # Get final output
+    fn finish(self) -> String:
+        self.output
+
+# Format a Lean type from Simple type
+fn format_lean_type(simple_type: String) -> String:
+    match simple_type:
+        case "Int": "Int"
+        case "Float": "Float"
+        case "Bool": "Bool"
+        case "String": "String"
+        case "Nil": "Unit"
+        case "()": "Unit"
+        case _:
+            if simple_type.starts_with("List<"):
+                let inner = simple_type[5..simple_type.len()-1]
+                "List {format_lean_type(inner)}"
+            else if simple_type.starts_with("Option<"):
+                let inner = simple_type[7..simple_type.len()-1]
+                "Option {format_lean_type(inner)}"
+            else if simple_type.starts_with("Result<"):
+                # Extract Ok and Err types
+                let inner = simple_type[7..simple_type.len()-1]
+                let parts = inner.split(", ")
+                if parts.len() == 2:
+                    "Except {format_lean_type(parts[1])} {format_lean_type(parts[0])}"
+                else:
+                    simple_type
+            else:
+                simple_type
+
+# Format parameter list for Lean
+fn format_params(params: List<(String, String)>) -> String:
+    let mut result = []
+    for (name, ty) in params:
+        result.append("({name} : {format_lean_type(ty)})")
+    result.join(" ")

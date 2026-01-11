@@ -1,0 +1,525 @@
+///
+Module: sdn.value
+
+SDN runtime value types representing parsed SDN data.
+
+Provides:
+- SdnValue: Enum representing any SDN value
+- Type checking methods (is_null, is_int, etc.)
+- Type conversion methods (as_i64, as_str, etc.)
+- Path navigation (get, get_path)
+- Mutation (insert, push)
+///
+
+# Public exports
+export SdnValue
+
+/// SDN value representing any parsed SDN data
+enum SdnValue:
+    Null
+    Bool(Bool)
+    Int(Int)
+    Float(Float)
+    String(String)
+    Array(List<SdnValue>)
+    Dict(Dict<String, SdnValue>)
+    Table:
+        fields: Option<List<String>>   # Named fields (for named tables)
+        types: Option<List<String>>    # Type names (for typed tables)
+        rows: List<List<SdnValue>>     # Table rows
+
+impl SdnValue:
+    # Constructors
+    fn null() -> SdnValue:
+        return SdnValue.Null
+
+    fn bool_val(b: Bool) -> SdnValue:
+        return SdnValue.Bool(b)
+
+    fn int_val(i: Int) -> SdnValue:
+        return SdnValue.Int(i)
+
+    fn float_val(f: Float) -> SdnValue:
+        return SdnValue.Float(f)
+
+    fn string_val(s: String) -> SdnValue:
+        return SdnValue.String(s)
+
+    fn array_val(values: List<SdnValue>) -> SdnValue:
+        return SdnValue.Array(values)
+
+    fn dict_val() -> SdnValue:
+        return SdnValue.Dict({})
+
+    fn named_table(fields: List<String>, rows: List<List<SdnValue>>) -> SdnValue:
+        return SdnValue.Table(
+            fields: Some(fields),
+            types: None,
+            rows: rows
+        )
+
+    fn typed_table(types: List<String>, rows: List<List<SdnValue>>) -> SdnValue:
+        return SdnValue.Table(
+            fields: None,
+            types: Some(types),
+            rows: rows
+        )
+
+    # Type checking
+    fn is_null(self) -> Bool:
+        match self:
+            case Null:
+                return True
+            case _:
+                return False
+
+    fn is_bool(self) -> Bool:
+        match self:
+            case Bool(_):
+                return True
+            case _:
+                return False
+
+    fn is_int(self) -> Bool:
+        match self:
+            case Int(_):
+                return True
+            case _:
+                return False
+
+    fn is_float(self) -> Bool:
+        match self:
+            case Float(_):
+                return True
+            case _:
+                return False
+
+    fn is_number(self) -> Bool:
+        match self:
+            case Int(_):
+                return True
+            case Float(_):
+                return True
+            case _:
+                return False
+
+    fn is_string(self) -> Bool:
+        match self:
+            case String(_):
+                return True
+            case _:
+                return False
+
+    fn is_array(self) -> Bool:
+        match self:
+            case Array(_):
+                return True
+            case _:
+                return False
+
+    fn is_dict(self) -> Bool:
+        match self:
+            case Dict(_):
+                return True
+            case _:
+                return False
+
+    fn is_table(self) -> Bool:
+        match self:
+            case Table(_, _, _):
+                return True
+            case _:
+                return False
+
+    # Type conversions
+    fn as_bool(self) -> Option<Bool>:
+        match self:
+            case Bool(b):
+                return Some(b)
+            case _:
+                return None
+
+    fn as_i64(self) -> Option<Int>:
+        match self:
+            case Int(i):
+                return Some(i)
+            case _:
+                return None
+
+    fn as_f64(self) -> Option<Float>:
+        match self:
+            case Float(f):
+                return Some(f)
+            case Int(i):
+                # Int can be coerced to Float
+                return Some(i.to_float())
+            case _:
+                return None
+
+    fn as_str(self) -> Option<String>:
+        match self:
+            case String(s):
+                return Some(s)
+            case _:
+                return None
+
+    fn as_array(self) -> Option<List<SdnValue>>:
+        match self:
+            case Array(arr):
+                return Some(arr)
+            case _:
+                return None
+
+    fn as_dict(self) -> Option<Dict<String, SdnValue>>:
+        match self:
+            case Dict(dict):
+                return Some(dict)
+            case _:
+                return None
+
+    # Access methods
+    fn get(self, key: String) -> Option<SdnValue>:
+        """
+        Get value at key (for dicts) or index (for arrays).
+
+        For dicts: returns value at key
+        For arrays: parses key as integer index
+        For other types: returns None
+        """
+        match self:
+            case Dict(dict):
+                return dict.get(key)
+
+            case Array(arr):
+                # Try to parse key as integer index
+                let idx = key.to_int()
+                match idx:
+                    case Some(i):
+                        if i >= 0 and i < arr.len:
+                            return Some(arr[i])
+                        else:
+                            return None
+                    case None:
+                        return None
+
+            case _:
+                return None
+
+    fn get_path(self, path: String) -> Option<SdnValue>:
+        """
+        Get value at a dotted path (e.g., "server.port").
+
+        Splits path on '.' and navigates through the value tree.
+        """
+        let keys = path.split(".")
+        let mut current = self
+
+        for key in keys:
+            match current.get(key):
+                case Some(val):
+                    current = val
+                case None:
+                    return None
+
+        return Some(current)
+
+    # Mutation methods
+    fn insert(mut self, key: String, value: SdnValue) -> Option<SdnValue>:
+        """
+        Insert a value into a dict.
+
+        Returns the previous value if key existed, None otherwise.
+        Only works on Dict values.
+        """
+        match self:
+            case Dict(mut dict):
+                let prev = dict.get(key)
+                dict[key] = value
+                return prev
+
+            case _:
+                return None
+
+    fn push(mut self, value: SdnValue) -> Bool:
+        """
+        Push a value to an array.
+
+        Returns True if successful, False otherwise.
+        Only works on Array values.
+        """
+        match self:
+            case Array(mut arr):
+                arr.push(value)
+                return True
+
+            case _:
+                return False
+
+    # Utility methods
+    fn type_name(self) -> String:
+        """Get the type name of this value"""
+        match self:
+            case Null:
+                return "null"
+            case Bool(_):
+                return "bool"
+            case Int(_):
+                return "int"
+            case Float(_):
+                return "float"
+            case String(_):
+                return "string"
+            case Array(_):
+                return "array"
+            case Dict(_):
+                return "dict"
+            case Table(_, _, _):
+                return "table"
+
+    fn to_string(self) -> String:
+        """Format value as SDN string"""
+        match self:
+            case Null:
+                return "null"
+
+            case Bool(b):
+                return if b: "true" else: "false"
+
+            case Int(i):
+                return i.to_string()
+
+            case Float(f):
+                return f.to_string()
+
+            case String(s):
+                # Quote if contains special chars or spaces
+                if self.needs_quoting(s):
+                    return "\"${self.escape_string(s)}\""
+                else:
+                    return s
+
+            case Array(arr):
+                let parts = []
+                for val in arr:
+                    parts.push(val.to_string())
+                return "[${parts.join(\", \")}]"
+
+            case Dict(dict):
+                let parts = []
+                for (key, val) in dict.items():
+                    parts.push("${key}: ${val.to_string()}")
+                return "{${parts.join(\", \")}}"
+
+            case Table(fields, _, rows):
+                let mut result = ""
+
+                # Add field headers if named table
+                match fields:
+                    case Some(field_list):
+                        result += "|${field_list.join(\", \")}|"
+                    case None:
+                        pass
+
+                # Add rows
+                for row in rows:
+                    result += "\n    "
+                    let parts = []
+                    for val in row:
+                        parts.push(val.to_string())
+                    result += parts.join(", ")
+
+                return result
+
+    # Helper methods for string formatting
+    fn needs_quoting(self, s: String) -> Bool:
+        """Check if string needs quotes"""
+        # Quote if contains whitespace or special chars
+        return s.contains(" ") or s.contains(",") or s.contains(":")
+
+    fn escape_string(self, s: String) -> String:
+        """Escape special characters in string"""
+        let mut result = ""
+        for ch in s.chars():
+            match ch:
+                case '"':
+                    result += "\\\""
+                case '\\':
+                    result += "\\\\"
+                case '\n':
+                    result += "\\n"
+                case '\t':
+                    result += "\\t"
+                case '\r':
+                    result += "\\r"
+                case _:
+                    result += ch
+        return result
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_primitive(self) -> Bool:
+        """Check if value is a primitive (null, bool, int, float, string)."""
+        match self:
+            case Null: True
+            case Bool(_): True
+            case Int(_): True
+            case Float(_): True
+            case String(_): True
+            case _: False
+
+    fn is_collection(self) -> Bool:
+        """Check if value is a collection (array, dict, table)."""
+        match self:
+            case Array(_): True
+            case Dict(_): True
+            case Table(_, _, _): True
+            case _: False
+
+    fn is_truthy(self) -> Bool:
+        """Check if value is truthy (non-null, non-false, non-zero, non-empty)."""
+        match self:
+            case Null: False
+            case Bool(b): b
+            case Int(i): i != 0
+            case Float(f): f != 0.0
+            case String(s): s.len() > 0
+            case Array(arr): arr.len() > 0
+            case Dict(dict): dict.len() > 0
+            case Table(_, _, rows): rows.len() > 0
+
+    fn is_empty(self) -> Bool:
+        """Check if collection is empty (always False for primitives)."""
+        match self:
+            case Array(arr): arr.len() == 0
+            case Dict(dict): dict.len() == 0
+            case Table(_, _, rows): rows.len() == 0
+            case _: False
+
+    fn len(self) -> Option<Int>:
+        """Get length of collection (None for primitives)."""
+        match self:
+            case Array(arr): Some(arr.len())
+            case Dict(dict): Some(dict.len())
+            case Table(_, _, rows): Some(rows.len())
+            case String(s): Some(s.len())
+            case _: None
+
+    fn is_named_table(self) -> Bool:
+        """Check if table has named fields."""
+        match self:
+            case Table(fields, _, _):
+                return fields.is_some()
+            case _:
+                return False
+
+    fn is_typed_table(self) -> Bool:
+        """Check if table has type annotations."""
+        match self:
+            case Table(_, types, _):
+                return types.is_some()
+            case _:
+                return False
+
+    fn has_key(self, key: String) -> Bool:
+        """Check if dict contains key."""
+        match self:
+            case Dict(dict):
+                return dict.contains_key(key)
+            case _:
+                return False
+
+    fn keys(self) -> Option<List<String>>:
+        """Get list of keys (for dict) or None."""
+        match self:
+            case Dict(dict):
+                return Some(dict.keys())
+            case _:
+                return None
+
+    fn values(self) -> Option<List<SdnValue>>:
+        """Get list of values (for dict or array) or None."""
+        match self:
+            case Dict(dict):
+                return Some(dict.values())
+            case Array(arr):
+                return Some(arr)
+            case _:
+                return None
+
+    fn contains(self, value: SdnValue) -> Bool:
+        """Check if array contains value (uses string comparison)."""
+        match self:
+            case Array(arr):
+                for item in arr:
+                    if item.to_string() == value.to_string():
+                        return True
+                return False
+            case _:
+                return False
+
+    fn index_of(self, value: SdnValue) -> Option<Int>:
+        """Find index of value in array."""
+        match self:
+            case Array(arr):
+                for i in 0..arr.len():
+                    if arr[i].to_string() == value.to_string():
+                        return Some(i)
+                return None
+            case _:
+                return None
+
+    fn row_count(self) -> Option<Int>:
+        """Get number of rows in table."""
+        match self:
+            case Table(_, _, rows):
+                return Some(rows.len())
+            case _:
+                return None
+
+    fn column_count(self) -> Option<Int>:
+        """Get number of columns in table."""
+        match self:
+            case Table(fields, _, rows):
+                # Check fields first
+                match fields:
+                    case Some(field_list):
+                        return Some(field_list.len())
+                    case None:
+                        # Check first row
+                        if rows.len() > 0:
+                            return Some(rows[0].len())
+                        else:
+                            return Some(0)
+            case _:
+                return None
+
+    fn summary(self) -> String:
+        """Get summary of SDN value."""
+        let type_name = self.type_name()
+        match self:
+            case Null:
+                return "SdnValue: null"
+            case Bool(b):
+                return "SdnValue: bool ({b})"
+            case Int(i):
+                return "SdnValue: int ({i})"
+            case Float(f):
+                return "SdnValue: float ({f})"
+            case String(s):
+                let preview = if s.len() > 20:
+                    s.slice(0, 20) + "..."
+                else:
+                    s
+                return "SdnValue: string ('{preview}')"
+            case Array(arr):
+                return "SdnValue: array ({arr.len()} elements)"
+            case Dict(dict):
+                return "SdnValue: dict ({dict.len()} entries)"
+            case Table(_, _, rows):
+                return "SdnValue: table ({rows.len()} rows)"
+
+# Create default value (null)
+fn default_sdn_value() -> SdnValue:
+    return SdnValue.Null

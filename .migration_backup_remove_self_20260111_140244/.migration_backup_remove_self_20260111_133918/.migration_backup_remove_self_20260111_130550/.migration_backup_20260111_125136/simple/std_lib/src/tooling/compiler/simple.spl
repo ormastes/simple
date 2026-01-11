@@ -1,0 +1,354 @@
+# Simple Language Compiler Adapter
+# Integrates Simple native compiler with tooling framework
+
+use tooling.core.project.{Language, LanguageConfig}
+use tooling.compiler.interface.{
+    LanguageCompiler,
+    CompilationMode,
+    CompilationResult,
+    Artifact,
+    ArtifactType,
+    CompilationError,
+    ErrorSeverity
+}
+
+# Simple compiler adapter
+pub class SimpleCompiler:
+    pub compiler_path: String
+    pub optimization_level: i32
+
+    pub fn new(): SimpleCompiler =
+        """Create Simple compiler adapter.
+
+        Returns:
+            Compiler with default settings
+
+        Example:
+            let compiler = SimpleCompiler.new()
+            let result = compiler.compile(config, CompilationMode::Release, true)
+        """
+        SimpleCompiler {
+            compiler_path: "simple",  # Use 'simple' from PATH
+            optimization_level: 2
+        }
+
+    pub fn set_compiler_path(self, path: String):
+        """Set path to Simple compiler binary.
+
+        Args:
+            path: Path to compiler
+        """
+        self.compiler_path = path
+
+    pub fn set_optimization_level(self, level: i32):
+        """Set optimization level (0-3).
+
+        Args:
+            level: Optimization level
+        """
+        self.optimization_level = level
+
+    pub fn get_optimization_level(self): i32 =
+        """Get current optimization level.
+
+        Returns:
+            Optimization level (0-3)
+        """
+        self.optimization_level
+
+    pub fn get_build_command(self, mode: CompilationMode, incremental: bool): String =
+        """Get build command for display.
+
+        Args:
+            mode: Compilation mode
+            incremental: Incremental flag
+
+        Returns:
+            Command string
+
+        Example:
+            compiler.get_build_command(CompilationMode::Release, true)
+            # → "simple build --release --opt=2 --incremental"
+        """
+        let mut cmd = "{self.compiler_path} build"
+
+        match mode:
+            CompilationMode::Debug:
+                pass
+            CompilationMode::Release:
+                cmd += " --release"
+            CompilationMode::Profile:
+                cmd += " --profile"
+
+        if self.optimization_level > 0:
+            cmd += " --opt={self.optimization_level}"
+
+        if incremental:
+            cmd += " --incremental"
+
+        cmd
+
+impl LanguageCompiler for SimpleCompiler:
+    fn compile(
+        self,
+        config: LanguageConfig,
+        mode: CompilationMode,
+        incremental: bool
+    ): CompilationResult =
+        """Compile Simple code.
+
+        Args:
+            config: Language configuration
+            mode: Compilation mode (Debug/Release/Profile)
+            incremental: Enable incremental compilation
+
+        Returns:
+            Compilation result with artifacts or errors
+        """
+        @extern("runtime", "rt_time_now_unix_micros")
+        fn _rt_time_now_unix_micros() -> i64
+
+        let result = CompilationResult.new()
+        let start_time = _rt_time_now_unix_micros() / 1000  # Convert microseconds to milliseconds
+
+        # Build compiler command
+        let mut args: List<String> = []
+        args.append("build")
+
+        # Add mode flag
+        match mode:
+            CompilationMode::Debug:
+                pass  # Default
+            CompilationMode::Release:
+                args.append("--release")
+            CompilationMode::Profile:
+                args.append("--profile")
+
+        # Add optimization level
+        if self.optimization_level > 0:
+            args.append("--opt={self.optimization_level}")
+
+        # Add incremental flag
+        if incremental:
+            args.append("--incremental")
+
+        # Add source directory
+        args.append(config.root)
+
+        # Execute compiler
+        # TODO: [stdlib][P3] Use process execution when available
+        # For now, return mock success
+        let output = self.execute_compiler(args)
+
+        # Parse compiler output
+        if output.exit_code == 0:
+            # Success - add artifacts
+            let executable_path = "{config.root}/target/app"
+            let artifact = Artifact.new(
+                executable_path,
+                ArtifactType::Executable,
+                Language::Simple
+            )
+            result.add_artifact(artifact)
+        else:
+            # Failure - parse errors
+            let errors = self.parse_errors(output.stderr)
+            for error in errors:
+                result.add_error(error)
+
+        let end_time = _rt_time_now_unix_micros() / 1000  # Convert microseconds to milliseconds
+        result.duration_ms = end_time - start_time
+
+        result
+
+    fn get_language(self): Language =
+        """Get language type.
+
+        Returns:
+            Language::Simple
+        """
+        Language::Simple
+
+    fn supports_incremental(self): bool =
+        """Check if incremental compilation is supported.
+
+        Returns:
+            True (Simple supports incremental builds)
+        """
+        true
+
+    fn get_executable_extension(self): String =
+        """Get executable file extension.
+
+        Returns:
+            "" on Unix, ".exe" on Windows
+        """
+        # TODO: [stdlib][P3] Detect platform
+        ""
+
+    fn get_library_extension(self): String =
+        """Get library file extension.
+
+        Returns:
+            ".so" on Linux, ".dylib" on macOS, ".dll" on Windows
+        """
+        # TODO: [stdlib][P3] Detect platform
+        ".so"
+
+# Helper types for process execution
+class ProcessOutput:
+    pub exit_code: i32
+    pub stdout: String
+    pub stderr: String
+
+    pub fn new(exit_code: i32, stdout: String, stderr: String): ProcessOutput =
+        ProcessOutput {
+            exit_code: exit_code,
+            stdout: stdout,
+            stderr: stderr
+        }
+
+    pub fn is_success(self): bool =
+        """Check if process succeeded.
+
+        Returns:
+            True if exit code is 0
+        """
+        self.exit_code == 0
+
+    pub fn is_failure(self): bool =
+        """Check if process failed.
+
+        Returns:
+            True if exit code is non-zero
+        """
+        self.exit_code != 0
+
+    pub fn has_stdout(self): bool =
+        """Check if stdout is non-empty.
+
+        Returns:
+            True if stdout has content
+        """
+        not self.stdout.is_empty()
+
+    pub fn has_stderr(self): bool =
+        """Check if stderr is non-empty.
+
+        Returns:
+            True if stderr has content
+        """
+        not self.stderr.is_empty()
+
+    pub fn summary(self): String =
+        """Get process output summary.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            output.summary()
+            # → "Exit code: 0, stdout: 1234 bytes, stderr: 0 bytes"
+        """
+        "Exit code: {self.exit_code}, stdout: {self.stdout.len()} bytes, stderr: {self.stderr.len()} bytes"
+
+# Helper methods
+impl SimpleCompiler:
+    fn execute_compiler(self, args: List<String>): ProcessOutput =
+        """Execute Simple compiler.
+
+        Args:
+            args: Compiler arguments
+
+        Returns:
+            Process output
+        """
+        # TODO: [stdlib][P1] Implement actual process execution
+        # For now, return mock success
+        ProcessOutput.new(0, "", "")
+
+    fn parse_errors(self, stderr: String): List<CompilationError> =
+        """Parse compiler error output.
+
+        Args:
+            stderr: Compiler stderr output
+
+        Returns:
+            List of parsed errors
+
+        Error format: file:line:column: severity: message
+        Example: src/main.spl:10:5: error: undefined variable
+        """
+        let errors: List<CompilationError> = []
+
+        let lines = stderr.split("\n")
+        for line in lines:
+            if line.trim().is_empty():
+                continue
+
+            # Parse error line
+            let parts = line.split(":")
+            if parts.len() >= 5:
+                let file = parts[0].trim()
+                let line_num = self.parse_int(parts[1].trim())
+                let column = self.parse_int(parts[2].trim())
+                let severity_str = parts[3].trim()
+                let message = parts[4..].join(":").trim()
+
+                let severity = match severity_str:
+                    "error": ErrorSeverity::Error
+                    "warning": ErrorSeverity::Warning
+                    "info": ErrorSeverity::Info
+                    _: ErrorSeverity::Error
+
+                let error = CompilationError.new(
+                    file: file,
+                    line: line_num,
+                    column: column,
+                    message: message,
+                    severity: severity,
+                    language: Language::Simple
+                )
+                errors.append(error)
+
+        errors
+
+    fn parse_int(self, s: String): i32 =
+        """Parse integer from string.
+
+        Args:
+            s: String to parse
+
+        Returns:
+            Parsed integer or 0
+        """
+        # Simple integer parsing implementation
+        let trimmed = s.trim()
+        if trimmed.is_empty():
+            return 0
+
+        var result: i32 = 0
+        var negative = false
+        var start_idx = 0
+
+        # Check for sign
+        if trimmed[0] == '-':
+            negative = true
+            start_idx = 1
+        elif trimmed[0] == '+':
+            start_idx = 1
+
+        # Parse digits
+        for i in start_idx..trimmed.len():
+            let ch = trimmed[i]
+            if ch >= '0' and ch <= '9':
+                let digit = (ch as i32) - ('0' as i32)
+                result = result * 10 + digit
+            else:
+                # Invalid character, return what we have so far
+                break
+
+        if negative:
+            return -result
+        else:
+            return result

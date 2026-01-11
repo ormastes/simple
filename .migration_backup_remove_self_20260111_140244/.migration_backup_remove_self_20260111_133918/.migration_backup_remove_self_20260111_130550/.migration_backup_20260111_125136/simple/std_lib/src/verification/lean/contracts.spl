@@ -1,0 +1,174 @@
+# Lean Contract Translation
+#
+# Translates contracts to Lean propositions and theorems.
+
+import verification.lean.emitter as emit
+import verification.models.contracts as c
+
+# Contract clause as Lean proposition
+class LeanProp:
+    name: String
+    params: List<(String, String)>  # (name, type)
+    body: String
+
+    fn create(name: String, params: List<(String, String)>, body: String) -> LeanProp:
+        return LeanProp(name, params, body)
+
+    fn emit(self, builder: emit.LeanBuilder) -> emit.LeanBuilder:
+        param_strs = ["(" + n + " : " + t + ")" for (n, t) in self.params]
+        params_str = param_strs.join(" ")
+        sig = "def " + self.name
+        if len(self.params) > 0:
+            sig = sig + " " + params_str
+        sig = sig + " : Prop :="
+        b = builder.line(sig)
+        b = b.push_indent()
+        b = b.line(self.body)
+        b = b.pop_indent()
+        return b
+
+# Theorem from contract
+class LeanTheorem:
+    name: String
+    params: List<(String, String)>
+    proposition: String
+    proof: String
+
+    fn create(name: String, params: List<(String, String)>, proposition: String, proof: String = "sorry") -> LeanTheorem:
+        return LeanTheorem(name, params, proposition, proof)
+
+    fn emit(self, builder: emit.LeanBuilder) -> emit.LeanBuilder:
+        # Split proof by newlines and use multiline emitter if multiple lines
+        proof_lines = self.proof.split("\n")
+        if len(proof_lines) > 1:
+            return emit.emit_theorem_multiline(builder, self.name, self.params, self.proposition, proof_lines)
+        return emit.emit_theorem(builder, self.name, self.params, self.proposition, self.proof)
+
+# Theorem with implicit parameters
+class LeanTheoremImplicit:
+    name: String
+    implicit_params: List<(String, String)>
+    explicit_params: List<(String, String)>
+    proposition: String
+    proof_lines: List<String>
+
+    fn create(name: String, implicit_params: List<(String, String)>, explicit_params: List<(String, String)>, proposition: String, proof_lines: List<String>) -> LeanTheoremImplicit:
+        return LeanTheoremImplicit(name, implicit_params, explicit_params, proposition, proof_lines)
+
+    fn emit(self, builder: emit.LeanBuilder) -> emit.LeanBuilder:
+        return emit.emit_theorem_implicit(builder, self.name, self.implicit_params, self.explicit_params, self.proposition, self.proof_lines)
+
+# Translate contract expression to Lean
+fn translate_contract_expr(expr: c.ContractExpr) -> String:
+    match expr:
+        case ValExpr(v):
+            return translate_val(v)
+        case VarExpr(name):
+            return name
+        case OldExpr(e):
+            return "old_" + translate_contract_expr(e)
+        case RetExpr:
+            return "result"
+        case ErrExpr:
+            return "err"
+        case BinOpExpr(op, left, right):
+            l = translate_contract_expr(left)
+            r = translate_contract_expr(right)
+            lean_op = translate_binop(op)
+            return "(" + l + " " + lean_op + " " + r + ")"
+        case UnOpExpr(op, e):
+            inner = translate_contract_expr(e)
+            lean_op = translate_unop(op)
+            return lean_op + inner
+        case FieldExpr(e, field):
+            inner = translate_contract_expr(e)
+            return inner + "." + field
+        case CallExpr(fn_name, args):
+            arg_strs = [translate_contract_expr(a) for a in args]
+            return fn_name + " " + arg_strs.join(" ")
+
+fn translate_val(v: c.Val) -> String:
+    match v:
+        case IntVal(n): return str(n)
+        case BoolVal(b):
+            if b:
+                return "true"
+            else:
+                return "false"
+        case StrVal(s): return "\"" + s + "\""
+        case NilVal: return "none"
+        case ErrorVal(tag, _): return "error \"" + tag + "\""
+
+fn translate_binop(op: String) -> String:
+    match op:
+        case "+": return "+"
+        case "-": return "-"
+        case "*": return "*"
+        case "/": return "/"
+        case "==": return "="
+        case "!=": return "≠"
+        case "<": return "<"
+        case "<=": return "≤"
+        case ">": return ">"
+        case ">=": return "≥"
+        case "&&": return "∧"
+        case "||": return "∨"
+        case _: return op
+
+fn translate_unop(op: String) -> String:
+    match op:
+        case "-": return "-"
+        case "!": return "¬"
+        case "not": return "¬"
+        case _: return op
+
+# Generate invariant proposition
+fn generate_invariant_prop(type_name: String, clauses: List<c.ContractClause>) -> LeanProp:
+    if len(clauses) == 0:
+        body = "True"
+    elif len(clauses) == 1:
+        body = translate_contract_expr(clauses[0].condition)
+    else:
+        parts = [translate_contract_expr(cl.condition) for cl in clauses]
+        body = parts.join(" ∧ ")
+
+    return LeanProp.create("inv_" + type_name, [("self", type_name)], body)
+
+# Generate precondition theorem
+fn generate_precondition_theorem(fn_name: String, contract: c.FunctionContract, params: List<(String, String)>) -> LeanTheorem | None:
+    if len(contract.preconditions) == 0:
+        return None
+
+    parts = [translate_contract_expr(cl.condition) for cl in contract.preconditions]
+    prop = parts.join(" ∧ ")
+
+    return LeanTheorem.create(fn_name + "_pre", params, prop)
+
+# Generate postcondition theorem
+fn generate_postcondition_theorem(fn_name: String, contract: c.FunctionContract, params: List<(String, String)>, ret_type: String) -> LeanTheorem | None:
+    if len(contract.postconditions) == 0:
+        return None
+
+    # Add result parameter
+    full_params = params.append(("result", ret_type))
+
+    parts = [translate_contract_expr(cl.condition) for cl in contract.postconditions]
+    prop = parts.join(" ∧ ")
+
+    return LeanTheorem.create(fn_name + "_post", full_params, prop)
+
+# Generate full contract verification theorem
+fn generate_contract_theorem(fn_name: String, contract: c.FunctionContract, params: List<(String, String)>, ret_type: String) -> LeanTheorem:
+    pre_parts = [translate_contract_expr(cl.condition) for cl in contract.preconditions]
+    post_parts = [translate_contract_expr(cl.condition) for cl in contract.postconditions]
+
+    pre = "True"
+    if len(pre_parts) > 0:
+        pre = pre_parts.join(" ∧ ")
+    post = "True"
+    if len(post_parts) > 0:
+        post = post_parts.join(" ∧ ")
+
+    prop = pre + " → ∃ result : " + ret_type + ", " + post
+
+    return LeanTheorem.create(fn_name + "_contract", params, prop)

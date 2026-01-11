@@ -1,0 +1,1396 @@
+# Regex - Regular expression support for Simple
+# Pattern matching and text processing with NFA-based engine
+
+# =========================================================================
+# Internal Regex Engine - NFA-based implementation
+# =========================================================================
+
+# Regex AST node types
+class RegexNode:
+    """Base class for regex AST nodes."""
+    node_type: String  # For debugging
+
+class LiteralNode(RegexNode):
+    char: String  # Single character
+
+    fn new(c: String) -> LiteralNode:
+        return LiteralNode { char: c }
+
+class CharClassNode(RegexNode):
+    chars: List<String>   # Individual characters
+    ranges: List<(String, String)>  # Character ranges like a-z
+    negated: Bool         # True for [^...]
+
+    fn new() -> CharClassNode:
+        return CharClassNode { chars: [], ranges: [], negated: false }
+
+    fn matches(self, c: String) -> Bool:
+        let mut found = false
+
+        # Check individual characters
+        for ch in self.chars:
+            if ch == c:
+                found = true
+                break
+
+        # Check ranges
+        if not found:
+            for range in self.ranges:
+                let start = range[0]
+                let end = range[1]
+                if c >= start and c <= end:
+                    found = true
+                    break
+
+        return if self.negated: not found else: found
+
+class ConcatNode(RegexNode):
+    left: RegexNode
+    right: RegexNode
+
+    fn new(l: RegexNode, r: RegexNode) -> ConcatNode:
+        return ConcatNode { left: l, right: r }
+
+class AltNode(RegexNode):
+    left: RegexNode
+    right: RegexNode
+
+    fn new(l: RegexNode, r: RegexNode) -> AltNode:
+        return AltNode { left: l, right: r }
+
+class StarNode(RegexNode):
+    child: RegexNode
+    greedy: Bool
+
+    fn new(c: RegexNode, g: Bool = true) -> StarNode:
+        return StarNode { child: c, greedy: g }
+
+class PlusNode(RegexNode):
+    child: RegexNode
+    greedy: Bool
+
+    fn new(c: RegexNode, g: Bool = true) -> PlusNode:
+        return PlusNode { child: c, greedy: g }
+
+class QuestionNode(RegexNode):
+    child: RegexNode
+    greedy: Bool
+
+    fn new(c: RegexNode, g: Bool = true) -> QuestionNode:
+        return QuestionNode { child: c, greedy: g }
+
+class QuantNode(RegexNode):
+    child: RegexNode
+    min: i32
+    max: i32  # -1 for infinity
+    greedy: Bool
+
+    fn new(c: RegexNode, min_v: i32, max_v: i32, g: Bool = true) -> QuantNode:
+        return QuantNode { child: c, min: min_v, max: max_v, greedy: g }
+
+class GroupNode(RegexNode):
+    child: RegexNode
+    group_id: i32  # Capture group number
+
+    fn new(c: RegexNode, gid: i32) -> GroupNode:
+        return GroupNode { child: c, group_id: gid }
+
+class AnchorNode(RegexNode):
+    anchor_type: String  # "start" or "end" or "word_boundary"
+
+    fn new(t: String) -> AnchorNode:
+        return AnchorNode { anchor_type: t }
+
+# NFA State
+class NFAState:
+    state_id: i32
+    transitions: List<(String, i32)>  # (char, target_state_id)
+    epsilon_transitions: List<i32>    # epsilon transitions (no input consumed)
+    is_accept: Bool
+    group_start: i32  # -1 if not a group start, else group id
+    group_end: i32    # -1 if not a group end, else group id
+
+    fn new(sid: i32) -> NFAState:
+        return NFAState {
+            state_id: sid,
+            transitions: [],
+            epsilon_transitions: [],
+            is_accept: false,
+            group_start: -1,
+            group_end: -1
+        }
+
+    fn add_transition(self, char: String, target: i32) -> NFAState:
+        let mut new_transitions = self.transitions
+        new_transitions.append((char, target))
+        return NFAState {
+            state_id: self.state_id,
+            transitions: new_transitions,
+            epsilon_transitions: self.epsilon_transitions,
+            is_accept: self.is_accept,
+            group_start: self.group_start,
+            group_end: self.group_end
+        }
+
+    fn add_epsilon(self, target: i32) -> NFAState:
+        let mut new_eps = self.epsilon_transitions
+        new_eps.append(target)
+        return NFAState {
+            state_id: self.state_id,
+            transitions: self.transitions,
+            epsilon_transitions: new_eps,
+            is_accept: self.is_accept,
+            group_start: self.group_start,
+            group_end: self.group_end
+        }
+
+# NFA Fragment (used during construction)
+class NFAFragment:
+    start: i32      # Start state ID
+    end: i32        # End state ID (dangling, needs to be connected)
+
+    fn new(s: i32, e: i32) -> NFAFragment:
+        return NFAFragment { start: s, end: e }
+
+# Complete NFA
+class NFA:
+    states: List<NFAState>
+    start_state: i32
+    num_groups: i32
+
+    fn new() -> NFA:
+        return NFA { states: [], start_state: 0, num_groups: 0 }
+
+    fn add_state(self) -> (NFA, i32):
+        let sid = self.states.len()
+        let mut new_states = self.states
+        new_states.append(NFAState.new(sid))
+        let new_nfa = NFA { states: new_states, start_state: self.start_state, num_groups: self.num_groups }
+        return (new_nfa, sid)
+
+    fn get_state(self, sid: i32) -> NFAState:
+        return self.states[sid]
+
+    fn update_state(self, sid: i32, new_state: NFAState) -> NFA:
+        let mut new_states = []
+        for i in range(0, self.states.len()):
+            if i == sid:
+                new_states.append(new_state)
+            else:
+                new_states.append(self.states[i])
+        return NFA { states: new_states, start_state: self.start_state, num_groups: self.num_groups }
+
+    fn set_accept(self, sid: i32) -> NFA:
+        let mut state = self.states[sid]
+        let new_state = NFAState {
+            state_id: state.state_id,
+            transitions: state.transitions,
+            epsilon_transitions: state.epsilon_transitions,
+            is_accept: true,
+            group_start: state.group_start,
+            group_end: state.group_end
+        }
+        return self.update_state(sid, new_state)
+
+    fn set_group_start(self, sid: i32, group_id: i32) -> NFA:
+        let mut state = self.states[sid]
+        let new_state = NFAState {
+            state_id: state.state_id,
+            transitions: state.transitions,
+            epsilon_transitions: state.epsilon_transitions,
+            is_accept: state.is_accept,
+            group_start: group_id,
+            group_end: state.group_end
+        }
+        return self.update_state(sid, new_state)
+
+    fn set_group_end(self, sid: i32, group_id: i32) -> NFA:
+        let mut state = self.states[sid]
+        let new_state = NFAState {
+            state_id: state.state_id,
+            transitions: state.transitions,
+            epsilon_transitions: state.epsilon_transitions,
+            is_accept: state.is_accept,
+            group_start: state.group_start,
+            group_end: group_id
+        }
+        return self.update_state(sid, new_state)
+
+    fn set_num_groups(self, ng: i32) -> NFA:
+        return NFA { states: self.states, start_state: self.start_state, num_groups: ng }
+
+    fn add_transition_to(self, sid: i32, char: String, target: i32) -> NFA:
+        let state = self.states[sid]
+        let new_state = state.add_transition(char, target)
+        return self.update_state(sid, new_state)
+
+    fn add_epsilon_to(self, sid: i32, target: i32) -> NFA:
+        let state = self.states[sid]
+        let new_state = state.add_epsilon(target)
+        return self.update_state(sid, new_state)
+
+# Regex Parser - redesigned for pass-by-value semantics
+class RegexParser:
+    pattern: String
+
+    fn new(p: String) -> RegexParser:
+        return RegexParser { pattern: p }
+
+    fn peek_at(self, pos: i32) -> Option<String>:
+        if pos >= self.pattern.len():
+            return None
+        return Some(self.pattern[pos])
+
+    fn advance_from(self, pos: i32) -> (Option<String>, i32):
+        let c = self.peek_at(pos)
+        if c.is_some():
+            return (c, pos + 1)
+        return (None, pos)
+
+    fn parse(self) -> RegexNode:
+        let (node, _final_pos, _group_count) = self.parse_alternation(0, 0)
+        return node
+
+    fn parse_alternation(self, pos: i32, group_count: i32) -> (RegexNode, i32, i32):
+        let (mut left, mut current_pos, mut gc) = self.parse_concat(pos, group_count)
+
+        while self.peek_at(current_pos) == Some("|"):
+            current_pos = current_pos + 1  # consume |
+            let (right, new_pos, new_gc) = self.parse_concat(current_pos, gc)
+            left = AltNode.new(left, right)
+            current_pos = new_pos
+            gc = new_gc
+
+        return (left, current_pos, gc)
+
+    fn parse_concat(self, pos: i32, group_count: i32) -> (RegexNode, i32, i32):
+        let mut nodes = []
+        let mut current_pos = pos
+        let mut gc = group_count
+
+        while true:
+            let c = self.peek_at(current_pos)
+            if c.is_none() or c == Some("|") or c == Some(")"):
+                break
+
+            let (node, new_pos, new_gc) = self.parse_quantified(current_pos, gc)
+            nodes.append(node)
+            current_pos = new_pos
+            gc = new_gc
+
+        if nodes.len() == 0:
+            # Empty pattern - match empty string
+            return (LiteralNode.new(""), current_pos, gc)
+
+        if nodes.len() == 1:
+            return (nodes[0], current_pos, gc)
+
+        # Build concatenation tree (left-associative)
+        let mut result = nodes[0]
+        for i in range(1, nodes.len()):
+            result = ConcatNode.new(result, nodes[i])
+
+        return (result, current_pos, gc)
+
+    fn parse_quantified(self, pos: i32, group_count: i32) -> (RegexNode, i32, i32):
+        let (mut node, mut current_pos, mut gc) = self.parse_atom(pos, group_count)
+
+        # Check for quantifiers
+        let c = self.peek_at(current_pos)
+        if c == Some("*"):
+            current_pos = current_pos + 1
+            let greedy = self.peek_at(current_pos) != Some("?")
+            if not greedy:
+                current_pos = current_pos + 1
+            node = StarNode.new(node, greedy)
+        elif c == Some("+"):
+            current_pos = current_pos + 1
+            let greedy = self.peek_at(current_pos) != Some("?")
+            if not greedy:
+                current_pos = current_pos + 1
+            node = PlusNode.new(node, greedy)
+        elif c == Some("?"):
+            current_pos = current_pos + 1
+            let greedy = self.peek_at(current_pos) != Some("?")
+            if not greedy:
+                current_pos = current_pos + 1
+            node = QuestionNode.new(node, greedy)
+        elif c == Some("{{"):
+            # Quantifier {n,m}
+            current_pos = current_pos + 1
+            let (min_v, max_v, new_pos) = self.parse_quantifier_range(current_pos)
+            current_pos = new_pos
+            let greedy = self.peek_at(current_pos) != Some("?")
+            if not greedy:
+                current_pos = current_pos + 1
+            node = QuantNode.new(node, min_v, max_v, greedy)
+
+        return (node, current_pos, gc)
+
+    fn parse_quantifier_range(self, pos: i32) -> (i32, i32, i32):
+        # Parse {n}, {n,}, or {n,m}
+        let mut num_str = ""
+        let mut current_pos = pos
+
+        while self.peek_at(current_pos) != Some(",") and self.peek_at(current_pos) != Some("}}"):
+            let (ch, new_pos) = self.advance_from(current_pos)
+            num_str = num_str + ch.unwrap()
+            current_pos = new_pos
+
+        let min_v = num_str.to_int()
+
+        if self.peek_at(current_pos) == Some(","):
+            current_pos = current_pos + 1  # consume ,
+
+            if self.peek_at(current_pos) == Some("}}"):
+                # {n,} - n or more
+                current_pos = current_pos + 1  # consume }
+                return (min_v, -1, current_pos)
+
+            num_str = ""
+            while self.peek_at(current_pos) != Some("}}"):
+                let (ch, new_pos) = self.advance_from(current_pos)
+                num_str = num_str + ch.unwrap()
+                current_pos = new_pos
+
+            current_pos = current_pos + 1  # consume }
+            return (min_v, num_str.to_int(), current_pos)
+
+        current_pos = current_pos + 1  # consume }
+        return (min_v, min_v, current_pos)  # {n} - exactly n
+
+    fn parse_atom(self, pos: i32, group_count: i32) -> (RegexNode, i32, i32):
+        let c = self.peek_at(pos)
+
+        if c.is_none():
+            # Empty - shouldn't happen in well-formed regex
+            return (LiteralNode.new(""), pos, group_count)
+
+        let ch = c.unwrap()
+        let mut current_pos = pos
+        let mut gc = group_count
+
+        # Anchors
+        if ch == "^":
+            current_pos = current_pos + 1
+            return (AnchorNode.new("start"), current_pos, gc)
+
+        if ch == "$":
+            current_pos = current_pos + 1
+            return (AnchorNode.new("end"), current_pos, gc)
+
+        # Groups
+        if ch == "(":
+            current_pos = current_pos + 1
+
+            # Check for non-capturing group
+            if self.peek_at(current_pos) == Some("?") and self.peek_at(current_pos + 1) == Some(":"):
+                current_pos = current_pos + 2  # skip ?:
+                let (child, new_pos, new_gc) = self.parse_alternation(current_pos, gc)
+                current_pos = new_pos
+                if self.peek_at(current_pos) == Some(")"):
+                    current_pos = current_pos + 1
+                return (child, current_pos, new_gc)  # Non-capturing group
+
+            # Capturing group
+            gc = gc + 1
+            let gid = gc
+            let (child, new_pos, new_gc) = self.parse_alternation(current_pos, gc)
+            current_pos = new_pos
+            gc = new_gc
+            if self.peek_at(current_pos) == Some(")"):
+                current_pos = current_pos + 1
+            return (GroupNode.new(child, gid), current_pos, gc)
+
+        # Character classes
+        if ch == "[":
+            let (cc, new_pos) = self.parse_char_class(current_pos)
+            return (cc, new_pos, gc)
+
+        # Escaped characters
+        if ch == "\\":
+            current_pos = current_pos + 1
+            let (node, new_pos) = self.parse_escape(current_pos)
+            return (node, new_pos, gc)
+
+        # Wildcard
+        if ch == ".":
+            current_pos = current_pos + 1
+            # Match any character except newline
+            let cc = CharClassNode.new()
+            cc.negated = true
+            cc.chars.append("\n")
+            return (cc, current_pos, gc)
+
+        # Literal character
+        current_pos = current_pos + 1
+        return (LiteralNode.new(ch), current_pos, gc)
+
+    fn parse_char_class(self, pos: i32) -> (CharClassNode, i32):
+        let mut current_pos = pos + 1  # consume [
+        let cc = CharClassNode.new()
+
+        # Check for negation
+        if self.peek_at(current_pos) == Some("^"):
+            current_pos = current_pos + 1
+            cc.negated = true
+
+        while self.peek_at(current_pos) != Some("]") and self.peek_at(current_pos).is_some():
+            let (c_opt, new_pos) = self.advance_from(current_pos)
+            let c = c_opt.unwrap()
+            current_pos = new_pos
+
+            # Check for range
+            if self.peek_at(current_pos) == Some("-") and self.peek_at(current_pos + 1) != Some("]"):
+                current_pos = current_pos + 1  # consume -
+                let (end_char_opt, new_pos2) = self.advance_from(current_pos)
+                let end_char = end_char_opt.unwrap()
+                current_pos = new_pos2
+                cc.ranges.append((c, end_char))
+            else:
+                cc.chars.append(c)
+
+        if self.peek_at(current_pos) == Some("]"):
+            current_pos = current_pos + 1  # consume ]
+
+        return (cc, current_pos)
+
+    fn parse_escape(self, pos: i32) -> (RegexNode, i32):
+        let (c, new_pos) = self.advance_from(pos)
+
+        if c.is_none():
+            return (LiteralNode.new("\\"), pos)
+
+        let ch = c.unwrap()
+
+        # Predefined character classes
+        if ch == "d":
+            # Digits [0-9]
+            let cc = CharClassNode.new()
+            cc.ranges.append(("0", "9"))
+            return (cc, new_pos)
+
+        if ch == "D":
+            # Non-digits
+            let cc = CharClassNode.new()
+            cc.ranges.append(("0", "9"))
+            cc.negated = true
+            return (cc, new_pos)
+
+        if ch == "w":
+            # Word characters [a-zA-Z0-9_]
+            let cc = CharClassNode.new()
+            cc.ranges.append(("a", "z"))
+            cc.ranges.append(("A", "Z"))
+            cc.ranges.append(("0", "9"))
+            cc.chars.append("_")
+            return (cc, new_pos)
+
+        if ch == "W":
+            # Non-word characters
+            let cc = CharClassNode.new()
+            cc.ranges.append(("a", "z"))
+            cc.ranges.append(("A", "Z"))
+            cc.ranges.append(("0", "9"))
+            cc.chars.append("_")
+            cc.negated = true
+            return (cc, new_pos)
+
+        if ch == "s":
+            # Whitespace
+            let cc = CharClassNode.new()
+            cc.chars.append(" ")
+            cc.chars.append("\t")
+            cc.chars.append("\n")
+            cc.chars.append("\r")
+            return (cc, new_pos)
+
+        if ch == "S":
+            # Non-whitespace
+            let cc = CharClassNode.new()
+            cc.chars.append(" ")
+            cc.chars.append("\t")
+            cc.chars.append("\n")
+            cc.chars.append("\r")
+            cc.negated = true
+            return (cc, new_pos)
+
+        if ch == "b":
+            # Word boundary
+            return (AnchorNode.new("word_boundary"), new_pos)
+
+        if ch == "B":
+            # Non-word boundary
+            return (AnchorNode.new("non_word_boundary"), new_pos)
+
+        if ch == "n":
+            return (LiteralNode.new("\n"), new_pos)
+
+        if ch == "t":
+            return (LiteralNode.new("\t"), new_pos)
+
+        if ch == "r":
+            return (LiteralNode.new("\r"), new_pos)
+
+        # Escaped special character - treat as literal
+        return (LiteralNode.new(ch), new_pos)
+
+# NFA Builder using Thompson's construction
+class NFABuilder:
+    # Stateless builder - NFA is passed explicitly
+
+    fn new() -> NFABuilder:
+        return NFABuilder {}
+
+    fn build(self, ast: RegexNode) -> NFA:
+        let mut nfa = NFA.new()
+        let (nfa1, frag) = self.build_fragment(nfa, ast)
+
+        # Make the end state accept
+        let nfa2 = nfa1.set_accept(frag.end)
+
+        # Set start state
+        let final_nfa = NFA { states: nfa2.states, start_state: frag.start, num_groups: nfa2.num_groups }
+
+        return final_nfa
+
+    fn build_fragment(self, mut nfa: NFA, node: RegexNode) -> (NFA, NFAFragment):
+        # Literal
+        if node is LiteralNode:
+            let lit = node as LiteralNode
+            let (nfa1, start) = nfa.add_state()
+            let (nfa2, end) = nfa1.add_state()
+
+            if lit.char.len() > 0:
+                let nfa3 = nfa2.add_transition_to(start, lit.char, end)
+                return (nfa3, NFAFragment.new(start, end))
+            else:
+                # Empty literal - epsilon transition
+                let nfa3 = nfa2.add_epsilon_to(start, end)
+                return (nfa3, NFAFragment.new(start, end))
+
+        # Character class
+        if node is CharClassNode:
+            let cc = node as CharClassNode
+            let (nfa1, start) = nfa.add_state()
+            let (nfa2, end) = nfa1.add_state()
+
+            # For char class, we create transitions for each possible character
+            # In practice, we'd optimize this, but for now we'll match during execution
+            # Add a marker transition
+            let nfa3 = nfa2.add_transition_to(start, "__CHARCLASS__", end)
+            # Store the char class in the state (we'll extend NFAState to hold this)
+
+            return (nfa3, NFAFragment.new(start, end))
+
+        # Concatenation
+        if node is ConcatNode:
+            let concat = node as ConcatNode
+            let (nfa1, left_frag) = self.build_fragment(nfa, concat.left)
+            let (nfa2, right_frag) = self.build_fragment(nfa1, concat.right)
+
+            # Connect left end to right start
+            let nfa3 = nfa2.add_epsilon_to(left_frag.end, right_frag.start)
+
+            return (nfa3, NFAFragment.new(left_frag.start, right_frag.end))
+
+        # Alternation
+        if node is AltNode:
+            let alt = node as AltNode
+            let (nfa1, left_frag) = self.build_fragment(nfa, alt.left)
+            let (nfa2, right_frag) = self.build_fragment(nfa1, alt.right)
+
+            let (nfa3, start) = nfa2.add_state()
+            let (nfa4, end) = nfa3.add_state()
+
+            # Split from start to both alternatives
+            let nfa5 = nfa4.add_epsilon_to(start, left_frag.start)
+            let nfa6 = nfa5.add_epsilon_to(start, right_frag.start)
+
+            # Join both ends
+            let nfa7 = nfa6.add_epsilon_to(left_frag.end, end)
+            let nfa8 = nfa7.add_epsilon_to(right_frag.end, end)
+
+            return (nfa8, NFAFragment.new(start, end))
+
+        # Star (zero or more)
+        if node is StarNode:
+            let star = node as StarNode
+            let (nfa1, child_frag) = self.build_fragment(nfa, star.child)
+
+            let (nfa2, start) = nfa1.add_state()
+            let (nfa3, end) = nfa2.add_state()
+
+            # Start can skip to end (zero matches)
+            let nfa4 = nfa3.add_epsilon_to(start, child_frag.start)
+            let nfa5 = nfa4.add_epsilon_to(start, end)
+
+            # Child end loops back to start
+            let nfa6 = nfa5.add_epsilon_to(child_frag.end, child_frag.start)
+            let nfa7 = nfa6.add_epsilon_to(child_frag.end, end)
+
+            return (nfa7, NFAFragment.new(start, end))
+
+        # Plus (one or more)
+        if node is PlusNode:
+            let plus = node as PlusNode
+            let (nfa1, child_frag) = self.build_fragment(nfa, plus.child)
+
+            let (nfa2, start) = nfa1.add_state()
+            let (nfa3, end) = nfa2.add_state()
+
+            # Must match at least once
+            let nfa4 = nfa3.add_epsilon_to(start, child_frag.start)
+
+            # Child end can loop back or finish
+            let nfa5 = nfa4.add_epsilon_to(child_frag.end, child_frag.start)
+            let nfa6 = nfa5.add_epsilon_to(child_frag.end, end)
+
+            return (nfa6, NFAFragment.new(start, end))
+
+        # Question (zero or one)
+        if node is QuestionNode:
+            let quest = node as QuestionNode
+            let (nfa1, child_frag) = self.build_fragment(nfa, quest.child)
+
+            let (nfa2, start) = nfa1.add_state()
+            let (nfa3, end) = nfa2.add_state()
+
+            # Can skip child or match once
+            let nfa4 = nfa3.add_epsilon_to(start, child_frag.start)
+            let nfa5 = nfa4.add_epsilon_to(start, end)
+
+            let nfa6 = nfa5.add_epsilon_to(child_frag.end, end)
+
+            return (nfa6, NFAFragment.new(start, end))
+
+        # Group
+        if node is GroupNode:
+            let group = node as GroupNode
+            let (nfa1, child_frag) = self.build_fragment(nfa, group.child)
+
+            let (nfa2, start) = nfa1.add_state()
+            let (nfa3, end) = nfa2.add_state()
+
+            # Mark group boundaries
+            let nfa4 = nfa3.set_group_start(start, group.group_id)
+            let nfa5 = nfa4.set_group_end(end, group.group_id)
+
+            let nfa6 = nfa5.add_epsilon_to(start, child_frag.start)
+            let nfa7 = nfa6.add_epsilon_to(child_frag.end, end)
+
+            if group.group_id > nfa7.num_groups:
+                let nfa8 = nfa7.set_num_groups(group.group_id)
+                return (nfa8, NFAFragment.new(start, end))
+            else:
+                return (nfa7, NFAFragment.new(start, end))
+
+        # Anchor
+        if node is AnchorNode:
+            let anchor = node as AnchorNode
+            let (nfa1, start) = nfa.add_state()
+            let (nfa2, end) = nfa1.add_state()
+
+            # Anchors are handled during matching, add epsilon transition
+            let nfa3 = nfa2.add_epsilon_to(start, end)
+
+            return (nfa3, NFAFragment.new(start, end))
+
+        # Default: empty fragment
+        let (nfa1, start) = nfa.add_state()
+        let (nfa2, end) = nfa1.add_state()
+        let nfa3 = nfa2.add_epsilon_to(start, end)
+        return (nfa3, NFAFragment.new(start, end))
+
+# NFA Matcher - simulates NFA execution
+class NFAMatcher:
+    nfa: NFA
+    text: String
+    pos: i32  # Current position in text
+
+    fn new(nfa_val: NFA, text_val: String) -> NFAMatcher:
+        return NFAMatcher { nfa: nfa_val, text: text_val, pos: 0 }
+
+    fn match_at(self, start_pos: i32) -> Option<Match>:
+        """Try to match starting at the given position."""
+        let mut current_pos = start_pos
+
+        # Track current states with their group captures
+        let mut current_states = []
+        let initial_groups = []  # Empty group captures
+        current_states.append((self.nfa.start_state, initial_groups, start_pos))
+
+        # Expand epsilon closures
+        current_states = self.epsilon_closure(current_states)
+
+        let mut match_pos = -1
+        let mut match_groups = []
+        let mut iteration_count = 0
+        let max_iterations = self.text.len() + 100  # Safety limit
+
+        # Process each character
+        while current_pos <= self.text.len() and iteration_count < max_iterations:
+            iteration_count = iteration_count + 1
+
+            # Check if any current state is accepting
+            for state_info in current_states:
+                let state_id = state_info[0]
+                let groups = state_info[1]
+                let state = self.nfa.states[state_id]
+
+                if state.is_accept:
+                    # Found a match
+                    match_pos = current_pos
+                    match_groups = groups
+
+            if current_pos >= self.text.len():
+                break
+
+            if current_states.len() == 0:
+                break  # No active states
+
+            # Get next character
+            let c = self.text[current_pos]
+
+            # Compute next states
+            let mut next_states = []
+
+            for state_info in current_states:
+                let state_id = state_info[0]
+                let groups = state_info[1]
+                let state = self.nfa.states[state_id]
+
+                # Check transitions
+                for trans in state.transitions:
+                    let trans_char = trans[0]
+                    let target_id = trans[1]
+
+                    # Check for exact match or special markers
+                    if trans_char == c:
+                        next_states.append((target_id, groups, current_pos + 1))
+                    elif trans_char == "__CHARCLASS__":
+                        # Character class - for now accept any character except newline
+                        # TODO: Proper character class matching
+                        if c != "\n":
+                            next_states.append((target_id, groups, current_pos + 1))
+
+            if next_states.len() == 0:
+                break  # No more transitions possible
+
+            # Move to next position
+            current_pos = current_pos + 1
+            current_states = self.epsilon_closure(next_states)
+
+        if match_pos >= 0:
+            let matched_text = self.text.substring(start_pos, match_pos)
+            let m = Match.new(matched_text, start_pos, match_pos)
+            m.groups = match_groups
+            return Some(m)
+
+        return None
+
+    fn epsilon_closure(self, states: List<(i32, List<String>, i32)>) -> List<(i32, List<String>, i32)>:
+        """Compute epsilon closure of a set of states using iterative approach."""
+        let mut result = []
+        let mut visited = []
+        let mut work_queue = []
+        let mut iteration_count = 0
+        let max_iterations = self.nfa.states.len() * 10  # Safety limit
+
+        # Initialize work queue with input states
+        for state_info in states:
+            work_queue.append(state_info)
+
+        # Process work queue iteratively
+        while work_queue.len() > 0 and iteration_count < max_iterations:
+            iteration_count = iteration_count + 1
+
+            let state_info = work_queue[0]
+            work_queue = work_queue[1:]  # Remove first element
+
+            let state_id = state_info[0]
+            let groups = state_info[1]
+            let pos = state_info[2]
+
+            # Skip if already visited
+            if visited.contains(state_id):
+                continue
+
+            visited.append(state_id)
+            result.append(state_info)
+
+            let state = self.nfa.states[state_id]
+
+            # Follow epsilon transitions
+            for target_id in state.epsilon_transitions:
+                if not visited.contains(target_id):
+                    work_queue.append((target_id, groups, pos))
+
+        return result
+
+# Compiled regex - holds AST and NFA
+class CompiledRegex:
+    ast: RegexNode
+    nfa: NFA
+    pattern_str: String
+
+    fn new(pattern: String) -> CompiledRegex:
+        # Parse pattern to AST
+        let parser = RegexParser.new(pattern)
+        let ast = parser.parse()
+
+        # Build NFA from AST
+        let builder = NFABuilder.new()
+        let nfa = builder.build(ast)
+
+        return CompiledRegex { ast: ast, nfa: nfa, pattern_str: pattern }
+
+    fn match_at(self, text: String, pos: i32) -> Option<Match>:
+        let matcher = NFAMatcher.new(self.nfa, text)
+        return matcher.match_at(pos)
+
+    fn search(self, text: String) -> Option<Match>:
+        # Try matching at each position
+        for i in range(0, text.len() + 1):
+            let m = self.match_at(text, i)
+            if m.is_some():
+                return m
+
+        return None
+
+    fn findall(self, text: String) -> List<Match>:
+        let mut results = []
+        let mut pos = 0
+
+        while pos < text.len():
+            let m = self.match_at(text, pos)
+            if m.is_some():
+                let match_val = m.unwrap()
+                results.append(match_val)
+                # Move past this match
+                pos = match_val.end
+                if match_val.end == pos:
+                    pos = pos + 1  # Avoid infinite loop on zero-width matches
+            else:
+                pos = pos + 1
+
+        return results
+
+# Regex match result
+class Match:
+    text: String
+    start: i32
+    end: i32
+    groups: List<String>
+
+    fn new(text: String, start: i32, end: i32) -> Match:
+        return Match {
+            text: text,
+            start: start,
+            end: end,
+            groups: []
+        }
+
+    fn matched_text(self) -> String:
+        return self.text
+
+    fn span(self) -> (i32, i32):
+        return (self.start, self.end)
+
+    fn group(self, index: i32) -> Option<String>:
+        if index < 0 or index >= self.groups.len():
+            return None
+        return Some(self.groups[index])
+
+    fn all_groups(self) -> List<String>:
+        return self.groups
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn length(self) -> i32:
+        """Get length of matched text.
+
+        Returns:
+            Number of characters matched
+
+        Example:
+            match = Match.new("hello", 0, 5)
+            match.length()  # → 5
+        """
+        return self.end - self.start
+
+    fn is_empty(self) -> Bool:
+        """Check if match is empty (zero length).
+
+        Returns:
+            true if start == end
+
+        Example:
+            match = Match.new("", 0, 0)
+            match.is_empty()  # → true
+        """
+        return self.start == self.end
+
+    fn has_groups(self) -> Bool:
+        """Check if match has capture groups.
+
+        Returns:
+            true if groups list is non-empty
+
+        Example:
+            match = Match.new("text", 0, 4)
+            match.has_groups()  # → false
+        """
+        return self.groups.len() > 0
+
+    fn group_count(self) -> i32:
+        """Get number of capture groups.
+
+        Returns:
+            Number of groups
+
+        Example:
+            match.group_count()  # → 0 or number of groups
+        """
+        return self.groups.len()
+
+    fn get_start(self) -> i32:
+        """Get start position of match.
+
+        Returns:
+            Start index
+
+        Example:
+            match = Match.new("text", 5, 9)
+            match.get_start()  # → 5
+        """
+        return self.start
+
+    fn get_end(self) -> i32:
+        """Get end position of match.
+
+        Returns:
+            End index
+
+        Example:
+            match = Match.new("text", 5, 9)
+            match.get_end()  # → 9
+        """
+        return self.end
+
+    fn summary(self) -> String:
+        """Get summary of match.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            match.summary()
+            # → "Match: 'text' at [5:9], 2 groups"
+        """
+        let text = self.text
+        let start = self.start
+        let end = self.end
+        let groups = self.group_count()
+        return "Match: '{text}' at [{start}:{end}], {groups} groups"
+
+# Compiled regex pattern
+class Pattern:
+    pattern: String
+    compiled: CompiledRegex
+
+    fn new(pattern: String) -> Pattern:
+        return Pattern {
+            pattern: pattern,
+            compiled: CompiledRegex.new(pattern)
+        }
+
+    # Match at the start of string
+    fn match(self, text: String) -> Option<Match>:
+        """Match pattern at the start of the text using NFA engine.
+
+        Args:
+            text: Text to match against
+
+        Returns:
+            Match object if pattern matches at start, None otherwise
+
+        Example:
+            pattern = Pattern.new("h.*o")
+            pattern.match("hello world")  # → Some(Match)
+            pattern.match("world hello")  # → None
+        """
+        return self.compiled.match_at(text, 0)
+
+    # Search anywhere in string
+    fn search(self, text: String) -> Option<Match>:
+        """Search for pattern anywhere in the text using NFA engine.
+
+        Args:
+            text: Text to search in
+
+        Returns:
+            First Match object found, None if no match
+
+        Example:
+            pattern = Pattern.new("\\d+")
+            pattern.search("age: 25")  # → Some(Match("25", 5, 7))
+        """
+        return self.compiled.search(text)
+
+    # Check if entire string matches
+    fn fullmatch(self, text: String) -> Option<Match>:
+        """Check if entire text matches the pattern.
+
+        Args:
+            text: Text to match
+
+        Returns:
+            Match object if entire text matches, None otherwise
+
+        Example:
+            pattern = Pattern.new("[a-z]+")
+            pattern.fullmatch("hello")  # → Some(Match)
+            pattern.fullmatch("hello123")  # → None
+        """
+        let m = self.compiled.match_at(text, 0)
+        if m.is_some():
+            let match_val = m.unwrap()
+            if match_val.end == text.len():
+                return Some(match_val)
+        return None
+
+    # Find all matches
+    fn findall(self, text: String) -> List<Match>:
+        """Find all non-overlapping matches in the text.
+
+        Args:
+            text: Text to search in
+
+        Returns:
+            List of all Match objects found
+
+        Example:
+            pattern = Pattern.new("\\d+")
+            pattern.findall("1 2 3")  # → [Match("1", ...), Match("2", ...), Match("3", ...)]
+        """
+        return self.compiled.findall(text)
+
+    # Replace matches with replacement string
+    fn sub(self, replacement: String, text: String, count: i32 = -1) -> String:
+        """Replace matches with replacement string.
+
+        Args:
+            replacement: Replacement string (supports backreferences like \\1, \\2)
+            text: Text to perform substitution on
+            count: Maximum number of replacements (-1 for all)
+
+        Returns:
+            Text with substitutions performed
+
+        Example:
+            pattern = Pattern.new("(\\w+)\\s+(\\w+)")
+            pattern.sub("\\2 \\1", "hello world")  # → "world hello"
+        """
+        let matches = self.findall(text)
+
+        if matches.len() == 0:
+            return text
+
+        let mut result = ""
+        let mut last_end = 0
+        let mut replaced = 0
+
+        for match_val in matches:
+            if count >= 0 and replaced >= count:
+                break
+
+            # Add text before match
+            result = result + text.substring(last_end, match_val.start)
+
+            # Process replacement string (handle backreferences)
+            let replaced_text = self.process_replacement(replacement, match_val)
+            result = result + replaced_text
+
+            last_end = match_val.end
+            replaced = replaced + 1
+
+        # Add remaining text
+        result = result + text.substring(last_end, text.len())
+
+        return result
+
+    fn process_replacement(self, replacement: String, match_val: Match) -> String:
+        """Process replacement string, handling backreferences.
+
+        Args:
+            replacement: Replacement string with possible backreferences
+            match_val: Match object with captured groups
+
+        Returns:
+            Processed replacement string
+        """
+        let mut result = ""
+        let mut i = 0
+
+        while i < replacement.len():
+            let c = replacement[i]
+
+            if c == "\\" and i + 1 < replacement.len():
+                let next = replacement[i + 1]
+
+                # Check for backreference
+                if next >= "0" and next <= "9":
+                    let group_num = next.to_int()
+                    let group = match_val.group(group_num)
+
+                    if group.is_some():
+                        result = result + group.unwrap()
+                    else:
+                        result = result + "\\" + next  # Keep as-is if group doesn't exist
+
+                    i = i + 2
+                    continue
+
+            result = result + c
+            i = i + 1
+
+        return result
+
+    # Split string by pattern
+    fn split(self, text: String, maxsplit: i32 = -1) -> List<String>:
+        """Split string by pattern matches.
+
+        Args:
+            text: Text to split
+            maxsplit: Maximum number of splits (-1 for unlimited)
+
+        Returns:
+            List of split parts
+
+        Example:
+            pattern = Pattern.new("\\s+")
+            pattern.split("hello  world  foo")  # → ["hello", "world", "foo"]
+        """
+        let matches = self.findall(text)
+
+        if matches.len() == 0:
+            return [text]
+
+        let mut result = []
+        let mut last_end = 0
+        let mut splits = 0
+
+        for match_val in matches:
+            if maxsplit >= 0 and splits >= maxsplit:
+                break
+
+            # Add text before match
+            result.append(text.substring(last_end, match_val.start))
+
+            last_end = match_val.end
+            splits = splits + 1
+
+        # Add remaining text
+        result.append(text.substring(last_end, text.len()))
+
+        return result
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn get_pattern(self) -> String:
+        """Get pattern string.
+
+        Returns:
+            Pattern string
+
+        Example:
+            pattern = Pattern.new("[0-9]+")
+            pattern.get_pattern()  # → "[0-9]+"
+        """
+        return self.pattern
+
+    fn is_empty(self) -> Bool:
+        """Check if pattern is empty.
+
+        Returns:
+            true if pattern string is empty
+
+        Example:
+            pattern = Pattern.new("")
+            pattern.is_empty()  # → true
+        """
+        return self.pattern.len() == 0
+
+    fn pattern_length(self) -> i32:
+        """Get length of pattern string.
+
+        Returns:
+            Number of characters in pattern
+
+        Example:
+            pattern = Pattern.new("[a-z]+")
+            pattern.pattern_length()  # → 6
+        """
+        return self.pattern.len()
+
+    fn is_literal(self) -> Bool:
+        """Check if pattern is a simple literal (no regex special chars).
+
+        Returns:
+            true if pattern contains no special regex characters
+
+        Example:
+            Pattern.new("hello").is_literal()  # → true
+            Pattern.new("h.*o").is_literal()   # → false
+        """
+        let special_chars = [
+            "\\", ".", "^", "$", "*", "+", "?", "{{", "}}", "[", "]", "(", ")", "|"
+        ]
+        for ch in special_chars:
+            if self.pattern.contains(ch):
+                return false
+        return true
+
+    fn summary(self) -> String:
+        """Get summary of pattern.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            pattern.summary()
+            # → "Pattern: '[0-9]+' (6 chars, non-literal)"
+        """
+        let pattern = self.pattern
+        let len = self.pattern_length()
+        let type = if self.is_literal(): "literal" else: "non-literal"
+        return "Pattern: '{pattern}' ({len} chars, {type})"
+
+# Compile a regex pattern
+fn compile(pattern: String) -> Pattern:
+    return Pattern.new(pattern)
+
+# Match at start of string (convenience function)
+fn match(pattern: String, text: String) -> Option<Match>:
+    let p = compile(pattern)
+    return p.match(text)
+
+# Search anywhere in string (convenience function)
+fn search(pattern: String, text: String) -> Option<Match>:
+    let p = compile(pattern)
+    return p.search(text)
+
+# Check if entire string matches (convenience function)
+fn fullmatch(pattern: String, text: String) -> Option<Match>:
+    let p = compile(pattern)
+    return p.fullmatch(text)
+
+# Find all matches (convenience function)
+fn findall(pattern: String, text: String) -> List<Match>:
+    let p = compile(pattern)
+    return p.findall(text)
+
+# Replace matches (convenience function)
+fn sub(pattern: String, replacement: String, text: String, count: i32 = -1) -> String:
+    let p = compile(pattern)
+    return p.sub(replacement, text, count)
+
+# Split by pattern (convenience function)
+fn split(pattern: String, text: String, maxsplit: i32 = -1) -> List<String>:
+    let p = compile(pattern)
+    return p.split(text, maxsplit)
+
+# Escape special regex characters
+fn escape(text: String) -> String:
+    # Escape special regex characters
+    let mut result = text
+    let special_chars = [
+        "\\", ".", "^", "$", "*", "+", "?", "{{", "}}", "[", "]", "(", ")", "|"
+    ]
+
+    for ch in special_chars:
+        result = result.replace(ch, "\\" + ch)
+
+    return result
+
+# Check if pattern matches (boolean)
+fn is_match(pattern: String, text: String) -> Bool:
+    return search(pattern, text).is_some()
+
+# Extract matched text from Match
+fn extract_text(m: Match) -> String:
+    return m.matched_text()
+
+# Character class helpers (for pattern building)
+fn digit() -> String:
+    return "[0-9]"
+
+fn word() -> String:
+    return "[a-zA-Z0-9_]"
+
+fn whitespace() -> String:
+    return "[ \t\n\r]"
+
+fn any_char() -> String:
+    return "."
+
+# Quantifier helpers
+fn zero_or_more(pattern: String) -> String:
+    return pattern + "*"
+
+fn one_or_more(pattern: String) -> String:
+    return pattern + "+"
+
+fn optional(pattern: String) -> String:
+    return pattern + "?"
+
+fn exactly(pattern: String, n: i32) -> String:
+    return "{pattern}{{{n}}}"
+
+fn at_least(pattern: String, n: i32) -> String:
+    return "{pattern}{{{n},}}"
+
+fn between(pattern: String, min: i32, max: i32) -> String:
+    return "{pattern}{{{min},{max}}}"
+
+# Anchor helpers
+fn start_of_line() -> String:
+    return "^"
+
+fn end_of_line() -> String:
+    return "$"
+
+fn word_boundary() -> String:
+    return "\\b"
+
+# Export all types and functions
+export Match
+export Pattern
+export compile
+export match
+export search
+export fullmatch
+export findall
+export sub
+export split
+export escape
+export is_match
+export extract_text
+export digit
+export word
+export whitespace
+export any_char
+export zero_or_more
+export one_or_more
+export optional
+export exactly
+export at_least
+export between
+export start_of_line
+export end_of_line
+export word_boundary
