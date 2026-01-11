@@ -34,7 +34,7 @@
 | `@async` blocking `print` test | ✅ FIXED | Low |
 | Test harness module resolution | 🔍 INVESTIGATING | Medium |
 | Nested Method Mutations Not Persisting | ✅ FIXED | Critical |
-| Method Chaining Drops Mutations | 🐛 OPEN | Critical |
+| Custom Method Chaining Not Supported | 🐛 OPEN | High |
 | Enum Method `self` Match Fails | 🐛 OPEN | High |
 | String `>=` `<=` Comparison Unsupported | 🔄 WORKAROUND | Medium |
 | Dict `contains()` Method Missing | 🔄 WORKAROUND | Low |
@@ -1878,57 +1878,107 @@ This would have broken any code that uses helper methods that modify object stat
 
 ---
 
-## Method Chaining Drops Mutations 🐛 OPEN
+## Custom Method Chaining Not Supported 🐛 OPEN
 
-**Type:** Bug
-**Priority:** Critical  
+**Type:** Limitation - Interpreter Architecture
+**Priority:** High (was Critical, but misleading description)
 **Discovered:** 2026-01-05
+**Clarified:** 2026-01-11
 **Component:** Interpreter (method dispatch)
 
 ### Description
 
-When chaining method calls like `self.method().unwrap()`, the mutations made by `method()` are not persisted to the original object.
+**CLARIFICATION (2026-01-11):** The original bug report was misleading. The issue is NOT that "mutations are dropped". The actual limitation is that **custom class method chaining is not supported** by the interpreter architecture.
+
+**What Works:**
+- ✅ Built-in method chaining: `"  HELLO  ".trim().to_lower()` → `"hello"`
+- ✅ Option/Result chaining: `opt.unwrap()`, `result.is_ok()`
+- ✅ Custom methods without chaining: `c.increment()` then `c.get()` works fine
+- ✅ Mutations persist correctly when not chaining
+
+**What Doesn't Work:**
+- ❌ Custom class method chaining: `c.increment().get()` → semantic error
+- Error: "method 'get' not found on value of type object in nested call context"
+
+### Root Cause
+
+The `call_method_on_value()` function in `src/compiler/src/interpreter_helpers/method_dispatch.rs` only handles a hardcoded list of built-in methods:
+- String: len, is_empty, to_string, chars, trim, to_upper, to_lower
+- Option: is_some, is_none, unwrap, unwrap_or
+- Result: is_ok, is_err, unwrap, unwrap_err
+- Array: len, is_empty, first, last
+- Int: abs, to_string
+- Float: abs, floor, ceil, round, to_string
+
+Custom class methods are not registered in this dispatch table, so chaining fails.
 
 ### Reproduction
 
 ```simple
 class Counter:
-    value: i64
-    
+    value: Int
+
     fn new() -> Counter:
-        return Counter { value: 0 }
-    
-    fn increment(self) -> Counter:
+        return Counter(value: 0)
+
+    fn increment(mut self) -> Counter:
         self.value = self.value + 1
         return self
-    
-    fn get(self) -> i64:
+
+    fn get(self) -> Int:
         return self.value
 
-c = Counter.new()
-c.increment()
-print("After direct: " + c.value.to_string())  # 1 - works
+let mut c = Counter.new()
 
-result = c.increment().get()  # Chain drops mutation
-print("Chained result: " + result.to_string())  # 2 - sees mutated value
-print("After chain: " + c.value.to_string())    # 1 - mutation lost!
+# This works:
+c.increment()
+let value = c.get()
+print("Value: " + value.to_string())  # Prints: 1
+
+# This fails:
+let result = c.increment().get()
+# Error: method 'get' not found on value of type object in nested call context
 ```
+
+**Verification (2026-01-11):**
+- `/tmp/test_chaining_simple.spl` - Works without chaining ✅
+- `/tmp/test_actual_chain.spl` - Fails with chaining ❌
+- `/tmp/test_builtin_chain.spl` - Built-in chaining works ✅
 
 ### Impact
 
-Any code using method chaining with state mutation fails:
-- `self.advance().unwrap()` in JSON parser
-- Fluent builder patterns
-- Any `option.unwrap()` or `result.unwrap()` after a mutating method
+- ❌ **BLOCKS** fluent builder patterns with custom classes
+- ❌ **BLOCKS** chaining custom Result/Option-like types
+- ❌ **BLOCKS** any custom method chains
+- ✅ Works fine for built-in types (String, Option, Result, Array)
+- ✅ Mutations DO persist when not chaining
 
 ### Workaround
 
 Split chained calls into separate statements:
 ```simple
-# Instead of: ch = self.advance().unwrap()
-ch_opt = self.advance()
-ch = ch_opt.unwrap()
+# Instead of: result = c.increment().get()
+temp = c.increment()
+result = temp.get()
 ```
+
+Or use built-in types for chaining:
+```simple
+# This works:
+let text = "  HELLO  ".trim().to_lower()
+let value = Some(42).unwrap()
+```
+
+### Possible Fix
+
+Extend `call_method_on_value()` to:
+1. Look up custom class methods from the `classes` HashMap
+2. Look up impl methods from the `impl_methods` HashMap
+3. Execute custom methods with proper environment
+4. Return the result for further chaining
+
+**Files to modify:**
+- `src/compiler/src/interpreter_helpers/method_dispatch.rs` - Add custom method lookup
 
 ---
 
