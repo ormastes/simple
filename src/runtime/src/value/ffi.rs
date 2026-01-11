@@ -1480,3 +1480,208 @@ pub unsafe extern "C" fn rt_base64_encode(
         Err(_) => RuntimeValue::NIL,
     }
 }
+
+// ============================================================================
+// Date/Time FFI Functions
+// ============================================================================
+
+/// Get current Unix timestamp in microseconds since epoch (1970-01-01 00:00:00 UTC)
+#[no_mangle]
+pub extern "C" fn rt_time_now_unix_micros() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => {
+            let secs = duration.as_secs() as i64;
+            let micros = duration.subsec_micros() as i64;
+            secs * 1_000_000 + micros
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Convert Unix timestamp (microseconds) to year
+#[no_mangle]
+pub extern "C" fn rt_timestamp_get_year(micros: i64) -> i32 {
+    let days = micros / (86400 * 1_000_000);
+    timestamp_days_to_year(days)
+}
+
+/// Convert Unix timestamp (microseconds) to month (1-12)
+#[no_mangle]
+pub extern "C" fn rt_timestamp_get_month(micros: i64) -> i32 {
+    let days = micros / (86400 * 1_000_000);
+    let (_, month, _) = timestamp_days_to_ymd(days);
+    month
+}
+
+/// Convert Unix timestamp (microseconds) to day of month (1-31)
+#[no_mangle]
+pub extern "C" fn rt_timestamp_get_day(micros: i64) -> i32 {
+    let days = micros / (86400 * 1_000_000);
+    let (_, _, day) = timestamp_days_to_ymd(days);
+    day
+}
+
+/// Convert Unix timestamp (microseconds) to hour (0-23)
+#[no_mangle]
+pub extern "C" fn rt_timestamp_get_hour(micros: i64) -> i32 {
+    let seconds_in_day = (micros / 1_000_000) % 86400;
+    (seconds_in_day / 3600) as i32
+}
+
+/// Convert Unix timestamp (microseconds) to minute (0-59)
+#[no_mangle]
+pub extern "C" fn rt_timestamp_get_minute(micros: i64) -> i32 {
+    let seconds_in_day = (micros / 1_000_000) % 86400;
+    ((seconds_in_day % 3600) / 60) as i32
+}
+
+/// Convert Unix timestamp (microseconds) to second (0-59)
+#[no_mangle]
+pub extern "C" fn rt_timestamp_get_second(micros: i64) -> i32 {
+    let seconds_in_day = (micros / 1_000_000) % 86400;
+    (seconds_in_day % 60) as i32
+}
+
+/// Convert Unix timestamp (microseconds) to microsecond (0-999999)
+#[no_mangle]
+pub extern "C" fn rt_timestamp_get_microsecond(micros: i64) -> i32 {
+    (micros % 1_000_000) as i32
+}
+
+/// Convert date/time components to Unix timestamp (microseconds)
+#[no_mangle]
+pub extern "C" fn rt_timestamp_from_components(
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: i32,
+    microsecond: i32,
+) -> i64 {
+    let days = ymd_to_timestamp_days(year, month, day);
+    let seconds_in_day = (hour as i64) * 3600 + (minute as i64) * 60 + (second as i64);
+    days * 86400 * 1_000_000 + seconds_in_day * 1_000_000 + (microsecond as i64)
+}
+
+/// Add days to a Unix timestamp
+#[no_mangle]
+pub extern "C" fn rt_timestamp_add_days(micros: i64, days: i64) -> i64 {
+    micros + days * 86400 * 1_000_000
+}
+
+/// Calculate difference in days between two timestamps
+#[no_mangle]
+pub extern "C" fn rt_timestamp_diff_days(micros1: i64, micros2: i64) -> i64 {
+    (micros1 - micros2) / (86400 * 1_000_000)
+}
+
+// Helper: Check if year is leap year
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+// Helper: Get days in month
+fn days_in_month(year: i32, month: i32) -> i32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => if is_leap_year(year) { 29 } else { 28 },
+        _ => 0,
+    }
+}
+
+// Helper: Convert days since Unix epoch to year
+fn timestamp_days_to_year(days: i64) -> i32 {
+    // Unix epoch starts at 1970-01-01
+    let mut year = 1970;
+    let mut remaining_days = days;
+
+    // Handle negative days (dates before 1970)
+    if remaining_days < 0 {
+        while remaining_days < 0 {
+            year -= 1;
+            let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+            remaining_days += days_in_year as i64;
+        }
+        return year;
+    }
+
+    // Handle positive days (dates after 1970)
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if remaining_days < days_in_year as i64 {
+            break;
+        }
+        remaining_days -= days_in_year as i64;
+        year += 1;
+    }
+
+    year
+}
+
+// Helper: Convert days since Unix epoch to (year, month, day)
+fn timestamp_days_to_ymd(days: i64) -> (i32, i32, i32) {
+    let mut year = 1970;
+    let mut remaining_days = days;
+
+    // Handle negative days (dates before 1970)
+    if remaining_days < 0 {
+        while remaining_days < 0 {
+            year -= 1;
+            let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+            remaining_days += days_in_year as i64;
+        }
+    } else {
+        // Handle positive days (dates after 1970)
+        loop {
+            let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+            if remaining_days < days_in_year as i64 {
+                break;
+            }
+            remaining_days -= days_in_year as i64;
+            year += 1;
+        }
+    }
+
+    // Now convert remaining days to month and day
+    let mut month = 1;
+    while month <= 12 {
+        let days_in_current_month = days_in_month(year, month) as i64;
+        if remaining_days < days_in_current_month {
+            break;
+        }
+        remaining_days -= days_in_current_month;
+        month += 1;
+    }
+
+    let day = remaining_days + 1; // Days are 1-indexed
+
+    (year, month, day as i32)
+}
+
+// Helper: Convert (year, month, day) to days since Unix epoch
+fn ymd_to_timestamp_days(year: i32, month: i32, day: i32) -> i64 {
+    let mut days: i64 = 0;
+
+    // Add days for all years from 1970 to year-1
+    if year >= 1970 {
+        for y in 1970..year {
+            days += if is_leap_year(y) { 366 } else { 365 };
+        }
+    } else {
+        for y in year..1970 {
+            days -= if is_leap_year(y) { 366 } else { 365 };
+        }
+    }
+
+    // Add days for all months in current year
+    for m in 1..month {
+        days += days_in_month(year, m) as i64;
+    }
+
+    // Add remaining days
+    days += (day - 1) as i64;
+
+    days
+}
