@@ -2354,3 +2354,171 @@ pub unsafe extern "C" fn rt_path_absolute(
     
     super::rt_string_new(absolute.as_ptr(), absolute.len() as u64)
 }
+
+// ============================================================================
+// Atomic Operations FFI
+// ============================================================================
+
+use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::Mutex;
+use std::collections::HashMap;
+
+lazy_static::lazy_static! {
+    static ref ATOMIC_BOOL_MAP: Mutex<HashMap<i64, Box<AtomicBool>>> = Mutex::new(HashMap::new());
+    static ref ATOMIC_INT_MAP: Mutex<HashMap<i64, Box<AtomicI64>>> = Mutex::new(HashMap::new());
+}
+
+static mut ATOMIC_BOOL_COUNTER: i64 = 1;
+static mut ATOMIC_INT_COUNTER: i64 = 1;
+
+// ----------------------------------------------------------------------------
+// AtomicBool Operations
+// ----------------------------------------------------------------------------
+
+/// Create a new atomic boolean
+#[no_mangle]
+pub extern "C" fn rt_atomic_bool_new(initial: bool) -> i64 {
+    let atomic = Box::new(AtomicBool::new(initial));
+    unsafe {
+        let handle = ATOMIC_BOOL_COUNTER;
+        ATOMIC_BOOL_COUNTER += 1;
+        ATOMIC_BOOL_MAP.lock().unwrap().insert(handle, atomic);
+        handle
+    }
+}
+
+/// Load value from atomic boolean
+#[no_mangle]
+pub extern "C" fn rt_atomic_bool_load(handle: i64) -> bool {
+    ATOMIC_BOOL_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+/// Store value to atomic boolean
+#[no_mangle]
+pub extern "C" fn rt_atomic_bool_store(handle: i64, value: bool) {
+    if let Some(atomic) = ATOMIC_BOOL_MAP.lock().unwrap().get(&handle) {
+        atomic.store(value, Ordering::SeqCst);
+    }
+}
+
+/// Swap value of atomic boolean
+#[no_mangle]
+pub extern "C" fn rt_atomic_bool_swap(handle: i64, value: bool) -> bool {
+    ATOMIC_BOOL_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.swap(value, Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+/// Free atomic boolean
+#[no_mangle]
+pub extern "C" fn rt_atomic_bool_free(handle: i64) {
+    ATOMIC_BOOL_MAP.lock().unwrap().remove(&handle);
+}
+
+// ----------------------------------------------------------------------------
+// AtomicInt Operations
+// ----------------------------------------------------------------------------
+
+/// Create a new atomic integer
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_new(initial: i64) -> i64 {
+    let atomic = Box::new(AtomicI64::new(initial));
+    unsafe {
+        let handle = ATOMIC_INT_COUNTER;
+        ATOMIC_INT_COUNTER += 1;
+        ATOMIC_INT_MAP.lock().unwrap().insert(handle, atomic);
+        handle
+    }
+}
+
+/// Load value from atomic integer
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_load(handle: i64) -> i64 {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.load(Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Store value to atomic integer
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_store(handle: i64, value: i64) {
+    if let Some(atomic) = ATOMIC_INT_MAP.lock().unwrap().get(&handle) {
+        atomic.store(value, Ordering::SeqCst);
+    }
+}
+
+/// Swap value of atomic integer
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_swap(handle: i64, value: i64) -> i64 {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.swap(value, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Compare and exchange atomic integer
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_compare_exchange(handle: i64, current: i64, new: i64) -> bool {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| {
+            atomic.compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+        })
+        .unwrap_or(false)
+}
+
+/// Fetch and add to atomic integer
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_fetch_add(handle: i64, value: i64) -> i64 {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.fetch_add(value, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Fetch and subtract from atomic integer
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_fetch_sub(handle: i64, value: i64) -> i64 {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.fetch_sub(value, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Fetch and bitwise AND with atomic integer
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_fetch_and(handle: i64, value: i64) -> i64 {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.fetch_and(value, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Fetch and bitwise OR with atomic integer
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_fetch_or(handle: i64, value: i64) -> i64 {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.fetch_or(value, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Fetch and bitwise XOR with atomic integer
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_fetch_xor(handle: i64, value: i64) -> i64 {
+    ATOMIC_INT_MAP.lock().unwrap()
+        .get(&handle)
+        .map(|atomic| atomic.fetch_xor(value, Ordering::SeqCst))
+        .unwrap_or(0)
+}
+
+/// Free atomic integer
+#[no_mangle]
+pub extern "C" fn rt_atomic_int_free(handle: i64) {
+    ATOMIC_INT_MAP.lock().unwrap().remove(&handle);
+}
