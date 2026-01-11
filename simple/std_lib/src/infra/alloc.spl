@@ -138,6 +138,60 @@ struct Arena:
     fn supports_dealloc(self) -> Bool:
         return false
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_empty(self) -> Bool:
+        """Check if arena has no allocations.
+
+        Returns:
+            True if no bytes are used
+        """
+        return self.used() == 0
+
+    fn is_full(self) -> Bool:
+        """Check if arena is full.
+
+        Returns:
+            True if no space remaining
+        """
+        return self.used() >= self.capacity()
+
+    fn available(self) -> i64:
+        """Get available space in bytes.
+
+        Returns:
+            Number of bytes remaining
+        """
+        return self.capacity() - self.used()
+
+    fn utilization(self) -> f64:
+        """Get utilization as percentage.
+
+        Returns:
+            Percentage of capacity used (0.0 to 1.0)
+        """
+        let cap = self.capacity()
+        if cap == 0:
+            return 0.0
+        return (self.used() as f64) / (cap as f64)
+
+    fn summary(self) -> String:
+        """Get summary of arena state.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            arena.summary()
+            # → "Arena: 512/1024 bytes (50.0% used)"
+        """
+        let used_bytes = self.used()
+        let total_bytes = self.capacity()
+        let util_pct = self.utilization() * 100.0
+        return "Arena: {used_bytes}/{total_bytes} bytes ({util_pct:.1}% used)"
+
 /**
 Typed arena for allocating objects of a specific type.
 
@@ -271,6 +325,69 @@ struct Pool:
     fn dealloc(self, ptr: i64):
         self.release(ptr)
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_empty(self) -> Bool:
+        """Check if all objects are available (none in use).
+
+        Returns:
+            True if all objects are in the pool
+        """
+        return self.available() == self.capacity()
+
+    fn is_exhausted(self) -> Bool:
+        """Check if pool has no available objects.
+
+        Returns:
+            True if no objects available
+        """
+        return self.available() == 0
+
+    fn in_use(self) -> i64:
+        """Get number of objects currently in use.
+
+        Returns:
+            Number of acquired objects
+        """
+        return self.capacity() - self.available()
+
+    fn utilization(self) -> f64:
+        """Get utilization as percentage.
+
+        Returns:
+            Percentage of objects in use (0.0 to 1.0)
+        """
+        let cap = self.capacity()
+        if cap == 0:
+            return 0.0
+        return (self.in_use() as f64) / (cap as f64)
+
+    fn object_size(self) -> i64:
+        """Get size of each object in bytes.
+
+        Returns:
+            Object size
+        """
+        return self._object_size
+
+    fn summary(self) -> String:
+        """Get summary of pool state.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            pool.summary()
+            # → "Pool: 25/100 objects in use (25.0%), 64 bytes each"
+        """
+        let in_use_count = self.in_use()
+        let total_count = self.capacity()
+        let util_pct = self.utilization() * 100.0
+        let obj_size = self._object_size
+        return "Pool: {in_use_count}/{total_count} objects in use ({util_pct:.1}%), {obj_size} bytes each"
+
 /**
 Typed object pool for reusing objects of a specific type.
 
@@ -375,6 +492,59 @@ struct BumpAllocator:
     fn free(self):
         rt_arena_free(self._buffer)
 
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_empty(self) -> Bool:
+        """Check if no allocations have been made.
+
+        Returns:
+            True if offset is zero
+        """
+        return self._offset == 0
+
+    fn is_full(self) -> Bool:
+        """Check if allocator is full.
+
+        Returns:
+            True if no space remaining
+        """
+        return self._offset >= self._capacity
+
+    fn capacity(self) -> i64:
+        """Get total capacity in bytes.
+
+        Returns:
+            Total capacity
+        """
+        return self._capacity
+
+    fn utilization(self) -> f64:
+        """Get utilization as percentage.
+
+        Returns:
+            Percentage of capacity used (0.0 to 1.0)
+        """
+        if self._capacity == 0:
+            return 0.0
+        return (self._offset as f64) / (self._capacity as f64)
+
+    fn summary(self) -> String:
+        """Get summary of allocator state.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            bump.summary()
+            # → "BumpAllocator: 256/4096 bytes used (6.2%)"
+        """
+        let used_bytes = self.used()
+        let total_bytes = self.capacity()
+        let util_pct = self.utilization() * 100.0
+        return "BumpAllocator: {used_bytes}/{total_bytes} bytes used ({util_pct:.1}%)"
+
 /**
 Allocator configuration for classes.
 
@@ -392,3 +562,55 @@ struct AllocatorConfig:
 
     fn default() -> AllocatorConfig:
         return AllocatorConfig(allocator_type: "gc", capacity: 0)
+
+    # =========================================================================
+    # Helper Methods
+    # =========================================================================
+
+    fn is_arena(self) -> Bool:
+        """Check if configuration is for arena allocator.
+
+        Returns:
+            True if allocator type is "arena"
+        """
+        return self.allocator_type == "arena"
+
+    fn is_pool(self) -> Bool:
+        """Check if configuration is for pool allocator.
+
+        Returns:
+            True if allocator type is "pool"
+        """
+        return self.allocator_type == "pool"
+
+    fn is_gc(self) -> Bool:
+        """Check if configuration is for GC allocator.
+
+        Returns:
+            True if allocator type is "gc"
+        """
+        return self.allocator_type == "gc"
+
+    fn has_capacity(self) -> Bool:
+        """Check if configuration specifies capacity.
+
+        Returns:
+            True if capacity > 0
+        """
+        return self.capacity > 0
+
+    fn summary(self) -> String:
+        """Get summary of allocator configuration.
+
+        Returns:
+            Human-readable summary
+
+        Example:
+            config.summary()
+            # → "AllocatorConfig: arena, capacity: 1024"
+        """
+        let cap_str = if self.has_capacity():
+            ", capacity: {self.capacity}"
+        else:
+            ""
+        return "AllocatorConfig: {self.allocator_type}{cap_str}"

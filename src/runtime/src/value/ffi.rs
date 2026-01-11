@@ -2106,3 +2106,177 @@ pub unsafe extern "C" fn rt_process_execute(
     }
 }
 
+// ============================================================================
+// Program Arguments FFI Functions
+// ============================================================================
+
+use std::sync::OnceLock;
+
+/// Global storage for program arguments
+static PROGRAM_ARGS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Set program arguments (called by runtime initialization)
+#[no_mangle]
+pub extern "C" fn rt_set_args(args: RuntimeValue) {
+    // Extract arguments from RuntimeValue array
+    let args_len = super::collections::rt_array_len(args);
+    let mut arg_vec = Vec::new();
+    
+    unsafe {
+        for i in 0..args_len {
+            let arg_val = super::collections::rt_array_get(args, i);
+            if arg_val.is_heap() {
+                let ptr = arg_val.as_heap_ptr();
+                if (*ptr).object_type == HeapObjectType::String {
+                    let str_obj = ptr as *const RuntimeString;
+                    let data = (str_obj.add(1)) as *const u8;
+                    let slice = std::slice::from_raw_parts(data, (*str_obj).len as usize);
+                    if let Ok(s) = String::from_utf8(slice.to_vec()) {
+                        arg_vec.push(s);
+                    }
+                }
+            }
+        }
+    }
+    
+    let _ = PROGRAM_ARGS.set(arg_vec);
+}
+
+/// Get program arguments
+/// Returns List[String] of command line arguments
+#[no_mangle]
+pub unsafe extern "C" fn rt_get_args() -> RuntimeValue {
+    // Get arguments from global storage
+    let args = PROGRAM_ARGS.get().map(|v| v.as_slice()).unwrap_or(&[]);
+    
+    // Create array to hold arguments
+    let arr = super::collections::rt_array_new(args.len() as u64);
+    
+    // Add each argument to the array
+    for (i, arg) in args.iter().enumerate() {
+        let arg_val = super::rt_string_new(arg.as_ptr(), arg.len() as u64);
+        super::collections::rt_array_push(arr, arg_val);
+    }
+    
+    arr
+}
+
+// ============================================================================
+// File/Directory Search FFI Functions
+// ============================================================================
+
+/// Find files matching pattern (simplified glob matching)
+/// Returns List[String] of matching file paths
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_find(
+    dir_ptr: *const u8,
+    dir_len: u64,
+    pattern_ptr: *const u8,
+    pattern_len: u64,
+    recursive: bool,
+) -> RuntimeValue {
+    use std::fs;
+    use std::path::Path;
+    
+    // Helper to check if filename matches simple glob pattern
+    fn matches_pattern(filename: &str, pattern: &str) -> bool {
+        // Handle simple patterns: "*", "*.ext", "prefix*", "*suffix"
+        if pattern == "*" {
+            return true;
+        }
+        
+        if let Some(ext) = pattern.strip_prefix("*.") {
+            return filename.ends_with(&format!(".{}", ext));
+        }
+        
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            return filename.starts_with(prefix);
+        }
+        
+        if let Some(suffix) = pattern.strip_prefix('*') {
+            return filename.ends_with(suffix);
+        }
+        
+        // Exact match
+        filename == pattern
+    }
+    
+    if dir_ptr.is_null() || pattern_ptr.is_null() {
+        return super::collections::rt_array_new(0);
+    }
+    
+    let dir_bytes = std::slice::from_raw_parts(dir_ptr, dir_len as usize);
+    let dir_str = match std::str::from_utf8(dir_bytes) {
+        Ok(s) => s,
+        Err(_) => return super::collections::rt_array_new(0),
+    };
+    
+    let pattern_bytes = std::slice::from_raw_parts(pattern_ptr, pattern_len as usize);
+    let pattern_str = match std::str::from_utf8(pattern_bytes) {
+        Ok(s) => s,
+        Err(_) => return super::collections::rt_array_new(0),
+    };
+    
+    let dir_path = Path::new(dir_str);
+    let mut results = Vec::new();
+    
+    // Non-recursive: just list immediate directory entries
+    if !recursive {
+        if let Ok(entries) = fs::read_dir(dir_path) {
+            for entry in entries.flatten() {
+                if let Some(filename) = entry.file_name().to_str() {
+                    if matches_pattern(filename, pattern_str) {
+                        if let Some(path_str) = entry.path().to_str() {
+                            results.push(path_str.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        // Recursive: walk directory tree
+        fn walk_dir(dir: &Path, pattern: &str, results: &mut Vec<String>) {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    
+                    if path.is_file() {
+                        if let Some(filename) = entry.file_name().to_str() {
+                            if matches_pattern(filename, pattern) {
+                                if let Some(path_str) = path.to_str() {
+                                    results.push(path_str.to_string());
+                                }
+                            }
+                        }
+                    } else if path.is_dir() {
+                        walk_dir(&path, pattern, results);
+                    }
+                }
+            }
+        }
+        
+        walk_dir(dir_path, pattern_str, &mut results);
+    }
+    
+    // Create array with results
+    let arr = super::collections::rt_array_new(results.len() as u64);
+    for path in results {
+        let path_val = super::rt_string_new(path.as_ptr(), path.len() as u64);
+        super::collections::rt_array_push(arr, path_val);
+    }
+    
+    arr
+}
+
+/// List files matching glob pattern in directory
+/// Returns List[String] of matching file paths
+#[no_mangle]
+pub unsafe extern "C" fn rt_dir_glob(
+    dir_ptr: *const u8,
+    dir_len: u64,
+    pattern_ptr: *const u8,
+    pattern_len: u64,
+) -> RuntimeValue {
+    // For now, implement glob as non-recursive find
+    rt_file_find(dir_ptr, dir_len, pattern_ptr, pattern_len, false)
+}
