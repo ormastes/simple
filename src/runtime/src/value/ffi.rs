@@ -1351,3 +1351,132 @@ pub unsafe extern "C" fn rt_env_cwd() -> RuntimeValue {
         Err(_) => RuntimeValue::NIL,
     }
 }
+
+// ============================================================================
+// Base64 encoding/decoding FFI functions
+// ============================================================================
+
+/// Decode base64 string to bytes
+#[no_mangle]
+pub unsafe extern "C" fn rt_base64_decode(
+    input_ptr: *const u8,
+    input_len: u64,
+) -> RuntimeValue {
+    if input_ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    let input_bytes = std::slice::from_raw_parts(input_ptr, input_len as usize);
+    let input_str = match std::str::from_utf8(input_bytes) {
+        Ok(s) => s,
+        Err(_) => return RuntimeValue::NIL,
+    };
+
+    // Simple base64 decoding implementation
+    const DECODE_TABLE: [u8; 128] = [
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 62, 255, 255, 255, 63,
+        52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 255, 255, 255, 0, 255, 255,
+        255, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+        15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 255, 255, 255, 255, 255,
+        255, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+        41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 255, 255, 255, 255, 255,
+    ];
+
+    let mut result = Vec::new();
+    let input_chars: Vec<u8> = input_str.bytes().filter(|&b| !b.is_ascii_whitespace()).collect();
+
+    let mut i = 0;
+    while i < input_chars.len() {
+        // Get 4 characters (or remaining)
+        let mut chunk = [0u8; 4];
+        let mut chunk_len = 0;
+
+        while chunk_len < 4 && i < input_chars.len() {
+            let c = input_chars[i];
+            i += 1;
+
+            if c == b'=' {
+                chunk[chunk_len] = 0;
+                chunk_len += 1;
+            } else if (c as usize) < 128 && DECODE_TABLE[c as usize] != 255 {
+                chunk[chunk_len] = DECODE_TABLE[c as usize];
+                chunk_len += 1;
+            }
+        }
+
+        if chunk_len >= 2 {
+            result.push((chunk[0] << 2) | (chunk[1] >> 4));
+        }
+        if chunk_len >= 3 {
+            result.push((chunk[1] << 4) | (chunk[2] >> 2));
+        }
+        if chunk_len >= 4 {
+            result.push((chunk[2] << 6) | chunk[3]);
+        }
+    }
+
+    // Remove padding bytes
+    while result.last() == Some(&0) && input_str.ends_with('=') {
+        result.pop();
+    }
+
+    // Convert to string (assuming UTF-8)
+    match String::from_utf8(result) {
+        Ok(decoded) => {
+            let bytes = decoded.as_bytes();
+            super::rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+        }
+        Err(_) => RuntimeValue::NIL,
+    }
+}
+
+/// Encode bytes to base64 string
+#[no_mangle]
+pub unsafe extern "C" fn rt_base64_encode(
+    input_ptr: *const u8,
+    input_len: u64,
+) -> RuntimeValue {
+    if input_ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    let input_bytes = std::slice::from_raw_parts(input_ptr, input_len as usize);
+
+    const ENCODE_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < input_bytes.len() {
+        let b1 = input_bytes[i];
+        let b2 = if i + 1 < input_bytes.len() { input_bytes[i + 1] } else { 0 };
+        let b3 = if i + 2 < input_bytes.len() { input_bytes[i + 2] } else { 0 };
+
+        result.push(ENCODE_TABLE[(b1 >> 2) as usize]);
+        result.push(ENCODE_TABLE[(((b1 & 0x03) << 4) | (b2 >> 4)) as usize]);
+
+        if i + 1 < input_bytes.len() {
+            result.push(ENCODE_TABLE[(((b2 & 0x0F) << 2) | (b3 >> 6)) as usize]);
+        } else {
+            result.push(b'=');
+        }
+
+        if i + 2 < input_bytes.len() {
+            result.push(ENCODE_TABLE[(b3 & 0x3F) as usize]);
+        } else {
+            result.push(b'=');
+        }
+
+        i += 3;
+    }
+
+    match String::from_utf8(result) {
+        Ok(encoded) => {
+            let bytes = encoded.as_bytes();
+            super::rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+        }
+        Err(_) => RuntimeValue::NIL,
+    }
+}
