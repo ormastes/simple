@@ -157,14 +157,57 @@ impl Counter:
 
 **Quick Reference:**
 ```simple
-fn getter(self) -> i32:           # ✓ Read-only
-fn setter(mut self, val: i32):    # ✓ Mutates
+# Instance methods - always have self parameter
+fn getter(self) -> i32:           # ✓ Read-only instance method
+fn setter(mut self, val: i32):    # ✓ Mutable instance method
 fn query(self) -> bool:           # ✓ Read-only check
-fn modify(mut self):              # ✓ Mutates
+fn modify(mut self):              # ✓ Mutates the instance
 
+# Static/associated functions - no self parameter
+fn new() -> Counter:              # ✓ Static constructor
+fn from_value(val: i32) -> Counter:  # ✓ Static factory
+
+# Wrong - never specify self's type
 fn wrong(self: MyType):           # ✗ Don't specify type
 fn bad(mut self: MyType):         # ✗ Type is implicit
 ```
+
+**Important:** `self` parameter must ALWAYS be written for instance methods. The word "implicit" means the **type** is implicit, not the parameter itself.
+
+```simple
+pub struct Point:
+    x: f64
+    y: f64
+
+impl Point:
+    # Static method - no self, called as Point::new()
+    fn new(x: f64, y: f64) -> Point:
+        return Point(x: x, y: y)
+
+    # Instance method - immutable self, called as point.get_x()
+    fn get_x(self) -> f64:
+        return self.x
+
+    # Instance method - mutable self, called as point.set_x(5.0)
+    fn set_x(mut self, value: f64):
+        self.x = value
+
+    # Instance method - immutable self, called as point.distance_to(other)
+    fn distance_to(self, other: Point) -> f64:
+        let dx = self.x - other.x
+        let dy = self.y - other.y
+        return (dx * dx + dy * dy).sqrt()
+
+    # Instance method - mutable self, called as point.translate(10.0, 20.0)
+    fn translate(mut self, dx: f64, dy: f64):
+        self.x += dx
+        self.y += dy
+```
+
+**Summary:**
+- **Instance method with read-only access:** `fn method(self, ...)`
+- **Instance method with mutation:** `fn method(mut self, ...)`
+- **Static/associated function:** `fn function(...)` (no self at all)
 
 ### Function Visibility
 - Functions are **public by default**
