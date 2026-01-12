@@ -15,7 +15,12 @@ pub fn run_lint(args: &[String]) -> i32 {
         .map(|s| PathBuf::from(s))
         .unwrap_or_else(|| PathBuf::from("."));
     let json_output = args.iter().any(|a| a == "--json");
-    let _fix = args.iter().any(|a| a == "--fix"); // TODO: [driver][P1] Implement auto-fix
+    let fix = args.iter().any(|a| a == "--fix");
+
+    if fix {
+        eprintln!("error: --fix flag is not yet implemented");
+        return 1;
+    }
 
     // Check if path is directory
     if path.is_dir() {
