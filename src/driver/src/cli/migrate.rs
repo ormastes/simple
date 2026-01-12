@@ -17,12 +17,17 @@ pub fn run_migrate(args: &[String]) -> i32 {
     let subcommand = &args[1];
     match subcommand.as_str() {
         "--fix-generics" => {
-            let path = if args.len() > 2 {
-                PathBuf::from(&args[2])
-            } else {
-                PathBuf::from(".")
-            };
-            migrate_generics(&path)
+            // Check for --dry-run flag
+            let dry_run = args.iter().any(|a| a == "--dry-run" || a == "-n");
+
+            // Find path argument (skip --dry-run flags)
+            let path = args.iter()
+                .skip(2)
+                .find(|a| !a.starts_with('-'))
+                .map(|s| PathBuf::from(s))
+                .unwrap_or_else(|| PathBuf::from("."));
+
+            migrate_generics(&path, dry_run)
         }
         _ => {
             eprintln!("error: unknown migration subcommand: {}", subcommand);
@@ -36,7 +41,7 @@ fn print_migrate_help() {
     println!("Migration tools for Simple language syntax changes");
     println!();
     println!("Usage:");
-    println!("  simple migrate --fix-generics [path]");
+    println!("  simple migrate --fix-generics [OPTIONS] [path]");
     println!();
     println!("Migrations:");
     println!("  --fix-generics <path>    Convert [] generic syntax to <>");
@@ -44,15 +49,17 @@ fn print_migrate_help() {
     println!("                           Processes all .spl files in path");
     println!();
     println!("Options:");
+    println!("  -n, --dry-run           Preview changes without modifying files");
     println!("  -h, --help              Show this help message");
     println!();
     println!("Examples:");
     println!("  simple migrate --fix-generics src/");
     println!("  simple migrate --fix-generics my_file.spl");
+    println!("  simple migrate --fix-generics --dry-run src/");
 }
 
 /// Migrate generic syntax from [] to <>
-fn migrate_generics(path: &Path) -> i32 {
+fn migrate_generics(path: &Path, dry_run: bool) -> i32 {
     if !path.exists() {
         eprintln!("error: path does not exist: {}", path.display());
         return 1;
@@ -77,16 +84,24 @@ fn migrate_generics(path: &Path) -> i32 {
         return 0;
     }
 
-    println!("Migrating {} file(s)...", files.len());
+    if dry_run {
+        println!("DRY RUN: Previewing changes to {} file(s)...", files.len());
+    } else {
+        println!("Migrating {} file(s)...", files.len());
+    }
 
     let mut modified_count = 0;
     let mut error_count = 0;
 
     for file in &files {
-        match migrate_file_generics(file) {
+        match migrate_file_generics(file, dry_run) {
             Ok(true) => {
                 modified_count += 1;
-                println!("  ✓ {}", file.display());
+                if dry_run {
+                    println!("  ⚠ {} (would be modified)", file.display());
+                } else {
+                    println!("  ✓ {}", file.display());
+                }
             }
             Ok(false) => {
                 // No changes needed
@@ -99,10 +114,21 @@ fn migrate_generics(path: &Path) -> i32 {
     }
 
     println!();
-    println!("Migration complete!");
-    println!("  Modified: {}", modified_count);
-    println!("  Unchanged: {}", files.len() - modified_count - error_count);
-    println!("  Errors: {}", error_count);
+    if dry_run {
+        println!("DRY RUN complete!");
+        println!("  Would modify: {}", modified_count);
+        println!("  Unchanged: {}", files.len() - modified_count - error_count);
+        println!("  Errors: {}", error_count);
+        if modified_count > 0 {
+            println!();
+            println!("Run without --dry-run to apply these changes");
+        }
+    } else {
+        println!("Migration complete!");
+        println!("  Modified: {}", modified_count);
+        println!("  Unchanged: {}", files.len() - modified_count - error_count);
+        println!("  Errors: {}", error_count);
+    }
 
     if error_count > 0 {
         1
@@ -112,8 +138,8 @@ fn migrate_generics(path: &Path) -> i32 {
 }
 
 /// Migrate a single file's generic syntax
-/// Returns Ok(true) if file was modified, Ok(false) if no changes needed
-fn migrate_file_generics(path: &Path) -> Result<bool, String> {
+/// Returns Ok(true) if file was/would be modified, Ok(false) if no changes needed
+fn migrate_file_generics(path: &Path, dry_run: bool) -> Result<bool, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("failed to read file: {}", e))?;
 
@@ -124,9 +150,11 @@ fn migrate_file_generics(path: &Path) -> Result<bool, String> {
         return Ok(false);
     }
 
-    // Write back
-    fs::write(path, new_content)
-        .map_err(|e| format!("failed to write file: {}", e))?;
+    // Write back only if not in dry-run mode
+    if !dry_run {
+        fs::write(path, new_content)
+            .map_err(|e| format!("failed to write file: {}", e))?;
+    }
 
     Ok(true)
 }
