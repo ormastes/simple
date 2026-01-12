@@ -215,9 +215,12 @@ impl MockRegistry {
 }
 
 /// Parse mock configuration from SDN-like format
+///
+/// NOTE: Currently returns disabled configuration. Mock rules are defined
+/// programmatically via MockConfig::with_rules() or loaded from test metadata.
+/// SDN file-based configuration will be implemented when needed for external
+/// test configuration files.
 pub fn parse_mock_config(config_str: &str) -> Result<MockConfig, String> {
-    // TODO: Implement proper SDN parsing
-    // For now, return an empty configuration
     let _ = config_str;
     Ok(MockConfig::disabled())
 }
