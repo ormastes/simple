@@ -268,3 +268,98 @@ Options from original session summary:
 **Duration**: ~2 hours
 **Status**: ✅ Major progress, parser limitation identified
 **Quality**: ✅ Comprehensive documentation, no regressions
+
+## CRITICAL DISCOVERY: Nested Generics Never Worked
+
+### Investigation Result
+
+Deep investigation into the parser revealed **nested generics have NEVER worked**, despite:
+- ✅ Existing code attempting to handle them (`>>` token splitting)
+- ✅ Passing tests that gave false confidence
+- ✅ Documentation suggesting they work
+
+### The Misleading Test
+
+**Test**: `test_new_nested_generics_no_warning()` 
+
+**Source**: `"val x: List<Option<String>> = []"`
+
+**Status**: ✅ PASSING
+
+**Problem**: Only checks for deprecation warnings, ignores parse failures!
+
+```rust
+fn parse_and_get_hints(src: &str) -> Vec<(ErrorHintLevel, String)> {
+    let _ = parser.parse(); // Parse (may succeed or fail, we just want hints)
+    //      ^ IGNORES RESULT!
+    parser.error_hints()
+}
+```
+
+### Verification
+
+Created test to actually check parse success:
+
+```rust
+let src = "val x: List<Option<String>> = []";
+let result = parser.parse();
+assert!(result.is_ok());  // ❌ FAILS!
+```
+
+**Error**: `expected Comma, found Assign`
+
+### Root Cause
+
+The parser has `>>` splitting code (lines 237-277 in `parser_types.rs`) but it doesn't work correctly. When parsing `Option<Guard<i32>>`:
+
+1. Inner parse (Guard) consumes `>>` token
+2. Should split into two `>` tokens
+3. Use one to close Guard, leave one for Option
+4. **But**: Token doesn't get pushed back correctly to outer parse
+5. Outer parse tries to continue parsing Option's args
+6. Finds `:` or `=` instead of `,` → error
+
+### Impact Escalation
+
+**Previous Assessment**: Nested generics are a parser limitation
+
+**ACTUAL Reality**: Nested generics have a BUG in existing code attempting to support them
+
+**Severity**: P0 → Critical (was believed to work, blocks features silently)
+
+### All Affected Code
+
+- ❌ sync.spl (try_lock, try_read, try_write)  
+- ❌ Any API using `Option<Vec<T>>`
+- ❌ Any API using `Result<List<T>, E>`
+- ❌ All nested generics everywhere
+
+### Workaround Still Works
+
+```simple
+type GuardI32 = Guard<i32>
+fn test() -> Option<GuardI32>:  # ✅ Works
+    return nil
+```
+
+### Files Created
+
+1. `doc/report/NESTED_GENERICS_BUG_ANALYSIS_2026-01-12.md` - Complete root cause analysis
+2. `src/parser/tests/test_nested_generic_manual.rs` - Reproduction tests
+3. `src/parser/tests/test_verify_nested_parse.rs` - Verification test
+
+### Next Steps (If Continuing)
+
+1. Add debug logging to `parse_single_type()` in parser_types.rs
+2. Trace token consumption through recursive calls
+3. Verify `pending_tokens` queue implementation  
+4. Fix `>>` token splitting logic
+5. Add comprehensive test suite (2-4 level nesting)
+6. Uncomment sync.spl methods
+
+**Estimated Fix Time**: 2-4 hours (debugging existing code)
+
+---
+
+**Critical Update**: What was thought to be a "parser limitation" is actually a **critical bug in code that attempts to support nested generics**. The severity is higher because developers believed this feature worked based on passing tests.
+
