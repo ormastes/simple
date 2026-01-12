@@ -25,8 +25,11 @@ pub struct SdnDocument {
 impl SdnDocument {
     /// Parse source into an editable document.
     pub fn parse(source: &str) -> Result<Self> {
-        let root = parse(source)?;
-        let spans = HashMap::new(); // TODO: [sdn][P2] populate during parse
+        use crate::parser::Parser;
+
+        let mut parser = Parser::new(source);
+        let (root, spans) = parser.parse_with_spans()?;
+
         Ok(Self {
             source: source.to_string(),
             root,
@@ -396,5 +399,32 @@ mod tests {
         let sdn = doc.to_sdn();
         assert!(sdn.contains("name: Alice"));
         assert!(sdn.contains("age: 30"));
+    }
+
+    #[test]
+    fn test_span_tracking() {
+        let source = "name: Alice\nage: 30\nserver:\n    host: localhost\n    port: 8080";
+        let doc = SdnDocument::parse(source).unwrap();
+
+        // Check that spans were collected
+        assert!(!doc.spans.is_empty(), "Spans should be collected");
+
+        // Check that top-level keys have spans
+        assert!(doc.spans.contains_key("name"), "name should have a span");
+        assert!(doc.spans.contains_key("age"), "age should have a span");
+        assert!(doc.spans.contains_key("server"), "server should have a span");
+
+        // Check nested paths
+        assert!(doc.spans.contains_key("server.host"), "server.host should have a span");
+        assert!(doc.spans.contains_key("server.port"), "server.port should have a span");
+
+        // Verify spans have reasonable positions
+        if let Some(name_span) = doc.spans.get("name") {
+            assert_eq!(name_span.line, 1, "name should be on line 1");
+        }
+
+        if let Some(age_span) = doc.spans.get("age") {
+            assert_eq!(age_span.line, 2, "age should be on line 2");
+        }
     }
 }

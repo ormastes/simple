@@ -411,13 +411,35 @@ impl<'a> Parser<'a> {
                 || self.check(&TokenKind::Async)
                 || self.check(&TokenKind::At)
                 || self.check(&TokenKind::Hash)
+                || self.check(&TokenKind::Static)
                 || (self.check(&TokenKind::Pub)
                     && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async)))
             {
-                // Method (optionally async/decorated/attributed/pub).
+                // Method (optionally async/decorated/attributed/pub/static).
                 let start_span = self.current.span;
+                // Handle optional `static` keyword for static methods
+                let is_static = if self.check(&TokenKind::Static) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
                 let item = self.parse_item()?;
-                if let Node::Function(f) = item {
+                if let Node::Function(mut f) = item {
+                    // Auto-inject 'self' parameter for instance methods (non-static) if not present
+                    // Skip auto-injection for constructors (methods named "new")
+                    if !is_static && f.name != "new" && (f.params.is_empty() || f.params[0].name != "self") {
+                        // Inject implicit self parameter at the beginning
+                        let self_param = Parameter {
+                            span: f.span,
+                            name: "self".to_string(),
+                            ty: None, // Type is implicit (will be inferred as the struct/class type)
+                            default: None,
+                            mutability: Mutability::Immutable,
+                            inject: false,
+                        };
+                        f.params.insert(0, self_param);
+                    }
                     methods.push(f);
                 } else {
                     return Err(ParseError::syntax_error_with_span(
@@ -531,12 +553,34 @@ impl<'a> Parser<'a> {
                 || self.check(&TokenKind::Async)
                 || self.check(&TokenKind::At)
                 || self.check(&TokenKind::Hash)
+                || self.check(&TokenKind::Static)
                 || (self.check(&TokenKind::Pub)
                     && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async)))
             {
                 let start_span = self.current.span;
+                // Handle optional `static` keyword for static methods
+                let is_static = if self.check(&TokenKind::Static) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
                 let item = self.parse_item()?;
-                if let Node::Function(f) = item {
+                if let Node::Function(mut f) = item {
+                    // Auto-inject 'self' parameter for instance methods (non-static) if not present
+                    // Skip auto-injection for constructors (methods named "new")
+                    if !is_static && f.name != "new" && (f.params.is_empty() || f.params[0].name != "self") {
+                        // Inject implicit self parameter at the beginning
+                        let self_param = Parameter {
+                            span: f.span,
+                            name: "self".to_string(),
+                            ty: None, // Type is implicit (will be inferred as the class type)
+                            default: None,
+                            mutability: Mutability::Immutable,
+                            inject: false,
+                        };
+                        f.params.insert(0, self_param);
+                    }
                     methods.push(f);
                 } else {
                     return Err(ParseError::syntax_error_with_span(

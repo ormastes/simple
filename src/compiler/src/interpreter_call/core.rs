@@ -340,6 +340,76 @@ pub(crate) fn exec_function_with_values(
     })
 }
 
+/// Execute function with already-evaluated Values and self context for method calls
+pub(crate) fn exec_function_with_values_and_self(
+    func: &FunctionDef,
+    args: &[Value],
+    outer_env: &Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    self_ctx: Option<(&str, &HashMap<String, Value>)>,
+) -> Result<Value, CompileError> {
+    with_effect_check!(func, {
+        let mut local_env = Env::new();
+
+        // Set up self context if provided
+        if let Some((class_name, fields)) = self_ctx {
+            // Check if this is an enum method (fields contains just "self")
+            if fields.len() == 1 && fields.contains_key("self") {
+                // For enum methods, self should be the enum value directly
+                local_env.insert("self".into(), fields.get("self").unwrap().clone());
+            } else {
+                // For class methods, self is an Object
+                local_env.insert(
+                    "self".into(),
+                    Value::Object {
+                        class: class_name.to_string(),
+                        fields: fields.clone(),
+                    },
+                );
+            }
+        }
+
+        let self_mode = if self_ctx.is_some() {
+            SelfMode::SkipSelf
+        } else {
+            SelfMode::IncludeSelf
+        };
+
+        let bound = bind_args_with_values(
+            &func.params,
+            args,
+            outer_env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            self_mode,
+        )?;
+        for (name, val) in bound {
+            local_env.insert(name, val);
+        }
+
+        let result = extract_block_result!(exec_block_fn(
+            &func.body,
+            &mut local_env,
+            functions,
+            classes,
+            enums,
+            impl_methods
+        ));
+        validate_unit!(
+            &result,
+            func.return_type.as_ref(),
+            format!("return type mismatch in '{}'", func.name)
+        );
+
+        Ok(result)
+    })
+}
+
 pub(crate) fn exec_function_with_captured_env(
     func: &FunctionDef,
     args: &[Argument],
@@ -418,13 +488,20 @@ fn exec_function_inner(
     let mut local_env = Env::new();
 
     if let Some((class_name, fields)) = self_ctx {
-        local_env.insert(
-            "self".into(),
-            Value::Object {
-                class: class_name.to_string(),
-                fields: fields.clone(),
-            },
-        );
+        // Check if this is an enum method (fields contains just "self")
+        if fields.len() == 1 && fields.contains_key("self") {
+            // For enum methods, self should be the enum value directly, not wrapped in Object
+            local_env.insert("self".into(), fields.get("self").unwrap().clone());
+        } else {
+            // For class methods, self is an Object
+            local_env.insert(
+                "self".into(),
+                Value::Object {
+                    class: class_name.to_string(),
+                    fields: fields.clone(),
+                },
+            );
+        }
     }
     let self_mode = if self_ctx.is_some() {
         SelfMode::SkipSelf
@@ -550,14 +627,17 @@ pub(crate) fn instantiate_class(
         fields.insert(field.name.clone(), val);
     }
 
-    // Check if we're already inside this class's `new` method to prevent recursion
+    // Check if we should call the `new` method
+    // Only call `new()` if it has special attributes like #[inject]
+    // Otherwise, do field-based construction
     let already_in_new = IN_NEW_METHOD.with(|set| set.borrow().contains(class_name));
 
     if let Some(new_method) = class_def.methods.iter().find(|m| m.name == METHOD_NEW) {
-        // If already in this class's `new` method, skip calling `new` again (prevents recursion)
-        if already_in_new {
-            // Fall through to field-based construction below
-        } else {
+        // Only auto-call new() if it has special attributes like #[inject]
+        // Otherwise, use field-based construction
+        let should_call_new = has_inject_attr(new_method);
+
+        if should_call_new && !already_in_new {
             let self_val = Value::Object {
                 class: class_name.to_string(),
                 fields: fields.clone(),
@@ -628,7 +708,8 @@ pub(crate) fn instantiate_class(
         }
     }
 
-    // Field-based construction (no `new` method or already inside `new`)
+    // Field-based construction
+    // Used when there's no `new` method with special attributes
     let mut positional_idx = 0;
     for arg in args {
         let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;

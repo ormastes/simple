@@ -4,6 +4,7 @@ use crate::error::{Result, SdnError, Span};
 use crate::lexer::{Lexer, Token, TokenKind};
 use crate::value::SdnValue;
 use indexmap::IndexMap;
+use std::collections::HashMap;
 
 /// SDN parser state.
 pub struct Parser<'a> {
@@ -12,6 +13,10 @@ pub struct Parser<'a> {
     /// Original source (preserved for error messages)
     #[allow(dead_code)]
     source: &'a str,
+    /// Span tracking: maps path to source location
+    spans: HashMap<String, Span>,
+    /// Current path being parsed (for span tracking)
+    current_path: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -23,6 +28,8 @@ impl<'a> Parser<'a> {
             tokens,
             pos: 0,
             source,
+            spans: HashMap::new(),
+            current_path: Vec::new(),
         }
     }
 
@@ -45,6 +52,37 @@ impl<'a> Parser<'a> {
         Ok(SdnValue::Dict(root))
     }
 
+    /// Parse the document and return both the value tree and span mappings.
+    /// Spans map from path (e.g., "server.port") to source location.
+    pub fn parse_with_spans(&mut self) -> Result<(SdnValue, HashMap<String, Span>)> {
+        let value = self.parse()?;
+        let spans = std::mem::take(&mut self.spans);
+        Ok((value, spans))
+    }
+
+    /// Get the current path as a string (e.g., "server.port").
+    fn get_current_path(&self) -> String {
+        self.current_path.join(".")
+    }
+
+    /// Record a span for the current path.
+    fn record_span(&mut self, span: Span) {
+        if !self.current_path.is_empty() {
+            let path = self.get_current_path();
+            self.spans.insert(path, span);
+        }
+    }
+
+    /// Push a key onto the current path.
+    fn push_path(&mut self, key: String) {
+        self.current_path.push(key);
+    }
+
+    /// Pop a key from the current path.
+    fn pop_path(&mut self) {
+        self.current_path.pop();
+    }
+
     /// Parse a single statement.
     fn parse_statement(&mut self) -> Result<Option<(String, SdnValue)>> {
         self.skip_newlines();
@@ -53,11 +91,22 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
 
+        // Record starting position for span
+        let start_pos = self.pos;
+        let start_span = if start_pos < self.tokens.len() {
+            self.tokens[start_pos].span
+        } else {
+            Span::default()
+        };
+
         // Must start with an identifier
         let name = self.expect_identifier()?;
 
+        // Push this key onto the path
+        self.push_path(name.clone());
+
         // Check what follows
-        match self.peek_kind() {
+        let result = match self.peek_kind() {
             Some(TokenKind::Colon) => {
                 self.advance();
                 self.parse_colon_stmt(name)
@@ -76,7 +125,23 @@ impl<'a> Parser<'a> {
                     span,
                 ))
             }
+        };
+
+        // Record span if successful
+        if result.is_ok() {
+            let end_span = if self.pos > 0 && self.pos <= self.tokens.len() {
+                self.tokens[self.pos - 1].span
+            } else {
+                start_span
+            };
+            let merged_span = start_span.merge(end_span);
+            self.record_span(merged_span);
         }
+
+        // Pop the path
+        self.pop_path();
+
+        result
     }
 
     /// Parse statement after `:`.
@@ -145,32 +210,58 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 Some(TokenKind::Identifier(_)) => {
-                    let key = self.expect_identifier()?;
+                    let start_pos = self.pos;
+                    let start_span = if start_pos < self.tokens.len() {
+                        self.tokens[start_pos].span
+                    } else {
+                        Span::default()
+                    };
 
-                    match self.peek_kind() {
+                    let key = self.expect_identifier()?;
+                    self.push_path(key.clone());
+
+                    let result: Result<()> = match self.peek_kind() {
                         Some(TokenKind::Colon) => {
                             self.advance();
                             if let Some((_, value)) = self.parse_colon_stmt(key.clone())? {
                                 dict.insert(key, value);
                             }
+                            Ok(())
                         }
                         Some(TokenKind::Equals) => {
                             self.advance();
                             let value = self.parse_inline_value()?;
                             dict.insert(key, value);
                             self.skip_newlines();
+                            Ok(())
                         }
                         Some(TokenKind::Pipe) => {
                             if let Some((_, value)) = self.parse_named_table(key.clone())? {
                                 dict.insert(key, value);
                             }
+                            Ok(())
                         }
                         _ => {
                             // Bare identifier as value
                             dict.insert(key.clone(), SdnValue::String(key));
                             self.skip_newlines();
+                            Ok(())
                         }
+                    };
+
+                    if result.is_ok() {
+                        let end_span = if self.pos > 0 && self.pos <= self.tokens.len() {
+                            self.tokens[self.pos - 1].span
+                        } else {
+                            start_span
+                        };
+                        let merged_span = start_span.merge(end_span);
+                        self.record_span(merged_span);
                     }
+
+                    self.pop_path();
+
+                    result?;
                 }
                 _ => {
                     // Unexpected token in dict block

@@ -9,6 +9,7 @@ use super::super::{
     evaluate_expr, evaluate_method_call_with_self_update, exec_function, Control, Enums,
     ImplMethods,
 };
+use crate::interpreter::interpreter_call::exec_function_with_values_and_self;
 
 pub(crate) fn call_method_on_value(
     recv_val: Value,
@@ -145,6 +146,44 @@ pub(crate) fn call_method_on_value(
             "to_string" => return Ok(Value::Str(f.to_string())),
             _ => {}
         },
+
+        // Custom class methods - enable method chaining on user-defined classes
+        Value::Object { class, fields } => {
+            // Search for method in class definition
+            if let Some(class_def) = _classes.get(class).cloned() {
+                if let Some(func) = class_def.methods.iter().find(|m| m.name == method) {
+                    // Call method with self context
+                    return exec_function_with_values_and_self(
+                        func,
+                        _args,
+                        _env,
+                        _functions,
+                        _classes,
+                        _enums,
+                        _impl_methods,
+                        Some((class, fields)),
+                    );
+                }
+            }
+
+            // Search for method in impl blocks
+            if let Some(methods) = _impl_methods.get(class) {
+                if let Some(func) = methods.iter().find(|m| m.name == method) {
+                    return exec_function_with_values_and_self(
+                        func,
+                        _args,
+                        _env,
+                        _functions,
+                        _classes,
+                        _enums,
+                        _impl_methods,
+                        Some((class, fields)),
+                    );
+                }
+            }
+
+            // Method not found, fall through to error
+        }
 
         _ => {}
     }

@@ -157,15 +157,16 @@ class NFA:
     states: List<NFAState>
     start_state: i32
     num_groups: i32
+    char_classes: List<CharClassNode>  # Store character classes for matching
 
     static fn new() -> NFA:
-        return NFA { states: [], start_state: 0, num_groups: 0 }
+        return NFA { states: [], start_state: 0, num_groups: 0, char_classes: [] }
 
     fn add_state() -> (NFA, i32):
         val sid = self.states.len()
         var new_states = self.states
         new_states.append(NFAState.new(sid))
-        val new_nfa = NFA { states: new_states, start_state: self.start_state, num_groups: self.num_groups }
+        val new_nfa = NFA { states: new_states, start_state: self.start_state, num_groups: self.num_groups, char_classes: self.char_classes }
         return (new_nfa, sid)
 
     fn get_state(sid: i32) -> NFAState:
@@ -178,7 +179,7 @@ class NFA:
                 new_states.append(new_state)
             else:
                 new_states.append(self.states[i])
-        return NFA { states: new_states, start_state: self.start_state, num_groups: self.num_groups }
+        return NFA { states: new_states, start_state: self.start_state, num_groups: self.num_groups, char_classes: self.char_classes }
 
     fn set_accept(sid: i32) -> NFA:
         var state = self.states[sid]
@@ -217,7 +218,15 @@ class NFA:
         return self.update_state(sid, new_state)
 
     fn set_num_groups(ng: i32) -> NFA:
-        return NFA { states: self.states, start_state: self.start_state, num_groups: ng }
+        return NFA { states: self.states, start_state: self.start_state, num_groups: ng, char_classes: self.char_classes }
+
+    fn add_char_class(cc: CharClassNode) -> (NFA, i32):
+        """Add a character class and return updated NFA with the class index."""
+        val idx = self.char_classes.len()
+        var new_classes = self.char_classes
+        new_classes.append(cc)
+        val new_nfa = NFA { states: self.states, start_state: self.start_state, num_groups: self.num_groups, char_classes: new_classes }
+        return (new_nfa, idx)
 
     fn add_transition_to(sid: i32, char: text, target: i32) -> NFA:
         val state = self.states[sid]
@@ -550,7 +559,7 @@ class NFABuilder:
         val nfa2 = nfa1.set_accept(frag.end)
 
         # Set start state
-        val final_nfa = NFA { states: nfa2.states, start_state: frag.start, num_groups: nfa2.num_groups }
+        val final_nfa = NFA { states: nfa2.states, start_state: frag.start, num_groups: nfa2.num_groups, char_classes: nfa2.char_classes }
 
         return final_nfa
 
@@ -575,13 +584,14 @@ class NFABuilder:
             val (nfa1, start) = nfa.add_state()
             val (nfa2, end) = nfa1.add_state()
 
-            # For char class, we create transitions for each possible character
-            # In practice, we'd optimize this, but for now we'll match during execution
-            # Add a marker transition
-            val nfa3 = nfa2.add_transition_to(start, "__CHARCLASS__", end)
-            # Store the char class in the state (we'll extend NFAState to hold this)
+            # Store the character class in the NFA and get its index
+            val (nfa3, cc_idx) = nfa2.add_char_class(cc)
 
-            return (nfa3, NFAFragment.new(start, end))
+            # Add a marker transition with the character class index
+            val marker = "__CC_" + cc_idx.to_string() + "__"
+            val nfa4 = nfa3.add_transition_to(start, marker, end)
+
+            return (nfa4, NFAFragment.new(start, end))
 
         # Concatenation
         if node is ConcatNode:
@@ -768,10 +778,12 @@ class NFAMatcher:
                     # Check for exact match or special markers
                     if trans_char == c:
                         next_states.append((target_id, groups, current_pos + 1))
-                    elif trans_char == "__CHARCLASS__":
-                        # Character class - for now accept any character except newline
-                        # TODO: Proper character class matching
-                        if c != "\n":
+                    elif trans_char.starts_with("__CC_") and trans_char.ends_with("__"):
+                        # Character class - extract index and use stored char class
+                        val idx_str = trans_char.substring(5, trans_char.len() - 2)
+                        val cc_idx = parse_int(idx_str)
+                        val char_class = self.nfa.char_classes[cc_idx]
+                        if char_class.matches(c):
                             next_states.append((target_id, groups, current_pos + 1))
 
             if next_states.len() == 0:
