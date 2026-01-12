@@ -62,26 +62,77 @@ mod tests {
 
 Tests go in `simple/std_lib/test/{unit|system|integration}/`
 
+**CRITICAL: Use docstring markdown, NOT println() for test documentation!**
+
 ```simple
 # feature_spec.spl
 import spec
 
 describe "Feature":
-    """Feature documentation."""
+    """
+    # Feature Module
+
+    Provides core functionality for X, Y, Z.
+
+    ## Overview
+    - Feature A does X
+    - Feature B does Y
+
+    ## Usage
+    ```simple
+    val f = Feature.new(10)
+    f.increment()
+    ```
+    """
 
     context "when initialized":
+        """
+        Tests default initialization behavior.
+        Ensures all fields start with correct values.
+        """
+
         it "should have default value":
+            """
+            Default constructor should initialize value to 0.
+
+            **Expected:** value = 0
+            **Actual:** Verified via expect() assertion
+            """
             let f = Feature.new()
             expect(f.value).to(equal(0))
 
     context "with operations":
+        """
+        Tests arithmetic operations on Feature.
+
+        ## Tested Operations
+        - increment(): adds 1
+        - decrement(): subtracts 1
+        - add(n): adds n
+        """
+
         before_each:
             self.f = Feature.new(10)
 
         it "should increment":
+            """
+            Increment operation should add 1 to current value.
+
+            Given: Feature with value 10
+            When: increment() is called
+            Then: value should be 11
+            """
             self.f.increment()
             expect(self.f.value).to(equal(11))
 ```
+
+**Documentation Guidelines:**
+- **Every `describe` block**: Rich markdown overview with usage examples
+- **Every `context` block**: Explain what scenario/condition is being tested
+- **Every `it` block**: Document expected behavior, inputs, outputs
+- **Use markdown**: Headers, lists, code blocks, tables
+- **NO println()**: All explanations go in docstrings, not print statements
+- **Auto-generate docs**: SSpec uses docstrings for spec documentation
 
 ## Test File Naming
 

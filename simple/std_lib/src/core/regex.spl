@@ -14,7 +14,7 @@ class LiteralNode(RegexNode):
     char: text  # Single character
 
     fn new(c: text) -> LiteralNode:
-        return LiteralNode { char: c }
+        return LiteralNode { char: c, node_type: "literal" }
 
 class CharClassNode(RegexNode):
     chars: List<text>   # Individual characters
@@ -22,7 +22,7 @@ class CharClassNode(RegexNode):
     negated: bool         # True for [^...]
 
     static fn new() -> CharClassNode:
-        return CharClassNode { chars: [], ranges: [], negated: false }
+        return CharClassNode { chars: [], ranges: [], negated: false, node_type: "charclass" }
 
     fn matches(c: text) -> bool:
         var found = false
@@ -49,35 +49,35 @@ class ConcatNode(RegexNode):
     right: RegexNode
 
     fn new(l: RegexNode, r: RegexNode) -> ConcatNode:
-        return ConcatNode { left: l, right: r }
+        return ConcatNode { left: l, right: r, node_type: "concat" }
 
 class AltNode(RegexNode):
     left: RegexNode
     right: RegexNode
 
     fn new(l: RegexNode, r: RegexNode) -> AltNode:
-        return AltNode { left: l, right: r }
+        return AltNode { left: l, right: r, node_type: "alt" }
 
 class StarNode(RegexNode):
     child: RegexNode
     greedy: bool
 
     fn new(c: RegexNode, g: bool = true) -> StarNode:
-        return StarNode { child: c, greedy: g }
+        return StarNode { child: c, greedy: g, node_type: "star" }
 
 class PlusNode(RegexNode):
     child: RegexNode
     greedy: bool
 
     fn new(c: RegexNode, g: bool = true) -> PlusNode:
-        return PlusNode { child: c, greedy: g }
+        return PlusNode { child: c, greedy: g, node_type: "plus" }
 
 class QuestionNode(RegexNode):
     child: RegexNode
     greedy: bool
 
     fn new(c: RegexNode, g: bool = true) -> QuestionNode:
-        return QuestionNode { child: c, greedy: g }
+        return QuestionNode { child: c, greedy: g, node_type: "question" }
 
 class QuantNode(RegexNode):
     child: RegexNode
@@ -86,20 +86,20 @@ class QuantNode(RegexNode):
     greedy: bool
 
     fn new(c: RegexNode, min_v: i32, max_v: i32, g: bool = true) -> QuantNode:
-        return QuantNode { child: c, min: min_v, max: max_v, greedy: g }
+        return QuantNode { child: c, min: min_v, max: max_v, greedy: g, node_type: "quant" }
 
 class GroupNode(RegexNode):
     child: RegexNode
     group_id: i32  # Capture group number
 
     fn new(c: RegexNode, gid: i32) -> GroupNode:
-        return GroupNode { child: c, group_id: gid }
+        return GroupNode { child: c, group_id: gid, node_type: "group" }
 
 class AnchorNode(RegexNode):
     anchor_type: text  # "start" or "end" or "word_boundary"
 
     fn new(t: text) -> AnchorNode:
-        return AnchorNode { anchor_type: t }
+        return AnchorNode { anchor_type: t, node_type: "anchor" }
 
 # NFA State
 class NFAState:
@@ -247,14 +247,14 @@ class RegexParser:
 
     fn peek_at(pos: i32) -> Option<text>:
         if pos >= self.pattern.len():
-            return None
+            return nil
         return Some(self.pattern[pos])
 
     fn advance_from(pos: i32) -> (Option<text>, i32):
         val c = self.peek_at(pos)
-        if c.is_some():
+        if c!= nil:
             return (c, pos + 1)
-        return (None, pos)
+        return (nil, pos)
 
     fn parse() -> RegexNode:
         val (node, _final_pos, _group_count) = self.parse_alternation(0, 0)
@@ -279,7 +279,7 @@ class RegexParser:
 
         while true:
             val c = self.peek_at(current_pos)
-            if c.is_none() or c == Some("|") or c == Some(")"):
+            if c== nil or c == Some("|") or c == Some(")"):
                 break
 
             val (node, new_pos, new_gc) = self.parse_quantified(current_pos, gc)
@@ -371,7 +371,7 @@ class RegexParser:
     fn parse_atom(pos: i32, group_count: i32) -> (RegexNode, i32, i32):
         val c = self.peek_at(pos)
 
-        if c.is_none():
+        if c== nil:
             # Empty - shouldn't happen in well-formed regex
             return (LiteralNode.new(""), pos, group_count)
 
@@ -444,7 +444,7 @@ class RegexParser:
             current_pos = current_pos + 1
             cc.negated = true
 
-        while self.peek_at(current_pos) != Some("]") and self.peek_at(current_pos).is_some():
+        while self.peek_at(current_pos) != Some("]") and self.peek_at(current_pos)!= nil:
             val (c_opt, new_pos) = self.advance_from(current_pos)
             val c = c_opt.unwrap()
             current_pos = new_pos
@@ -467,7 +467,7 @@ class RegexParser:
     fn parse_escape(pos: i32) -> (RegexNode, i32):
         val (c, new_pos) = self.advance_from(pos)
 
-        if c.is_none():
+        if c== nil:
             return (LiteralNode.new("\\"), pos)
 
         val ch = c.unwrap()
@@ -564,18 +564,15 @@ class NFABuilder:
         return final_nfa
 
     fn build_fragment(mut nfa: NFA, node: RegexNode) -> (NFA, NFAFragment):
-        # NOTE: The 'is' operator doesn't work correctly for class inheritance
-        # in the Simple interpreter, so all type checks fall through to the default case.
-        # The default case uses field-based detection to handle all node types.
+        # Use node_type field for type detection (is and as operators broken)
 
-        # Literal (checked via default case - kept for documentation)
-        if false:  # Disabled - 'is' operator broken
-            val lit = node as LiteralNode
+        # Literal
+        if node.node_type == "literal":
             val (nfa1, start) = nfa.add_state()
             val (nfa2, end) = nfa1.add_state()
 
-            if lit.char.len() > 0:
-                val nfa3 = nfa2.add_transition_to(start, lit.char, end)
+            if node.char.len() > 0:
+                val nfa3 = nfa2.add_transition_to(start, node.char, end)
                 return (nfa3, NFAFragment.new(start, end))
             else:
                 # Empty literal - epsilon transition
@@ -583,13 +580,12 @@ class NFABuilder:
                 return (nfa3, NFAFragment.new(start, end))
 
         # Character class
-        if node is CharClassNode:
-            val cc = node as CharClassNode
+        if node.node_type == "charclass":
             val (nfa1, start) = nfa.add_state()
             val (nfa2, end) = nfa1.add_state()
 
             # Store the character class in the NFA and get its index
-            val (nfa3, cc_idx) = nfa2.add_char_class(cc)
+            val (nfa3, cc_idx) = nfa2.add_char_class(node)
 
             # Add a marker transition with the character class index
             val marker = "__CC_" + cc_idx.to_string() + "__"
@@ -598,10 +594,9 @@ class NFABuilder:
             return (nfa4, NFAFragment.new(start, end))
 
         # Concatenation
-        if node is ConcatNode:
-            val concat = node as ConcatNode
-            val (nfa1, left_frag) = self.build_fragment(nfa, concat.left)
-            val (nfa2, right_frag) = self.build_fragment(nfa1, concat.right)
+        if node.node_type == "concat":
+            val (nfa1, left_frag) = self.build_fragment(nfa, node.left)
+            val (nfa2, right_frag) = self.build_fragment(nfa1, node.right)
 
             # Connect left end to right start
             val nfa3 = nfa2.add_epsilon_to(left_frag.end, right_frag.start)
@@ -609,10 +604,9 @@ class NFABuilder:
             return (nfa3, NFAFragment.new(left_frag.start, right_frag.end))
 
         # Alternation
-        if node is AltNode:
-            val alt = node as AltNode
-            val (nfa1, left_frag) = self.build_fragment(nfa, alt.left)
-            val (nfa2, right_frag) = self.build_fragment(nfa1, alt.right)
+        if node.node_type == "alt":
+            val (nfa1, left_frag) = self.build_fragment(nfa, node.left)
+            val (nfa2, right_frag) = self.build_fragment(nfa1, node.right)
 
             val (nfa3, start) = nfa2.add_state()
             val (nfa4, end) = nfa3.add_state()
@@ -628,9 +622,8 @@ class NFABuilder:
             return (nfa8, NFAFragment.new(start, end))
 
         # Star (zero or more)
-        if node is StarNode:
-            val star = node as StarNode
-            val (nfa1, child_frag) = self.build_fragment(nfa, star.child)
+        if node.node_type == "star":
+            val (nfa1, child_frag) = self.build_fragment(nfa, node.child)
 
             val (nfa2, start) = nfa1.add_state()
             val (nfa3, end) = nfa2.add_state()
@@ -646,9 +639,8 @@ class NFABuilder:
             return (nfa7, NFAFragment.new(start, end))
 
         # Plus (one or more)
-        if node is PlusNode:
-            val plus = node as PlusNode
-            val (nfa1, child_frag) = self.build_fragment(nfa, plus.child)
+        if node.node_type == "plus":
+            val (nfa1, child_frag) = self.build_fragment(nfa, node.child)
 
             val (nfa2, start) = nfa1.add_state()
             val (nfa3, end) = nfa2.add_state()
@@ -663,9 +655,8 @@ class NFABuilder:
             return (nfa6, NFAFragment.new(start, end))
 
         # Question (zero or one)
-        if node is QuestionNode:
-            val quest = node as QuestionNode
-            val (nfa1, child_frag) = self.build_fragment(nfa, quest.child)
+        if node.node_type == "question":
+            val (nfa1, child_frag) = self.build_fragment(nfa, node.child)
 
             val (nfa2, start) = nfa1.add_state()
             val (nfa3, end) = nfa2.add_state()
@@ -679,29 +670,27 @@ class NFABuilder:
             return (nfa6, NFAFragment.new(start, end))
 
         # Group
-        if node is GroupNode:
-            val group = node as GroupNode
-            val (nfa1, child_frag) = self.build_fragment(nfa, group.child)
+        if node.node_type == "group":
+            val (nfa1, child_frag) = self.build_fragment(nfa, node.child)
 
             val (nfa2, start) = nfa1.add_state()
             val (nfa3, end) = nfa2.add_state()
 
             # Mark group boundaries
-            val nfa4 = nfa3.set_group_start(start, group.group_id)
-            val nfa5 = nfa4.set_group_end(end, group.group_id)
+            val nfa4 = nfa3.set_group_start(start, node.group_id)
+            val nfa5 = nfa4.set_group_end(end, node.group_id)
 
             val nfa6 = nfa5.add_epsilon_to(start, child_frag.start)
             val nfa7 = nfa6.add_epsilon_to(child_frag.end, end)
 
-            if group.group_id > nfa7.num_groups:
-                val nfa8 = nfa7.set_num_groups(group.group_id)
+            if node.group_id > nfa7.num_groups:
+                val nfa8 = nfa7.set_num_groups(node.group_id)
                 return (nfa8, NFAFragment.new(start, end))
             else:
                 return (nfa7, NFAFragment.new(start, end))
 
         # Anchor
-        if node is AnchorNode:
-            val anchor = node as AnchorNode
+        if node.node_type == "anchor":
             val (nfa1, start) = nfa.add_state()
             val (nfa2, end) = nfa1.add_state()
 
@@ -710,24 +699,11 @@ class NFABuilder:
 
             return (nfa3, NFAFragment.new(start, end))
 
-        # Default: Handle node types using field-based detection
-        # NOTE: Due to broken 'is' operator, all nodes end up here
-        # TODO: Implement field-based type detection for all node types
-
-        # For now, try to handle as literal (most common case)
-        val char_field = node.char
-        if char_field.len() > 0:
-            # LiteralNode with character
-            val (nfa1, start) = nfa.add_state()
-            val (nfa2, end) = nfa1.add_state()
-            val nfa3 = nfa2.add_transition_to(start, char_field, end)
-            return (nfa3, NFAFragment.new(start, end))
-        else:
-            # Empty literal or unknown node type
-            val (nfa1, start) = nfa.add_state()
-            val (nfa2, end) = nfa1.add_state()
-            val nfa3 = nfa2.add_epsilon_to(start, end)
-            return (nfa3, NFAFragment.new(start, end))
+        # Default: Unknown node type
+        val (nfa1, start) = nfa.add_state()
+        val (nfa2, end) = nfa1.add_state()
+        val nfa3 = nfa2.add_epsilon_to(start, end)
+        return (nfa3, NFAFragment.new(start, end))
 
 # NFA Matcher - simulates NFA execution
 class NFAMatcher:
@@ -816,7 +792,7 @@ class NFAMatcher:
             m.groups = match_groups
             return Some(m)
 
-        return None
+        return nil
 
     fn epsilon_closure(states: List<(i32, List<text>, i32)>) -> List<(i32, List<text>, i32)>:
         """Compute epsilon closure of a set of states using iterative approach."""
@@ -882,10 +858,10 @@ class CompiledRegex:
         # Try matching at each position
         for i in range(0, text.len() + 1):
             val m = self.match_at(text, i)
-            if m.is_some():
+            if m!= nil:
                 return m
 
-        return None
+        return nil
 
     fn findall(text: text) -> List<Match>:
         var results = []
@@ -893,7 +869,7 @@ class CompiledRegex:
 
         while pos < text.len():
             val m = self.match_at(text, pos)
-            if m.is_some():
+            if m!= nil:
                 val match_val = m.unwrap()
                 results.append(match_val)
                 # Move past this match
@@ -928,7 +904,7 @@ class Match:
 
     fn group(index: i32) -> Option<text>:
         if index < 0 or index >= self.groups.len():
-            return None
+            return nil
         return Some(self.groups[index])
 
     fn all_groups() -> List<text>:
@@ -1085,11 +1061,11 @@ class Pattern:
             pattern.fullmatch("hello123")  # → None
         """
         val m = self.compiled.match_at(text, 0)
-        if m.is_some():
+        if m!= nil:
             val match_val = m.unwrap()
             if match_val.end == text.len():
                 return Some(match_val)
-        return None
+        return nil
 
     # Find all matches
     fn findall(text: text) -> List<Match>:
@@ -1175,7 +1151,7 @@ class Pattern:
                     val group_num = next.to_int()
                     val group = match_val.group(group_num)
 
-                    if group.is_some():
+                    if group!= nil:
                         result = result + group.unwrap()
                     else:
                         result = result + "\\" + next  # Keep as-is if group doesn't exist
@@ -1349,7 +1325,7 @@ fn escape(text: text) -> text:
 
 # Check if pattern matches (boolean)
 fn is_match(pattern: text, text: text) -> bool:
-    return search(pattern, text).is_some()
+    return search(pattern, text)!= nil
 
 # Extract matched text from Match
 fn extract_text(m: Match) -> text:
