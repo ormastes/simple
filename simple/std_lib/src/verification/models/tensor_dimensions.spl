@@ -16,7 +16,7 @@ class DimVar:
         DimVar(id: id, name: nil, bound: nil)
 
     fn named(id: i32, name: text) -> DimVar:
-        DimVar(id: id, name: Some(name), bound: None)
+        DimVar(id: id, name: Some(name), bound: nil)
 
     var fn set_bound(dim: Dim):
         self.bound = Some(dim)
@@ -29,7 +29,7 @@ enum Dim:
     # Fixed dimension size
     Literal(value: i32)
     # Dimension variable (for inference)
-    Var(var: DimVar)
+    Var(variable: DimVar)
     # Named dimension with optional range constraint
     Named(name: text, range: Option<(i32, i32)>)
     # Dynamic dimension (unknown at compile time, checked at runtime)
@@ -43,30 +43,30 @@ enum Dim:
             case Var(v):
                 match v.name:
                     case Some(n): "?{n}"
-                    case None: "?{v.id}"
+                    case nil: "?{v.id}"
             case Named(n, range):
                 match range:
                     case Some((lo, hi)): "{n}: {lo}..{hi}"
-                    case None: "{n}"
+                    case nil: "{n}"
             case Dynamic: "?"
             case Broadcast: "#"
 
     fn is_concrete() -> bool:
         match self:
             case Literal(_): True
-            case Named(_, None): True
+            case Named(_, nil): True
             case _: False
 
     fn get_value() -> Option<i32>:
         match self:
             case Literal(v): Some(v)
-            case _: None
+            case _: nil
 
     fn get_range() -> Option<(i32, i32)>:
         match self:
             case Literal(v): Some((v, v))
             case Named(_, range): range
-            case _: None
+            case _: nil
 
     fn is_literal() -> bool:
         """Check if this is Literal dimension.
@@ -80,7 +80,7 @@ enum Dim:
     fn is_var() -> bool:
         """Check if this is Var dimension.
         Returns: true for Var
-        Example: Dim.Var(var: v).is_var()  # → True
+        Example: Dim.Var(variable: v).is_var()  # → True
         """
         match self:
             case Var(_): True
@@ -89,7 +89,7 @@ enum Dim:
     fn is_named() -> bool:
         """Check if this is Named dimension.
         Returns: true for Named
-        Example: Dim.Named(name: "batch", range: None).is_named()  # → True
+        Example: Dim.Named(name: "batch", range: nil).is_named()  # → True
         """
         match self:
             case Named(_, _): True
@@ -116,7 +116,7 @@ enum Dim:
     fn is_inferred() -> bool:
         """Check if dimension requires inference (Var or Dynamic).
         Returns: true for Var or Dynamic
-        Example: Dim.Var(var: v).is_inferred()  # → True
+        Example: Dim.Var(variable: v).is_inferred()  # → True
         """
         match self:
             case Var(_): True
@@ -140,11 +140,11 @@ enum Dim:
             case Var(v):
                 match v.name:
                     case Some(n): "Dimension variable: {n} (id={v.id})"
-                    case None: "Dimension variable: id={v.id}"
+                    case nil: "Dimension variable: id={v.id}"
             case Named(n, range):
                 match range:
                     case Some((lo, hi)): "Named dimension: {n} in range [{lo}, {hi}]"
-                    case None: "Named dimension: {n}"
+                    case nil: "Named dimension: {n}"
             case Dynamic: "Dynamic dimension (runtime-determined)"
             case Broadcast: "Broadcast dimension (flexible)"
 
@@ -348,7 +348,7 @@ class TensorShape:
         else if idx < 0 and -idx <= self.dims.len():
             Some(self.dims[self.dims.len() + idx])
         else:
-            None
+            nil
 
     fn is_concrete() -> bool:
         self.dims.all(|d| d.is_concrete())
@@ -360,8 +360,8 @@ class TensorShape:
             match d.get_range():
                 case Some((lo, _)):
                     product = product * lo
-                case None:
-                    return None
+                case nil:
+                    return nil
         Some(product)
 
     # Get maximum total elements (from range maximums)
@@ -371,8 +371,8 @@ class TensorShape:
             match d.get_range():
                 case Some((_, hi)):
                     product = product * hi
-                case None:
-                    return None
+                case nil:
+                    return nil
         Some(product)
 
 # ============================================================================
@@ -409,13 +409,13 @@ class ShapeEnv:
                 match self.lookup_var(v.id):
                     case Some(bound):
                         self.apply(bound)
-                    case None:
+                    case nil:
                         dim
             case Dim.Named(n, _):
                 match self.lookup_named(n):
                     case Some(bound):
                         self.apply(bound)
-                    case None:
+                    case nil:
                         dim
             case _:
                 dim
@@ -603,12 +603,12 @@ class DimInferenceContext:
     var fn fresh_var() -> Dim:
         val id = self.next_var_id
         self.next_var_id = self.next_var_id + 1
-        Dim.Var(var: DimVar.new(id))
+        Dim.Var(variable: DimVar.new(id))
 
     var fn fresh_named_var(name: text) -> Dim:
         val id = self.next_var_id
         self.next_var_id = self.next_var_id + 1
-        Dim.Var(var: DimVar.named(id, name))
+        Dim.Var(variable: DimVar.named(id, name))
 
     var fn add_error(err: ShapeError):
         self.errors.push(err)
@@ -657,14 +657,14 @@ fn unify_dims(ctx: mut DimInferenceContext, d1: Dim, d2: Dim) -> Result<Dim, Sha
                                     Ok(Dim.Named(name: n1, range: Some((lo, hi))))
                                 else:
                                     Err(ShapeError.InferenceError(message: "Range intersection empty for dimension '{n1}': [{lo1}..{hi1}] ∩ [{lo2}..{hi2}] = ∅"))
-                            case None:
+                            case nil:
                                 Ok(Dim.Named(name: n1, range: Some((lo1, hi1))))
-                    case None:
+                    case nil:
                         match r2:
                             case Some((lo2, hi2)):
                                 Ok(Dim.Named(name: n1, range: Some((lo2, hi2))))
-                            case None:
-                                Ok(Dim.Named(name: n1, range: None))
+                            case nil:
+                                Ok(Dim.Named(name: n1, range: nil))
             else:
                 # Different names - add equality constraint
                 ctx.env.add_constraint(DimConstraint.Equal(d1: d1_applied, d2: d2_applied))
@@ -677,7 +677,7 @@ fn unify_dims(ctx: mut DimInferenceContext, d1: Dim, d2: Dim) -> Result<Dim, Sha
                 case Some((lo, hi)):
                     if v < lo or v > hi:
                         return Err(ShapeError.DimOutOfRange(dim_idx: 0, value: v, min: lo, max: hi))
-                case None:
+                case nil:
                     ()
             ctx.env.bind_named(n, Dim.Literal(value: v))
             Ok(Dim.Literal(value: v))
@@ -688,7 +688,7 @@ fn unify_dims(ctx: mut DimInferenceContext, d1: Dim, d2: Dim) -> Result<Dim, Sha
                 case Some((lo, hi)):
                     if v < lo or v > hi:
                         return Err(ShapeError.DimOutOfRange(dim_idx: 0, value: v, min: lo, max: hi))
-                case None:
+                case nil:
                     ()
             ctx.env.bind_named(n, Dim.Literal(value: v))
             Ok(Dim.Literal(value: v))
@@ -913,7 +913,7 @@ fn verify_shape_at_runtime(actual: List<i32>, declared: TensorShape) -> Result<(
                                 min: lo,
                                 max: hi
                             ))
-                    case None:
+                    case nil:
                         ()  # No constraint
             case Dim.Dynamic:
                 ()  # Always valid
