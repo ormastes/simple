@@ -12,7 +12,7 @@
 //! let module = loader.load(Path::new("program.smf"))?;
 //! ```
 //!
-//! ## From Memory (TODO)
+//! ## From Memory
 //! ```ignore
 //! let loader = ModuleLoader::new();
 //! let bytes: Vec<u8> = compile_to_memory(source)?;
@@ -26,7 +26,7 @@
 //! │                    ModuleLoader                       │
 //! │  ┌─────────────────┐    ┌─────────────────────────┐  │
 //! │  │ load(path)      │    │ load_from_memory(bytes) │  │
-//! │  │ (from file)     │    │ (from memory) [TODO]    │  │
+//! │  │ (from file)     │    │ (from memory)           │  │
 //! │  └────────┬────────┘    └───────────┬─────────────┘  │
 //! │           │                         │                │
 //! │           └──────────┬──────────────┘                │

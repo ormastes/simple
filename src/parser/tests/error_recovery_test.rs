@@ -163,3 +163,46 @@ fn test_common_mistake_suggestions() {
     assert!(CommonMistake::RustLetMut.suggestion().contains("var"));
     assert!(CommonMistake::TsConst.suggestion().contains("val"));
 }
+
+#[test]
+fn test_typescript_let_detection() {
+    use simple_parser::token::{Token, TokenKind, Span};
+
+    let let_token = Token::new(
+        TokenKind::Let,
+        Span::new(0, 3, 1, 1),
+        "let".to_string(),
+    );
+    let prev = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "\n".to_string());
+    let next = Token::new(
+        TokenKind::Identifier("x".to_string()),
+        Span::new(4, 5, 1, 5),
+        "x".to_string(),
+    );
+
+    let mistake = detect_common_mistake(&let_token, &prev, Some(&next));
+    assert_eq!(mistake, Some(CommonMistake::TsLet));
+    assert!(CommonMistake::TsLet.message().contains("val"));
+    assert!(CommonMistake::TsLet.message().contains("var"));
+}
+
+#[test]
+fn test_python_self_detection() {
+    use simple_parser::token::{Token, TokenKind, Span};
+
+    let self_token = Token::new(
+        TokenKind::Self_,
+        Span::new(0, 4, 1, 1),
+        "self".to_string(),
+    );
+    let prev = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "\n".to_string());
+    let dot_token = Token::new(
+        TokenKind::Dot,
+        Span::new(4, 5, 1, 5),
+        ".".to_string(),
+    );
+
+    let mistake = detect_common_mistake(&self_token, &prev, Some(&dot_token));
+    assert_eq!(mistake, Some(CommonMistake::PythonSelf));
+    assert!(CommonMistake::PythonSelf.message().contains("implicit"));
+}

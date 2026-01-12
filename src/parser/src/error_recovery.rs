@@ -349,6 +349,29 @@ pub fn detect_common_mistake(
         return Some(CommonMistake::CppTemplate);
     }
 
+    // Check for 'let' without 'mut' (TypeScript/JavaScript) - info level suggestion to use val/var
+    if matches!(current.kind, TokenKind::Let) {
+        // Only suggest if not followed by 'mut' (which is already handled above)
+        if let Some(next_token) = next {
+            if next_token.lexeme != "mut" {
+                return Some(CommonMistake::TsLet);
+            }
+        } else {
+            return Some(CommonMistake::TsLet);
+        }
+    }
+
+    // Check for Python-style explicit self.x (when 'self' keyword is followed by dot)
+    if matches!(current.kind, TokenKind::Self_)
+        && !matches!(previous.kind, TokenKind::Fn | TokenKind::Me) {
+        // This is 'self' being used explicitly (not in method signature)
+        if let Some(next_token) = next {
+            if matches!(next_token.kind, TokenKind::Dot) {
+                return Some(CommonMistake::PythonSelf);
+            }
+        }
+    }
+
     None
 }
 
