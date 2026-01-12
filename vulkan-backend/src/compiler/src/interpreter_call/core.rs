@@ -317,10 +317,10 @@ fn exec_function_inner(
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &HashMap<String, Value>)>,
 ) -> Result<Value, CompileError> {
-    // TODO: Re-enable coverage tracking when module is complete
-    // if let Some(cov) = crate::coverage::get_global_coverage() {
-    //     cov.lock().unwrap().record_function_call(&func.name);
-    // }
+    // Coverage tracking - enabled via SIMPLE_COVERAGE env var
+    if let Some(cov) = crate::coverage::get_global_coverage() {
+        cov.lock().unwrap().record_function_call(&func.name);
+    }
 
     let mut local_env = Env::new();
 
@@ -379,10 +379,10 @@ fn exec_function_with_values_inner(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    // TODO: Re-enable coverage tracking when module is complete
-    // if let Some(cov) = crate::coverage::get_global_coverage() {
-    //     cov.lock().unwrap().record_function_call(&func.name);
-    // }
+    // Coverage tracking - enabled via SIMPLE_COVERAGE env var
+    if let Some(cov) = crate::coverage::get_global_coverage() {
+        cov.lock().unwrap().record_function_call(&func.name);
+    }
 
     let mut local_env = Env::new();
     let self_mode = SelfMode::IncludeSelf;

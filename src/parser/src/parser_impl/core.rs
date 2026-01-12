@@ -69,7 +69,7 @@ impl<'a> Parser<'a> {
         let current = lexer.next_token();
         let previous = Token::new(TokenKind::Eof, Span::new(0, 0, 1, 1), String::new());
 
-        Self {
+        let mut parser = Self {
             lexer,
             current,
             previous,
@@ -82,7 +82,61 @@ impl<'a> Parser<'a> {
             macro_registry: MacroRegistry::new(),
             current_scope: "module".to_string(),
             error_hints: Vec::new(),
+        };
+
+        // Check for common mistakes in the initial token
+        // (since it was loaded via lexer.next_token() bypassing advance())
+        let next = parser.lexer.next_token();
+        parser.pending_tokens.push_back(next.clone());
+        let next_token = Some(&parser.pending_tokens[0]);
+
+        use crate::error_recovery::detect_common_mistake;
+        if let Some(mistake) = detect_common_mistake(&parser.current, &parser.previous, next_token) {
+            use crate::error_recovery::{CommonMistake, ErrorHint, ErrorHintLevel};
+            let level = match mistake {
+                CommonMistake::PythonDef
+                | CommonMistake::PythonNone
+                | CommonMistake::PythonTrue
+                | CommonMistake::PythonFalse
+                | CommonMistake::RustLetMut
+                | CommonMistake::JavaPublicClass
+                | CommonMistake::JavaVoid
+                | CommonMistake::JavaNew
+                | CommonMistake::JavaThis
+                | CommonMistake::TsFunction
+                | CommonMistake::TsConst
+                | CommonMistake::TsInterface
+                | CommonMistake::CppNamespace
+                | CommonMistake::CppTemplate
+                | CommonMistake::CTypeFirst
+                | CommonMistake::MissingColon => ErrorHintLevel::Error,
+                CommonMistake::VerboseReturnType
+                | CommonMistake::ExplicitSelf
+                | CommonMistake::WrongBrackets
+                | CommonMistake::CSemicolon
+                | CommonMistake::SemicolonAfterBlock => ErrorHintLevel::Warning,
+                CommonMistake::TsLet
+                | CommonMistake::PythonSelf
+                | CommonMistake::RustFnMut => ErrorHintLevel::Info,
+                CommonMistake::RustLifetime
+                | CommonMistake::RustMacro
+                | CommonMistake::RustTurbofish
+                | CommonMistake::TsArrowFunction
+                | CommonMistake::PythonElif => ErrorHintLevel::Hint,
+            };
+
+            let hint = ErrorHint {
+                level,
+                message: format!("Common mistake detected: {}", mistake.suggestion()),
+                span: parser.current.span.clone(),
+                suggestion: Some(mistake.suggestion()),
+                help: Some(mistake.message()),
+            };
+
+            parser.error_hints.push(hint);
         }
+
+        parser
     }
 
     /// Create a parser with LL(1) macro integration enabled.

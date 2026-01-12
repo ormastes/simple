@@ -410,10 +410,10 @@ fn exec_function_inner(
         }
     }
 
-    // TODO: [compiler][P2] Re-enable coverage tracking when module is complete
-    // if let Some(cov) = crate::coverage::get_global_coverage() {
-    //     cov.lock().unwrap().record_function_call(&func.name);
-    // }
+    // Coverage tracking - enabled via SIMPLE_COVERAGE env var
+    if let Some(cov) = crate::coverage::get_global_coverage() {
+        cov.lock().unwrap().record_function_call(&func.name);
+    }
 
     let mut local_env = Env::new();
 
@@ -481,10 +481,10 @@ fn exec_function_with_values_inner(
         diagram_ffi::trace_call(&func.name);
     }
 
-    // TODO: [compiler][P2] Re-enable coverage tracking when module is complete
-    // if let Some(cov) = crate::coverage::get_global_coverage() {
-    //     cov.lock().unwrap().record_function_call(&func.name);
-    // }
+    // Coverage tracking - enabled via SIMPLE_COVERAGE env var
+    if let Some(cov) = crate::coverage::get_global_coverage() {
+        cov.lock().unwrap().record_function_call(&func.name);
+    }
 
     let mut local_env = Env::new();
     let self_mode = SelfMode::IncludeSelf;

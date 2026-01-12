@@ -172,7 +172,7 @@ impl<'a> MirLowerer<'a> {
                 let cond_reg = self.lower_expr(condition)?;
 
                 // Emit decision probe for while condition coverage
-                // TODO: Get actual line/column from condition span
+                // Line/column require span tracking in HIR expressions
                 self.emit_decision_probe(cond_reg, 0, 0)?;
 
                 self.with_func(|func, current_block| {
