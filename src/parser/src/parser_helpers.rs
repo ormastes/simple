@@ -598,6 +598,18 @@ impl<'a> Parser<'a> {
             self.advance(); // consume '<'
             false
         } else if self.check(&TokenKind::LBracket) {
+            // Emit deprecation warning for square bracket syntax
+            use crate::error_recovery::{ErrorHint, ErrorHintLevel};
+            let bracket_span = self.current.span;
+            let warning = ErrorHint {
+                level: ErrorHintLevel::Warning,
+                message: "Deprecated syntax for generic parameters".to_string(),
+                span: bracket_span,
+                suggestion: Some("Use angle brackets <...> instead of [...]".to_string()),
+                help: Some("Run `simple migrate --fix-generics` to automatically update your code".to_string()),
+            };
+            self.error_hints.push(warning);
+
             self.advance(); // consume '['
             true
         } else {

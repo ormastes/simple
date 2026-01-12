@@ -812,6 +812,42 @@ fn value_to_display_string(v: RuntimeValue) -> String {
 }
 
 // ============================================================================
+// Code Coverage & Instrumentation Probes
+// ============================================================================
+
+/// Record a decision point for coverage tracking
+/// Called when a boolean decision is made (if, while, etc.)
+#[no_mangle]
+pub extern "C" fn rt_decision_probe(_decision_id: u64, _result: bool) {
+    // Stub implementation for future instrumentation
+    // In a full implementation, this would:
+    // 1. Record the decision_id and result in a coverage map
+    // 2. Track true/false branch coverage
+    // 3. Support coverage report generation
+}
+
+/// Record a condition evaluation for MC/DC coverage
+/// Called for each condition in a compound boolean expression
+#[no_mangle]
+pub extern "C" fn rt_condition_probe(_decision_id: u64, _condition_id: u32, _result: bool) {
+    // Stub implementation for future MC/DC (Modified Condition/Decision Coverage)
+    // In a full implementation, this would:
+    // 1. Track individual condition evaluations
+    // 2. Record condition outcomes within compound decisions
+    // 3. Enable MC/DC coverage analysis
+}
+
+/// Record execution of a code path/block for path coverage
+#[no_mangle]
+pub extern "C" fn rt_path_probe(_path_id: u64, _block_id: u32) {
+    // Stub implementation for future path coverage tracking
+    // In a full implementation, this would:
+    // 1. Record executed basic blocks
+    // 2. Track path coverage through the program
+    // 3. Support path profiling and hot path detection
+}
+
+// ============================================================================
 // Process control FFI functions
 // ============================================================================
 
@@ -3695,81 +3731,355 @@ pub extern "C" fn rt_torch_add(_a: RuntimeValue, _b: RuntimeValue) -> RuntimeVal
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_add_scalar(tensor: RuntimeValue, scalar: f64) -> RuntimeValue {
+    let tensor_handle = match value_to_tensor_handle(tensor) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let tensor_val = match get_tensor(tensor_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = tensor_val + scalar;
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_add_scalar(_tensor: RuntimeValue, _scalar: f64) -> RuntimeValue {
-    // TODO: Implement scalar addition
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_sub(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
+    let a_handle = match value_to_tensor_handle(a) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+    let b_handle = match value_to_tensor_handle(b) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let a_tensor = match get_tensor(a_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+    let b_tensor = match get_tensor(b_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = a_tensor - b_tensor;
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_sub(_a: RuntimeValue, _b: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement tensor subtraction
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_mul(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
+    let a_handle = match value_to_tensor_handle(a) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+    let b_handle = match value_to_tensor_handle(b) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let a_tensor = match get_tensor(a_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+    let b_tensor = match get_tensor(b_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = a_tensor * b_tensor;
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_mul(_a: RuntimeValue, _b: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement tensor multiplication
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_mul_scalar(tensor: RuntimeValue, scalar: f64) -> RuntimeValue {
+    let tensor_handle = match value_to_tensor_handle(tensor) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let tensor_val = match get_tensor(tensor_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = tensor_val * scalar;
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_mul_scalar(_tensor: RuntimeValue, _scalar: f64) -> RuntimeValue {
-    // TODO: Implement scalar multiplication
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_div(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
+    let a_handle = match value_to_tensor_handle(a) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+    let b_handle = match value_to_tensor_handle(b) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let a_tensor = match get_tensor(a_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+    let b_tensor = match get_tensor(b_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = a_tensor / b_tensor;
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_div(_a: RuntimeValue, _b: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement tensor division
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_matmul(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
+    let a_handle = match value_to_tensor_handle(a) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+    let b_handle = match value_to_tensor_handle(b) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let a_tensor = match get_tensor(a_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+    let b_tensor = match get_tensor(b_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = a_tensor.matmul(&b_tensor);
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_matmul(_a: RuntimeValue, _b: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement matrix multiplication
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_cos(tensor: RuntimeValue) -> RuntimeValue {
+    let tensor_handle = match value_to_tensor_handle(tensor) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let tensor_val = match get_tensor(tensor_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = tensor_val.cos();
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_cos(_tensor: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement cosine
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_max(tensor: RuntimeValue) -> RuntimeValue {
+    let tensor_handle = match value_to_tensor_handle(tensor) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let tensor_val = match get_tensor(tensor_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = tensor_val.max();
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_max(_tensor: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement max reduction
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_min(tensor: RuntimeValue) -> RuntimeValue {
+    let tensor_handle = match value_to_tensor_handle(tensor) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let tensor_val = match get_tensor(tensor_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = tensor_val.min();
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_min(_tensor: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement min reduction
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_std(tensor: RuntimeValue) -> RuntimeValue {
+    let tensor_handle = match value_to_tensor_handle(tensor) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let tensor_val = match get_tensor(tensor_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = tensor_val.std(true);
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_std(_tensor: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement standard deviation
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_var(tensor: RuntimeValue) -> RuntimeValue {
+    let tensor_handle = match value_to_tensor_handle(tensor) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let tensor_val = match get_tensor(tensor_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = tensor_val.var(true);
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_var(_tensor: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement variance
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_norm(tensor: RuntimeValue) -> RuntimeValue {
+    let tensor_handle = match value_to_tensor_handle(tensor) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let tensor_val = match get_tensor(tensor_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = tensor_val.norm();
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_norm(_tensor: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement norm
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_gt(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
+    let a_handle = match value_to_tensor_handle(a) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+    let b_handle = match value_to_tensor_handle(b) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let a_tensor = match get_tensor(a_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+    let b_tensor = match get_tensor(b_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = a_tensor.gt(&b_tensor);
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_gt(_a: RuntimeValue, _b: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement greater than comparison
     RuntimeValue::NIL
 }
 
@@ -3779,12 +4089,54 @@ pub extern "C" fn rt_torch_index(_tensor: RuntimeValue, _indices: RuntimeValue) 
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_select(tensor: RuntimeValue, dim: i64, index: i64) -> RuntimeValue {
+    let tensor_handle = match value_to_tensor_handle(tensor) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let tensor_val = match get_tensor(tensor_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = tensor_val.select(dim, index);
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_select(_tensor: RuntimeValue, _dim: i64, _index: i64) -> RuntimeValue {
-    // TODO: Implement tensor select
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_narrow(
+    tensor: RuntimeValue,
+    dim: i64,
+    start: i64,
+    length: i64,
+) -> RuntimeValue {
+    let tensor_handle = match value_to_tensor_handle(tensor) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let tensor_val = match get_tensor(tensor_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = tensor_val.narrow(dim, start, length);
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_narrow(
     _tensor: RuntimeValue,
@@ -3792,7 +4144,6 @@ pub extern "C" fn rt_torch_narrow(
     _start: i64,
     _length: i64,
 ) -> RuntimeValue {
-    // TODO: Implement tensor narrow
     RuntimeValue::NIL
 }
 
@@ -3852,18 +4203,73 @@ pub extern "C" fn rt_torch_checkpoint(_func: RuntimeValue, _inputs: RuntimeValue
 
 // Loss Functions
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_bce_loss(pred: RuntimeValue, target: RuntimeValue) -> RuntimeValue {
+    let pred_handle = match value_to_tensor_handle(pred) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+    let target_handle = match value_to_tensor_handle(target) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let pred_tensor = match get_tensor(pred_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+    let target_tensor = match get_tensor(target_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = pred_tensor.binary_cross_entropy::<tch::Tensor>(&target_tensor, None, tch::Reduction::Mean);
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_bce_loss(_pred: RuntimeValue, _target: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement binary cross entropy loss
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_cross_entropy_loss(
+    pred: RuntimeValue,
+    target: RuntimeValue,
+) -> RuntimeValue {
+    let pred_handle = match value_to_tensor_handle(pred) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+    let target_handle = match value_to_tensor_handle(target) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let pred_tensor = match get_tensor(pred_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+    let target_tensor = match get_tensor(target_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    let result = pred_tensor.cross_entropy_loss::<tch::Tensor>(&target_tensor, None, tch::Reduction::Mean, -100, 0.0);
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_cross_entropy_loss(
     _pred: RuntimeValue,
     _target: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: Implement cross entropy loss
     RuntimeValue::NIL
 }
 
@@ -4111,9 +4517,18 @@ pub extern "C" fn rt_torch_cifar10_load(
 
 // Distributed Training
 
+#[cfg(feature = "pytorch")]
 #[no_mangle]
 pub extern "C" fn rt_torch_dist_is_available() -> i64 {
-    // TODO: Check if distributed training is available
+    // Check if distributed training is available
+    // In tch-rs, distributed training support depends on PyTorch build
+    // For now, return 0 (not available) as it requires additional setup
+    0
+}
+
+#[cfg(not(feature = "pytorch"))]
+#[no_mangle]
+pub extern "C" fn rt_torch_dist_is_available() -> i64 {
     0
 }
 

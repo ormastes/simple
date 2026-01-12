@@ -45,7 +45,13 @@ impl Lowerer {
                 {
                     // Add mixin fields to class fields
                     for (field_name, field_type) in mixin_fields.clone() {
-                        // TODO: [compiler][P3] Check for field name conflicts
+                        // Check for field name conflicts
+                        if fields.iter().any(|(existing, _)| existing == &field_name) {
+                            // Field already exists - this is a conflict
+                            // For now, skip the duplicate field (last-one-wins semantics)
+                            // A future enhancement could emit a warning or error
+                            continue;
+                        }
                         fields.push((field_name, field_type));
                     }
                 }

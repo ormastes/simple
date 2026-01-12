@@ -5,8 +5,48 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use simple_parser::ast::{Argument, Capability, Effect, Expr, ImportTarget, Module, Node, UseStmt};
+use simple_parser::error_recovery::{ErrorHint, ErrorHintLevel};
+use simple_parser::Parser;
 
 use crate::CompileError;
+
+/// Display parser error hints (warnings, etc.) to stderr
+fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
+    let hints = parser.error_hints();
+    if hints.is_empty() {
+        return;
+    }
+
+    // Display hints to stderr
+    for hint in hints {
+        let level_str = match hint.level {
+            ErrorHintLevel::Error => "\x1b[31merror\x1b[0m",   // red
+            ErrorHintLevel::Warning => "\x1b[33mwarning\x1b[0m", // yellow
+            ErrorHintLevel::Info => "\x1b[36minfo\x1b[0m",    // cyan
+            ErrorHintLevel::Hint => "\x1b[32mhint\x1b[0m",    // green
+        };
+
+        eprintln!("{}: {}", level_str, hint.message);
+        eprintln!("  --> {}:{}:{}", path.display(), hint.span.line, hint.span.column);
+
+        // Show source line with caret
+        if let Some(line) = source.lines().nth(hint.span.line - 1) {
+            eprintln!("   |");
+            eprintln!("{:3} | {}", hint.span.line, line);
+            eprintln!("   | {}^", " ".repeat(hint.span.column - 1));
+        }
+
+        if let Some(ref suggestion) = hint.suggestion {
+            eprintln!("\n{}", suggestion);
+        }
+
+        if let Some(ref help) = hint.help {
+            eprintln!("\n{}", help);
+        }
+
+        eprintln!(); // blank line between hints
+    }
+}
 
 /// Application type for startup optimization (#1979)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -298,6 +338,9 @@ pub fn load_module_with_imports_validated(
     let module = parser
         .parse()
         .map_err(|e| CompileError::Parse(format!("{e}")))?;
+
+    // Display error hints (warnings, etc.) from parser
+    display_parser_hints(&parser, &source, &path);
 
     // Extract this module's capabilities for passing to child imports
     let this_caps = extract_module_capabilities(&module);

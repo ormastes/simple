@@ -188,6 +188,16 @@ pub use ffi::{
 // Re-export time FFI functions
 pub use ffi::rt_time_now_seconds;
 
+// Re-export atomic operations FFI functions
+pub use ffi::{
+    rt_atomic_bool_free, rt_atomic_bool_load, rt_atomic_bool_new, rt_atomic_bool_store,
+    rt_atomic_bool_swap, rt_atomic_flag_clear, rt_atomic_flag_free, rt_atomic_flag_new,
+    rt_atomic_flag_test_and_set, rt_atomic_int_compare_exchange, rt_atomic_int_fetch_add,
+    rt_atomic_int_fetch_and, rt_atomic_int_fetch_or, rt_atomic_int_fetch_sub,
+    rt_atomic_int_fetch_xor, rt_atomic_int_free, rt_atomic_int_load, rt_atomic_int_new,
+    rt_atomic_int_store, rt_atomic_int_swap,
+};
+
 // Re-export doctest I/O FFI functions
 pub use doctest_io::{
     doctest_is_dir, doctest_is_file, doctest_path_contains, doctest_path_exists,

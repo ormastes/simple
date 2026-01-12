@@ -12,6 +12,7 @@ pub mod gen_lean;
 pub mod help;
 pub mod init;
 pub mod llm_tools;
+pub mod migrate;
 pub mod repl;
 pub mod sandbox;
 pub mod sspec_docgen;

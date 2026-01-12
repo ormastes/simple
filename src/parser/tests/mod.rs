@@ -21,6 +21,7 @@ pub(crate) fn parse_err(src: &str) {
 // Test modules
 mod control_flow;
 mod data_structures;
+mod deprecation_warnings;
 mod edge_cases;
 mod enum_advanced;
 mod expressions;

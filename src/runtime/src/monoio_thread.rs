@@ -31,9 +31,9 @@ macro_rules! send_error {
 
 /// Send success response
 macro_rules! send_success {
-    ($tx:expr, $id:expr) => {
+    ($tx:expr, $id:expr) => {{
         let _ = $tx.send(IoResponse::Success { id: $id });
-    };
+    }};
 }
 
 /// Get TCP stream from registry or send error and return

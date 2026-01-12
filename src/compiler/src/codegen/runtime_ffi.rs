@@ -57,6 +57,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_aop_invoke_around", &[I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_aop_proceed", &[I64], &[I64]),
     // =========================================================================
+    // Code coverage & instrumentation probes
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_decision_probe", &[I64, I8], &[]),
+    RuntimeFuncSpec::new("rt_condition_probe", &[I64, I32, I8], &[]),
+    RuntimeFuncSpec::new("rt_path_probe", &[I64, I32], &[]),
+    // =========================================================================
     // Array operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_array_new", &[I64], &[I64]),
