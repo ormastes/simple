@@ -130,7 +130,7 @@ fn extract_and_convert(line: &str, keyword: &str, indent: usize) -> Option<Strin
 /// Check if line is manual tracking (passed/failed variables)
 fn is_manual_tracking_line(line: &str) -> bool {
     // Check for variable declarations/assignments
-    if (line.contains("passed") || line.contains("failed")) {
+    if line.contains("passed") || line.contains("failed") {
         if line.contains("= 0") || line.contains("+ 1") {
             return true;
         }
