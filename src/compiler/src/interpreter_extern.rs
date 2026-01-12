@@ -261,6 +261,14 @@ pub(crate) fn call_extern_function(
             Ok(Value::Int(base.pow(exp as u32)))
         }
 
+        // Time functions
+        "rt_time_now_seconds" => {
+            unsafe {
+                let time = simple_runtime::value::rt_time_now_seconds();
+                Ok(Value::Float(time))
+            }
+        }
+
         // Conversion functions
         "to_string" => {
             let val = evaluated
