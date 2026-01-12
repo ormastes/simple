@@ -38,6 +38,7 @@ use cli::doc_gen::{run_feature_gen, run_spec_gen, run_task_gen};
 use cli::gen_lean::run_gen_lean;
 use cli::help::{print_help, print_version, version};
 use cli::llm_tools::{run_context, run_diff, run_mcp};
+use cli::migrate::run_migrate;
 use cli::repl::run_repl;
 use cli::sandbox::{apply_sandbox, parse_sandbox_config};
 use cli::test_runner;
@@ -480,6 +481,9 @@ fn main() {
         }
         "fmt" => {
             std::process::exit(run_fmt(&args));
+        }
+        "migrate" => {
+            std::process::exit(run_migrate(&args));
         }
         "mcp" => {
             std::process::exit(run_mcp(&args));

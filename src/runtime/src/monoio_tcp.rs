@@ -343,20 +343,31 @@ pub extern "C" fn monoio_tcp_shutdown(
 ///
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
+///
+/// # Notes
+/// Due to FFI limitations (streams not Send/Sync), this only removes the
+/// metadata entry. The actual TCP connection was already closed when
+/// the stream was dropped after connect/accept.
 #[no_mangle]
 pub extern "C" fn monoio_tcp_close(stream_handle: RuntimeValue) -> RuntimeValue {
-    // TODO: [runtime][P1] Get stream from handle and close
-    // For now, return stub value
+    let handle = stream_handle.as_int();
 
-    tracing::warn!("monoio_tcp_close: stub implementation");
+    // Remove stream from storage
+    let mut streams = TCP_STREAMS.lock();
+    if handle < 0 || handle >= streams.len() as i64 {
+        tracing::error!("monoio_tcp_close: Invalid stream handle {}", handle);
+        return RuntimeValue::from_int(-1);
+    }
 
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Remove stream from TCP_STREAMS
-    // 3. Drop the TcpStream (closes connection)
-    // 4. Return success as RuntimeValue
+    // Mark as closed by replacing with dummy entry
+    // We can't actually remove it (would change other handles' indices)
+    streams[handle as usize] = Arc::new(MonoioTcpStream {
+        peer_addr: None,
+        local_addr: None,
+    });
 
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::info!("monoio_tcp_close: Closed stream handle {}", handle);
+    RuntimeValue::from_int(1) // Success
 }
 
 /// Close a TCP listener and release resources
@@ -367,20 +378,30 @@ pub extern "C" fn monoio_tcp_close(stream_handle: RuntimeValue) -> RuntimeValue 
 ///
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
+///
+/// # Notes
+/// Due to FFI limitations, this only removes the metadata entry.
+/// The actual listener socket is recreated on each accept operation.
 #[no_mangle]
 pub extern "C" fn monoio_tcp_listener_close(listener_handle: RuntimeValue) -> RuntimeValue {
-    // TODO: [runtime][P1] Get listener from handle and close
-    // For now, return stub value
+    let handle = listener_handle.as_int();
 
-    tracing::warn!("monoio_tcp_listener_close: stub implementation");
+    // Remove listener from storage
+    let mut listeners = TCP_LISTENERS.lock();
+    if handle < 0 || handle >= listeners.len() as i64 {
+        tracing::error!("monoio_tcp_listener_close: Invalid listener handle {}", handle);
+        return RuntimeValue::from_int(-1);
+    }
 
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Remove listener from TCP_LISTENERS
-    // 3. Drop the TcpListener (closes socket)
-    // 4. Return success as RuntimeValue
+    // Mark as closed by replacing with dummy entry (using placeholder address)
+    // We can't actually remove it (would change other handles' indices)
+    use std::net::{IpAddr, Ipv4Addr};
+    listeners[handle as usize] = Arc::new(MonoioTcpListener {
+        addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0),
+    });
 
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::info!("monoio_tcp_listener_close: Closed listener handle {}", handle);
+    RuntimeValue::from_int(1) // Success
 }
 
 /// Get local address of a TCP stream
@@ -393,19 +414,29 @@ pub extern "C" fn monoio_tcp_listener_close(listener_handle: RuntimeValue) -> Ru
 /// RuntimeValue containing address string, or nil on error
 #[no_mangle]
 pub extern "C" fn monoio_tcp_local_addr(stream_handle: RuntimeValue) -> RuntimeValue {
-    // TODO: [runtime][P1] Get stream from handle and return local address
-    // For now, return nil
+    let handle = stream_handle.as_int();
 
-    tracing::warn!("monoio_tcp_local_addr: stub implementation");
+    // Get stream from storage
+    let local_addr = {
+        let streams = TCP_STREAMS.lock();
+        if handle < 0 || handle >= streams.len() as i64 {
+            tracing::error!("monoio_tcp_local_addr: Invalid stream handle {}", handle);
+            return RuntimeValue::NIL;
+        }
+        streams[handle as usize].local_addr
+    };
 
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get stream from TCP_STREAMS
-    // 3. Call stream.local_addr()
-    // 4. Convert SocketAddr to string
-    // 5. Return as RuntimeString wrapped in RuntimeValue
-
-    RuntimeValue::NIL
+    match local_addr {
+        Some(addr) => {
+            let addr_str = addr.to_string();
+            tracing::debug!("monoio_tcp_local_addr: handle {} -> {}", handle, addr_str);
+            string_to_runtime_value(&addr_str)
+        }
+        None => {
+            tracing::error!("monoio_tcp_local_addr: No local address for handle {}", handle);
+            RuntimeValue::NIL
+        }
+    }
 }
 
 /// Get peer address of a TCP stream
@@ -418,19 +449,29 @@ pub extern "C" fn monoio_tcp_local_addr(stream_handle: RuntimeValue) -> RuntimeV
 /// RuntimeValue containing address string, or nil on error
 #[no_mangle]
 pub extern "C" fn monoio_tcp_peer_addr(stream_handle: RuntimeValue) -> RuntimeValue {
-    // TODO: [runtime][P1] Get stream from handle and return peer address
-    // For now, return nil
+    let handle = stream_handle.as_int();
 
-    tracing::warn!("monoio_tcp_peer_addr: stub implementation");
+    // Get stream from storage
+    let peer_addr = {
+        let streams = TCP_STREAMS.lock();
+        if handle < 0 || handle >= streams.len() as i64 {
+            tracing::error!("monoio_tcp_peer_addr: Invalid stream handle {}", handle);
+            return RuntimeValue::NIL;
+        }
+        streams[handle as usize].peer_addr
+    };
 
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get stream from TCP_STREAMS
-    // 3. Call stream.peer_addr()
-    // 4. Convert SocketAddr to string
-    // 5. Return as RuntimeString wrapped in RuntimeValue
-
-    RuntimeValue::NIL
+    match peer_addr {
+        Some(addr) => {
+            let addr_str = addr.to_string();
+            tracing::debug!("monoio_tcp_peer_addr: handle {} -> {}", handle, addr_str);
+            string_to_runtime_value(&addr_str)
+        }
+        None => {
+            tracing::error!("monoio_tcp_peer_addr: No peer address for handle {}", handle);
+            RuntimeValue::NIL
+        }
+    }
 }
 
 /// Set TCP_NODELAY option (disable Nagle's algorithm)

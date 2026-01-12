@@ -41,6 +41,19 @@ val name = "Alice"    # Immutable (preferred)
 var count = 0         # Mutable
 ```
 
+**Generics (use `<>` not `[]`):**
+```simple
+# Template/wrapper types - use angle brackets
+fn map<T, U>(f: fn(T) -> U) -> U
+struct Container<T>
+Option<T>, Result<T, E>, List<Int>
+
+# Arrays - use square brackets
+[i32]           # array type
+[1, 2, 3]       # array literal
+arr[0]          # indexing
+```
+
 **Methods (LL(1)-friendly, implicit self):**
 ```simple
 impl MyStruct:
@@ -70,6 +83,12 @@ See `/coding` skill for full details.
 ### Code Style
 - ❌ **NEVER over-engineer** - only make requested changes
 - ❌ **NEVER add unused code** - delete completely (no `_vars`)
+
+### Generic Syntax
+- ✅ **USE `<>` for generics**: `Option<T>`, `List<Int>`, `fn map<T, U>`
+- ❌ **DEPRECATED `[]` syntax**: `Option[T]` will show compiler warning
+- 🔧 **Auto-migrate**: Run `simple migrate --fix-generics src/` (Note: tool needs refinement)
+- 📅 **Timeline**: Deprecation warnings active, `[]` will be removed in v1.0.0
 
 ### TODO Comments
 - ❌ **NEVER remove TODO markers** unless the feature is fully implemented and working

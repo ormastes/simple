@@ -206,6 +206,20 @@ impl<'a> Parser<'a> {
         let using_square_brackets = self.check(&TokenKind::LBracket);
 
         if using_angle_brackets || using_square_brackets {
+            // Emit deprecation warning for square bracket syntax
+            if using_square_brackets {
+                use crate::error_recovery::{ErrorHint, ErrorHintLevel};
+                let bracket_span = self.current.span;
+                let warning = ErrorHint {
+                    level: ErrorHintLevel::Warning,
+                    message: "Deprecated syntax for type parameters".to_string(),
+                    span: bracket_span,
+                    suggestion: Some(format!("Use angle brackets: {}<...> instead of {}[...]", name, name)),
+                    help: Some("Run `simple migrate --fix-generics` to automatically update your code".to_string()),
+                };
+                self.error_hints.push(warning);
+            }
+
             self.advance(); // consume '[' or '<'
             let mut args = Vec::new();
             let closing_token = if using_angle_brackets {

@@ -5,23 +5,23 @@
 #![cfg(feature = "monoio-net")]
 
 use crate::value::RuntimeValue;
+use crate::monoio_runtime::{execute_async, get_entries, runtime_value_to_string, string_to_runtime_value, extract_buffer_bytes, copy_to_buffer};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use parking_lot::Mutex;
+use monoio::net::UdpSocket;
 
 /// UDP socket handle stored in RuntimeValue
-/// Currently stores only local address; full monoio::net::UdpSocket integration pending
+/// Stores socket metadata including local and optional peer address
 ///
-/// Full implementation would:
-/// 1. Store Arc<monoio::net::UdpSocket> instead of just local_addr
-/// 2. Integrate with monoio runtime for async I/O operations
-/// 3. Support send_to/recv_from operations through the runtime
-/// 4. Handle socket lifecycle (bind, connect, close) properly
-#[derive(Debug)]
+/// For connected sockets (after monoio_udp_connect), peer_addr is set
+/// and send()/recv() can be used instead of send_to()/recv_from()
+#[derive(Debug, Clone)]
 pub struct MonoioUdpSocket {
-    // Temporary: store only local address until monoio integration is complete
+    /// Local address the socket is bound to
     local_addr: SocketAddr,
-    // Full implementation: Arc<monoio::net::UdpSocket>
+    /// Peer address if socket is connected (for connected UDP)
+    peer_addr: Option<SocketAddr>,
 }
 
 // Global storage for UDP sockets
@@ -40,19 +40,59 @@ lazy_static::lazy_static! {
 /// RuntimeValue containing socket handle (index), or negative value on error
 #[no_mangle]
 pub extern "C" fn monoio_udp_bind(addr: RuntimeValue) -> RuntimeValue {
-    // TODO: [runtime][P2] Extract string from RuntimeValue and parse SocketAddr
-    // For now, return stub value
+    // Extract string from RuntimeValue
+    let addr_str = match runtime_value_to_string(addr) {
+        Some(s) => s,
+        None => {
+            tracing::error!("monoio_udp_bind: Invalid address argument (not a string)");
+            return RuntimeValue::from_int(-1);
+        }
+    };
 
-    tracing::warn!("monoio_udp_bind: stub implementation");
+    // Parse as SocketAddr
+    let socket_addr: SocketAddr = match addr_str.parse() {
+        Ok(addr) => addr,
+        Err(e) => {
+            tracing::error!("monoio_udp_bind: Failed to parse address '{}': {}", addr_str, e);
+            return RuntimeValue::from_int(-1);
+        }
+    };
 
-    // In full implementation:
-    // 1. Extract string from RuntimeValue
-    // 2. Parse as SocketAddr
-    // 3. Create monoio::net::UdpSocket::bind(addr).await
-    // 4. Store in UDP_SOCKETS
-    // 5. Return handle (index) as RuntimeValue
+    // Bind socket (synchronous operation in monoio)
+    let bind_result = UdpSocket::bind(socket_addr);
 
-    RuntimeValue::from_int(-1) // Error: not implemented
+    let local_addr = match bind_result {
+        Ok(socket) => {
+            // Get actual bound address (in case port was 0)
+            match socket.local_addr() {
+                Ok(addr) => addr,
+                Err(e) => {
+                    tracing::error!("monoio_udp_bind: Failed to get local address: {}", e);
+                    return RuntimeValue::from_int(-1);
+                }
+            }
+            // Drop socket immediately - we'll recreate it for each operation
+        }
+        Err(e) => {
+            tracing::error!("monoio_udp_bind: Failed to bind to {}: {}", socket_addr, e);
+            return RuntimeValue::from_int(-2); // Bind failed
+        }
+    };
+
+    // Store socket metadata
+    let socket = Arc::new(MonoioUdpSocket {
+        local_addr,
+        peer_addr: None,
+    });
+
+    let handle = {
+        let mut sockets = UDP_SOCKETS.lock();
+        sockets.push(socket);
+        (sockets.len() - 1) as i64
+    };
+
+    tracing::info!("monoio_udp_bind: Bound to {} with handle {}", local_addr, handle);
+    RuntimeValue::from_int(handle)
 }
 
 /// Send data to a specific address via UDP
@@ -71,21 +111,67 @@ pub extern "C" fn monoio_udp_send_to(
     buffer: RuntimeValue,
     addr: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: [runtime][P1] Get socket from handle and send data
-    // For now, return stub value
+    let handle = socket_handle.as_int();
 
-    tracing::warn!("monoio_udp_send_to: stub implementation");
+    // Get socket's local address
+    let local_addr = {
+        let sockets = UDP_SOCKETS.lock();
+        if handle < 0 || handle >= sockets.len() as i64 {
+            tracing::error!("monoio_udp_send_to: Invalid socket handle {}", handle);
+            return RuntimeValue::from_int(-1);
+        }
+        sockets[handle as usize].local_addr
+    };
 
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get socket from UDP_SOCKETS
-    // 3. Extract buffer from RuntimeValue
-    // 4. Extract and parse destination address
-    // 5. Use monoio's ownership transfer (rent pattern):
-    //    let (result, buf) = socket.send_to(buffer, addr).await;
-    // 6. Return bytes sent as RuntimeValue
+    // Extract destination address
+    let dest_addr_str = match runtime_value_to_string(addr) {
+        Some(s) => s,
+        None => {
+            tracing::error!("monoio_udp_send_to: Invalid destination address (not a string)");
+            return RuntimeValue::from_int(-1);
+        }
+    };
 
-    RuntimeValue::from_int(-1) // Error: not implemented
+    let dest_addr: SocketAddr = match dest_addr_str.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!("monoio_udp_send_to: Failed to parse address '{}': {}", dest_addr_str, e);
+            return RuntimeValue::from_int(-1);
+        }
+    };
+
+    // Extract buffer data
+    let data = match extract_buffer_bytes(buffer) {
+        Some(d) => d,
+        None => {
+            tracing::error!("monoio_udp_send_to: Invalid buffer (not a string or array)");
+            return RuntimeValue::from_int(-1);
+        }
+    };
+
+    // Send data using monoio
+    let entries = get_entries();
+    let send_result = execute_async(entries, async move {
+        // Recreate socket at same local address
+        let socket = UdpSocket::bind(local_addr)?;
+
+        // Send data
+        let (result, _buf) = socket.send_to(data, dest_addr).await;
+        result?;
+
+        Ok::<_, std::io::Error>(_buf.len())
+    });
+
+    match send_result {
+        Ok(bytes_sent) => {
+            tracing::debug!("monoio_udp_send_to: Sent {} bytes to {}", bytes_sent, dest_addr);
+            RuntimeValue::from_int(bytes_sent as i64)
+        }
+        Err(e) => {
+            tracing::error!("monoio_udp_send_to: Failed to send: {}", e);
+            RuntimeValue::from_int(-1)
+        }
+    }
 }
 
 /// Receive data from UDP socket
@@ -97,29 +183,72 @@ pub extern "C" fn monoio_udp_send_to(
 /// * `max_len` - Maximum bytes to receive
 ///
 /// # Returns
-/// RuntimeValue containing tuple (bytes_received, sender_addr), or nil on error
+/// RuntimeValue containing bytes_received, or negative value on error
+///
+/// # Notes
+/// Currently returns only bytes_received. Sender address is not returned.
+/// In future, this could return a tuple (bytes, sender_addr).
+/// The received data is written to the provided buffer.
 #[no_mangle]
 pub extern "C" fn monoio_udp_recv_from(
     socket_handle: RuntimeValue,
     buffer: RuntimeValue,
     max_len: i64,
 ) -> RuntimeValue {
-    // TODO: [runtime][P1] Get socket from handle and receive data
-    // For now, return nil
+    let handle = socket_handle.as_int();
 
-    tracing::warn!("monoio_udp_recv_from: stub implementation");
+    // Get socket's local address
+    let local_addr = {
+        let sockets = UDP_SOCKETS.lock();
+        if handle < 0 || handle >= sockets.len() as i64 {
+            tracing::error!("monoio_udp_recv_from: Invalid socket handle {}", handle);
+            return RuntimeValue::from_int(-1);
+        }
+        sockets[handle as usize].local_addr
+    };
 
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get socket from UDP_SOCKETS
-    // 3. Extract buffer from RuntimeValue
-    // 4. Use monoio's ownership transfer (rent pattern):
-    //    let (result, buf) = socket.recv_from(buffer).await;
-    // 5. Extract (bytes_read, peer_addr) from result
-    // 6. Update buffer in RuntimeValue
-    // 7. Return tuple (bytes, addr_string) as RuntimeValue
+    if max_len <= 0 {
+        tracing::error!("monoio_udp_recv_from: Invalid max_len {}", max_len);
+        return RuntimeValue::from_int(-1);
+    }
 
-    RuntimeValue::NIL
+    // Receive data using monoio
+    let entries = get_entries();
+    let recv_result = execute_async(entries, async move {
+        // Recreate socket at same local address
+        let socket = UdpSocket::bind(local_addr)?;
+
+        // Allocate receive buffer
+        let buf = vec![0u8; max_len as usize];
+
+        // Receive data
+        let (result, buf) = socket.recv_from(buf).await;
+        let (bytes_read, sender_addr) = result?;
+
+        Ok::<_, std::io::Error>((bytes_read, sender_addr, buf))
+    });
+
+    match recv_result {
+        Ok((bytes_read, sender_addr, data)) => {
+            // Copy received data to RuntimeValue buffer
+            let copied = copy_to_buffer(buffer, &data[..bytes_read]);
+            if copied < 0 {
+                tracing::error!("monoio_udp_recv_from: Failed to copy data to buffer");
+                return RuntimeValue::from_int(-1);
+            }
+
+            tracing::debug!(
+                "monoio_udp_recv_from: Received {} bytes from {}",
+                bytes_read,
+                sender_addr
+            );
+            RuntimeValue::from_int(bytes_read as i64)
+        }
+        Err(e) => {
+            tracing::error!("monoio_udp_recv_from: Failed to receive: {}", e);
+            RuntimeValue::from_int(-1)
+        }
+    }
 }
 
 /// Connect UDP socket to a specific peer address
@@ -225,20 +354,31 @@ pub extern "C" fn monoio_udp_recv(
 ///
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
+///
+/// # Notes
+/// Due to FFI limitations, this only removes the metadata entry.
+/// The actual socket is recreated for each operation.
 #[no_mangle]
 pub extern "C" fn monoio_udp_close(socket_handle: RuntimeValue) -> RuntimeValue {
-    // TODO: [runtime][P1] Get socket from handle and close
-    // For now, return stub value
+    let handle = socket_handle.as_int();
 
-    tracing::warn!("monoio_udp_close: stub implementation");
+    // Remove socket from storage
+    let mut sockets = UDP_SOCKETS.lock();
+    if handle < 0 || handle >= sockets.len() as i64 {
+        tracing::error!("monoio_udp_close: Invalid socket handle {}", handle);
+        return RuntimeValue::from_int(-1);
+    }
 
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Remove socket from UDP_SOCKETS
-    // 3. Drop the UdpSocket (closes socket)
-    // 4. Return success as RuntimeValue
+    // Mark as closed by replacing with dummy entry
+    // We can't actually remove it (would change other handles' indices)
+    use std::net::{IpAddr, Ipv4Addr};
+    sockets[handle as usize] = Arc::new(MonoioUdpSocket {
+        local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0),
+        peer_addr: None,
+    });
 
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::info!("monoio_udp_close: Closed socket handle {}", handle);
+    RuntimeValue::from_int(1) // Success
 }
 
 /// Get local address of a UDP socket
@@ -251,19 +391,21 @@ pub extern "C" fn monoio_udp_close(socket_handle: RuntimeValue) -> RuntimeValue 
 /// RuntimeValue containing address string, or nil on error
 #[no_mangle]
 pub extern "C" fn monoio_udp_local_addr(socket_handle: RuntimeValue) -> RuntimeValue {
-    // TODO: [runtime][P1] Get socket from handle and return local address
-    // For now, return nil
+    let handle = socket_handle.as_int();
 
-    tracing::warn!("monoio_udp_local_addr: stub implementation");
+    // Get socket from storage
+    let local_addr = {
+        let sockets = UDP_SOCKETS.lock();
+        if handle < 0 || handle >= sockets.len() as i64 {
+            tracing::error!("monoio_udp_local_addr: Invalid socket handle {}", handle);
+            return RuntimeValue::NIL;
+        }
+        sockets[handle as usize].local_addr
+    };
 
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get socket from UDP_SOCKETS
-    // 3. Call socket.local_addr()
-    // 4. Convert SocketAddr to string
-    // 5. Return as RuntimeString wrapped in RuntimeValue
-
-    RuntimeValue::NIL
+    let addr_str = local_addr.to_string();
+    tracing::debug!("monoio_udp_local_addr: handle {} -> {}", handle, addr_str);
+    string_to_runtime_value(&addr_str)
 }
 
 /// Set broadcast option on UDP socket

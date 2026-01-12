@@ -714,10 +714,20 @@ pub fn compile_instruction<M: Module>(
             line,
             column,
         } => {
-            // TODO: [codegen][P3] Call rt_decision_probe(decision_id, result)
-            // For now, just ensure the result is used to prevent DCE
-            let _ = ctx.vreg_values.get(result);
-            let _ = (decision_id, file, line, column);
+            // Call rt_decision_probe(decision_id, result)
+            let result_val = match ctx.vreg_values.get(result) {
+                Some(&v) => v,
+                None => {
+                    return Err(format!("DecisionProbe: result vreg {:?} not found", result));
+                }
+            };
+
+            let decision_id_val = builder.ins().iconst(types::I64, *decision_id as i64);
+            let probe_func_id = ctx.runtime_funcs["rt_decision_probe"];
+            let probe_func_ref = ctx.module.declare_func_in_func(probe_func_id, builder.func);
+            builder.ins().call(probe_func_ref, &[decision_id_val, result_val]);
+
+            let _ = (file, line, column); // Keep metadata for future use
         }
 
         MirInst::ConditionProbe {
@@ -728,14 +738,30 @@ pub fn compile_instruction<M: Module>(
             line,
             column,
         } => {
-            // TODO: [codegen][P3] Call rt_condition_probe(decision_id, condition_id, result)
-            let _ = ctx.vreg_values.get(result);
-            let _ = (decision_id, condition_id, file, line, column);
+            // Call rt_condition_probe(decision_id, condition_id, result)
+            let result_val = match ctx.vreg_values.get(result) {
+                Some(&v) => v,
+                None => {
+                    return Err(format!("ConditionProbe: result vreg {:?} not found", result));
+                }
+            };
+
+            let decision_id_val = builder.ins().iconst(types::I64, *decision_id as i64);
+            let condition_id_val = builder.ins().iconst(types::I32, *condition_id as i64);
+            let probe_func_id = ctx.runtime_funcs["rt_condition_probe"];
+            let probe_func_ref = ctx.module.declare_func_in_func(probe_func_id, builder.func);
+            builder.ins().call(probe_func_ref, &[decision_id_val, condition_id_val, result_val]);
+
+            let _ = (file, line, column); // Keep metadata for future use
         }
 
         MirInst::PathProbe { path_id, block_id } => {
-            // TODO: [codegen][P3] Call rt_path_probe(path_id, block_id)
-            let _ = (path_id, block_id);
+            // Call rt_path_probe(path_id, block_id)
+            let path_id_val = builder.ins().iconst(types::I64, *path_id as i64);
+            let block_id_val = builder.ins().iconst(types::I32, *block_id as i64);
+            let probe_func_id = ctx.runtime_funcs["rt_path_probe"];
+            let probe_func_ref = ctx.module.declare_func_in_func(probe_func_id, builder.func);
+            builder.ins().call(probe_func_ref, &[path_id_val, block_id_val]);
         }
 
         MirInst::UnitBoundCheck {

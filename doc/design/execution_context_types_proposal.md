@@ -2,7 +2,8 @@
 
 **Feature**: Compile-time tracking of execution location (CPU, GPU, specific devices)
 **Inspiration**: Similar to how `Future<T>` tracks async computation
-**Date**: 2026-01-10
+**Date**: 2026-01-10 (Updated: 2026-01-12)
+**Syntax**: Uses `<>` for generic/template types (updated from `[]`)
 
 ---
 

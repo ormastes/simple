@@ -308,23 +308,38 @@ pub(super) fn eval_bdd_builtin(
 
             BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = false);
 
-            let failed = BDD_EXPECT_FAILED.with(|cell| *cell.borrow());
-            let failure_msg = BDD_FAILURE_MSG.with(|cell| cell.borrow().clone());
             let indent = BDD_INDENT.with(|cell| *cell.borrow());
             let indent_str = "  ".repeat(indent);
 
-            if failed {
-                println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
-                if let Some(msg) = failure_msg {
-                    println!("{}  \x1b[31m{}\x1b[0m", indent_str, msg);
+            // Check if block execution had an error first
+            match result {
+                Err(ref e) => {
+                    // Test failed due to execution error
+                    println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
+                    println!("{}  \x1b[31m{}\x1b[0m", indent_str, e);
+                    BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
+                    // Don't propagate the error - allow other tests to run
+                    Ok(Some(Value::Nil))
                 }
-                BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
-            } else {
-                println!("{}\x1b[32m✓ {}\x1b[0m", indent_str, name_str);
-                BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
-            }
+                Ok(_) => {
+                    // Check if expect failed
+                    let failed = BDD_EXPECT_FAILED.with(|cell| *cell.borrow());
+                    let failure_msg = BDD_FAILURE_MSG.with(|cell| cell.borrow().clone());
 
-            Ok(Some(result?))
+                    if failed {
+                        println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
+                        if let Some(msg) = failure_msg {
+                            println!("{}  \x1b[31m{}\x1b[0m", indent_str, msg);
+                        }
+                        BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
+                    } else {
+                        println!("{}\x1b[32m✓ {}\x1b[0m", indent_str, name_str);
+                        BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
+                    }
+
+                    Ok(Some(result?))
+                }
+            }
         }
         "skip" => {
             let name = eval_arg(

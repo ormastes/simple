@@ -266,9 +266,21 @@ impl SymbolUsageAnalyzer {
             }
 
             // Match expressions
-            Expr::Match { subject, .. } => {
+            Expr::Match { subject, arms } => {
                 self.collect_usage_from_expr(subject, usage);
-                // TODO: [compiler][P3] Collect from match arms
+                // Collect from match arms
+                for arm in arms {
+                    // Collect from guard expression if present
+                    if let Some(guard) = &arm.guard {
+                        self.collect_usage_from_expr(guard, usage);
+                    }
+                    // Collect from arm body
+                    for stmt in &arm.body.statements {
+                        self.collect_usage_from_node(stmt, usage);
+                    }
+                    // Note: We don't collect from pattern as patterns introduce new bindings
+                    // rather than referencing existing symbols
+                }
             }
 
             // Blocks
