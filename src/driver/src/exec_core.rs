@@ -13,6 +13,8 @@ use simple_compiler::CompilerPipeline;
 use simple_loader::loader::ModuleLoader as SmfLoader;
 use simple_loader::LoadedModule;
 use simple_native_loader::{default_runtime_provider, RuntimeSymbolProvider};
+use simple_parser::error_recovery::ErrorHintLevel;
+use simple_parser::Parser;
 use simple_runtime::gc::GcRuntime;
 use simple_runtime::NoGcAllocator;
 
@@ -79,6 +81,44 @@ impl ExecCore {
             let _ = gc.collect("post-run");
         } else {
             self.gc_alloc.collect();
+        }
+    }
+
+    /// Display error hints from parser (helpful messages for common mistakes)
+    fn display_error_hints(&self, parser: &Parser, source: &str) {
+        let hints = parser.error_hints();
+        if hints.is_empty() {
+            return;
+        }
+
+        // Display hints to stderr
+        for hint in hints {
+            let level_str = match hint.level {
+                ErrorHintLevel::Error => "\x1b[31merror\x1b[0m",   // red
+                ErrorHintLevel::Warning => "\x1b[33mwarning\x1b[0m", // yellow
+                ErrorHintLevel::Info => "\x1b[36minfo\x1b[0m",    // cyan
+                ErrorHintLevel::Hint => "\x1b[32mhint\x1b[0m",    // green
+            };
+
+            eprintln!("{}: {}", level_str, hint.message);
+            eprintln!("  --> line {}:{}", hint.span.line, hint.span.column);
+
+            // Show source line with caret
+            if let Some(line) = source.lines().nth(hint.span.line - 1) {
+                eprintln!("   |");
+                eprintln!("{:3} | {}", hint.span.line, line);
+                eprintln!("   | {}^", " ".repeat(hint.span.column - 1));
+            }
+
+            if let Some(ref suggestion) = hint.suggestion {
+                eprintln!("\nSuggestion: {}", suggestion);
+            }
+
+            if let Some(ref help) = hint.help {
+                eprintln!("\nHelp:\n{}", help);
+            }
+
+            eprintln!(); // blank line between hints
         }
     }
 
@@ -173,6 +213,15 @@ impl ExecCore {
 
     /// Compile file to SMF
     pub fn compile_file(&self, path: &Path, out: &Path) -> Result<(), String> {
+        // Parse source to collect error hints
+        let source = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        let mut parser = Parser::new(&source);
+        let _ast = parser.parse().map_err(|e| format!("parse error: {}", e))?;
+
+        // Display error hints
+        self.display_error_hints(&parser, &source);
+
         let mut compiler =
             CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
         compiler
@@ -277,6 +326,9 @@ impl ExecCore {
         // Parse source code
         let mut parser = Parser::new(source);
         let ast = parser.parse().map_err(|e| format!("parse error: {}", e))?;
+
+        // Display error hints (helpful messages for common mistakes)
+        self.display_error_hints(&parser, source);
 
         // Lower to HIR
         let hir_module = hir::lower(&ast).map_err(|e| format!("HIR lowering error: {}", e))?;
@@ -441,6 +493,15 @@ impl ExecCore {
         use simple_compiler::pipeline::module_loader::load_module_with_imports;
         use simple_compiler::set_interpreter_args;
         use std::collections::HashSet;
+
+        // Parse source to collect error hints
+        let source = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        let mut parser = Parser::new(&source);
+        let _ast = parser.parse().map_err(|e| format!("parse error: {}", e))?;
+
+        // Display error hints
+        self.display_error_hints(&parser, &source);
 
         // Set interpreter arguments
         set_interpreter_args(args);

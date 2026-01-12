@@ -11,6 +11,8 @@ use tempfile::TempDir;
 
 use simple_loader::memory::PlatformAllocator;
 use simple_loader::{create_executable, Settlement, SettlementConfig};
+use simple_parser::error_recovery::ErrorHintLevel;
+use simple_parser::Parser;
 use simple_runtime::gc::GcRuntime;
 use simple_runtime::value::{
     rt_capture_stderr_start, rt_capture_stderr_stop, rt_capture_stdout_start,
@@ -470,6 +472,44 @@ pub fn run_code(code: &str, args: &[String], stdin: &str) -> Result<RunResult, S
 /// assert_eq!(result.exit_code, 42);
 /// ```
 ///
+/// Display error hints from parser (helpful messages for common mistakes)
+fn display_error_hints(parser: &Parser, source: &str) {
+    let hints = parser.error_hints();
+    if hints.is_empty() {
+        return;
+    }
+
+    // Display hints to stderr
+    for hint in hints {
+        let level_str = match hint.level {
+            ErrorHintLevel::Error => "\x1b[31merror\x1b[0m",   // red
+            ErrorHintLevel::Warning => "\x1b[33mwarning\x1b[0m", // yellow
+            ErrorHintLevel::Info => "\x1b[36minfo\x1b[0m",    // cyan
+            ErrorHintLevel::Hint => "\x1b[32mhint\x1b[0m",    // green
+        };
+
+        eprintln!("{}: {}", level_str, hint.message);
+        eprintln!("  --> line {}:{}", hint.span.line, hint.span.column);
+
+        // Show source line with caret
+        if let Some(line) = source.lines().nth(hint.span.line - 1) {
+            eprintln!("   |");
+            eprintln!("{:3} | {}", hint.span.line, line);
+            eprintln!("   | {}^", " ".repeat(hint.span.column - 1));
+        }
+
+        if let Some(ref suggestion) = hint.suggestion {
+            eprintln!("\nSuggestion: {}", suggestion);
+        }
+
+        if let Some(ref help) = hint.help {
+            eprintln!("\nHelp:\n{}", help);
+        }
+
+        eprintln!(); // blank line between hints
+    }
+}
+
 /// # Note
 /// JIT compilation requires the code to have a `main` function with the signature
 /// `fn main() -> i64`. More complex programs with I/O or GC are not yet supported.
@@ -482,6 +522,9 @@ pub fn run_jit(code: &str) -> Result<RunResult, String> {
     // Parse source code
     let mut parser = Parser::new(code);
     let ast = parser.parse().map_err(|e| format!("parse error: {}", e))?;
+
+    // Display error hints (helpful messages for common mistakes)
+    display_error_hints(&parser, code);
 
     // Lower to HIR
     let hir_module = hir::lower(&ast).map_err(|e| format!("HIR lowering error: {}", e))?;
