@@ -240,11 +240,18 @@ impl Lowerer {
 
     /// Create sparse tensor from flat coordinate representation
     ///
-    /// Builds a dense array initialized with the default value,
-    /// then fills in the specified coordinates with their values.
+    /// NOTE: Flat mode tensor syntax is not yet implemented. Users should use
+    /// slice mode syntax instead (explicit slices with grid rows).
     ///
-    /// For now, this creates a full dense array. A future optimization
-    /// could use PyTorch's sparse tensor format for large tensors.
+    /// Future implementation would:
+    /// 1. Create dense array initialized with default value (or 0)
+    /// 2. Iterate through coordinate-value pairs and populate array
+    /// 3. For large sparse tensors, generate torch.sparse_coo_tensor call
+    /// 4. For small/dense tensors, generate standard torch.tensor call
+    ///
+    /// This optimization would detect sparsity ratio and choose appropriate
+    /// representation automatically. See PyTorch sparse tensor documentation
+    /// for COO (coordinate) format details.
     pub(super) fn create_sparse_tensor(
         &mut self,
         values: &[Vec<Box<Expr>>],
@@ -252,8 +259,8 @@ impl Lowerer {
         dims: &[(String, i64)],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
-        // For now, we'll convert flat mode to dense representation
-        // TODO: [compiler][P2] Future optimization - use torch.sparse_coo_tensor for large sparse tensors
+        // Sparse tensor flat mode is not yet implemented
+        // Implementation would check sparsity ratio and emit appropriate torch calls
 
         // Get default value or use 0
         let default_expr = if let Some(def) = default {
@@ -265,8 +272,7 @@ impl Lowerer {
             }
         };
 
-        // For now, create a simple error - full sparse tensor support will be added later
-        // This allows the code to compile while we implement the feature incrementally
+        // Return clear error directing users to working alternative
         Err(LowerError::Unsupported(
             "Sparse tensor (flat mode) not yet fully implemented. Use slice mode for now."
                 .to_string(),

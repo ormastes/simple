@@ -57,22 +57,22 @@ print "double({number}) = {doubled}"
 
 ```simple
 # Numeric literal formats & underscores :contentReference[oaicite:15]{index=15}
-let dec = 1_000_000
-let hex = 0xFF
-let bin = 0b1111_0000
-let oct = 0o755
+valdec = 1_000_000
+valhex = 0xFF
+valbin = 0b1111_0000
+valoct = 0o755
 
 # Interpolated string (double quotes interpolate by default)
 print "dec={dec} hex={hex} bin={bin} oct={oct}"
 
 # Raw string (single quotes = no interpolation / no escapes) :contentReference[oaicite:16]{index=16}
-let path = 'C:\Users\name'
+valpath = 'C:\Users\name'
 print "raw_path={path}"
 
 # Unit-typed numeric literals (suffix with underscore) :contentReference[oaicite:17]{index=17}
-let distance = 100_km
-let duration = 2_hr
-let user = 42_uid
+valdistance = 100_km
+valduration = 2_hr
+valuser = 42_uid
 
 print "distance={distance} duration={duration} user={user}"
 ```
@@ -132,7 +132,7 @@ class Bag:
         self.items.sort()
         return self
 
-let mut b = Bag(items: [])
+var b = Bag(items: [])
 b->append(3)->append(1)->append(2)->sort()
 
 print "bag={b.items}"
@@ -204,10 +204,10 @@ mut struct Cursor:
     x: f64
     y: f64
 
-let p = Point(x: 1, y: 2)
+valp = Point(x: 1, y: 2)
 # p.x = 9  # should be an error (immutable struct)
 
-let c = Cursor(x: 0, y: 0)
+valc = Cursor(x: 0, y: 0)
 c.x = 10
 print "cursor=({c.x}, {c.y})"
 
@@ -218,7 +218,7 @@ class Person:
     fn birthday():
         self.age = self.age + 1
 
-let a = Person(name: "Alice", age: 30)
+vala = Person(name: "Alice", age: 30)
 a.birthday()
 print "alice_age={a.age}"
 ```
@@ -306,13 +306,13 @@ mut struct Cursor:
 class Box:
     value: i32
 
-let a = Cursor(x: 1, y: 2)
-let b = a       # copy
+vala = Cursor(x: 1, y: 2)
+valb = a       # copy
 b.x = 9
 print "a.x={a.x} b.x={b.x}"   # expect a.x still 1
 
-let p = Box(value: 10)
-let q = p       # reference alias
+valp = Box(value: 10)
+valq = p       # reference alias
 q.value = 99
 print "p.value={p.value} q.value={q.value}"  # expect both 99
 ```
@@ -331,7 +331,7 @@ class Config:
     fn set_port(p: i32):
         self._port = p
 
-let mut cfg = Config(_port: 8080)
+var cfg = Config(_port: 8080)
 
 # Property-style access should forward to get_/set_
 print "port={cfg.port}"
@@ -379,7 +379,7 @@ print "signs: {signs}"
 fn apply_twice(f, x):
     f(f(x))
 
-# Without let - direct usage
+# Without val- direct usage
 double_twice = apply_twice(\x: x * 2, 5)
 print "double twice: {double_twice}"  # Should be 20
 
@@ -408,7 +408,7 @@ fn color_name(c: Color) -> str:
 
 print color_name(Color.Red)
 
-let x = -5
+valx = -5
 match x:
     case n if n < 0: print "neg {n}"
     case n: print "non-neg {n}"
@@ -427,7 +427,7 @@ fn make_with(ctor, a: i64, b: i64):
     # ctor is a “constructor-like” callable
     return ctor(x: a, y: b)
 
-let p = make_with(Point, 3, 4)
+valp = make_with(Point, 3, 4)
 print "p=({p.x},{p.y})"
 ```
 
@@ -450,7 +450,7 @@ impl Printable for User:
     fn stringify() -> str:
         return "User(name={self.name})"
 
-let u = User(name: "Kim")
+valu = User(name: "Kim")
 u.print_self()
 ```
 
@@ -487,26 +487,26 @@ class Player:
     hp: i32
 
 # GC-managed (default)
-let p: Player = Player(name: "Hero", hp: 100)
+valp: Player = Player(name: "Hero", hp: 100)
 
 # Unique owner
-let u: &Player = new(&) Player(name: "Solo", hp: 50)
-let v = move u
+valu: &Player = new(&) Player(name: "Solo", hp: 50)
+valv = move u
 # print u.hp  # should be compile error: moved
 
 # Shared owner
-let s1: *Player = new* Player(name: "Shared", hp: 75)
-let s2 = s1  # refcount +1
+vals1: *Player = new* Player(name: "Shared", hp: 75)
+vals2 = s1  # refcount +1
 
 # Weak pointer
-let w: -Player = weak_of(s1)
-let maybe_strong = w.upgrade()
+valw: -Player = weak_of(s1)
+valmaybe_strong = w.upgrade()
 match maybe_strong:
     case Some(sp): print "upgraded hp={sp.hp}"
     case None: print "expired"
 
 # Handle pointer (resource-like; runtime-managed pool)
-let h: +Player = new+ Player(name: "HandleGuy", hp: 1)
+valh: +Player = new+ Player(name: "HandleGuy", hp: 1)
 with handle_get(h) as view:
     print "handle view hp={view.hp}"
 ```
@@ -520,7 +520,7 @@ with handle_get(h) as view:
 
 fn worker():
     loop:
-        let msg = recv()
+        valmsg = recv()
         match msg:
             case "ping":
                 reply("pong")
@@ -530,7 +530,7 @@ fn worker():
             case _:
                 reply("unknown")
 
-let a = spawn worker()
+vala = spawn worker()
 
 send(a, "ping")
 print "got={recv(a)}"   # expect pong
@@ -548,11 +548,11 @@ print "joined"
 # This is a shape-check sample: async/await is part of the concurrency spec scope. :contentReference[oaicite:36]{index=36}
 
 async fn fetch_user(id: UserId) -> Result[User, NetError]:
-    let resp = await http.get("/users/{id}")
+    valresp = await http.get("/users/{id}")
     return parse_user(resp)
 
 async fn main():
-    let r = await fetch_user(42_uid)
+    valr = await fetch_user(42_uid)
     match r:
         case Ok(u): print "user={u}"
         case Err(e): print "err={e}"
@@ -595,7 +595,7 @@ class Router:
     fn get(path: str, handler: fn() -> str):
         self.routes[path] = handler
 
-let mut r = Router(routes: {})
+var r = Router(routes: {})
 
 r.get "/health", \: "ok"
 r.get "/hello", \: "hello"
@@ -616,7 +616,7 @@ pub fn app_config_path() -> FilePath:
     return "/etc/simple/app.toml"_file
 
 pub fn load_config(path: FilePath) -> Result[Config, ConfigError]:
-    let bytes = std.fs.read_bytes(path)?
+    valbytes = std.fs.read_bytes(path)?
     return std.config.parse(bytes)
 
 # Variant usage is implementation-defined; treat as a config-driven import resolution demo.
@@ -632,10 +632,10 @@ pub fn load_config(path: FilePath) -> Result[Config, ConfigError]:
 
 type f32x4 = vec[4, f32]
 
-let a: f32x4 = vec[1.0, 2.0, 3.0, 4.0]
-let b: f32x4 = vec[5.0, 6.0, 7.0, 8.0]
+vala: f32x4 = vec[1.0, 2.0, 3.0, 4.0]
+valb: f32x4 = vec[5.0, 6.0, 7.0, 8.0]
 
-let sum = a + b
+valsum = a + b
 print "sum0={sum[0]} sum_all={sum.sum()}"
 print "all_positive={(a > 0.0).all()}"
 ```
@@ -647,21 +647,21 @@ print "all_positive={(a > 0.0).all()}"
 
 use gpu
 
-let ctx = gpu.Context.default()
-let buf: gpu.Buffer[f32] = ctx.alloc(1024)
+valctx = gpu.Context.default()
+valbuf: gpu.Buffer[f32] = ctx.alloc(1024)
 
-let host_data: [f32; 1024] = [...]
+valhost_data: [f32; 1024] = [...]
 buf.upload(host_data)
 
 # Kernel shape (details depend on your eventual compiler/runtime implementation)
 @gpu.kernel
 fn scale2(in: gpu.Buffer[f32], out: gpu.Buffer[f32]):
-    let i = gpu.global_id()
+    vali = gpu.global_id()
     out[i] = in[i] * 2.0
 
 ctx.launch(scale2, grid: 1024, args: (buf, buf))
 
-let result = buf.download()
+valresult = buf.download()
 print "result0={result[0]}"
 ```
 

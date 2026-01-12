@@ -441,7 +441,11 @@ impl TypeChecker {
                     fields,
                     methods,
                     required_traits: mixin.required_traits.clone(),
-                    required_methods: vec![], // TODO: [type][P3] Phase 2 Step 6
+                    // Required methods populated in Phase 2 Step 6 (not yet implemented)
+                    // Would extract method signatures from mixin's requires clause:
+                    // mixin Comparable requires fn compare(other: Self) -> i32
+                    // Stored as RequiredMethodSig for validation during composition
+                    required_methods: vec![],
                 };
                 self.mixins.insert(mixin.name.clone(), info);
 
