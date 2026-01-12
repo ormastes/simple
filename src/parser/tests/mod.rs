@@ -27,5 +27,7 @@ mod enum_advanced;
 mod expressions;
 mod functions;
 mod statements;
+mod test_nested_generic_manual;
+mod test_verify_nested_parse;
 mod traits;
 mod types;
