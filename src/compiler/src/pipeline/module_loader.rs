@@ -31,14 +31,19 @@ fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
         }
 
         let level_str = match hint.level {
-            ErrorHintLevel::Error => "\x1b[31merror\x1b[0m",   // red
+            ErrorHintLevel::Error => "\x1b[31merror\x1b[0m", // red
             ErrorHintLevel::Warning => "\x1b[33mwarning\x1b[0m", // yellow
-            ErrorHintLevel::Info => "\x1b[36minfo\x1b[0m",    // cyan
-            ErrorHintLevel::Hint => "\x1b[32mhint\x1b[0m",    // green
+            ErrorHintLevel::Info => "\x1b[36minfo\x1b[0m",   // cyan
+            ErrorHintLevel::Hint => "\x1b[32mhint\x1b[0m",   // green
         };
 
         eprintln!("{}: {}", level_str, hint.message);
-        eprintln!("  --> {}:{}:{}", path.display(), hint.span.line, hint.span.column);
+        eprintln!(
+            "  --> {}:{}:{}",
+            path.display(),
+            hint.span.line,
+            hint.span.column
+        );
 
         // Show source line with caret
         if let Some(line) = source.lines().nth(hint.span.line - 1) {

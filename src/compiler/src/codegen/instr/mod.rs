@@ -725,7 +725,9 @@ pub fn compile_instruction<M: Module>(
             let decision_id_val = builder.ins().iconst(types::I64, *decision_id as i64);
             let probe_func_id = ctx.runtime_funcs["rt_decision_probe"];
             let probe_func_ref = ctx.module.declare_func_in_func(probe_func_id, builder.func);
-            builder.ins().call(probe_func_ref, &[decision_id_val, result_val]);
+            builder
+                .ins()
+                .call(probe_func_ref, &[decision_id_val, result_val]);
 
             let _ = (file, line, column); // Keep metadata for future use
         }
@@ -742,7 +744,10 @@ pub fn compile_instruction<M: Module>(
             let result_val = match ctx.vreg_values.get(result) {
                 Some(&v) => v,
                 None => {
-                    return Err(format!("ConditionProbe: result vreg {:?} not found", result));
+                    return Err(format!(
+                        "ConditionProbe: result vreg {:?} not found",
+                        result
+                    ));
                 }
             };
 
@@ -750,7 +755,10 @@ pub fn compile_instruction<M: Module>(
             let condition_id_val = builder.ins().iconst(types::I32, *condition_id as i64);
             let probe_func_id = ctx.runtime_funcs["rt_condition_probe"];
             let probe_func_ref = ctx.module.declare_func_in_func(probe_func_id, builder.func);
-            builder.ins().call(probe_func_ref, &[decision_id_val, condition_id_val, result_val]);
+            builder.ins().call(
+                probe_func_ref,
+                &[decision_id_val, condition_id_val, result_val],
+            );
 
             let _ = (file, line, column); // Keep metadata for future use
         }
@@ -761,7 +769,9 @@ pub fn compile_instruction<M: Module>(
             let block_id_val = builder.ins().iconst(types::I32, *block_id as i64);
             let probe_func_id = ctx.runtime_funcs["rt_path_probe"];
             let probe_func_ref = ctx.module.declare_func_in_func(probe_func_id, builder.func);
-            builder.ins().call(probe_func_ref, &[path_id_val, block_id_val]);
+            builder
+                .ins()
+                .call(probe_func_ref, &[path_id_val, block_id_val]);
         }
 
         MirInst::UnitBoundCheck {

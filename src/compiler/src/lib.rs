@@ -21,6 +21,7 @@ pub mod effects_cache;
 pub mod elf_utils;
 pub mod error;
 pub mod error_explanations;
+pub mod formatter;
 pub mod hir;
 pub mod hydration_manifest;
 pub mod import_loader;
@@ -50,12 +51,11 @@ pub mod predicate_parser;
 pub mod project;
 pub mod runtime_bridge;
 pub mod runtime_profile;
-pub mod formatter;
 pub mod semantic_diff;
 pub mod smf_builder;
 pub mod spec_coverage;
-pub mod text_diff;
 pub mod symbol_analyzer;
+pub mod text_diff;
 pub mod trait_coherence;
 pub mod value;
 pub mod value_bridge;
@@ -82,6 +82,7 @@ pub use di::{
     DiContainer, DiMode, DiProfile, DiResolveError, DiScope,
 };
 pub use error::{codes as error_codes, typo, CompileError, ErrorContext};
+pub use formatter::{FormatConfig, Formatter};
 pub use interpreter::{
     evaluate_module, get_interpreter_args, set_interpreter_args, set_macro_trace,
 };
@@ -111,7 +112,6 @@ pub use runtime_profile::{
     start_profiling, stop_profiling, FunctionStats, LayoutFeedback, ProfileConfig, RuntimeMetrics,
     RuntimeProfiler,
 };
-pub use formatter::{FormatConfig, Formatter};
 pub use semantic_diff::{
     ChangeKind, DiffSummary, ImpactLevel, SemanticChange, SemanticDiff, SemanticDiffer,
 };

@@ -428,7 +428,10 @@ impl<'a> Parser<'a> {
                 if let Node::Function(mut f) = item {
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present
                     // Skip auto-injection for constructors (methods named "new")
-                    if !is_static && f.name != "new" && (f.params.is_empty() || f.params[0].name != "self") {
+                    if !is_static
+                        && f.name != "new"
+                        && (f.params.is_empty() || f.params[0].name != "self")
+                    {
                         // Inject implicit self parameter at the beginning
                         let self_param = Parameter {
                             span: f.span,
@@ -569,7 +572,10 @@ impl<'a> Parser<'a> {
                 if let Node::Function(mut f) = item {
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present
                     // Skip auto-injection for constructors (methods named "new")
-                    if !is_static && f.name != "new" && (f.params.is_empty() || f.params[0].name != "self") {
+                    if !is_static
+                        && f.name != "new"
+                        && (f.params.is_empty() || f.params[0].name != "self")
+                    {
                         // Inject implicit self parameter at the beginning
                         let self_param = Parameter {
                             span: f.span,

@@ -91,7 +91,8 @@ impl<'a> Parser<'a> {
         let next_token = Some(&parser.pending_tokens[0]);
 
         use crate::error_recovery::detect_common_mistake;
-        if let Some(mistake) = detect_common_mistake(&parser.current, &parser.previous, next_token) {
+        if let Some(mistake) = detect_common_mistake(&parser.current, &parser.previous, next_token)
+        {
             use crate::error_recovery::{CommonMistake, ErrorHint, ErrorHintLevel};
             let level = match mistake {
                 CommonMistake::PythonDef
@@ -115,9 +116,9 @@ impl<'a> Parser<'a> {
                 | CommonMistake::WrongBrackets
                 | CommonMistake::CSemicolon
                 | CommonMistake::SemicolonAfterBlock => ErrorHintLevel::Warning,
-                CommonMistake::TsLet
-                | CommonMistake::PythonSelf
-                | CommonMistake::RustFnMut => ErrorHintLevel::Info,
+                CommonMistake::TsLet | CommonMistake::PythonSelf | CommonMistake::RustFnMut => {
+                    ErrorHintLevel::Info
+                }
                 CommonMistake::RustLifetime
                 | CommonMistake::RustMacro
                 | CommonMistake::RustTurbofish

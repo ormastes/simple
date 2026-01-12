@@ -223,32 +223,28 @@ pub(super) fn eval_op_expr(
                 BinOp::NotEq => Ok(Value::Bool(left_val != right_val)),
                 BinOp::Lt => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a < b)),
-                    _ if use_float => {
-                        Ok(Value::Bool(left_val.as_float()? < right_val.as_float()?))
-                    }
+                    _ if use_float => Ok(Value::Bool(left_val.as_float()? < right_val.as_float()?)),
                     _ => Ok(Value::Bool(left_val.as_int()? < right_val.as_int()?)),
-                }
+                },
                 BinOp::Gt => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a > b)),
-                    _ if use_float => {
-                        Ok(Value::Bool(left_val.as_float()? > right_val.as_float()?))
-                    }
+                    _ if use_float => Ok(Value::Bool(left_val.as_float()? > right_val.as_float()?)),
                     _ => Ok(Value::Bool(left_val.as_int()? > right_val.as_int()?)),
-                }
+                },
                 BinOp::LtEq => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a <= b)),
                     _ if use_float => {
                         Ok(Value::Bool(left_val.as_float()? <= right_val.as_float()?))
                     }
                     _ => Ok(Value::Bool(left_val.as_int()? <= right_val.as_int()?)),
-                }
+                },
                 BinOp::GtEq => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a >= b)),
                     _ if use_float => {
                         Ok(Value::Bool(left_val.as_float()? >= right_val.as_float()?))
                     }
                     _ => Ok(Value::Bool(left_val.as_int()? >= right_val.as_int()?)),
-                }
+                },
                 BinOp::Is => Ok(Value::Bool(left_val == right_val)),
                 BinOp::And => Ok(Value::Bool(left_val.truthy() && right_val.truthy())),
                 BinOp::Or => Ok(Value::Bool(left_val.truthy() || right_val.truthy())),

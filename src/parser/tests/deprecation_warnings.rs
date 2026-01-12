@@ -341,10 +341,7 @@ fn test_mixed_syntax() {
     let src_new = "fn modern<U>(y: U) -> U:\n    y";
 
     // Old syntax should warn
-    assert!(
-        has_deprecation_warning(src_old),
-        "Old syntax should warn"
-    );
+    assert!(has_deprecation_warning(src_old), "Old syntax should warn");
 
     // New syntax should not warn
     assert!(
