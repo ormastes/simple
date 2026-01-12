@@ -69,6 +69,7 @@ simple migrate --fix-generics file.spl   # Migrate single file
 ```
 
 **Features**:
+- **Dry-run mode** (`--dry-run` / `-n`) for safe preview without modifying files
 - Processes single files or entire directories recursively
 - Correctly distinguishes generic types from array types
 - Preserves array types (`[i32]`, `[T; N]`)
@@ -77,7 +78,7 @@ simple migrate --fix-generics file.spl   # Migrate single file
 - Preserves string literals (doesn't change `"List[T]"`)
 - Preserves comments (doesn't change `# Option[T]`)
 - Reports statistics: Modified, Unchanged, Errors
-- Outputs progress with ✓/✗ indicators
+- Outputs progress with ✓/⚠/✗ indicators
 
 **Algorithm**:
 - Two-pass implementation with bracket matching
@@ -233,19 +234,29 @@ val cell = matrix[i][j]
 
 ### For Users
 
-**Step 1**: Update your code
+**Step 1**: Preview changes (recommended)
 ```bash
 cd your_project/
+simple migrate --fix-generics --dry-run src/
+```
+
+**Step 2**: Apply migration
+```bash
 simple migrate --fix-generics src/
 ```
 
-**Step 2**: Review changes
-- Check git diff to verify changes
-- Look for any false positives
+**Step 3**: Review changes
+- Check git diff or jj diff to verify changes
 - Test your code compiles
+- Run your test suite
 
-**Step 3**: Commit
+**Step 4**: Commit
 ```bash
+# Using jj (recommended)
+jj describe -m "Migrate generic syntax from [] to <>"
+jj bookmark set main -r @
+
+# Or using git
 git add -A
 git commit -m "Migrate generic syntax from [] to <>"
 ```
@@ -281,9 +292,10 @@ fn works_new<T>(x: T) -> T:  # No warning, preferred
 **Problem**: Want to preview changes before modifying files
 
 **Solution**:
-- Currently the tool modifies files directly
-- Best practice: commit changes to version control first
-- Can use `git diff` or `jj diff` to review changes after migration
+- Use dry-run mode: `simple migrate --fix-generics --dry-run src/`
+- Shows which files would be modified without changing them
+- Safe to run multiple times
+- Apply changes by running without `--dry-run`
 
 ### Compiler Warnings
 
@@ -337,9 +349,9 @@ fn works_new<T>(x: T) -> T:  # No warning, preferred
 
 - [x] ~~Refine migration algorithm to eliminate false positives~~ ✅ DONE
 - [x] ~~Add comprehensive tests for migration tool~~ ✅ DONE (20 tests)
+- [x] ~~Add migration preview mode (dry-run)~~ ✅ DONE
 - [ ] Create community announcement post
 - [ ] Set v1.0.0 release date
-- [ ] Add migration preview mode (dry-run)
 
 ### Medium Priority
 
