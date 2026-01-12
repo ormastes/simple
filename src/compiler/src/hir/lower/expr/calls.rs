@@ -153,8 +153,9 @@ impl Lowerer {
         }
     }
 
-    /// Handle I/O builtins: print, println, eprint, eprintln
+    /// Handle I/O builtins: print, print_raw, eprint, eprint_raw, dprint
     ///
+    /// Note: println and eprintln are deprecated (show runtime errors)
     /// Returns Some(HirExpr) if the name matches a builtin, None otherwise.
     fn lower_io_builtin(
         &mut self,
@@ -162,7 +163,7 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
-        if matches!(name, "print" | "println" | "eprint" | "eprintln") {
+        if matches!(name, "print" | "print_raw" | "eprint" | "eprint_raw" | "dprint" | "println" | "eprintln") {
             Ok(Some(self.lower_builtin_call(
                 name,
                 args,

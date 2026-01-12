@@ -13,6 +13,7 @@ pub mod help;
 pub mod init;
 pub mod llm_tools;
 pub mod migrate;
+mod migrate_sspec;
 pub mod repl;
 pub mod sandbox;
 pub mod sspec_docgen;

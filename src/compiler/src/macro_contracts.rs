@@ -434,6 +434,7 @@ fn create_function_from_stub(
             default: None,
             mutability: Mutability::Immutable,
             inject: false,
+            variadic: false,
         })
         .collect();
 

@@ -92,12 +92,16 @@ pub(super) fn call_value_with_args(
 /// Built-in extern functions that are always available without explicit declaration.
 /// These are the "prelude" functions - print, math, and conversion utilities.
 pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
-    // I/O functions
-    "print",
-    "println",
-    "eprint",
-    "eprintln",
+    // I/O functions (print now adds newline by default, like Python)
+    "print",       // prints with newline (new behavior)
+    "print_raw",   // prints without newline (for old print behavior)
+    "eprint",      // stderr with newline (new behavior)
+    "eprint_raw",  // stderr without newline (for old eprint behavior)
+    "dprint",      // debug print (only outputs when --debug flag is set)
     "input",
+    // Deprecated (show error messages)
+    "println",     // deprecated: use print instead
+    "eprintln",    // deprecated: use eprint instead
     // Math functions
     "abs",
     "min",

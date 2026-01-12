@@ -174,6 +174,7 @@ impl<'a> Parser<'a> {
                             default: None,
                             mutability: crate::ast::Mutability::Immutable,
                             inject: false,
+                            variadic: false,
                         };
                         f.params.insert(0, self_param);
                     }

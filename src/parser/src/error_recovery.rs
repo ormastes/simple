@@ -325,9 +325,10 @@ pub fn detect_common_mistake(
     // In Simple, 'new' is a valid identifier for:
     // - Method names after dot (e.g., Type.new())
     // - Function names after fn keyword (e.g., fn new() or static fn new())
+    // - Static method calls after :: (e.g., List::new())
     // Only flag standalone 'new Type()' pattern as a mistake
     if matches!(current.kind, TokenKind::New)
-        && !matches!(previous.kind, TokenKind::Dot | TokenKind::Fn)
+        && !matches!(previous.kind, TokenKind::Dot | TokenKind::Fn | TokenKind::DoubleColon)
     {
         return Some(CommonMistake::JavaNew);
     }

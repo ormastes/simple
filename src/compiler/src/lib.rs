@@ -84,7 +84,8 @@ pub use di::{
 pub use error::{codes as error_codes, typo, CompileError, ErrorContext};
 pub use formatter::{FormatConfig, Formatter};
 pub use interpreter::{
-    evaluate_module, get_interpreter_args, set_interpreter_args, set_macro_trace,
+    evaluate_module, get_interpreter_args, is_debug_mode, set_debug_mode, set_interpreter_args,
+    set_macro_trace,
 };
 pub use ir_export::{export_ast, export_hir, export_mir, ExportResult};
 pub use layout_recorder::{

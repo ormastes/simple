@@ -257,6 +257,8 @@ pub struct Parameter {
     pub mutability: Mutability,
     /// Per-parameter DI injection flag (#1013)
     pub inject: bool,
+    /// Variadic parameter flag (e.g., items: T...)
+    pub variadic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
