@@ -283,6 +283,82 @@ fn _helper(x: i32) -> i32:
 @unsafe     # Unsafe operations
 ```
 
+## Test Documentation
+
+**CRITICAL: Use docstring markdown intensively in SSpec tests!**
+
+### SSpec Test Documentation Rules
+
+1. **Every test block needs a docstring** (`describe`, `context`, `it`)
+2. **Use rich markdown** (headers, lists, code blocks, tables)
+3. **NO println() for documentation** - use docstrings instead
+4. **Auto-documentation**: SSpec generates docs from docstrings
+
+### Example
+
+```simple
+describe "Pattern Matching":
+    """
+    # Pattern Matching Engine
+
+    Tests NFA-based regex pattern matching.
+
+    ## Features Tested
+    - Literal matching
+    - Character classes
+    - Quantifiers (*, +, ?)
+    - Alternation (|)
+
+    ## Performance
+    O(nm) worst case where n=text length, m=pattern length
+    """
+
+    context "when matching literals":
+        """
+        Tests exact string matching without special characters.
+
+        **Input:** Plain text patterns like "hello"
+        **Expected:** Match only exact strings
+        """
+
+        it "should match single characters":
+            """
+            Single character patterns should match exactly.
+
+            | Pattern | Input | Match |
+            |---------|-------|-------|
+            | "a"     | "a"   | ✓     |
+            | "a"     | "b"   | ✗     |
+
+            Given: Pattern("a")
+            When: matches("a")
+            Then: returns true
+            """
+            val p = Pattern.new("a")
+            expect(p.matches("a")).to(be_true())
+```
+
+**What NOT to do:**
+```simple
+it "should match":
+    # BAD: Using println() instead of docstrings
+    println("Testing pattern matching...")
+    println("Expected: true")
+    expect(result).to(be_true())
+```
+
+**What TO do:**
+```simple
+it "should match":
+    """
+    Pattern should match exact string.
+
+    Expected: true
+    Actual: Verified via expect() assertion
+    """
+    expect(result).to(be_true())
+```
+
 ## Bug Reports
 
 File in `simple/bug_report.md`:
