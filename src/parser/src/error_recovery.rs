@@ -261,8 +261,33 @@ pub fn detect_common_mistake(
         return Some(CommonMistake::PythonDef);
     }
 
-    // Check for 'None' (Python)
+    // Check for 'None' (Python) - but skip in valid Simple contexts
+    // None is valid as:
+    // 1. Enum variant name (e.g., "enum Option: None")
+    // 2. Pattern matching (e.g., "case None:")
+    // 3. Enum variant constructor (e.g., "return None" for Option<T>)
     if current.lexeme == "None" && matches!(current.kind, TokenKind::Identifier(_)) {
+        // Skip if after 'case' (pattern matching)
+        if matches!(previous.kind, TokenKind::Case) {
+            return None;
+        }
+        // Skip if we're in an enum variant context (after newline/indent in enum body)
+        // This is approximate but covers the common case
+        if matches!(previous.kind, TokenKind::Newline | TokenKind::Indent) {
+            return None;
+        }
+        // Skip if after 'return' - could be returning None enum variant
+        // Without full type information, we can't distinguish between:
+        //   - Python mistake: return None  (should be: return nil)
+        //   - Valid Simple:   return None  (returning Option::None variant)
+        // Err on the side of not flagging valid Simple code
+        if matches!(previous.kind, TokenKind::Return) {
+            return None;
+        }
+        // Skip if after '=' - could be assigning None enum variant
+        if matches!(previous.kind, TokenKind::Assign) {
+            return None;
+        }
         return Some(CommonMistake::PythonNone);
     }
 
