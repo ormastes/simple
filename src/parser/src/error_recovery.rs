@@ -372,6 +372,39 @@ pub fn detect_common_mistake(
         }
     }
 
+    // Check for TypeScript arrow function: ) =>
+    if matches!(current.kind, TokenKind::FatArrow)
+        && matches!(previous.kind, TokenKind::RParen) {
+        return Some(CommonMistake::TsArrowFunction);
+    }
+
+    // Check for wrong brackets in generics: identifier[
+    if matches!(current.kind, TokenKind::LBracket)
+        && matches!(previous.kind, TokenKind::Identifier(_)) {
+        // This could be array indexing, but if followed by type-like identifier, likely generic
+        if let Some(next_token) = next {
+            // Check if next token looks like a type (capitalized identifier)
+            if let TokenKind::Identifier(ref name) = next_token.kind {
+                if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    return Some(CommonMistake::WrongBrackets);
+                }
+            }
+        }
+    }
+
+    // Check for Rust turbofish: ::<
+    if matches!(current.kind, TokenKind::Lt)
+        && matches!(previous.kind, TokenKind::DoubleColon) {
+        return Some(CommonMistake::RustTurbofish);
+    }
+
+    // Check for Rust macro syntax: identifier!
+    if current.lexeme == "!"
+        && matches!(current.kind, TokenKind::Not)
+        && matches!(previous.kind, TokenKind::Identifier(_)) {
+        return Some(CommonMistake::RustMacro);
+    }
+
     None
 }
 

@@ -177,7 +177,9 @@ impl Parser<'_> {
         let start_span = self.current.span;
         let condition = self.parse_expression()?;
 
-        // TODO: Optional error message: condition, "message"
+        // Optional error message support: condition, "message"
+        // Currently not implemented - all contracts use default error messages
+        // Future: Check for comma, parse string literal for custom message
         let message = None;
 
         Ok(ContractClause {

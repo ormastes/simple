@@ -206,3 +206,87 @@ fn test_python_self_detection() {
     assert_eq!(mistake, Some(CommonMistake::PythonSelf));
     assert!(CommonMistake::PythonSelf.message().contains("implicit"));
 }
+
+#[test]
+fn test_typescript_arrow_function_detection() {
+    use simple_parser::token::{Token, TokenKind, Span};
+
+    let fat_arrow = Token::new(
+        TokenKind::FatArrow,
+        Span::new(8, 10, 1, 9),
+        "=>".to_string(),
+    );
+    let rparen = Token::new(
+        TokenKind::RParen,
+        Span::new(7, 8, 1, 8),
+        ")".to_string(),
+    );
+
+    let mistake = detect_common_mistake(&fat_arrow, &rparen, None);
+    assert_eq!(mistake, Some(CommonMistake::TsArrowFunction));
+    assert!(CommonMistake::TsArrowFunction.message().contains("lambda"));
+}
+
+#[test]
+fn test_rust_turbofish_detection() {
+    use simple_parser::token::{Token, TokenKind, Span};
+
+    let lt = Token::new(
+        TokenKind::Lt,
+        Span::new(4, 5, 1, 5),
+        "<".to_string(),
+    );
+    let double_colon = Token::new(
+        TokenKind::DoubleColon,
+        Span::new(2, 4, 1, 3),
+        "::".to_string(),
+    );
+
+    let mistake = detect_common_mistake(&lt, &double_colon, None);
+    assert_eq!(mistake, Some(CommonMistake::RustTurbofish));
+}
+
+#[test]
+fn test_rust_macro_detection() {
+    use simple_parser::token::{Token, TokenKind, Span};
+
+    let not = Token::new(
+        TokenKind::Not,
+        Span::new(5, 6, 1, 6),
+        "!".to_string(),
+    );
+    let ident = Token::new(
+        TokenKind::Identifier("println".to_string()),
+        Span::new(0, 5, 1, 1),
+        "println".to_string(),
+    );
+
+    let mistake = detect_common_mistake(&not, &ident, None);
+    assert_eq!(mistake, Some(CommonMistake::RustMacro));
+    assert!(CommonMistake::RustMacro.suggestion().contains("@"));
+}
+
+#[test]
+fn test_wrong_brackets_detection() {
+    use simple_parser::token::{Token, TokenKind, Span};
+
+    let lbracket = Token::new(
+        TokenKind::LBracket,
+        Span::new(4, 5, 1, 5),
+        "[".to_string(),
+    );
+    let ident = Token::new(
+        TokenKind::Identifier("Vec".to_string()),
+        Span::new(0, 3, 1, 1),
+        "Vec".to_string(),
+    );
+    let type_param = Token::new(
+        TokenKind::Identifier("String".to_string()),
+        Span::new(5, 11, 1, 6),
+        "String".to_string(),
+    );
+
+    let mistake = detect_common_mistake(&lbracket, &ident, Some(&type_param));
+    assert_eq!(mistake, Some(CommonMistake::WrongBrackets));
+    assert!(CommonMistake::WrongBrackets.suggestion().contains("<>"));
+}

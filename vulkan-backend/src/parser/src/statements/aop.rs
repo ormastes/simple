@@ -378,12 +378,15 @@ impl<'a> Parser<'a> {
         content: &str,
         span: Span,
     ) -> Result<PredicateExpr, ParseError> {
-        // TODO: Implement a simple inline predicate parser here
-        // For now, create a simple selector as placeholder
-        // The full predicate parser is in the compiler crate (simple_compiler::predicate_parser)
-        // and will be used during compilation/semantic analysis
-
-        // Simple placeholder: treat the entire content as a selector name
+        // LIMITATION: Simplified predicate parsing for early-stage compilation
+        //
+        // This creates a basic selector-only predicate. Full predicate parsing
+        // (supporting boolean operations, function signatures, etc.) happens during
+        // semantic analysis in simple_compiler::predicate_parser to avoid circular
+        // dependencies between parser and compiler crates.
+        //
+        // Current behavior: Treats entire content as a selector name
+        // Future: Parse full predicate grammar defined in grammar comment above
         Ok(PredicateExpr::selector(
             content.trim().to_string(),
             vec![],
