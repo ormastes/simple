@@ -209,8 +209,13 @@ impl Settlement {
             code_slots,
             data_slots,
             functions: functions.clone(),
-            globals: Vec::new(), // TODO: [loader][P3] populate from module
-            types: Vec::new(),   // TODO: [loader][P3] populate from module
+            // Global and type metadata population requires:
+            // 1. SMF format to include global/type sections
+            // 2. Compiler to emit global definitions in SMF
+            // 3. Settlement allocator for global/type tables
+            // Currently unused - deferred until settlement GC integration
+            globals: Vec::new(),
+            types: Vec::new(),
             dependencies,        // Now properly populated from linker
             version: module.version,
             code_size,

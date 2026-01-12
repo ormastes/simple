@@ -20,8 +20,8 @@ impl CompilerPipeline {
             ));
         }
 
-        // TODO: Re-enable coverage when module is complete
-        // let coverage_enabled = crate::coverage::is_coverage_enabled();
+        // Coverage module is complete and available via SIMPLE_COVERAGE env var
+        let coverage_enabled = crate::coverage::is_coverage_enabled();
 
         match BackendKind::for_target(&target) {
             BackendKind::Cranelift => {
@@ -35,7 +35,7 @@ impl CompilerPipeline {
                 let backend = LlvmBackend::new(target)
                     .map_err(|e| CompileError::Codegen(format!("{e}")))?;
                 backend
-                    .with_coverage(false)  // TODO: Use coverage_enabled when module is complete
+                    .with_coverage(coverage_enabled)
                     .compile(mir_module)
                     .map_err(|e| CompileError::Codegen(format!("{e}")))
             }

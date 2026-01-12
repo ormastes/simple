@@ -315,10 +315,14 @@ pub fn detect_common_mistake(
         return Some(CommonMistake::JavaVoid);
     }
 
-    // Check for 'new' keyword (Java/C++) - but NOT when used as method name after dot
-    // In Simple, 'new' is a valid method name for constructors (e.g., Type.new())
+    // Check for 'new' keyword (Java/C++) - but NOT when used as method/function name
+    // In Simple, 'new' is a valid identifier for:
+    // - Method names after dot (e.g., Type.new())
+    // - Function names after fn keyword (e.g., fn new() or static fn new())
     // Only flag standalone 'new Type()' pattern as a mistake
-    if matches!(current.kind, TokenKind::New) && !matches!(previous.kind, TokenKind::Dot) {
+    if matches!(current.kind, TokenKind::New)
+        && !matches!(previous.kind, TokenKind::Dot | TokenKind::Fn)
+    {
         return Some(CommonMistake::JavaNew);
     }
 
