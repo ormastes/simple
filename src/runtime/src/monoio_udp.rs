@@ -10,13 +10,18 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 /// UDP socket handle stored in RuntimeValue
-/// Wraps monoio::net::UdpSocket
+/// Currently stores only local address; full monoio::net::UdpSocket integration pending
+///
+/// Full implementation would:
+/// 1. Store Arc<monoio::net::UdpSocket> instead of just local_addr
+/// 2. Integrate with monoio runtime for async I/O operations
+/// 3. Support send_to/recv_from operations through the runtime
+/// 4. Handle socket lifecycle (bind, connect, close) properly
 #[derive(Debug)]
 pub struct MonoioUdpSocket {
-    // TODO: [runtime][P3] Store actual monoio::net::UdpSocket when runtime integration is complete
-    // For now, store local address
+    // Temporary: store only local address until monoio integration is complete
     local_addr: SocketAddr,
-    // In full implementation, this would be Arc<monoio::net::UdpSocket>
+    // Full implementation: Arc<monoio::net::UdpSocket>
 }
 
 // Global storage for UDP sockets

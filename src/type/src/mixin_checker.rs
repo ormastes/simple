@@ -95,7 +95,15 @@ impl TypeChecker {
                 }
             }
 
-            // TODO: [type][P3] Add class/struct own fields when they're registered
+            // Add class/struct own fields once registration is implemented
+            // Would need to:
+            // 1. Add struct_fields: HashMap<String, Vec<(String, Type)>> to store struct's own fields
+            // 2. Populate it during struct/class registration in type checker
+            // 3. Append struct's fields after mixin fields here:
+            //    if let Some(own_fields) = self.struct_fields.get(type_name) {
+            //        all_fields.extend(own_fields.clone());
+            //    }
+            // This ensures correct field resolution order: mixin fields first, own fields last
             all_fields
         } else {
             Vec::new()

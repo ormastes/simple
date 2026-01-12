@@ -10,13 +10,18 @@ use crate::macro_registry::ConstValue;
 impl<'a> Parser<'a> {
     pub(crate) fn advance(&mut self) {
         // Detect common mistakes before advancing
+        // Skip check if this is the very first advance (previous == EOF) because
+        // the initial token was already checked in Parser::new()
+        let skip_check = matches!(self.previous.kind, TokenKind::Eof);
+
         let next_token = if !self.pending_tokens.is_empty() {
             Some(&self.pending_tokens[0])
         } else {
             None
         };
 
-        if let Some(mistake) = detect_common_mistake(&self.current, &self.previous, next_token) {
+        if !skip_check {
+            if let Some(mistake) = detect_common_mistake(&self.current, &self.previous, next_token) {
             // Determine error hint level based on mistake type
             use crate::error_recovery::CommonMistake;
             let level = match mistake {
@@ -66,7 +71,8 @@ impl<'a> Parser<'a> {
                 help: Some(mistake.message()),
             };
 
-            self.error_hints.push(hint);
+                self.error_hints.push(hint);
+            }
         }
 
         self.previous = std::mem::replace(

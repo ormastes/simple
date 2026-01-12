@@ -130,8 +130,14 @@ impl Lowerer {
                         self.register_trait(trait_def)?;
                     }
                 }
-                // TODO: [compiler][P2] Handle constants when HIR lowering supports them
-                // Currently, Node::Const is not handled during HIR lowering phase
+                // Constants not yet supported in HIR lowering
+                // Implementation would require:
+                // 1. Add HirConst variant to HIR (similar to HirFunction, HirStruct)
+                // 2. Implement const expression evaluation at compile time
+                // 3. Store evaluated constants in symbol table/globals
+                // 4. Handle const imports similar to function registration above
+                // 5. Support const visibility and re-exports
+                // See Node::Const in AST and ConstStmt definition in ast/nodes/statements.rs
                 _ => {}
             }
         }

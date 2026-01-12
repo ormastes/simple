@@ -149,11 +149,16 @@ impl SuiParser {
         let content = self.extract_until("$}")?;
         self.expect_str("$}")?;
 
-        // Simple parsing: "let name: Type = value"
+        // Currently stores raw declaration string; full parsing not yet implemented
+        // Proper implementation would parse "let name: Type = value" into components:
+        // 1. Extract variable name after "let" keyword
+        // 2. Parse optional type annotation after ":" (if present)
+        // 3. Parse optional initializer after "=" (if present)
+        // 4. Handle edge cases: no type, no initializer, complex types, etc.
+        // This would enable type checking and validation of shared state declarations
         let trimmed = content.trim();
 
-        // For now, just store the raw declaration
-        // TODO: [parser][P2] Parse into proper AST
+        // For now, store raw declaration until AST parsing is needed
         Ok(SharedStateDecl {
             name: trimmed.to_string(),
             type_annotation: None,

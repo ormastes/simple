@@ -314,7 +314,12 @@ pub enum ReturnWrapMode {
 /// Determine how a return statement should be wrapped
 pub fn get_return_wrap_mode(func: &FunctionDef, env: &EffectEnv) -> ReturnWrapMode {
     if needs_promise_wrapping(func, env) {
-        // TODO: [type][P3] Detect error returns vs normal returns
+        // Error detection not yet implemented - would need type information
+        // To detect error returns:
+        // 1. Check if function returns Result<T, E> or throws
+        // 2. Analyze return expression to determine if it's an error variant
+        // 3. Return ReturnWrapMode::Rejected for error returns
+        // 4. Return ReturnWrapMode::Resolved for success returns
         // For now, all returns in async functions use Resolved
         ReturnWrapMode::Resolved
     } else {
@@ -348,9 +353,14 @@ pub fn needs_await(expr: &Expr, env: &EffectEnv) -> AwaitMode {
             }
             AwaitMode::None
         }
-        // Method calls might be async (can't determine without type info)
+        // Method calls might be async (requires type information)
         Expr::MethodCall { .. } => {
-            // TODO: [type][P3] Requires type information to determine if method is async
+            // To detect async methods would need:
+            // 1. Type inference to determine receiver type
+            // 2. Method lookup in type's impl blocks
+            // 3. Check if method has async effect annotation
+            // 4. Return AwaitMode::Implicit if async
+            // For now, assume synchronous (user must add explicit await if needed)
             AwaitMode::None
         }
         // Explicit await

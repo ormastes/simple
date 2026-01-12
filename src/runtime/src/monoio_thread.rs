@@ -795,7 +795,9 @@ impl RuntimeThread {
         let _socket = get_udp_socket!(registry, socket_id, response_tx);
 
         // Note: monoio's UdpSocket doesn't expose set_broadcast
-        // TODO: [runtime][P3] Access underlying socket2 socket if needed
+        // monoio's UdpSocket wraps socket2::Socket but doesn't expose all options
+        // Would need to access underlying socket2::Socket for full functionality
+        // via socket.as_raw_socket()/as_raw_fd() and socket2::Socket::from_raw_socket()
         tracing::warn!("UDP set_broadcast not fully supported in monoio, returning success");
         send_success!(response_tx, 0);
     }
@@ -809,7 +811,9 @@ impl RuntimeThread {
         let _socket = get_udp_socket!(registry, socket_id, response_tx);
 
         // Note: monoio's UdpSocket doesn't expose set_multicast_ttl_v4
-        // TODO: [runtime][P3] Access underlying socket2 socket if needed
+        // monoio's UdpSocket wraps socket2::Socket but doesn't expose all options
+        // Would need to access underlying socket2::Socket for full functionality
+        // via socket.as_raw_socket()/as_raw_fd() and socket2::Socket::from_raw_socket()
         tracing::warn!("UDP set_multicast_ttl not fully supported in monoio, returning success");
         send_success!(response_tx, 0);
     }
@@ -824,7 +828,9 @@ impl RuntimeThread {
         let _socket = get_udp_socket!(registry, socket_id, response_tx);
 
         // Note: monoio's UdpSocket doesn't expose join_multicast_v4
-        // TODO: [runtime][P3] Access underlying socket2 socket if needed
+        // monoio's UdpSocket wraps socket2::Socket but doesn't expose all options
+        // Would need to access underlying socket2::Socket for full functionality
+        // via socket.as_raw_socket()/as_raw_fd() and socket2::Socket::from_raw_socket()
         tracing::warn!("UDP join_multicast not fully supported in monoio, returning success");
         send_success!(response_tx, 0);
     }
@@ -839,7 +845,9 @@ impl RuntimeThread {
         let _socket = get_udp_socket!(registry, socket_id, response_tx);
 
         // Note: monoio's UdpSocket doesn't expose leave_multicast_v4
-        // TODO: [runtime][P3] Access underlying socket2 socket if needed
+        // monoio's UdpSocket wraps socket2::Socket but doesn't expose all options
+        // Would need to access underlying socket2::Socket for full functionality
+        // via socket.as_raw_socket()/as_raw_fd() and socket2::Socket::from_raw_socket()
         tracing::warn!("UDP leave_multicast not fully supported in monoio, returning success");
         send_success!(response_tx, 0);
     }

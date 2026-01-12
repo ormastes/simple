@@ -78,13 +78,13 @@ pub extern "C" fn monoio_runtime_init_global() -> RuntimeValue {
 /// Feature #1731: Task spawning and management
 #[no_mangle]
 pub extern "C" fn monoio_spawn_local(_task_fn: RuntimeValue) -> RuntimeValue {
-    // TODO: [runtime][P3] Convert RuntimeValue to Future
-    // For now, return stub value
-    // In full implementation:
-    // 1. Extract closure from RuntimeValue
-    // 2. Convert to async block
-    // 3. Spawn on thread-local runtime
-    // 4. Return task handle as RuntimeValue
+    // Stub implementation - RuntimeValue to Future conversion not yet implemented
+    // Full implementation would:
+    // 1. Extract closure from RuntimeValue (RuntimeClosure)
+    // 2. Create async block that calls the closure
+    // 3. Spawn on thread-local monoio runtime using spawn_local()
+    // 4. Wrap returned JoinHandle in RuntimeValue
+    // Requires FFI bridge between RuntimeValue and async Rust
 
     tracing::warn!("monoio_spawn_local: stub implementation");
     RuntimeValue::from_int(0)
@@ -219,8 +219,13 @@ thread_local! {
 /// Get current runtime statistics
 #[no_mangle]
 pub extern "C" fn monoio_get_stats() -> RuntimeValue {
-    // TODO: [runtime][P3] Return stats as RuntimeValue (struct or dict)
-    // For now, return stub
+    // Stub implementation - would return RuntimeStats as RuntimeValue
+    // Full implementation would:
+    // 1. Get RUNTIME_STATS from thread-local storage
+    // 2. Create RuntimeDict or RuntimeObject with stats fields:
+    //    {tasks_spawned, tasks_completed, io_operations, io_errors}
+    // 3. Return as RuntimeValue
+    // Currently returns 0 as placeholder
     RuntimeValue::from_int(0)
 }
 

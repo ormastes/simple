@@ -89,7 +89,7 @@ Options:
 simple
 >>> 1 + 2
 3
->>> let x = 10
+>>> val x = 10
 >>> x * 5
 50
 >>> exit
@@ -114,25 +114,25 @@ simple watch app.spl
 ### Variables & Types
 
 ```simple
-# Variables are mutable by default
-x = 10
-let y = 20          # 'let' is optional
-const PI = 3.14159  # Immutable constant
+# Variables - immutable (val) or mutable (var)
+val x = 10          # Immutable (preferred)
+var y = 20          # Mutable (when needed)
+val PI = 3.14159    # Immutable constant
 
 # Type annotations (optional due to inference)
-let count: i64 = 100
+val count: i64 = 100
 
 # Basic types
-let a: i32 = 42
-let pi: f64 = 3.14159
-let flag: bool = true
+vala: i32 = 42
+valpi: f64 = 3.14159
+valflag: bool = true
 
 # Strings with interpolation
-let name = "world"
-let msg = "Hello, {name}!"
+valname = "world"
+valmsg = "Hello, {name}!"
 
 # Raw strings (no interpolation)
-let path = 'C:\Users\name'
+valpath = 'C:\Users\name'
 ```
 
 ### Control Flow
@@ -170,12 +170,12 @@ fn greet(name: str):
     print "Hello, {name}!"
 
 # Call functions
-let sum = add(1, 2)
+valsum = add(1, 2)
 greet("Alice")
 
 # Lambdas use backslash
-let double = \x: x * 2
-let evens = nums.filter \x: x % 2 == 0
+valdouble = \x: x * 2
+valevens = nums.filter \x: x % 2 == 0
 ```
 
 ### Structs & Classes
@@ -191,7 +191,7 @@ mut struct Cursor:
     x: f64
     y: f64
 
-let p = Point(x: 1.0, y: 2.0)
+valp = Point(x: 1.0, y: 2.0)
 
 # Classes (reference types, mutable by default)
 class Person:
@@ -207,7 +207,7 @@ immut class Color:
     green: u8
     blue: u8
 
-let alice = Person(name: "Alice", age: 30)
+valalice = Person(name: "Alice", age: 30)
 alice.greet()
 ```
 
@@ -215,16 +215,16 @@ alice.greet()
 
 ```simple
 # Arrays
-let nums = [1, 2, 3, 4, 5]
-let first = nums[0]
+valnums = [1, 2, 3, 4, 5]
+valfirst = nums[0]
 
 # Dictionaries
-let scores = {"alice": 100, "bob": 85}
-let alice_score = scores["alice"]
+valscores = {"alice": 100, "bob": 85}
+valalice_score = scores["alice"]
 
 # Tuples
-let pair = (1, "hello")
-let (num, text) = pair
+valpair = (1, "hello")
+val(num, text) = pair
 ```
 
 ### Unit Types (Postfix Literals)
@@ -243,21 +243,21 @@ unit UserId: i64 as uid
 unit OrderId: i64 as oid
 
 # Usage with postfix literals
-let height = 175_cm              # Length type
-let width = 10_cm + 5_mm         # Auto-converts to same base
-let speed = 200_kmph             # Velocity type
-let distance = 42_km             # Length type
+valheight = 175_cm              # Length type
+valwidth = 10_cm + 5_mm         # Auto-converts to same base
+valspeed = 200_kmph             # Velocity type
+valdistance = 42_km             # Length type
 
 # Type safety - compile error:
-# let bad = height + speed       # Error: can't add Length + Velocity
+# valbad = height + speed       # Error: can't add Length + Velocity
 
 # Semantic IDs prevent mix-ups
-let user = 42_uid                # UserId
-let order = 100_oid              # OrderId
-# let wrong: UserId = 100_oid    # Error: OrderId ≠ UserId
+valuser = 42_uid                # UserId
+valorder = 100_oid              # OrderId
+# valwrong: UserId = 100_oid    # Error: OrderId ≠ UserId
 
 # Computed units
-let travel_time = distance / speed    # Returns Time type
+valtravel_time = distance / speed    # Returns Time type
 print("ETA: {travel_time.to_min()} minutes")
 ```
 
@@ -318,8 +318,8 @@ assert_eq!(a, b)                     # Panic if a != b
 assert_ne!(a, b)                     # Panic if a == b
 
 # Collections
-let nums = vec![1, 2, 3, 4, 5]       # Create vector
-let formatted = format!("x={x}")     # Format string without printing
+valnums = vec![1, 2, 3, 4, 5]       # Create vector
+valformatted = format!("x={x}")     # Format string without printing
 
 # Panic with message
 panic!("Something went wrong: {err}")
@@ -484,8 +484,8 @@ fn generate_uuid() -> String:
 Create your first Simple program:
 
 ```sdoctest
->>> let x = 10
->>> let y = 20
+>>> val x = 10
+>>> valy = 20
 >>> x + y
 30
 >>> "Result: {x + y}"
@@ -505,7 +505,7 @@ simple test --doctest --tag slow # Run only slow-tagged doctests
 
 ```simple
 # The -> operator calls a method and assigns result back
-let mut data = load_data()
+var data = load_data()
 data->normalize()        # data = data.normalize()
 data->filter(min: 0)     # data = data.filter(min: 0)
 
@@ -528,7 +528,7 @@ fn vector_add_kernel(a: []f32, b: []f32, result: []f32):
 # GPU kernel style 2: @simd with auto bounds handling
 @simd
 fn vector_scale(data: []f32, scale: f32):
-    let i = this.index()             # Global linear index (same as gpu.global_id())
+    vali = this.index()             # Global linear index (same as gpu.global_id())
     data[i] = data[i] * scale        # Bounds auto-handled
 
 # Host function - runs on CPU
@@ -558,17 +558,17 @@ fn main():
 #[gpu]
 fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
     # Multi-dimensional indexing
-    let row = gpu.global_id(0)       # First dimension
-    let col = gpu.global_id(1)       # Second dimension
+    valrow = gpu.global_id(0)       # First dimension
+    valcol = gpu.global_id(1)       # Second dimension
 
     # Thread group (workgroup) info
-    let local_row = gpu.local_id(0)  # Index within workgroup
-    let group_row = gpu.group_id(0)  # Workgroup index
+    vallocal_row = gpu.local_id(0)  # Index within workgroup
+    valgroup_row = gpu.group_id(0)  # Workgroup index
 
     # Alternative @simd style
-    # let (row, col) = this.index()  # Tuple for 2D
-    # let local_idx = this.thread_index()
-    # let group_idx = this.group_index()
+    # val(row, col) = this.index()  # Tuple for 2D
+    # vallocal_idx = this.thread_index()
+    # valgroup_idx = this.group_index()
 
     if row < N and col < N:
         var sum = 0.0_f32
