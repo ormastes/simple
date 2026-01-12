@@ -302,11 +302,14 @@ fn works_new<T>(x: T) -> T:  # No warning, preferred
 **Problem**: Too many warnings
 
 **Solution**:
-- Run migration tool: `simple migrate --fix-generics .`
-- Or suppress warnings (NOT recommended):
+- **Recommended**: Run migration tool to fix: `simple migrate --fix-generics .`
+- **Alternative**: Suppress warnings temporarily:
   ```bash
   simple compile --allow-deprecated file.spl
+  # or
+  export SIMPLE_ALLOW_DEPRECATED=1
   ```
+  Note: This only hides warnings; code still needs updating before v1.0.0
 
 ---
 

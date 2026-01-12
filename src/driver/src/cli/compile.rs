@@ -16,6 +16,11 @@ pub fn compile_file(
     use simple_driver::jj::{BuildEvent, BuildState, JJConnector};
     use std::time::Instant;
 
+    // Set environment variable if deprecated syntax warnings should be suppressed
+    if options.allow_deprecated {
+        std::env::set_var("SIMPLE_ALLOW_DEPRECATED", "1");
+    }
+
     let runner = Runner::new();
     let out_path = output.unwrap_or_else(|| source.with_extension("smf"));
 

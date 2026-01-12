@@ -241,12 +241,20 @@ Run `simple migrate --fix-generics` to automatically update your code
 
 ### Q: Can I suppress deprecation warnings?
 
-**A:** Not currently, but you can:
-1. **Fix the warnings**: Run `simple migrate --fix-generics`
-2. **Redirect stderr**: `simple compile 2>/dev/null` (not recommended)
-3. **Wait for --allow-deprecated flag**: Coming soon
+**A:** Yes! Use the `--allow-deprecated` flag:
 
-**Note**: The `--allow-deprecated` flag is planned but not yet implemented.
+```bash
+simple compile myfile.spl --allow-deprecated
+```
+
+This suppresses all deprecation warnings for the old `[]` generic syntax.
+
+**Alternatives**:
+1. **Fix the warnings**: Run `simple migrate --fix-generics` (recommended)
+2. **Environment variable**: Set `SIMPLE_ALLOW_DEPRECATED=1`
+3. **Redirect stderr**: `simple compile 2>/dev/null` (not recommended)
+
+**Note**: The flag only suppresses warnings - the deprecated syntax still works during the transition period.
 
 ---
 
@@ -476,7 +484,7 @@ Exact dates to be announced.
 **A:** Roadmap:
 
 **High Priority**:
-- [ ] `--allow-deprecated` flag to suppress warnings
+- [x] `--allow-deprecated` flag to suppress warnings
 - [ ] Community announcement
 - [ ] v1.0.0 timeline
 

@@ -48,6 +48,9 @@ pub struct CompileOptions {
 
     /// Build log output path for replay and debugging.
     pub log_path: Option<PathBuf>,
+
+    /// Allow deprecated syntax without warnings (e.g., [] for generics).
+    pub allow_deprecated: bool,
 }
 
 impl Default for CompileOptions {
@@ -66,6 +69,7 @@ impl Default for CompileOptions {
             deterministic: false,
             build_timestamp: None,
             log_path: None,
+            allow_deprecated: false,
         }
     }
 }
@@ -188,6 +192,12 @@ impl CompileOptions {
         self
     }
 
+    /// Allow deprecated syntax without warnings.
+    pub fn with_allow_deprecated(mut self) -> Self {
+        self.allow_deprecated = true;
+        self
+    }
+
     /// Get the number of threads to use for parallel compilation.
     /// Returns the configured number or all available cores.
     pub fn thread_count(&self) -> usize {
@@ -256,6 +266,8 @@ impl CompileOptions {
                 if let Some(path) = arg.strip_prefix("--log=") {
                     opts.log_path = Some(PathBuf::from(path));
                 }
+            } else if arg == "--allow-deprecated" {
+                opts.allow_deprecated = true;
             }
         }
 

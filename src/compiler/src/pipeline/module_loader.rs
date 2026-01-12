@@ -17,8 +17,19 @@ fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
         return;
     }
 
+    // Check if deprecated syntax warnings should be suppressed
+    let allow_deprecated = std::env::var("SIMPLE_ALLOW_DEPRECATED").is_ok()
+        || std::env::var("SIMPLE_NO_DEPRECATED_WARNINGS").is_ok();
+
     // Display hints to stderr
     for hint in hints {
+        // Skip deprecation warnings if --allow-deprecated is set
+        if allow_deprecated && hint.level == ErrorHintLevel::Warning {
+            if hint.message.contains("Deprecated syntax") {
+                continue;
+            }
+        }
+
         let level_str = match hint.level {
             ErrorHintLevel::Error => "\x1b[31merror\x1b[0m",   // red
             ErrorHintLevel::Warning => "\x1b[33mwarning\x1b[0m", // yellow
