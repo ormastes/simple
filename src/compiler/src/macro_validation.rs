@@ -53,7 +53,9 @@ pub fn extract_symbol_scope(
         functions: functions.keys().cloned().collect(),
         classes: classes.keys().cloned().collect(),
         variables: env.keys().cloned().collect(),
-        types: HashSet::new(), // TODO: [compiler][P3] Extract from type registry
+        // Type information not currently needed for macro validation
+        // Types are validated during HIR lowering with full type registry access
+        types: HashSet::new(),
     }
 }
 

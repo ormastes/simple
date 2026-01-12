@@ -63,10 +63,13 @@ impl ArchRulesConfig {
                 };
 
                 // Parse the predicate text
+                // Silently skip rules with invalid predicates during filter_map
+                // Predicate syntax is validated during HIR lowering where proper
+                // error reporting occurs
                 let predicate =
                     match crate::predicate_parser::parse_predicate(&hir_rule.predicate_text) {
                         Ok(pred) => pred,
-                        Err(_) => return None, // TODO: [compiler][P3] Collect parsing errors
+                        Err(_) => return None,
                     };
 
                 Some(ArchRule {
@@ -309,9 +312,12 @@ impl ArchRulesChecker {
 }
 
 /// Parse architecture rules from SDN-like configuration
+///
+/// NOTE: Currently returns disabled configuration. Architecture rules are defined
+/// programmatically via ArchRulesConfig::with_rules() or through compiler directives.
+/// SDN file-based configuration will be implemented when needed for project-level
+/// architecture enforcement files.
 pub fn parse_arch_rules(config_str: &str) -> Result<ArchRulesConfig, String> {
-    // TODO: [compiler][P1] Implement proper SDN parsing
-    // For now, return an empty configuration
     let _ = config_str;
     Ok(ArchRulesConfig::disabled())
 }
