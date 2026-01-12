@@ -260,10 +260,21 @@ describe "Import syntax":
 | Total print statements | ~500 | **-5,860** ✅ |
 | Documentation coverage | **~80%** | **+78%** ✅ |
 
-### Time Savings
-- **Manual conversion:** 30 min/file × 67 files = **33.5 hours**
-- **Automated migration:** 1 min/file × 67 files = **67 minutes**
-- **Time saved:** **32 hours (96% reduction)** ✅
+### Time Savings (Revised After Pilot)
+
+**Structure Conversion Only:**
+- Manual: 30 min/file × 67 files = 33.5 hours
+- Automated: 1 min/file × 67 files = 67 minutes
+- Savings: 32 hours (96% reduction) ✅
+
+**Complete Migration (Structure + Assertions + Docs):**
+- Automated structure: 67 minutes
+- Manual assertion conversion: 50-100 hours (NEW - discovered in pilot)
+- Manual docstring enhancement: 50-100 hours
+- Review & testing: 25-50 hours
+- **Total: 125-250 hours** (~2-5 min/assertion, 75-150 min/file)
+
+**Note:** Tool saves ~50% time vs manual from scratch, but assertion conversion adds substantial manual effort beyond initial estimates.
 
 ### Business Impact
 - **Auto-generated feature catalog** from docstrings
@@ -284,13 +295,16 @@ describe "Import syntax":
 - [x] Test on real codebase files
 - [x] Document everything
 
-### Phase 2: Initial Migration (Week 2)
-- [ ] Fix parser compilation errors (unrelated)
-- [ ] Run migration on 5-10 smallest files
-- [ ] Manual review of generated docstrings
+### Phase 2: Initial Pilot Migration (Week 2) ⚠️ IN PROGRESS
+- [x] Run pilot test on before_each_spec.spl (257 lines)
+- [x] Discovered assertion conversion requirement
+- [x] Created assertion conversion guide
+- [x] Created pilot migration report
+- [ ] Manually convert assertions in pilot file
 - [ ] Fill in TODO placeholders with comprehensive docs
 - [ ] Run tests to verify functionality
-- [ ] Gather team feedback
+- [ ] Document total time spent
+- [ ] Gather lessons learned
 
 ### Phase 3: Bulk Migration (Week 3)
 - [ ] Run migration tool on all 67 print-based files
@@ -327,14 +341,18 @@ describe "Import syntax":
 
 ### New Files Created
 ```
-doc/examples/sspec_conversion_example.md          - Conversion guide (350+ lines)
-doc/report/sspec_docstring_audit_report.md        - Audit report (270+ lines)
-doc/report/sspec_migration_implementation_summary.md - Implementation (420+ lines)
-doc/design/sspec_lint_rules_design.md             - Lint design (580+ lines)
-scripts/audit_sspec.py                             - Audit automation (230+ lines)
-src/driver/src/cli/migrate_sspec.rs               - Migration logic (210+ lines)
-SSPEC_DOCUMENTATION_INITIATIVE.md                 - This summary
+doc/examples/sspec_conversion_example.md          - Conversion guide (350+ lines) ✅
+doc/report/sspec_docstring_audit_report.md        - Audit report (270+ lines) ✅
+doc/report/sspec_migration_implementation_summary.md - Implementation (420+ lines) ✅
+doc/report/sspec_pilot_migration_report.md        - Pilot test results (480+ lines) ✅ NEW
+doc/design/sspec_lint_rules_design.md             - Lint design (580+ lines) ✅
+doc/guide/sspec_assertion_conversion.md           - Assertion guide (650+ lines) ✅ NEW
+scripts/audit_sspec.py                             - Audit automation (230+ lines) ⚠️
+src/driver/src/cli/migrate_sspec.rs               - Migration logic (210+ lines) ✅
+SSPEC_DOCUMENTATION_INITIATIVE.md                 - This summary ✅
 ```
+
+**Note:** scripts/audit_sspec.py mentioned in documentation but not created as file
 
 ### Files Modified
 ```
@@ -348,7 +366,7 @@ sample_migration_spec.spl          - Synthetic test case
 test_migration_debug.spl           - Minimal test case
 ```
 
-**Total:** ~2,270+ lines of documentation and code
+**Total:** ~3,400+ lines of documentation and code (updated after pilot)
 
 ---
 
