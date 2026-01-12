@@ -185,6 +185,9 @@ pub use ffi::{
     rt_print_value, rt_println_str, rt_println_value,
 };
 
+// Re-export time FFI functions
+pub use ffi::rt_time_now_seconds;
+
 // Re-export doctest I/O FFI functions
 pub use doctest_io::{
     doctest_is_dir, doctest_is_file, doctest_path_contains, doctest_path_exists,
