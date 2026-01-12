@@ -465,6 +465,11 @@ impl Lowerer {
                         .map_err(LowerError::Capability)?;
                 }
                 self.resolve_type(t)?
+            } else if param.name == "self" && owner_type.is_some() {
+                // Special case: implicit self parameter in methods
+                // The parser adds an implicit self parameter with ty: None
+                // We infer it as the class type
+                self.current_class_type.unwrap_or(TypeId::VOID)
             } else {
                 return Err(LowerError::MissingParameterType(param.name.clone()));
             };

@@ -48,6 +48,13 @@ thread_local! {
 /// Thread-safe via atomic operations with SeqCst ordering for signal handlers.
 pub(crate) static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Global debug mode flag.
+///
+/// When set to true, debug print statements (dprint) will output.
+/// When false, dprint calls are silently ignored.
+/// Thread-safe via atomic operations.
+pub(crate) static DEBUG_MODE: AtomicBool = AtomicBool::new(false);
+
 thread_local! {
     pub(crate) static ACTOR_SPAWNER: ThreadSpawner = ThreadSpawner::new();
     pub(crate) static ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = RefCell::new(None);
@@ -205,6 +212,26 @@ pub fn is_interrupted() -> bool {
 /// after a previous command was interrupted.
 pub fn reset_interrupt() {
     INTERRUPT_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+//==============================================================================
+// Debug Mode Management
+//==============================================================================
+
+/// Enable or disable debug mode.
+///
+/// When debug mode is enabled, dprint() statements will output.
+/// When disabled, dprint() calls are silently ignored.
+pub fn set_debug_mode(enabled: bool) {
+    DEBUG_MODE.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Check if debug mode is enabled.
+///
+/// Returns true if debug printing is enabled.
+#[inline]
+pub fn is_debug_mode() -> bool {
+    DEBUG_MODE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 //==============================================================================

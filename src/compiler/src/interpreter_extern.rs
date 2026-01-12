@@ -11,7 +11,7 @@ type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
 // Import shared functions from parent module
-use super::{evaluate_expr, get_interpreter_args};
+use super::{evaluate_expr, get_interpreter_args, is_debug_mode};
 
 // Import diagram tracing
 use simple_runtime::value::diagram_ffi;
@@ -131,19 +131,9 @@ pub(crate) fn call_extern_function(
 
     match name {
         // I/O functions - now use runtime capture system
+        // print now adds newline by default (like Python)
         "print" => {
             check_effect_violations("print")?;
-            for (i, val) in evaluated.iter().enumerate() {
-                if i > 0 {
-                    print_to_stdout(" ");
-                }
-                print_to_stdout(&val.to_display_string());
-            }
-            flush_stdout();
-            Ok(Value::Nil)
-        }
-        "println" => {
-            check_effect_violations("println")?;
             for (i, val) in evaluated.iter().enumerate() {
                 if i > 0 {
                     print_to_stdout(" ");
@@ -154,8 +144,40 @@ pub(crate) fn call_extern_function(
             flush_stdout();
             Ok(Value::Nil)
         }
+        // print_raw prints without newline
+        "print_raw" => {
+            check_effect_violations("print_raw")?;
+            for (i, val) in evaluated.iter().enumerate() {
+                if i > 0 {
+                    print_to_stdout(" ");
+                }
+                print_to_stdout(&val.to_display_string());
+            }
+            flush_stdout();
+            Ok(Value::Nil)
+        }
+        // println is deprecated - show error message
+        "println" => {
+            return Err(CompileError::runtime(
+                "'println' is deprecated. Use 'print' instead (it now adds a newline by default, like Python). For no newline, use 'print_raw'."
+            ));
+        }
+        // eprint now adds newline by default
         "eprint" => {
             check_effect_violations("eprint")?;
+            for (i, val) in evaluated.iter().enumerate() {
+                if i > 0 {
+                    print_to_stderr(" ");
+                }
+                print_to_stderr(&val.to_display_string());
+            }
+            print_to_stderr("\n");
+            flush_stderr();
+            Ok(Value::Nil)
+        }
+        // eprint_raw prints to stderr without newline
+        "eprint_raw" => {
+            check_effect_violations("eprint_raw")?;
             for (i, val) in evaluated.iter().enumerate() {
                 if i > 0 {
                     print_to_stderr(" ");
@@ -165,16 +187,26 @@ pub(crate) fn call_extern_function(
             flush_stderr();
             Ok(Value::Nil)
         }
+        // eprintln is deprecated - show error message
         "eprintln" => {
-            check_effect_violations("eprintln")?;
-            for (i, val) in evaluated.iter().enumerate() {
-                if i > 0 {
-                    print_to_stderr(" ");
+            return Err(CompileError::runtime(
+                "'eprintln' is deprecated. Use 'eprint' instead (it now adds a newline by default). For no newline, use 'eprint_raw'."
+            ));
+        }
+        // dprint only prints when debug mode is enabled
+        "dprint" => {
+            if is_debug_mode() {
+                check_effect_violations("dprint")?;
+                print_to_stdout("[DEBUG] ");
+                for (i, val) in evaluated.iter().enumerate() {
+                    if i > 0 {
+                        print_to_stdout(" ");
+                    }
+                    print_to_stdout(&val.to_display_string());
                 }
-                print_to_stderr(&val.to_display_string());
+                print_to_stdout("\n");
+                flush_stdout();
             }
-            print_to_stderr("\n");
-            flush_stderr();
             Ok(Value::Nil)
         }
         "input" => {

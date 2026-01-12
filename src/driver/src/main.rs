@@ -105,10 +105,16 @@ fn main() {
     let gc_off = args.iter().any(|a| a == "--gc=off" || a == "--gc=OFF");
     let use_notui = args.iter().any(|a| a == "--notui");
     let macro_trace = args.iter().any(|a| a == "--macro-trace");
+    let debug_mode = args.iter().any(|a| a == "--debug");
 
     // Enable macro tracing if requested
     if macro_trace {
         simple_compiler::set_macro_trace(true);
+    }
+
+    // Enable debug mode if requested (for dprint function)
+    if debug_mode {
+        simple_compiler::set_debug_mode(true);
     }
 
     // Parse and apply sandbox configuration before running code (#916-919)
@@ -146,6 +152,10 @@ fn main() {
         }
 
         if arg == "--macro-trace" {
+            continue;
+        }
+
+        if arg == "--debug" {
             continue;
         }
 

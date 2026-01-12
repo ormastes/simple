@@ -440,6 +440,7 @@ impl<'a> Parser<'a> {
                             default: None,
                             mutability: Mutability::Immutable,
                             inject: false,
+                            variadic: false,
                         };
                         f.params.insert(0, self_param);
                     }
@@ -584,6 +585,7 @@ impl<'a> Parser<'a> {
                             default: None,
                             mutability: Mutability::Immutable,
                             inject: false,
+                            variadic: false,
                         };
                         f.params.insert(0, self_param);
                     }

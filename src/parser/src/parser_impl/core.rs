@@ -518,6 +518,14 @@ impl<'a> Parser<'a> {
                 None
             };
 
+            // Check for variadic parameter (e.g., items: T...)
+            let variadic = if self.check(&TokenKind::Ellipsis) {
+                self.advance();
+                true
+            } else {
+                false
+            };
+
             let default = if self.check(&TokenKind::Assign) {
                 self.advance();
                 Some(self.parse_expression()?)
@@ -532,6 +540,7 @@ impl<'a> Parser<'a> {
                 default,
                 mutability,
                 inject,
+                variadic,
             });
 
             // Handle comma or newline between parameters

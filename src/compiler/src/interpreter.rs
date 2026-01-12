@@ -33,8 +33,8 @@ pub(crate) use interpreter_state::{
     ExecutionMode,
 };
 pub use interpreter_state::{
-    get_current_file, get_interpreter_args, init_signal_handlers, is_interrupted, reset_interrupt,
-    set_current_file, set_interpreter_args,
+    get_current_file, get_interpreter_args, init_signal_handlers, is_debug_mode, is_interrupted,
+    reset_interrupt, set_current_file, set_debug_mode, set_interpreter_args,
 };
 pub(crate) use interpreter_state::{
     ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER, AOP_CONFIG, BASE_UNIT_DIMENSIONS,

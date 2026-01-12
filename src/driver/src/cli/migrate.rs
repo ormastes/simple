@@ -6,6 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+use super::migrate_sspec;
+
 /// Run migration command
 pub fn run_migrate(args: &[String]) -> i32 {
     // args[0] is "migrate", args[1] is the subcommand
@@ -30,6 +32,34 @@ pub fn run_migrate(args: &[String]) -> i32 {
 
             migrate_generics(&path, dry_run)
         }
+        "--fix-print" => {
+            // Check for --dry-run flag
+            let dry_run = args.iter().any(|a| a == "--dry-run" || a == "-n");
+
+            // Find path argument (skip --dry-run flags)
+            let path = args
+                .iter()
+                .skip(2)
+                .find(|a| !a.starts_with('-'))
+                .map(|s| PathBuf::from(s))
+                .unwrap_or_else(|| PathBuf::from("."));
+
+            migrate_print_syntax(&path, dry_run)
+        }
+        "--fix-sspec-docstrings" => {
+            // Check for --dry-run flag
+            let dry_run = args.iter().any(|a| a == "--dry-run" || a == "-n");
+
+            // Find path argument (skip --dry-run flags)
+            let path = args
+                .iter()
+                .skip(2)
+                .find(|a| !a.starts_with('-'))
+                .map(|s| PathBuf::from(s))
+                .unwrap_or_else(|| PathBuf::from("."));
+
+            migrate_sspec_docstrings(&path, dry_run)
+        }
         _ => {
             eprintln!("error: unknown migration subcommand: {}", subcommand);
             eprintln!("Run 'simple migrate --help' for usage");
@@ -43,11 +73,26 @@ fn print_migrate_help() {
     println!();
     println!("Usage:");
     println!("  simple migrate --fix-generics [OPTIONS] [path]");
+    println!("  simple migrate --fix-print [OPTIONS] [path]");
+    println!("  simple migrate --fix-sspec-docstrings [OPTIONS] [path]");
     println!();
     println!("Migrations:");
     println!("  --fix-generics <path>    Convert [] generic syntax to <>");
     println!("                           Example: List[T] → List<T>");
     println!("                           Processes all .spl files in path");
+    println!();
+    println!("  --fix-print <path>       Migrate print/println syntax");
+    println!("                           println() → print()");
+    println!("                           print() → print_raw()");
+    println!("                           eprintln() → eprint()");
+    println!("                           eprint() → eprint_raw()");
+    println!("                           Processes all .spl files in path");
+    println!();
+    println!("  --fix-sspec-docstrings   Convert print-based SSpec tests to docstrings");
+    println!("           <path>          Converts: print('describe...')");
+    println!("                           To: describe \"...\":");
+    println!("                                   \"\"\"Documentation\"\"\"");
+    println!("                           Processes *_spec.spl files only");
     println!();
     println!("Options:");
     println!("  -n, --dry-run           Preview changes without modifying files");
@@ -57,6 +102,10 @@ fn print_migrate_help() {
     println!("  simple migrate --fix-generics src/");
     println!("  simple migrate --fix-generics my_file.spl");
     println!("  simple migrate --fix-generics --dry-run src/");
+    println!("  simple migrate --fix-print simple/std_lib/");
+    println!("  simple migrate --fix-print --dry-run .");
+    println!("  simple migrate --fix-sspec-docstrings simple/std_lib/test/features/");
+    println!("  simple migrate --fix-sspec-docstrings --dry-run tests/");
 }
 
 /// Migrate generic syntax from [] to <>
@@ -498,5 +547,313 @@ val nested: List<Option<Result<T, E>>> = []"#;
         let input = "struct Array[T, const N: usize]:\n    data: [T; N]";
         let expected = "struct Array<T, const N: usize>:\n    data: [T; N]";
         assert_eq!(migrate_generic_syntax(input), expected);
+    }
+}
+
+/// Migrate print/println syntax
+fn migrate_print_syntax(path: &Path, dry_run: bool) -> i32 {
+    if !path.exists() {
+        eprintln!("error: path does not exist: {}", path.display());
+        return 1;
+    }
+
+    let files = if path.is_file() {
+        vec![path.to_path_buf()]
+    } else {
+        // Walk directory and find all .spl files
+        WalkDir::new(path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("spl"))
+            .map(|e| e.path().to_path_buf())
+            .collect::<Vec<_>>()
+    };
+
+    if files.is_empty() {
+        println!("No .spl files found in {}", path.display());
+        return 0;
+    }
+
+    if dry_run {
+        println!("DRY RUN: Previewing changes to {} file(s)...", files.len());
+    } else {
+        println!("Migrating {} file(s)...", files.len());
+    }
+
+    let mut modified_count = 0;
+    let mut error_count = 0;
+
+    for file in &files {
+        match migrate_file_print(&file, dry_run) {
+            Ok(true) => {
+                modified_count += 1;
+                if dry_run {
+                    println!("  ⚠ {} (would be modified)", file.display());
+                } else {
+                    println!("  ✓ {}", file.display());
+                }
+            }
+            Ok(false) => {
+                // No changes needed
+            }
+            Err(e) => {
+                error_count += 1;
+                eprintln!("  ✗ {}: {}", file.display(), e);
+            }
+        }
+    }
+
+    println!();
+    if dry_run {
+        println!("DRY RUN complete!");
+        println!("  Would modify: {}", modified_count);
+        println!(
+            "  Unchanged: {}",
+            files.len() - modified_count - error_count
+        );
+        println!("  Errors: {}", error_count);
+        if modified_count > 0 {
+            println!();
+            println!("Run without --dry-run to apply these changes");
+        }
+    } else {
+        println!("Migration complete!");
+        println!("  Modified: {}", modified_count);
+        println!(
+            "  Unchanged: {}",
+            files.len() - modified_count - error_count
+        );
+        println!("  Errors: {}", error_count);
+    }
+
+    if error_count > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Migrate a single file's print syntax
+/// Returns Ok(true) if file was/would be modified, Ok(false) if no changes needed
+fn migrate_file_print(path: &Path, dry_run: bool) -> Result<bool, String> {
+    let content = fs::read_to_string(path).map_err(|e| format!("failed to read file: {}", e))?;
+
+    let new_content = migrate_print_calls(&content);
+
+    if new_content == content {
+        // No changes needed
+        return Ok(false);
+    }
+
+    // Write back only if not in dry-run mode
+    if !dry_run {
+        fs::write(path, new_content).map_err(|e| format!("failed to write file: {}", e))?;
+    }
+
+    Ok(true)
+}
+
+/// Migrate print/println syntax
+/// Old: print (no newline), println (with newline)
+/// New: print (with newline), print_raw (no newline)
+fn migrate_print_calls(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut result = String::with_capacity(source.len() + 100);
+    let mut i = 0;
+    let mut in_string = false;
+    let mut in_comment = false;
+    let mut escape_next = false;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        if escape_next {
+            escape_next = false;
+            result.push(ch);
+            i += 1;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_string => {
+                escape_next = true;
+                result.push(ch);
+                i += 1;
+                continue;
+            }
+            '"' if !in_comment => {
+                in_string = !in_string;
+                result.push(ch);
+                i += 1;
+                continue;
+            }
+            '#' if !in_string => {
+                in_comment = true;
+                result.push(ch);
+                i += 1;
+                continue;
+            }
+            '\n' => {
+                in_comment = false;
+                result.push(ch);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if in_string || in_comment {
+            result.push(ch);
+            i += 1;
+            continue;
+        }
+
+        // Check for function calls: println, print, eprintln, eprint
+        if ch == 'p' || ch == 'e' {
+            if let Some(replacement) = try_replace_print_call(&chars, i) {
+                result.push_str(&replacement.new_text);
+                i += replacement.consumed_len;
+            } else {
+                result.push(ch);
+                i += 1;
+            }
+        } else {
+            result.push(ch);
+            i += 1;
+        }
+    }
+
+    result
+}
+
+struct Replacement {
+    new_text: String,
+    consumed_len: usize,
+}
+
+/// Try to replace print call at position
+fn try_replace_print_call(chars: &[char], pos: usize) -> Option<Replacement> {
+    let remaining: String = chars[pos..].iter().take(20).collect();
+
+    // Match patterns and their replacements
+    // Priority order matters: check longer patterns first
+    if remaining.starts_with("println(") {
+        Some(Replacement {
+            new_text: "print(".to_string(),
+            consumed_len: "println(".len(),
+        })
+    } else if remaining.starts_with("eprintln(") {
+        Some(Replacement {
+            new_text: "eprint(".to_string(),
+            consumed_len: "eprintln(".len(),
+        })
+    } else if remaining.starts_with("print(") {
+        Some(Replacement {
+            new_text: "print_raw(".to_string(),
+            consumed_len: "print(".len(),
+        })
+    } else if remaining.starts_with("eprint(") {
+        Some(Replacement {
+            new_text: "eprint_raw(".to_string(),
+            consumed_len: "eprint(".len(),
+        })
+    } else {
+        None
+    }
+}
+
+/// Migrate print-based SSpec tests to intensive docstring format
+fn migrate_sspec_docstrings(path: &Path, dry_run: bool) -> i32 {
+    if !path.exists() {
+        eprintln!("error: path does not exist: {}", path.display());
+        return 1;
+    }
+
+    let files = if path.is_file() {
+        vec![path.to_path_buf()]
+    } else {
+        // Walk directory and find all *_spec.spl files
+        WalkDir::new(path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.ends_with("_spec.spl"))
+                    .unwrap_or(false)
+            })
+            .map(|e| e.path().to_path_buf())
+            .collect::<Vec<_>>()
+    };
+
+    if files.is_empty() {
+        println!("No *_spec.spl files found in {}", path.display());
+        return 0;
+    }
+
+    if dry_run {
+        println!("DRY RUN: Previewing SSpec docstring migration for {} file(s)...", files.len());
+    } else {
+        println!("Migrating {} SSpec test file(s) to intensive docstring format...", files.len());
+    }
+
+    let mut modified_count = 0;
+    let mut error_count = 0;
+    let mut skipped_count = 0;
+
+    for file in &files {
+        match migrate_sspec::migrate_file_sspec(file, dry_run) {
+            Ok(true) => {
+                modified_count += 1;
+                if dry_run {
+                    println!("  ⚠  {} (would be modified)", file.display());
+                } else {
+                    println!("  ✓  {}", file.display());
+                }
+            }
+            Ok(false) => {
+                skipped_count += 1;
+                // No changes needed - likely already in docstring format
+            }
+            Err(e) => {
+                error_count += 1;
+                eprintln!("  ✗  {}: {}", file.display(), e);
+            }
+        }
+    }
+
+    println!();
+    if dry_run {
+        println!("DRY RUN complete!");
+        println!("  Would modify: {}", modified_count);
+        println!("  Already correct: {}", skipped_count);
+        println!("  Errors: {}", error_count);
+        if modified_count > 0 {
+            println!();
+            println!("Run without --dry-run to apply these changes");
+            println!("IMPORTANT: Review changes carefully before committing!");
+            println!("See doc/examples/sspec_conversion_example.md for migration guide");
+        }
+    } else {
+        println!("Migration complete!");
+        println!("  Modified: {}", modified_count);
+        println!("  Already correct: {}", skipped_count);
+        println!("  Errors: {}", error_count);
+        if modified_count > 0 {
+            println!();
+            println!("⚠  IMPORTANT: Review all changes before committing!");
+            println!("   - Check that test logic is preserved");
+            println!("   - Add comprehensive docstring documentation");
+            println!("   - Run tests to verify functionality");
+            println!();
+            println!("See doc/examples/sspec_conversion_example.md for best practices");
+        }
+    }
+
+    if error_count > 0 {
+        1
+    } else {
+        0
     }
 }

@@ -100,6 +100,7 @@ pub fn print_help() {
     eprintln!("  --gc-log       Enable verbose GC logging");
     eprintln!("  --gc=off       Disable garbage collection");
     eprintln!("  --macro-trace  Enable macro expansion tracing");
+    eprintln!("  --debug        Enable debug mode (dprint statements will output)");
     eprintln!("  --target <arch>  Target architecture for cross-compilation");
     eprintln!("  --linker <name>  Native linker: mold, lld, ld (auto-detected if not set)");
     eprintln!("  --snapshot     Create JJ snapshot on successful build/test");
