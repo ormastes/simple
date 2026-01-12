@@ -1,11 +1,14 @@
 //! Tests for error recovery and common mistake detection
 
-use simple_parser::{Parser, error_recovery::{CommonMistake, detect_common_mistake}};
+use simple_parser::{
+    error_recovery::{detect_common_mistake, CommonMistake},
+    Parser,
+};
 
 #[test]
 fn test_python_def_detection() {
     // Test the detection function directly since 'def' is treated as an identifier
-    use simple_parser::token::{Token, TokenKind, Span};
+    use simple_parser::token::{Span, Token, TokenKind};
 
     let def_token = Token::new(
         TokenKind::Identifier("def".to_string()),
@@ -28,24 +31,20 @@ fn test_python_none_detection() {
 
     // Check if we detected the Python None mistake
     let hints = parser.error_hints();
-    let has_none_hint = hints.iter().any(|hint| {
-        hint.message.contains("nil") && hint.message.contains("None")
-    });
+    let has_none_hint = hints
+        .iter()
+        .any(|hint| hint.message.contains("nil") && hint.message.contains("None"));
 
     // If detection didn't work during parsing, test the detection function directly
     if !has_none_hint {
-        use simple_parser::token::{Token, TokenKind, Span};
+        use simple_parser::token::{Span, Token, TokenKind};
 
         let none_token = Token::new(
             TokenKind::Identifier("None".to_string()),
             Span::new(8, 12, 1, 9),
             "None".to_string(),
         );
-        let prev_token = Token::new(
-            TokenKind::Assign,
-            Span::new(6, 7, 1, 7),
-            "=".to_string(),
-        );
+        let prev_token = Token::new(TokenKind::Assign, Span::new(6, 7, 1, 7), "=".to_string());
 
         let mistake = detect_common_mistake(&none_token, &prev_token, None);
         assert_eq!(mistake, Some(CommonMistake::PythonNone));
@@ -54,7 +53,7 @@ fn test_python_none_detection() {
 
 #[test]
 fn test_python_true_false_detection() {
-    use simple_parser::token::{Token, TokenKind, Span};
+    use simple_parser::token::{Span, Token, TokenKind};
 
     // Test True
     let true_token = Token::new(
@@ -80,18 +79,14 @@ fn test_python_true_false_detection() {
 
 #[test]
 fn test_rust_let_mut_detection() {
-    use simple_parser::token::{Token, TokenKind, Span};
+    use simple_parser::token::{Span, Token, TokenKind};
 
     let mut_token = Token::new(
         TokenKind::Identifier("mut".to_string()),
         Span::new(4, 7, 1, 5),
         "mut".to_string(),
     );
-    let let_token = Token::new(
-        TokenKind::Let,
-        Span::new(0, 3, 1, 1),
-        "let".to_string(),
-    );
+    let let_token = Token::new(TokenKind::Let, Span::new(0, 3, 1, 1), "let".to_string());
 
     let mistake = detect_common_mistake(&mut_token, &let_token, None);
     assert_eq!(mistake, Some(CommonMistake::RustLetMut));
@@ -99,7 +94,7 @@ fn test_rust_let_mut_detection() {
 
 #[test]
 fn test_typescript_const_detection() {
-    use simple_parser::token::{Token, TokenKind, Span};
+    use simple_parser::token::{Span, Token, TokenKind};
 
     let const_token = Token::new(
         TokenKind::Identifier("const".to_string()),
@@ -114,7 +109,7 @@ fn test_typescript_const_detection() {
 
 #[test]
 fn test_typescript_function_detection() {
-    use simple_parser::token::{Token, TokenKind, Span};
+    use simple_parser::token::{Span, Token, TokenKind};
 
     let function_token = Token::new(
         TokenKind::Identifier("function".to_string()),
@@ -129,7 +124,7 @@ fn test_typescript_function_detection() {
 
 #[test]
 fn test_java_public_class_detection() {
-    use simple_parser::token::{Token, TokenKind, Span};
+    use simple_parser::token::{Span, Token, TokenKind};
 
     let public_token = Token::new(
         TokenKind::Identifier("public".to_string()),
@@ -166,13 +161,9 @@ fn test_common_mistake_suggestions() {
 
 #[test]
 fn test_typescript_let_detection() {
-    use simple_parser::token::{Token, TokenKind, Span};
+    use simple_parser::token::{Span, Token, TokenKind};
 
-    let let_token = Token::new(
-        TokenKind::Let,
-        Span::new(0, 3, 1, 1),
-        "let".to_string(),
-    );
+    let let_token = Token::new(TokenKind::Let, Span::new(0, 3, 1, 1), "let".to_string());
     let prev = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "\n".to_string());
     let next = Token::new(
         TokenKind::Identifier("x".to_string()),
@@ -188,19 +179,11 @@ fn test_typescript_let_detection() {
 
 #[test]
 fn test_python_self_detection() {
-    use simple_parser::token::{Token, TokenKind, Span};
+    use simple_parser::token::{Span, Token, TokenKind};
 
-    let self_token = Token::new(
-        TokenKind::Self_,
-        Span::new(0, 4, 1, 1),
-        "self".to_string(),
-    );
+    let self_token = Token::new(TokenKind::Self_, Span::new(0, 4, 1, 1), "self".to_string());
     let prev = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "\n".to_string());
-    let dot_token = Token::new(
-        TokenKind::Dot,
-        Span::new(4, 5, 1, 5),
-        ".".to_string(),
-    );
+    let dot_token = Token::new(TokenKind::Dot, Span::new(4, 5, 1, 5), ".".to_string());
 
     let mistake = detect_common_mistake(&self_token, &prev, Some(&dot_token));
     assert_eq!(mistake, Some(CommonMistake::PythonSelf));
@@ -209,18 +192,14 @@ fn test_python_self_detection() {
 
 #[test]
 fn test_typescript_arrow_function_detection() {
-    use simple_parser::token::{Token, TokenKind, Span};
+    use simple_parser::token::{Span, Token, TokenKind};
 
     let fat_arrow = Token::new(
         TokenKind::FatArrow,
         Span::new(8, 10, 1, 9),
         "=>".to_string(),
     );
-    let rparen = Token::new(
-        TokenKind::RParen,
-        Span::new(7, 8, 1, 8),
-        ")".to_string(),
-    );
+    let rparen = Token::new(TokenKind::RParen, Span::new(7, 8, 1, 8), ")".to_string());
 
     let mistake = detect_common_mistake(&fat_arrow, &rparen, None);
     assert_eq!(mistake, Some(CommonMistake::TsArrowFunction));
@@ -229,13 +208,9 @@ fn test_typescript_arrow_function_detection() {
 
 #[test]
 fn test_rust_turbofish_detection() {
-    use simple_parser::token::{Token, TokenKind, Span};
+    use simple_parser::token::{Span, Token, TokenKind};
 
-    let lt = Token::new(
-        TokenKind::Lt,
-        Span::new(4, 5, 1, 5),
-        "<".to_string(),
-    );
+    let lt = Token::new(TokenKind::Lt, Span::new(4, 5, 1, 5), "<".to_string());
     let double_colon = Token::new(
         TokenKind::DoubleColon,
         Span::new(2, 4, 1, 3),
@@ -248,13 +223,9 @@ fn test_rust_turbofish_detection() {
 
 #[test]
 fn test_rust_macro_detection() {
-    use simple_parser::token::{Token, TokenKind, Span};
+    use simple_parser::token::{Span, Token, TokenKind};
 
-    let not = Token::new(
-        TokenKind::Not,
-        Span::new(5, 6, 1, 6),
-        "!".to_string(),
-    );
+    let not = Token::new(TokenKind::Not, Span::new(5, 6, 1, 6), "!".to_string());
     let ident = Token::new(
         TokenKind::Identifier("println".to_string()),
         Span::new(0, 5, 1, 1),
@@ -268,13 +239,9 @@ fn test_rust_macro_detection() {
 
 #[test]
 fn test_wrong_brackets_detection() {
-    use simple_parser::token::{Token, TokenKind, Span};
+    use simple_parser::token::{Span, Token, TokenKind};
 
-    let lbracket = Token::new(
-        TokenKind::LBracket,
-        Span::new(4, 5, 1, 5),
-        "[".to_string(),
-    );
+    let lbracket = Token::new(TokenKind::LBracket, Span::new(4, 5, 1, 5), "[".to_string());
     let ident = Token::new(
         TokenKind::Identifier("Vec".to_string()),
         Span::new(0, 3, 1, 1),
@@ -293,7 +260,7 @@ fn test_wrong_brackets_detection() {
 
 #[test]
 fn test_c_type_first_detection() {
-    use simple_parser::token::{Token, TokenKind, Span};
+    use simple_parser::token::{Span, Token, TokenKind};
 
     // Test "int x"
     let int_token = Token::new(
@@ -327,6 +294,8 @@ fn test_c_type_first_detection() {
     assert_eq!(mistake, Some(CommonMistake::CTypeFirst));
 
     // Test message content
-    assert!(CommonMistake::CTypeFirst.message().contains("Type comes after"));
+    assert!(CommonMistake::CTypeFirst
+        .message()
+        .contains("Type comes after"));
     assert!(CommonMistake::CTypeFirst.suggestion().contains("val"));
 }

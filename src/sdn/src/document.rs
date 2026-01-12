@@ -412,11 +412,20 @@ mod tests {
         // Check that top-level keys have spans
         assert!(doc.spans.contains_key("name"), "name should have a span");
         assert!(doc.spans.contains_key("age"), "age should have a span");
-        assert!(doc.spans.contains_key("server"), "server should have a span");
+        assert!(
+            doc.spans.contains_key("server"),
+            "server should have a span"
+        );
 
         // Check nested paths
-        assert!(doc.spans.contains_key("server.host"), "server.host should have a span");
-        assert!(doc.spans.contains_key("server.port"), "server.port should have a span");
+        assert!(
+            doc.spans.contains_key("server.host"),
+            "server.host should have a span"
+        );
+        assert!(
+            doc.spans.contains_key("server.port"),
+            "server.port should have a span"
+        );
 
         // Verify spans have reasonable positions
         if let Some(name_span) = doc.spans.get("name") {

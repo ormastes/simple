@@ -4224,7 +4224,8 @@ pub extern "C" fn rt_torch_bce_loss(pred: RuntimeValue, target: RuntimeValue) ->
         None => return RuntimeValue::NIL,
     };
 
-    let result = pred_tensor.binary_cross_entropy::<tch::Tensor>(&target_tensor, None, tch::Reduction::Mean);
+    let result =
+        pred_tensor.binary_cross_entropy::<tch::Tensor>(&target_tensor, None, tch::Reduction::Mean);
     let handle = store_tensor(result);
     RuntimeValue::from_int(handle)
 }
@@ -4259,7 +4260,13 @@ pub extern "C" fn rt_torch_cross_entropy_loss(
         None => return RuntimeValue::NIL,
     };
 
-    let result = pred_tensor.cross_entropy_loss::<tch::Tensor>(&target_tensor, None, tch::Reduction::Mean, -100, 0.0);
+    let result = pred_tensor.cross_entropy_loss::<tch::Tensor>(
+        &target_tensor,
+        None,
+        tch::Reduction::Mean,
+        -100,
+        0.0,
+    );
     let handle = store_tensor(result);
     RuntimeValue::from_int(handle)
 }

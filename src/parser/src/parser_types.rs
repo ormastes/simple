@@ -214,8 +214,14 @@ impl<'a> Parser<'a> {
                     level: ErrorHintLevel::Warning,
                     message: "Deprecated syntax for type parameters".to_string(),
                     span: bracket_span,
-                    suggestion: Some(format!("Use angle brackets: {}<...> instead of {}[...]", name, name)),
-                    help: Some("Run `simple migrate --fix-generics` to automatically update your code".to_string()),
+                    suggestion: Some(format!(
+                        "Use angle brackets: {}<...> instead of {}[...]",
+                        name, name
+                    )),
+                    help: Some(
+                        "Run `simple migrate --fix-generics` to automatically update your code"
+                            .to_string(),
+                    ),
                 };
                 self.error_hints.push(warning);
             }

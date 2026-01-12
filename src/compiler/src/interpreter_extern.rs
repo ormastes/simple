@@ -262,21 +262,23 @@ pub(crate) fn call_extern_function(
         }
 
         // Time functions
-        "rt_time_now_seconds" => {
-            unsafe {
-                let time = simple_runtime::value::rt_time_now_seconds();
-                Ok(Value::Float(time))
-            }
-        }
+        "rt_time_now_seconds" => unsafe {
+            let time = simple_runtime::value::rt_time_now_seconds();
+            Ok(Value::Float(time))
+        },
 
         // Atomic bool operations
         "rt_atomic_bool_new" => {
-            let initial_val = evaluated
-                .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_bool_new expects 1 argument".into()))?;
+            let initial_val = evaluated.first().ok_or_else(|| {
+                CompileError::Semantic("rt_atomic_bool_new expects 1 argument".into())
+            })?;
             let initial = match initial_val {
                 Value::Bool(b) => *b,
-                _ => return Err(CompileError::Semantic("rt_atomic_bool_new expects bool argument".into())),
+                _ => {
+                    return Err(CompileError::Semantic(
+                        "rt_atomic_bool_new expects bool argument".into(),
+                    ))
+                }
             };
             unsafe {
                 let handle = simple_runtime::value::rt_atomic_bool_new(initial);
@@ -286,7 +288,9 @@ pub(crate) fn call_extern_function(
         "rt_atomic_bool_load" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_bool_load expects 1 argument".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_bool_load expects 1 argument".into())
+                })?
                 .as_int()?;
             unsafe {
                 let value = simple_runtime::value::rt_atomic_bool_load(handle);
@@ -296,14 +300,20 @@ pub(crate) fn call_extern_function(
         "rt_atomic_bool_store" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_bool_store expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_bool_store expects 2 arguments".into())
+                })?
                 .as_int()?;
-            let value_val = evaluated
-                .get(1)
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_bool_store expects 2 arguments".into()))?;
+            let value_val = evaluated.get(1).ok_or_else(|| {
+                CompileError::Semantic("rt_atomic_bool_store expects 2 arguments".into())
+            })?;
             let value = match value_val {
                 Value::Bool(b) => *b,
-                _ => return Err(CompileError::Semantic("rt_atomic_bool_store expects bool argument".into())),
+                _ => {
+                    return Err(CompileError::Semantic(
+                        "rt_atomic_bool_store expects bool argument".into(),
+                    ))
+                }
             };
             unsafe {
                 simple_runtime::value::rt_atomic_bool_store(handle, value);
@@ -313,14 +323,20 @@ pub(crate) fn call_extern_function(
         "rt_atomic_bool_swap" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_bool_swap expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_bool_swap expects 2 arguments".into())
+                })?
                 .as_int()?;
-            let value_val = evaluated
-                .get(1)
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_bool_swap expects 2 arguments".into()))?;
+            let value_val = evaluated.get(1).ok_or_else(|| {
+                CompileError::Semantic("rt_atomic_bool_swap expects 2 arguments".into())
+            })?;
             let value = match value_val {
                 Value::Bool(b) => *b,
-                _ => return Err(CompileError::Semantic("rt_atomic_bool_swap expects bool argument".into())),
+                _ => {
+                    return Err(CompileError::Semantic(
+                        "rt_atomic_bool_swap expects bool argument".into(),
+                    ))
+                }
             };
             unsafe {
                 let old = simple_runtime::value::rt_atomic_bool_swap(handle, value);
@@ -330,7 +346,9 @@ pub(crate) fn call_extern_function(
         "rt_atomic_bool_free" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_bool_free expects 1 argument".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_bool_free expects 1 argument".into())
+                })?
                 .as_int()?;
             unsafe {
                 simple_runtime::value::rt_atomic_bool_free(handle);
@@ -342,7 +360,9 @@ pub(crate) fn call_extern_function(
         "rt_atomic_int_new" => {
             let initial = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_new expects 1 argument".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_new expects 1 argument".into())
+                })?
                 .as_int()?;
             unsafe {
                 let handle = simple_runtime::value::rt_atomic_int_new(initial);
@@ -352,7 +372,9 @@ pub(crate) fn call_extern_function(
         "rt_atomic_int_load" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_load expects 1 argument".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_load expects 1 argument".into())
+                })?
                 .as_int()?;
             unsafe {
                 let value = simple_runtime::value::rt_atomic_int_load(handle);
@@ -362,11 +384,15 @@ pub(crate) fn call_extern_function(
         "rt_atomic_int_store" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_store expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_store expects 2 arguments".into())
+                })?
                 .as_int()?;
             let value = evaluated
                 .get(1)
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_store expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_store expects 2 arguments".into())
+                })?
                 .as_int()?;
             unsafe {
                 simple_runtime::value::rt_atomic_int_store(handle, value);
@@ -376,11 +402,15 @@ pub(crate) fn call_extern_function(
         "rt_atomic_int_swap" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_swap expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_swap expects 2 arguments".into())
+                })?
                 .as_int()?;
             let value = evaluated
                 .get(1)
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_swap expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_swap expects 2 arguments".into())
+                })?
                 .as_int()?;
             unsafe {
                 let old = simple_runtime::value::rt_atomic_int_swap(handle, value);
@@ -390,29 +420,46 @@ pub(crate) fn call_extern_function(
         "rt_atomic_int_compare_exchange" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_compare_exchange expects 3 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic(
+                        "rt_atomic_int_compare_exchange expects 3 arguments".into(),
+                    )
+                })?
                 .as_int()?;
             let current = evaluated
                 .get(1)
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_compare_exchange expects 3 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic(
+                        "rt_atomic_int_compare_exchange expects 3 arguments".into(),
+                    )
+                })?
                 .as_int()?;
             let new = evaluated
                 .get(2)
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_compare_exchange expects 3 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic(
+                        "rt_atomic_int_compare_exchange expects 3 arguments".into(),
+                    )
+                })?
                 .as_int()?;
             unsafe {
-                let success = simple_runtime::value::rt_atomic_int_compare_exchange(handle, current, new);
+                let success =
+                    simple_runtime::value::rt_atomic_int_compare_exchange(handle, current, new);
                 Ok(Value::Bool(success))
             }
         }
         "rt_atomic_int_fetch_add" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_fetch_add expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_fetch_add expects 2 arguments".into())
+                })?
                 .as_int()?;
             let value = evaluated
                 .get(1)
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_fetch_add expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_fetch_add expects 2 arguments".into())
+                })?
                 .as_int()?;
             unsafe {
                 let old = simple_runtime::value::rt_atomic_int_fetch_add(handle, value);
@@ -422,11 +469,15 @@ pub(crate) fn call_extern_function(
         "rt_atomic_int_fetch_sub" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_fetch_sub expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_fetch_sub expects 2 arguments".into())
+                })?
                 .as_int()?;
             let value = evaluated
                 .get(1)
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_fetch_sub expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_fetch_sub expects 2 arguments".into())
+                })?
                 .as_int()?;
             unsafe {
                 let old = simple_runtime::value::rt_atomic_int_fetch_sub(handle, value);
@@ -436,11 +487,15 @@ pub(crate) fn call_extern_function(
         "rt_atomic_int_fetch_and" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_fetch_and expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_fetch_and expects 2 arguments".into())
+                })?
                 .as_int()?;
             let value = evaluated
                 .get(1)
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_fetch_and expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_fetch_and expects 2 arguments".into())
+                })?
                 .as_int()?;
             unsafe {
                 let old = simple_runtime::value::rt_atomic_int_fetch_and(handle, value);
@@ -450,11 +505,15 @@ pub(crate) fn call_extern_function(
         "rt_atomic_int_fetch_or" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_fetch_or expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_fetch_or expects 2 arguments".into())
+                })?
                 .as_int()?;
             let value = evaluated
                 .get(1)
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_fetch_or expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_fetch_or expects 2 arguments".into())
+                })?
                 .as_int()?;
             unsafe {
                 let old = simple_runtime::value::rt_atomic_int_fetch_or(handle, value);
@@ -464,11 +523,15 @@ pub(crate) fn call_extern_function(
         "rt_atomic_int_fetch_xor" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_fetch_xor expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_fetch_xor expects 2 arguments".into())
+                })?
                 .as_int()?;
             let value = evaluated
                 .get(1)
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_fetch_xor expects 2 arguments".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_fetch_xor expects 2 arguments".into())
+                })?
                 .as_int()?;
             unsafe {
                 let old = simple_runtime::value::rt_atomic_int_fetch_xor(handle, value);
@@ -478,7 +541,9 @@ pub(crate) fn call_extern_function(
         "rt_atomic_int_free" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_int_free expects 1 argument".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_int_free expects 1 argument".into())
+                })?
                 .as_int()?;
             unsafe {
                 simple_runtime::value::rt_atomic_int_free(handle);
@@ -487,16 +552,16 @@ pub(crate) fn call_extern_function(
         }
 
         // Atomic flag operations
-        "rt_atomic_flag_new" => {
-            unsafe {
-                let handle = simple_runtime::value::rt_atomic_flag_new();
-                Ok(Value::Int(handle))
-            }
-        }
+        "rt_atomic_flag_new" => unsafe {
+            let handle = simple_runtime::value::rt_atomic_flag_new();
+            Ok(Value::Int(handle))
+        },
         "rt_atomic_flag_test_and_set" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_flag_test_and_set expects 1 argument".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_flag_test_and_set expects 1 argument".into())
+                })?
                 .as_int()?;
             unsafe {
                 let was_set = simple_runtime::value::rt_atomic_flag_test_and_set(handle);
@@ -506,7 +571,9 @@ pub(crate) fn call_extern_function(
         "rt_atomic_flag_clear" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_flag_clear expects 1 argument".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_flag_clear expects 1 argument".into())
+                })?
                 .as_int()?;
             unsafe {
                 simple_runtime::value::rt_atomic_flag_clear(handle);
@@ -516,7 +583,9 @@ pub(crate) fn call_extern_function(
         "rt_atomic_flag_free" => {
             let handle = evaluated
                 .first()
-                .ok_or_else(|| CompileError::Semantic("rt_atomic_flag_free expects 1 argument".into()))?
+                .ok_or_else(|| {
+                    CompileError::Semantic("rt_atomic_flag_free expects 1 argument".into())
+                })?
                 .as_int()?;
             unsafe {
                 simple_runtime::value::rt_atomic_flag_free(handle);
