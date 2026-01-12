@@ -290,3 +290,43 @@ fn test_wrong_brackets_detection() {
     assert_eq!(mistake, Some(CommonMistake::WrongBrackets));
     assert!(CommonMistake::WrongBrackets.suggestion().contains("<>"));
 }
+
+#[test]
+fn test_c_type_first_detection() {
+    use simple_parser::token::{Token, TokenKind, Span};
+
+    // Test "int x"
+    let int_token = Token::new(
+        TokenKind::Identifier("int".to_string()),
+        Span::new(0, 3, 1, 1),
+        "int".to_string(),
+    );
+    let prev = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "\n".to_string());
+    let var_token = Token::new(
+        TokenKind::Identifier("x".to_string()),
+        Span::new(4, 5, 1, 5),
+        "x".to_string(),
+    );
+
+    let mistake = detect_common_mistake(&int_token, &prev, Some(&var_token));
+    assert_eq!(mistake, Some(CommonMistake::CTypeFirst));
+
+    // Test "float y"
+    let float_token = Token::new(
+        TokenKind::Identifier("float".to_string()),
+        Span::new(0, 5, 1, 1),
+        "float".to_string(),
+    );
+    let y_token = Token::new(
+        TokenKind::Identifier("y".to_string()),
+        Span::new(6, 7, 1, 7),
+        "y".to_string(),
+    );
+
+    let mistake = detect_common_mistake(&float_token, &prev, Some(&y_token));
+    assert_eq!(mistake, Some(CommonMistake::CTypeFirst));
+
+    // Test message content
+    assert!(CommonMistake::CTypeFirst.message().contains("Type comes after"));
+    assert!(CommonMistake::CTypeFirst.suggestion().contains("val"));
+}

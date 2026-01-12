@@ -264,6 +264,7 @@ impl CommonMistake {
             Self::WrongBrackets => "Use <> instead of [] for generics".to_string(),
             Self::ExplicitSelf => "Remove the 'self' parameter (it's implicit)".to_string(),
             Self::VerboseReturnType => "Consider omitting return type (type inference works)".to_string(),
+            Self::CTypeFirst => "Use 'val' or 'var' with type after name".to_string(),
             _ => "See error message for details".to_string(),
         }
     }
@@ -314,8 +315,10 @@ pub fn detect_common_mistake(
         return Some(CommonMistake::JavaVoid);
     }
 
-    // Check for 'new' keyword (Java/C++)
-    if matches!(current.kind, TokenKind::New) {
+    // Check for 'new' keyword (Java/C++) - but NOT when used as method name after dot
+    // In Simple, 'new' is a valid method name for constructors (e.g., Type.new())
+    // Only flag standalone 'new Type()' pattern as a mistake
+    if matches!(current.kind, TokenKind::New) && !matches!(previous.kind, TokenKind::Dot) {
         return Some(CommonMistake::JavaNew);
     }
 
@@ -403,6 +406,27 @@ pub fn detect_common_mistake(
         && matches!(current.kind, TokenKind::Not)
         && matches!(previous.kind, TokenKind::Identifier(_)) {
         return Some(CommonMistake::RustMacro);
+    }
+
+    // Check for C-style type-first declarations: int x, float y, etc.
+    if let TokenKind::Identifier(ref type_name) = current.kind {
+        // Common C/C++/Java type names
+        let c_types = [
+            "int", "uint", "float", "double", "char", "long", "short",
+            "byte", "boolean", "void", "string", "String",
+            "int8", "int16", "int32", "int64",
+            "uint8", "uint16", "uint32", "uint64",
+            "float32", "float64",
+        ];
+
+        if c_types.contains(&type_name.as_str()) {
+            // Check if followed by identifier (likely a variable name)
+            if let Some(next_token) = next {
+                if matches!(next_token.kind, TokenKind::Identifier(_)) {
+                    return Some(CommonMistake::CTypeFirst);
+                }
+            }
+        }
     }
 
     None

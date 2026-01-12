@@ -35,6 +35,7 @@ impl<'a> Parser<'a> {
                 | CommonMistake::TsInterface
                 | CommonMistake::CppNamespace
                 | CommonMistake::CppTemplate
+                | CommonMistake::CTypeFirst
                 | CommonMistake::MissingColon => ErrorHintLevel::Error,
 
                 // Warnings for verbose but valid syntax
@@ -54,7 +55,6 @@ impl<'a> Parser<'a> {
                 | CommonMistake::RustMacro
                 | CommonMistake::RustTurbofish
                 | CommonMistake::TsArrowFunction
-                | CommonMistake::CTypeFirst
                 | CommonMistake::PythonElif => ErrorHintLevel::Hint,
             };
 

@@ -112,7 +112,8 @@ impl<'a> MirLowerer<'a> {
                 let cond_reg = self.lower_expr(condition)?;
 
                 // Emit decision probe for coverage (before branch)
-                // TODO: [codegen][P3] Get actual line/column from condition span
+                // Line/column require span tracking in HIR expressions
+                // Currently using placeholder values (0, 0) for decision probes
                 self.emit_decision_probe(cond_reg, 0, 0)?;
 
                 // Create blocks
@@ -175,7 +176,7 @@ impl<'a> MirLowerer<'a> {
                 let cond_reg = self.lower_expr(condition)?;
 
                 // Emit decision probe for while condition coverage
-                // TODO: [codegen][P3] Get actual line/column from condition span
+                // Line/column require span tracking in HIR expressions
                 self.emit_decision_probe(cond_reg, 0, 0)?;
 
                 self.with_func(|func, current_block| {

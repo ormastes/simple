@@ -217,10 +217,13 @@ impl ExecCore {
         let source = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
         let mut parser = Parser::new(&source);
-        let _ast = parser.parse().map_err(|e| format!("parse error: {}", e))?;
+        let parse_result = parser.parse();
 
-        // Display error hints
+        // Display error hints (even if parsing failed)
         self.display_error_hints(&parser, &source);
+
+        // Now check if parsing succeeded
+        let _ast = parse_result.map_err(|e| format!("parse error: {}", e))?;
 
         let mut compiler =
             CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
@@ -325,10 +328,13 @@ impl ExecCore {
 
         // Parse source code
         let mut parser = Parser::new(source);
-        let ast = parser.parse().map_err(|e| format!("parse error: {}", e))?;
+        let parse_result = parser.parse();
 
-        // Display error hints (helpful messages for common mistakes)
+        // Display error hints (even if parsing failed)
         self.display_error_hints(&parser, source);
+
+        // Now check if parsing succeeded
+        let ast = parse_result.map_err(|e| format!("parse error: {}", e))?;
 
         // Lower to HIR
         let hir_module = hir::lower(&ast).map_err(|e| format!("HIR lowering error: {}", e))?;
@@ -498,10 +504,13 @@ impl ExecCore {
         let source = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
         let mut parser = Parser::new(&source);
-        let _ast = parser.parse().map_err(|e| format!("parse error: {}", e))?;
+        let parse_result = parser.parse();
 
-        // Display error hints
+        // Display error hints (even if parsing failed)
         self.display_error_hints(&parser, &source);
+
+        // Now check if parsing succeeded
+        let _ast = parse_result.map_err(|e| format!("parse error: {}", e))?;
 
         // Set interpreter arguments
         set_interpreter_args(args);
