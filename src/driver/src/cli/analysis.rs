@@ -2,7 +2,7 @@
 
 use simple_parser::{Node, Parser};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Query for generated code in the codebase
 pub fn run_query(args: &[String]) -> i32 {
@@ -38,15 +38,19 @@ pub fn run_query(args: &[String]) -> i32 {
         spl_files.push(search_path.clone());
     } else if search_path.is_dir() {
         // Walk directory recursively
-        if let Ok(entries) = fs::read_dir(&search_path) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() && path.extension().map_or(false, |e| e == "spl") {
-                    spl_files.push(path);
+        fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().map_or(false, |e| e == "spl") {
+                        files.push(path);
+                    } else if path.is_dir() {
+                        walk_dir(&path, files);
+                    }
                 }
-                // TODO: [driver][P3] Add recursive directory walking
             }
         }
+        walk_dir(&search_path, &mut spl_files);
     }
 
     if spl_files.is_empty() {
