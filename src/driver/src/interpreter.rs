@@ -521,10 +521,13 @@ pub fn run_jit(code: &str) -> Result<RunResult, String> {
 
     // Parse source code
     let mut parser = Parser::new(code);
-    let ast = parser.parse().map_err(|e| format!("parse error: {}", e))?;
+    let parse_result = parser.parse();
 
-    // Display error hints (helpful messages for common mistakes)
+    // Display error hints (even if parsing failed)
     display_error_hints(&parser, code);
+
+    // Now check if parsing succeeded
+    let ast = parse_result.map_err(|e| format!("parse error: {}", e))?;
 
     // Lower to HIR
     let hir_module = hir::lower(&ast).map_err(|e| format!("HIR lowering error: {}", e))?;

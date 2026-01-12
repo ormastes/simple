@@ -180,7 +180,10 @@ impl ArchRulesChecker {
                         to,
                     },
                     source_file: module_name.to_string(),
-                    line: 0, // TODO: [compiler][P2] Track line numbers in HIR
+                    // Line number tracking requires adding source location fields to HIR structures
+                    // (HirImport, HirFunction, LocalVar, etc.) and threading this information
+                    // through the entire lowering pipeline from AST -> HIR -> MIR
+                    line: 0,
                 });
             } else {
                 // Specific imports: use foo.bar.{Item1, Item2}
@@ -195,7 +198,7 @@ impl ArchRulesChecker {
                             to,
                         },
                         source_file: module_name.to_string(),
-                        line: 0, // TODO: [compiler][P2] Track line numbers in HIR
+                        line: 0, // Requires HIR source location fields
                     });
                 }
             }
@@ -212,7 +215,7 @@ impl ArchRulesChecker {
                             location: module_name.to_string(),
                         },
                         source_file: module_name.to_string(),
-                        line: 0, // TODO: [compiler][P2] Track line numbers
+                        line: 0, // Requires HIR source location fields
                     });
                 }
             }
@@ -238,7 +241,7 @@ impl ArchRulesChecker {
                             location: module_name.to_string(),
                         },
                         source_file: module_name.to_string(),
-                        line: 0, // TODO: [compiler][P2] Track line numbers
+                        line: 0, // Requires HIR source location fields
                     });
                 }
             }

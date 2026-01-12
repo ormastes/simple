@@ -132,11 +132,25 @@ impl<'a> Parser<'a> {
 
             self.expect(&TokenKind::Colon)?;
 
-            // Parse trait bounds: Trait1 + Trait2 + ...
+            // Parse trait bounds: Trait1 + Trait2 + !Trait3 + ...
             let mut trait_bounds = Vec::new();
+            let mut negative_trait_bounds = Vec::new();
             loop {
+                // Check for negative bound (!Trait)
+                let is_negative = if self.check(&TokenKind::Bang) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
+
                 let bound_name = self.expect_identifier()?;
-                trait_bounds.push(bound_name);
+
+                if is_negative {
+                    negative_trait_bounds.push(bound_name);
+                } else {
+                    trait_bounds.push(bound_name);
+                }
 
                 // Check for + to continue parsing bounds
                 if self.check(&TokenKind::Plus) {
@@ -150,7 +164,7 @@ impl<'a> Parser<'a> {
                 span,
                 type_param,
                 bounds: trait_bounds,
-                negative_bounds: vec![], // TODO: Parse !Trait syntax (#1151)
+                negative_bounds: negative_trait_bounds,
             });
 
             // Check for comma to continue parsing more bounds

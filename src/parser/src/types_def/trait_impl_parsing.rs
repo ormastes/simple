@@ -148,6 +148,13 @@ impl<'a> Parser<'a> {
                 } else {
                     crate::ast::Visibility::Private
                 };
+                // Handle optional `static` keyword for static methods
+                let is_static = if self.check(&TokenKind::Static) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
                 // Handle async functions and me methods in impl blocks
                 let item = if self.check(&TokenKind::Async) {
                     self.parse_async_function()?
@@ -157,6 +164,19 @@ impl<'a> Parser<'a> {
                 };
                 if let Node::Function(mut f) = item {
                     f.visibility = visibility;
+                    // Auto-inject 'self' parameter for instance methods (non-static) if not present
+                    if !is_static && (f.params.is_empty() || f.params[0].name != "self") {
+                        // Inject implicit self parameter at the beginning
+                        let self_param = Parameter {
+                            span: f.span,
+                            name: "self".to_string(),
+                            ty: None, // Type is implicit (will be inferred as the impl type)
+                            default: None,
+                            mutability: crate::ast::Mutability::Immutable,
+                            inject: false,
+                        };
+                        f.params.insert(0, self_param);
+                    }
                     methods.push(f);
                 }
             }
