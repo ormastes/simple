@@ -245,13 +245,16 @@ pub extern "C" fn monoio_tcp_read(
     _buffer: RuntimeValue,
     _max_len: i64,
 ) -> RuntimeValue {
-    tracing::error!("monoio_tcp_read: Not implemented - requires runtime thread architecture");
-    tracing::info!("monoio_tcp_read: For async TCP I/O, write applications in Simple language directly");
-
-    // TODO: [runtime][P1] Implement with dedicated runtime thread + message passing
-    // Current FFI approach cannot keep streams alive between calls
-
-    RuntimeValue::from_int(-1) // Error: not implemented
+    // NOT SUPPORTED: Monoio streams are not Send/Sync and cannot persist across FFI boundary.
+    // See doc/runtime/monoio_limitations.md for architecture explanation and alternatives.
+    //
+    // Recommended alternatives:
+    // 1. Use Simple async/await with monoio types directly (no FFI)
+    // 2. Use std::net::TcpStream for synchronous I/O
+    //
+    // This limitation is architectural and intentional, not a bug to be fixed.
+    tracing::error!("monoio_tcp_read: Not supported - use Simple async/await or std::net");
+    RuntimeValue::from_int(-1) // Error: not supported
 }
 
 /// Write data to a TCP stream from buffer

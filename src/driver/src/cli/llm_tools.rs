@@ -4,6 +4,7 @@ use simple_compiler::api_surface::ApiSurface;
 use simple_compiler::context_pack::ContextPack;
 use simple_compiler::mcp::{ExpandWhat, McpGenerator, McpTools};
 use simple_compiler::semantic_diff::SemanticDiffer;
+use simple_compiler::text_diff::TextDiff;
 use simple_parser::Parser;
 use std::fs;
 use std::path::PathBuf;
@@ -127,27 +128,27 @@ pub fn run_diff(args: &[String]) -> i32 {
     };
 
     // Parse old file
-    let mut old_parser = Parser::new(&old_source);
-    let old_module = match old_parser.parse() {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("error: parse failed in {}: {}", old_path.display(), e);
-            return 1;
-        }
-    };
-
-    // Parse new file
-    let mut new_parser = Parser::new(&new_source);
-    let new_module = match new_parser.parse() {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("error: parse failed in {}: {}", new_path.display(), e);
-            return 1;
-        }
-    };
-
     if semantic {
-        // Semantic diff (AST-based)
+        // Semantic diff (AST-based) - requires parsing
+        let mut old_parser = Parser::new(&old_source);
+        let old_module = match old_parser.parse() {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("error: parse failed in {}: {}", old_path.display(), e);
+                return 1;
+            }
+        };
+
+        // Parse new file
+        let mut new_parser = Parser::new(&new_source);
+        let new_module = match new_parser.parse() {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("error: parse failed in {}: {}", new_path.display(), e);
+                return 1;
+            }
+        };
+
         let differ =
             SemanticDiffer::new(format!("{} -> {}", old_path.display(), new_path.display()));
         let diff = differ.diff_modules(&old_module, &new_module);
@@ -168,10 +169,28 @@ pub fn run_diff(args: &[String]) -> i32 {
             0
         }
     } else {
-        // TODO: [driver][P1] Implement text-based diff
-        eprintln!("error: text-based diff not implemented yet. Use --semantic flag.");
-        eprintln!("Usage: simple diff <old.spl> <new.spl> --semantic");
-        1
+        // Text-based diff (line-by-line using LCS algorithm)
+        let diff = TextDiff::new(&old_source, &new_source);
+
+        if json_output {
+            let json = serde_json::json!({
+                "old_file": old_path.display().to_string(),
+                "new_file": new_path.display().to_string(),
+                "additions": diff.additions(),
+                "deletions": diff.deletions(),
+                "hunks": diff.hunks.len(),
+            });
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            0
+        } else {
+            let output = diff.format_unified(
+                &old_path.display().to_string(),
+                &new_path.display().to_string(),
+                3,
+            );
+            print!("{}", output);
+            0
+        }
     }
 }
 

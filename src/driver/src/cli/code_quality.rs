@@ -1,7 +1,7 @@
 //! Code quality commands: lint and format.
 
 use simple_common::diagnostic::Diagnostics;
-use simple_compiler::{LintChecker, LintConfig};
+use simple_compiler::{Formatter, LintChecker, LintConfig};
 use simple_parser::Parser;
 use std::fs;
 use std::path::PathBuf;
@@ -224,25 +224,39 @@ pub fn run_fmt(args: &[String]) -> i32 {
         }
     };
 
-    // TODO: [driver][P1] Implement actual formatting logic
-    // For now, this is a placeholder that validates the file can be parsed
+    // Parse and format the source code
     let mut parser = Parser::new(&source);
-    match parser.parse() {
-        Ok(_) => {
-            if check_only {
-                println!("{}: formatted correctly", path.display());
-                0
-            } else {
-                println!(
-                    "{}: would format (formatter not yet implemented)",
-                    path.display()
-                );
-                0
-            }
-        }
+    let module = match parser.parse() {
+        Ok(m) => m,
         Err(e) => {
             eprintln!("error: parse failed: {}", e);
+            return 1;
+        }
+    };
+
+    let mut formatter = Formatter::new();
+    let formatted = formatter.format_module(&module);
+
+    if check_only {
+        // Check if file is already formatted
+        if source == formatted {
+            println!("{}: formatted correctly", path.display());
+            0
+        } else {
+            eprintln!("{}: needs formatting", path.display());
             1
+        }
+    } else {
+        // Write formatted code back to file
+        match fs::write(&path, &formatted) {
+            Ok(_) => {
+                println!("{}: formatted", path.display());
+                0
+            }
+            Err(e) => {
+                eprintln!("error: cannot write {}: {}", path.display(), e);
+                1
+            }
         }
     }
 }

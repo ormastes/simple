@@ -769,7 +769,7 @@ pub fn handle_dict_methods(
     let result = match method {
         "len" => Value::Int(map.len() as i64),
         "is_empty" => Value::Bool(map.is_empty()),
-        "contains_key" => {
+        "contains_key" | "contains" => {
             let key = eval_arg(
                 args,
                 0,

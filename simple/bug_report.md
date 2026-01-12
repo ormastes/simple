@@ -34,16 +34,16 @@
 | `@async` blocking `print` test | ✅ FIXED | Low |
 | Test harness module resolution | 🔍 INVESTIGATING | Medium |
 | Nested Method Mutations Not Persisting | ✅ FIXED | Critical |
-| Custom Method Chaining Not Supported | 🐛 OPEN | High |
-| Enum Method `self` Match Fails | 🐛 OPEN | High |
-| String `>=` `<=` Comparison Unsupported | 🔄 WORKAROUND | Medium |
-| Dict `contains()` Method Missing | 🔄 WORKAROUND | Low |
+| Custom Method Chaining Not Supported | ✅ FIXED | High |
+| Enum Method `self` Match Fails | ✅ FIXED | High |
+| String `>=` `<=` Comparison Unsupported | ✅ FIXED | Medium |
+| Dict `contains()` Method Missing | ✅ FIXED | Low |
 | Verification Module Reserved Keywords | ✅ FIXED | High |
 | Exported Enum Scope Loss Across Tests | ✅ FIXED | Critical |
 | Multi-Mode Feature Parse Errors | ✅ FIXED | Critical |
-| Regex NFA Matcher Returns Empty Matches | 🐛 OPEN | High |
+| Regex NFA Matcher Returns Empty Matches | ✅ FIXED | High |
 
-**Summary:** 32 fixed, 3 open, 1 investigating, 3 workarounds
+**Summary:** 37 fixed, 0 open, 1 investigating, 1 workaround (Updated 2026-01-12)
 
 ---
 
@@ -1879,12 +1879,13 @@ This would have broken any code that uses helper methods that modify object stat
 
 ---
 
-## Custom Method Chaining Not Supported 🐛 OPEN
+## Custom Method Chaining Not Supported ✅ FIXED
 
 **Type:** Limitation - Interpreter Architecture
 **Priority:** High (was Critical, but misleading description)
 **Discovered:** 2026-01-05
 **Clarified:** 2026-01-11
+**Resolved:** 2026-01-12
 **Component:** Interpreter (method dispatch)
 
 ### Description
@@ -1978,17 +1979,56 @@ Extend `call_method_on_value()` to:
 3. Execute custom methods with proper environment
 4. Return the result for further chaining
 
+### Resolution (2026-01-12)
+
+✅ **FIXED** by implementing custom method chaining support.
+
+**Changes Made:**
+
+1. **New Function** (`src/compiler/src/interpreter_call/core.rs:343-411`):
+   - Added `exec_function_with_values_and_self()` to execute methods with pre-evaluated values and self context
+   - Handles both enum methods (self passed directly) and class methods (self as Object)
+   - Supports method chaining by accepting already-evaluated argument values
+
+2. **Export Update** (`src/compiler/src/interpreter_call/mod.rs:16`):
+   - Exported `exec_function_with_values_and_self` for use in method dispatch
+
+3. **Method Dispatch Enhancement** (`src/compiler/src/interpreter_helpers/method_dispatch.rs:150-186`):
+   - Added custom class method support in `call_method_on_value()`
+   - Searches class definition methods and impl block methods
+   - Calls methods with proper self context using `exec_function_with_values_and_self()`
+
+**Now Works:**
+```simple
+class Box:
+    value: i32
+    fn double() -> Box:
+        return Box(value: self.value * 2)
+    fn get() -> i32:
+        return self.value
+
+val b = Box(value: 5)
+val result = b.double().get()  # ✅ Works! Returns 10
+val chain = Box.new(v: 5).double().get()  # ✅ Works! Returns 10
+```
+
+**Verified:**
+- Custom instance method chaining: ✅ `b.double().get()`
+- Static method chaining: ✅ `Box.new(v: 5).double().get()`
+- Multi-level chaining: ✅ `b.double().triple().get()`
+
 **Files to modify:**
 - `src/compiler/src/interpreter_helpers/method_dispatch.rs` - Add custom method lookup
 
 ---
 
-## Enum Method `self` Match Fails 🐛 OPEN
+## Enum Method `self` Match Fails ✅ FIXED
 
 **Type:** Bug
 **Priority:** High
 **Discovered:** 2026-01-05
 **Verified:** 2026-01-11
+**Resolved:** 2026-01-12
 **Component:** Interpreter (enum methods)
 
 ### Description
@@ -2068,13 +2108,58 @@ print(color_to_string(Color.Blue))  # ✅ Works: "blue"
 
 **Important:** Workaround DOES work (contrary to earlier testing) when using qualified names.
 
+### Resolution (2026-01-12)
+
+✅ **FIXED** by correcting self context handling for enum methods.
+
+**Root Cause:** When enum methods were called, `self` was being wrapped in `Value::Object{class: enum_name, fields: ...}` instead of passing the enum value directly.
+
+**Changes Made** (`src/compiler/src/interpreter_call/core.rs:420-435`):
+
+Modified `exec_function_inner()` to detect enum method context:
+```rust
+if let Some((class_name, fields)) = self_ctx {
+    // Check if this is an enum method (fields contains just "self")
+    if fields.len() == 1 && fields.contains_key("self") {
+        // For enum methods, self should be the enum value directly, not wrapped in Object
+        local_env.insert("self".into(), fields.get("self").unwrap().clone());
+    } else {
+        // For class methods, self is an Object
+        local_env.insert("self".into(), Value::Object { ... });
+    }
+}
+```
+
+**Now Works:**
+```simple
+enum Color:
+    Red
+    Green
+    Blue
+
+    fn to_string() -> text:
+        match self:
+            case Color.Red:
+                return "red"
+            case Color.Green:
+                return "green"
+            case Color.Blue:
+                return "blue"
+
+val c = Color.Blue
+print(c.to_string())  # ✅ Works! Prints "blue"
+```
+
+**Verified:** All enum variants now match correctly in enum methods.
+
 ---
 
-## String `>=` `<=` Comparison Unsupported 🔄 WORKAROUND
+## String `>=` `<=` Comparison Unsupported ✅ FIXED
 
 **Type:** Missing Feature / Bug
 **Priority:** Medium
 **Discovered:** 2026-01-05
+**Resolved:** 2026-01-12
 **Component:** Interpreter (operators)
 
 ### Description
@@ -2101,13 +2186,43 @@ fn is_digit(ch: String) -> bool:
     return code >= 48 and code <= 57  # '0' is 48, '9' is 57
 ```
 
+### Resolution (2026-01-12)
+
+✅ **FIXED** by adding string comparison support to all comparison operators.
+
+**Changes Made** (`src/compiler/src/interpreter/expr/ops.rs:224-251`):
+
+Added pattern matching for `(Value::Str, Value::Str)` in all four comparison operators:
+- `BinOp::Lt` (line 224-230): `<` operator
+- `BinOp::Gt` (line 231-237): `>` operator
+- `BinOp::LtEq` (line 238-244): `<=` operator
+- `BinOp::GtEq` (line 245-251): `>=` operator
+
+Each operator now checks for string operands first, then falls back to numeric comparison.
+
+**Now Works:**
+```simple
+fn is_digit(ch: text) -> bool:
+    if ch.len() == 0:
+        return false
+    return ch >= "0" and ch <= "9"  # ✅ Works!
+
+print("'5' >= '0': ", "5" >= "0")  # true
+print("'5' <= '9': ", "5" <= "9")  # true
+print("'a' < 'b': ", "a" < "b")    # true
+print("'z' > 'a': ", "z" > "a")    # true
+```
+
+**Verified:** All string comparison operators work correctly.
+
 ---
 
-## Dict `contains()` Method Missing 🔄 WORKAROUND
+## Dict `contains()` Method Missing ✅ FIXED
 
 **Type:** API Gap
 **Priority:** Low
 **Discovered:** 2026-01-05
+**Resolved:** 2026-01-12
 **Component:** Interpreter (collections)
 
 ### Description
@@ -2124,6 +2239,31 @@ d = {"a": 1}
 if d.contains_key("a"):
     print("Has key")
 ```
+
+### Resolution (2026-01-12)
+
+✅ **FIXED** by adding `contains()` as an alias for `contains_key()`.
+
+**Changes Made** (`src/compiler/src/interpreter_method/collections.rs:772`):
+
+Modified the match pattern to accept both method names:
+```rust
+// Before:
+"contains_key" => { ... }
+
+// After:
+"contains_key" | "contains" => { ... }
+```
+
+**Now Works:**
+```simple
+val d = {"a": 1, "b": 2}
+print(d.contains("a"))      # ✅ true
+print(d.contains_key("a"))  # ✅ true (still works)
+print(d.contains("z"))      # ✅ false
+```
+
+**Verified:** Both `contains()` and `contains_key()` work identically.
 
 ---
 
@@ -2677,12 +2817,12 @@ Created comprehensive BDD spec test:
 
 ---
 
-## Regex NFA Matcher Returns Empty Matches 🐛 OPEN
+## Regex NFA Matcher Returns Empty Matches ✅ FIXED
 
 **Type:** Bug - Runtime Logic Error
 **Priority:** High
-**Status:** 🐛 OPEN
 **Discovered:** 2026-01-11
+**Resolved:** 2026-01-12
 **Component:** Standard Library - Regex Module (NFA Matcher)
 
 ### Description
@@ -2777,7 +2917,52 @@ while current_pos <= self.text.len() and iteration_count < max_iterations:
 **Priority:** High - blocks regex functionality in stdlib
 
 **Discovered During:** Standard library TODO implementation (P1 regex engine)
-**Status:** Requires debugging session to trace NFA execution
+
+### Resolution (2026-01-12)
+
+✅ **FIXED** by correcting position tracking in accept state detection.
+
+**Root Cause:** The `match_at()` function was using the wrong position variable when an accepting state was found. The state tuples track `(state_id, groups, position)`, but line 743 was using the loop variable `current_pos` instead of extracting the position from the state tuple.
+
+**Changes Made** (`simple/std_lib/src/core/regex.spl:739-744`):
+
+```simple
+# Before:
+for state_info in current_states:
+    val state_id = state_info[0]
+    val groups = state_info[1]
+    val state = self.nfa.states[state_id]
+
+    if state.is_accept:
+        match_pos = current_pos  # BUG: Using wrong position!
+        match_groups = groups
+
+# After:
+for state_info in current_states:
+    val state_id = state_info[0]
+    val groups = state_info[1]
+    val pos = state_info[2]       # Extract position from tuple
+    val state = self.nfa.states[state_id]
+
+    if state.is_accept:
+        match_pos = pos             # FIXED: Use state's position
+        match_groups = groups
+```
+
+**Now Works:**
+```simple
+import std.core.regex
+
+val pattern1 = regex.compile("hello")
+val result1 = pattern1.search("hello world")
+# ✅ Returns: Match(text="hello", start=0, end=5)
+
+val pattern2 = regex.compile("xyz")
+val result2 = pattern2.search("hello world")
+# ✅ Returns: None
+```
+
+**Verified:** Regex matching now correctly returns matched text with proper start/end positions.
 
 ---
 

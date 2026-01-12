@@ -50,9 +50,11 @@ pub mod predicate_parser;
 pub mod project;
 pub mod runtime_bridge;
 pub mod runtime_profile;
+pub mod formatter;
 pub mod semantic_diff;
 pub mod smf_builder;
 pub mod spec_coverage;
+pub mod text_diff;
 pub mod symbol_analyzer;
 pub mod trait_coherence;
 pub mod value;
@@ -109,10 +111,12 @@ pub use runtime_profile::{
     start_profiling, stop_profiling, FunctionStats, LayoutFeedback, ProfileConfig, RuntimeMetrics,
     RuntimeProfiler,
 };
+pub use formatter::{FormatConfig, Formatter};
 pub use semantic_diff::{
     ChangeKind, DiffSummary, ImpactLevel, SemanticChange, SemanticDiff, SemanticDiffer,
 };
 pub use spec_coverage::{find_spec_file, SpecCoverageReport};
+pub use text_diff::{DiffHunk, DiffLine, TextDiff};
 pub use trait_coherence::{CoherenceChecker, CoherenceError};
 pub use value::{
     BorrowMutValue,
