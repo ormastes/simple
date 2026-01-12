@@ -156,7 +156,7 @@ pub fn lint_file_internal(
 
     // Create lint checker
     let config = LintConfig::default();
-    let mut checker = LintChecker::new();
+    let mut checker = LintChecker::with_config(config);
 
     // Run lint checks
     checker.check_module(&module.items);

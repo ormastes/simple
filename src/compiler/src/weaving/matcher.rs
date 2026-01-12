@@ -244,18 +244,20 @@ impl Weaver {
     }
 
     /// Build a signature string for a function.
+    ///
+    /// Currently uses simplified type matching ("*" and "Any") because proper type name
+    /// resolution requires a type registry. Future improvement would pass a TypeRegistry
+    /// reference to resolve TypeIds to actual type names (e.g., "i32", "String", "MyStruct").
     pub(super) fn build_signature(&self, function: &MirFunction) -> String {
-        // Simple signature: return_type name(param_types...)
-        // TODO: [compiler][P3] Use proper type names instead of TypeId debug format
-        // For now, just use simple format that matches predicate patterns
+        // Use simplified matching for now - this is sufficient for most AOP use cases
+        // since predicates often match by function name and attributes rather than exact types
         let param_types = function
             .params
             .iter()
-            .map(|_| "Any".to_string()) // Simplified for now
+            .map(|_| "Any".to_string())
             .collect::<Vec<_>>()
             .join(", ");
 
-        // Use "*" for return type to match any
         format!("* {}({})", function.name, param_types)
     }
 }

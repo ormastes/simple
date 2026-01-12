@@ -200,27 +200,3 @@ mod mixin_type_tests {
         assert_eq!(instantiated.fields[0].1, Type::Int);
     }
 }
-
-#[cfg(test)]
-mod mixin_integration_tests {
-    // These tests would require the full compiler pipeline
-    // For now, we'll skip them until the compiler builds successfully
-
-    #[test]
-    #[ignore = "Requires full compiler build"]
-    fn test_mixin_hir_lowering() {
-        // TODO: Test HIR lowering once compiler builds
-    }
-
-    #[test]
-    #[ignore = "Requires full compiler build"]
-    fn test_mixin_field_expansion() {
-        // TODO: Test that mixin fields are expanded into class
-    }
-
-    #[test]
-    #[ignore = "Requires full compiler build"]
-    fn test_mixin_method_lowering() {
-        // TODO: Test that mixin methods are lowered correctly
-    }
-}

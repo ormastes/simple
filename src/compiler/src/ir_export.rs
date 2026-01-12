@@ -98,9 +98,7 @@ impl<'a> Serialize for SerializableAst<'a> {
 
         let mut state = serializer.serialize_struct("AstModule", 2)?;
         state.serialize_field("type", "AST")?;
-        // TODO: [compiler][P3] Field removed from Module
         state.serialize_field("node_count", &self.0.items.len())?;
-        // TODO: [compiler][P3] Add more detailed AST structure when needed
         state.end()
     }
 }
@@ -115,8 +113,6 @@ impl<'a> Serialize for SerializableHir<'a> {
         state.serialize_field("type", "HIR")?;
         state.serialize_field("name", &self.0.name)?;
         state.serialize_field("function_count", &self.0.functions.len())?;
-        // TODO: [compiler][P3] Field removed from HirModule
-        // TODO: [compiler][P3] Add more detailed HIR structure when needed
         state.end()
     }
 }
@@ -131,7 +127,6 @@ impl<'a> Serialize for SerializableMir<'a> {
         state.serialize_field("type", "MIR")?;
         state.serialize_field("name", &self.0.name)?;
         state.serialize_field("function_count", &self.0.functions.len())?;
-        // TODO: [compiler][P3] Add more detailed MIR structure when needed
         state.end()
     }
 }
