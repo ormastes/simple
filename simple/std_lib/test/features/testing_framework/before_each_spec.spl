@@ -1,70 +1,275 @@
 # Before Each Feature Specification
-# Feature #183: BDD before_each hooks for test setup
-# Category: Testing Framework | Difficulty: 2 | Status: Complete
+"""
+# Before Each Hooks (Test Setup)
 
-# =====================================================
-# Feature Metadata
-# =====================================================
+**Feature ID:** #183
+**Category:** Testing Framework
+**Difficulty:** 2/5 (Beginner-Intermediate)
+**Status:** Complete
 
-class FeatureMetadata:
-    id: i32
-    name: text
-    category: text
-    difficulty: i32
-    status: text
-    impl_type: text
-    spec_ref: text
-    files: List<text>
-    tests: List<text>
-    description: text
-    code_examples: List<text>
-    dependencies: List<i32>
-    required_by: List<i32>
-    notes: text
+## Overview
 
-# Feature Definition
-val FEATURE = FeatureMetadata {
-    id: 183,
-    name: 'Before Each Hooks',
-    category: 'Testing Framework',
-    difficulty: 2,
-    status: 'Complete',
-    impl_type: 'Simple',
-    spec_ref: 'doc/spec/testing/testing_bdd_framework.md',
-    files: [
-        'simple/std_lib/src/spec/dsl.spl'
-    ],
-    tests: [
-        'simple/std_lib/test/system/spec/spec_framework_spec.spl'
-    ],
-    description: 'BDD before_each hooks for running setup code before each test example. Ensures consistent test state and reduces duplication.',
-    code_examples: [],
-    dependencies: [180, 181, 182],
-    required_by: [184],
-    notes: 'Hooks run in definition order. Inherited from parent groups. Runs before each it block.'
-}
+Before Each hooks in Simple's SSpec framework provide automatic test setup functionality that runs
+before each test example (it block). This feature eliminates test duplication by centralizing
+common initialization code, ensuring every test starts with fresh, consistent state.
 
-# =====================================================
-# BDD Specification Tests
-# =====================================================
+**Key Features:**
+- **Automatic execution:** Runs before every it block in the scope
+- **Inheritance:** Child contexts inherit parent before_each hooks
+- **Execution order:** Parent hooks run before child hooks
+- **State isolation:** Each test gets fresh state from hook execution
+- **Multiple hooks:** Multiple before_each blocks execute in definition order
 
-print('============================================================')
-print('  BEFORE EACH HOOKS FEATURE SPECIFICATION (#183)')
-print('  Category: Testing Framework | Difficulty: 2 | Status: Complete')
-print('============================================================')
-print('')
+## Syntax
 
-var passed = 0
-var failed = 0
+### Basic before_each Hook
 
-# -----------------------------------------------------
-# Hook Definition
-# -----------------------------------------------------
+```simple
+import std.spec
 
-print('describe Hook definition:')
-print('  context before_each registers hooks:')
-print('    it stores setup blocks:')
+describe "Calculator":
+    before_each:
+        val calc = Calculator.new()
+        val expected_result = 0
 
+    it "starts at zero":
+        expect(calc.value).to(eq(expected_result))
+
+    it "adds correctly":
+        calc.add(5)
+        expect(calc.value).to(eq(5))
+```
+
+**Grammar:**
+```
+before_each_hook = 'before_each' ':' NEWLINE INDENT statement+ DEDENT
+```
+
+### Hook Inheritance
+
+```simple
+describe "Nested contexts":
+    before_each:
+        val parent_value = "parent"
+
+    context "child context":
+        before_each:
+            val child_value = "child"
+
+        it "has both values":
+            # parent_value defined from parent before_each
+            # child_value defined from child before_each
+            expect(parent_value).to(eq("parent"))
+            expect(child_value).to(eq("child"))
+```
+
+### Multiple Hooks
+
+```simple
+describe "Multiple hooks":
+    before_each:
+        val first = 1
+
+    before_each:
+        val second = 2
+
+    it "runs both hooks":
+        # Both before_each blocks executed in order
+        expect(first).to(eq(1))
+        expect(second).to(eq(2))
+```
+
+## Runtime Representation
+
+**Hook Storage:**
+Each describe/context block maintains a list of before_each hooks:
+```simple
+class TestGroup:
+    hooks_before: List<fn() -> void>  # Executed before each test
+
+    fn add_before_each(hook: fn() -> void):
+        self.hooks_before.append(hook)
+```
+
+**Execution Model:**
+When running a test, hooks execute in this order:
+1. Grandparent before_each hooks (outer describe)
+2. Parent before_each hooks (outer context)
+3. Current before_each hooks (current context)
+4. Test body (it block)
+
+**Memory:** Each hook execution creates new scope - variables defined in hooks are available
+to tests but isolated between tests.
+
+## Comparison with Other Languages
+
+| Feature | Simple | RSpec (Ruby) | Jest (JS) | pytest (Python) | JUnit (Java) |
+|---------|--------|--------------|-----------|-----------------|--------------|
+| Syntax | `before_each:` | `before(:each)` | `beforeEach()` | `@pytest.fixture` | `@BeforeEach` |
+| Inheritance | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No |
+| Execution order | Parent→Child | Parent→Child | Parent→Child | Fixtures→Test | Annotations only |
+| Multiple hooks | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ⚠️ Multiple methods |
+| State isolation | ✅ Auto | ✅ Auto | ✅ Auto | ✅ Auto | ⚠️ Manual |
+
+## Common Patterns
+
+### Database Setup
+
+```simple
+describe "User model":
+    before_each:
+        val db = Database.connect("test.db")
+        db.clear_users()
+        val user = User.create("alice", "alice@example.com")
+
+    it "saves users":
+        expect(db.count_users()).to(eq(1))
+
+    it "finds users by email":
+        val found = db.find_by_email("alice@example.com")
+        expect(found.name).to(eq("alice"))
+```
+
+### HTTP Client Setup
+
+```simple
+describe "API client":
+    before_each:
+        val client = HttpClient.new("http://localhost:3000")
+        client.set_timeout(5000)
+        val auth_token = "test-token-123"
+
+    it "sends authenticated requests":
+        val response = client.get("/users", auth_token)
+        expect(response.status).to(eq(200))
+```
+
+### Test Data Initialization
+
+```simple
+describe "Shopping cart":
+    before_each:
+        val cart = Cart.new()
+        val item1 = Item.new("Book", 10.00)
+        val item2 = Item.new("Pen", 2.50)
+
+    it "calculates totals":
+        cart.add(item1)
+        cart.add(item2)
+        expect(cart.total()).to(eq(12.50))
+```
+
+## Built-in Behavior
+
+### Automatic Execution
+- Hooks run automatically before each it block
+- No manual invocation needed
+- Guaranteed to run (unless hook itself fails)
+
+### State Isolation
+- Variables defined in hooks are scoped to test
+- Changes in one test don't affect others
+- Fresh execution for every test
+
+### Hook Order
+- Multiple before_each blocks run in definition order
+- Parent hooks run before child hooks
+- Predictable, deterministic execution
+
+## Implementation Files
+
+**Framework:** `simple/std_lib/src/spec/dsl.spl` - SSpec DSL implementation
+**Runner:** `simple/std_lib/src/spec/runner.spl` - Hook execution logic
+**Tests:** `simple/std_lib/test/features/testing_framework/before_each_spec.spl` - This file
+
+## Related Features
+
+- **After Each Hooks (#184):** Cleanup code after each test
+- **Describe Blocks (#180):** Test group organization
+- **Context Blocks (#182):** Nested test scoping
+- **It Examples (#181):** Individual test cases
+
+## Performance Characteristics
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| Hook registration | O(1) | Append to hook list |
+| Hook execution | O(n) | n = number of hooks in chain |
+| State creation | O(1) | New scope per test |
+
+**Memory:** Each test gets new scope - O(k) where k = variables defined in hooks
+
+## Limitations and Future Work
+
+**Current Limitations:**
+- No lazy hook execution (runs for every test, even if unused)
+- No hook parameters (can't parameterize setup)
+- No conditional hooks (can't skip based on test metadata)
+- No async before_each (synchronous only)
+
+**Planned Features:**
+- Lazy hooks: Only run if test accesses defined variables
+- Parameterized hooks: `before_each(params):`
+- Conditional hooks: `before_each if: predicate`
+- Async hooks: `before_each async:`
+- Hook composition: `use_hooks([db_setup, auth_setup])`
+
+## Best Practices
+
+**Do:**
+- Use before_each for common initialization
+- Keep hooks simple and focused
+- Define variables in hooks, use in tests
+- Use nested contexts for different setups
+- Clean up resources in after_each if needed
+
+**Don't:**
+- Put test assertions in before_each (belongs in it blocks)
+- Rely on hook execution for side effects visible outside tests
+- Create deeply nested hook chains (hard to debug)
+- Use before_each for one-time setup (use before_all instead)
+"""
+
+import std.spec
+
+
+describe "Hook definition":
+    """
+    ## Defining Before Each Hooks
+
+    Before each hooks are defined using the `before_each:` keyword followed by an indented block
+    of setup code. The framework registers these hooks and executes them before each test.
+
+    **Syntax:** `before_each: <statement>+`
+
+    **Registration:** Hooks are stored in the describe/context block's hook list
+
+    **Implementation:** `simple/std_lib/src/spec/dsl.spl:before_each()`
+    """
+
+        it "registers setup blocks":
+            """
+            **Given** a before_each block with setup code
+            **When** the test group is defined
+            **Then** the hook is registered for execution before each test
+
+            **Code Example:**
+            ```simple
+            describe "Tests":
+                before_each:
+                    val x = 42  # Registered as hook
+
+                it "has access to x":
+                    expect(x).to(eq(42))
+            ```
+
+            **Runtime Behavior:**
+            - Hook block is stored as a closure
+            - Closure captured at definition time
+            - Executed before each it block in scope
+
+            **Implementation:** Hook stored in TestGroup.hooks_before list
+            """
 struct Hook:
     hook_type: text
     order: i64
@@ -73,49 +278,112 @@ fn create_hook(t: text, ord: i64) -> Hook:
     return Hook { hook_type: t, order: ord }
 
 val hook = create_hook("before_each", 1)
-if hook.hook_type == "before_each":
-    print('      [PASS] stores setup blocks')
-    passed = passed + 1
-else:
-    print('      [FAIL] stores setup blocks')
-    failed = failed + 1
+expect(hook.hook_type).to(eq("before_each"))
 
-print('    it tracks hook order:')
+        it "tracks hook order":
+            """
+            **Given** multiple before_each blocks defined in sequence
+            **When** hooks are registered
+            **Then** execution order is preserved (first defined, first executed)
 
+            **Code Example:**
+            ```simple
+            describe "Order":
+                before_each:
+                    val first = 1   # Executes first
+
+                before_each:
+                    val second = 2  # Executes second
+
+                it "runs in order":
+                    # first is 1, second is 2
+                    expect(first).to(eq(1))
+            ```
+
+            **Runtime Behavior:**
+            - Hooks stored in list in definition order
+            - List iteration executes hooks sequentially
+            - Predictable, deterministic order
+
+            **Use Case:** Multi-stage setup where later hooks depend on earlier ones
+            """
 val hooks = [
     create_hook("before_each", 1),
     create_hook("before_each", 2),
     create_hook("before_each", 3)
 ]
-if hooks[0].order == 1 and hooks[2].order == 3:
-    print('      [PASS] tracks hook order')
-    passed = passed + 1
-else:
-    print('      [FAIL] tracks hook order')
-    failed = failed + 1
+expect(hooks[0].order).to(eq(1))
+expect(hooks[2].order).to(eq(3))
 
-# -----------------------------------------------------
-# Hook Execution
-# -----------------------------------------------------
+describe "Hook execution":
+    """
+    ## Executing Before Each Hooks
 
-print('')
-print('describe Hook execution:')
-print('  context runs before each test:')
-print('    it executes setup code:')
+    Before each hooks execute automatically before every it block within their scope. The framework
+    ensures hooks run in the correct order and create fresh state for each test.
 
+    **Execution Trigger:** Start of each it block
+    **Execution Order:** Parent hooks → child hooks → test body
+    **State:** New scope created for each test
+
+    **Implementation:** `simple/std_lib/src/spec/runner.spl:run_test()`
+    """
+
+        it "executes setup code":
+            """
+            **Given** a before_each hook with initialization code
+            **When** a test runs
+            **Then** the setup code executes and variables are available to the test
+
+            **Code Example:**
+            ```simple
+            describe "Setup":
+                before_each:
+                    val db = Database.connect()
+                    db.seed_data()
+
+                it "has data":
+                    # db is available, data is seeded
+                    expect(db.count()).to(be_gt(0))
+            ```
+
+            **Runtime Behavior:**
+            - Hook closure called before test body
+            - Variables defined in hook enter test scope
+            - Execution completes before test starts
+
+            **Pattern:** Initialize resources, prepare test environment
+            """
 fn setup() -> i64:
     return 42
 
 val setup_value = setup()
-if setup_value == 42:
-    print('      [PASS] executes setup')
-    passed = passed + 1
-else:
-    print('      [FAIL] executes setup')
-    failed = failed + 1
+expect(setup_value).to(eq(42))
 
-print('    it runs for every test:')
+        it "runs for every test":
+            """
+            **Given** a describe block with multiple it blocks
+            **When** tests execute
+            **Then** before_each hook runs once per test (not once per describe)
 
+            **Code Example:**
+            ```simple
+            describe "Multiple tests":
+                before_each:
+                    print("Setup running")  # Prints 3 times
+
+                it "test 1": ...
+                it "test 2": ...
+                it "test 3": ...
+            ```
+
+            **Runtime Behavior:**
+            - Framework iterates through all it blocks
+            - For each it block: run hooks → run test → repeat
+            - N tests = N hook executions
+
+            **Benefit:** Each test gets fresh state, preventing test pollution
+            """
 fn run_hooks_for_tests(num_tests: i64) -> i64:
     var hook_runs = 0
     var i = 0
@@ -124,36 +392,88 @@ fn run_hooks_for_tests(num_tests: i64) -> i64:
         i = i + 1
     return hook_runs
 
-if run_hooks_for_tests(5) == 5:
-    print('      [PASS] runs for every test')
-    passed = passed + 1
-else:
-    print('      [FAIL] runs for every test')
-    failed = failed + 1
+expect(run_hooks_for_tests(5)).to(eq(5))
 
-# -----------------------------------------------------
-# State Reset
-# -----------------------------------------------------
+describe "State reset":
+    """
+    ## State Isolation Between Tests
 
-print('')
-print('describe State reset:')
-print('  context resets between tests:')
-print('    it provides fresh state:')
+    Each test execution creates a new scope from before_each hooks, ensuring tests don't interfere
+    with each other. Variables defined in hooks are fresh for every test.
 
+    **Mechanism:** New scope per test, re-execute hooks
+
+    **Guarantee:** No shared state between tests (unless explicitly using global state)
+
+    **Implementation:** Scope creation in hook execution
+    """
+
+        it "provides fresh state":
+            """
+            **Given** a before_each hook that initializes a variable
+            **When** multiple tests run
+            **Then** each test gets a fresh copy of the variable
+
+            **Code Example:**
+            ```simple
+            describe "Fresh state":
+                before_each:
+                    var counter = 0  # Fresh for each test
+
+                it "test 1":
+                    counter = counter + 1
+                    expect(counter).to(eq(1))  # Passes
+
+                it "test 2":
+                    counter = counter + 1
+                    expect(counter).to(eq(1))  # Also passes (fresh counter)
+            ```
+
+            **Runtime Behavior:**
+            - Hook executes, creates counter = 0
+            - Test 1 runs, modifies counter to 1
+            - Test 1 ends, scope destroyed
+            - Hook executes again, creates new counter = 0
+            - Test 2 runs with fresh counter
+
+            **Pattern:** Prevents test pollution, ensures test independence
+            """
 fn create_fresh_state() -> i64:
     return 0
 
 val state1 = create_fresh_state()
 val state2 = create_fresh_state()
-if state1 == 0 and state2 == 0:
-    print('      [PASS] provides fresh state')
-    passed = passed + 1
-else:
-    print('      [FAIL] provides fresh state')
-    failed = failed + 1
+expect(state1).to(eq(0))
+expect(state2).to(eq(0))
 
-print('    it isolates test state:')
+        it "isolates test state":
+            """
+            **Given** tests that modify state from before_each
+            **When** tests execute in sequence
+            **Then** modifications in one test don't affect others
 
+            **Code Example:**
+            ```simple
+            describe "Isolation":
+                before_each:
+                    val list = []  # Fresh empty list per test
+
+                it "adds item":
+                    list.append(1)
+                    expect(list.len()).to(eq(1))
+
+                it "is still empty":
+                    # list is fresh, not affected by previous test
+                    expect(list.len()).to(eq(0))
+            ```
+
+            **Runtime Behavior:**
+            - Each test gets new scope from hook execution
+            - Mutations local to test scope
+            - Scope destroyed after test completes
+
+            **Benefit:** Tests can be run in any order without affecting each other
+            """
 fn run_isolated_test(initial: i64) -> i64:
     var local = initial
     local = local + 10
@@ -161,97 +481,103 @@ fn run_isolated_test(initial: i64) -> i64:
 
 val test1 = run_isolated_test(0)
 val test2 = run_isolated_test(0)
-if test1 == 10 and test2 == 10:
-    print('      [PASS] isolates test state')
-    passed = passed + 1
-else:
-    print('      [FAIL] isolates test state')
-    failed = failed + 1
+expect(test1).to(eq(10))
+expect(test2).to(eq(10))
 
-# -----------------------------------------------------
-# Hook Inheritance
-# -----------------------------------------------------
+describe "Hook inheritance":
+    """
+    ## Hook Inheritance in Nested Contexts
 
-print('')
-print('describe Hook inheritance:')
-print('  context inherits parent hooks:')
-print('    it runs parent hooks first:')
+    Child contexts inherit before_each hooks from parent contexts. When a test runs in a nested
+    context, all hooks in the ancestor chain execute, from outermost to innermost.
 
+    **Inheritance:** Child inherits all parent hooks
+    **Execution Order:** Grandparent → Parent → Child → Test
+    **Accumulation:** Each level can add more hooks
+
+    **Implementation:** Hook chain traversal in test execution
+    """
+
+        it "runs parent hooks first":
+            """
+            **Given** nested contexts with before_each hooks at each level
+            **When** a test in the innermost context runs
+            **Then** parent hooks execute before child hooks
+
+            **Code Example:**
+            ```simple
+            describe "Parent":
+                before_each:
+                    val level = "parent"
+
+                context "Child":
+                    before_each:
+                        val child_level = "child"
+
+                    it "has both":
+                        # Parent hook ran first, then child hook
+                        expect(level).to(eq("parent"))
+                        expect(child_level).to(eq("child"))
+            ```
+
+            **Runtime Behavior:**
+            - Framework builds hook chain from outermost to innermost context
+            - Executes hooks in order: outer → inner
+            - Each hook adds variables to scope
+            - Test body executes with all variables available
+
+            **Pattern:** Layered setup - parent provides common setup, child adds specific setup
+            """
 struct HookChain:
-    parent_hooks: List<text>
-    child_hooks: List<text>
+    parent_hooks: [text]
+    child_hooks: [text]
 
-fn get_hook_order(chain: HookChain) -> List<text>:
+fn get_hook_order(chain: HookChain) -> [text]:
     return chain.parent_hooks + chain.child_hooks
 
 val chain = HookChain { parent_hooks: ["parent1"], child_hooks: ["child1"] }
 val order = get_hook_order(chain)
-if order[0] == "parent1" and order[1] == "child1":
-    print('      [PASS] runs parent hooks first')
-    passed = passed + 1
-else:
-    print('      [FAIL] runs parent hooks first')
-    failed = failed + 1
+expect(order[0]).to(eq("parent1"))
+expect(order[1]).to(eq("child1"))
 
-print('    it accumulates hooks:')
+        it "accumulates hooks":
+            """
+            **Given** multiple levels of nesting with hooks at each level
+            **When** a test in the deepest context runs
+            **Then** all hooks from all ancestor levels execute
 
+            **Code Example:**
+            ```simple
+            describe "Level 1":
+                before_each:
+                    val l1 = 1
+
+                context "Level 2":
+                    before_each:
+                        val l2 = 2
+
+                    context "Level 3":
+                        before_each:
+                            val l3 = 3
+
+                        it "has all levels":
+                            # All three hooks ran
+                            expect(l1).to(eq(1))
+                            expect(l2).to(eq(2))
+                            expect(l3).to(eq(3))
+            ```
+
+            **Runtime Behavior:**
+            - Hook accumulation: each level adds to the list
+            - Execution: iterate through accumulated list
+            - All variables from all hooks available to test
+
+            **Use Case:** Complex setup requiring multiple stages
+            **Pattern:** General setup → specific setup → very specific setup
+            """
 val nested_chain = HookChain {
     parent_hooks: ["level1", "level2"],
     child_hooks: ["level3"]
 }
 val all_hooks = get_hook_order(nested_chain)
-if all_hooks.len() == 3:
-    print('      [PASS] accumulates hooks')
-    passed = passed + 1
-else:
-    print('      [FAIL] accumulates hooks')
-    failed = failed + 1
-
-# =====================================================
-# Documentation Output
-# =====================================================
-
-print('')
-print('============================================================')
-print('  GENERATED DOCUMENTATION')
-print('============================================================')
-print('')
-print('# Before Each Hooks')
-print('')
-print("**Feature ID:** #183")
-print("**Category:** Testing Framework")
-print("**Difficulty:** Level 2/5")
-print("**Status:** Complete")
-print("**Implementation:** Simple")
-print('')
-print('## Description')
-print('')
-print(FEATURE.description)
-print('')
-print('## Usage Example')
-print('')
-print('```simple')
-print('describe "Calculator":')
-print('    before_each:')
-print('        val calc = Calculator.new()')
-print('')
-print('    it "starts at zero":')
-print('        expect(calc.value).to eq(0)')
-print('```')
-print('')
-print('## Notes')
-print('')
-print(FEATURE.notes)
-
-# Summary
-print('')
-print('============================================================')
-print('  TEST SUMMARY')
-print('============================================================')
-val total = passed + failed
-print("Passed: {passed}")
-print("Failed: {failed}")
-print("Total:  {total}")
-if failed == 0:
-    print('All tests PASSED!')
-print('============================================================')
+expect(all_hooks.len()).to(eq(3))

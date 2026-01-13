@@ -234,7 +234,12 @@ pub type WhereClause = Vec<WhereBound>;
 pub enum GenericParam {
     /// Type parameter: T, U, etc.
     /// Can optionally have trait bounds: T: Display, I: Iterator
-    Type { name: String, bounds: Vec<String> },
+    /// Can optionally have default type: Rhs = Self
+    Type {
+        name: String,
+        bounds: Vec<String>,
+        default: Option<Type>,
+    },
     /// Const parameter: const N: usize
     Const { name: String, ty: Type },
 }
