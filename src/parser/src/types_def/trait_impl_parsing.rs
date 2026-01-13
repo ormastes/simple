@@ -294,14 +294,74 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Type)?;
         let name = self.expect_identifier()?;
 
-        // Parse optional bounds: `type Item: Clone + Default`
+        // Parse optional bounds: `type Item: Clone + Default` or `type Iter: Iterator<Item=T>`
         let bounds = if self.check(&TokenKind::Colon) {
             self.advance();
             let mut bounds = Vec::new();
-            bounds.push(self.expect_identifier()?);
+
+            // Parse first bound
+            let bound_name = self.expect_identifier()?;
+
+            // Check for generic arguments in bound: Iterator<Item=T>
+            // Skip the generic args to avoid complexity - just store the trait name
+            if self.check(&TokenKind::Lt) {
+                let mut depth = 1;
+                self.advance(); // consume '<'
+                while depth > 0 && !self.is_at_end() {
+                    if self.check(&TokenKind::Lt) {
+                        depth += 1;
+                        self.advance();
+                    } else if self.check(&TokenKind::Gt) {
+                        depth -= 1;
+                        self.advance();
+                    } else if self.check(&TokenKind::ShiftRight) {
+                        // >> is two > tokens
+                        if depth <= 2 {
+                            depth -= 2;
+                            self.advance();
+                        } else {
+                            depth -= 2;
+                            self.advance();
+                        }
+                    } else {
+                        self.advance();
+                    }
+                }
+            }
+
+            bounds.push(bound_name);
+
+            // Parse additional bounds with + separator
             while self.check(&TokenKind::Plus) {
                 self.advance();
-                bounds.push(self.expect_identifier()?);
+                let bound_name = self.expect_identifier()?;
+
+                // Skip generic args for additional bounds too
+                if self.check(&TokenKind::Lt) {
+                    let mut depth = 1;
+                    self.advance();
+                    while depth > 0 && !self.is_at_end() {
+                        if self.check(&TokenKind::Lt) {
+                            depth += 1;
+                            self.advance();
+                        } else if self.check(&TokenKind::Gt) {
+                            depth -= 1;
+                            self.advance();
+                        } else if self.check(&TokenKind::ShiftRight) {
+                            if depth <= 2 {
+                                depth -= 2;
+                                self.advance();
+                            } else {
+                                depth -= 2;
+                                self.advance();
+                            }
+                        } else {
+                            self.advance();
+                        }
+                    }
+                }
+
+                bounds.push(bound_name);
             }
             bounds
         } else {

@@ -714,7 +714,19 @@ impl<'a> Parser<'a> {
                     }
                 }
 
-                params.push(GenericParam::Type { name, bounds });
+                // Parse optional default type: Rhs = Self or T = i32
+                let default = if self.check(&TokenKind::Assign) {
+                    self.advance(); // consume '='
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
+
+                params.push(GenericParam::Type {
+                    name,
+                    bounds,
+                    default,
+                });
             }
 
             // Check for end of generic parameters or comma before next parameter

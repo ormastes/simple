@@ -1,70 +1,320 @@
 # After Each Feature Specification
-# Feature #184: BDD after_each hooks for test teardown
-# Category: Testing Framework | Difficulty: 2 | Status: Complete
+"""
+# After Each Hooks (Test Cleanup)
 
-# =====================================================
-# Feature Metadata
-# =====================================================
+**Feature ID:** #184
+**Category:** Testing Framework
+**Difficulty:** 2/5 (Beginner-Intermediate)
+**Status:** Complete
 
-class FeatureMetadata:
-    id: i32
-    name: text
-    category: text
-    difficulty: i32
-    status: text
-    impl_type: text
-    spec_ref: text
-    files: List<text>
-    tests: List<text>
-    description: text
-    code_examples: List<text>
-    dependencies: List<i32>
-    required_by: List<i32>
-    notes: text
+## Overview
 
-# Feature Definition
-val FEATURE = FeatureMetadata {
-    id: 184,
-    name: 'After Each Hooks',
-    category: 'Testing Framework',
-    difficulty: 2,
-    status: 'Complete',
-    impl_type: 'Simple',
-    spec_ref: 'doc/spec/testing/testing_bdd_framework.md',
-    files: [
-        'simple/std_lib/src/spec/dsl.spl'
-    ],
-    tests: [
-        'simple/std_lib/test/system/spec/spec_framework_spec.spl'
-    ],
-    description: 'BDD after_each hooks for running cleanup code after each test example. Ensures resources are released and state is cleaned up.',
-    code_examples: [],
-    dependencies: [183],
-    required_by: [],
-    notes: 'Runs after each it block. Runs even if test fails. Child hooks run before parent hooks.'
-}
+After Each hooks in Simple's SSpec framework provide automatic test cleanup functionality that runs
+after each test example (it block). This feature ensures resources are properly released, connections
+closed, and state cleaned up, even when tests fail.
 
-# =====================================================
-# BDD Specification Tests
-# =====================================================
+**Key Features:**
+- **Automatic execution:** Runs after every it block in the scope
+- **Guaranteed execution:** Runs even if test fails or throws error
+- **Reverse inheritance:** Child hooks run before parent hooks (LIFO order)
+- **Multiple hooks:** Multiple after_each blocks execute in reverse definition order
+- **Resource safety:** Ensures cleanup happens regardless of test outcome
 
-print('============================================================')
-print('  AFTER EACH HOOKS FEATURE SPECIFICATION (#184)')
-print('  Category: Testing Framework | Difficulty: 2 | Status: Complete')
-print('============================================================')
-print('')
+## Syntax
 
-var passed = 0
-var failed = 0
+### Basic after_each Hook
 
-# -----------------------------------------------------
-# Teardown Definition
-# -----------------------------------------------------
+```simple
+import std.spec
 
-print('describe Teardown definition:')
-print('  context after_each registers hooks:')
-print('    it stores cleanup blocks:')
+describe "Database tests":
+    after_each:
+        db.rollback()
+        db.close()
 
+    it "inserts record":
+        db.insert(user_record)
+        expect(db.count()).to(eq(1))
+        # db.rollback() and db.close() run after this test
+
+    it "updates record":
+        db.update(user_id, new_data)
+        # db.rollback() and db.close() run after this test too
+```
+
+**Grammar:**
+```
+after_each_hook = 'after_each' ':' NEWLINE INDENT statement+ DEDENT
+```
+
+### Guaranteed Execution (Even on Failure)
+
+```simple
+describe "File operations":
+    after_each:
+        file.close()  # Always runs, even if test fails
+
+    it "reads file":
+        val data = file.read()
+        expect(data).to(contain("header"))
+        # file.close() runs even if assertion fails
+```
+
+### Hook Inheritance (Reverse Order)
+
+```simple
+describe "Nested cleanup":
+    after_each:
+        cleanup_parent()  # Runs LAST (after child)
+
+    context "child context":
+        after_each:
+            cleanup_child()  # Runs FIRST (before parent)
+
+        it "does work":
+            perform_operation()
+            # Execution order: cleanup_child() then cleanup_parent()
+```
+
+### Multiple Hooks (LIFO Order)
+
+```simple
+describe "Multiple teardowns":
+    after_each:
+        close_connection()  # Runs SECOND
+
+    after_each:
+        cleanup_temp_files()  # Runs FIRST
+
+    it "uses resources":
+        # Test runs
+        # Then: cleanup_temp_files() runs first
+        # Then: close_connection() runs second
+```
+
+## Runtime Representation
+
+**Hook Storage:**
+Each describe/context block maintains a list of after_each hooks:
+```simple
+class TestGroup:
+    hooks_after: List<fn() -> void>  # Executed after each test
+
+    fn add_after_each(hook: fn() -> void):
+        self.hooks_after.append(hook)
+```
+
+**Execution Model:**
+When a test completes (success or failure), hooks execute in this order:
+1. Test body (it block)
+2. Current after_each hooks (innermost context) - REVERSE order
+3. Parent after_each hooks (parent context) - REVERSE order
+4. Grandparent after_each hooks (outer describe) - REVERSE order
+
+**LIFO (Last In, First Out):** Teardown happens in reverse order of setup, like unwinding a stack.
+
+**Memory:** Hooks guaranteed to run for cleanup, preventing resource leaks.
+
+## Comparison with Other Languages
+
+| Feature | Simple | RSpec (Ruby) | Jest (JS) | pytest (Python) | JUnit (Java) |
+|---------|--------|--------------|-----------|-----------------|--------------|
+| Syntax | `after_each:` | `after(:each)` | `afterEach()` | `yield` in fixture | `@AfterEach` |
+| Guaranteed run | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
+| Runs on failure | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
+| Execution order | LIFO (Child→Parent) | LIFO | LIFO | LIFO | Annotation order |
+| Multiple hooks | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ⚠️ Multiple methods |
+
+## Common Patterns
+
+### Database Cleanup
+
+```simple
+describe "User model":
+    after_each:
+        db.rollback()      # Undo any changes
+        db.close()         # Close connection
+
+    it "creates user":
+        val user = User.create("alice")
+        expect(user.id).to(be_gt(0))
+        # Rollback ensures DB is clean for next test
+```
+
+### File Cleanup
+
+```simple
+describe "File operations":
+    after_each:
+        file.close()
+        fs.remove(temp_file_path)
+
+    it "writes file":
+        file.write("test data")
+        expect(file.size()).to(be_gt(0))
+        # File closed and deleted automatically
+```
+
+### Connection Cleanup
+
+```simple
+describe "API client":
+    after_each:
+        client.disconnect()
+        cleanup_auth_token()
+
+    it "makes requests":
+        val response = client.get("/users")
+        expect(response.status).to(eq(200))
+        # Connection closed, token cleaned up
+```
+
+### Temporary Resource Cleanup
+
+```simple
+describe "Cache operations":
+    after_each:
+        cache.clear()
+        temp_directory.remove_all()
+
+    it "caches data":
+        cache.set("key", value)
+        expect(cache.get("key")).to(eq(value))
+        # Cache cleared, temp files removed
+```
+
+## Built-in Behavior
+
+### Guaranteed Execution
+- Hooks run even if test fails or throws exception
+- Ensures resources are always cleaned up
+- Prevents resource leaks from test failures
+
+### Reverse Order (LIFO)
+- Child hooks run before parent hooks
+- Multiple hooks in same scope run in reverse definition order
+- Mirrors setup/teardown symmetry: last opened, first closed
+
+### Inheritance
+- Child contexts inherit parent after_each hooks
+- Parent cleanup happens after child cleanup
+- Allows layered resource management
+
+## Implementation Files
+
+**Framework:** `simple/std_lib/src/spec/dsl.spl` - SSpec DSL implementation
+**Runner:** `simple/std_lib/src/spec/runner.spl` - Hook execution logic, exception handling
+**Tests:** `simple/std_lib/test/features/testing_framework/after_each_spec.spl` - This file
+
+## Related Features
+
+- **Before Each Hooks (#183):** Setup code before each test (mirror of after_each)
+- **Describe Blocks (#180):** Test group organization
+- **Context Blocks (#182):** Nested test scoping
+- **It Examples (#181):** Individual test cases
+
+## Performance Characteristics
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| Hook registration | O(1) | Append to hook list |
+| Hook execution | O(n) | n = number of hooks in chain |
+| Cleanup | O(k) | k = cleanup operations |
+
+**Memory:** Hooks prevent resource leaks by ensuring cleanup
+
+## Limitations and Future Work
+
+**Current Limitations:**
+- No conditional teardown (runs for every test)
+- No error recovery in teardown (if cleanup fails, subsequent hooks may not run)
+- No async after_each (synchronous only)
+- No teardown parameters
+
+**Planned Features:**
+- Conditional teardown: `after_each if: predicate`
+- Error-resilient teardown: Continue even if one hook fails
+- Async teardown: `after_each async:`
+- Teardown composition: `use_teardowns([cleanup_db, cleanup_files])`
+
+## Best Practices
+
+**Do:**
+- Use after_each for resource cleanup (files, connections, transactions)
+- Release resources in reverse order of acquisition
+- Make teardown idempotent (safe to call multiple times)
+- Use nested contexts for layered cleanup
+- Log cleanup failures for debugging
+
+**Don't:**
+- Put test assertions in after_each (belongs in it blocks)
+- Depend on teardown side effects visible to other tests
+- Leave cleanup operations incomplete (check for errors)
+- Assume teardown always succeeds (handle failures gracefully)
+
+## Setup/Teardown Symmetry
+
+**Pattern:** Mirror before_each and after_each for balanced resource management
+
+```simple
+describe "Resource lifecycle":
+    before_each:
+        val conn = Database.connect()  # Acquire
+        conn.begin_transaction()       # Setup
+
+    after_each:
+        conn.rollback()                # Teardown (reverse order)
+        conn.close()                   # Release (reverse order)
+
+    it "uses database":
+        conn.execute("INSERT INTO users ...")
+        # Transaction rolled back, connection closed automatically
+```
+
+**Key Principle:** Last In, First Out (LIFO) - resources acquired last are released first.
+"""
+
+import std.spec
+
+
+describe "Teardown definition":
+    """
+    ## Defining After Each Hooks
+
+    After each hooks are defined using the `after_each:` keyword followed by an indented block
+    of cleanup code. The framework registers these hooks and executes them after each test.
+
+    **Syntax:** `after_each: <statement>+`
+
+    **Registration:** Hooks are stored in the describe/context block's hook list
+
+    **Implementation:** `simple/std_lib/src/spec/dsl.spl:after_each()`
+    """
+
+        it "stores cleanup blocks":
+            """
+            **Given** an after_each block with cleanup code
+            **When** the test group is defined
+            **Then** the hook is registered for execution after each test
+
+            **Code Example:**
+            ```simple
+            describe "Tests":
+                after_each:
+                    cleanup_resources()  # Registered as hook
+
+                it "uses resources":
+                    use_resources()
+                    # cleanup_resources() runs after this test
+            ```
+
+            **Runtime Behavior:**
+            - Hook block is stored as a closure
+            - Closure captured at definition time
+            - Executed after each it block in scope
+
+            **Implementation:** Hook stored in TestGroup.hooks_after list
+            """
 struct TeardownHook:
     hook_type: text
     cleanup_fn: text
@@ -73,47 +323,108 @@ fn create_teardown(name: text) -> TeardownHook:
     return TeardownHook { hook_type: "after_each", cleanup_fn: name }
 
 val hook = create_teardown("close_connection")
-if hook.hook_type == "after_each":
-    print('      [PASS] stores cleanup blocks')
-    passed = passed + 1
-else:
-    print('      [FAIL] stores cleanup blocks')
-    failed = failed + 1
+expect(hook.hook_type).to(eq("after_each"))
 
-print('    it supports multiple cleanups:')
+        it "supports multiple cleanups":
+            """
+            **Given** multiple after_each blocks defined in sequence
+            **When** hooks are registered
+            **Then** all hooks are stored for execution in reverse order
 
+            **Code Example:**
+            ```simple
+            describe "Cleanup":
+                after_each:
+                    cleanup_first()   # Runs SECOND (LIFO)
+
+                after_each:
+                    cleanup_second()  # Runs FIRST (LIFO)
+
+                it "test":
+                    # After test: cleanup_second(), then cleanup_first()
+            ```
+
+            **Runtime Behavior:**
+            - Hooks stored in list in definition order
+            - Execution happens in reverse order (LIFO)
+            - Last defined hook runs first
+
+            **Use Case:** Multi-stage cleanup where later cleanups must finish before earlier ones
+            """
 val hooks = [
     create_teardown("cleanup1"),
     create_teardown("cleanup2")
 ]
-if hooks.len() == 2:
-    print('      [PASS] multiple cleanups')
-    passed = passed + 1
-else:
-    print('      [FAIL] multiple cleanups')
-    failed = failed + 1
+expect(hooks.len()).to(eq(2))
 
-# -----------------------------------------------------
-# Teardown Execution
-# -----------------------------------------------------
+describe "Teardown execution":
+    """
+    ## Executing After Each Hooks
 
-print('')
-print('describe Teardown execution:')
-print('  context runs after each test:')
-print('    it executes cleanup:')
+    After each hooks execute automatically after every it block within their scope, regardless of
+    whether the test passes or fails. This guarantees resource cleanup.
 
+    **Execution Trigger:** End of each it block (success or failure)
+    **Execution Order:** Test body → child hooks → parent hooks (LIFO)
+    **Guarantee:** Always runs (even on test failure)
+
+    **Implementation:** `simple/std_lib/src/spec/runner.spl:run_test_with_cleanup()`
+    """
+
+        it "executes cleanup":
+            """
+            **Given** an after_each hook with cleanup code
+            **When** a test completes
+            **Then** the cleanup code executes
+
+            **Code Example:**
+            ```simple
+            describe "Cleanup":
+                after_each:
+                    temp_files.delete_all()
+
+                it "creates temp files":
+                    create_temp_file("data.tmp")
+                    # temp_files.delete_all() runs after test
+            ```
+
+            **Runtime Behavior:**
+            - Test body executes
+            - Test completes (pass or fail)
+            - Hook closure called
+            - Cleanup operations performed
+
+            **Pattern:** Resource release, state reset, cleanup
+            """
 fn cleanup() -> text:
     return "cleaned"
 
-if cleanup() == "cleaned":
-    print('      [PASS] executes cleanup')
-    passed = passed + 1
-else:
-    print('      [FAIL] executes cleanup')
-    failed = failed + 1
+expect(cleanup()).to(eq("cleaned"))
 
-print('    it runs for every test:')
+        it "runs for every test":
+            """
+            **Given** a describe block with multiple it blocks
+            **When** tests execute
+            **Then** after_each hook runs once per test
 
+            **Code Example:**
+            ```simple
+            describe "Multiple tests":
+                after_each:
+                    print("Cleanup")  # Prints 3 times
+
+                it "test 1": ...
+                it "test 2": ...
+                it "test 3": ...
+            ```
+
+            **Runtime Behavior:**
+            - Framework iterates through all it blocks
+            - For each it block: run test → run hooks → repeat
+            - N tests = N hook executions
+
+            **Benefit:** Each test cleaned up independently
+            """
 fn count_teardowns(num_tests: i64) -> i64:
     var teardown_count = 0
     var i = 0
@@ -122,22 +433,46 @@ fn count_teardowns(num_tests: i64) -> i64:
         i = i + 1
     return teardown_count
 
-if count_teardowns(3) == 3:
-    print('      [PASS] runs for every test')
-    passed = passed + 1
-else:
-    print('      [FAIL] runs for every test')
-    failed = failed + 1
+expect(count_teardowns(3)).to(eq(3))
 
-# -----------------------------------------------------
-# Guaranteed Execution
-# -----------------------------------------------------
+describe "Guaranteed execution":
+    """
+    ## Guaranteed Execution on Test Failure
 
-print('')
-print('describe Guaranteed execution:')
-print('  context runs even on failure:')
-print('    it runs after passing tests:')
+    After each hooks are guaranteed to execute even if the test fails or throws an exception.
+    This ensures resources are always cleaned up, preventing leaks.
 
+    **Guarantee:** Runs on success, failure, or exception
+
+    **Mechanism:** try/finally or equivalent in hook execution
+
+    **Implementation:** Exception handling in test runner
+    """
+
+        it "runs after passing tests":
+            """
+            **Given** a test that passes
+            **When** the test completes successfully
+            **Then** after_each hook runs
+
+            **Code Example:**
+            ```simple
+            describe "Pass":
+                after_each:
+                    cleanup()  # Runs after successful test
+
+                it "passes":
+                    expect(1).to(eq(1))  # Passes
+                    # cleanup() runs
+            ```
+
+            **Runtime Behavior:**
+            - Test body executes
+            - Assertions pass
+            - Hook executes normally
+
+            **Pattern:** Normal cleanup flow
+            """
 fn run_with_teardown(test_passes: bool) -> text:
     var teardown_ran = false
     if test_passes:
@@ -148,50 +483,130 @@ fn run_with_teardown(test_passes: bool) -> text:
         return "teardown executed"
     return "no teardown"
 
-if run_with_teardown(true) == "teardown executed":
-    print('      [PASS] runs after passing')
-    passed = passed + 1
-else:
-    print('      [FAIL] runs after passing')
-    failed = failed + 1
+expect(run_with_teardown(true)).to(eq("teardown executed"))
 
-print('    it runs after failing tests:')
+        it "runs after failing tests":
+            """
+            **Given** a test that fails
+            **When** the test fails
+            **Then** after_each hook still runs (guaranteed execution)
 
-if run_with_teardown(false) == "teardown executed":
-    print('      [PASS] runs after failing')
-    passed = passed + 1
-else:
-    print('      [FAIL] runs after failing')
-    failed = failed + 1
+            **Code Example:**
+            ```simple
+            describe "Fail":
+                after_each:
+                    cleanup()  # Runs even after failure
 
-# -----------------------------------------------------
-# Reverse Order
-# -----------------------------------------------------
+                it "fails":
+                    expect(1).to(eq(2))  # FAILS
+                    # cleanup() STILL runs (guaranteed)
+            ```
 
-print('')
-print('describe Reverse order:')
-print('  context child before parent:')
-print('    it runs child hooks first:')
+            **Runtime Behavior:**
+            - Test body executes
+            - Assertion fails (exception thrown)
+            - Exception caught by framework
+            - Hook executes in finally block
+            - Exception re-thrown
 
+            **Critical:** Prevents resource leaks when tests fail
+            **Pattern:** try { test } finally { after_each hooks }
+            """
+expect(run_with_teardown(false)).to(eq("teardown executed"))
+
+describe "Reverse order":
+    """
+    ## Reverse Execution Order (LIFO)
+
+    After each hooks execute in reverse order compared to before_each hooks. Child hooks run
+    before parent hooks, and multiple hooks in the same scope run in reverse definition order.
+
+    **Principle:** Last In, First Out (LIFO) - mirrors setup/teardown symmetry
+
+    **Reason:** Resources acquired last should be released first
+
+    **Implementation:** Reverse iteration through hook chain
+    """
+
+        it "runs child hooks first":
+            """
+            **Given** nested contexts with after_each hooks at each level
+            **When** a test in the innermost context completes
+            **Then** child hooks execute before parent hooks (reverse of before_each)
+
+            **Code Example:**
+            ```simple
+            describe "Parent":
+                after_each:
+                    cleanup_parent()  # Runs LAST
+
+                context "Child":
+                    after_each:
+                        cleanup_child()  # Runs FIRST
+
+                    it "test":
+                        # After test: cleanup_child() then cleanup_parent()
+            ```
+
+            **Runtime Behavior:**
+            - Framework builds hook chain from innermost to outermost
+            - Executes hooks in reverse order: inner → outer
+            - Each hook performs cleanup
+            - Resources released in reverse acquisition order
+
+            **Pattern:** Symmetric to before_each (parent → child setup becomes child → parent teardown)
+            """
 struct HookOrder:
-    child_hooks: List<text>
-    parent_hooks: List<text>
+    child_hooks: [text]
+    parent_hooks: [text]
 
-fn get_teardown_order(order: HookOrder) -> List<text>:
+fn get_teardown_order(order: HookOrder) -> [text]:
     return order.child_hooks + order.parent_hooks
 
 val tear_order = HookOrder { child_hooks: ["child"], parent_hooks: ["parent"] }
 val exec_order = get_teardown_order(tear_order)
-if exec_order[0] == "child" and exec_order[1] == "parent":
-    print('      [PASS] child hooks first')
-    passed = passed + 1
-else:
-    print('      [FAIL] child hooks first')
-    failed = failed + 1
+expect(exec_order[0]).to(eq("child"))
+expect(exec_order[1]).to(eq("parent"))
 
-print('    it maintains LIFO order:')
+        it "maintains LIFO order":
+            """
+            **Given** multiple after_each hooks defined in sequence
+            **When** hooks execute
+            **Then** they run in reverse definition order (last defined, first executed)
 
-fn lifo_teardown(items: List<text>) -> List<text>:
+            **Code Example:**
+            ```simple
+            describe "LIFO":
+                after_each:
+                    step1()  # Defined first, runs LAST
+
+                after_each:
+                    step2()  # Defined second, runs SECOND
+
+                after_each:
+                    step3()  # Defined last, runs FIRST
+
+                it "test":
+                    # After test: step3(), step2(), step1()
+            ```
+
+            **Runtime Behavior:**
+            - Hooks stored in definition order [step1, step2, step3]
+            - Execution iterates in reverse [step3, step2, step1]
+            - Last In, First Out
+
+            **Use Case:** Cleanup mirrors setup order
+            ```simple
+            before_each:
+                open_database()    # First
+                open_transaction() # Second
+
+            after_each:
+                close_transaction()  # Teardown second thing first
+                close_database()     # Teardown first thing last
+            ```
+            """
+fn lifo_teardown(items: [text]) -> [text]:
     var reversed = []
     var i = items.len() - 1
     while i >= 0:
@@ -201,60 +616,5 @@ fn lifo_teardown(items: List<text>) -> List<text>:
 
 val original = ["first", "second", "third"]
 val lifo = lifo_teardown(original)
-if lifo[0] == "third" and lifo[2] == "first":
-    print('      [PASS] LIFO order')
-    passed = passed + 1
-else:
-    print('      [FAIL] LIFO order')
-    failed = failed + 1
-
-# =====================================================
-# Documentation Output
-# =====================================================
-
-print('')
-print('============================================================')
-print('  GENERATED DOCUMENTATION')
-print('============================================================')
-print('')
-print('# After Each Hooks')
-print('')
-print("**Feature ID:** #184")
-print("**Category:** Testing Framework")
-print("**Difficulty:** Level 2/5")
-print("**Status:** Complete")
-print("**Implementation:** Simple")
-print('')
-print('## Description')
-print('')
-print(FEATURE.description)
-print('')
-print('## Usage Example')
-print('')
-print('```simple')
-print('describe "Database":')
-print('    after_each:')
-print('        db.rollback()')
-print('        db.close()')
-print('')
-print('    it "inserts record":')
-print('        db.insert(record)')
-print('        expect(db.count).to eq(1)')
-print('```')
-print('')
-print('## Notes')
-print('')
-print(FEATURE.notes)
-
-# Summary
-print('')
-print('============================================================')
-print('  TEST SUMMARY')
-print('============================================================')
-val total = passed + failed
-print("Passed: {passed}")
-print("Failed: {failed}")
-print("Total:  {total}")
-if failed == 0:
-    print('All tests PASSED!')
-print('============================================================')
+expect(lifo[0]).to(eq("third"))
+expect(lifo[2]).to(eq("first"))
