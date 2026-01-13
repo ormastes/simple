@@ -663,8 +663,15 @@ impl<'a> Parser<'a> {
                                 self.advance();
                             } else if self.check(&TokenKind::ShiftRight) {
                                 // >> is two > tokens
-                                depth -= 2;
-                                self.advance();
+                                if depth == 1 {
+                                    // Special case: depth is 1, so first > closes inner generics
+                                    // Second > belongs to outer context (function generic params)
+                                    // Don't consume the >> token - just exit the loop
+                                    break;
+                                } else {
+                                    depth -= 2;
+                                    self.advance();
+                                }
                             } else {
                                 self.advance();
                             }
@@ -689,6 +696,14 @@ impl<'a> Parser<'a> {
                                 } else if self.check(&TokenKind::Gt) {
                                     depth -= 1;
                                     self.advance();
+                                } else if self.check(&TokenKind::ShiftRight) {
+                                    if depth == 1 {
+                                        // First > closes inner generics, second > belongs to outer context
+                                        break;
+                                    } else {
+                                        depth -= 2;
+                                        self.advance();
+                                    }
                                 } else {
                                     self.advance();
                                 }
