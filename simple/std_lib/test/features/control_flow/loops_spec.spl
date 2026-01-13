@@ -1,4 +1,202 @@
 # Loops Feature Specification
+"""
+# Loops (For and While)
+
+**Feature ID:** #13
+**Category:** Control Flow
+**Difficulty:** 2/5 (Beginner-Intermediate)
+**Status:** Complete
+
+## Overview
+
+Loops in Simple provide iterative control flow for repeating operations. Simple supports two primary
+loop constructs: **for-in loops** for iterating over collections and **while loops** for condition-based
+iteration. Both support break and continue statements for flow control.
+
+**Design Philosophy:**
+Simple follows Python's philosophy that iteration should be explicit and readable. For-in loops work
+with any iterable (arrays, strings, ranges), and while loops provide imperative-style looping.
+
+## Syntax
+
+### For-In Loop
+
+```simple
+for variable in iterable:
+    # Loop body
+    # variable is bound to each element
+```
+
+**Grammar:**
+```
+for_stmt = 'for' identifier 'in' expression ':' NEWLINE INDENT statement+ DEDENT
+```
+
+**Iterables:**
+- Arrays: `[1, 2, 3]`
+- Strings: `"hello"` (iterates over characters)
+- Ranges: `range(0, 10)` (when available)
+- Custom iterables implementing iterator protocol (planned)
+
+### While Loop
+
+```simple
+while condition:
+    # Loop body
+    # Executes while condition is true
+```
+
+**Grammar:**
+```
+while_stmt = 'while' expression ':' NEWLINE INDENT statement+ DEDENT
+```
+
+### Break and Continue
+
+```simple
+while true:
+    if should_exit:
+        break  # Exit loop immediately
+
+for item in items:
+    if should_skip(item):
+        continue  # Skip to next iteration
+    process(item)
+```
+
+**Grammar:**
+```
+break_stmt = 'break' NEWLINE
+continue_stmt = 'continue' NEWLINE
+```
+
+## Runtime Representation
+
+**For Loop Execution:**
+1. Evaluate iterable expression once
+2. Extract iterator (via internal protocol)
+3. For each element:
+   - Bind element to loop variable
+   - Execute loop body
+   - Handle break/continue
+4. Loop variable goes out of scope after loop
+
+**While Loop Execution:**
+1. Evaluate condition expression
+2. If false, skip body and exit
+3. If true:
+   - Execute loop body
+   - Handle break/continue
+   - Re-evaluate condition
+4. Repeat until condition is false or break
+
+**Break/Continue:**
+Implemented as control flow exceptions in the interpreter:
+```rust
+pub enum LoopControl {
+    Break,
+    Continue,
+}
+```
+
+## Comparison with Other Languages
+
+| Feature | Simple | Python | JavaScript | Rust | Scala |
+|---------|--------|--------|------------|------|-------|
+| For-each syntax | `for x in items` | `for x in items` | `for (x of items)` | `for x in items` | `for (x <- items)` |
+| While loop | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
+| Break | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No (breakable) |
+| Continue | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ❌ No |
+| Loop labels | ❌ No | ❌ No | ❌ No | ✅ Yes | ❌ No |
+| Loop expressions | ❌ No | ❌ No | ❌ No | ✅ Yes | ✅ Yes |
+| C-style for | ❌ No | ❌ No | ✅ Yes | ❌ No | ❌ No |
+
+## Common Patterns
+
+### Accumulation Pattern
+
+```simple
+# Sum elements
+var total = 0
+for num in [1, 2, 3, 4, 5]:
+    total = total + num  # 15
+
+# Build new collection
+var evens = []
+for num in [1, 2, 3, 4, 5, 6]:
+    if num % 2 == 0:
+        evens.push(num)  # [2, 4, 6]
+```
+
+### Search Pattern
+
+```simple
+# Find first element matching condition
+var found = Option::None
+for item in items:
+    if predicate(item):
+        found = Option::Some(item)
+        break
+```
+
+### Countdown Pattern
+
+```simple
+var countdown = 10
+while countdown > 0:
+    print("T-minus {countdown}")
+    countdown = countdown - 1
+```
+
+### Infinite Loop with Break
+
+```simple
+while true:
+    val input = read_input()
+    if input == "quit":
+        break
+    process(input)
+```
+
+### Skip Invalid Items
+
+```simple
+var valid_sum = 0
+for item in items:
+    if not is_valid(item):
+        continue  # Skip invalid items
+    valid_sum = valid_sum + item
+```
+
+## Implementation Files
+
+**Parser:** `src/parser/src/statements/mod.rs` - For/while statement parsing
+**Interpreter:** `src/compiler/src/interpreter_control.rs` - Loop execution and break/continue
+**Codegen:** `src/compiler/src/codegen/control.rs` - MIR instructions for loops
+**Tests:** `src/driver/tests/interpreter_control.rs` - Loop control flow tests
+
+## Related Features
+
+- **Variables (#15):** Loop variables and accumulators
+- **Collections (#45):** Arrays and iterables for for-in loops
+- **Strings (#11):** String iteration (character-by-character)
+- **Control Flow (#17):** If/else for conditional logic within loops
+- **Functions (#14):** Early return from nested loops
+
+## Limitations and Future Work
+
+**Current Limitations:**
+- No loop labels (can't break outer loop from nested loop)
+- No loop expressions (loops are statements, not expressions)
+- No do-while loops
+- No for-range syntax (e.g., `for i in 0..10`)
+
+**Planned Features:**
+- Range syntax: `for i in 0..10` (lazy evaluation)
+- Iterator protocol for custom iterables
+- Labeled breaks: `break :outer_loop`
+- Comprehensions: `[x * 2 for x in items if x > 0]`
+"""
 # Feature #13: For loops, while loops, break, continue
 # Category: Control Flow | Difficulty: 2 | Status: Complete
 
@@ -56,23 +254,116 @@ print('')
 
 describe "For loops":
     """
-    TODO: Add documentation here
+    ## For-In Loops - Iterator-Based Iteration
+
+    For-in loops provide a concise, readable way to iterate over collections and other iterables.
+    Following Python's philosophy, Simple uses for-in syntax instead of C-style index-based loops.
+
+    **Key Properties:**
+    - Iterates over any iterable (arrays, strings, ranges)
+    - Loop variable is bound to each element in sequence
+    - No manual index management required
+    - Supports break and continue for flow control
+    - Loop variable scoped to loop body only
+
+    **Grammar:**
+    ```
+    for_stmt = 'for' identifier 'in' expression ':' NEWLINE INDENT statement+ DEDENT
+    ```
+
+    **Runtime Behavior:**
+    1. Evaluate iterable expression once (before loop starts)
+    2. Create internal iterator
+    3. For each iteration:
+       - Get next element from iterator
+       - Bind element to loop variable
+       - Execute loop body
+    4. Loop variable goes out of scope after loop
+
+    **Common Use Cases:**
+    - Summing array elements
+    - Transforming collections
+    - Counting elements matching criteria
+    - Processing each character in a string
+
+    **Implementation:** `src/compiler/src/interpreter_control.rs:interpret_for_loop()`
     """
         it "iterates over arrays":
             """
-            TODO: Add documentation here
+            **Given** an array of integers and a variable to accumulate the sum
+            **When** iterating over the array with a for-in loop
+            **Then** each element is visited in order and the sum is computed correctly
+
+            The most common use of for-in loops is iterating over arrays. The loop variable is
+            bound to each element in sequence, from index 0 to length-1.
+
+            **Code Example:**
+            ```simple
+            var product = 1
+            for num in [2, 3, 4]:
+                product = product * num
+            # product is now 24 (2 * 3 * 4)
+            ```
+
+            **Runtime Behavior:**
+            - Array `[1, 2, 3, 4, 5]` is evaluated once
+            - Loop executes 5 times (once per element)
+            - Variable `x` is bound to: 1, then 2, then 3, then 4, then 5
+            - Each iteration adds `x` to `sum`
+            - After loop: sum = 1 + 2 + 3 + 4 + 5 = 15
+
+            **Pattern:**
+            The accumulation pattern - start with initial value (0), update in each iteration.
+
+            **Implementation:** Array iteration creates iterator over indices [0..len)
             """
 
 var sum = 0
 for x in [1, 2, 3, 4, 5]:
     sum = sum + x
 
-if sum == 15:
-else:
+expect(sum).to(eq(15))
 
         it "iterates with index access":
             """
-            TODO: Add documentation here
+            **Given** an array and a counter variable
+            **When** iterating over the array without needing indices
+            **Then** each element is visited and the count matches array length
+
+            For-in loops don't provide automatic index access (unlike enumerate in Python). If you
+            need both element and index, you must manage the index manually or use a different
+            approach.
+
+            **Code Example:**
+            ```simple
+            val fruits = ['apple', 'banana', 'cherry']
+            var i = 0
+            for fruit in fruits:
+                print("{i}: {fruit}")
+                i = i + 1
+            # Prints:
+            # 0: apple
+            # 1: banana
+            # 2: cherry
+            ```
+
+            **Runtime Behavior:**
+            - Loop iterates over array elements directly (not indices)
+            - Each iteration: count incremented by 1
+            - After 3 iterations (for 'a', 'b', 'c'), count equals 3
+
+            **Pattern:**
+            When you only need to count iterations (not access indices), use a counter variable.
+
+            **Future Enhancement:**
+            Enumerate function planned for stdlib:
+            ```simple
+            for (index, item) in enumerate(items):
+                print("{index}: {item}")
+            ```
+
+            **Related Features:**
+            - For-range loops (planned) for index-based iteration
             """
 
 val items = ['a', 'b', 'c']
@@ -80,12 +371,36 @@ var count = 0
 for item in items:
     count = count + 1
 
-if count == 3:
-else:
+expect(count).to(eq(3))
 
         it "supports nested loops":
             """
-            TODO: Add documentation here
+            **Given** nested for-in loops
+            **When** iterating over combinations of elements
+            **Then** inner loop executes completely for each outer loop iteration
+
+            Loops can be nested to iterate over multi-dimensional structures or compute combinations
+            of elements from multiple collections.
+
+            **Code Example:**
+            ```simple
+            for row in [[1, 2], [3, 4], [5, 6]]:
+                for cell in row:
+                    print(cell)
+            # Prints: 1, 2, 3, 4, 5, 6 (each on new line)
+            ```
+
+            **Runtime Behavior:**
+            - Outer loop runs 2 times (for i in [1, 2])
+            - For each outer iteration, inner loop runs 3 times (for j in [1, 2, 3])
+            - Total iterations: 2 × 3 = 6
+            - Each iteration increments product by 1, so final value is 6
+
+            **Pattern:**
+            Cartesian product - process all combinations of elements from two collections.
+
+            **Note:** Simple doesn't currently support labeled breaks, so you can't break out of
+            an outer loop from within an inner loop. Workaround: use return statement or flag variable.
             """
 
 var product = 0
@@ -93,29 +408,83 @@ for i in [1, 2]:
     for j in [1, 2, 3]:
         product = product + 1
 
-if product == 6:
-else:
+expect(product).to(eq(6))
 
 print('')
 describe "While loops":
     """
-    TODO: Add documentation here
+    ## While Loops - Condition-Based Iteration
+
+    While loops execute repeatedly as long as a condition remains true. Unlike for-in loops
+    which iterate over a fixed collection, while loops continue until a boolean expression
+    becomes false.
+
+    **Key Properties:**
+    - Condition evaluated before each iteration (pre-test loop)
+    - Loop body may execute 0 times if condition is initially false
+    - Supports break (exit immediately) and continue (skip to next iteration)
+    - No automatic loop variable
+
+    **Grammar:**
+    ```
+    while_stmt = 'while' expression ':' NEWLINE INDENT statement+ DEDENT
+    ```
+
+    **Runtime Behavior:**
+    1. Evaluate condition expression
+    2. If false: Exit loop, continue with code after while
+    3. If true:
+       - Execute loop body
+       - Go to step 1
+    4. Repeat until condition becomes false or break executed
+
+    **Common Use Cases:**
+    - Countdown loops (decrement until reaching 0)
+    - Event loops (while true with break condition)
+    - Input validation (while invalid, prompt again)
+    - State-based iteration (while not done)
+
+    **Implementation:** `src/compiler/src/interpreter_control.rs:interpret_while_loop()`
     """
         it "loops while condition is true":
             """
-            TODO: Add documentation here
+            **Given** a counter variable starting at 0
+            **When** using a while loop with condition `n < 5`
+            **Then** the loop executes 5 times until condition becomes false
+
+            **Runtime Behavior:**
+            - Iteration 1: n=0, 0<5 is true, n becomes 1
+            - Iteration 2: n=1, 1<5 is true, n becomes 2
+            - Iteration 3: n=2, 2<5 is true, n becomes 3
+            - Iteration 4: n=3, 3<5 is true, n becomes 4
+            - Iteration 5: n=4, 4<5 is true, n becomes 5
+            - Condition check: n=5, 5<5 is false, exit loop
+
+            **Pattern:** Countdown/countup loops with explicit condition.
             """
 
 var n = 0
 while n < 5:
     n = n + 1
 
-if n == 5:
-else:
+expect(n).to(eq(5))
 
         it "supports break":
             """
-            TODO: Add documentation here
+            **Given** an infinite while loop with break condition
+            **When** break is executed when value equals 3
+            **Then** the loop exits immediately, value is 3
+
+            Break terminates the loop immediately, skipping any remaining iterations.
+            Common in event loops and search patterns.
+
+            **Runtime Behavior:**
+            - Iteration 1: value=0, increment to 1, 1≠3, continue
+            - Iteration 2: value=1, increment to 2, 2≠3, continue
+            - Iteration 3: value=2, increment to 3, 3==3, break executed
+            - Loop exits, value is 3
+
+            **Pattern:** Infinite loop with exit condition (event loop pattern).
             """
 
 var value = 0
@@ -124,12 +493,25 @@ while true:
     if value == 3:
         break
 
-if value == 3:
-else:
+expect(value).to(eq(3))
 
         it "supports continue":
             """
-            TODO: Add documentation here
+            **Given** a while loop that sums numbers, skipping one value
+            **When** continue is executed for idx==3
+            **Then** the sum excludes that value
+
+            Continue skips the rest of the current iteration and jumps to the next iteration.
+            Useful for filtering out unwanted values.
+
+            **Runtime Behavior:**
+            - Iteration 1: idx=1, 1≠3, total += 1, total=1
+            - Iteration 2: idx=2, 2≠3, total += 2, total=3
+            - Iteration 3: idx=3, 3==3, continue (skip total +=3)
+            - Iteration 4: idx=4, 4≠3, total += 4, total=7
+            - Iteration 5: idx=5, 5≠3, total += 5, total=12
+
+            **Pattern:** Skip invalid/unwanted items in a loop.
             """
 
 var total = 0
@@ -140,25 +522,64 @@ while idx < 5:
         continue
     total = total + idx
 
-if total == 12:
-else:
+expect(total).to(eq(12))
 
 print('')
 describe "Loop with collections":
     """
-    TODO: Add documentation here
+    ## Looping Over Collections
+
+    For-in loops work with various collection types beyond arrays, including strings (character
+    iteration) and future support for custom iterables.
+
+    **Supported Iterables:**
+    - Arrays: `[1, 2, 3]`
+    - Strings: `"hello"` (iterates over characters)
+    - Ranges: `range(0, 10)` (planned)
+    - Custom iterables: User-defined types implementing iterator protocol (planned)
+
+    **Implementation:**
+    Collections expose an internal iterator interface. For arrays, this is index-based iteration.
+    For strings, this is UTF-8 character iteration (grapheme clusters in future).
     """
         it "iterates over string characters":
             """
-            TODO: Add documentation here
+            **Given** a string "hello" with 5 characters
+            **When** iterating over the string with a for-in loop
+            **Then** each character is visited in sequence
+
+            Strings are iterable in Simple. The for-in loop iterates over each character
+            (currently code points; grapheme cluster support planned).
+
+            **Code Example:**
+            ```simple
+            var vowels = 0
+            for ch in "Simple Language":
+                if ch == 'a' or ch == 'e' or ch == 'i':
+                    vowels = vowels + 1
+            # vowels = 3 ('i', 'a', 'u', 'a', 'e')
+            ```
+
+            **Runtime Behavior:**
+            - String "hello" has 5 characters
+            - Loop executes 5 times: 'h', 'e', 'l', 'l', 'o'
+            - Each iteration increments char_count by 1
+            - Final char_count is 5
+
+            **Implementation:**
+            String iteration currently works with UTF-8 code points. Future support planned
+            for grapheme clusters (what users perceive as "characters").
+
+            **Related Features:**
+            - String type (#11) for text operations
+            - UTF-8 encoding (internal representation)
             """
 
 var char_count = 0
 for ch in 'hello':
     char_count = char_count + 1
 
-if char_count == 5:
-else:
+expect(char_count).to(eq(5))
 
 # =====================================================
 # Documentation Output
