@@ -717,6 +717,14 @@ impl<'a> Parser<'a> {
                 params.push(GenericParam::Type { name, bounds });
             }
 
+            // Check for end of generic parameters or comma before next parameter
+            // Special case: >> token when using angle brackets means we're at the end
+            if !use_brackets && self.check(&TokenKind::ShiftRight) {
+                // >> acts as the closing > for this generic param list
+                // Don't consume it here - the loop will exit and handle it below
+                break;
+            }
+
             if !self.check(&end_token) {
                 self.expect(&TokenKind::Comma)?;
             }
@@ -725,7 +733,52 @@ impl<'a> Parser<'a> {
         if use_brackets {
             self.expect(&TokenKind::RBracket)?; // consume ']'
         } else {
-            self.expect(&TokenKind::Gt)?; // consume '>'
+            // Handle >> token splitting for nested generics
+            if self.check(&TokenKind::ShiftRight) {
+                // Split >> into two > tokens
+                // This happens with nested generics like <I: Iterator<T>>
+                // The first > closes our generic param list
+                // The second > belongs to outer context
+                use crate::token::{Span, Token};
+
+                let shift_span = self.current.span.clone();
+
+                // Create first > token (replaces current >>)
+                let first_gt = Token::new(
+                    TokenKind::Gt,
+                    Span::new(
+                        shift_span.start,
+                        shift_span.start + 1,
+                        shift_span.line,
+                        shift_span.column,
+                    ),
+                    ">".to_string(),
+                );
+
+                // Create second > token (goes to pending)
+                let second_gt = Token::new(
+                    TokenKind::Gt,
+                    Span::new(
+                        shift_span.start + 1,
+                        shift_span.end,
+                        shift_span.line,
+                        shift_span.column + 1,
+                    ),
+                    ">".to_string(),
+                );
+
+                // Replace current token with first >
+                self.current = first_gt;
+                // Push second > to pending
+                self.pending_tokens.push_front(second_gt);
+
+                // Now advance past the first > (moves to second >)
+                self.advance();
+                // And advance past the second > too (closes our generic param list)
+                self.advance();
+            } else {
+                self.expect(&TokenKind::Gt)?; // consume '>'
+            }
         }
 
         Ok(params)
