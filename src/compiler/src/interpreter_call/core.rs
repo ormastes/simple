@@ -123,43 +123,134 @@ pub(crate) fn bind_args_with_injected(
         .filter(|p| !(self_mode.should_skip_self() && p.name == METHOD_SELF))
         .collect();
 
+    // Check if there's a variadic parameter (should be last)
+    let variadic_param_idx = params_to_bind.iter().position(|p| p.variadic);
+
     let mut bound = HashMap::new();
     let mut positional_idx = 0usize;
+    let mut variadic_values = Vec::new();
+
     for arg in args {
-        let val = evaluate_expr(
-            &arg.value,
-            outer_env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?;
-        if let Some(name) = &arg.name {
-            let param = params_to_bind.iter().find(|p| &p.name == name);
-            if param.is_none() {
-                bail_semantic!("unknown argument {}", name);
+        // Check if this is a spread expression (args...)
+        if let Expr::Spread(inner) = &arg.value {
+            // Evaluate the inner expression (should be variadic/array/tuple)
+            let spread_val = evaluate_expr(
+                inner,
+                outer_env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+
+            // Extract values from spread
+            let spread_values: Vec<Value> = match spread_val {
+                Value::Array(arr) => arr,
+                Value::Tuple(tup) => tup,
+                _ => {
+                    bail_semantic!("spread operator requires array or tuple value");
+                }
+            };
+
+            // Bind each spread value to the next positional parameter
+            for spread_item in spread_values {
+                if let Some(var_idx) = variadic_param_idx {
+                    if positional_idx == var_idx {
+                        // This value goes into variadic parameter
+                        variadic_values.push(spread_item);
+                    } else if positional_idx < var_idx {
+                        // Regular parameter before variadic
+                        let param = params_to_bind[positional_idx];
+                        let val = wrap_trait_object!(spread_item, param.ty.as_ref());
+                        validate_unit!(
+                            &val,
+                            param.ty.as_ref(),
+                            format!("parameter '{}'", param.name)
+                        );
+                        bound.insert(param.name.clone(), val);
+                    } else {
+                        bail_semantic!("too many arguments");
+                    }
+                } else {
+                    // No variadic - bind to regular parameters
+                    if positional_idx >= params_to_bind.len() {
+                        bail_semantic!("too many arguments");
+                    }
+                    let param = params_to_bind[positional_idx];
+                    let val = wrap_trait_object!(spread_item, param.ty.as_ref());
+                    validate_unit!(
+                        &val,
+                        param.ty.as_ref(),
+                        format!("parameter '{}'", param.name)
+                    );
+                    bound.insert(param.name.clone(), val);
+                }
+                positional_idx += 1;
             }
-            let val = wrap_trait_object!(val, param.and_then(|p| p.ty.as_ref()));
-            validate_unit!(
-                &val,
-                param.and_then(|p| p.ty.as_ref()),
-                format!("parameter '{}'", name)
-            );
-            bound.insert(name.clone(), val);
         } else {
-            if positional_idx >= params_to_bind.len() {
-                bail_semantic!("too many arguments");
+            // Normal argument (not spread)
+            let val = evaluate_expr(
+                &arg.value,
+                outer_env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+
+            if let Some(name) = &arg.name {
+                // Named argument
+                let param = params_to_bind.iter().find(|p| &p.name == name);
+                if param.is_none() {
+                    bail_semantic!("unknown argument {}", name);
+                }
+                let val = wrap_trait_object!(val, param.and_then(|p| p.ty.as_ref()));
+                validate_unit!(
+                    &val,
+                    param.and_then(|p| p.ty.as_ref()),
+                    format!("parameter '{}'", name)
+                );
+                bound.insert(name.clone(), val);
+            } else {
+                // Positional argument
+                if let Some(var_idx) = variadic_param_idx {
+                    if positional_idx >= var_idx {
+                        // This and all remaining positional args go into variadic parameter
+                        variadic_values.push(val);
+                    } else {
+                        // Regular positional parameter before variadic
+                        let param = params_to_bind[positional_idx];
+                        let val = wrap_trait_object!(val, param.ty.as_ref());
+                        validate_unit!(
+                            &val,
+                            param.ty.as_ref(),
+                            format!("parameter '{}'", param.name)
+                        );
+                        bound.insert(param.name.clone(), val);
+                    }
+                } else {
+                    // No variadic parameter - normal positional binding
+                    if positional_idx >= params_to_bind.len() {
+                        bail_semantic!("too many arguments");
+                    }
+                    let param = params_to_bind[positional_idx];
+                    let val = wrap_trait_object!(val, param.ty.as_ref());
+                    validate_unit!(
+                        &val,
+                        param.ty.as_ref(),
+                        format!("parameter '{}'", param.name)
+                    );
+                    bound.insert(param.name.clone(), val);
+                }
+                positional_idx += 1;
             }
-            let param = params_to_bind[positional_idx];
-            let val = wrap_trait_object!(val, param.ty.as_ref());
-            validate_unit!(
-                &val,
-                param.ty.as_ref(),
-                format!("parameter '{}'", param.name)
-            );
-            bound.insert(param.name.clone(), val);
-            positional_idx += 1;
         }
+    }
+
+    // Bind variadic parameter with collected values
+    if let Some(var_idx) = variadic_param_idx {
+        let param = params_to_bind[var_idx];
+        bound.insert(param.name.clone(), Value::Tuple(variadic_values));
     }
 
     for param in params_to_bind {
