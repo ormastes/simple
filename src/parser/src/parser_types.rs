@@ -255,23 +255,42 @@ impl<'a> Parser<'a> {
             // Expect closing token, with special handling for >> when using angle brackets
             if using_angle_brackets && self.check(&TokenKind::ShiftRight) {
                 // Split >> into two > tokens
-                // Consume the >> and push back a single >
+                // Replace current >> with > and push second > to pending
                 let shift_span = self.current.span.clone();
-                self.advance(); // consume >>
 
-                // Push back a > token
                 use crate::token::{Span, Token};
-                let gt_token = Token::new(
+
+                // Create first > token (replaces current >>)
+                let first_gt = Token::new(
                     TokenKind::Gt,
                     Span::new(
-                        shift_span.start + 1, // Second > starts at +1
+                        shift_span.start,
+                        shift_span.start + 1,
+                        shift_span.line,
+                        shift_span.column,
+                    ),
+                    ">".to_string(),
+                );
+
+                // Create second > token (goes to pending)
+                let second_gt = Token::new(
+                    TokenKind::Gt,
+                    Span::new(
+                        shift_span.start + 1,
                         shift_span.end,
                         shift_span.line,
                         shift_span.column + 1,
                     ),
                     ">".to_string(),
                 );
-                self.pending_tokens.push_front(gt_token);
+
+                // Replace current token with first >
+                self.current = first_gt;
+                // Push second > to pending
+                self.pending_tokens.push_front(second_gt);
+
+                // Now advance past the first >
+                self.advance();
             } else {
                 self.expect(&closing_token)?;
             }
