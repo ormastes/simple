@@ -1,66 +1,232 @@
 # Methods Feature Specification
-# Feature #17: Methods and self
-# Category: Language | Difficulty: 3 | Status: Complete
+"""
+# Methods (Instance and Static)
 
-# =====================================================
-# Feature Metadata
-# =====================================================
+**Feature ID:** #17
+**Category:** Language
+**Difficulty:** 3/5 (Intermediate)
+**Status:** Complete
 
-class FeatureMetadata:
-    id: i32
-    name: text
-    category: text
-    difficulty: i32
-    status: text
-    impl_type: text
-    spec_ref: text
-    files: List<text>
-    tests: List<text>
-    description: text
-    code_examples: List<text>
-    dependencies: List<i32>
-    required_by: List<i32>
-    notes: text
+## Overview
 
-# Feature Definition
-val FEATURE = FeatureMetadata {
-    id: 17,
-    name: 'Methods',
-    category: 'Language',
-    difficulty: 3,
-    status: 'Complete',
-    impl_type: 'Rust',
-    spec_ref: 'doc/spec/data_structures.md',
-    files: [
-        'src/compiler/src/interpreter_method.rs',
-        'src/parser/src/statements/mod.rs'
-    ],
-    tests: [
-        'src/driver/tests/interpreter_oop_tests.rs'
-    ],
-    description: 'Instance methods with self parameter, static methods, and method chaining. Methods are defined inside class bodies.',
-    code_examples: [],
-    dependencies: [1, 2, 11, 12],
-    required_by: [20, 21],
-    notes: 'Methods use self for instance access. Static methods have no self parameter.'
+Methods in Simple are functions defined within class bodies that operate on class instances or
+provide class-level utilities. Following Scala and Rust conventions, instance methods use an
+implicit `self` parameter for accessing object state, while static methods have no `self` binding.
+
+**Key Features:**
+- **Instance methods:** Implicit `self` parameter for object access
+- **Static methods:** Class-level functions without `self`
+- **Method chaining:** Return `self` for fluent APIs
+- **Field mutation:** Direct field updates via `self.field = value`
+- **Dot notation:** Method calls use `instance.method()` syntax
+
+## Syntax
+
+### Instance Methods
+
+```simple
+class Counter:
+    value: i32
+
+    fn increment():               # self is implicit
+        self.value = self.value + 1
+
+    fn get() -> i32:
+        return self.value
+```
+
+**Grammar:**
+```
+method_def = 'fn' identifier '(' param_list? ')' ('->' type)? ':' body
+# self is NOT in param_list - it's implicit for non-static methods
+```
+
+### Static Methods
+
+```simple
+class Math:
+    fn square(x: i32) -> i32:     # No self - static
+        return x * x
+```
+
+**Static Keyword:** Currently, static methods are detected by absence of `self` usage.
+Future: May add explicit `static` keyword.
+
+### Method Calls
+
+```simple
+# Instance method
+val c = Counter { value: 0 }
+c.increment()                     # Binds self to c
+
+# Static method
+val result = Math.square(5)       # No self binding
+```
+
+## Runtime Representation
+
+**Method Dispatch:**
+Instance methods are resolved at call time:
+```rust
+impl Interpreter {
+    fn call_method(&mut self, receiver: RuntimeValue, method_name: &str, args: Vec<RuntimeValue>) {
+        // 1. Look up method in class definition
+        // 2. Create new environment with self bound to receiver
+        // 3. Execute method body with self + args
+        // 4. Return result
+    }
 }
+```
 
-# =====================================================
-# BDD Specification Tests
-# =====================================================
+**Self Binding:**
+```rust
+// When calling instance.method(args):
+let mut method_env = Environment::new();
+method_env.define("self", receiver.clone());  // Bind self
+for (param, arg) in params.zip(args) {
+    method_env.define(param, arg);
+}
+// Execute method body in method_env
+```
 
-print('============================================================')
-print('  METHODS FEATURE SPECIFICATION (#17)')
-print('  Category: Language | Difficulty: 3 | Status: Complete')
-print('============================================================')
-print('')
+**Static Methods:**
+Static methods are just functions - no special runtime representation needed.
 
-var passed = 0
-var failed = 0
+## Comparison with Other Languages
 
-print('describe Instance methods:')
-print('  it defines method with self:')
+| Feature | Simple | Python | JavaScript | Rust | Scala |
+|---------|--------|--------|------------|------|-------|
+| Instance methods | Implicit `self` | Explicit `self` | Implicit `this` | Explicit `self` | Implicit `this` |
+| Static methods | No `self` usage | `@staticmethod` | `static` keyword | No instance methods in impl | `object` singleton |
+| Method chaining | `return self` | `return self` | `return this` | `return self` | `return this` |
+| Syntax | `fn method()` | `def method(self):` | `method() {}` | `fn method(&self)` | `def method =` |
+| Field access | `self.field` | `self.field` | `this.field` | `self.field` | `this.field` |
+| Mutability | Implicit | Implicit | Implicit | Explicit (`&mut self`) | Implicit |
 
+## Common Patterns
+
+### Constructor Pattern (Static new)
+```simple
+class Person:
+    name: text
+    age: i32
+
+    fn new(n: text, a: i32) -> Person:
+        return Person { name: n, age: a }
+
+val p = Person.new("Alice", 30)
+```
+
+### Builder Pattern (Method Chaining)
+```simple
+class QueryBuilder:
+    query: text
+
+    fn new() -> QueryBuilder:
+        return QueryBuilder { query: "" }
+
+    fn select(fields: text) -> QueryBuilder:
+        self.query = "SELECT {fields}"
+        return self
+
+    fn from(table: text) -> QueryBuilder:
+        self.query = "{self.query} FROM {table}"
+        return self
+
+    fn build() -> text:
+        return self.query
+
+val q = QueryBuilder.new()
+    .select("*")
+    .from("users")
+    .build()
+```
+
+### Accumulator Pattern
+```simple
+class Sum:
+    total: i32
+
+    fn add(n: i32):
+        self.total = self.total + n
+
+    fn result() -> i32:
+        return self.total
+```
+
+## Implementation Files
+
+**Parser:** `src/parser/src/statements/mod.rs` - Method definition parsing
+**Interpreter:** `src/compiler/src/interpreter_method.rs` - Method calls, self binding
+**Runtime:** `src/runtime/src/value/objects.rs` - Class and method representation
+**Tests:** `src/driver/tests/interpreter_oop_tests.rs` - Method tests
+
+## Related Features
+
+- **Classes (#11):** Methods are defined in class bodies
+- **Functions (#12):** Static methods are essentially functions
+- **Variables (#15):** `self` is an implicit variable in instance methods
+- **Structs (#TBD):** Methods vs free functions
+
+## Limitations and Future Work
+
+**Current Limitations:**
+- No explicit `static` keyword (inferred from `self` usage)
+- No `&self` vs `&mut self` distinction (all methods can mutate)
+- No method visibility modifiers
+- No operator overloading via methods
+- No default parameters
+
+**Planned Features:**
+- Explicit `static fn` keyword
+- Immutable vs mutable methods: `fn get()` vs `me set()`
+- Method visibility: `private fn`, `public fn`
+- Operator overloading: `fn __add__(other)`
+- Extension methods (add methods to existing classes)
+- Trait methods (interface implementation)
+
+## Performance Characteristics
+
+| Operation | Time | Space | Notes |
+|-----------|------|-------|-------|
+| Method lookup | O(1) | - | HashMap in class definition |
+| Method call | O(1) | O(n) | Create new stack frame, n = params |
+| Self binding | O(1) | O(1) | Single environment entry |
+| Field access via self | O(1) | - | HashMap lookup |
+"""
+
+import std.spec
+
+
+describe "Instance methods":
+    """
+    ## Instance Methods with Implicit Self
+
+    Instance methods are functions defined in class bodies that operate on class instances.
+    The `self` parameter is implicit - it's not declared in the parameter list but is
+    automatically available in the method body.
+
+    **Self Binding:**
+    - `self` refers to the receiver object (instance on left of dot)
+    - Available implicitly in all non-static methods
+    - Can access fields via `self.field`
+    - Can mutate fields via `self.field = value`
+
+    **Method Calls:**
+    Syntax: `instance.method(args)` where instance is bound to `self`
+    """
+
+        it "defines method with self":
+            """
+            **Given** a class with an instance method using self
+            **When** calling the method on an instance
+            **Then** self is bound to the instance and method executes
+
+            Instance methods automatically receive `self` as the receiver object.
+
+            **Implementation:** `src/compiler/src/interpreter_method.rs:call_method()`
+            **Pattern:** Counter with increment - classic mutable object pattern
+            """
 class Counter:
    value: i32
 
@@ -72,15 +238,19 @@ class Counter:
 
 val c = Counter {value: 0 }
 c.increment()
-if c.get() == 1:
-    print('    [PASS] method with self')
-    passed = passed + 1
-else:
-    print('    [FAIL] self method')
-    failed = failed + 1
+expect(c.get()).to(eq(1))
 
-print('  it accesses fields via self:')
+        it "accesses fields via self":
+            """
+            **Given** a class method that reads multiple fields via self
+            **When** calling the method
+            **Then** all fields are accessible through self.field syntax
 
+            Methods can access any field of the class instance via `self.field_name`.
+
+            **Example:** Computed property - magnitude_squared uses x and y fields
+            **Performance:** Field access is O(1) HashMap lookup
+            """
 class Point:
     x: i32
     y: i32
@@ -89,15 +259,19 @@ class Point:
         return self.x * self.x + self.y * self.y
 
 val p = Point { x: 3, y: 4 }
-if p.magnitude_squared() == 25:
-    print('    [PASS] field access via self')
-    passed = passed + 1
-else:
-    print('    [FAIL] field access')
-    failed = failed + 1
+expect(p.magnitude_squared()).to(eq(25))
 
-print('  it mutates fields via self:')
+        it "mutates fields via self":
+            """
+            **Given** a class method that mutates a field via self
+            **When** calling the method multiple times
+            **Then** field mutations persist across calls
 
+            Instance methods can mutate fields with `self.field = new_value`.
+
+            **Pattern:** Accumulator - building up state through method calls
+            **Note:** All instance methods can mutate (no &self vs &mut self yet)
+            """
 class Accumulator:
     total: i32
 
@@ -107,17 +281,37 @@ class Accumulator:
 val acc = Accumulator { total: 0 }
 acc.add(5)
 acc.add(10)
-if acc.total == 15:
-    print('    [PASS] field mutation via self')
-    passed = passed + 1
-else:
-    print('    [FAIL] field mutation')
-    failed = failed + 1
+expect(acc.total).to(eq(15))
 
-print('')
-print('describe Static methods:')
-print('  it defines static method (no self):')
+describe "Static methods":
+    """
+    ## Static Methods - Class-Level Functions
 
+    Static methods are functions defined in class bodies that don't have access to `self`.
+    They're called on the class name, not on instances, and are typically used for
+    constructors, factory methods, or utility functions related to the class.
+
+    **Characteristics:**
+    - No `self` parameter (implicit or explicit)
+    - Called on class name: `ClassName.method()`
+    - Cannot access instance fields
+    - Common for constructor pattern: `fn new()`
+
+    **Detection:** Currently inferred from absence of `self` usage
+    (may add explicit `static` keyword in future)
+    """
+
+        it "defines static method (no self)":
+            """
+            **Given** a class with static methods (no self usage)
+            **When** calling the method on the class name
+            **Then** method executes without instance binding
+
+            Static methods are utility functions associated with a class.
+
+            **Example:** Math class with pure functions
+            **Use Case:** Namespacing related functions under class name
+            """
 class Math:
     fn square(x):
         return x * x
@@ -125,15 +319,20 @@ class Math:
     fn cube(x):
         return x * x * x
 
-if Math.square(5) == 25:
-    print('    [PASS] static method')
-    passed = passed + 1
-else:
-    print('    [FAIL] static method')
-    failed = failed + 1
+expect(Math.square(5)).to(eq(25))
 
-print('  it uses static new pattern:')
+        it "uses static new pattern":
+            """
+            **Given** a class with static `new` constructor method
+            **When** calling ClassName.new() with arguments
+            **Then** returns a new instance of the class
 
+            Simple uses the static `new` pattern for constructors instead of
+            special constructor syntax.
+
+            **Pattern:** Constructor pattern - `fn new()` replaces `__init__`
+            **Advantage:** Constructor is just a regular method, no special syntax
+            """
 class Person:
     name: text
     age: i32
@@ -142,17 +341,42 @@ class Person:
         return Person { name: n, age: a }
 
 val person = Person.new('Bob', 25)
-if person.name == 'Bob' and person.age == 25:
-    print('    [PASS] static new pattern')
-    passed = passed + 1
-else:
-    print('    [FAIL] new pattern')
-    failed = failed + 1
+expect(person.name).to(eq('Bob'))
+expect(person.age).to(eq(25))
 
-print('')
-print('describe Method chaining:')
-print('  it chains method calls:')
+describe "Method chaining":
+    """
+    ## Method Chaining - Fluent APIs
 
+    Method chaining enables fluent API design by returning `self` from methods.
+    This allows multiple method calls to be chained together in a single expression.
+
+    **Pattern:**
+    ```simple
+    instance.method1()
+           .method2()
+           .method3()
+    ```
+
+    **Requirements:**
+    - Methods must return `self`
+    - Works best with methods that modify state
+    - Terminal method typically returns a value (not self)
+
+    **Use Cases:** Builders, query constructors, configuration objects
+    """
+
+        it "chains method calls":
+            """
+            **Given** a class with methods that return self
+            **When** chaining multiple method calls
+            **Then** each method operates on the same instance
+
+            Method chaining requires methods to `return self` after mutation.
+
+            **Pattern:** Builder pattern - accumulate state through chained calls
+            **Example:** add(5).multiply(3) modifies same instance
+            """
 class Builder:
    value: i32
 
@@ -173,30 +397,52 @@ class Builder:
 val b = Builder.new()
 b.add(5)
 b.multiply(3)
-if b.result() == 15:
-    print('    [PASS] method chaining')
-    passed = passed + 1
-else:
-    print('    [FAIL] chaining')
-    failed = failed + 1
+expect(b.result()).to(eq(15))
 
-print('')
-print('describe Method with parameters:')
-print('  it passes multiple parameters:')
+describe "Method with parameters":
+    """
+    ## Methods with Parameters
 
+    Methods can accept parameters in addition to the implicit `self`. Parameters
+    are declared in the parameter list and can be used alongside `self` in the
+    method body.
+
+    **Syntax:** `fn method(param1, param2, ...)`
+
+    **Scoping:**
+    - Parameters are local to method
+    - Self is always available in instance methods
+    - Parameters shadow outer variables
+    """
+
+        it "passes multiple parameters":
+            """
+            **Given** a static method with multiple parameters
+            **When** calling the method with arguments
+            **Then** all parameters are bound to arguments
+
+            Static methods can have any number of parameters.
+
+            **Example:** Calculator.add(1, 2, 3) - static method with 3 params
+            **Note:** No self, just regular function parameters
+            """
 class Calculator:
     fn add(a, b, c):
         return a + b + c
 
-if Calculator.add(1, 2, 3) == 6:
-    print('    [PASS] multiple parameters')
-    passed = passed + 1
-else:
-    print('    [FAIL] parameters')
-    failed = failed + 1
+expect(Calculator.add(1, 2, 3)).to(eq(6))
 
-print('  it uses instance and params:')
+        it "uses instance and params":
+            """
+            **Given** an instance method with parameters
+            **When** calling the method with arguments
+            **Then** method has access to both self and parameters
 
+            Instance methods combine `self` (implicit) with explicit parameters.
+
+            **Example:** Multiplier.apply(7) uses self.factor * param
+            **Pattern:** Instance state + input parameters for computation
+            """
 class Multiplier:
     factor: i32
 
@@ -204,46 +450,4 @@ class Multiplier:
         return self.factor * x
 
 val m = Multiplier { factor: 10 }
-if m.apply(7) == 70:
-    print('    [PASS] instance + params')
-    passed = passed + 1
-else:
-    print('    [FAIL] instance + params')
-    failed = failed + 1
-
-# =====================================================
-# Documentation Output
-# =====================================================
-
-print('')
-print('============================================================')
-print('  GENERATED DOCUMENTATION')
-print('============================================================')
-print('')
-print('# Methods')
-print('')
-print('**Feature ID:** #17')
-print('**Category:** Language')
-print('**Difficulty:** Level 3/5')
-print('**Status:** Complete')
-print('**Implementation:** Rust')
-print('')
-print('## Description')
-print('')
-print(FEATURE.description)
-print('')
-print('## Notes')
-print('')
-print(FEATURE.notes)
-
-# Summary
-print('')
-print('============================================================')
-print('  TEST SUMMARY')
-print('============================================================')
-print('Passed: {passed}')
-print('Failed: {failed}')
-print('Total:  {passed + failed}')
-if failed == 0:
-    print('All tests PASSED!')
-print('============================================================')
+expect(m.apply(7)).to(eq(70))
