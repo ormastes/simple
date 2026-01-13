@@ -21,6 +21,22 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Trait)?;
         let name = self.expect_identifier()?;
         let generic_params = self.parse_generic_params_as_strings()?;
+
+        // Parse super traits (trait inheritance): trait Copy: Clone
+        let mut super_traits = Vec::new();
+        if self.check(&TokenKind::Colon) {
+            self.advance(); // consume ':'
+
+            // Parse first super trait
+            super_traits.push(self.expect_identifier()?);
+
+            // Parse additional super traits with + separator: trait T: A + B
+            while self.check(&TokenKind::Plus) {
+                self.advance(); // consume '+'
+                super_traits.push(self.expect_identifier()?);
+            }
+        }
+
         let where_clause = self.parse_where_clause()?;
 
         let (associated_types, methods) = self.parse_indented_trait_body()?;
@@ -29,6 +45,7 @@ impl<'a> Parser<'a> {
             span: self.make_span(start_span),
             name,
             generic_params,
+            super_traits,
             where_clause,
             associated_types,
             methods,
