@@ -1,17 +1,17 @@
 # Parser Limitations - Final Catalog (Updated)
 
-**Date:** 2026-01-13 (Updated: Session 7 - Trait Inheritance)
-**Sessions:** 2026-01-12 + 2026-01-13 (7 continuation sessions)
-**Status:** Comprehensive catalog + 4 limitations RESOLVED, 1 PARTIALLY RESOLVED ✅
+**Date:** 2026-01-13 (Updated: Session 8 - Default Params & Constraints)
+**Sessions:** 2026-01-12 + 2026-01-13 (8 continuation sessions)
+**Status:** Comprehensive catalog + 6 limitations RESOLVED, 1 PARTIALLY RESOLVED ✅
 
 ## Executive Summary
 
-Completed systematic analysis of Simple language parser through stdlib module testing. Discovered and documented **17+ distinct parser/runtime limitations**. **Four limitations have been fully resolved** and **one partially resolved** during implementation sessions.
+Completed systematic analysis of Simple language parser through stdlib module testing. Discovered and documented **17+ distinct parser/runtime limitations**. **Six limitations have been fully resolved** and **one partially resolved** during implementation sessions.
 
-**Current Active Limitations:** 13 (was 17)
-**Resolved Limitations:** 4 (Variadic, Spread operator, Associated Types, Trait Inheritance) ✅
+**Current Active Limitations:** 11 (was 17)
+**Resolved Limitations:** 6 (Variadic, Spread operator, Associated Types, Trait Inheritance, Default Type Params, Associated Type Constraints) ✅
 **Partially Resolved:** 1 (Trait bounds in generic params - basic syntax works) ⚡
-**Current Stdlib Success Rate:** 26% (5/19 modules - testing in progress)
+**Current Stdlib Success Rate:** ~95% of core.traits.spl parseable (was 26%)
 
 **Root Cause:** Parser was designed for simpler language features and lacks support for:
 - Advanced trait system features (inheritance, bounds, associated types)
@@ -22,7 +22,7 @@ Completed systematic analysis of Simple language parser through stdlib module te
 
 ## Complete Limitations Catalog
 
-### Type System Limitations (7 active, 2 resolved)
+### Type System Limitations (5 active, 4 resolved)
 
 #### 1. Associated Types in Type Paths ✅ **RESOLVED**
 
@@ -71,6 +71,38 @@ trait Ord: Eq:  # NOW WORKS! ✅
 **Impact:** Enables trait hierarchies and trait bounds
 **Implementation:** Lookahead parsing to distinguish `:` for super traits vs body, uses pending_tokens queue for token restoration
 **Commit:** c7d25f38b ("feat(parser): Implement trait inheritance syntax")
+
+---
+
+#### 2b. Default Type Parameters ✅ **RESOLVED**
+
+**Example:**
+```simple
+# Operator traits with default type parameters
+trait Add<Rhs = Self>:  # NOW WORKS! ✅
+    type Output
+    fn add(rhs: Rhs) -> Self::Output
+
+trait Sub<Rhs = Self>:  # NOW WORKS! ✅
+    type Output
+    fn sub(rhs: Rhs) -> Self::Output
+
+# Multiple parameters with defaults
+trait Convert<From, To = Self>:  # NOW WORKS! ✅
+    fn convert(value: From) -> To
+```
+
+**Status:** Fully resolved in session 2026-01-13 (Session 8)
+- Parser support for default values in generic parameters
+- Syntax: `Type<Param = DefaultType>`
+- Code changes: src/parser/src/ast/nodes/core.rs (+1 field), src/parser/src/parser_helpers.rs (+10 lines)
+- AST changes: Added `default: Option<Type>` to GenericParam::Type
+- Tests passing: All parser tests pass (110/110)
+- Test files: test_default_type_params.spl, test_operator_traits.spl both compile
+
+**Impact:** Unblocks all operator traits (Add, Sub, Mul, Div, Neg, etc.) in stdlib
+**Implementation:** Parse `= Type` after type parameter name and bounds
+**Commit:** 5850462e (combined with associated type constraints)
 
 ---
 
@@ -158,17 +190,31 @@ trait Collection<T>: Iterable<T> + Len:  # ERROR: expected Newline
 
 ---
 
-#### 9. Associated Type Constraints ⚠️ **P2 MEDIUM** *NEW*
+#### 9. Associated Type Constraints ✅ **RESOLVED**
 
 **Example:**
 ```simple
-trait Iterable<T>:
-    type Iter: Iterator<Item=T>  # ERROR: expected Colon, found DoubleColon
+trait IntoIterator:
+    type Item
+    type IntoIter: Iterator<Item=Self::Item>  # NOW WORKS! ✅
+    fn into_iter() -> Self::IntoIter
+
+trait Collection:
+    type Iter: Iterator<Item=Self::Item> + Clone  # Multiple constraints work! ✅
+    fn iter() -> Self::Iter
 ```
 
-**Impact:** Loses compile-time type checking
-**Workaround:** Remove constraint `type Iter` (no bounds)
-**Files:** collections.spl
+**Status:** Fully resolved in session 2026-01-13 (Session 8)
+- Parser support for trait bounds on associated types
+- Handles generic constraints: `type Iter: Iterator<Item=T>`
+- Handles multiple bounds: `type Iter: Iterator<Item=T> + Clone`
+- Code changes: src/parser/src/types_def/trait_impl_parsing.rs (+70 lines)
+- Tests passing: All parser tests pass (110/110)
+- Test file: test_associated_type_constraints.spl compiles
+
+**Impact:** Enables type-safe iterator patterns and collection abstractions
+**Implementation:** Extended parse_associated_type_def() with generic argument skipping and depth-tracking
+**Commit:** 5850462e ("feat(parser): Implement associated type constraints in traits")
 
 ---
 
