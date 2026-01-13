@@ -233,7 +233,8 @@ pub type WhereClause = Vec<WhereBound>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum GenericParam {
     /// Type parameter: T, U, etc.
-    Type(String),
+    /// Can optionally have trait bounds: T: Display, I: Iterator
+    Type { name: String, bounds: Vec<String> },
     /// Const parameter: const N: usize
     Const { name: String, ty: Type },
 }
@@ -242,7 +243,7 @@ impl GenericParam {
     /// Get the name of the parameter
     pub fn name(&self) -> &str {
         match self {
-            GenericParam::Type(name) => name,
+            GenericParam::Type { name, .. } => name,
             GenericParam::Const { name, .. } => name,
         }
     }
