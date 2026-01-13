@@ -190,14 +190,23 @@ impl<'a> Parser<'a> {
             return Ok(Type::DynTrait(trait_name));
         }
 
-        // Simple or generic type (possibly qualified: module.Type)
+        // Simple or generic type (possibly qualified: module.Type or Self::Item)
         let mut name = self.expect_identifier()?;
 
-        // Check for qualified type name: module.Type or module.submodule.Type
-        while self.check(&TokenKind::Dot) {
-            self.advance(); // consume '.'
+        // Check for qualified type name: module.Type, module.submodule.Type, or Self::Item
+        // Support both . (module path) and :: (associated type path)
+        while self.check(&TokenKind::Dot) || self.check(&TokenKind::DoubleColon) {
+            let is_double_colon = self.check(&TokenKind::DoubleColon);
+            self.advance(); // consume '.' or '::'
             let segment = self.expect_identifier()?;
-            name.push('.');
+
+            if is_double_colon {
+                // Use :: for associated types (e.g., Self::Item, Iterator::Item)
+                name.push_str("::");
+            } else {
+                // Use . for module paths (e.g., core.option)
+                name.push('.');
+            }
             name.push_str(&segment);
         }
 
