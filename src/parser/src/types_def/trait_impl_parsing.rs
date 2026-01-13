@@ -23,17 +23,34 @@ impl<'a> Parser<'a> {
         let generic_params = self.parse_generic_params_as_strings()?;
 
         // Parse super traits (trait inheritance): trait Copy: Clone
+        // Need to distinguish between:
+        //   trait Copy:        (no super traits, : starts body)
+        //   trait Copy: Clone: (has super trait Clone, second : starts body)
         let mut super_traits = Vec::new();
         if self.check(&TokenKind::Colon) {
-            self.advance(); // consume ':'
+            // Peek ahead: if the token after : is an identifier, it's super trait syntax
+            // Otherwise, the : starts the trait body
+            let colon_span = self.current.span.clone();
+            self.advance(); // consume ':' to peek at next token
 
-            // Parse first super trait
-            super_traits.push(self.expect_identifier()?);
-
-            // Parse additional super traits with + separator: trait T: A + B
-            while self.check(&TokenKind::Plus) {
-                self.advance(); // consume '+'
+            if matches!(self.current.kind, TokenKind::Identifier(_)) {
+                // This is super trait syntax - parse super traits
+                // Parse first super trait
                 super_traits.push(self.expect_identifier()?);
+
+                // Parse additional super traits with + separator: trait T: A + B
+                while self.check(&TokenKind::Plus) {
+                    self.advance(); // consume '+'
+                    super_traits.push(self.expect_identifier()?);
+                }
+                // After super traits, expect another : for the body
+                // (which will be consumed by parse_indented_trait_body)
+            } else {
+                // Not super trait syntax - put the colon back for the body parser
+                use crate::token::Token;
+                let colon_token = Token::new(TokenKind::Colon, colon_span, ":".to_string());
+                self.pending_tokens.push_front(self.current.clone());
+                self.current = colon_token;
             }
         }
 
