@@ -2,170 +2,1648 @@
 # Feature #TBD: SDN-based hierarchical configuration (OmegaConf-like)
 # Category: ML Infrastructure | Difficulty: 3 | Status: Planned
 
-# =====================================================
-# Feature Metadata
-# =====================================================
+"""
+# Hierarchical Configuration System
 
-class FeatureMetadata:
-    id: i32
-    name: text
-    category: text
-    difficulty: i32
-    status: text
-    impl_type: text
-    spec_ref: text
-    files: List<text>
-    tests: List<text>
-    description: text
-    code_examples: List<text>
-    dependencies: List<i32>
-    required_by: List<i32>
-    notes: text
+**Feature ID:** TBD (planned feature)
+**Category:** ML Infrastructure
+**Difficulty:** 3/5
+**Status:** 🚧 Planned (Not Yet Implemented)
 
-# Feature Definition - Commented out due to parse errors
-# val FEATURE = FeatureMetadata {
-#     id: 0,  # TBD - assign when implementing
-#     name: "Configuration System (OmegaConf-like)",
-#     category: "ML Infrastructure",
-#     difficulty: 3,
-#     status: "Planned",
-# }
+## Overview
 
-# =====================================================
-# BDD Specification Tests
-# =====================================================
+Simple's Configuration System provides a hierarchical, type-safe, and composable approach to
+managing ML experiment configurations. Inspired by Hydra/OmegaConf from the Python ecosystem,
+it enables complex configuration workflows while maintaining Simple's emphasis on simplicity
+and type safety.
 
-print("  CONFIG SYSTEM FEATURE SPECIFICATION")
-print("  Category: ML Infrastructure | Status: Planned")
-print("")
+The system is built on Simple's native **SDN (Simple Data Notation)** format, providing a
+more ergonomic alternative to YAML while supporting advanced features like:
+- Variable interpolation (`${model.hidden_size}`)
+- CLI overrides with dot notation (`train.lr=0.001`)
+- Custom resolvers (`${env:CUDA_VISIBLE_DEVICES}`)
+- Schema validation with automatic type coercion
+- Immutable frozen configs for reproducibility
 
+## Key Features
 
-# describe "SDN config loading"
+- **SDN-Based:** Native Simple syntax for configurations
+- **Hierarchical:** Nested structures with dot notation access
+- **Composable:** Merge multiple config sources (files, CLI, code)
+- **Type-Safe:** Schema validation with automatic type conversion
+- **Interpolation:** Variable references and custom resolvers
+- **Immutable:** Frozen configs prevent accidental modification
+- **CLI-Friendly:** Override any value via command line
+- **Reproducible:** Configs can be saved/loaded for experiment tracking
+
+## Motivation
+
+### Problem: Configuration Hell in ML
+
+Machine learning experiments require managing complex configurations:
+```python
+# config.yaml (traditional approach)
+model:
+  architecture: "transformer"
+  hidden_size: 768
+  num_layers: 12
+  dropout: 0.1
+
+training:
+  batch_size: 32
+  learning_rate: 0.001
+  epochs: 100
+  optimizer: "adam"
+
+data:
+  train_path: "/data/train"
+  val_path: "/data/val"
+  max_length: 512
+```
+
+**Challenges:**
+- **Brittle:** Typos cause runtime errors
+- **Repetitive:** Copying values across config sections
+- **Hard to Override:** CLI overrides require manual parsing
+- **No Type Safety:** "32" vs 32 inconsistencies
+- **Poor Composition:** Hard to combine multiple configs
+
+### Solution: Hierarchical Config System
+
+```simple
+# config.sdn (Simple approach)
+val config = {
+    model: {
+        architecture: "transformer",
+        hidden_size: 768,
+        num_layers: 12,
+        dropout: 0.1
+    },
+    training: {
+        batch_size: 32,
+        learning_rate: 0.001,
+        epochs: 100,
+        optimizer: "adam",
+        # Reference other config values
+        warmup_steps: "${math.floor:${training.epochs} * 0.1}"
+    },
+    data: {
+        base_path: "${env:DATA_DIR}",  # Environment variable
+        train_path: "${data.base_path}/train",
+        val_path: "${data.base_path}/val",
+        max_length: 512
+    }
+}
+
+# Type-safe schema
+schema TrainConfig:
+    model: ModelConfig
+    training: TrainingConfig
+    data: DataConfig
+
+# Validate and freeze
+val validated = Conf.validate(config, TrainConfig)
+val frozen = Conf.freeze(validated)
+```
+
+**Benefits:**
+- **Type-Safe:** Schema validation catches errors early
+- **DRY:** Interpolation eliminates repetition
+- **Composable:** Merge configs easily
+- **Flexible:** Override via CLI or code
+- **Reproducible:** Save exact config used
+
+## Syntax
+
+### Basic Config (SDN)
+
+```simple
+# config.sdn
+{
+    experiment_name: "baseline",
+    seed: 42,
+    model: {
+        type: "transformer",
+        hidden_size: 256,
+        num_heads: 8
+    },
+    training: {
+        batch_size: 32,
+        lr: 1e-3,
+        epochs: 50
+    }
+}
+```
+
+### Loading Config
+
+```simple
+val config = Conf.load("config.sdn")
+val model_type = config.model.type  # "transformer"
+val lr = config.training.lr         # 0.001
+```
+
+### CLI Overrides (Dotlist Syntax)
+
+```bash
+simple train.spl train.lr=0.01 train.batch_size=64 model.hidden_size=512
+```
+
+```simple
+# In code:
+val base_config = Conf.load("config.sdn")
+val overrides = Conf.parse_dotlist(cli_args)
+val final_config = Conf.merge(base_config, overrides)
+```
+
+### Interpolation
+
+```simple
+{
+    base_path: "/data",
+    train_path: "${base_path}/train",  # Resolves to "/data/train"
+    val_path: "${base_path}/val",      # Resolves to "/data/val"
+
+    # Use environment variables
+    output_dir: "${env:HOME}/experiments",
+
+    # Custom resolvers
+    timestamp: "${time.now:%Y%m%d_%H%M%S}",
+    cpu_count: "${sys.cpu_count}"
+}
+```
+
+### Schema Validation
+
+```simple
+schema TrainConfig:
+    batch_size: i32       # Must be integer
+    lr: f64               # Must be float
+    epochs: i32           # Must be integer
+    model_path: text      # Must be string
+
+val config = Conf.load("config.sdn")
+val validated = Conf.validate(config, TrainConfig)
+# Automatic type coercion: "100" → 100, "0.001" → 0.001
+```
+
+## Test Coverage (Planned)
+
+This specification validates the following when implemented:
+
+1. **SDN Loading:** Parse SDN files, merge multiple sources
+2. **CLI Overrides:** Parse dotlist syntax, type coercion
+3. **Interpolation:** Variable references, custom resolvers, built-in resolvers
+4. **Validation:** Schema validation, type conversion, error reporting
+5. **Immutability:** Frozen configs, cloning for modification
+
+## Implementation
+
+**Status:** 🚧 **Planned** - Not yet implemented
+
+**Primary Files (Planned):**
+- `src/stdlib/ml/config.spl` - Configuration API
+- `src/stdlib/ml/resolvers.spl` - Built-in resolvers
+- `src/sdn/` - SDN parser (already exists)
+
+**Testing (Future):**
+- `simple/std_lib/test/features/ml/config_system_spec.spl` - This file
+
+**Dependencies:**
+- SDN parser (already implemented)
+- Schema/type system
+- CLI argument parsing
+
+**Required By:**
+- Feature #TBD: Training Engine (needs config management)
+- Feature #TBD: Experiment Tracking (needs config persistence)
+
+## Design Details
+
+### SDN (Simple Data Notation)
+
+Simple's native configuration format, cleaner than YAML:
+
+**Comparison:**
+
+```yaml
+# YAML
+model:
+  architecture: transformer
+  config:
+    hidden_size: 768
+    num_layers: 12
+```
+
+```simple
+# SDN
+{
+    model: {
+        architecture: "transformer",
+        config: {
+            hidden_size: 768,
+            num_layers: 12
+        }
+    }
+}
+```
+
+**Benefits over YAML:**
+- No indentation ambiguity
+- Consistent syntax with Simple code
+- No special characters (`?`, `:`, `|`, `>`)
+- Commas optional for clarity
+
+### Dotlist Override Syntax
+
+**Format:** `key.subkey.field=value`
+
+**Examples:**
+```bash
+train.lr=0.01                    # Set learning rate
+model.hidden_size=512            # Set model size
+data.max_length=128              # Set max length
+experiment.name="my_experiment"  # Set string value
+```
+
+**Type Coercion:**
+```
+"42"      → 42 (i64)
+"0.001"   → 0.001 (f64)
+"true"    → true (bool)
+"[1,2,3]" → [1, 2, 3] (array)
+"{a: 1}"  → {a: 1} (dict)
+```
+
+**Parsing Algorithm:**
+```
+1. Split on '=' to get key and value
+2. Split key on '.' to get path
+3. Parse value (detect type from syntax)
+4. Create nested dict structure
+5. Merge into base config
+```
+
+### Variable Interpolation
+
+**Syntax:** `${path.to.var}`
+
+**Resolution:**
+```simple
+val config = {
+    base: "/data",
+    train: "${base}/train",  # Step 1: See ${...}
+                              # Step 2: Extract path "base"
+                              # Step 3: Lookup value "/data"
+                              # Step 4: Replace with "/data"
+                              # Result: "/data/train"
+}
+```
+
+**Circular Reference Detection:**
+```simple
+val bad_config = {
+    a: "${b}",
+    b: "${a}"  # ERROR: Circular reference detected
+}
+```
+
+**Error Message:**
+```
+error: circular reference in config
+  --> config.sdn:3:8
+   |
+ 2 |     a: "${b}",
+ 3 |     b: "${a}"
+   |        ^^^^^^ this refers back to 'a'
+   |
+   = note: circular reference chain: a → b → a
+```
+
+### Custom Resolvers
+
+**Syntax:** `${resolver_name:arg1,arg2,...}`
+
+**Built-in Resolvers:**
+
+```simple
+# Environment variables
+${env:HOME}                    # /home/user
+${env:CUDA_VISIBLE_DEVICES}    # "0,1,2,3"
+
+# Path operations
+${path.join:a,b,c}            # "a/b/c"
+${path.abs:/data}             # "/absolute/path/to/data"
+
+# Time operations
+${time.now:%Y%m%d}            # "20240115"
+${time.now:%H%M%S}            # "143052"
+
+# System info
+${sys.cpu_count}              # 16
+${sys.platform}               # "linux"
+${sys.hostname}               # "training-node-01"
+
+# Math operations
+${math.floor:${train.epochs} * 0.1}  # Floor of epochs * 0.1
+${math.ceil:${data.size} / ${batch_size}}  # Ceiling division
+```
+
+**Custom Resolver Definition:**
+```simple
+# Define custom resolver
+fn my_resolver(args: List<text>) -> text:
+    return args.join("_")
+
+Conf.register_resolver("custom", my_resolver)
+
+# Use in config
+{
+    output_name: "${custom:experiment,baseline,v1}"  # "experiment_baseline_v1"
+}
+```
+
+### Schema Validation
+
+**Define Schema:**
+```simple
+schema ModelConfig:
+    architecture: text
+    hidden_size: i32
+    num_layers: i32
+    dropout: f64
+
+schema DataConfig:
+    train_path: text
+    val_path: text
+    batch_size: i32
+
+schema ExperimentConfig:
+    model: ModelConfig
+    data: DataConfig
+    seed: i32
+```
+
+**Validate:**
+```simple
+val config = Conf.load("config.sdn")
+val validated = Conf.validate(config, ExperimentConfig)
+
+# Validation errors:
+# - Type mismatch: "hidden_size: expected i32, got text"
+# - Missing field: "model.dropout is required"
+# - Extra field: "unknown_field not in schema"
+```
+
+**Automatic Type Coercion:**
+```simple
+# Config file has strings:
+{
+    hidden_size: "512",    # String "512"
+    dropout: "0.1",        # String "0.1"
+    use_gpu: "true"        # String "true"
+}
+
+# Schema expects types:
+schema Config:
+    hidden_size: i32
+    dropout: f64
+    use_gpu: bool
+
+# After validation:
+{
+    hidden_size: 512,      # Converted to i32
+    dropout: 0.1,          # Converted to f64
+    use_gpu: true          # Converted to bool
+}
+```
+
+### Frozen Configs
+
+**Freeze for Immutability:**
+```simple
+val config = Conf.load("config.sdn")
+val frozen = Conf.freeze(config)
+
+# Attempting to modify throws error:
+frozen.train.lr = 0.01  # ERROR: Cannot modify frozen config
+```
+
+**Unfreeze for Modification:**
+```simple
+val mutable = Conf.unfreeze(frozen)
+mutable.train.lr = 0.01  # OK
+val refrozen = Conf.freeze(mutable)
+```
+
+**Why Freeze?**
+- **Reproducibility:** Ensure config doesn't change during experiment
+- **Safety:** Prevent accidental modifications
+- **Sharing:** Configs can be passed to functions without mutation risk
+
+## Comparison with Other Systems
+
+| Feature | Simple Config | OmegaConf | Hydra | YAML |
+|---------|---------------|-----------|-------|------|
+| Format | SDN | YAML | YAML | YAML |
+| Type Safety | ✅ Schema | ✅ Structured | ❌ No | ❌ No |
+| Interpolation | ✅ `${var}` | ✅ `${var}` | ✅ `${var}` | ❌ No |
+| CLI Overrides | ✅ Dotlist | ✅ Dotlist | ✅ Dotlist | ❌ No |
+| Resolvers | ✅ Custom | ✅ Custom | ✅ Custom | ❌ No |
+| Immutability | ✅ Freeze | ✅ Freeze | ❌ No | ❌ No |
+| Native Lang | ✅ Yes | ❌ Python | ❌ Python | N/A |
+
+## Common Patterns
+
+### Multi-Stage Config Composition
+
+```simple
+# Base config
+val base = Conf.load("base.sdn")
+
+# Environment-specific overrides
+val env_config = match environment:
+    "dev" => Conf.load("dev.sdn")
+    "staging" => Conf.load("staging.sdn")
+    "prod" => Conf.load("prod.sdn")
+
+# CLI overrides
+val cli_overrides = Conf.parse_dotlist(args)
+
+# Merge (later configs override earlier)
+val final = Conf.merge_many([base, env_config, cli_overrides])
+```
+
+### Experiment Tracking
+
+```simple
+fn run_experiment(config: Config):
+    # Freeze config for reproducibility
+    val frozen = Conf.freeze(config)
+
+    # Save config
+    Conf.save(frozen, "${config.output_dir}/config.sdn")
+
+    # Run training
+    train(frozen)
+
+    # Save results with config
+    save_results({
+        config: frozen,
+        metrics: results,
+        timestamp: time.now()
+    })
+```
+
+### Hyperparameter Sweeps
+
+```simple
+val base_config = Conf.load("base.sdn")
+val lr_values = [1e-4, 1e-3, 1e-2]
+val batch_sizes = [16, 32, 64]
+
+for lr in lr_values:
+    for batch in batch_sizes:
+        val config = Conf.merge(base_config, {
+            train: {lr: lr, batch_size: batch}
+        })
+        run_experiment(config)
+```
+
+## Performance Characteristics
+
+| Operation | Complexity | Notes |
+|-----------|------------|-------|
+| Load SDN file | O(n) | Linear in config size |
+| Dot notation access | O(d) | d = depth of nesting |
+| Merge configs | O(n) | Deep merge recursive |
+| Interpolation | O(r) | r = number of references |
+| Validation | O(n) | Linear in config fields |
+
+**Optimizations:**
+- Lazy resolution: Only resolve interpolations when accessed
+- Caching: Memoize resolver results
+- Schema compilation: Pre-compile validation rules
+
+## Related Features
+
+- SDN Parser (already implemented in `src/sdn/`)
+- Feature #TBD: Training Engine (uses configs)
+- Feature #TBD: Experiment Tracking (persists configs)
+- Feature #21: Dicts (config representation)
+- Feature #25: String Type (config keys/values)
+
+## Migration from Other Systems
+
+### From YAML + Hydra
+
+**Before (YAML + Hydra):**
+```yaml
+# config.yaml
+model:
+  _target_: models.Transformer
+  hidden_size: 768
+
+defaults:
+  - override hydra/launcher: joblib
+```
+
+```python
+@hydra.main(config_path="conf", config_name="config")
+def main(cfg: DictConfig):
+    model = instantiate(cfg.model)
+```
+
+**After (SDN + Simple Config):**
+```simple
+# config.sdn
+{
+    model: {
+        type: "Transformer",
+        hidden_size: 768
+    }
+}
+```
+
+```simple
+fn main():
+    val cfg = Conf.load("config.sdn")
+    val validated = Conf.validate(cfg, ExperimentConfig)
+    val model = create_model(validated.model)
+```
+
+### From JSON Config Files
+
+**Before (JSON):**
+```json
+{
+  "model": {"type": "transformer", "size": 768},
+  "data_path": "/data"
+}
+```
+
+```python
+import json
+with open("config.json") as f:
+    config = json.load(f)
+lr = config["train"]["lr"]  # KeyError if missing
+```
+
+**After (SDN):**
+```simple
+val config = Conf.load("config.sdn")
+val lr = config.train.lr  # Type-safe access
+```
+
+**Timeline:**
+- **Phase 1:** Core (SDN loading, merging, CLI parsing, basic interpolation)
+- **Phase 2:** Advanced (Custom resolvers, schema validation, freeze/unfreeze)
+- **Phase 3:** Production (Lazy resolution, error messages, diff tool)
+
+**Current Status:**
+- ✅ SDN parser implemented
+- ⏳ Conf API not yet implemented
+- ⏳ Awaiting schema/validation system
+- ⏳ Awaiting CLI argument parsing integration
+
+**Estimated Completion:** Not scheduled
+
+---
+
+**Notes:**
+- All tests in this specification are currently **TODO**
+- Tests will be enabled when implementation begins
+- This spec serves as design documentation for the planned feature
+
+**Migration Notes (This File):**
+- Automated migration: N/A (planned feature spec)
+- Documentation enhancement: ~50 minutes (Session 4)
+- Tests remain TODO until feature implementation
+"""
+
 describe "SDN config loading":
     """
-    TODO: Add documentation here
+    ## SDN Configuration File Loading
+
+    SDN (Simple Data Notation) is Simple's native configuration format, providing a clean
+    alternative to YAML with native Simple syntax. The config system loads SDN files and
+    provides type-safe access to configuration values.
+
+    **SDN Syntax:**
+    ```simple
+    {
+        key: "value",
+        nested: {
+            field: 42,
+            list: [1, 2, 3]
+        }
+    }
+    ```
+
+    **Loading:**
+    ```simple
+    val config = Conf.load("config.sdn")
+    val value = config.nested.field  # 42
+    ```
+
+    **Benefits over YAML:**
+    - No indentation ambiguity
+    - Consistent with Simple syntax
+    - No special characters
+    - Type-safe access
+
+    **Hierarchical Structure:**
+    Configs are nested dictionaries supporting arbitrary depth:
+    - Dot notation access: `config.model.hidden_size`
+    - Subscript access: `config["model"]["hidden_size"]`
+    - Type preservation: integers stay integers, not strings
+
+    **Multi-Source Merging:**
+    Combine multiple config files with later values overriding earlier:
+    ```simple
+    val base = Conf.load("base.sdn")
+    val override = Conf.load("override.sdn")
+    val merged = Conf.merge(base, override)
+    ```
+
+    **Implementation:** When implemented, will use existing SDN parser in `src/sdn/`
+    with added Conf API for loading, merging, and access.
     """
 
-# it "loads hierarchical configs from SDN files"
         it "loads hierarchical configs from SDN files":
             """
-            TODO: Add documentation here
+            **Given** an SDN configuration file with nested structure
+            **When** loading the file via Conf.load()
+            **Then** creates hierarchical config with dot notation access
+
+            **Config File (config.sdn):**
+            ```simple
+            {
+                experiment: "baseline",
+                model: {
+                    type: "transformer",
+                    hidden_size: 768,
+                    num_layers: 12
+                },
+                training: {
+                    batch_size: 32,
+                    lr: 0.001,
+                    epochs: 100
+                }
+            }
+            ```
+
+            **Loading:**
+            ```simple
+            val cfg = Conf.load("config.sdn")
+            ```
+
+            **Access Patterns:**
+            ```simple
+            # Dot notation
+            cfg.experiment           # "baseline"
+            cfg.model.type           # "transformer"
+            cfg.model.hidden_size    # 768
+            cfg.training.lr          # 0.001
+
+            # Subscript notation
+            cfg["model"]["type"]     # "transformer"
+            ```
+
+            **Type Preservation:**
+            - Strings stay strings: `"transformer"`
+            - Integers stay integers: `768` (not `"768"`)
+            - Floats stay floats: `0.001`
+            - Booleans stay booleans: `true`
+
+            **Verification:** All nested values accessible with correct types
+
+            **Implementation:** Uses SDN parser + dict wrapper for dot notation
+
+            **Related:** SDN parser, Feature #21 (Dicts)
             """
-# TODO: Implement
+# TODO: Implement when Conf API is ready
 print("    [TODO] Not yet implemented")
 
-# it "merges multiple config sources"
         it "merges multiple config sources":
             """
-            TODO: Add documentation here
+            **Given** multiple SDN config files (base + overrides)
+            **When** merging them with Conf.merge()
+            **Then** later configs override earlier values (deep merge)
+
+            **Base Config (base.sdn):**
+            ```simple
+            {
+                model: {
+                    type: "transformer",
+                    hidden_size: 256,
+                    num_layers: 6
+                },
+                training: {
+                    batch_size: 32,
+                    lr: 0.001
+                }
+            }
+            ```
+
+            **Override Config (large.sdn):**
+            ```simple
+            {
+                model: {
+                    hidden_size: 768,  # Override
+                    num_layers: 12     # Override
+                }
+            }
+            ```
+
+            **Merging:**
+            ```simple
+            val base = Conf.load("base.sdn")
+            val override = Conf.load("large.sdn")
+            val merged = Conf.merge(base, override)
+            ```
+
+            **Result:**
+            ```simple
+            {
+                model: {
+                    type: "transformer",  # From base (preserved)
+                    hidden_size: 768,     # From override
+                    num_layers: 12        # From override
+                },
+                training: {
+                    batch_size: 32,       # From base (unchanged)
+                    lr: 0.001             # From base (unchanged)
+                }
+            }
+            ```
+
+            **Deep Merge Algorithm:**
+            ```
+            merge(base, override):
+                for key in override:
+                    if key not in base:
+                        base[key] = override[key]  # Add new key
+                    elif is_dict(override[key]) and is_dict(base[key]):
+                        merge(base[key], override[key])  # Recursive
+                    else:
+                        base[key] = override[key]  # Override value
+            ```
+
+            **Use Cases:**
+            - Base config + environment-specific overrides
+            - Default config + experiment-specific changes
+            - Shared config + user customizations
+
+            **Verification:** Merged config has override values, preserves non-overridden
+
+            **Implementation:** Recursive dict merge with type checking
+
+            **Related:** Feature #21 (Dicts), config composition
             """
-# TODO: Implement
+# TODO: Implement when Conf.merge() is ready
 print("    [TODO] Not yet implemented")
 
-# describe "CLI dotlist overrides"
 print("")
 describe "CLI dotlist overrides":
     """
-    TODO: Add documentation here
+    ## Command-Line Configuration Overrides
+
+    Dotlist syntax enables overriding any configuration value from the command line using
+    dot notation. This is essential for ML experimentation where you want to quickly test
+    different hyperparameters without editing config files.
+
+    **Syntax:** `key.subkey.field=value`
+
+    **Examples:**
+    ```bash
+    simple train.spl train.lr=0.01 model.hidden_size=512 experiment.name="test"
+    ```
+
+    **Parsing:**
+    ```simple
+    val args = ["train.lr=0.01", "model.hidden_size=512"]
+    val overrides = Conf.parse_dotlist(args)
+    # Result: {train: {lr: 0.01}, model: {hidden_size: 512}}
+    ```
+
+    **Type Coercion:**
+    Automatically infer types from syntax:
+    - Integers: `batch_size=32` → 32
+    - Floats: `lr=0.001` → 0.001
+    - Booleans: `use_gpu=true` → true
+    - Strings: `name="experiment"` → "experiment"
+    - Arrays: `dims=[128,256,512]` → [128, 256, 512]
+    - Dicts: `config={a:1,b:2}` → {a: 1, b: 2}
+
+    **Merging with Base Config:**
+    ```simple
+    val base = Conf.load("config.sdn")
+    val cli = Conf.parse_dotlist(cli_args)
+    val final = Conf.merge(base, cli)
+    ```
+
+    **Implementation:** Parse dotlist → create nested dict → merge with base config
     """
 
-# it "parses dotlist syntax"
         it "parses dotlist syntax":
             """
-            TODO: Add documentation here
+            **Given** command-line arguments in dotlist format
+            **When** parsing with Conf.parse_dotlist()
+            **Then** creates nested dictionary structure
+
+            **Input:**
+            ```simple
+            val args = ["train.epochs=20", "model.size=512", "debug=true"]
+            ```
+
+            **Parsing:**
+            ```simple
+            val config = Conf.parse_dotlist(args)
+            ```
+
+            **Result:**
+            ```simple
+            {
+                train: {
+                    epochs: 20
+                },
+                model: {
+                    size: 512
+                },
+                debug: true
+            }
+            ```
+
+            **Parsing Algorithm:**
+            ```
+            1. For each "key.path=value":
+                a. Split on '=' to get (path, value)
+                b. Split path on '.' to get parts
+                c. Parse value to infer type
+                d. Build nested dict structure
+                e. Set value at deepest level
+            ```
+
+            **Nested Path Handling:**
+            ```simple
+            "a.b.c.d=10" → {a: {b: {c: {d: 10}}}}
+            ```
+
+            **Verification:** Dotlist creates correct nested structure
+
+            **Implementation:** Recursive dict construction from path parts
+
+            **Example Usage:**
+            ```bash
+            simple train.spl train.epochs=20
+            ```
+
+            **Related:** CLI argument parsing, config merging
             """
 # TODO: Example: "train.epochs=20" -> {train: {epochs: 20}}
 print("    [TODO] Not yet implemented")
 
-# it "supports type coercion"
         it "supports type coercion":
             """
-            TODO: Add documentation here
+            **Given** dotlist arguments with various value formats
+            **When** parsing the arguments
+            **Then** automatically infers and converts to correct types
+
+            **Type Inference Rules:**
+            ```
+            "42"           → 42 (i64)        # Integer
+            "3.14"         → 3.14 (f64)      # Float
+            "true"         → true (bool)     # Boolean
+            "false"        → false (bool)    # Boolean
+            "hello"        → "hello" (text)  # String (no quotes)
+            "\"hello\""    → "hello" (text)  # String (with quotes)
+            "[1,2,3]"      → [1, 2, 3]       # Array
+            "{a:1,b:2}"    → {a: 1, b: 2}    # Dict
+            ```
+
+            **Examples:**
+            ```simple
+            val inputs = [
+                "count=100",          # i64
+                "lr=0.001",           # f64
+                "use_gpu=true",       # bool
+                "name=experiment",    # text
+                "dims=[64,128,256]",  # array
+                "meta={a:1,b:2}"      # dict
+            ]
+            val config = Conf.parse_dotlist(inputs)
+            ```
+
+            **Result:**
+            ```simple
+            {
+                count: 100,                      # i64
+                lr: 0.001,                       # f64
+                use_gpu: true,                   # bool
+                name: "experiment",              # text
+                dims: [64, 128, 256],            # array
+                meta: {a: 1, b: 2}               # dict
+            }
+            ```
+
+            **Detection Algorithm:**
+            ```
+            detect_type(value_str):
+                if value_str == "true" or value_str == "false":
+                    return parse_bool(value_str)
+                if value_str matches r"^-?\d+$":
+                    return parse_int(value_str)
+                if value_str matches r"^-?\d+\.\d+$":
+                    return parse_float(value_str)
+                if value_str starts_with("["):
+                    return parse_array(value_str)
+                if value_str starts_with("{"):
+                    return parse_dict(value_str)
+                return value_str  # default to string
+            ```
+
+            **Quote Handling:**
+            ```simple
+            name="my experiment"  # With quotes → "my experiment"
+            name=my_experiment    # No quotes → "my_experiment"
+            ```
+
+            **Verification:** All types correctly inferred and converted
+
+            **Implementation:** Regex patterns + type parsers
+
+            **Related:** Type system, SDN parsing
             """
 # TODO: "42" -> 42, "true" -> true, "[1,2,3]" -> [1,2,3]
 print("    [TODO] Not yet implemented")
 
-# describe "Interpolation and resolvers"
 print("")
 describe "Interpolation and resolvers":
     """
-    TODO: Add documentation here
+    ## Variable Interpolation and Custom Resolvers
+
+    Interpolation enables dynamic configuration values by referencing other config values
+    or calling resolver functions. This eliminates repetition and enables complex config
+    composition.
+
+    **Basic Interpolation:**
+    ```simple
+    {
+        base_path: "/data",
+        train_path: "${base_path}/train"  # Resolves to "/data/train"
+    }
+    ```
+
+    **Resolver Syntax:** `${resolver_name:arg1,arg2,...}`
+
+    **Built-in Resolvers:**
+    - `${env:VAR_NAME}` - Environment variables
+    - `${path.join:a,b,c}` - Path concatenation
+    - `${time.now:%Y%m%d}` - Timestamp formatting
+    - `${sys.cpu_count}` - System info
+    - `${math.floor:expr}` - Math operations
+
+    **Custom Resolvers:**
+    ```simple
+    fn my_resolver(args: List<text>) -> text:
+        return args.join("_")
+
+    Conf.register_resolver("custom", my_resolver)
+
+    # Use: ${custom:a,b,c} → "a_b_c"
+    ```
+
+    **Resolution Process:**
+    1. Scan config for `${...}` patterns
+    2. Parse resolver name and arguments
+    3. Call resolver function
+    4. Replace pattern with result
+    5. Repeat until no patterns remain
+
+    **Circular Reference Detection:**
+    Detects and reports cycles: `a → b → c → a`
+
+    **Implementation:** Pattern matching + recursive resolution with cycle detection
     """
 
-# it "resolves variable references"
         it "resolves variable references":
             """
-            TODO: Add documentation here
+            **Given** a config with variable references (`${var}`)
+            **When** resolving the config
+            **Then** replaces references with actual values
+
+            **Config:**
+            ```simple
+            {
+                base_dir: "/data",
+                train_path: "${base_dir}/train",
+                val_path: "${base_dir}/val",
+                test_path: "${base_dir}/test"
+            }
+            ```
+
+            **Resolution:**
+            ```simple
+            val config = Conf.load_and_resolve("config.sdn")
+            ```
+
+            **Result:**
+            ```simple
+            {
+                base_dir: "/data",
+                train_path: "/data/train",    # Resolved
+                val_path: "/data/val",        # Resolved
+                test_path: "/data/test"       # Resolved
+            }
+            ```
+
+            **Resolution Algorithm:**
+            ```
+            resolve(config):
+                for key, value in config:
+                    if is_string(value) and contains(value, "${"):
+                        pattern = extract_pattern(value)
+                        ref_path = pattern.path
+                        ref_value = lookup(config, ref_path)
+                        value = replace(value, pattern, ref_value)
+            ```
+
+            **Nested References:**
+            ```simple
+            {
+                root: "/data",
+                base: "${root}/project",
+                train: "${base}/train"  # → "/data/project/train"
+            }
+            ```
+
+            **Verification:** All references resolved to correct values
+
+            **Implementation:** Regex pattern matching + path lookup + substitution
+
+            **Related:** String interpolation, path operations
             """
 # TODO: ${base}/data -> "/data/train" if base="/data"
 print("    [TODO] Not yet implemented")
 
-# it "supports custom resolvers"
         it "supports custom resolvers":
             """
-            TODO: Add documentation here
+            **Given** a custom resolver function registered
+            **When** using resolver in config (`${name:args}`)
+            **Then** calls function with arguments and uses return value
+
+            **Resolver Definition:**
+            ```simple
+            fn path_join(args: List<text>) -> text:
+                return args.join("/")
+
+            Conf.register_resolver("path.join", path_join)
+            ```
+
+            **Config:**
+            ```simple
+            {
+                project_dir: "${path.join:/data,experiments,baseline}",
+                output_dir: "${path.join:${project_dir},outputs}"
+            }
+            ```
+
+            **Resolution:**
+            ```simple
+            val config = Conf.load_and_resolve("config.sdn")
+            ```
+
+            **Result:**
+            ```simple
+            {
+                project_dir: "/data/experiments/baseline",
+                output_dir: "/data/experiments/baseline/outputs"
+            }
+            ```
+
+            **Resolver Calling:**
+            ```
+            1. See pattern: ${path.join:a,b,c}
+            2. Extract resolver name: "path.join"
+            3. Extract arguments: ["a", "b", "c"]
+            4. Call: path_join(["a", "b", "c"])
+            5. Get result: "a/b/c"
+            6. Replace pattern with result
+            ```
+
+            **Nested Resolvers:**
+            ```simple
+            {
+                timestamp: "${time.now:%Y%m%d}",
+                run_name: "${custom:${experiment}_${timestamp}}"
+            }
+            ```
+
+            **Verification:** Custom resolver called and result substituted
+
+            **Implementation:** Resolver registry (dict of name → function)
+
+            **Related:** Function references, dynamic dispatch
             """
 # TODO: ${path.join:a,b,c} -> "a/b/c"
 print("    [TODO] Not yet implemented")
 
-# it "provides built-in resolvers"
         it "provides built-in resolvers":
             """
-            TODO: Add documentation here
+            **Given** a config using built-in resolvers
+            **When** resolving the config
+            **Then** resolver functions provide dynamic values
+
+            **Environment Variables:**
+            ```simple
+            {
+                home_dir: "${env:HOME}",
+                cuda_devices: "${env:CUDA_VISIBLE_DEVICES}"
+            }
+            # Result: {home_dir: "/home/user", cuda_devices: "0,1,2,3"}
+            ```
+
+            **Time Formatting:**
+            ```simple
+            {
+                timestamp: "${time.now:%Y%m%d_%H%M%S}",
+                date: "${time.now:%Y-%m-%d}"
+            }
+            # Result: {timestamp: "20240115_143052", date: "2024-01-15"}
+            ```
+
+            **System Info:**
+            ```simple
+            {
+                cpu_count: "${sys.cpu_count}",
+                platform: "${sys.platform}",
+                hostname: "${sys.hostname}"
+            }
+            # Result: {cpu_count: 16, platform: "linux", hostname: "gpu-node-01"}
+            ```
+
+            **Path Operations:**
+            ```simple
+            {
+                project: "${path.join:${env:HOME},projects,ml}",
+                abs_path: "${path.abs:data}"
+            }
+            # Result: {project: "/home/user/projects/ml", abs_path: "/full/path/to/data"}
+            ```
+
+            **Math Operations:**
+            ```simple
+            {
+                epochs: 100,
+                warmup_steps: "${math.floor:${epochs} * 0.1}"
+            }
+            # Result: {warmup_steps: 10}
+            ```
+
+            **Built-in Resolver List:**
+            - `env:VAR` - Environment variable
+            - `path.join:...` - Join path components
+            - `path.abs:path` - Absolute path
+            - `time.now:format` - Current time formatted
+            - `sys.cpu_count` - CPU count
+            - `sys.platform` - Platform name
+            - `sys.hostname` - Hostname
+            - `math.floor:expr` - Floor of expression
+            - `math.ceil:expr` - Ceiling of expression
+
+            **Verification:** All built-in resolvers work correctly
+
+            **Implementation:** Pre-registered resolver functions
+
+            **Related:** Environment access, system introspection
             """
 # TODO: ${env:HOME}, ${time.now:%Y%m%d}, ${sys.cpu_count}
 print("    [TODO] Not yet implemented")
 
-# describe "Schema validation"
 print("")
 describe "Schema validation":
     """
-    TODO: Add documentation here
+    ## Type-Safe Schema Validation
+
+    Schema validation ensures configs match expected structure and types, catching errors
+    early. Automatic type coercion handles string→int conversions common in CLI overrides.
+
+    **Define Schema:**
+    ```simple
+    schema TrainConfig:
+        batch_size: i32
+        lr: f64
+        epochs: i32
+        model_path: text
+    ```
+
+    **Validate:**
+    ```simple
+    val config = Conf.load("config.sdn")
+    val validated = Conf.validate(config, TrainConfig)
+    # Throws error if validation fails
+    ```
+
+    **Type Coercion:**
+    ```simple
+    # Config has strings (common from CLI):
+    {batch_size: "32", lr: "0.001"}
+
+    # Schema expects types:
+    schema Config:
+        batch_size: i32
+        lr: f64
+
+    # After validation:
+    {batch_size: 32, lr: 0.001}  # Automatically converted
+    ```
+
+    **Error Messages:**
+    - Type mismatch: "batch_size: expected i32, got text 'invalid'"
+    - Missing field: "model_path is required but not found"
+    - Extra field: "unknown_field not defined in schema"
+
+    **Implementation:** Recursive schema matching + type conversion + error reporting
     """
 
-# it "validates against schema"
         it "validates against schema":
             """
-            TODO: Add documentation here
+            **Given** a config and a schema definition
+            **When** validating with Conf.validate()
+            **Then** ensures config matches schema structure and types
+
+            **Schema:**
+            ```simple
+            schema ModelConfig:
+                architecture: text
+                hidden_size: i32
+                dropout: f64
+
+            schema ExperimentConfig:
+                model: ModelConfig
+                batch_size: i32
+                lr: f64
+            ```
+
+            **Valid Config:**
+            ```simple
+            {
+                model: {
+                    architecture: "transformer",
+                    hidden_size: 768,
+                    dropout: 0.1
+                },
+                batch_size: 32,
+                lr: 0.001
+            }
+            ```
+
+            **Validation:**
+            ```simple
+            val config = Conf.load("config.sdn")
+            val validated = Conf.validate(config, ExperimentConfig)
+            # Success - config matches schema
+            ```
+
+            **Invalid Config:**
+            ```simple
+            {
+                model: {
+                    architecture: "transformer",
+                    hidden_size: "768",  # Wrong type (text, not i32)
+                    # dropout missing
+                },
+                batch_size: 32
+                # lr missing
+            }
+            ```
+
+            **Validation Errors:**
+            ```
+            error: config validation failed
+              --> config.sdn:4:21
+               |
+             4 |     hidden_size: "768",
+               |                  ^^^^^ expected i32, got text
+               |
+            error: missing required field
+              --> config.sdn:6:5
+               |
+             6 |     },
+               |      ^ missing field: model.dropout (f64)
+               |
+            error: missing required field
+              --> config.sdn:8:5
+               |
+             8 | }
+               |  ^ missing field: lr (f64)
+            ```
+
+            **Verification:** Valid configs pass, invalid configs error with helpful messages
+
+            **Implementation:** Recursive schema matching with error collection
+
+            **Related:** Type system, schema definitions
             """
 # TODO: Enforce type constraints
 print("    [TODO] Not yet implemented")
 
-# it "converts types automatically"
         it "converts types automatically":
             """
-            TODO: Add documentation here
+            **Given** a config with string values (common from CLI/env vars)
+            **When** validating against schema with typed fields
+            **Then** automatically converts strings to expected types
+
+            **Config (from CLI overrides):**
+            ```simple
+            {
+                batch_size: "32",      # String (from CLI)
+                lr: "0.001",           # String
+                use_gpu: "true",       # String
+                epochs: "100"          # String
+            }
+            ```
+
+            **Schema:**
+            ```simple
+            schema TrainConfig:
+                batch_size: i32
+                lr: f64
+                use_gpu: bool
+                epochs: i32
+            ```
+
+            **After Validation:**
+            ```simple
+            {
+                batch_size: 32,        # Converted to i32
+                lr: 0.001,             # Converted to f64
+                use_gpu: true,         # Converted to bool
+                epochs: 100            # Converted to i32
+            }
+            ```
+
+            **Conversion Rules:**
+            ```
+            text → i32:   "100" → 100
+            text → f64:   "0.001" → 0.001
+            text → bool:  "true" → true, "false" → false
+            i32 → f64:    100 → 100.0
+            ```
+
+            **Invalid Conversions:**
+            ```simple
+            # Config:
+            {batch_size: "invalid"}
+
+            # Schema expects i32
+
+            # Error:
+            "batch_size: cannot convert 'invalid' to i32"
+            ```
+
+            **Verification:** Valid string values converted, invalid values error
+
+            **Implementation:** Type parser + conversion functions
+
+            **Related:** Type coercion, CLI parsing
             """
 # TODO: "100" -> 100 when schema expects i32
 print("    [TODO] Not yet implemented")
 
-# it "reports validation errors with paths"
         it "reports validation errors with paths":
             """
-            TODO: Add documentation here
+            **Given** a config with multiple validation errors
+            **When** validating the config
+            **Then** reports all errors with full paths to problematic fields
+
+            **Config:**
+            ```simple
+            {
+                model: {
+                    architecture: 123,          # Wrong type
+                    hidden_size: "not_a_number" # Invalid conversion
+                },
+                training: {
+                    batch_size: 32,
+                    lr: "invalid"               # Invalid conversion
+                    # epochs missing
+                }
+            }
+            ```
+
+            **Schema:**
+            ```simple
+            schema ModelConfig:
+                architecture: text
+                hidden_size: i32
+
+            schema TrainingConfig:
+                batch_size: i32
+                lr: f64
+                epochs: i32
+
+            schema Config:
+                model: ModelConfig
+                training: TrainingConfig
+            ```
+
+            **Validation Errors:**
+            ```
+            error: type mismatch at model.architecture
+               |
+               | expected: text
+               | got: i32 (123)
+               |
+
+            error: type conversion failed at model.hidden_size
+               |
+               | cannot convert "not_a_number" to i32
+               |
+
+            error: type conversion failed at training.lr
+               |
+               | cannot convert "invalid" to f64
+               |
+
+            error: missing required field
+               |
+               | field: training.epochs
+               | type: i32
+               |
+            ```
+
+            **Error Path Format:**
+            - Root level: `field_name`
+            - Nested: `parent.child.grandchild`
+            - Array: `list[3].field`
+
+            **Multiple Errors:**
+            Validation collects all errors instead of stopping at first,
+            enabling users to fix all issues at once.
+
+            **Verification:** All validation errors reported with accurate paths
+
+            **Implementation:** Error accumulation during recursive validation
+
+            **Related:** Error reporting, path tracking
             """
 # TODO: "train.epochs: expected i32, got text"
 print("    [TODO] Not yet implemented")
 
-# describe "Frozen configs"
 print("")
 describe "Frozen configs":
     """
-    TODO: Add documentation here
+    ## Immutable Configuration Freezing
+
+    Frozen configs prevent accidental modification during experiment execution, ensuring
+    reproducibility. This is critical for ML experiments where config changes can
+    invalidate results.
+
+    **Freeze:**
+    ```simple
+    val config = Conf.load("config.sdn")
+    val frozen = Conf.freeze(config)
+
+    frozen.train.lr = 0.01  # ERROR: Cannot modify frozen config
+    ```
+
+    **Unfreeze for Modification:**
+    ```simple
+    val mutable = Conf.unfreeze(frozen)
+    mutable.train.lr = 0.01  # OK
+    val refrozen = Conf.freeze(mutable)
+    ```
+
+    **Why Freeze?**
+    - **Reproducibility:** Config can't change during execution
+    - **Safety:** Prevents accidental mutations
+    - **Sharing:** Pass to functions without mutation risk
+    - **Logging:** Save exact config used for experiment
+
+    **Use Pattern:**
+    ```simple
+    fn run_experiment(config):
+        val frozen = Conf.freeze(config)
+        Conf.save(frozen, "experiment_config.sdn")
+        train(frozen)  # Can't accidentally modify
+    ```
+
+    **Implementation:** Wrapper that intercepts modification attempts
     """
 
-# it "prevents modification when frozen"
         it "prevents modification when frozen":
             """
-            TODO: Add documentation here
+            **Given** a frozen configuration object
+            **When** attempting to modify any field
+            **Then** raises error preventing mutation
+
+            **Create and Freeze:**
+            ```simple
+            val config = {
+                model: {hidden_size: 256},
+                training: {lr: 0.001, epochs: 100}
+            }
+            val frozen = Conf.freeze(config)
+            ```
+
+            **Modification Attempts (All Error):**
+            ```simple
+            # Top-level modification
+            frozen.seed = 42
+            # ERROR: Cannot modify frozen config
+
+            # Nested modification
+            frozen.model.hidden_size = 512
+            # ERROR: Cannot modify frozen config at path: model.hidden_size
+
+            # Deep nested modification
+            frozen.training.lr = 0.01
+            # ERROR: Cannot modify frozen config at path: training.lr
+            ```
+
+            **Error Message:**
+            ```
+            error: cannot modify frozen configuration
+              |
+              | attempted modification at: training.lr
+              | current value: 0.001
+              | attempted value: 0.01
+              |
+              = note: use Conf.unfreeze() to create mutable copy
+            ```
+
+            **Still Readable:**
+            ```simple
+            val lr = frozen.training.lr  # OK: 0.001 (reading allowed)
+            ```
+
+            **Verification:** All modification attempts fail with clear errors
+
+            **Implementation:** Immutable wrapper with modification guards
+
+            **Related:** Immutability, const correctness
             """
 # TODO: cfg.train.epochs = 20 throws error if frozen
 print("    [TODO] Not yet implemented")
 
-# it "allows cloning for modification"
         it "allows cloning for modification":
             """
-            TODO: Add documentation here
+            **Given** a frozen configuration
+            **When** unfreezing to create mutable clone
+            **Then** clone can be modified without affecting original
+
+            **Original Frozen Config:**
+            ```simple
+            val original = Conf.freeze({
+                model: {hidden_size: 256},
+                training: {lr: 0.001}
+            })
+            ```
+
+            **Unfreeze for Modification:**
+            ```simple
+            val modified = Conf.unfreeze(original)
+            modified.training.lr = 0.01  # OK: mutable
+            modified.model.hidden_size = 512  # OK: mutable
+            ```
+
+            **Original Unchanged:**
+            ```simple
+            original.training.lr  # Still 0.001
+            original.model.hidden_size  # Still 256
+            ```
+
+            **Refreeze if Needed:**
+            ```simple
+            val refrozen = Conf.freeze(modified)
+            refrozen.training.lr = 0.02  # ERROR: frozen again
+            ```
+
+            **Use Case - Hyperparameter Sweep:**
+            ```simple
+            val base_frozen = Conf.freeze(base_config)
+
+            for lr in [1e-4, 1e-3, 1e-2]:
+                val config = Conf.unfreeze(base_frozen)
+                config.training.lr = lr
+                run_experiment(Conf.freeze(config))
+            ```
+
+            **Clone Semantics:**
+            - Deep copy: Modifying nested fields doesn't affect original
+            - Independent: Each unfrozen copy is independent
+            - Re-freezable: Can freeze clones for safety
+
+            **Verification:**
+            - Unfrozen clone is modifiable
+            - Original frozen config unchanged
+            - Refrozen clone is immutable again
+
+            **Implementation:** Deep copy + freeze/unfreeze wrapper
+
+            **Related:** Copy-on-write, immutable data structures
             """
 # TODO: mutable_cfg = Conf.unfreeze(cfg)
 print("    [TODO] Not yet implemented")
@@ -174,27 +1652,3 @@ print("    [TODO] Not yet implemented")
 print("")
 print("  SUMMARY: Config System tests not yet implemented")
 print("  This is a planned feature - see spec for full design")
-
-# =====================================================
-# Implementation Roadmap
-# =====================================================
-
-# Phase 1: Core (v0.1)
-# - [x] SDN loading (already exists in src/sdn/)
-# - [ ] Conf.merge() with deep merge
-# - [ ] Dot notation access
-# - [ ] CLI dotlist parsing
-# - [ ] Basic interpolation (${var})
-
-# Phase 2: Advanced (v0.2)
-# - [ ] Custom resolvers
-# - [ ] Built-in resolvers (path, env, time, sys)
-# - [ ] Schema validation with type coercion
-# - [ ] Freeze/unfreeze
-
-# Phase 3: Production (v0.3)
-# - [ ] Lazy resolution
-# - [ ] Validation decorators
-# - [ ] Error messages with source location
-# - [ ] YAML compatibility layer
-# - [ ] Config diff tool
