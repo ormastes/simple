@@ -164,7 +164,16 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            let value = self.parse_expression()?;
+            let mut value = self.parse_expression()?;
+
+            // Check for spread operator: args...
+            // This enables spreading variadic parameters in function calls
+            // Example: wrapper(args...) where args is a variadic parameter
+            if self.check(&TokenKind::Ellipsis) {
+                self.advance(); // consume ...
+                value = Expr::Spread(Box::new(value));
+            }
+
             args.push(Argument { name, value });
 
             // Skip newlines, indent, dedent after argument (for multi-line argument lists)
