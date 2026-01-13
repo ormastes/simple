@@ -64,7 +64,7 @@ use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
 
 // Diagram tracing for call flow profiling
-use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, Parameter, SelfMode, Type};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, Parameter, SelfMode, Type};
 use simple_runtime::value::diagram_ffi;
 use std::cell::RefCell;
 use std::collections::HashMap;
