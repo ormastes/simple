@@ -299,6 +299,9 @@ impl<'a> Parser<'a> {
             TokenKind::Default => "Default".to_string(),
             // Allow 'common' to be used as identifier (directory name in stdlib)
             TokenKind::Common => "common".to_string(),
+            // Allow logical/conversion operators as trait names
+            TokenKind::Not => "Not".to_string(),
+            TokenKind::From => "From".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
