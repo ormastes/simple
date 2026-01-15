@@ -83,7 +83,8 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::For)?;
 
-        let pattern = self.parse_pattern()?;
+        // Check for enumerate shorthand: `for i, item in items:`
+        let (pattern, auto_enumerate) = self.parse_for_pattern()?;
         self.expect(&TokenKind::In)?;
         let iterable = self.parse_expression()?;
         self.expect(&TokenKind::Colon)?;
@@ -100,7 +101,40 @@ impl<'a> Parser<'a> {
             iterable,
             body,
             is_suspend: false,
+            auto_enumerate,
         }))
+    }
+
+    /// Parse for loop pattern, detecting enumerate shorthand `for i, item in items:`
+    /// Returns (pattern, auto_enumerate)
+    fn parse_for_pattern(&mut self) -> Result<(Pattern, bool), ParseError> {
+        // Check if this looks like enumerate shorthand: bare `ident, pattern`
+        // (not a tuple pattern which uses parentheses)
+        if let TokenKind::Identifier { name, .. } = &self.current.kind {
+            let index_name = name.clone();
+            let index_span = self.current.span;
+            self.advance();
+
+            // If followed by comma (enumerate shorthand), parse the item pattern
+            if self.check(&TokenKind::Comma) {
+                self.advance(); // consume comma
+                let item_pattern = self.parse_pattern()?;
+
+                // Create tuple pattern for (index, item)
+                let tuple_pattern = Pattern::Tuple(vec![
+                    Pattern::Identifier(index_name),
+                    item_pattern,
+                ]);
+                return Ok((tuple_pattern, true));
+            }
+
+            // Not enumerate shorthand - just a regular identifier pattern
+            return Ok((Pattern::Identifier(index_name), false));
+        }
+
+        // Fall back to standard pattern parsing (handles tuples, wildcards, etc.)
+        let pattern = self.parse_pattern()?;
+        Ok((pattern, false))
     }
 
     pub(crate) fn parse_while(&mut self) -> Result<Node, ParseError> {
@@ -380,7 +414,8 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::ForSuspend)?;
 
-        let pattern = self.parse_pattern()?;
+        // Check for enumerate shorthand: `for~ i, item in items:`
+        let (pattern, auto_enumerate) = self.parse_for_pattern()?;
         self.expect(&TokenKind::In)?;
         let iterable = self.parse_expression()?;
         self.expect(&TokenKind::Colon)?;
@@ -397,6 +432,7 @@ impl<'a> Parser<'a> {
             iterable,
             body,
             is_suspend: true,
+            auto_enumerate,
         }))
     }
 

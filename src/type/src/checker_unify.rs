@@ -199,6 +199,10 @@ impl TypeChecker {
                 // Full capability tracking will be added in Phase 2
                 self.ast_type_to_type(inner)
             }
+            AstType::SelfType => {
+                // Self return type - treat as Self (will be resolved during type checking)
+                Type::Named("Self".to_string())
+            }
         }
     }
 

@@ -335,6 +335,10 @@ pub enum Type {
         repr: Option<ReprType>,
         constraints: UnitReprConstraints,
     },
+    /// Self type: `self` used as return type in methods
+    /// Resolved to the enclosing type during semantic analysis
+    /// Enables fluent APIs: fn increment() -> self
+    SelfType,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

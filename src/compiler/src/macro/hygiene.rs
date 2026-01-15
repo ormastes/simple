@@ -202,6 +202,7 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
                 iterable,
                 body,
                 is_suspend: stmt.is_suspend,
+                auto_enumerate: stmt.auto_enumerate,
             })
         }
         Node::While(stmt) => {

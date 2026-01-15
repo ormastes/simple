@@ -392,6 +392,8 @@ impl<'a> Monomorphizer<'a> {
                 repr: repr.clone(),
                 constraints: constraints.clone(),
             },
+            // Self type doesn't have type parameters to substitute
+            AstType::SelfType => AstType::SelfType,
         }
     }
 
