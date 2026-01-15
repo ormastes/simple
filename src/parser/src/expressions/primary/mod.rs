@@ -26,7 +26,7 @@ impl<'a> Parser<'a> {
             | TokenKind::Nil
             | TokenKind::Symbol(_) => self.parse_primary_literal(),
             TokenKind::Result
-            | TokenKind::Identifier(_)
+            | TokenKind::Identifier { .. }
             | TokenKind::Self_
             | TokenKind::Out
             | TokenKind::OutErr

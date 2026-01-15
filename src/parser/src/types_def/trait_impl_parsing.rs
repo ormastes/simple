@@ -33,7 +33,7 @@ impl<'a> Parser<'a> {
             let colon_span = self.current.span.clone();
             self.advance(); // consume ':' to peek at next token
 
-            if matches!(self.current.kind, TokenKind::Identifier(_)) {
+            if matches!(self.current.kind, TokenKind::Identifier { .. }) {
                 // This is super trait syntax - parse super traits
                 // Parse first super trait
                 super_traits.push(self.expect_identifier()?);

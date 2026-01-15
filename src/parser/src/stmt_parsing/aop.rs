@@ -39,7 +39,7 @@ impl<'a> Parser<'a> {
         let interceptor = self.expect_identifier()?;
 
         // Parse optional advice type (default: before)
-        let advice_type = if let TokenKind::Identifier(name) = &self.current.kind {
+        let advice_type = if let TokenKind::Identifier { name: name, .. } = &self.current.kind {
             match name.as_str() {
                 "before" | "after_success" | "after_error" | "around" => {
                     let type_name = name.clone();
@@ -59,7 +59,7 @@ impl<'a> Parser<'a> {
         };
 
         // Parse optional priority
-        let priority = if let TokenKind::Identifier(s) = &self.current.kind {
+        let priority = if let TokenKind::Identifier { name: s, .. } = &self.current.kind {
             if s == "priority" {
                 self.advance(); // consume 'priority'
                 if let TokenKind::Integer(val) = self.current.kind {
@@ -110,7 +110,7 @@ impl<'a> Parser<'a> {
         let implementation = self.expect_identifier()?;
 
         // Parse optional scope
-        let scope = if let TokenKind::Identifier(name) = &self.current.kind {
+        let scope = if let TokenKind::Identifier { name: name, .. } = &self.current.kind {
             match name.as_str() {
                 "singleton" | "transient" | "scoped" => {
                     let scope_name = name.clone();
@@ -124,7 +124,7 @@ impl<'a> Parser<'a> {
         };
 
         // Parse optional priority
-        let priority = if let TokenKind::Identifier(s) = &self.current.kind {
+        let priority = if let TokenKind::Identifier { name: s, .. } = &self.current.kind {
             if s == "priority" {
                 self.advance(); // consume 'priority'
                 if let TokenKind::Integer(val) = self.current.kind {
@@ -223,7 +223,7 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier()?;
 
         // Expect 'implements'
-        if let TokenKind::Identifier(s) = &self.current.kind {
+        if let TokenKind::Identifier { name: s, .. } = &self.current.kind {
             if s != "implements" {
                 return Err(ParseError::unexpected_token(
                     "implements",
@@ -289,7 +289,7 @@ impl<'a> Parser<'a> {
         let start = self.current.span;
 
         // Expect 'expect' keyword
-        if let TokenKind::Identifier(s) = &self.current.kind {
+        if let TokenKind::Identifier { name: s, .. } = &self.current.kind {
             if s != "expect" {
                 return Err(ParseError::unexpected_token(
                     "expect",

@@ -505,7 +505,7 @@ impl Parser<'_> {
 
             // Parse rule: 'allow', 'repr', or 'fn'
             // Note: 'allow' can be either an identifier or the Allow keyword
-            if matches!(&self.current.kind, TokenKind::Identifier(s) if s == "allow")
+            if matches!(&self.current.kind, TokenKind::Identifier { name: s, .. } if s == "allow")
                 || self.check(&TokenKind::Allow)
             {
                 self.advance(); // consume 'allow'
@@ -569,7 +569,7 @@ impl Parser<'_> {
     /// Parse a single repr type: u8, i12, f32, etc.
     fn parse_repr_type(&mut self) -> Result<ReprType, ParseError> {
         match &self.current.kind {
-            TokenKind::Identifier(s) => {
+            TokenKind::Identifier { name: s, .. } => {
                 let s = s.clone();
                 if let Some(repr) = ReprType::from_str(&s) {
                     self.advance();

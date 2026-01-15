@@ -1,4 +1,4 @@
-use crate::token::TokenKind;
+use crate::token::{NamePattern, TokenKind};
 
 impl<'a> super::Lexer<'a> {
     pub(super) fn scan_identifier(&mut self, first: char) -> TokenKind {
@@ -176,7 +176,10 @@ impl<'a> super::Lexer<'a> {
             "forbid" => TokenKind::Forbid,
             "allow" => TokenKind::Allow,
             "mock" => TokenKind::Mock,
-            _ => TokenKind::Identifier(name),
+            _ => {
+                let pattern = NamePattern::detect(&name);
+                TokenKind::Identifier { name, pattern }
+            }
         }
     }
 

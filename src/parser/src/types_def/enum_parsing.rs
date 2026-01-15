@@ -149,12 +149,12 @@ impl<'a> Parser<'a> {
         while !self.check(&TokenKind::RParen) {
             // Try to parse as named field: `name: Type`
             // Look ahead to check if this is `Identifier Colon Type`
-            let field = if matches!(self.current.kind, TokenKind::Identifier(_)) {
+            let field = if matches!(self.current.kind, TokenKind::Identifier { .. }) {
                 // Save position for potential backtrack
                 let saved_current = self.current.clone();
 
                 // Try to get the identifier
-                if let TokenKind::Identifier(ident) = &self.current.kind {
+                if let TokenKind::Identifier { name: ident, .. } = &self.current.kind {
                     let name = ident.clone();
                     self.advance();
 

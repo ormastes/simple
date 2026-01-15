@@ -202,7 +202,7 @@ impl<'a> Parser<'a> {
         // Check if this token could start a type expression
         let result = matches!(
             &self.current.kind,
-            TokenKind::Identifier(_)
+            TokenKind::Identifier { .. }
                 | TokenKind::LParen
                 | TokenKind::LBracket
                 | TokenKind::Fn
@@ -276,7 +276,7 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn expect_identifier(&mut self) -> Result<String, ParseError> {
         let name = match &self.current.kind {
-            TokenKind::Identifier(name) => name.clone(),
+            TokenKind::Identifier { name: name, .. } => name.clone(),
             // Allow contract keywords to be used as identifiers (parameter names, variable names, etc.)
             // These are only keywords in specific contract contexts
             TokenKind::Result => "result".to_string(),
@@ -315,7 +315,7 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn check_ident(&self, name: &str) -> bool {
-        matches!(&self.current.kind, TokenKind::Identifier(current) if current == name)
+        matches!(&self.current.kind, TokenKind::Identifier { name: current, .. } if current == name)
     }
 
     pub(crate) fn expect_ident_value(&mut self, name: &str) -> Result<(), ParseError> {
@@ -335,7 +335,7 @@ impl<'a> Parser<'a> {
     /// This allows using reserved words like 'unit', 'test', etc. in module paths.
     pub(crate) fn expect_path_segment(&mut self) -> Result<String, ParseError> {
         // First try regular identifier
-        if let TokenKind::Identifier(name) = &self.current.kind {
+        if let TokenKind::Identifier { name: name, .. } = &self.current.kind {
             let name = name.clone();
             self.advance();
             return Ok(name);
@@ -397,7 +397,7 @@ impl<'a> Parser<'a> {
     /// This allows using reserved words like 'new', 'type', etc. as method names.
     pub(crate) fn expect_method_name(&mut self) -> Result<String, ParseError> {
         // First try regular identifier
-        if let TokenKind::Identifier(name) = &self.current.kind {
+        if let TokenKind::Identifier { name: name, .. } = &self.current.kind {
             let name = name.clone();
             self.advance();
             return Ok(name);

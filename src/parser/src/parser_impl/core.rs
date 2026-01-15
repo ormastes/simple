@@ -326,7 +326,7 @@ impl<'a> Parser<'a> {
                 });
 
                 // Check if next token is an uppercase identifier (type alias pattern)
-                if let TokenKind::Identifier(name) = &next.kind {
+                if let TokenKind::Identifier { name: name, .. } = &next.kind {
                     if name.chars().next().map_or(false, |c| c.is_uppercase()) {
                         // PascalCase identifier after 'type' - treat as type alias
                         self.parse_type_alias()
