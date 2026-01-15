@@ -126,13 +126,13 @@ fn interpreter_result_has_empty_stdout_when_no_capture() {
 }
 
 // ============= Print Output Capture Tests =============
-// Note: print/println/eprint/eprintln are now prelude functions - no extern fn needed
+// Note: print/print/eprint/eprint are now prelude functions - no extern fn needed
 
 #[test]
 fn interpreter_captures_print_output() {
     let interpreter = Interpreter::new();
     let code = r#"
-println("hello")
+print("hello")
 main = 0
 "#;
     let result = interpreter
@@ -154,7 +154,7 @@ fn interpreter_captures_multiple_prints() {
     let code = r#"
 print("a")
 print("b")
-println("c")
+print("c")
 main = 0
 "#;
     let result = interpreter
@@ -166,14 +166,14 @@ main = 0
             },
         )
         .unwrap();
-    assert_eq!(result.stdout, "abc\n");
+    assert_eq!(result.stdout, "a\nb\nc\n");
 }
 
 #[test]
 fn interpreter_captures_print_with_multiple_args() {
     let interpreter = Interpreter::new();
     let code = r#"
-println("x", "y", "z")
+print("x", "y", "z")
 main = 0
 "#;
     let result = interpreter
@@ -192,8 +192,8 @@ main = 0
 fn interpreter_captures_print_with_values() {
     let interpreter = Interpreter::new();
     let code = r#"
-let x = 42
-println("value:", x)
+val x = 42
+print("value:", x)
 main = 0
 "#;
     let result = interpreter
@@ -212,7 +212,7 @@ main = 0
 fn interpreter_captures_stderr() {
     let interpreter = Interpreter::new();
     let code = r#"
-eprintln("error message")
+eprint("error message")
 main = 0
 "#;
     let result = interpreter
@@ -232,9 +232,9 @@ main = 0
 fn interpreter_captures_mixed_stdout_stderr() {
     let interpreter = Interpreter::new();
     let code = r#"
-println("out1")
-eprintln("err1")
-println("out2")
+print("out1")
+eprint("err1")
+print("out2")
 main = 0
 "#;
     let result = interpreter
@@ -315,11 +315,11 @@ fn main() -> i64:
 // These tests verify that print works in native codegen (compiler) mode
 
 #[test]
-fn compiler_mode_captures_println() {
+fn compiler_mode_captures_print() {
     let interpreter = Interpreter::new();
     let code = r#"
 fn main() -> i64:
-    println("hello from compiler")
+    print("hello from compiler")
     return 0
 "#;
     let result = interpreter
@@ -332,7 +332,7 @@ fn main() -> i64:
             },
         )
         .unwrap();
-    assert_eq!(result.stdout, "hello from compiler\n");
+    assert_eq!(result.stdout, "hello from compiler");
     assert_eq!(result.exit_code, 0);
 }
 
@@ -341,7 +341,7 @@ fn compiler_mode_captures_multiple_args() {
     let interpreter = Interpreter::new();
     let code = r#"
 fn main() -> i64:
-    println("a", "b", "c")
+    print("a", "b", "c")
     return 0
 "#;
     let result = interpreter
@@ -354,7 +354,7 @@ fn main() -> i64:
             },
         )
         .unwrap();
-    assert_eq!(result.stdout, "a b c\n");
+    assert_eq!(result.stdout, "a b c");
     assert_eq!(result.exit_code, 0);
 }
 
@@ -363,7 +363,7 @@ fn compiler_mode_captures_stderr() {
     let interpreter = Interpreter::new();
     let code = r#"
 fn main() -> i64:
-    eprintln("error from compiler")
+    eprint("error from compiler")
     return 0
 "#;
     let result = interpreter
@@ -376,6 +376,6 @@ fn main() -> i64:
             },
         )
         .unwrap();
-    assert_eq!(result.stderr, "error from compiler\n");
+    assert_eq!(result.stderr, "error from compiler");
     assert_eq!(result.exit_code, 0);
 }
