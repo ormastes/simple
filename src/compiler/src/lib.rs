@@ -10,6 +10,7 @@ pub mod aop_config;
 pub mod api_surface;
 pub mod arch_rules;
 pub mod build_log;
+pub mod blocks;
 pub mod build_mode;
 pub mod codegen;
 pub mod compilability;

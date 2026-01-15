@@ -94,7 +94,8 @@ impl Value {
             | Value::ThreadPool(_)
             | Value::Mock(_)
             | Value::Matcher(_)
-            | Value::NativeFunction(_) => true,
+            | Value::NativeFunction(_)
+            | Value::Block { .. } => true,
         }
     }
 
