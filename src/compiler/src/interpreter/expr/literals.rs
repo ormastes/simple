@@ -85,6 +85,16 @@ pub(super) fn eval_literal_expr(
             Ok(Some(Value::Str(out)))
         }
         Expr::Symbol(s) => Ok(Some(Value::Symbol(s.clone()))),
+        // Custom block expressions: m{...}, sh{...}, sql{...}, re{...}, etc.
+        Expr::BlockExpr { kind, payload } => {
+            // Create a Block value that can be processed by block handlers
+            // The result is lazily computed when the block is used
+            Ok(Some(Value::Block {
+                kind: kind.clone(),
+                payload: payload.clone(),
+                result: None, // Will be computed on first use
+            }))
+        }
         Expr::Identifier(name) => {
             // Check for Option::None literal using type-safe variant
             if name == OptionVariant::None.as_str() {

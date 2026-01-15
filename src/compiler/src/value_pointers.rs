@@ -307,6 +307,11 @@ impl Clone for Value {
             Value::Mock(m) => Value::Mock(m.clone()),
             Value::Matcher(m) => Value::Matcher(m.clone()),
             Value::NativeFunction(native) => Value::NativeFunction(native.clone()),
+            Value::Block { kind, payload, result } => Value::Block {
+                kind: kind.clone(),
+                payload: payload.clone(),
+                result: result.clone(),
+            },
             Value::Nil => Value::Nil,
         }
     }
@@ -391,6 +396,10 @@ impl PartialEq for Value {
                 },
             ) => va == vb && sa == sb && fa == fb,
             (Value::NativeFunction(_), Value::NativeFunction(_)) => false,
+            (
+                Value::Block { kind: ka, payload: pa, result: ra },
+                Value::Block { kind: kb, payload: pb, result: rb },
+            ) => ka == kb && pa == pb && ra == rb,
             (Value::Nil, Value::Nil) => true,
             _ => false,
         }

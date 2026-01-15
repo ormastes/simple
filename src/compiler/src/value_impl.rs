@@ -197,6 +197,7 @@ impl Value {
             Value::Matcher(_) => "matcher",
             Value::EnumType { .. } => "enum_type",
             Value::EnumVariantConstructor { .. } => "enum_variant_constructor",
+            Value::Block { .. } => "block",
             Value::Nil => "nil",
         }
     }
