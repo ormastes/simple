@@ -433,6 +433,15 @@ impl From<&Value> for BridgeValue {
                 // Bridge the inner value - union type info is lost in FFI
                 BridgeValue::from(inner.as_ref())
             }
+            Value::Block { kind, payload, .. } => {
+                // Store block as string: "kind:payload"
+                let data = format!("{}:{}", kind, payload);
+                BridgeValue {
+                    tag: bridge_tags::STRING, // Use STRING tag for block data
+                    payload: 0,
+                    extended: CString::new(data).unwrap().into_raw() as *mut u8,
+                }
+            }
         }
     }
 }
