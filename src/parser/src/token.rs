@@ -198,6 +198,13 @@ pub enum TokenKind {
     Allow,            // allow (keyword for architecture rules: `allow pc{...}`)
     Mock,             // mock (for mock declarations: `mock Name implements Trait:`)
 
+    // Custom Blocks (#1090-1098)
+    // DSL embedding blocks: kind{payload} where payload is captured raw
+    CustomBlock {
+        kind: String,    // Block kind: "m", "sh", "sql", "re", "md", "html", "graph", "img"
+        payload: String, // Raw payload content (not parsed by outer lexer)
+    },
+
     // Contract keywords (LLM-friendly features)
     // New spec syntax (doc/spec/invariant.md)
     Out,    // out (postcondition block)

@@ -24,7 +24,8 @@ impl<'a> Parser<'a> {
             | TokenKind::FString(_)
             | TokenKind::Bool(_)
             | TokenKind::Nil
-            | TokenKind::Symbol(_) => self.parse_primary_literal(),
+            | TokenKind::Symbol(_)
+            | TokenKind::CustomBlock { .. } => self.parse_primary_literal(),
             TokenKind::Result
             | TokenKind::Identifier { .. }
             | TokenKind::Self_

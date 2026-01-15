@@ -524,6 +524,15 @@ pub enum Expr {
         mode: Box<TensorMode>,
         device: Option<String>,
     },
+
+    /// Custom block expression: m{...}, sh{...}, sql{...}, re{...}, etc.
+    /// DSL embedding with typed result based on block kind.
+    BlockExpr {
+        /// Block kind: "m", "sh", "sql", "re", "md", "html", "graph", "img"
+        kind: String,
+        /// Raw payload content (parsed by block-specific handler)
+        payload: String,
+    },
 }
 
 /// Tensor rendering mode for N-dimensional tensors (#1910-#1969)
