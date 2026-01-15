@@ -262,99 +262,285 @@ unary_expr     = ('-' | '!' | 'not') unary_expr | postfix_expr
 Simple uses Python-style "dunder" (double underscore) methods for operator overloading.
 This provides a **common interface** across all types.
 
-### Core Operator Traits
+### Complete Operator Reference (Julia-Compatible)
+
+Simple supports all Julia default operators plus Python-style dunder methods.
+
+#### Arithmetic Operators
+
+| Operator | Dunder | Description | Julia |
+|----------|--------|-------------|-------|
+| `+x` | `__pos__` | Unary plus | ✅ |
+| `-x` | `__neg__` | Unary minus | ✅ |
+| `x + y` | `__add__` | Addition | ✅ |
+| `x - y` | `__sub__` | Subtraction | ✅ |
+| `x * y` | `__mul__` | Multiplication | ✅ |
+| `x / y` | `__truediv__` | Division | ✅ |
+| `x ÷ y` | `__floordiv__` | Integer division | ✅ |
+| `x \ y` | `__rdiv__` | Inverse division (y/x) | ✅ |
+| `x ^ y` | `__pow__` | Exponentiation | ✅ |
+| `x % y` | `__mod__` | Remainder | ✅ |
+
+#### Bitwise Operators
+
+| Operator | Dunder | Description | Julia |
+|----------|--------|-------------|-------|
+| `~x` | `__invert__` | Bitwise NOT | ✅ |
+| `x & y` | `__and__` | Bitwise AND | ✅ |
+| `x \| y` | `__or__` | Bitwise OR | ✅ |
+| `x ⊻ y` | `__xor__` | Bitwise XOR | ✅ |
+| `x ⊼ y` | `__nand__` | Bitwise NAND | ✅ |
+| `x ⊽ y` | `__nor__` | Bitwise NOR | ✅ |
+| `x << y` | `__lshift__` | Left shift | ✅ |
+| `x >> y` | `__rshift__` | Arithmetic right shift | ✅ |
+| `x >>> y` | `__urshift__` | Logical right shift | ✅ |
+
+#### Comparison Operators
+
+| Operator | Dunder | Description | Julia |
+|----------|--------|-------------|-------|
+| `x == y` | `__eq__` | Equality | ✅ |
+| `x != y` or `x ≠ y` | `__ne__` | Inequality | ✅ |
+| `x < y` | `__lt__` | Less than | ✅ |
+| `x <= y` or `x ≤ y` | `__le__` | Less or equal | ✅ |
+| `x > y` | `__gt__` | Greater than | ✅ |
+| `x >= y` or `x ≥ y` | `__ge__` | Greater or equal | ✅ |
+
+#### Logical Operators (Short-Circuit)
+
+| Operator | Description | Notes |
+|----------|-------------|-------|
+| `!x` or `not x` | Logical NOT | Not overloadable |
+| `x && y` or `x and y` | Short-circuit AND | Not overloadable |
+| `x \|\| y` or `x or y` | Short-circuit OR | Not overloadable |
+
+#### Special Operators
+
+| Operator | Dunder | Description |
+|----------|--------|-------------|
+| `x @ y` | `__matmul__` | Matrix multiplication |
+| `x[k]` | `__getitem__` | Index/subscript access |
+| `x[k] = v` | `__setitem__` | Index assignment |
+| `k in x` | `__contains__` | Membership test |
+| `x(...)` | `__call__` | Callable |
+
+#### Numeric Protocol (Torch-Compatible)
+
+| Function | Dunder | Description |
+|----------|--------|-------------|
+| `abs(x)` | `__abs__` | Absolute value |
+| `round(x)` | `__round__` | Round to nearest |
+| `floor(x)` | `__floor__` | Round down |
+| `ceil(x)` | `__ceil__` | Round up |
+| `trunc(x)` | `__trunc__` | Truncate toward zero |
+| `int(x)` | `__int__` | Convert to integer |
+| `float(x)` | `__float__` | Convert to float |
+| `bool(x)` | `__bool__` | Truthiness test |
+
+#### Container Protocol (Torch-Compatible)
+
+| Function | Dunder | Description |
+|----------|--------|-------------|
+| `len(x)` | `__len__` | Length / size |
+| `for e in x` | `__iter__` | Iteration |
+| `reversed(x)` | `__reversed__` | Reverse iteration |
+
+#### String Conversion
+
+| Function | Dunder | Description |
+|----------|--------|-------------|
+| `repr(x)` | `__repr__` | Debug representation |
+| `str(x)` | `__str__` | String representation |
+| `hash(x)` | `__hash__` | Hash value |
+
+#### Updating Operators (In-Place)
+
+All binary operators have in-place variants with `i` prefix:
+
+| Operator | Dunder | Description |
+|----------|--------|-------------|
+| `x += y` | `__iadd__` | In-place add |
+| `x -= y` | `__isub__` | In-place subtract |
+| `x *= y` | `__imul__` | In-place multiply |
+| `x /= y` | `__itruediv__` | In-place divide |
+| `x ÷= y` | `__ifloordiv__` | In-place integer divide |
+| `x ^= y` | `__ipow__` | In-place power |
+| `x %= y` | `__imod__` | In-place modulo |
+| `x &= y` | `__iand__` | In-place bitwise AND |
+| `x \|= y` | `__ior__` | In-place bitwise OR |
+| `x ⊻= y` | `__ixor__` | In-place bitwise XOR |
+| `x <<= y` | `__ilshift__` | In-place left shift |
+| `x >>= y` | `__irshift__` | In-place right shift |
+
+#### Right-Hand Variants
+
+When LHS doesn't implement an operator, RHS's right-hand variant is called:
+
+| Dunder | Called When |
+|--------|-------------|
+| `__radd__` | `a + b` where `a` has no `__add__` |
+| `__rsub__` | `a - b` where `a` has no `__sub__` |
+| `__rmul__` | `a * b` where `a` has no `__mul__` |
+| `__rtruediv__` | `a / b` where `a` has no `__truediv__` |
+| `__rpow__` | `a ^ b` where `a` has no `__pow__` |
+
+### Trait Definitions
 
 ```simple
-# Arithmetic operators
+# Arithmetic
 trait __add__<T, R = Self>:
-    fn __add__(other: T) -> R          # a + b
+    fn __add__(other: T) -> R
 
 trait __sub__<T, R = Self>:
-    fn __sub__(other: T) -> R          # a - b
+    fn __sub__(other: T) -> R
 
 trait __mul__<T, R = Self>:
-    fn __mul__(other: T) -> R          # a * b
+    fn __mul__(other: T) -> R
 
-trait __div__<T, R = Self>:
-    fn __div__(other: T) -> R          # a / b
+trait __truediv__<T, R = Self>:
+    fn __truediv__(other: T) -> R      # /
+
+trait __floordiv__<T, R = Self>:
+    fn __floordiv__(other: T) -> R     # ÷
 
 trait __mod__<T, R = Self>:
-    fn __mod__(other: T) -> R          # a % b
+    fn __mod__(other: T) -> R          # %
 
 trait __pow__<T, R = Self>:
-    fn __pow__(exp: T) -> R            # a ^ b
+    fn __pow__(exp: T) -> R            # ^
 
-# Right-hand variants (when LHS doesn't implement)
-trait __radd__<T, R = Self>:
-    fn __radd__(other: T) -> R         # b + a (called on a)
+# Bitwise
+trait __and__<T, R = Self>:
+    fn __and__(other: T) -> R          # &
 
-trait __rmul__<T, R = Self>:
-    fn __rmul__(other: T) -> R         # b * a (called on a)
+trait __or__<T, R = Self>:
+    fn __or__(other: T) -> R           # |
 
-# In-place variants
-trait __iadd__<T>:
-    fn __iadd__(other: T)              # a += b
+trait __xor__<T, R = Self>:
+    fn __xor__(other: T) -> R          # ⊻
 
-trait __imul__<T>:
-    fn __imul__(other: T)              # a *= b
-```
+trait __nand__<T, R = Self>:
+    fn __nand__(other: T) -> R         # ⊼
 
-### Unary Operators
+trait __nor__<T, R = Self>:
+    fn __nor__(other: T) -> R          # ⊽
 
-```simple
+trait __lshift__<T, R = Self>:
+    fn __lshift__(other: T) -> R       # <<
+
+trait __rshift__<T, R = Self>:
+    fn __rshift__(other: T) -> R       # >>
+
+trait __urshift__<T, R = Self>:
+    fn __urshift__(other: T) -> R      # >>>
+
+# Unary
 trait __neg__<R = Self>:
-    fn __neg__() -> R                  # -a
+    fn __neg__() -> R                  # -x
 
 trait __pos__<R = Self>:
-    fn __pos__() -> R                  # +a
-
-trait __not__<R = bool>:
-    fn __not__() -> R                  # !a or not a
+    fn __pos__() -> R                  # +x
 
 trait __invert__<R = Self>:
-    fn __invert__() -> R               # ~a (bitwise not)
-```
+    fn __invert__() -> R               # ~x
 
-### Comparison Operators
-
-```simple
+# Comparison
 trait __eq__<T>:
-    fn __eq__(other: T) -> bool        # a == b
+    fn __eq__(other: T) -> bool        # ==
 
 trait __ne__<T>:
-    fn __ne__(other: T) -> bool        # a != b
+    fn __ne__(other: T) -> bool        # !=, ≠
 
 trait __lt__<T>:
-    fn __lt__(other: T) -> bool        # a < b
+    fn __lt__(other: T) -> bool        # <
 
 trait __le__<T>:
-    fn __le__(other: T) -> bool        # a <= b
+    fn __le__(other: T) -> bool        # <=, ≤
 
 trait __gt__<T>:
-    fn __gt__(other: T) -> bool        # a > b
+    fn __gt__(other: T) -> bool        # >
 
 trait __ge__<T>:
-    fn __ge__(other: T) -> bool        # a >= b
-```
+    fn __ge__(other: T) -> bool        # >=, ≥
 
-### Special Operators
-
-```simple
+# Special
 trait __matmul__<T, R>:
-    fn __matmul__(other: T) -> R       # a @ b (matrix multiply)
+    fn __matmul__(other: T) -> R       # @
 
 trait __getitem__<K, V>:
-    fn __getitem__(key: K) -> V        # a[k]
+    fn __getitem__(key: K) -> V        # []
 
 trait __setitem__<K, V>:
-    fn __setitem__(key: K, value: V)   # a[k] = v
+    fn __setitem__(key: K, value: V)   # []=
 
 trait __contains__<T>:
-    fn __contains__(item: T) -> bool   # item in a
+    fn __contains__(item: T) -> bool   # in
 
 trait __call__<Args, R>:
-    fn __call__(args: Args) -> R       # a(args)
+    fn __call__(args: Args) -> R       # ()
+
+# Numeric Protocol (Torch-Compatible)
+trait __abs__<R = Self>:
+    fn __abs__() -> R                  # abs(x)
+
+trait __round__<R = Self>:
+    fn __round__() -> R                # round(x)
+    fn __round__(ndigits: i32) -> R    # round(x, ndigits)
+
+trait __floor__<R = Self>:
+    fn __floor__() -> R                # floor(x)
+
+trait __ceil__<R = Self>:
+    fn __ceil__() -> R                 # ceil(x)
+
+trait __trunc__<R = Self>:
+    fn __trunc__() -> R                # trunc(x)
+
+trait __int__:
+    fn __int__() -> i64                # int(x)
+
+trait __float__:
+    fn __float__() -> f64              # float(x)
+
+trait __bool__:
+    fn __bool__() -> bool              # bool(x), truthiness
+
+# Container Protocol (Torch-Compatible)
+trait __len__:
+    fn __len__() -> i64                # len(x)
+
+trait __iter__<T>:
+    fn __iter__() -> Iterator<T>       # for e in x
+
+trait __reversed__<T>:
+    fn __reversed__() -> Iterator<T>   # reversed(x)
+
+# String Conversion
+trait __repr__:
+    fn __repr__() -> str               # repr(x)
+
+trait __str__:
+    fn __str__() -> str                # str(x)
+
+trait __hash__:
+    fn __hash__() -> i64               # hash(x)
 ```
+
+### Unicode Operator Aliases
+
+Simple supports Unicode aliases for common operators (like Julia):
+
+| ASCII | Unicode | Name |
+|-------|---------|------|
+| `!=` | `≠` | Not equal |
+| `<=` | `≤` | Less or equal |
+| `>=` | `≥` | Greater or equal |
+| `xor` | `⊻` | XOR |
+| `nand` | `⊼` | NAND |
+| `nor` | `⊽` | NOR |
+| `div` | `÷` | Integer division |
+| `sqrt` | `√` | Square root (unary) |
+| `cbrt` | `∛` | Cube root (unary) |
 
 ### Operator Resolution
 
@@ -426,7 +612,51 @@ impl Tensor:
 
     fn __lt__(other: Tensor) -> Tensor:
         self.element_lt(other)
+
+    # Numeric protocol (torch-compatible)
+    fn __abs__() -> Tensor:
+        self.abs()  # Element-wise absolute value
+
+    fn __round__() -> Tensor:
+        self.round()  # Element-wise round
+
+    fn __floor__() -> Tensor:
+        self.floor()
+
+    fn __ceil__() -> Tensor:
+        self.ceil()
+
+    # Container protocol
+    fn __len__() -> i64:
+        self.shape[0]  # Size of first dimension
+
+    fn __iter__() -> Iterator<Tensor>:
+        self.iter()  # Iterate over first dimension
+
+    fn __bool__() -> bool:
+        # Note: Like PyTorch, raises error for multi-element tensors
+        if self.numel() != 1:
+            raise "Boolean value of multi-element tensor is ambiguous"
+        self.item() != 0
+
+    # String conversion
+    fn __repr__() -> str:
+        "Tensor(shape={self.shape}, dtype={self.dtype})"
+
+    fn __str__() -> str:
+        self.to_string()
 ```
+
+### Torch Alignment Notes
+
+The dunder interface is designed for seamless PyTorch-style tensor operations:
+
+1. **Element-wise operations**: `+`, `-`, `*`, `/`, `^` apply element-wise
+2. **Broadcasting**: Automatic shape broadcasting via `__radd__`, `__rmul__`, etc.
+3. **Matrix multiply**: `@` operator (`__matmul__`) for matrix multiplication
+4. **In-place suffix**: PyTorch uses `.abs_()`, we use `__iabs__` dunder pattern
+5. **Boolean ambiguity**: `__bool__` raises error for multi-element tensors (PyTorch behavior)
+6. **Numeric protocol**: `abs()`, `round()`, `floor()`, `ceil()` work with tensors
 
 ### Usage Examples
 
@@ -450,6 +680,28 @@ val m3 = m1 @ m2           # Calls m1.__matmul__(m2), shape [3, 5]
 # Math expressions (with implicit multiply)
 val x = Tensor.randn [100]
 val y = 2x^2 + 3x + 1      # Quadratic formula, element-wise
+
+# Numeric protocol functions
+val a = Tensor.from [-1.5, 2.7, -3.2]
+val b = abs(a)             # [1.5, 2.7, 3.2] via __abs__
+val c = round(a)           # [-2.0, 3.0, -3.0] via __round__
+val d = floor(a)           # [-2.0, 2.0, -4.0] via __floor__
+val e = ceil(a)            # [-1.0, 3.0, -3.0] via __ceil__
+
+# Container protocol
+val t = Tensor.randn [3, 4, 5]
+val n = len(t)             # 3 (first dimension) via __len__
+for row in t:              # Iterate rows via __iter__
+    print(row.shape)       # [4, 5]
+
+# Boolean ambiguity (PyTorch behavior)
+val scalar = Tensor.from [1.0]
+if scalar:                 # Works: single element via __bool__
+    print("truthy")
+
+val multi = Tensor.from [1.0, 2.0]
+if multi:                  # Raises: "Boolean value of multi-element tensor is ambiguous"
+    ...
 ```
 
 ---
@@ -501,3 +753,4 @@ val y = 2x^2 + 3x + 1      # Quadratic formula, element-wise
 - [Python Dunder Methods](https://www.geeksforgeeks.org/python/dunder-magic-methods-python/)
 - [Rust std::ops](https://doc.rust-lang.org/std/ops/index.html)
 - [Real Python - Operator Overloading](https://realpython.com/operator-function-overloading/)
+- [PyTorch Tensor Documentation](https://docs.pytorch.org/docs/stable/tensors.html)
