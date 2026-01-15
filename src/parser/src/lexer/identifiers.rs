@@ -33,6 +33,12 @@ impl<'a> super::Lexer<'a> {
             }
         }
 
+        // Check for custom block syntax: kind{payload}
+        // Supported kinds: m, sh, sql, re, md, html, graph, img
+        if let Some(block_kind) = self.try_scan_custom_block(first) {
+            return block_kind;
+        }
+
         let mut name = String::from(first);
 
         while let Some(ch) = self.peek() {
@@ -211,6 +217,111 @@ impl<'a> super::Lexer<'a> {
 
         // Unclosed pointcut - return error
         TokenKind::Error("Unclosed pointcut expression (missing '}')".to_string())
+    }
+
+    /// Try to scan a custom block: kind{payload}
+    /// Returns Some(TokenKind) if a valid custom block is found, None otherwise.
+    /// Supported kinds: m, sh, sql, re, md, html, graph, img
+    pub(super) fn try_scan_custom_block(&mut self, first: char) -> Option<TokenKind> {
+        // Check single-character block kinds: m{...}
+        if first == 'm' && self.peek() == Some('{') {
+            self.advance(); // consume '{'
+            return Some(self.scan_custom_block_payload("m"));
+        }
+
+        // Check two-character block kinds: sh{...}, re{...}, md{...}
+        match first {
+            's' => {
+                if self.peek() == Some('h') && self.peek_ahead(1) == Some('{') {
+                    self.advance(); // consume 'h'
+                    self.advance(); // consume '{'
+                    return Some(self.scan_custom_block_payload("sh"));
+                }
+                if self.peek() == Some('q') && self.peek_ahead(1) == Some('l') && self.peek_ahead(2) == Some('{') {
+                    self.advance(); // consume 'q'
+                    self.advance(); // consume 'l'
+                    self.advance(); // consume '{'
+                    return Some(self.scan_custom_block_payload("sql"));
+                }
+            }
+            'r' => {
+                if self.peek() == Some('e') && self.peek_ahead(1) == Some('{') {
+                    self.advance(); // consume 'e'
+                    self.advance(); // consume '{'
+                    return Some(self.scan_custom_block_payload("re"));
+                }
+            }
+            'm' => {
+                if self.peek() == Some('d') && self.peek_ahead(1) == Some('{') {
+                    self.advance(); // consume 'd'
+                    self.advance(); // consume '{'
+                    return Some(self.scan_custom_block_payload("md"));
+                }
+            }
+            'h' => {
+                if self.peek() == Some('t') && self.peek_ahead(1) == Some('m') && self.peek_ahead(2) == Some('l') && self.peek_ahead(3) == Some('{') {
+                    self.advance(); // consume 't'
+                    self.advance(); // consume 'm'
+                    self.advance(); // consume 'l'
+                    self.advance(); // consume '{'
+                    return Some(self.scan_custom_block_payload("html"));
+                }
+            }
+            'g' => {
+                if self.peek() == Some('r') && self.peek_ahead(1) == Some('a') && self.peek_ahead(2) == Some('p') && self.peek_ahead(3) == Some('h') && self.peek_ahead(4) == Some('{') {
+                    self.advance(); // consume 'r'
+                    self.advance(); // consume 'a'
+                    self.advance(); // consume 'p'
+                    self.advance(); // consume 'h'
+                    self.advance(); // consume '{'
+                    return Some(self.scan_custom_block_payload("graph"));
+                }
+            }
+            'i' => {
+                if self.peek() == Some('m') && self.peek_ahead(1) == Some('g') && self.peek_ahead(2) == Some('{') {
+                    self.advance(); // consume 'm'
+                    self.advance(); // consume 'g'
+                    self.advance(); // consume '{'
+                    return Some(self.scan_custom_block_payload("img"));
+                }
+            }
+            _ => {}
+        }
+
+        None
+    }
+
+    /// Scan the payload of a custom block (everything between { and matching })
+    /// Handles nested braces correctly.
+    pub(super) fn scan_custom_block_payload(&mut self, kind: &str) -> TokenKind {
+        let mut payload = String::new();
+        let mut depth = 1; // We've already consumed the opening {
+
+        while let Some(ch) = self.peek() {
+            if ch == '{' {
+                depth += 1;
+                payload.push(ch);
+                self.advance();
+            } else if ch == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    self.advance(); // consume the closing }
+                    return TokenKind::CustomBlock {
+                        kind: kind.to_string(),
+                        payload,
+                    };
+                } else {
+                    payload.push(ch);
+                    self.advance();
+                }
+            } else {
+                payload.push(ch);
+                self.advance();
+            }
+        }
+
+        // Unclosed block - return error
+        TokenKind::Error(format!("Unclosed {} block (missing '}}')", kind))
     }
 
     pub(super) fn scan_symbol(&mut self) -> TokenKind {

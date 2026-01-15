@@ -559,6 +559,15 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
                 FallbackReason::NotYetImplemented("tensor literal (requires PyTorch)".into()),
             );
         }
+
+        // Custom block expressions: m{...}, sh{...}, sql{...}, re{...}, etc.
+        // These require block-specific runtime handlers
+        Expr::BlockExpr { kind, .. } => {
+            add_reason(
+                reasons,
+                FallbackReason::NotYetImplemented(format!("{} block", kind)),
+            );
+        }
     }
 }
 

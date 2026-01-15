@@ -88,6 +88,13 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Symbol(s))
             }
+            TokenKind::CustomBlock { kind, payload } => {
+                // Custom block expression: m{...}, sh{...}, sql{...}, re{...}, etc.
+                let kind = kind.clone();
+                let payload = payload.clone();
+                self.advance();
+                Ok(Expr::BlockExpr { kind, payload })
+            }
             _ => Err(ParseError::unexpected_token(
                 "literal",
                 format!("{:?}", self.current.kind),
