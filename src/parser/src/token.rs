@@ -1,3 +1,54 @@
+/// Naming pattern for variables and identifiers
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamePattern {
+    /// ALL_CAPS - compile-time constant, non-rebindable
+    Constant,
+    /// PascalCase - type name (class, struct, enum, trait)
+    TypeName,
+    /// lowercase - immutable variable, supports functional update (->)
+    Immutable,
+    /// ends with _ - mutable variable, supports reassignment
+    Mutable,
+    /// starts with _ - private member (visibility, not mutability)
+    Private,
+}
+
+impl NamePattern {
+    /// Detect the naming pattern from an identifier string
+    pub fn detect(name: &str) -> Self {
+        if name.is_empty() {
+            return NamePattern::Immutable;
+        }
+
+        // Private: starts with underscore
+        if name.starts_with('_') {
+            return NamePattern::Private;
+        }
+
+        // Mutable: ends with underscore
+        if name.ends_with('_') {
+            return NamePattern::Mutable;
+        }
+
+        // Check if ALL_CAPS (all uppercase letters, numbers, and underscores)
+        let is_all_caps = name
+            .chars()
+            .all(|c| c.is_uppercase() || c.is_numeric() || c == '_');
+
+        if is_all_caps && name.chars().any(|c| c.is_alphabetic()) {
+            return NamePattern::Constant;
+        }
+
+        // TypeName: starts with uppercase
+        if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+            return NamePattern::TypeName;
+        }
+
+        // Default: lowercase immutable variable
+        NamePattern::Immutable
+    }
+}
+
 /// Source location
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
@@ -59,7 +110,7 @@ pub enum TokenKind {
     Symbol(String), // :symbol
 
     // Identifiers and Keywords
-    Identifier(String),
+    Identifier { name: String, pattern: NamePattern },
 
     // Keywords
     Fn,
@@ -255,6 +306,34 @@ pub enum TokenKind {
     // Special
     Eof,
     Error(String),
+}
+
+impl TokenKind {
+    /// Returns true if this is an identifier token
+    pub fn is_identifier(&self) -> bool {
+        matches!(self, TokenKind::Identifier { .. })
+    }
+
+    /// Get the identifier name if this is an Identifier token
+    pub fn as_identifier(&self) -> Option<&str> {
+        match self {
+            TokenKind::Identifier { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Get the identifier name and pattern if this is an Identifier token
+    pub fn as_identifier_with_pattern(&self) -> Option<(&str, NamePattern)> {
+        match self {
+            TokenKind::Identifier { name, pattern } => Some((name, *pattern)),
+            _ => None,
+        }
+    }
+
+    /// Check if this is an identifier with a specific name
+    pub fn is_identifier_named(&self, expected: &str) -> bool {
+        matches!(self, TokenKind::Identifier { name, .. } if name == expected)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

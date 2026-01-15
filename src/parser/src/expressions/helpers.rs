@@ -142,7 +142,7 @@ impl<'a> Parser<'a> {
 
             // Check for named argument with '=' or ':' syntax
             let mut name = None;
-            if let TokenKind::Identifier(id) = &self.current.kind {
+            if let TokenKind::Identifier { name: id, .. } = &self.current.kind {
                 let id_clone = id.clone();
                 // Peek ahead for '=' or ':' without consuming the stream
                 let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {

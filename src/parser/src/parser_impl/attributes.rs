@@ -17,7 +17,7 @@ impl<'a> Parser<'a> {
 
         // Parse the attribute name - accept identifiers and some keywords
         let name = match &self.current.kind {
-            TokenKind::Identifier(s) => {
+            TokenKind::Identifier { name: s, .. } => {
                 let name = s.clone();
                 self.advance();
                 name

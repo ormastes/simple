@@ -617,7 +617,7 @@ impl<'a> Parser<'a> {
 
     /// Check if current position is at a macro invocation (identifier followed by !)
     fn is_macro_invocation_start(&mut self) -> bool {
-        if let TokenKind::Identifier(_) = &self.current.kind {
+        if let TokenKind::Identifier { .. } = &self.current.kind {
             self.peek_is(&TokenKind::Bang)
         } else {
             false

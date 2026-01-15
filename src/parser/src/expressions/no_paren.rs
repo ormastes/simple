@@ -159,7 +159,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Bool(_)
                 | TokenKind::Nil
                 | TokenKind::Symbol(_)
-                | TokenKind::Identifier(_)
+                | TokenKind::Identifier { .. }
                 | TokenKind::Result
                 | TokenKind::Type
                 | TokenKind::Out
@@ -236,7 +236,7 @@ impl<'a> Parser<'a> {
     /// Parse a single argument (possibly named)
     fn parse_single_argument(&mut self) -> Result<Argument, ParseError> {
         // Check for named argument: name: value
-        if let TokenKind::Identifier(name) = &self.current.kind {
+        if let TokenKind::Identifier { name: name, .. } = &self.current.kind {
             let name_clone = name.clone();
             // Peek ahead to check for colon
             if self.peek_is(&TokenKind::Colon) {

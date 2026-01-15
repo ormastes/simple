@@ -181,7 +181,7 @@ impl<'a> Parser<'a> {
 
     /// Parse a gherkin name (identifier or string)
     fn parse_gherkin_name(&mut self) -> Result<String, ParseError> {
-        if let TokenKind::Identifier(s) = &self.current.kind {
+        if let TokenKind::Identifier { name: s, .. } = &self.current.kind {
             let n = s.clone();
             self.advance();
             Ok(n)
@@ -228,7 +228,7 @@ impl<'a> Parser<'a> {
                 let name = self.expect_identifier()?;
                 self.expect(&TokenKind::Gt)?;
                 parts.push(format!("<{}>", name));
-            } else if let TokenKind::Identifier(s) = &self.current.kind {
+            } else if let TokenKind::Identifier { name: s, .. } = &self.current.kind {
                 parts.push(s.clone());
                 self.advance();
             } else if let TokenKind::Integer(n) = &self.current.kind {
@@ -297,7 +297,7 @@ impl<'a> Parser<'a> {
         let mut parts = Vec::new();
 
         while !self.check(&TokenKind::Colon) && !self.is_at_end() {
-            if let TokenKind::Identifier(s) = &self.current.kind {
+            if let TokenKind::Identifier { name: s, .. } = &self.current.kind {
                 parts.push(s.clone());
                 self.advance();
             } else if let TokenKind::Integer(n) = &self.current.kind {

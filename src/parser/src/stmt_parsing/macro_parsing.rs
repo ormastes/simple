@@ -121,7 +121,7 @@ impl<'a> Parser<'a> {
             self.advance();
             let label = if self.peek_is(&TokenKind::Colon) {
                 match &self.current.kind {
-                    TokenKind::Identifier(_) => Some(self.expect_identifier()?),
+                    TokenKind::Identifier { .. } => Some(self.expect_identifier()?),
                     TokenKind::Result => {
                         let name = self.current.lexeme.clone();
                         self.advance();
@@ -382,7 +382,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn parse_macro_qident(&mut self) -> Result<String, ParseError> {
         match &self.current.kind {
-            TokenKind::Identifier(_) => self.expect_identifier(),
+            TokenKind::Identifier { .. } => self.expect_identifier(),
             TokenKind::FString(_)
             | TokenKind::String(_)
             | TokenKind::RawString(_)
@@ -450,7 +450,7 @@ impl<'a> Parser<'a> {
             } else if self.check_ident("emit") {
                 self.advance();
                 let label = match &self.current.kind {
-                    TokenKind::Identifier(_) => self.expect_identifier()?,
+                    TokenKind::Identifier { .. } => self.expect_identifier()?,
                     TokenKind::Result => {
                         let name = self.current.lexeme.clone();
                         self.advance();

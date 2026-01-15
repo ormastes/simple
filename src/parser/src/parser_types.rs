@@ -382,7 +382,7 @@ impl<'a> Parser<'a> {
     /// Parse a repr type in type context (returns ReprType)
     fn parse_repr_type_optional(&mut self) -> Result<ReprType, ParseError> {
         match &self.current.kind {
-            TokenKind::Identifier(s) => {
+            TokenKind::Identifier { name: s, .. } => {
                 let s = s.clone();
                 if let Some(repr) = ReprType::from_str(&s) {
                     self.advance();
@@ -431,7 +431,7 @@ impl<'a> Parser<'a> {
         constraints: &mut UnitReprConstraints,
     ) -> Result<(), ParseError> {
         match &self.current.kind {
-            TokenKind::Identifier(s) => {
+            TokenKind::Identifier { name: s, .. } => {
                 let s = s.clone();
                 match s.as_str() {
                     "range" => {

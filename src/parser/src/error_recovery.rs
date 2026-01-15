@@ -257,7 +257,7 @@ pub fn detect_common_mistake(
     next: Option<&Token>,
 ) -> Option<CommonMistake> {
     // Check for Python-style 'def'
-    if current.lexeme == "def" && matches!(current.kind, TokenKind::Identifier(_)) {
+    if current.lexeme == "def" && matches!(current.kind, TokenKind::Identifier { .. }) {
         return Some(CommonMistake::PythonDef);
     }
 
@@ -266,7 +266,7 @@ pub fn detect_common_mistake(
     // 1. Enum variant name (e.g., "enum Option: None")
     // 2. Pattern matching (e.g., "case None:")
     // 3. Enum variant constructor (e.g., "return None" for Option<T>)
-    if current.lexeme == "None" && matches!(current.kind, TokenKind::Identifier(_)) {
+    if current.lexeme == "None" && matches!(current.kind, TokenKind::Identifier { .. }) {
         // Skip if after 'case' (pattern matching)
         if matches!(previous.kind, TokenKind::Case) {
             return None;
@@ -292,23 +292,23 @@ pub fn detect_common_mistake(
     }
 
     // Check for 'True' or 'False' (Python/Java)
-    if current.lexeme == "True" && matches!(current.kind, TokenKind::Identifier(_)) {
+    if current.lexeme == "True" && matches!(current.kind, TokenKind::Identifier { .. }) {
         return Some(CommonMistake::PythonTrue);
     }
-    if current.lexeme == "False" && matches!(current.kind, TokenKind::Identifier(_)) {
+    if current.lexeme == "False" && matches!(current.kind, TokenKind::Identifier { .. }) {
         return Some(CommonMistake::PythonFalse);
     }
 
     // Check for 'let mut' (Rust)
     if matches!(previous.kind, TokenKind::Let)
         && current.lexeme == "mut"
-        && matches!(current.kind, TokenKind::Identifier(_))
+        && matches!(current.kind, TokenKind::Identifier { .. })
     {
         return Some(CommonMistake::RustLetMut);
     }
 
     // Check for 'public class' (Java)
-    if current.lexeme == "public" && matches!(current.kind, TokenKind::Identifier(_)) {
+    if current.lexeme == "public" && matches!(current.kind, TokenKind::Identifier { .. }) {
         if let Some(next_token) = next {
             if next_token.lexeme == "class" {
                 return Some(CommonMistake::JavaPublicClass);
@@ -317,7 +317,7 @@ pub fn detect_common_mistake(
     }
 
     // Check for 'void' (Java/C++)
-    if current.lexeme == "void" && matches!(current.kind, TokenKind::Identifier(_)) {
+    if current.lexeme == "void" && matches!(current.kind, TokenKind::Identifier { .. }) {
         return Some(CommonMistake::JavaVoid);
     }
 
@@ -334,32 +334,32 @@ pub fn detect_common_mistake(
     }
 
     // Check for 'this' (Java/JavaScript)
-    if current.lexeme == "this" && matches!(current.kind, TokenKind::Identifier(_)) {
+    if current.lexeme == "this" && matches!(current.kind, TokenKind::Identifier { .. }) {
         return Some(CommonMistake::JavaThis);
     }
 
     // Check for 'function' (JavaScript/TypeScript)
-    if current.lexeme == "function" && matches!(current.kind, TokenKind::Identifier(_)) {
+    if current.lexeme == "function" && matches!(current.kind, TokenKind::Identifier { .. }) {
         return Some(CommonMistake::TsFunction);
     }
 
     // Check for 'const' (TypeScript/JavaScript)
-    if current.lexeme == "const" && matches!(current.kind, TokenKind::Identifier(_)) {
+    if current.lexeme == "const" && matches!(current.kind, TokenKind::Identifier { .. }) {
         return Some(CommonMistake::TsConst);
     }
 
     // Check for 'interface' (TypeScript/Java)
-    if current.lexeme == "interface" && matches!(current.kind, TokenKind::Identifier(_)) {
+    if current.lexeme == "interface" && matches!(current.kind, TokenKind::Identifier { .. }) {
         return Some(CommonMistake::TsInterface);
     }
 
     // Check for 'namespace' (C++)
-    if current.lexeme == "namespace" && matches!(current.kind, TokenKind::Identifier(_)) {
+    if current.lexeme == "namespace" && matches!(current.kind, TokenKind::Identifier { .. }) {
         return Some(CommonMistake::CppNamespace);
     }
 
     // Check for 'template' (C++)
-    if current.lexeme == "template" && matches!(current.kind, TokenKind::Identifier(_)) {
+    if current.lexeme == "template" && matches!(current.kind, TokenKind::Identifier { .. }) {
         return Some(CommonMistake::CppTemplate);
     }
 
@@ -394,13 +394,13 @@ pub fn detect_common_mistake(
 
     // Check for wrong brackets in generics: identifier[
     if matches!(current.kind, TokenKind::LBracket)
-        && matches!(previous.kind, TokenKind::Identifier(_))
+        && matches!(previous.kind, TokenKind::Identifier { .. })
     {
         // This could be array indexing, but if followed by type-like identifier, likely generic
         if let Some(next_token) = next {
             // Check if next token looks like a type (capitalized identifier)
-            if let TokenKind::Identifier(ref name) = next_token.kind {
-                if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+            if let TokenKind::Identifier { name, .. } = &next_token.kind {
+                if name.chars().next().map_or(false, |c: char| c.is_uppercase()) {
                     return Some(CommonMistake::WrongBrackets);
                 }
             }
@@ -415,13 +415,13 @@ pub fn detect_common_mistake(
     // Check for Rust macro syntax: identifier!
     if current.lexeme == "!"
         && matches!(current.kind, TokenKind::Not)
-        && matches!(previous.kind, TokenKind::Identifier(_))
+        && matches!(previous.kind, TokenKind::Identifier { .. })
     {
         return Some(CommonMistake::RustMacro);
     }
 
     // Check for C-style type-first declarations: int x, float y, etc.
-    if let TokenKind::Identifier(ref type_name) = current.kind {
+    if let TokenKind::Identifier { name: type_name, .. } = &current.kind {
         // Common C/C++/Java type names
         let c_types = [
             "int", "uint", "float", "double", "char", "long", "short", "byte", "boolean", "void",
@@ -432,7 +432,7 @@ pub fn detect_common_mistake(
         if c_types.contains(&type_name.as_str()) {
             // Check if followed by identifier (likely a variable name)
             if let Some(next_token) = next {
-                if matches!(next_token.kind, TokenKind::Identifier(_)) {
+                if matches!(next_token.kind, TokenKind::Identifier { .. }) {
                     return Some(CommonMistake::CTypeFirst);
                 }
             }

@@ -125,7 +125,7 @@ impl Parser<'_> {
         self.expect(&TokenKind::Dot)?; // .
 
         // Parse variable name
-        let variable = if let TokenKind::Identifier(name) = &self.current.kind {
+        let variable = if let TokenKind::Identifier { name: name, .. } = &self.current.kind {
             let name = name.clone();
             self.advance();
             name
@@ -168,6 +168,6 @@ impl Parser<'_> {
 
     /// Check if current token is an identifier with specific name (for bounds kind)
     fn check_bounds_kind(&self, name: &str) -> bool {
-        matches!(&self.current.kind, TokenKind::Identifier(n) if n == name)
+        matches!(&self.current.kind, TokenKind::Identifier { name: n, .. } if n == name)
     }
 }
