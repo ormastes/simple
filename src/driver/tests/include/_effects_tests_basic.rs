@@ -57,14 +57,14 @@ main = bad()
 
 #[test]
 fn effects_pure_blocks_println() {
-    // Pure function cannot use println (I/O)
+    // Pure function cannot use print (I/O)
     run_expect_compile_error(
         r#"
-extern fn println(msg)
+extern fn print(msg)
 
 @pure
 fn bad():
-    println("hello")
+    print("hello")
     return 0
 
 main = bad()

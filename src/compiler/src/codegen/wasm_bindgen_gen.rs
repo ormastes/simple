@@ -325,6 +325,7 @@ mod tests {
                 default: None,
                 mutability: Mutability::Immutable,
                 inject: false,
+                variadic: false,
             }],
             return_type: None,
             where_clause: WhereClause::default(),

@@ -720,6 +720,7 @@ mod tests {
                     default: None,
                     mutability: Mutability::Immutable,
                     inject: false,
+                    variadic: false,
                 })
                 .collect(),
             return_type: ret_type,

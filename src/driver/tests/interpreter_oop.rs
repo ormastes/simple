@@ -8,7 +8,7 @@ use simple_driver::interpreter::{run_code, Interpreter, RunConfig};
 fn interpreter_class_methods() {
     let code = r#"
 class Calculator:
-    fn add(a, b):
+    static fn add(a, b):
         return a + b
 
 main = Calculator.add(3, 4)

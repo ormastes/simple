@@ -292,6 +292,7 @@ fn test_check_module_integration() {
         span: make_span(),
         name: "Printable".to_string(),
         generic_params: vec![],
+        super_traits: vec![],
         where_clause: vec![],
         associated_types: vec![],
         methods: vec![],
