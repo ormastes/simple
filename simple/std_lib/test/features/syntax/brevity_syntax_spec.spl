@@ -1,0 +1,616 @@
+"""
+# Brevity Syntax Features
+
+**Feature IDs:** #1080-1086
+**Category:** Syntax
+**Difficulty:** 3/5
+**Status:** Planned
+
+## Overview
+
+Simple provides concise syntax for common patterns, reducing boilerplate while maintaining
+LL(1) parseability. These features are inspired by Haskell (space-separated args), Elixir
+(pipeline), Julia (implicit multiplication, power operator), and Python (dunder interface).
+
+**Key Features:**
+- **Space-separated arguments:** `add 1 2 3` instead of `add(1, 2, 3)`
+- **Pipeline operator:** `data |> parse |> filter pred`
+- **Implicit multiplication:** `3x + 2y` instead of `3*x + 2*y`
+- **Power operator:** `x^2` instead of `x.pow(2)` (Julia/MATLAB style)
+- **Dunder interface:** Python-style `__add__`, `__mul__`, `__pow__` for operator overloading
+- **Tensor broadcast:** `a + b` auto-broadcasts via dunder interface
+
+## Syntax
+
+### Space-Separated Arguments
+
+```simple
+# Function calls without parentheses or commas
+print "hello"
+add 1 2 3
+max 10 20
+
+# Operators end the call (highest precedence for application)
+f a + b        # Parsed as: f(a) + b
+f (a + b)      # Parsed as: f(a + b)
+f a b + c      # Parsed as: f(a, b) + c
+
+# Method calls keep the dot
+list.map \x: x * 2
+user.set name: "Alice"
+```
+
+**Grammar:**
+```
+call_expr = IDENT atom*
+atom = IDENT | NUMBER | STRING | '(' expr ')' | lambda_expr
+```
+
+### Pipeline Operator
+
+```simple
+# Left-to-right data flow
+data |> parse |> filter pred |> save path
+
+# Equivalent to nested calls
+save(filter(parse(data), pred), path)
+
+# Multi-line pipelines
+result = raw_data
+    |> parse
+    |> validate
+    |> filter \x: x.active
+    |> map \x: x.name
+    |> take 10
+```
+
+**Grammar:**
+```
+pipeline_expr = logical_or_expr ('|>' logical_or_expr)*
+```
+
+### Implicit Multiplication
+
+```simple
+# Number followed by identifier = multiplication
+val y = 3x + 2y - 5z      # 3*x + 2*y - 5*z
+val area = 2πr            # 2*π*r
+val quad = ax² + bx + c   # a*x² + b*x + c
+
+# Does NOT apply to:
+val hex = 0xFF            # Hex literal (0x prefix)
+val sci = 3e10            # Scientific notation
+val unit = 100_km         # Semantic literal (underscore)
+```
+
+**Lexer rule:** NUMBER immediately followed by IDENT (no space) inserts implicit `*`.
+
+### Tensor Broadcast Operators
+
+```simple
+# Operators on tensors auto-broadcast
+val a = Tensor.randn [3, 4]
+val b = Tensor.randn [3, 4]
+val c = a + b             # Element-wise addition
+val d = a * b             # Element-wise multiplication
+val e = a ** 2            # Element-wise power
+
+# Scalar-tensor operations
+val scaled = 3 * tensor   # Broadcast scalar
+val shifted = tensor + 1  # Broadcast scalar
+```
+
+**No grammar change:** Uses operator overloading on Tensor type.
+
+## Runtime Representation
+
+These features are purely syntactic sugar:
+
+- **Space-separated args:** Desugared to standard function calls
+- **Pipeline:** `a |> f b` → `f(a, b)`
+- **Implicit multiply:** Lexer inserts `*` token
+- **Tensor broadcast:** Operator methods handle broadcasting
+
+## LL(1) Compatibility
+
+All features maintain LL(1) parseability:
+
+| Feature | Mechanism | Lookahead |
+|---------|-----------|-----------|
+| Space args | Application has highest precedence | 1 token |
+| Pipeline | Lowest precedence binary operator | 1 token |
+| Implicit * | Lexer transformation | N/A |
+| Broadcast | No grammar change | N/A |
+
+"""
+
+# ============================================================================
+# BDD Specification Tests
+# ============================================================================
+
+describe "Space-Separated Arguments":
+
+    it "calls function with single argument":
+        """
+        Single argument without parentheses.
+        """
+        fn double(x: i32) -> i32:
+            x * 2
+
+        expect(double 5).to(eq(10))
+
+    it "calls function with multiple arguments":
+        """
+        Multiple space-separated arguments.
+        """
+        fn add(a: i32, b: i32, c: i32) -> i32:
+            a + b + c
+
+        expect(add 1 2 3).to(eq(6))
+
+    it "handles operators correctly":
+        """
+        Operators end the function call (application binds tightest).
+        """
+        fn square(x: i32) -> i32:
+            x * x
+
+        # f a + b means (f a) + b
+        expect(square 3 + 1).to(eq(10))  # 9 + 1
+
+    it "groups with parentheses":
+        """
+        Parentheses group complex expressions as single argument.
+        """
+        fn double(x: i32) -> i32:
+            x * 2
+
+        expect(double (3 + 2)).to(eq(10))  # double(5)
+
+    it "works with lambdas":
+        """
+        Lambda expressions as arguments.
+        """
+        fn apply(f: fn(i32) -> i32, x: i32) -> i32:
+            f(x)
+
+        expect(apply \x: x * 2 5).to(eq(10))
+
+    it "supports named arguments":
+        """
+        Named arguments with colon syntax.
+        """
+        fn greet(name: text, times: i32) -> text:
+            "{name}!" * times
+
+        expect(greet name: "Hi" times: 2).to(eq("Hi!Hi!"))
+
+
+describe "Pipeline Operator":
+
+    it "pipes single function":
+        """
+        Basic pipeline with single function.
+        """
+        fn double(x: i32) -> i32:
+            x * 2
+
+        expect(5 |> double).to(eq(10))
+
+    it "chains multiple functions":
+        """
+        Pipeline chains left to right.
+        """
+        fn double(x: i32) -> i32:
+            x * 2
+
+        fn add_one(x: i32) -> i32:
+            x + 1
+
+        # 5 → 10 → 11
+        expect(5 |> double |> add_one).to(eq(11))
+
+    it "passes additional arguments":
+        """
+        Pipeline inserts value as first argument.
+        """
+        fn add(a: i32, b: i32) -> i32:
+            a + b
+
+        # 5 |> add 3 means add(5, 3)
+        expect(5 |> add 3).to(eq(8))
+
+    it "works with methods":
+        """
+        Pipeline can call methods on result.
+        """
+        val nums = [1, 2, 3, 4, 5]
+
+        val result = nums
+            |> filter \x: x > 2
+            |> map \x: x * 2
+            |> sum
+
+        expect(result).to(eq(24))  # (3+4+5) * 2 = 24
+
+    it "handles multi-line pipelines":
+        """
+        Pipelines can span multiple lines.
+        """
+        fn parse(s: text) -> i32:
+            s.to_int()
+
+        fn double(x: i32) -> i32:
+            x * 2
+
+        val result = "21"
+            |> parse
+            |> double
+
+        expect(result).to(eq(42))
+
+
+describe "Implicit Multiplication":
+
+    it "multiplies number and variable":
+        """
+        Number followed by identifier = multiplication.
+        """
+        val x = 5
+        val y = 3x + 2
+
+        expect(y).to(eq(17))  # 3*5 + 2
+
+    it "handles multiple terms":
+        """
+        Multiple implicit multiplications in expression.
+        """
+        val x = 2
+        val y = 3
+        val result = 2x + 3y - 1
+
+        expect(result).to(eq(12))  # 2*2 + 3*3 - 1 = 4 + 9 - 1
+
+    it "works with floating point":
+        """
+        Float literal with implicit multiply.
+        """
+        val π = 3.14159
+        val r = 10.0
+        val circumference = 2π * r
+
+        expect(circumference).to(be_close_to(62.8318, 0.001))
+
+    it "does not affect hex literals":
+        """
+        0x prefix is hex, not implicit multiply.
+        """
+        val hex = 0xFF
+
+        expect(hex).to(eq(255))
+
+    it "does not affect scientific notation":
+        """
+        e followed by digit is exponent, not multiply.
+        """
+        val sci = 3e2
+
+        expect(sci).to(eq(300.0))
+
+    it "does not affect semantic literals":
+        """
+        Underscore prefix is semantic literal, not multiply.
+        """
+        val distance = 100_km
+
+        expect(distance.value).to(eq(100))
+        expect(distance.unit).to(eq("km"))
+
+
+describe "Tensor Broadcast Operators":
+
+    it "broadcasts element-wise addition":
+        """
+        + operator broadcasts tensors.
+        """
+        val a = Tensor.from [1.0, 2.0, 3.0]
+        val b = Tensor.from [10.0, 20.0, 30.0]
+        val c = a + b
+
+        expect(c.to_list()).to(eq([11.0, 22.0, 33.0]))
+
+    it "broadcasts element-wise multiplication":
+        """
+        * operator broadcasts tensors.
+        """
+        val a = Tensor.from [1.0, 2.0, 3.0]
+        val b = Tensor.from [2.0, 2.0, 2.0]
+        val c = a * b
+
+        expect(c.to_list()).to(eq([2.0, 4.0, 6.0]))
+
+    it "broadcasts scalar to tensor":
+        """
+        Scalar operations broadcast to all elements.
+        """
+        val a = Tensor.from [1.0, 2.0, 3.0]
+        val b = a * 2
+        val c = a + 10
+
+        expect(b.to_list()).to(eq([2.0, 4.0, 6.0]))
+        expect(c.to_list()).to(eq([11.0, 12.0, 13.0]))
+
+    it "broadcasts different shapes":
+        """
+        NumPy-style broadcasting for compatible shapes.
+        """
+        val a = Tensor.randn [3, 4]
+        val b = Tensor.randn [1, 4]  # Broadcasts row to all rows
+        val c = a + b
+
+        expect(c.shape()).to(eq([3, 4]))
+
+
+describe "Power Operator ^":
+
+    it "computes integer powers":
+        """
+        Basic power operation with integers.
+        """
+        expect(2^3).to(eq(8))
+        expect(3^2).to(eq(9))
+        expect(10^0).to(eq(1))
+
+    it "is right-associative":
+        """
+        Power operator associates right-to-left like math convention.
+        """
+        # 2^3^2 = 2^(3^2) = 2^9 = 512, NOT (2^3)^2 = 64
+        expect(2^3^2).to(eq(512))
+
+    it "has higher precedence than multiplication":
+        """
+        Power binds tighter than * and /.
+        """
+        # 2 * 3^2 = 2 * 9 = 18, NOT (2*3)^2 = 36
+        expect(2 * 3^2).to(eq(18))
+
+        # 12 / 2^2 = 12 / 4 = 3, NOT (12/2)^2 = 36
+        expect(12 / 2^2).to(eq(3))
+
+    it "works with floating point":
+        """
+        Power with float exponents.
+        """
+        expect(4.0^0.5).to(be_close_to(2.0, 0.001))  # Square root
+        expect(8.0^(1.0/3.0)).to(be_close_to(2.0, 0.001))  # Cube root
+
+    it "works with variables":
+        """
+        Power with variable operands.
+        """
+        val x = 3
+        val y = x^2 + 1
+
+        expect(y).to(eq(10))  # 9 + 1
+
+    it "combines with implicit multiplication":
+        """
+        Implicit multiply and power together.
+        """
+        val x = 2
+        val y = 3x^2 + 2x + 1  # 3*4 + 2*2 + 1 = 12 + 4 + 1 = 17
+
+        expect(y).to(eq(17))
+
+
+describe "Dunder Interface (Operator Overloading)":
+
+    it "calls __add__ for + operator":
+        """
+        Custom type with __add__ method.
+        """
+        class Vector2:
+            x: f64
+            y: f64
+
+            fn __add__(other: Vector2) -> Vector2:
+                Vector2 { x: self.x + other.x, y: self.y + other.y }
+
+        val a = Vector2 { x: 1.0, y: 2.0 }
+        val b = Vector2 { x: 3.0, y: 4.0 }
+        val c = a + b
+
+        expect(c.x).to(eq(4.0))
+        expect(c.y).to(eq(6.0))
+
+    it "calls __mul__ for * operator":
+        """
+        Custom type with __mul__ method.
+        """
+        class Vector2:
+            x: f64
+            y: f64
+
+            fn __mul__(scalar: f64) -> Vector2:
+                Vector2 { x: self.x * scalar, y: self.y * scalar }
+
+        val v = Vector2 { x: 2.0, y: 3.0 }
+        val scaled = v * 2.0
+
+        expect(scaled.x).to(eq(4.0))
+        expect(scaled.y).to(eq(6.0))
+
+    it "calls __rmul__ for right-hand operations":
+        """
+        Right-hand multiplication when LHS doesn't implement.
+        """
+        class Vector2:
+            x: f64
+            y: f64
+
+            fn __rmul__(scalar: f64) -> Vector2:
+                Vector2 { x: self.x * scalar, y: self.y * scalar }
+
+        val v = Vector2 { x: 2.0, y: 3.0 }
+        val scaled = 2.0 * v  # Calls v.__rmul__(2.0)
+
+        expect(scaled.x).to(eq(4.0))
+        expect(scaled.y).to(eq(6.0))
+
+    it "calls __pow__ for ^ operator":
+        """
+        Custom type with __pow__ method.
+        """
+        class Number:
+            value: f64
+
+            fn __pow__(exp: i32) -> Number:
+                var result = 1.0
+                for _ in 0..exp:
+                    result = result * self.value
+                Number { value: result }
+
+        val n = Number { value: 3.0 }
+        val squared = n ^ 2
+
+        expect(squared.value).to(eq(9.0))
+
+    it "calls __eq__ for == operator":
+        """
+        Custom equality check.
+        """
+        class Point:
+            x: i32
+            y: i32
+
+            fn __eq__(other: Point) -> bool:
+                self.x == other.x and self.y == other.y
+
+        val p1 = Point { x: 1, y: 2 }
+        val p2 = Point { x: 1, y: 2 }
+        val p3 = Point { x: 3, y: 4 }
+
+        expect(p1 == p2).to(be_true())
+        expect(p1 == p3).to(be_false())
+
+    it "calls __neg__ for unary minus":
+        """
+        Unary negation operator.
+        """
+        class Vector2:
+            x: f64
+            y: f64
+
+            fn __neg__() -> Vector2:
+                Vector2 { x: -self.x, y: -self.y }
+
+        val v = Vector2 { x: 1.0, y: -2.0 }
+        val neg = -v
+
+        expect(neg.x).to(eq(-1.0))
+        expect(neg.y).to(eq(2.0))
+
+    it "calls __matmul__ for @ operator":
+        """
+        Matrix multiplication operator.
+        """
+        val a = Tensor.from [[1.0, 2.0], [3.0, 4.0]]
+        val b = Tensor.from [[5.0, 6.0], [7.0, 8.0]]
+        val c = a @ b
+
+        # [[1*5+2*7, 1*6+2*8], [3*5+4*7, 3*6+4*8]]
+        # [[19, 22], [43, 50]]
+        expect(c.get(0, 0)).to(eq(19.0))
+        expect(c.get(1, 1)).to(eq(50.0))
+
+    it "supports power operator on tensors":
+        """
+        ^ operator for element-wise power on tensors.
+        """
+        val a = Tensor.from [2.0, 3.0, 4.0]
+        val b = a ^ 2
+
+        expect(b.to_list()).to(eq([4.0, 9.0, 16.0]))
+
+
+# ============================================================================
+# Combined Examples
+# ============================================================================
+
+describe "Combined Brevity Features":
+
+    it "uses all features together":
+        """
+        Combining space-separated args, pipeline, and implicit multiply.
+        """
+        fn scale(data: List<f64>, factor: f64) -> List<f64>:
+            data.map \x: x * factor
+
+        fn offset(data: List<f64>, delta: f64) -> List<f64>:
+            data.map \x: x + delta
+
+        val x = 2.0
+        val data = [1.0, 2.0, 3.0]
+
+        # Using pipeline + space-separated args
+        val result = data
+            |> scale 3x      # scale(data, 6.0)
+            |> offset 1.0    # offset(result, 1.0)
+
+        expect(result).to(eq([7.0, 13.0, 19.0]))
+
+    it "creates math-like expressions":
+        """
+        Math formulas with implicit multiply, power, and tensors.
+        """
+        val x = Tensor.from [1.0, 2.0, 3.0]
+        val a = 2.0
+        val b = 3.0
+        val c = 1.0
+
+        # Quadratic: ax² + bx + c
+        # Note: x^2 is element-wise power via __pow__
+        val y = a * x^2 + b * x + c
+
+        # For x=[1,2,3]: [2+3+1, 8+6+1, 18+9+1] = [6, 15, 28]
+        expect(y.to_list()).to(eq([6.0, 15.0, 28.0]))
+
+    it "uses dunder interface for custom math":
+        """
+        Custom type with full operator support.
+        """
+        class Complex:
+            re: f64
+            im: f64
+
+            fn __add__(other: Complex) -> Complex:
+                Complex { re: self.re + other.re, im: self.im + other.im }
+
+            fn __mul__(other: Complex) -> Complex:
+                # (a+bi)(c+di) = (ac-bd) + (ad+bc)i
+                Complex {
+                    re: self.re * other.re - self.im * other.im,
+                    im: self.re * other.im + self.im * other.re
+                }
+
+            fn __neg__() -> Complex:
+                Complex { re: -self.re, im: -self.im }
+
+            fn __eq__(other: Complex) -> bool:
+                self.re == other.re and self.im == other.im
+
+        val i = Complex { re: 0.0, im: 1.0 }
+        val one = Complex { re: 1.0, im: 0.0 }
+
+        # i * i = -1
+        val i_squared = i * i
+        expect(i_squared.re).to(eq(-1.0))
+        expect(i_squared.im).to(eq(0.0))
+
+        # (1 + i) + (2 + 3i) = (3 + 4i)
+        val a = Complex { re: 1.0, im: 1.0 }
+        val b = Complex { re: 2.0, im: 3.0 }
+        val c = a + b
+        expect(c.re).to(eq(3.0))
+        expect(c.im).to(eq(4.0))
