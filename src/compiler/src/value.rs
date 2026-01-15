@@ -588,6 +588,13 @@ pub enum Value {
     Matcher(MatcherValue),
     /// Native callable for interpreter intrinsics (internal use only).
     NativeFunction(NativeFunction),
+    /// Custom block value - result of evaluating m{}, sh{}, sql{}, re{}, etc.
+    /// Stores the block kind and payload for block-specific processing.
+    Block {
+        kind: String,    // Block kind: "m", "sh", "sql", "re", "md", "html", "graph", "img"
+        payload: String, // Raw payload content
+        result: Option<Box<Value>>, // Parsed/evaluated result (lazily computed)
+    },
     Nil,
 }
 
