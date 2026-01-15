@@ -95,6 +95,8 @@ pub struct ForStmt {
     pub body: Block,
     /// Suspension for loop (for~) for explicit suspension points in async-by-default
     pub is_suspend: bool,
+    /// Enumerate shorthand: `for i, item in items:` auto-wraps items with indices
+    pub auto_enumerate: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

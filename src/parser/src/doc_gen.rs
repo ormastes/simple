@@ -664,6 +664,7 @@ fn format_type(ty: &Type) -> String {
             }
             result
         }
+        Type::SelfType => "self".to_string(),
     }
 }
 

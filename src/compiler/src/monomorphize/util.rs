@@ -164,6 +164,10 @@ pub fn ast_type_to_concrete(
             // Unit with repr - treat as a named unit type
             ConcreteType::Named(name.clone())
         }
+        AstType::SelfType => {
+            // self return type - treat as Self (enclosing type)
+            ConcreteType::Named("Self".to_string())
+        }
     }
 }
 

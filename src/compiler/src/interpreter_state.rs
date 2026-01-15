@@ -60,6 +60,9 @@ thread_local! {
     pub(crate) static ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = RefCell::new(None);
     pub(crate) static ACTOR_OUTBOX: RefCell<Option<mpsc::Sender<Message>>> = RefCell::new(None);
     pub(crate) static CONST_NAMES: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+    /// Immutable variables tracked by naming pattern (lowercase without underscore suffix)
+    /// These cannot be reassigned but support functional update with ->
+    pub(crate) static IMMUTABLE_VARS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
     pub(crate) static EXTERN_FUNCTIONS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
     /// Current context object for context blocks (DSL support)
     pub(crate) static CONTEXT_OBJECT: RefCell<Option<Value>> = RefCell::new(None);

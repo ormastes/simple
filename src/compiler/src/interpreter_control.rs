@@ -510,10 +510,19 @@ pub(super) fn exec_for(
     // Use iter_to_vec to handle all iterable types uniformly
     let items = iter_to_vec(&iterable)?;
 
-    for item in items {
+    // If auto_enumerate, wrap items with indices as tuples
+    for (index, item) in items.into_iter().enumerate() {
         check_interrupt!();
+
+        // Create the value to bind - either (index, item) tuple or just item
+        let bind_value = if for_stmt.auto_enumerate {
+            Value::Tuple(vec![Value::Int(index as i64), item])
+        } else {
+            item
+        };
+
         // Use bind_pattern to handle all pattern types (identifier, tuple, etc.)
-        if !bind_pattern(&for_stmt.pattern, &item, env) {
+        if !bind_pattern(&for_stmt.pattern, &bind_value, env) {
             // Pattern didn't match - skip this iteration
             continue;
         }

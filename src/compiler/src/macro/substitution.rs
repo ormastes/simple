@@ -178,6 +178,7 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
             iterable: substitute_expr_templates(&stmt.iterable, const_bindings),
             body: substitute_block_templates(&stmt.body, const_bindings),
             is_suspend: stmt.is_suspend,
+            auto_enumerate: stmt.auto_enumerate,
         }),
         Node::While(stmt) => Node::While(WhileStmt {
             span: stmt.span,

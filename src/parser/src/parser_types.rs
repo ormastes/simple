@@ -190,6 +190,12 @@ impl<'a> Parser<'a> {
             return Ok(Type::DynTrait(trait_name));
         }
 
+        // Handle self return type: fn method() -> self
+        if self.check(&TokenKind::Self_) {
+            self.advance();
+            return Ok(Type::SelfType);
+        }
+
         // Simple or generic type (possibly qualified: module.Type or Self::Item)
         let mut name = self.expect_identifier()?;
 

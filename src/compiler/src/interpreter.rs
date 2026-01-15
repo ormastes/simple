@@ -40,9 +40,9 @@ pub(crate) use interpreter_state::{
     ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER, AOP_CONFIG, BASE_UNIT_DIMENSIONS,
     COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, CURRENT_FILE,
     DI_CONFIG, DI_SINGLETONS, EXECUTION_MODE, EXTERN_FUNCTIONS, GENERATOR_YIELDS,
-    INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER,
-    MODULE_GLOBALS, MOVED_VARS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
-    UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
+    IMMUTABLE_VARS, INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED,
+    MACRO_DEFINITION_ORDER, MODULE_GLOBALS, MOVED_VARS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC,
+    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 
 /// Check if an expression is a simple identifier (for move tracking)
@@ -61,6 +61,20 @@ fn get_pattern_name(pattern: &simple_parser::ast::Pattern) -> Option<String> {
         simple_parser::ast::Pattern::Typed { pattern, .. } => get_pattern_name(pattern),
         _ => None,
     }
+}
+
+/// Check if a variable name indicates immutability by naming pattern
+/// Returns true if immutable (lowercase), false if mutable (ends with _)
+pub(crate) fn is_immutable_by_pattern(name: &str) -> bool {
+    if name.is_empty() {
+        return true;
+    }
+    // Mutable if ends with underscore
+    if name.ends_with('_') {
+        return false;
+    }
+    // Otherwise immutable
+    true
 }
 
 /// Stores enum definitions: name -> EnumDef
@@ -266,12 +280,28 @@ pub(crate) fn exec_node(
         }
         Node::Assignment(assign) if assign.op == AssignOp::Assign => {
             if let Expr::Identifier(name) = &assign.target {
+                // Check if this is a first-time assignment (implicit declaration)
+                let is_first_assignment = !env.contains_key(name);
+
                 let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(name));
                 if is_const {
                     return Err(CompileError::Semantic(format!(
                         "cannot assign to const '{name}'"
                     )));
                 }
+
+                // Check immutability for reassignments (not first assignment)
+                if !is_first_assignment {
+                    let is_immutable = IMMUTABLE_VARS.with(|cell| cell.borrow().contains(name));
+                    if is_immutable && !name.ends_with('_') {
+                        return Err(CompileError::Semantic(format!(
+                            "cannot reassign to immutable variable '{name}'\n\
+                             help: consider using '{name}_' for a mutable variable, \
+                             or use '{name}->method()' for functional updates"
+                        )));
+                    }
+                }
+
                 // Handle method calls on objects - need to persist mutations to self
                 let (value, update) = handle_method_call_with_self_update(
                     &assign.value,
@@ -299,6 +329,26 @@ pub(crate) fn exec_node(
                         });
                     } else {
                         env.insert(name.clone(), value);
+
+                        // If this is a first-time assignment (implicit declaration),
+                        // track its mutability based on naming pattern
+                        if is_first_assignment {
+                            let immutable_by_pattern = is_immutable_by_pattern(name);
+                            let is_all_caps = name.chars().all(|c| c.is_uppercase() || c.is_numeric() || c == '_')
+                                && name.chars().any(|c| c.is_alphabetic());
+
+                            if immutable_by_pattern {
+                                if is_all_caps {
+                                    // ALL_CAPS = constant
+                                    CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
+                                } else {
+                                    // Lowercase = immutable (supports functional updates)
+                                    IMMUTABLE_VARS.with(|cell| cell.borrow_mut().insert(name.clone()));
+                                }
+                            }
+                            // else: ends with _ = mutable, no tracking needed
+                        }
+
                         // Also sync to MODULE_GLOBALS if it exists there (for module-level assignments)
                         MODULE_GLOBALS.with(|cell| {
                             let mut globals = cell.borrow_mut();
