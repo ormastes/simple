@@ -615,12 +615,13 @@ pub enum BinOp {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
-    Neg,    // -
-    Not,    // not
-    BitNot, // ~
-    Ref,    // & (immutable borrow)
-    RefMut, // &mut (mutable borrow)
-    Deref,  // *
+    Neg,         // -
+    Not,         // not
+    BitNot,      // ~
+    Ref,         // & (immutable borrow)
+    RefMut,      // &mut (mutable borrow)
+    Deref,       // *
+    ChannelRecv, // <- (channel receive)
 }
 
 // Patterns
