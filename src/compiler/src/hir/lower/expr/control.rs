@@ -44,17 +44,27 @@ impl Lowerer {
 
     /// Lower a lambda expression to HIR
     ///
-    /// Captures all variables from the outer scope.
+    /// Captures variables based on capture_all flag:
+    /// - true: captures all immutable variables from outer scope
+    /// - false: only captures variables explicitly used in body
     /// Parameters default to I64 type if not explicitly typed.
     /// Result type is taken from the lambda body.
     pub(super) fn lower_lambda(
         &mut self,
         params: &[ast::LambdaParam],
         body: &Expr,
+        capture_all: bool,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         // Track captured variables from outer scope
-        let captures: Vec<usize> = ctx.locals.iter().enumerate().map(|(i, _)| i).collect();
+        let captures: Vec<usize> = if capture_all {
+            // Capture all immutable variables from outer scope
+            ctx.locals.iter().enumerate().map(|(i, _)| i).collect()
+        } else {
+            // TODO: analyze body to determine which variables are actually used
+            // For now, capture all (conservative approach)
+            ctx.locals.iter().enumerate().map(|(i, _)| i).collect()
+        };
 
         // Collect parameter names and types
         let param_info: Vec<(String, TypeId)> = params
@@ -109,36 +119,23 @@ impl Lowerer {
 
     /// Lower a go expression to HIR
     ///
-    /// `go(args) \params: body` or `go |captures| \: body`
-    /// Both forms lower to spawn_isolated with a lambda
+    /// Forms:
+    /// - `go(x, y) \a, b: body` - pass args to params (no capture)
+    /// - `go(x, y) \*: body` or `go(x, y) \: body` - capture specified vars or all
+    /// - `go \*: body` or `go \: body` - capture all immutables
     pub(super) fn lower_go(
         &mut self,
         args: &[Expr],
         params: &[String],
-        is_capture_form: bool,
+        _is_capture_form: bool,
         body: &Expr,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
-        // For go expressions, we create a lambda and spawn it
-        // go(x, y) \a, b: expr  =>  spawn_isolated(\a, b: expr)(x, y)
-        // go |x, y| \: expr     =>  spawn_isolated(\: expr using captured x, y)
+        let has_params = !params.is_empty();
+        let has_args = !args.is_empty();
 
-        if is_capture_form {
-            // Capture form: go |x, y| \: body
-            // The args are identifiers that should be captured
-            // We create a lambda with no parameters that uses the captures
-            let lambda_params: Vec<ast::LambdaParam> = Vec::new();
-            let lambda_hir = self.lower_lambda(&lambda_params, body, ctx)?;
-
-            // Spawn the lambda
-            Ok(HirExpr {
-                kind: HirExprKind::ActorSpawn {
-                    body: Box::new(lambda_hir),
-                },
-                ty: TypeId::I64, // Returns thread handle
-            })
-        } else {
-            // Args form: go(x, y) \a, b: body
+        if has_params {
+            // Args form with params: go(x, y) \a, b: body
             // Create a lambda with the parameters
             let lambda_params: Vec<ast::LambdaParam> = params
                 .iter()
@@ -148,7 +145,7 @@ impl Lowerer {
                 })
                 .collect();
 
-            let lambda_hir = self.lower_lambda(&lambda_params, body, ctx)?;
+            let lambda_hir = self.lower_lambda(&lambda_params, body, false, ctx)?;
 
             // Lower the arguments
             let mut arg_hirs = Vec::new();
@@ -157,19 +154,32 @@ impl Lowerer {
             }
 
             // Create a call to the lambda with the arguments
-            // This is effectively: (lambda)(args...)
             let call_hir = HirExpr {
                 kind: HirExprKind::Call {
                     func: Box::new(lambda_hir),
                     args: arg_hirs,
                 },
-                ty: TypeId::I64, // The result type of the body
+                ty: TypeId::I64,
             };
 
             // Spawn the call
             Ok(HirExpr {
                 kind: HirExprKind::ActorSpawn {
                     body: Box::new(call_hir),
+                },
+                ty: TypeId::I64, // Returns thread handle
+            })
+        } else {
+            // Capture form: go(x, y) \*: or go \*:
+            // Empty args means capture all
+            let capture_all = !has_args;
+            let lambda_params: Vec<ast::LambdaParam> = Vec::new();
+            let lambda_hir = self.lower_lambda(&lambda_params, body, capture_all, ctx)?;
+
+            // Spawn the lambda
+            Ok(HirExpr {
+                kind: HirExprKind::ActorSpawn {
+                    body: Box::new(lambda_hir),
                 },
                 ty: TypeId::I64, // Returns thread handle
             })

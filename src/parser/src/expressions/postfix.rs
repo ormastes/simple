@@ -344,7 +344,7 @@ impl<'a> Parser<'a> {
     /// Parse a trailing block lambda: \params: body
     pub(crate) fn parse_trailing_lambda(&mut self) -> Result<Expr, ParseError> {
         self.expect(&TokenKind::Backslash)?;
-        let params = self.parse_lambda_params()?;
+        let (params, capture_all) = self.parse_lambda_params()?;
         self.expect(&TokenKind::Colon)?;
 
         // Check if body is an indented block or inline expression
@@ -367,20 +367,32 @@ impl<'a> Parser<'a> {
             params,
             body: Box::new(body),
             move_mode: MoveMode::Copy,
+            capture_all,
         })
     }
 
     /// Parse lambda parameters (comma-separated identifiers before colon)
     /// Used by both trailing lambda and inline lambda parsing
-    pub(crate) fn parse_lambda_params(&mut self) -> Result<Vec<LambdaParam>, ParseError> {
+    /// Supports \*: for capture-all syntax
+    pub(crate) fn parse_lambda_params(&mut self) -> Result<(Vec<LambdaParam>, bool), ParseError> {
         let mut params = Vec::new();
-        // Check for no-param lambda: \: expr
-        if !self.check(&TokenKind::Colon) {
+        let mut capture_all = false;
+
+        // Check for capture-all: \*:
+        if self.check(&TokenKind::Star) {
+            self.advance();
+            capture_all = true;
+        }
+        // Check for no-param lambda: \: expr (also treated as capture-all)
+        else if !self.check(&TokenKind::Colon) {
             let name = self.expect_identifier()?;
             params.push(LambdaParam { name, ty: None });
             self.parse_remaining_lambda_params(&mut params)?;
+        } else {
+            // Empty params with just \: means capture all
+            capture_all = true;
         }
-        Ok(params)
+        Ok((params, capture_all))
     }
 
     /// Parse lambda parameters between pipes: |x| or |x, y|

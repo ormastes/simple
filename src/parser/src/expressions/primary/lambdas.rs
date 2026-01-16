@@ -21,6 +21,7 @@ impl<'a> Parser<'a> {
                     params,
                     body: Box::new(body),
                     move_mode: MoveMode::Copy,
+                    capture_all: false, // Pipe syntax doesn't support capture-all
                 })
             }
             TokenKind::Move => {
