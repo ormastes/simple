@@ -1,6 +1,7 @@
 # string_interpolation_spec
 
-*Source: `./vulkan-backend/simple/test/system/features/string_interpolation/string_interpolation_spec.spl`*
+*Source: `simple/test/system/features/string_interpolation/string_interpolation_spec.spl`*
+*Last Updated: 2026-01-16*
 
 ---
 

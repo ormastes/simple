@@ -1,6 +1,7 @@
 # type_aliases_spec
 
-*Source: `./vulkan-backend/simple/test/system/features/type_aliases/type_aliases_spec.spl`*
+*Source: `simple/test/system/features/type_aliases/type_aliases_spec.spl`*
+*Last Updated: 2026-01-16*
 
 ---
 

@@ -1,6 +1,7 @@
 # visibility_modifiers_spec
 
-*Source: `./vulkan-backend/simple/test/system/features/visibility_modifiers/visibility_modifiers_spec.spl`*
+*Source: `simple/test/system/features/visibility_modifiers/visibility_modifiers_spec.spl`*
+*Last Updated: 2026-01-16*
 
 ---
 
