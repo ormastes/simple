@@ -79,11 +79,11 @@ impl<'a> Parser<'a> {
             self.advance(); // consume '('
 
             if self.check(&TokenKind::RParen) {
-                // Empty parens: go() \*: - capture all form
+                // Empty parens: go() \ *: - capture all form
                 self.advance();
                 Vec::new()
             } else {
-                // Parse argument expressions: go(x, y) \a, b: or go(x, y) \*:
+                // Parse argument expressions: go(x, y) \a, b: or go(x, y) \ *:
                 let mut args = Vec::new();
                 loop {
                     args.push(self.parse_expression()?);
@@ -97,7 +97,7 @@ impl<'a> Parser<'a> {
                 args
             }
         } else if self.check(&TokenKind::Backslash) {
-            // Shorthand: go \*: means capture all
+            // Shorthand: go \ *: means capture all
             Vec::new()
         } else {
             return Err(ParseError::unexpected_token(
@@ -113,7 +113,7 @@ impl<'a> Parser<'a> {
         // Parse parameters or * for capture-all
         let mut params = Vec::new();
         if self.check(&TokenKind::Star) {
-            // \*: means capture all immutables
+            // \ *: means capture all immutables
             self.advance();
         } else if !self.check(&TokenKind::Colon) {
             // Parse parameter list: \a, b, c:
@@ -134,11 +134,7 @@ impl<'a> Parser<'a> {
         // Parse body expression
         let body = Box::new(self.parse_expression()?);
 
-        Ok(Expr::Go {
-            args,
-            params,
-            body,
-        })
+        Ok(Expr::Go { args, params, body })
     }
 
     fn parse_new_expr(&mut self) -> Result<Expr, ParseError> {

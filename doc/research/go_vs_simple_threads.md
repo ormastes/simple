@@ -2,8 +2,9 @@
 
 ## Research Comparison & Improvement Proposals
 
-**Status:** Research
+**Status:** Phase 2 & 3 Complete (Go keyword + Channel operators)
 **Date:** 2026-01-16
+**Updated:** 2026-01-16
 
 ---
 
@@ -783,25 +784,40 @@ go(scope) \s: while not s.is_done(): work()
 | Document WaitGroup = Latch | `doc/guide/concurrency.md` | 0.5 day |
 | Create SSpec tests | `std_lib/test/features/` | 1 day |
 
-### Phase 2: Syntax (P2 - Medium Effort)
+### Phase 2: Syntax (P2 - Medium Effort) ✅ COMPLETE
 
-| Task | Files | Effort |
+**Status:** Complete (2026-01-16)
+
+| Task | Files | Status |
 |------|-------|--------|
-| Add `<-` token to lexer | `src/parser/src/lexer.rs` | 0.5 day |
-| Add `ChannelArrow` TokenKind | `src/parser/src/token.rs` | 0.5 day |
-| Parse prefix `<-expr` (recv) | `src/parser/src/parser_expr.rs` | 1 day |
-| Update tree-sitter grammar | `std_lib/src/parser/treesitter/` | 0.5 day |
-| Update highlights.scm | `std_lib/src/parser/treesitter/queries/` | 0.5 day |
+| Add `<-` token to lexer | `src/parser/src/lexer/operators.rs` | ✅ Done |
+| Add `ChannelArrow` TokenKind | `src/parser/src/token.rs` | ✅ Done |
+| Parse prefix `<-expr` (recv) | `src/parser/src/expressions/unary.rs` | ✅ Done |
+| Update tree-sitter grammar | `std_lib/src/parser/treesitter/` | ⏭️ Deferred |
+| Update highlights.scm | `std_lib/src/parser/treesitter/queries/` | ⏭️ Deferred |
 
-### Phase 3: Go Keyword (P2 - Medium Effort)
+### Phase 3: Go Keyword (P2 - Medium Effort) ✅ COMPLETE
 
-| Task | Files | Effort |
+**Status:** Complete (2026-01-16)
+
+| Task | Files | Status |
 |------|-------|--------|
-| Add `go` keyword to lexer | `src/parser/src/lexer.rs` | 0.5 day |
-| Parse `go(args) \params: expr` | `src/parser/src/parser_stmt.rs` | 1 day |
-| Parse `go \|captures\| \: expr` | `src/parser/src/parser_stmt.rs` | 1 day |
-| Lower to `spawn_isolated` call | `src/compiler/src/hir_lower.rs` | 1 day |
-| Add SSpec tests | `std_lib/test/features/` | 0.5 day |
+| Add `go` keyword to lexer | `src/parser/src/lexer/identifiers.rs` | ✅ Done |
+| Parse `go(args) \params: expr` | `src/parser/src/expressions/primary/control.rs` | ✅ Done |
+| Parse `go \ *:` capture-all syntax | `src/parser/src/expressions/primary/control.rs` | ✅ Done |
+| Add `Expr::Go` AST variant | `src/parser/src/ast/nodes/core.rs` | ✅ Done |
+| Lower to HIR ActorSpawn | `src/compiler/src/hir/lower/expr/control.rs` | ✅ Done |
+| Add parser tests | `src/parser/tests/expression_tests.rs` | ✅ Done (6 tests) |
+| Create lambda SSpec | `simple/std_lib/test/features/language/lambda_spec.spl` | ✅ Done (9 tests) |
+
+**Key Implementation Details:**
+- **Simplified Syntax:** Removed `|capture|` pipe notation in favor of param-based discrimination
+- **Capture-All:** Introduced `\ *:` and `\:` syntax for explicit capture-all semantics
+- **Three Forms:**
+  - `go(x, y) \a, b: expr` - pass args to params
+  - `go(x, y) \: expr` - capture specific vars
+  - `go \ *: expr` or `go \: expr` - capture all immutables
+- **Lambda Integration:** Added `capture_all: bool` field to `Expr::Lambda` for consistency
 
 ### Phase 4: Advanced (P2-P3)
 

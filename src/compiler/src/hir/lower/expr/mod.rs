@@ -43,7 +43,12 @@ impl Lowerer {
                 else_branch,
                 ..
             } => self.lower_if(condition, then_branch, else_branch.as_deref(), ctx),
-            Expr::Lambda { params, body, capture_all, .. } => self.lower_lambda(params, body, *capture_all, ctx),
+            Expr::Lambda {
+                params,
+                body,
+                capture_all,
+                ..
+            } => self.lower_lambda(params, body, *capture_all, ctx),
             Expr::Yield(value) => self.lower_yield(value.as_deref(), ctx),
             Expr::ContractResult => self.lower_contract_result(ctx),
             Expr::ContractOld(inner) => self.lower_contract_old(inner, ctx),
@@ -63,11 +68,7 @@ impl Lowerer {
             // Spawn expression: spawn expr
             Expr::Spawn(expr) => self.lower_spawn(expr, ctx),
             // Go expression: go(...) \params: or go \*:
-            Expr::Go {
-                args,
-                params,
-                body,
-            } => self.lower_go(args, params, body, ctx),
+            Expr::Go { args, params, body } => self.lower_go(args, params, body, ctx),
             _ => Err(LowerError::Unsupported(format!("{:?}", expr))),
         }
     }

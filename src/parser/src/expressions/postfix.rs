@@ -373,12 +373,12 @@ impl<'a> Parser<'a> {
 
     /// Parse lambda parameters (comma-separated identifiers before colon)
     /// Used by both trailing lambda and inline lambda parsing
-    /// Supports \*: for capture-all syntax
+    /// Supports \ *: for capture-all syntax
     pub(crate) fn parse_lambda_params(&mut self) -> Result<(Vec<LambdaParam>, bool), ParseError> {
         let mut params = Vec::new();
         let mut capture_all = false;
 
-        // Check for capture-all: \*:
+        // Check for capture-all: \ *:
         if self.check(&TokenKind::Star) {
             self.advance();
             capture_all = true;

@@ -316,7 +316,8 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
             receiver: Box::new(apply_macro_hygiene_expr(receiver, ctx)),
             index: *index,
         },
-        Expr::Lambda { capture_all, 
+        Expr::Lambda {
+            capture_all,
             params,
             body,
             move_mode,
