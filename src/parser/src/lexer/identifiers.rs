@@ -50,6 +50,17 @@ impl<'a> super::Lexer<'a> {
             }
         }
 
+        // Check for i18n pattern: Name_"..." (identifier ending with _ followed by ")
+        // The identifier must end with _ and be immediately followed by "
+        if name.ends_with('_') && self.check('"') {
+            self.advance(); // consume opening "
+            // Check for triple-quoted i18n string: Name_"""..."""
+            if self.check('"') && self.check_ahead(1, '"') {
+                return self.scan_i18n_triple_string(name);
+            }
+            return self.scan_i18n_string(name);
+        }
+
         // Check for suspension keywords with tilde suffix (if~, while~, for~)
         // These must be checked before regular keyword matching
         if self.check('~') {

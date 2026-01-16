@@ -107,6 +107,17 @@ pub enum TokenKind {
     Nil,
     Symbol(String), // :symbol
 
+    /// i18n named string: Name_"text"
+    I18nString {
+        name: String,
+        default_text: String,
+    },
+    /// i18n string with template interpolations: Name_"text with {var}"
+    I18nFString {
+        name: String,
+        parts: Vec<FStringToken>,
+    },
+
     // Identifiers and Keywords
     Identifier {
         name: String,

@@ -386,6 +386,20 @@ pub enum Expr {
     Nil,
     Symbol(String),
 
+    /// i18n named string: Name_"default text"
+    I18nString {
+        name: String,
+        default_text: String,
+    },
+    /// i18n string with template: Name_"Hello {user}!"{user: name}
+    I18nTemplate {
+        name: String,
+        parts: Vec<FStringPart>, // Reuse existing FStringPart
+        args: Vec<(String, Expr)>,
+    },
+    /// Reference to i18n string by name only: print(Login_failed)
+    I18nRef(String),
+
     // Compound
     Identifier(String),
     Path(Vec<String>), // EnumName::Variant or module::item

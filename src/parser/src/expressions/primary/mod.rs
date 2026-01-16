@@ -5,6 +5,7 @@ use crate::token::TokenKind;
 
 mod collections;
 mod control;
+mod i18n;
 mod identifiers;
 mod lambdas;
 mod literals;
@@ -26,6 +27,7 @@ impl<'a> Parser<'a> {
             | TokenKind::Nil
             | TokenKind::Symbol(_)
             | TokenKind::CustomBlock { .. } => self.parse_primary_literal(),
+            TokenKind::I18nString { .. } | TokenKind::I18nFString { .. } => self.parse_i18n_literal(),
             TokenKind::Result
             | TokenKind::Identifier { .. }
             | TokenKind::Self_

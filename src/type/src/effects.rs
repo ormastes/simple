@@ -630,6 +630,7 @@ mod tests {
             is_abstract: false,
             is_sync: true, // Marked as sync but contains suspension
             bounds_block: None,
+            is_me_method: false,
         };
 
         let env = HashMap::new();

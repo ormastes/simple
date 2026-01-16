@@ -1,5 +1,6 @@
 mod comments;
 mod escapes;
+mod i18n;
 mod identifiers;
 mod indentation;
 mod numbers;

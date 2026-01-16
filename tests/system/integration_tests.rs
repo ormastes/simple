@@ -314,6 +314,7 @@ fn test_hir_function_integration() {
     use simple_compiler::hir::{ConcurrencyMode, VerificationMode};
     let func = HirFunction {
         name: "add".to_string(),
+        span: None,
         params: vec![
             LocalVar {
                 name: "a".to_string(),

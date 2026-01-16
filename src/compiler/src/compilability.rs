@@ -450,6 +450,27 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             add_reason(reasons, FallbackReason::StringOps);
         }
 
+        // i18n strings - need runtime locale lookup
+        Expr::I18nString { .. } => {
+            add_reason(reasons, FallbackReason::NotYetImplemented("i18n string".into()));
+        }
+
+        Expr::I18nTemplate { parts, args, .. } => {
+            for part in parts {
+                if let simple_parser::ast::FStringPart::Expr(e) = part {
+                    analyze_expr(e, reasons);
+                }
+            }
+            for (_, value) in args {
+                analyze_expr(value, reasons);
+            }
+            add_reason(reasons, FallbackReason::NotYetImplemented("i18n template".into()));
+        }
+
+        Expr::I18nRef(_) => {
+            add_reason(reasons, FallbackReason::NotYetImplemented("i18n reference".into()));
+        }
+
         // Comprehensions need collection and iterator runtime
         Expr::ListComprehension {
             expr,

@@ -45,6 +45,11 @@ pub fn print_help() {
     eprintln!("  simple fmt [path]           Format file or directory");
     eprintln!("  simple fmt --check          Check formatting without changes");
     eprintln!();
+    eprintln!("Internationalization (i18n):");
+    eprintln!("  simple i18n extract [path]      Extract i18n strings to locale files");
+    eprintln!("  simple i18n generate <locale>   Generate locale template (e.g., ko-KR)");
+    eprintln!("  simple i18n --help              Show i18n help");
+    eprintln!();
     eprintln!("LLM-Friendly Tools:");
     eprintln!("  simple mcp <file.spl>       Generate minimal code preview (90% token reduction)");
     eprintln!("  simple mcp <file.spl> --expand <symbol>  Expand specific symbol");

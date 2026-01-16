@@ -517,6 +517,9 @@ fn main() {
 
             std::process::exit(run_check(&files, options));
         }
+        "i18n" => {
+            std::process::exit(simple_driver::cli::i18n::run_i18n(&args));
+        }
         "migrate" => {
             std::process::exit(run_migrate(&args));
         }
