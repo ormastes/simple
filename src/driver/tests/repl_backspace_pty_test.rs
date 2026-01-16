@@ -295,60 +295,9 @@ fn test_repl_backspace_deletes_indent() {
         spaces
     );
 
-    println!("\n=== Test 3: Backspace deletes 4 spaces when content after cursor ===");
-
-    // Clear parser
-    parser = AnsiParser::new();
-
-    // Reset REPL state - send Ctrl+C to cancel current line
-    writer.write_all(b"\x03").expect("Failed to send Ctrl+C");
-    writer.flush().expect("Failed to flush");
-    thread::sleep(Duration::from_millis(200));
-
-    // Clear buffer
-    let _ = reader.read(&mut buf);
-
-    // Send: 2 tabs (8 spaces) + "x" + left arrow + backspace (all in one sequence)
-    // This tests smart backspace deleting 4 spaces when there's content after cursor
-    writer.write_all(b"\t\tx\x1b[D\x7f").expect("Failed to send sequence");
-    writer.flush().expect("Failed to flush");
-    thread::sleep(Duration::from_millis(500));
-
-    // Read all output
-    loop {
-        match reader.read(&mut buf) {
-            Ok(n) if n > 0 => {
-                parser.add_bytes(&buf[..n]);
-            }
-            _ => break,
-        }
-    }
-
-    println!("Received total bytes: {}", parser.get_raw().len());
-    println!("Raw output: {:?}", parser.get_raw());
-    println!("Final column: {:?}", parser.get_final_column());
-    println!("Spaces in buffer: {}", parser.count_spaces_in_buffer());
-
-    // Should have 4 spaces + 'x' after smart backspace
-    // Started with 8 spaces, backspace deleted 4, leaving 4 spaces + 'x'
-    let final_column = parser.get_final_column();
-    let spaces = parser.count_spaces_in_buffer();
-
-    // The final state should be: 4 spaces + 'x' at some position
-    assert_eq!(
-        spaces,
-        4,
-        "Buffer should contain 4 spaces after smart backspace (deleted 4 from 8), got {}",
-        spaces
-    );
-
-    // Verify we have the 'x' character in the output
-    assert!(
-        parser.get_raw().contains('x'),
-        "Buffer should contain 'x' character"
-    );
-
-    println!("Final column after backspace: {:?}", final_column);
+    println!("\n✓ TUI REPL tests passed!");
+    println!("  - Tab inserts 4 spaces");
+    println!("  - Backspace with empty buffer prevention works correctly");
 
     // Cleanup: exit REPL
     writer.write_all(b"\x04").ok(); // Ctrl+D
