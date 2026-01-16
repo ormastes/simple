@@ -5,6 +5,7 @@ use simple_parser::token::NumericSuffix;
 
 use super::evaluate_expr;
 use super::units::{lookup_unit_family, lookup_unit_family_with_si};
+use crate::blocks;
 use crate::error::CompileError;
 use crate::value::{OptionVariant, Value};
 
@@ -87,13 +88,11 @@ pub(super) fn eval_literal_expr(
         Expr::Symbol(s) => Ok(Some(Value::Symbol(s.clone()))),
         // Custom block expressions: m{...}, sh{...}, sql{...}, re{...}, etc.
         Expr::BlockExpr { kind, payload } => {
-            // Create a Block value that can be processed by block handlers
-            // The result is lazily computed when the block is used
-            Ok(Some(Value::Block {
-                kind: kind.clone(),
-                payload: payload.clone(),
-                result: None, // Will be computed on first use
-            }))
+            // Evaluate the block using the appropriate handler
+            match blocks::evaluate_block(kind, payload) {
+                Ok(value) => Ok(Some(value)),
+                Err(e) => Err(e),
+            }
         }
         Expr::Identifier(name) => {
             // Check for Option::None literal using type-safe variant
