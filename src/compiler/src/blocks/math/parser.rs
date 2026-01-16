@@ -380,7 +380,7 @@ impl MathParser {
                         self.advance();
                     }
                 }
-                Ok(MathExpr::Int {
+                Ok(MathExpr::Integral {
                     var,
                     range,
                     body: Box::new(body),
@@ -413,7 +413,7 @@ impl MathParser {
             // \sum_{i=a}^{b} -> sum(i, a..b)
             "sum" | "prod" | "int" => self.parse_latex_binder(cmd),
             // Greek letters: \alpha -> alpha
-            name if is_greek_letter(name) => Ok(MathExpr::Var(name)),
+            name if is_greek_letter(name) => Ok(MathExpr::Var(name.to_string())),
             // \cdot, \times -> multiplication
             "cdot" | "times" => {
                 // These are binary operators, but in LaTeX they appear between operands
@@ -515,7 +515,7 @@ impl MathParser {
                         self.advance();
                     }
                 }
-                Ok(MathExpr::Int {
+                Ok(MathExpr::Integral {
                     var,
                     range,
                     body: Box::new(body),
