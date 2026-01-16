@@ -262,7 +262,7 @@ pub(super) fn eval_builtin(
             } = val
             {
                 GENERATOR_YIELDS.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
-                let _ = evaluate_expr(&body, &captured, functions, classes, enums, impl_methods);
+                let _ = evaluate_expr(&body, &mut captured, functions, classes, enums, impl_methods);
                 let yields = GENERATOR_YIELDS.with(|cell| cell.borrow_mut().take().unwrap_or_default());
                 let gen = GeneratorValue::new_with_values(yields);
                 return Ok(Some(Value::Generator(gen)));

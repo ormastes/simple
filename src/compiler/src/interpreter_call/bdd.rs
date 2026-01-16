@@ -135,7 +135,7 @@ pub(crate) fn exec_block_value(
             impl_methods,
         ),
         Value::BlockClosure { nodes, env: captured } => {
-            exec_block_closure(&nodes, &captured, functions, classes, enums, impl_methods)
+            exec_block_closure(&nodes, &mut captured, functions, classes, enums, impl_methods)
         }
         _ => Ok(Value::Nil),
     }

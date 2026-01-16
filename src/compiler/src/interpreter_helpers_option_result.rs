@@ -195,7 +195,7 @@ pub(crate) fn eval_option_or_else(
         env: captured,
     } = func_arg
     {
-        return evaluate_expr(&body, &captured, functions, classes, enums, impl_methods);
+        return evaluate_expr(&body, &mut captured, functions, classes, enums, impl_methods);
     }
     Ok(Value::none())
 }

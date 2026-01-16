@@ -279,7 +279,7 @@ pub fn handle_bool_methods(
                     env: captured,
                 } = func
                 {
-                    let result = evaluate_expr(&body, &captured, functions, classes, enums, impl_methods)?;
+                    let result = evaluate_expr(&body, &mut captured, functions, classes, enums, impl_methods)?;
                     return Ok(Some(Value::some(result)));
                 }
                 return Ok(Some(Value::some(Value::Nil)));
