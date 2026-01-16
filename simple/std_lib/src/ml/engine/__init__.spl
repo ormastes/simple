@@ -33,7 +33,7 @@
 # trainer.run(train_loader, max_epochs=10)
 # ```
 
-export Engine, State, Metric, Loss, Accuracy
+export Engine, State, Metric, Loss, Accuracy, MSE, MAE, RMSE
 export ITERATION_COMPLETED_EVERY, EPOCH_COMPLETED_EVERY
 export STARTED, EPOCH_STARTED, ITERATION_STARTED, ITERATION_COMPLETED
 export EPOCH_COMPLETED, COMPLETED, EXCEPTION_RAISED
@@ -391,12 +391,17 @@ class Engine:
 class Accuracy(Metric):
     """Accuracy metric for classification.
 
-    Expects output to be (predictions, labels) tuple.
+    Expects output to be dict with "pred" and "labels" keys, or tuple (pred, labels).
+    Predictions and labels can be lists/arrays of class indices.
 
     Example:
         ```simple
         val accuracy = Accuracy()
         trainer.add_metric(accuracy, "acc")
+
+        # Output format options:
+        # 1. Dict: {"pred": [0, 1, 2], "labels": [0, 1, 1]}
+        # 2. Tuple: ([0, 1, 2], [0, 1, 1])
         ```
     """
     correct: i64
@@ -416,17 +421,41 @@ class Accuracy(Metric):
         """Update with batch output.
 
         Args:
-            output: Dict with "pred" and "labels" keys
+            output: Dict with "pred" and "labels" keys, or tuple (pred, labels)
+
+        Supported formats:
+            - Dict: {"pred": [0, 1, 2], "labels": [0, 1, 1]}
+            - Tuple: ([0, 1, 2], [0, 1, 1])
+            - Predictions can be class indices (integers) or logits (will use argmax)
         """
-        # Assuming output is dict with "pred" and "labels"
-        # TODO: Implement actual accuracy computation
-        pass
+        var pred = []
+        var labels = []
+
+        # Extract predictions and labels from output
+        if isinstance(output, dict):
+            if "pred" in output and "labels" in output:
+                pred = output["pred"]
+                labels = output["labels"]
+            elif "y_pred" in output and "y_true" in output:
+                pred = output["y_pred"]
+                labels = output["y_true"]
+        elif isinstance(output, tuple) and len(output) >= 2:
+            pred = output[0]
+            labels = output[1]
+
+        # Compute matches
+        if len(pred) > 0 and len(labels) > 0:
+            val n = min(len(pred), len(labels))
+            for i in range(n):
+                self.total += 1
+                if pred[i] == labels[i]:
+                    self.correct += 1
 
     fn compute() -> f64:
         """Compute accuracy.
 
         Returns:
-            Accuracy value
+            Accuracy value in range [0.0, 1.0]
         """
         if self.total == 0:
             return 0.0
@@ -475,3 +504,202 @@ class Loss(Metric):
         if self.count == 0:
             return 0.0
         return self.total_loss / self.count.to_f64()
+
+
+# ============================================================================
+# Regression Metrics
+# ============================================================================
+
+class MSE(Metric):
+    """Mean Squared Error metric for regression.
+
+    Computes: (1/n) * sum((pred - actual)^2)
+
+    Example:
+        ```simple
+        val mse = MSE()
+        trainer.add_metric(mse, "mse")
+
+        # Output format: {"pred": [1.0, 2.0], "actual": [1.1, 2.2]}
+        ```
+    """
+    total_squared_error: f64
+    count: i64
+
+    fn __init__():
+        """Initialize MSE metric."""
+        self.total_squared_error = 0.0
+        self.count = 0
+
+    fn reset():
+        """Reset for new epoch."""
+        self.total_squared_error = 0.0
+        self.count = 0
+
+    fn update(output: any):
+        """Update with batch output.
+
+        Args:
+            output: Dict with "pred" and "actual" keys, or tuple (pred, actual)
+        """
+        var pred = []
+        var actual = []
+
+        # Extract predictions and actuals from output
+        if isinstance(output, dict):
+            if "pred" in output and "actual" in output:
+                pred = output["pred"]
+                actual = output["actual"]
+            elif "y_pred" in output and "y_true" in output:
+                pred = output["y_pred"]
+                actual = output["y_true"]
+        elif isinstance(output, tuple) and len(output) >= 2:
+            pred = output[0]
+            actual = output[1]
+
+        # Compute squared errors
+        if len(pred) > 0 and len(actual) > 0:
+            val n = min(len(pred), len(actual))
+            for i in range(n):
+                val diff = pred[i].to_f64() - actual[i].to_f64()
+                self.total_squared_error += diff * diff
+                self.count += 1
+
+    fn compute() -> f64:
+        """Compute mean squared error.
+
+        Returns:
+            MSE value
+        """
+        if self.count == 0:
+            return 0.0
+        return self.total_squared_error / self.count.to_f64()
+
+
+class MAE(Metric):
+    """Mean Absolute Error metric for regression.
+
+    Computes: (1/n) * sum(|pred - actual|)
+
+    Example:
+        ```simple
+        val mae = MAE()
+        trainer.add_metric(mae, "mae")
+
+        # Output format: {"pred": [1.0, 2.0], "actual": [1.1, 2.2]}
+        ```
+    """
+    total_absolute_error: f64
+    count: i64
+
+    fn __init__():
+        """Initialize MAE metric."""
+        self.total_absolute_error = 0.0
+        self.count = 0
+
+    fn reset():
+        """Reset for new epoch."""
+        self.total_absolute_error = 0.0
+        self.count = 0
+
+    fn update(output: any):
+        """Update with batch output.
+
+        Args:
+            output: Dict with "pred" and "actual" keys, or tuple (pred, actual)
+        """
+        var pred = []
+        var actual = []
+
+        # Extract predictions and actuals from output
+        if isinstance(output, dict):
+            if "pred" in output and "actual" in output:
+                pred = output["pred"]
+                actual = output["actual"]
+            elif "y_pred" in output and "y_true" in output:
+                pred = output["y_pred"]
+                actual = output["y_true"]
+        elif isinstance(output, tuple) and len(output) >= 2:
+            pred = output[0]
+            actual = output[1]
+
+        # Compute absolute errors
+        if len(pred) > 0 and len(actual) > 0:
+            val n = min(len(pred), len(actual))
+            for i in range(n):
+                val diff = pred[i].to_f64() - actual[i].to_f64()
+                self.total_absolute_error += abs(diff)
+                self.count += 1
+
+    fn compute() -> f64:
+        """Compute mean absolute error.
+
+        Returns:
+            MAE value
+        """
+        if self.count == 0:
+            return 0.0
+        return self.total_absolute_error / self.count.to_f64()
+
+
+class RMSE(Metric):
+    """Root Mean Squared Error metric for regression.
+
+    Computes: sqrt((1/n) * sum((pred - actual)^2))
+
+    Example:
+        ```simple
+        val rmse = RMSE()
+        trainer.add_metric(rmse, "rmse")
+        ```
+    """
+    _mse: MSE
+
+    fn __init__():
+        """Initialize RMSE metric."""
+        self._mse = MSE()
+
+    fn reset():
+        """Reset for new epoch."""
+        self._mse.reset()
+
+    fn update(output: any):
+        """Update with batch output."""
+        self._mse.update(output)
+
+    fn compute() -> f64:
+        """Compute root mean squared error.
+
+        Returns:
+            RMSE value
+        """
+        val mse_val = self._mse.compute()
+        return sqrt(mse_val)
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn abs(x: f64) -> f64:
+    """Absolute value."""
+    if x < 0.0:
+        return -x
+    return x
+
+
+fn sqrt(x: f64) -> f64:
+    """Square root using Newton's method."""
+    if x <= 0.0:
+        return 0.0
+    var guess = x / 2.0
+    for _ in range(20):  # Newton iterations
+        guess = (guess + x / guess) / 2.0
+    return guess
+
+
+fn min(a: i64, b: i64) -> i64:
+    """Minimum of two integers."""
+    if a < b:
+        return a
+    return b

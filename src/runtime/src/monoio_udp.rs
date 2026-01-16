@@ -268,19 +268,11 @@ pub extern "C" fn monoio_udp_connect(
     socket_handle: RuntimeValue,
     addr: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: [runtime][P1] Get socket from handle and connect
-    // For now, return stub value
+    // NOTE: This function is deprecated due to monoio architecture limitations.
+    // Use rt_monoio_udp_connect from monoio_direct.rs instead.
 
-    tracing::warn!("monoio_udp_connect: stub implementation");
-
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get socket from UDP_SOCKETS
-    // 3. Extract and parse peer address
-    // 4. Call socket.connect(addr).await
-    // 5. Return success as RuntimeValue
-
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::warn!("monoio_udp_connect: deprecated - use rt_monoio_udp_connect instead");
+    RuntimeValue::from_int(-1)
 }
 
 /// Send data to connected peer via UDP
@@ -297,20 +289,11 @@ pub extern "C" fn monoio_udp_send(
     socket_handle: RuntimeValue,
     buffer: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: [runtime][P1] Get socket from handle and send data to connected peer
-    // For now, return stub value
+    // NOTE: This function is deprecated due to monoio architecture limitations.
+    // Use rt_monoio_udp_send from monoio_direct.rs instead.
 
-    tracing::warn!("monoio_udp_send: stub implementation");
-
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get socket from UDP_SOCKETS
-    // 3. Extract buffer from RuntimeValue
-    // 4. Use monoio's ownership transfer:
-    //    let (result, buf) = socket.send(buffer).await;
-    // 5. Return bytes sent as RuntimeValue
-
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::warn!("monoio_udp_send: deprecated - use rt_monoio_udp_send instead");
+    RuntimeValue::from_int(-1)
 }
 
 /// Receive data from connected peer via UDP
@@ -329,21 +312,11 @@ pub extern "C" fn monoio_udp_recv(
     buffer: RuntimeValue,
     max_len: i64,
 ) -> RuntimeValue {
-    // TODO: [runtime][P1] Get socket from handle and receive data from connected peer
-    // For now, return stub value
+    // NOTE: This function is deprecated due to monoio architecture limitations.
+    // Use rt_monoio_udp_recv from monoio_direct.rs instead.
 
-    tracing::warn!("monoio_udp_recv: stub implementation");
-
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get socket from UDP_SOCKETS
-    // 3. Extract buffer from RuntimeValue
-    // 4. Use monoio's ownership transfer:
-    //    let (result, buf) = socket.recv(buffer).await;
-    // 5. Update buffer in RuntimeValue
-    // 6. Return bytes received as RuntimeValue
-
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::warn!("monoio_udp_recv: deprecated - use rt_monoio_udp_recv instead");
+    RuntimeValue::from_int(-1)
 }
 
 /// Close a UDP socket and release resources
@@ -422,18 +395,11 @@ pub extern "C" fn monoio_udp_set_broadcast(
     socket_handle: RuntimeValue,
     broadcast: i64,
 ) -> RuntimeValue {
-    // TODO: [runtime][P1] Get socket from handle and set option
-    // For now, return stub value
+    // NOTE: This function is deprecated due to monoio architecture limitations.
+    // Use rt_monoio_udp_set_broadcast from monoio_direct.rs instead.
 
-    tracing::warn!("monoio_udp_set_broadcast: stub implementation");
-
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get socket from UDP_SOCKETS
-    // 3. Call socket.set_broadcast(broadcast != 0)
-    // 4. Return success as RuntimeValue
-
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::warn!("monoio_udp_set_broadcast: deprecated - use rt_monoio_udp_set_broadcast instead");
+    RuntimeValue::from_int(-1)
 }
 
 /// Set multicast TTL on UDP socket
@@ -450,18 +416,11 @@ pub extern "C" fn monoio_udp_set_multicast_ttl(
     socket_handle: RuntimeValue,
     ttl: i64,
 ) -> RuntimeValue {
-    // TODO: [runtime][P1] Get socket from handle and set option
-    // For now, return stub value
+    // NOTE: This function is deprecated due to monoio architecture limitations.
+    // Use rt_monoio_udp_set_multicast_ttl from monoio_direct.rs instead.
 
-    tracing::warn!("monoio_udp_set_multicast_ttl: stub implementation");
-
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get socket from UDP_SOCKETS
-    // 3. Call socket.set_multicast_ttl_v4(ttl as u32)
-    // 4. Return success as RuntimeValue
-
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::warn!("monoio_udp_set_multicast_ttl: deprecated - use rt_monoio_udp_set_multicast_ttl instead");
+    RuntimeValue::from_int(-1)
 }
 
 /// Join a multicast group
@@ -480,20 +439,11 @@ pub extern "C" fn monoio_udp_join_multicast(
     multicast_addr: RuntimeValue,
     interface_addr: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: [runtime][P1] Get socket from handle and join multicast group
-    // For now, return stub value
+    // NOTE: This function is deprecated due to monoio architecture limitations.
+    // Use rt_monoio_udp_join_multicast from monoio_direct.rs instead.
 
-    tracing::warn!("monoio_udp_join_multicast: stub implementation");
-
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get socket from UDP_SOCKETS
-    // 3. Extract and parse multicast address
-    // 4. Extract and parse interface address
-    // 5. Call socket.join_multicast_v4(multicast, interface)
-    // 6. Return success as RuntimeValue
-
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::warn!("monoio_udp_join_multicast: deprecated - use rt_monoio_udp_join_multicast instead");
+    RuntimeValue::from_int(-1)
 }
 
 /// Leave a multicast group
@@ -512,20 +462,11 @@ pub extern "C" fn monoio_udp_leave_multicast(
     multicast_addr: RuntimeValue,
     interface_addr: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: [runtime][P1] Get socket from handle and leave multicast group
-    // For now, return stub value
+    // NOTE: This function is deprecated due to monoio architecture limitations.
+    // Use rt_monoio_udp_leave_multicast from monoio_direct.rs instead.
 
-    tracing::warn!("monoio_udp_leave_multicast: stub implementation");
-
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get socket from UDP_SOCKETS
-    // 3. Extract and parse multicast address
-    // 4. Extract and parse interface address
-    // 5. Call socket.leave_multicast_v4(multicast, interface)
-    // 6. Return success as RuntimeValue
-
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::warn!("monoio_udp_leave_multicast: deprecated - use rt_monoio_udp_leave_multicast instead");
+    RuntimeValue::from_int(-1)
 }
 
 #[cfg(test)]

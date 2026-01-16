@@ -6,7 +6,7 @@
 
 use crate::monoio_buffer::OwnedBuf;
 use crate::monoio_runtime::direct::{block_on, init_direct_runtime, with_registry};
-use crate::monoio_runtime::{copy_to_buffer, extract_buffer_bytes};
+use crate::monoio_runtime::{copy_to_buffer, execute_async, extract_buffer_bytes, get_entries};
 use crate::value::monoio_future::{rt_monoio_future_new, IoOperationType, MonoioFuture, PENDING_MARKER};
 use crate::value::{HeapHeader, HeapObjectType, RuntimeValue};
 use monoio::io::{AsyncReadRent, AsyncReadRentExt, AsyncWriteRent, AsyncWriteRentExt};
@@ -323,6 +323,203 @@ pub extern "C" fn rt_monoio_tcp_listener_close(listener_handle: RuntimeValue) ->
     }
 }
 
+/// Flush pending writes on a TCP stream.
+///
+/// Note: monoio uses completion-based I/O, so writes are typically already
+/// submitted to the kernel. This function ensures any buffered data is sent.
+#[no_mangle]
+pub extern "C" fn rt_monoio_tcp_flush(stream_handle: RuntimeValue) -> RuntimeValue {
+    use monoio::io::AsyncWriteRentExt;
+
+    let stream_id = stream_handle.as_int();
+
+    // Take stream for async operation
+    let mut stream = match with_registry(|reg| reg.take_tcp_stream(stream_id)) {
+        Some(s) => s,
+        None => {
+            tracing::error!("rt_monoio_tcp_flush: Invalid stream handle {}", stream_id);
+            return RuntimeValue::from_int(-1);
+        }
+    };
+
+    let result = execute_async(get_entries(), async move {
+        stream.flush().await?;
+        Ok::<_, std::io::Error>(stream)
+    });
+
+    match result {
+        Ok(stream) => {
+            with_registry(|reg| reg.put_back_tcp_stream(stream_id, stream));
+            RuntimeValue::from_int(1)
+        }
+        Err(e) => {
+            tracing::error!("rt_monoio_tcp_flush: {}", e);
+            RuntimeValue::from_int(-1)
+        }
+    }
+}
+
+/// Shutdown a TCP stream for reading, writing, or both.
+///
+/// # Arguments
+/// * `stream_handle` - TCP stream handle
+/// * `how` - 0=Read, 1=Write, 2=Both
+#[no_mangle]
+pub extern "C" fn rt_monoio_tcp_shutdown(stream_handle: RuntimeValue, how: i64) -> RuntimeValue {
+    let stream_id = stream_handle.as_int();
+
+    // Validate how parameter
+    let shutdown = match how {
+        0 => std::net::Shutdown::Read,
+        1 => std::net::Shutdown::Write,
+        2 => std::net::Shutdown::Both,
+        _ => {
+            tracing::error!("rt_monoio_tcp_shutdown: Invalid shutdown mode {}", how);
+            return RuntimeValue::from_int(-1);
+        }
+    };
+
+    // Get stream for operation
+    let stream = match with_registry(|reg| reg.take_tcp_stream(stream_id)) {
+        Some(s) => s,
+        None => {
+            tracing::error!("rt_monoio_tcp_shutdown: Invalid stream handle {}", stream_id);
+            return RuntimeValue::from_int(-1);
+        }
+    };
+
+    // Get raw fd and perform shutdown
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let result = unsafe {
+        libc::shutdown(fd, match shutdown {
+            std::net::Shutdown::Read => libc::SHUT_RD,
+            std::net::Shutdown::Write => libc::SHUT_WR,
+            std::net::Shutdown::Both => libc::SHUT_RDWR,
+        })
+    };
+
+    // Put stream back
+    with_registry(|reg| reg.put_back_tcp_stream(stream_id, stream));
+
+    if result == 0 {
+        RuntimeValue::from_int(1)
+    } else {
+        tracing::error!("rt_monoio_tcp_shutdown: shutdown failed with errno");
+        RuntimeValue::from_int(-1)
+    }
+}
+
+/// Get local address of a TCP stream.
+#[no_mangle]
+pub extern "C" fn rt_monoio_tcp_local_addr(stream_handle: RuntimeValue) -> RuntimeValue {
+    let stream_id = stream_handle.as_int();
+
+    let addr = with_registry(|reg| {
+        reg.get_tcp_stream(stream_id).and_then(|s| s.local_addr().ok())
+    });
+
+    match addr {
+        Some(addr) => crate::monoio_runtime::string_to_runtime_value(&addr.to_string()),
+        None => RuntimeValue::NIL,
+    }
+}
+
+/// Get peer address of a TCP stream.
+#[no_mangle]
+pub extern "C" fn rt_monoio_tcp_peer_addr(stream_handle: RuntimeValue) -> RuntimeValue {
+    let stream_id = stream_handle.as_int();
+
+    let addr = with_registry(|reg| {
+        reg.get_tcp_stream(stream_id).and_then(|s| s.peer_addr().ok())
+    });
+
+    match addr {
+        Some(addr) => crate::monoio_runtime::string_to_runtime_value(&addr.to_string()),
+        None => RuntimeValue::NIL,
+    }
+}
+
+/// Set TCP_NODELAY option (disable Nagle's algorithm).
+#[no_mangle]
+pub extern "C" fn rt_monoio_tcp_set_nodelay(stream_handle: RuntimeValue, nodelay: i64) -> RuntimeValue {
+    let stream_id = stream_handle.as_int();
+
+    let result = with_registry(|reg| {
+        reg.get_tcp_stream(stream_id).map(|s| {
+            use std::os::unix::io::AsRawFd;
+            let fd = s.as_raw_fd();
+            let value: libc::c_int = if nodelay != 0 { 1 } else { 0 };
+            unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_NODELAY,
+                    &value as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            }
+        })
+    });
+
+    match result {
+        Some(0) => RuntimeValue::from_int(1),
+        Some(_) => RuntimeValue::from_int(-1),
+        None => RuntimeValue::from_int(-1),
+    }
+}
+
+/// Set TCP keepalive option.
+///
+/// # Arguments
+/// * `stream_handle` - TCP stream handle
+/// * `keepalive_secs` - Keepalive interval in seconds, or 0 to disable
+#[no_mangle]
+pub extern "C" fn rt_monoio_tcp_set_keepalive(stream_handle: RuntimeValue, keepalive_secs: i64) -> RuntimeValue {
+    let stream_id = stream_handle.as_int();
+
+    let result = with_registry(|reg| {
+        reg.get_tcp_stream(stream_id).map(|s| {
+            use std::os::unix::io::AsRawFd;
+            let fd = s.as_raw_fd();
+
+            // Enable/disable keepalive
+            let enabled: libc::c_int = if keepalive_secs > 0 { 1 } else { 0 };
+            let r1 = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_KEEPALIVE,
+                    &enabled as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+
+            if r1 != 0 || keepalive_secs <= 0 {
+                return r1;
+            }
+
+            // Set keepalive interval
+            let secs = keepalive_secs as libc::c_int;
+            unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_KEEPIDLE,
+                    &secs as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            }
+        })
+    });
+
+    match result {
+        Some(0) => RuntimeValue::from_int(1),
+        Some(_) => RuntimeValue::from_int(-1),
+        None => RuntimeValue::from_int(-1),
+    }
+}
+
 // ============================================================================
 // UDP Operations
 // ============================================================================
@@ -495,6 +692,410 @@ pub extern "C" fn rt_monoio_udp_close(socket_handle: RuntimeValue) -> RuntimeVal
         RuntimeValue::from_int(1)
     } else {
         RuntimeValue::from_int(0)
+    }
+}
+
+/// Get local address of a UDP socket.
+#[no_mangle]
+pub extern "C" fn rt_monoio_udp_local_addr(socket_handle: RuntimeValue) -> RuntimeValue {
+    let socket_id = socket_handle.as_int();
+
+    let addr = with_registry(|reg| {
+        reg.get_udp_socket(socket_id).and_then(|s| s.local_addr().ok())
+    });
+
+    match addr {
+        Some(addr) => crate::monoio_runtime::string_to_runtime_value(&addr.to_string()),
+        None => RuntimeValue::NIL,
+    }
+}
+
+/// Connect a UDP socket to a remote address.
+///
+/// After connecting, send() and recv() can be used instead of send_to() and recv_from().
+#[no_mangle]
+pub extern "C" fn rt_monoio_udp_connect(socket_handle: RuntimeValue, addr: RuntimeValue) -> RuntimeValue {
+    let socket_id = socket_handle.as_int();
+
+    let addr_str = match crate::monoio_runtime::runtime_value_to_string(addr) {
+        Some(s) => s,
+        None => {
+            tracing::error!("rt_monoio_udp_connect: Invalid address");
+            return RuntimeValue::from_int(-1);
+        }
+    };
+
+    let socket_addr: SocketAddr = match addr_str.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!("rt_monoio_udp_connect: Invalid address format: {}", e);
+            return RuntimeValue::from_int(-2);
+        }
+    };
+
+    let result = with_registry(|reg| {
+        reg.get_udp_socket(socket_id).map(|s| {
+            use std::os::unix::io::AsRawFd;
+            let fd = s.as_raw_fd();
+
+            // Connect using libc
+            let (addr_ptr, addr_len) = match socket_addr {
+                SocketAddr::V4(ref a) => {
+                    let sin = libc::sockaddr_in {
+                        sin_family: libc::AF_INET as libc::sa_family_t,
+                        sin_port: a.port().to_be(),
+                        sin_addr: libc::in_addr {
+                            s_addr: u32::from_ne_bytes(a.ip().octets()),
+                        },
+                        sin_zero: [0; 8],
+                    };
+                    (
+                        Box::into_raw(Box::new(sin)) as *const libc::sockaddr,
+                        std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                    )
+                }
+                SocketAddr::V6(ref a) => {
+                    let sin6 = libc::sockaddr_in6 {
+                        sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                        sin6_port: a.port().to_be(),
+                        sin6_flowinfo: a.flowinfo(),
+                        sin6_addr: libc::in6_addr {
+                            s6_addr: a.ip().octets(),
+                        },
+                        sin6_scope_id: a.scope_id(),
+                    };
+                    (
+                        Box::into_raw(Box::new(sin6)) as *const libc::sockaddr,
+                        std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+                    )
+                }
+            };
+
+            let result = unsafe { libc::connect(fd, addr_ptr, addr_len) };
+
+            // Free the allocated address
+            unsafe {
+                match socket_addr {
+                    SocketAddr::V4(_) => {
+                        drop(Box::from_raw(addr_ptr as *mut libc::sockaddr_in));
+                    }
+                    SocketAddr::V6(_) => {
+                        drop(Box::from_raw(addr_ptr as *mut libc::sockaddr_in6));
+                    }
+                }
+            }
+
+            result
+        })
+    });
+
+    match result {
+        Some(0) => RuntimeValue::from_int(1),
+        Some(_) => {
+            tracing::error!("rt_monoio_udp_connect: connect failed");
+            RuntimeValue::from_int(-3)
+        }
+        None => {
+            tracing::error!("rt_monoio_udp_connect: Invalid socket handle");
+            RuntimeValue::from_int(-1)
+        }
+    }
+}
+
+/// Send data to connected peer via UDP.
+#[no_mangle]
+pub extern "C" fn rt_monoio_udp_send(socket_handle: RuntimeValue, buffer: RuntimeValue, len: i64) -> RuntimeValue {
+    let socket_id = socket_handle.as_int();
+
+    if len <= 0 {
+        return RuntimeValue::from_int(0);
+    }
+
+    let data = match extract_buffer_bytes(buffer) {
+        Some(mut bytes) => {
+            if bytes.len() > len as usize {
+                bytes.truncate(len as usize);
+            }
+            bytes
+        }
+        None => {
+            tracing::error!("rt_monoio_udp_send: Invalid buffer");
+            return RuntimeValue::from_int(-1);
+        }
+    };
+
+    let result = with_registry(|reg| {
+        reg.get_udp_socket(socket_id).map(|s| {
+            use std::os::unix::io::AsRawFd;
+            let fd = s.as_raw_fd();
+
+            unsafe {
+                libc::send(fd, data.as_ptr() as *const libc::c_void, data.len(), 0)
+            }
+        })
+    });
+
+    match result {
+        Some(n) if n >= 0 => RuntimeValue::from_int(n as i64),
+        Some(_) => {
+            tracing::error!("rt_monoio_udp_send: send failed");
+            RuntimeValue::from_int(-2)
+        }
+        None => {
+            tracing::error!("rt_monoio_udp_send: Invalid socket handle");
+            RuntimeValue::from_int(-1)
+        }
+    }
+}
+
+/// Receive data from connected peer via UDP.
+#[no_mangle]
+pub extern "C" fn rt_monoio_udp_recv(socket_handle: RuntimeValue, buffer: RuntimeValue, max_len: i64) -> RuntimeValue {
+    let socket_id = socket_handle.as_int();
+
+    if max_len <= 0 {
+        return RuntimeValue::from_int(0);
+    }
+
+    let mut recv_buf = vec![0u8; max_len as usize];
+
+    let result = with_registry(|reg| {
+        reg.get_udp_socket(socket_id).map(|s| {
+            use std::os::unix::io::AsRawFd;
+            let fd = s.as_raw_fd();
+
+            unsafe {
+                libc::recv(fd, recv_buf.as_mut_ptr() as *mut libc::c_void, recv_buf.len(), 0)
+            }
+        })
+    });
+
+    match result {
+        Some(n) if n >= 0 => {
+            let bytes_read = n as usize;
+            recv_buf.truncate(bytes_read);
+            let copied = copy_to_buffer(buffer, &recv_buf);
+            RuntimeValue::from_int(copied)
+        }
+        Some(_) => {
+            tracing::error!("rt_monoio_udp_recv: recv failed");
+            RuntimeValue::from_int(-2)
+        }
+        None => {
+            tracing::error!("rt_monoio_udp_recv: Invalid socket handle");
+            RuntimeValue::from_int(-1)
+        }
+    }
+}
+
+/// Set broadcast option on UDP socket.
+#[no_mangle]
+pub extern "C" fn rt_monoio_udp_set_broadcast(socket_handle: RuntimeValue, broadcast: i64) -> RuntimeValue {
+    let socket_id = socket_handle.as_int();
+
+    let result = with_registry(|reg| {
+        reg.get_udp_socket(socket_id).map(|s| {
+            use std::os::unix::io::AsRawFd;
+            let fd = s.as_raw_fd();
+            let value: libc::c_int = if broadcast != 0 { 1 } else { 0 };
+            unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_BROADCAST,
+                    &value as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            }
+        })
+    });
+
+    match result {
+        Some(0) => RuntimeValue::from_int(1),
+        Some(_) => RuntimeValue::from_int(-1),
+        None => RuntimeValue::from_int(-1),
+    }
+}
+
+/// Set multicast TTL on UDP socket.
+#[no_mangle]
+pub extern "C" fn rt_monoio_udp_set_multicast_ttl(socket_handle: RuntimeValue, ttl: i64) -> RuntimeValue {
+    let socket_id = socket_handle.as_int();
+
+    if ttl < 0 || ttl > 255 {
+        tracing::error!("rt_monoio_udp_set_multicast_ttl: TTL out of range");
+        return RuntimeValue::from_int(-1);
+    }
+
+    let result = with_registry(|reg| {
+        reg.get_udp_socket(socket_id).map(|s| {
+            use std::os::unix::io::AsRawFd;
+            let fd = s.as_raw_fd();
+            let value = ttl as libc::c_int;
+            unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_IP,
+                    libc::IP_MULTICAST_TTL,
+                    &value as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            }
+        })
+    });
+
+    match result {
+        Some(0) => RuntimeValue::from_int(1),
+        Some(_) => RuntimeValue::from_int(-1),
+        None => RuntimeValue::from_int(-1),
+    }
+}
+
+/// Join a multicast group.
+#[no_mangle]
+pub extern "C" fn rt_monoio_udp_join_multicast(
+    socket_handle: RuntimeValue,
+    multicast_addr: RuntimeValue,
+    interface_addr: RuntimeValue,
+) -> RuntimeValue {
+    let socket_id = socket_handle.as_int();
+
+    let mcast_str = match crate::monoio_runtime::runtime_value_to_string(multicast_addr) {
+        Some(s) => s,
+        None => {
+            tracing::error!("rt_monoio_udp_join_multicast: Invalid multicast address");
+            return RuntimeValue::from_int(-1);
+        }
+    };
+
+    let iface_str = match crate::monoio_runtime::runtime_value_to_string(interface_addr) {
+        Some(s) => s,
+        None => {
+            tracing::error!("rt_monoio_udp_join_multicast: Invalid interface address");
+            return RuntimeValue::from_int(-1);
+        }
+    };
+
+    let mcast_ip: std::net::Ipv4Addr = match mcast_str.parse() {
+        Ok(ip) => ip,
+        Err(e) => {
+            tracing::error!("rt_monoio_udp_join_multicast: Invalid multicast IP: {}", e);
+            return RuntimeValue::from_int(-2);
+        }
+    };
+
+    let iface_ip: std::net::Ipv4Addr = match iface_str.parse() {
+        Ok(ip) => ip,
+        Err(e) => {
+            tracing::error!("rt_monoio_udp_join_multicast: Invalid interface IP: {}", e);
+            return RuntimeValue::from_int(-2);
+        }
+    };
+
+    let result = with_registry(|reg| {
+        reg.get_udp_socket(socket_id).map(|s| {
+            use std::os::unix::io::AsRawFd;
+            let fd = s.as_raw_fd();
+
+            let mreq = libc::ip_mreq {
+                imr_multiaddr: libc::in_addr {
+                    s_addr: u32::from_ne_bytes(mcast_ip.octets()),
+                },
+                imr_interface: libc::in_addr {
+                    s_addr: u32::from_ne_bytes(iface_ip.octets()),
+                },
+            };
+
+            unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_IP,
+                    libc::IP_ADD_MEMBERSHIP,
+                    &mreq as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::ip_mreq>() as libc::socklen_t,
+                )
+            }
+        })
+    });
+
+    match result {
+        Some(0) => RuntimeValue::from_int(1),
+        Some(_) => RuntimeValue::from_int(-3),
+        None => RuntimeValue::from_int(-1),
+    }
+}
+
+/// Leave a multicast group.
+#[no_mangle]
+pub extern "C" fn rt_monoio_udp_leave_multicast(
+    socket_handle: RuntimeValue,
+    multicast_addr: RuntimeValue,
+    interface_addr: RuntimeValue,
+) -> RuntimeValue {
+    let socket_id = socket_handle.as_int();
+
+    let mcast_str = match crate::monoio_runtime::runtime_value_to_string(multicast_addr) {
+        Some(s) => s,
+        None => {
+            tracing::error!("rt_monoio_udp_leave_multicast: Invalid multicast address");
+            return RuntimeValue::from_int(-1);
+        }
+    };
+
+    let iface_str = match crate::monoio_runtime::runtime_value_to_string(interface_addr) {
+        Some(s) => s,
+        None => {
+            tracing::error!("rt_monoio_udp_leave_multicast: Invalid interface address");
+            return RuntimeValue::from_int(-1);
+        }
+    };
+
+    let mcast_ip: std::net::Ipv4Addr = match mcast_str.parse() {
+        Ok(ip) => ip,
+        Err(e) => {
+            tracing::error!("rt_monoio_udp_leave_multicast: Invalid multicast IP: {}", e);
+            return RuntimeValue::from_int(-2);
+        }
+    };
+
+    let iface_ip: std::net::Ipv4Addr = match iface_str.parse() {
+        Ok(ip) => ip,
+        Err(e) => {
+            tracing::error!("rt_monoio_udp_leave_multicast: Invalid interface IP: {}", e);
+            return RuntimeValue::from_int(-2);
+        }
+    };
+
+    let result = with_registry(|reg| {
+        reg.get_udp_socket(socket_id).map(|s| {
+            use std::os::unix::io::AsRawFd;
+            let fd = s.as_raw_fd();
+
+            let mreq = libc::ip_mreq {
+                imr_multiaddr: libc::in_addr {
+                    s_addr: u32::from_ne_bytes(mcast_ip.octets()),
+                },
+                imr_interface: libc::in_addr {
+                    s_addr: u32::from_ne_bytes(iface_ip.octets()),
+                },
+            };
+
+            unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_IP,
+                    libc::IP_DROP_MEMBERSHIP,
+                    &mreq as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::ip_mreq>() as libc::socklen_t,
+                )
+            }
+        })
+    });
+
+    match result {
+        Some(0) => RuntimeValue::from_int(1),
+        Some(_) => RuntimeValue::from_int(-3),
+        None => RuntimeValue::from_int(-1),
     }
 }
 

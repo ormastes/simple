@@ -271,21 +271,14 @@ pub extern "C" fn monoio_tcp_write(
     stream_handle: RuntimeValue,
     buffer: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: [runtime][P1] Get stream from handle and write data
-    // For now, return stub value
+    // NOTE: This function is deprecated due to monoio architecture limitations.
+    // Use rt_monoio_tcp_write from monoio_direct.rs instead, which uses
+    // thread-local registry to properly manage stream lifetimes.
+    //
+    // See rt_monoio_tcp_write for the working implementation.
 
-    tracing::warn!("monoio_tcp_write: stub implementation");
-
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get stream from TCP_STREAMS
-    // 3. Extract buffer from RuntimeValue
-    // 4. Use monoio's ownership transfer (rent pattern):
-    //    let (result, buf) = stream.write(buffer).await;
-    // 5. Update buffer in RuntimeValue with returned buf
-    // 6. Return bytes written as RuntimeValue
-
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::warn!("monoio_tcp_write: deprecated - use rt_monoio_tcp_write instead");
+    RuntimeValue::from_int(-1)
 }
 
 /// Flush pending writes on a TCP stream
@@ -298,12 +291,11 @@ pub extern "C" fn monoio_tcp_write(
 /// RuntimeValue containing 1 on success, or negative value on error
 #[no_mangle]
 pub extern "C" fn monoio_tcp_flush(stream_handle: RuntimeValue) -> RuntimeValue {
-    // TODO: [runtime][P1] Get stream from handle and flush
-    // For now, return stub value
+    // NOTE: This function is deprecated due to monoio architecture limitations.
+    // Use rt_monoio_tcp_flush from monoio_direct.rs instead.
 
-    tracing::warn!("monoio_tcp_flush: stub implementation");
-
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::warn!("monoio_tcp_flush: deprecated - use rt_monoio_tcp_flush instead");
+    RuntimeValue::from_int(-1)
 }
 
 /// Shutdown a TCP stream for reading, writing, or both
@@ -320,22 +312,12 @@ pub extern "C" fn monoio_tcp_shutdown(
     stream_handle: RuntimeValue,
     how: i64,
 ) -> RuntimeValue {
-    // TODO: [runtime][P1] Get stream from handle and shutdown
-    // For now, return stub value
+    // NOTE: This function is deprecated due to monoio architecture limitations.
+    // Use rt_monoio_tcp_shutdown from monoio_direct.rs instead.
+    // how: 0=Read, 1=Write, 2=Both
 
-    tracing::warn!("monoio_tcp_shutdown: stub implementation");
-
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get stream from TCP_STREAMS
-    // 3. Convert how to std::net::Shutdown
-    //    0 -> Shutdown::Read
-    //    1 -> Shutdown::Write
-    //    2 -> Shutdown::Both
-    // 4. Call stream.shutdown(how).await
-    // 5. Return success as RuntimeValue
-
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::warn!("monoio_tcp_shutdown: deprecated - use rt_monoio_tcp_shutdown instead");
+    RuntimeValue::from_int(-1)
 }
 
 /// Close a TCP stream and release resources
@@ -491,18 +473,11 @@ pub extern "C" fn monoio_tcp_set_nodelay(
     stream_handle: RuntimeValue,
     nodelay: i64,
 ) -> RuntimeValue {
-    // TODO: [runtime][P1] Get stream from handle and set option
-    // For now, return stub value
+    // NOTE: This function is deprecated due to monoio architecture limitations.
+    // Use rt_monoio_tcp_set_nodelay from monoio_direct.rs instead.
 
-    tracing::warn!("monoio_tcp_set_nodelay: stub implementation");
-
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get stream from TCP_STREAMS
-    // 3. Call stream.set_nodelay(nodelay != 0)
-    // 4. Return success as RuntimeValue
-
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::warn!("monoio_tcp_set_nodelay: deprecated - use rt_monoio_tcp_set_nodelay instead");
+    RuntimeValue::from_int(-1)
 }
 
 /// Set TCP keepalive option
@@ -519,19 +494,11 @@ pub extern "C" fn monoio_tcp_set_keepalive(
     stream_handle: RuntimeValue,
     keepalive_secs: i64,
 ) -> RuntimeValue {
-    // TODO: [runtime][P1] Get stream from handle and set option
-    // For now, return stub value
+    // NOTE: This function is deprecated due to monoio architecture limitations.
+    // Use rt_monoio_tcp_set_keepalive from monoio_direct.rs instead.
 
-    tracing::warn!("monoio_tcp_set_keepalive: stub implementation");
-
-    // In full implementation:
-    // 1. Extract handle from RuntimeValue
-    // 2. Get stream from TCP_STREAMS
-    // 3. Convert keepalive_secs to Option<Duration>
-    // 4. Call stream.set_keepalive(duration)
-    // 5. Return success as RuntimeValue
-
-    RuntimeValue::from_int(-1) // Error: not implemented
+    tracing::warn!("monoio_tcp_set_keepalive: deprecated - use rt_monoio_tcp_set_keepalive instead");
+    RuntimeValue::from_int(-1)
 }
 
 #[cfg(test)]

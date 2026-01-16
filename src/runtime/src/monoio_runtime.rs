@@ -454,14 +454,29 @@ pub mod direct {
             self.tcp_streams.remove(&id)
         }
 
+        /// Put back a TCP stream (after async operation)
+        pub fn put_back_tcp_stream(&mut self, id: i64, stream: TcpStream) {
+            self.tcp_streams.insert(id, stream);
+        }
+
         /// Take ownership of a TCP listener (removes from registry)
         pub fn take_tcp_listener(&mut self, id: i64) -> Option<TcpListener> {
             self.tcp_listeners.remove(&id)
         }
 
+        /// Put back a TCP listener (after async operation)
+        pub fn put_back_tcp_listener(&mut self, id: i64, listener: TcpListener) {
+            self.tcp_listeners.insert(id, listener);
+        }
+
         /// Take ownership of a UDP socket (removes from registry)
         pub fn take_udp_socket(&mut self, id: i64) -> Option<UdpSocket> {
             self.udp_sockets.remove(&id)
+        }
+
+        /// Put back a UDP socket (after async operation)
+        pub fn put_back_udp_socket(&mut self, id: i64, socket: UdpSocket) {
+            self.udp_sockets.insert(id, socket);
         }
 
         /// Remove a TCP listener
