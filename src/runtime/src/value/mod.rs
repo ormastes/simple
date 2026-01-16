@@ -33,7 +33,7 @@ pub mod gpu;
 pub mod gpu_backend;
 #[cfg(feature = "vulkan")]
 pub mod gpu_vulkan;
-mod heap;
+pub mod heap;
 #[cfg(feature = "monoio-direct")]
 pub mod monoio_future;
 pub mod net;
