@@ -25,15 +25,13 @@ impl CompilerPipeline {
 
         match BackendKind::for_target(&target) {
             BackendKind::Cranelift => {
-                let codegen = Codegen::for_target(target)
-                    .map_err(|e| CompileError::Codegen(format!("{e}")))?;
+                let codegen = Codegen::for_target(target).map_err(|e| CompileError::Codegen(format!("{e}")))?;
                 codegen
                     .compile_module(mir_module)
                     .map_err(|e| CompileError::Codegen(format!("{e}")))
             }
             BackendKind::Llvm => {
-                let backend =
-                    LlvmBackend::new(target).map_err(|e| CompileError::Codegen(format!("{e}")))?;
+                let backend = LlvmBackend::new(target).map_err(|e| CompileError::Codegen(format!("{e}")))?;
                 backend
                     .with_coverage(coverage_enabled)
                     .compile(mir_module)
@@ -42,14 +40,14 @@ impl CompilerPipeline {
             #[cfg(feature = "vulkan")]
             BackendKind::Vulkan => {
                 use crate::codegen::vulkan::VulkanBackend;
-                let mut backend = VulkanBackend::new(target)
-                    .map_err(|e| CompileError::Codegen(format!("{e}")))?;
+                let mut backend = VulkanBackend::new(target).map_err(|e| CompileError::Codegen(format!("{e}")))?;
                 backend.compile(mir_module)
             }
             BackendKind::Software => {
                 // Software backend is for GPU kernel fallback, not general compilation
                 Err(CompileError::Codegen(
-                    "Software GPU backend cannot be used for general compilation; use for_gpu_kernel() instead".to_string()
+                    "Software GPU backend cannot be used for general compilation; use for_gpu_kernel() instead"
+                        .to_string(),
                 ))
             }
         }

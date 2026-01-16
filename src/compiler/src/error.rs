@@ -142,29 +142,21 @@ pub mod typo {
     /// - Short names (≤3 chars): max 1 edit
     /// - Medium names (4-6 chars): max 2 edits
     /// - Long names (>6 chars): max 3 edits
-    pub fn suggest_name<'a>(
-        name: &str,
-        candidates: impl IntoIterator<Item = &'a str>,
-    ) -> Option<&'a str> {
+    pub fn suggest_name<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
         let max_distance = match name.len() {
             0..=3 => 1,
             4..=6 => 2,
             _ => 3,
         };
 
-        find_similar(name, candidates, max_distance)
-            .into_iter()
-            .next()
+        find_similar(name, candidates, max_distance).into_iter().next()
     }
 
     /// Format a suggestion message for a typo.
     ///
     /// Returns `Some("did you mean 'foo'?")` if a suggestion is found,
     /// or `None` if no good match exists.
-    pub fn format_suggestion<'a>(
-        name: &str,
-        candidates: impl IntoIterator<Item = &'a str>,
-    ) -> Option<String> {
+    pub fn format_suggestion<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<String> {
         suggest_name(name, candidates).map(|suggestion| format!("did you mean '{}'?", suggestion))
     }
 
@@ -198,19 +190,10 @@ pub mod typo {
         fn test_suggest_name() {
             let candidates = ["println", "print", "printf", "sprint"];
 
-            assert_eq!(
-                suggest_name("pritn", candidates.iter().copied()),
-                Some("print")
-            );
+            assert_eq!(suggest_name("pritn", candidates.iter().copied()), Some("print"));
             // "printl" has distance 1 to both "print" and "println", alphabetically "print" comes first
-            assert_eq!(
-                suggest_name("printl", candidates.iter().copied()),
-                Some("print")
-            );
-            assert_eq!(
-                suggest_name("printlnn", candidates.iter().copied()),
-                Some("println")
-            );
+            assert_eq!(suggest_name("printl", candidates.iter().copied()), Some("print"));
+            assert_eq!(suggest_name("printlnn", candidates.iter().copied()), Some("println"));
             assert_eq!(suggest_name("xyz", candidates.iter().copied()), None);
         }
 
@@ -335,35 +318,17 @@ pub enum CompileError {
 
     // Rich variants with context (new API)
     #[error("io: {message}")]
-    IoWithContext {
-        message: String,
-        context: ErrorContext,
-    },
+    IoWithContext { message: String, context: ErrorContext },
     #[error("parse: {message}")]
-    ParseWithContext {
-        message: String,
-        context: ErrorContext,
-    },
+    ParseWithContext { message: String, context: ErrorContext },
     #[error("semantic: {message}")]
-    SemanticWithContext {
-        message: String,
-        context: ErrorContext,
-    },
+    SemanticWithContext { message: String, context: ErrorContext },
     #[error("codegen: {message}")]
-    CodegenWithContext {
-        message: String,
-        context: ErrorContext,
-    },
+    CodegenWithContext { message: String, context: ErrorContext },
     #[error("lint: {message}")]
-    LintWithContext {
-        message: String,
-        context: ErrorContext,
-    },
+    LintWithContext { message: String, context: ErrorContext },
     #[error("runtime: {message}")]
-    RuntimeWithContext {
-        message: String,
-        context: ErrorContext,
-    },
+    RuntimeWithContext { message: String, context: ErrorContext },
 }
 
 impl CompileError {
@@ -555,17 +520,12 @@ macro_rules! semantic_error {
         $crate::error::CompileError::semantic($msg)
     };
     ($msg:expr, span = $span:expr) => {
-        $crate::error::CompileError::semantic_with_context(
-            $msg,
-            $crate::error::ErrorContext::new().with_span($span),
-        )
+        $crate::error::CompileError::semantic_with_context($msg, $crate::error::ErrorContext::new().with_span($span))
     };
     ($msg:expr, span = $span:expr, code = $code:expr) => {
         $crate::error::CompileError::semantic_with_context(
             $msg,
-            $crate::error::ErrorContext::new()
-                .with_span($span)
-                .with_code($code),
+            $crate::error::ErrorContext::new().with_span($span).with_code($code),
         )
     };
 }
@@ -576,10 +536,7 @@ macro_rules! runtime_error {
         $crate::error::CompileError::runtime($msg)
     };
     ($msg:expr, span = $span:expr) => {
-        $crate::error::CompileError::runtime_with_context(
-            $msg,
-            $crate::error::ErrorContext::new().with_span($span),
-        )
+        $crate::error::CompileError::runtime_with_context($msg, $crate::error::ErrorContext::new().with_span($span))
     };
 }
 
@@ -603,10 +560,7 @@ mod tests {
         let err = CompileError::semantic_with_context("undefined variable: x", ctx);
         let diag = err.to_diagnostic();
 
-        assert!(diag
-            .code
-            .as_ref()
-            .is_some_and(|c| c == codes::UNDEFINED_VARIABLE));
+        assert!(diag.code.as_ref().is_some_and(|c| c == codes::UNDEFINED_VARIABLE));
         assert!(!diag.help.is_empty());
     }
 

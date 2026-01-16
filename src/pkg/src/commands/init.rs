@@ -17,11 +17,7 @@ pub fn init_project(dir: &Path, name: Option<&str>) -> PkgResult<()> {
     // Determine project name
     let project_name = name
         .map(|s| s.to_string())
-        .or_else(|| {
-            dir.file_name()
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string())
-        })
+        .or_else(|| dir.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
         .unwrap_or_else(|| "my-project".to_string());
 
     // Create manifest

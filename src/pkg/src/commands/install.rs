@@ -30,9 +30,7 @@ pub fn install_dependencies(dir: &Path) -> PkgResult<InstallResult> {
     let lock_path = dir.join("simple.lock");
 
     if !manifest_path.exists() {
-        return Err(PkgError::ManifestNotFound(
-            manifest_path.display().to_string(),
-        ));
+        return Err(PkgError::ManifestNotFound(manifest_path.display().to_string()));
     }
 
     let manifest = Manifest::load(&manifest_path)?;
@@ -292,10 +290,7 @@ mod tests {
         let result = install_dependencies(&temp_dir).unwrap();
         assert_eq!(result.installed, 0);
         assert_eq!(result.skipped, 1);
-        assert!(result
-            .skipped_packages
-            .iter()
-            .any(|(name, _)| name == "http"));
+        assert!(result.skipped_packages.iter().any(|(name, _)| name == "http"));
 
         cleanup_test_project(&temp_dir);
     }

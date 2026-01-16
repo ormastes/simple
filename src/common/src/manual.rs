@@ -186,10 +186,7 @@ impl BorrowState {
 ///   if s.shared = 0 then { s with exclusive := true } else s
 pub fn take_exclusive(s: BorrowState) -> BorrowState {
     if s.shared.is_zero() {
-        BorrowState {
-            exclusive: true,
-            ..s
-        }
+        BorrowState { exclusive: true, ..s }
     } else {
         s
     }
@@ -220,10 +217,7 @@ pub fn release_shared(s: BorrowState) -> BorrowState {
 /// Lean: def releaseExclusive (s : BorrowState) : BorrowState :=
 ///   { s with exclusive := false }
 pub fn release_exclusive(s: BorrowState) -> BorrowState {
-    BorrowState {
-        exclusive: false,
-        ..s
-    }
+    BorrowState { exclusive: false, ..s }
 }
 
 //==============================================================================
@@ -297,9 +291,7 @@ impl ValidBorrowState {
     /// Corresponds to Lean's `takeShared`.
     pub fn take_shared(self) -> Option<ValidBorrowState> {
         match self {
-            ValidBorrowState::Unborrowed => Some(ValidBorrowState::Shared(
-                std::num::NonZeroUsize::new(1).unwrap(),
-            )),
+            ValidBorrowState::Unborrowed => Some(ValidBorrowState::Shared(std::num::NonZeroUsize::new(1).unwrap())),
             ValidBorrowState::Shared(n) => Some(ValidBorrowState::Shared(
                 std::num::NonZeroUsize::new(n.get() + 1).unwrap(),
             )),
@@ -321,9 +313,7 @@ impl ValidBorrowState {
     pub fn release_shared(self) -> ValidBorrowState {
         match self {
             ValidBorrowState::Shared(n) if n.get() == 1 => ValidBorrowState::Unborrowed,
-            ValidBorrowState::Shared(n) => {
-                ValidBorrowState::Shared(std::num::NonZeroUsize::new(n.get() - 1).unwrap())
-            }
+            ValidBorrowState::Shared(n) => ValidBorrowState::Shared(std::num::NonZeroUsize::new(n.get() - 1).unwrap()),
             other => other, // No-op if not shared
         }
     }

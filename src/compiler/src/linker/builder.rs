@@ -59,10 +59,7 @@ impl LinkerBuilder {
     ///
     /// Returns an error if the linker name is not recognized.
     pub fn linker_name(mut self, name: &str) -> LinkerResult<Self> {
-        self.linker = Some(
-            NativeLinker::from_name(name)
-                .ok_or_else(|| LinkerError::LinkerNotFound(name.to_string()))?,
-        );
+        self.linker = Some(NativeLinker::from_name(name).ok_or_else(|| LinkerError::LinkerNotFound(name.to_string()))?);
         Ok(self)
     }
 
@@ -100,9 +97,7 @@ impl LinkerBuilder {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.options
-            .libraries
-            .extend(names.into_iter().map(|s| s.into()));
+        self.options.libraries.extend(names.into_iter().map(|s| s.into()));
         self
     }
 
@@ -118,9 +113,7 @@ impl LinkerBuilder {
         I: IntoIterator<Item = P>,
         P: Into<PathBuf>,
     {
-        self.options
-            .library_paths
-            .extend(paths.into_iter().map(|p| p.into()));
+        self.options.library_paths.extend(paths.into_iter().map(|p| p.into()));
         self
     }
 
@@ -181,9 +174,7 @@ impl LinkerBuilder {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.options
-            .extra_flags
-            .extend(flags.into_iter().map(|s| s.into()));
+        self.options.extra_flags.extend(flags.into_iter().map(|s| s.into()));
         self
     }
 
@@ -204,9 +195,7 @@ impl LinkerBuilder {
             .ok_or_else(|| LinkerError::InvalidConfig("no output file specified".to_string()))?;
 
         if self.objects.is_empty() {
-            return Err(LinkerError::InvalidConfig(
-                "no object files specified".to_string(),
-            ));
+            return Err(LinkerError::InvalidConfig("no object files specified".to_string()));
         }
 
         // Detect linker if not specified
@@ -254,11 +243,7 @@ pub fn link_objects(objects: &[impl AsRef<Path>], output: impl AsRef<Path>) -> L
 }
 
 /// Convenience function to link object files with the specified linker.
-pub fn link_with(
-    linker: NativeLinker,
-    objects: &[impl AsRef<Path>],
-    output: impl AsRef<Path>,
-) -> LinkerResult<()> {
+pub fn link_with(linker: NativeLinker, objects: &[impl AsRef<Path>], output: impl AsRef<Path>) -> LinkerResult<()> {
     LinkerBuilder::new()
         .linker(linker)
         .objects(objects.iter().map(|p| p.as_ref().to_path_buf()))
@@ -297,10 +282,7 @@ mod tests {
         assert_eq!(builder.objects.len(), 2);
         assert_eq!(builder.output, Some(PathBuf::from("program")));
         assert_eq!(builder.options.libraries, vec!["c"]);
-        assert_eq!(
-            builder.options.library_paths,
-            vec![PathBuf::from("/usr/lib")]
-        );
+        assert_eq!(builder.options.library_paths, vec![PathBuf::from("/usr/lib")]);
         assert!(builder.options.strip);
         assert!(builder.options.pie);
         assert_eq!(builder.options.threads, Some(4));

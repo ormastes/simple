@@ -77,7 +77,7 @@ pub enum Node {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decorator {
     pub span: Span,
-    pub name: Expr, // The decorator expression (e.g., Identifier or Call)
+    pub name: Expr,                  // The decorator expression (e.g., Identifier or Call)
     pub args: Option<Vec<Argument>>, // Arguments if @decorator(args), supports named args
 }
 

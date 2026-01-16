@@ -28,10 +28,7 @@ pub fn monomorphize_module(module: &Module) -> Module {
 
     for (name, type_args) in call_sites {
         if let Some(mangled) = mono.specialize_function_call(&name, type_args.clone()) {
-            call_rewrites
-                .entry(name)
-                .or_default()
-                .push((type_args, mangled));
+            call_rewrites.entry(name).or_default().push((type_args, mangled));
         }
     }
 
@@ -140,11 +137,7 @@ impl<'a> CallSiteRewriter<'a> {
     fn rewrite_block(&self, block: &Block) -> Block {
         Block {
             span: block.span,
-            statements: block
-                .statements
-                .iter()
-                .map(|n| self.rewrite_node(n))
-                .collect(),
+            statements: block.statements.iter().map(|n| self.rewrite_node(n)).collect(),
         }
     }
 
@@ -199,11 +192,7 @@ impl<'a> CallSiteRewriter<'a> {
                 op: *op,
                 operand: Box::new(self.rewrite_expr(operand)),
             },
-            Expr::MethodCall {
-                receiver,
-                method,
-                args,
-            } => Expr::MethodCall {
+            Expr::MethodCall { receiver, method, args } => Expr::MethodCall {
                 receiver: Box::new(self.rewrite_expr(receiver)),
                 method: method.clone(),
                 args: args
@@ -256,11 +245,7 @@ impl<'a> CallSiteRewriter<'a> {
     }
 
     /// Infer type arguments from call arguments (same logic as CallSiteAnalyzer).
-    fn infer_type_args(
-        &self,
-        func: &FunctionDef,
-        args: &[simple_parser::ast::Argument],
-    ) -> Option<Vec<ConcreteType>> {
+    fn infer_type_args(&self, func: &FunctionDef, args: &[simple_parser::ast::Argument]) -> Option<Vec<ConcreteType>> {
         let mut type_args = Vec::new();
 
         for type_param in &func.generic_params {
@@ -269,8 +254,7 @@ impl<'a> CallSiteRewriter<'a> {
                     if type_uses_param(ty, type_param) {
                         if let Some(arg) = args.get(i) {
                             // Rewriter doesn't have type context, use empty map
-                            if let Some(concrete) = infer_concrete_type(&arg.value, &HashMap::new())
-                            {
+                            if let Some(concrete) = infer_concrete_type(&arg.value, &HashMap::new()) {
                                 type_args.push(concrete);
                                 break;
                             }

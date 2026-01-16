@@ -6,8 +6,7 @@ use crate::value::RuntimeValue;
 pub type AopTargetFn = extern "C" fn(argc: u64, argv: *const RuntimeValue) -> RuntimeValue;
 
 /// Around advice function signature.
-pub type AopAroundFn =
-    extern "C" fn(ctx: *mut ProceedContext, argc: u64, argv: *const RuntimeValue) -> RuntimeValue;
+pub type AopAroundFn = extern "C" fn(ctx: *mut ProceedContext, argc: u64, argv: *const RuntimeValue) -> RuntimeValue;
 
 /// Proceed context passed to around advice.
 #[repr(C)]

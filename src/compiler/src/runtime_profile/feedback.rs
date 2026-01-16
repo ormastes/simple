@@ -34,9 +34,7 @@ impl LayoutFeedback {
             config.overrides.insert(name.clone(), LayoutPhase::Startup);
         }
         for name in &self.promote_to_first_frame {
-            config
-                .overrides
-                .insert(name.clone(), LayoutPhase::FirstFrame);
+            config.overrides.insert(name.clone(), LayoutPhase::FirstFrame);
         }
         for name in &self.promote_to_steady {
             config.overrides.insert(name.clone(), LayoutPhase::Steady);

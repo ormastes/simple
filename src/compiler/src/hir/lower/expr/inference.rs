@@ -6,11 +6,7 @@ use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
 impl Lowerer {
-    pub(in crate::hir::lower) fn infer_type(
-        &mut self,
-        expr: &Expr,
-        ctx: &FunctionContext,
-    ) -> LowerResult<TypeId> {
+    pub(in crate::hir::lower) fn infer_type(&mut self, expr: &Expr, ctx: &FunctionContext) -> LowerResult<TypeId> {
         match expr {
             Expr::Integer(_) => Ok(TypeId::I64),
             Expr::Float(_) => Ok(TypeId::F64),
@@ -117,9 +113,7 @@ impl Lowerer {
                 let (_idx, field_ty) = self.get_field_info(struct_ty, field)?;
                 Ok(field_ty)
             }
-            Expr::MethodCall {
-                receiver, method, ..
-            } => {
+            Expr::MethodCall { receiver, method, .. } => {
                 // Handle SIMD intrinsics: this.index(), this.thread_index(), this.group_index()
                 // and thread_group.barrier(), gpu.* functions
                 if let Expr::Identifier(recv_name) = receiver.as_ref() {
@@ -137,8 +131,7 @@ impl Lowerer {
                         // gpu.* intrinsic functions
                         match method.as_str() {
                             // Size/index queries return i64
-                            "global_id" | "local_id" | "group_id" | "global_size"
-                            | "local_size" | "num_groups" => {
+                            "global_id" | "local_id" | "group_id" | "global_size" | "local_size" | "num_groups" => {
                                 return Ok(TypeId::I64);
                             }
                             // Synchronization returns void

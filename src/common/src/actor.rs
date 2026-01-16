@@ -51,9 +51,7 @@ impl ActorLifecycle {
     /// Returns Ok(()) if successfully joined, Err if already joined or thread panicked.
     pub fn join(&mut self) -> Result<(), String> {
         match std::mem::replace(self, ActorLifecycle::Joined) {
-            ActorLifecycle::Running(handle) => {
-                handle.join().map_err(|_| "actor panicked".to_string())
-            }
+            ActorLifecycle::Running(handle) => handle.join().map_err(|_| "actor panicked".to_string()),
             ActorLifecycle::Joined => {
                 // Already joined, this is idempotent
                 Ok(())
@@ -108,9 +106,7 @@ impl ActorHandle {
 
     /// Send a message to this actor.
     pub fn send(&self, msg: Message) -> Result<(), String> {
-        self.inbox
-            .send(msg)
-            .map_err(|e| format!("send failed: {e}"))
+        self.inbox.send(msg).map_err(|e| format!("send failed: {e}"))
     }
 
     /// Receive a message from this actor (blocking).
@@ -133,10 +129,7 @@ impl ActorHandle {
 
     /// Try to receive without blocking.
     pub fn try_recv(&self) -> Result<Option<Message>, String> {
-        let guard = self
-            .outbox
-            .lock()
-            .map_err(|_| "recv lock poisoned".to_string())?;
+        let guard = self.outbox.lock().map_err(|_| "recv lock poisoned".to_string())?;
         match guard.try_recv() {
             Ok(msg) => Ok(Some(msg)),
             Err(mpsc::TryRecvError::Empty) => Ok(None),
@@ -155,18 +148,12 @@ impl ActorHandle {
 
     /// Check if the actor is still running.
     pub fn is_running(&self) -> bool {
-        self.lifecycle
-            .lock()
-            .map(|guard| guard.is_running())
-            .unwrap_or(false)
+        self.lifecycle.lock().map(|guard| guard.is_running()).unwrap_or(false)
     }
 
     /// Check if the actor has been joined.
     pub fn is_joined(&self) -> bool {
-        self.lifecycle
-            .lock()
-            .map(|guard| guard.is_joined())
-            .unwrap_or(true)
+        self.lifecycle.lock().map(|guard| guard.is_joined()).unwrap_or(true)
     }
 
     /// Get the inbox sender for registering with scheduler.

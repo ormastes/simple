@@ -3,9 +3,7 @@
 //! Provides C-compatible FFI for Vulkan swapchain operations including creation,
 //! recreation, image acquisition, and presentation.
 
-use super::common::{
-    next_handle, VulkanFfiError, DEVICE_REGISTRY, SWAPCHAIN_REGISTRY, WINDOW_SURFACES,
-};
+use super::common::{next_handle, VulkanFfiError, DEVICE_REGISTRY, SWAPCHAIN_REGISTRY, WINDOW_SURFACES};
 
 #[cfg(feature = "vulkan")]
 use crate::vulkan::VulkanError;
@@ -90,12 +88,7 @@ pub extern "C" fn rt_vk_swapchain_create(
 /// # Returns
 /// 0 (VulkanFfiError::Success) on success, negative error code on failure
 #[no_mangle]
-pub extern "C" fn rt_vk_swapchain_recreate(
-    swapchain_handle: u64,
-    surface_handle: u64,
-    width: u32,
-    height: u32,
-) -> i32 {
+pub extern "C" fn rt_vk_swapchain_recreate(swapchain_handle: u64, surface_handle: u64, width: u32, height: u32) -> i32 {
     #[cfg(feature = "vulkan")]
     {
         let swapchain_registry = SWAPCHAIN_REGISTRY.lock();
@@ -111,12 +104,7 @@ pub extern "C" fn rt_vk_swapchain_recreate(
             let mut swapchain = swapchain_mutex.lock();
             match swapchain.recreate(&surface, width, height) {
                 Ok(()) => {
-                    tracing::info!(
-                        "Swapchain {} recreated to {}x{}",
-                        swapchain_handle,
-                        width,
-                        height
-                    );
+                    tracing::info!("Swapchain {} recreated to {}x{}", swapchain_handle, width, height);
                     VulkanFfiError::Success as i32
                 }
                 Err(e) => {
@@ -287,11 +275,7 @@ pub extern "C" fn rt_vk_swapchain_get_image_count(swapchain_handle: u64) -> i32 
 /// # Returns
 /// 0 (VulkanFfiError::Success) on success, negative error code on failure
 #[no_mangle]
-pub extern "C" fn rt_vk_swapchain_get_extent(
-    swapchain_handle: u64,
-    out_width: *mut u32,
-    out_height: *mut u32,
-) -> i32 {
+pub extern "C" fn rt_vk_swapchain_get_extent(swapchain_handle: u64, out_width: *mut u32, out_height: *mut u32) -> i32 {
     #[cfg(feature = "vulkan")]
     {
         if out_width.is_null() || out_height.is_null() {

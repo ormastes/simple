@@ -101,9 +101,8 @@ pub fn discover_files(root: &Path) -> Result<HashSet<PathBuf>, CompileError> {
         }
 
         // Quick scan for imports
-        let source = fs::read_to_string(&canonical).map_err(|e| {
-            CompileError::Io(format!("Failed to read {}: {}", canonical.display(), e))
-        })?;
+        let source = fs::read_to_string(&canonical)
+            .map_err(|e| CompileError::Io(format!("Failed to read {}: {}", canonical.display(), e)))?;
 
         // Extract imports with a lightweight scan
         let imports = extract_imports_quick(&source, canonical.parent().unwrap_or(Path::new(".")));
@@ -184,8 +183,8 @@ fn extract_use_path(line: &str, base_dir: &Path) -> Option<PathBuf> {
 
 /// Parse a single file and extract its imports.
 fn parse_file(path: &Path, base_dir: &Path) -> Result<ParsedFile, CompileError> {
-    let source = fs::read_to_string(path)
-        .map_err(|e| CompileError::Io(format!("Failed to read {}: {}", path.display(), e)))?;
+    let source =
+        fs::read_to_string(path).map_err(|e| CompileError::Io(format!("Failed to read {}: {}", path.display(), e)))?;
 
     let mut parser = simple_parser::Parser::new(&source);
     let module = parser
@@ -325,12 +324,9 @@ pub fn flatten_module_with_cache(
         });
     }
 
-    let parsed = cache.get(&canonical).ok_or_else(|| {
-        CompileError::Io(format!(
-            "Module not found in cache: {}",
-            canonical.display()
-        ))
-    })?;
+    let parsed = cache
+        .get(&canonical)
+        .ok_or_else(|| CompileError::Io(format!("Module not found in cache: {}", canonical.display())))?;
 
     let mut items = Vec::new();
 
@@ -472,8 +468,7 @@ mod tests {
         );
 
         // Create main file that imports helper
-        let main_path =
-            create_test_file(temp_dir.path(), "main.spl", "use helper\nmain = add(1, 2)");
+        let main_path = create_test_file(temp_dir.path(), "main.spl", "use helper\nmain = add(1, 2)");
 
         let files = discover_files(&main_path).unwrap();
         assert_eq!(files.len(), 2);
@@ -495,21 +490,9 @@ mod tests {
     fn test_parse_files_parallel_multiple() {
         let temp_dir = TempDir::new().unwrap();
 
-        let file1 = create_test_file(
-            temp_dir.path(),
-            "mod1.spl",
-            "fn foo() -> i64:\n    return 1",
-        );
-        let file2 = create_test_file(
-            temp_dir.path(),
-            "mod2.spl",
-            "fn bar() -> i64:\n    return 2",
-        );
-        let file3 = create_test_file(
-            temp_dir.path(),
-            "mod3.spl",
-            "fn baz() -> i64:\n    return 3",
-        );
+        let file1 = create_test_file(temp_dir.path(), "mod1.spl", "fn foo() -> i64:\n    return 1");
+        let file2 = create_test_file(temp_dir.path(), "mod2.spl", "fn bar() -> i64:\n    return 2");
+        let file3 = create_test_file(temp_dir.path(), "mod3.spl", "fn baz() -> i64:\n    return 3");
 
         let files = vec![
             file1.canonicalize().unwrap(),
@@ -530,13 +513,9 @@ mod tests {
         let valid = create_test_file(temp_dir.path(), "valid.spl", "main = 42");
 
         // Invalid file (syntax error)
-        let invalid =
-            create_test_file(temp_dir.path(), "invalid.spl", "fn foo(\n    broken syntax");
+        let invalid = create_test_file(temp_dir.path(), "invalid.spl", "fn foo(\n    broken syntax");
 
-        let files = vec![
-            valid.canonicalize().unwrap(),
-            invalid.canonicalize().unwrap(),
-        ];
+        let files = vec![valid.canonicalize().unwrap(), invalid.canonicalize().unwrap()];
         let cache = parse_files_parallel(&files);
 
         // Should have one valid module and one error

@@ -163,13 +163,11 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
-        if matches!(name, "print" | "print_raw" | "eprint" | "eprint_raw" | "dprint" | "println" | "eprintln") {
-            Ok(Some(self.lower_builtin_call(
-                name,
-                args,
-                TypeId::NIL,
-                ctx,
-            )?))
+        if matches!(
+            name,
+            "print" | "print_raw" | "eprint" | "eprint_raw" | "dprint" | "println" | "eprintln"
+        ) {
+            Ok(Some(self.lower_builtin_call(name, args, TypeId::NIL, ctx)?))
         } else {
             Ok(None)
         }
@@ -186,21 +184,11 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
         match name {
-            "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow" => Ok(Some(
-                self.lower_builtin_call(name, args, TypeId::I64, ctx)?,
-            )),
-            "to_string" => Ok(Some(self.lower_builtin_call(
-                name,
-                args,
-                TypeId::STRING,
-                ctx,
-            )?)),
-            "to_int" => Ok(Some(self.lower_builtin_call(
-                name,
-                args,
-                TypeId::I64,
-                ctx,
-            )?)),
+            "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow" => {
+                Ok(Some(self.lower_builtin_call(name, args, TypeId::I64, ctx)?))
+            }
+            "to_string" => Ok(Some(self.lower_builtin_call(name, args, TypeId::STRING, ctx)?)),
+            "to_int" => Ok(Some(self.lower_builtin_call(name, args, TypeId::I64, ctx)?)),
             _ => Ok(None),
         }
     }

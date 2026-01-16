@@ -197,11 +197,7 @@ impl SymbolUsageAnalyzer {
             }
 
             // Method calls
-            Expr::MethodCall {
-                receiver,
-                method,
-                args,
-            } => {
+            Expr::MethodCall { receiver, method, args } => {
                 self.collect_usage_from_expr(receiver, usage);
                 usage.used_functions.insert(method.clone());
                 for arg in args {

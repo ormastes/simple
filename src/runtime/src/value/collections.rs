@@ -161,8 +161,7 @@ impl RuntimeTuple {
 /// Allocate a new array with the given capacity
 #[no_mangle]
 pub extern "C" fn rt_array_new(capacity: u64) -> RuntimeValue {
-    let size = std::mem::size_of::<RuntimeArray>()
-        + capacity as usize * std::mem::size_of::<RuntimeValue>();
+    let size = std::mem::size_of::<RuntimeArray>() + capacity as usize * std::mem::size_of::<RuntimeValue>();
     let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
 
     unsafe {
@@ -189,12 +188,7 @@ pub extern "C" fn rt_array_len(array: RuntimeValue) -> i64 {
 /// Get an element from an array
 #[no_mangle]
 pub extern "C" fn rt_array_get(array: RuntimeValue, index: i64) -> RuntimeValue {
-    let arr = as_typed_ptr!(
-        array,
-        HeapObjectType::Array,
-        RuntimeArray,
-        RuntimeValue::NIL
-    );
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
@@ -238,12 +232,7 @@ pub extern "C" fn rt_array_push(array: RuntimeValue, value: RuntimeValue) -> boo
 /// Pop an element from an array
 #[no_mangle]
 pub extern "C" fn rt_array_pop(array: RuntimeValue) -> RuntimeValue {
-    let arr = as_typed_ptr!(
-        mut array,
-        HeapObjectType::Array,
-        RuntimeArray,
-        RuntimeValue::NIL
-    );
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
         if (*arr).len == 0 {
             return RuntimeValue::NIL;
@@ -271,8 +260,7 @@ pub extern "C" fn rt_array_clear(array: RuntimeValue) -> bool {
 /// Allocate a new tuple with the given length
 #[no_mangle]
 pub extern "C" fn rt_tuple_new(len: u64) -> RuntimeValue {
-    let size =
-        std::mem::size_of::<RuntimeTuple>() + len as usize * std::mem::size_of::<RuntimeValue>();
+    let size = std::mem::size_of::<RuntimeTuple>() + len as usize * std::mem::size_of::<RuntimeValue>();
     let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
 
     unsafe {
@@ -291,12 +279,7 @@ pub extern "C" fn rt_tuple_new(len: u64) -> RuntimeValue {
 /// Get an element from a tuple
 #[no_mangle]
 pub extern "C" fn rt_tuple_get(tuple: RuntimeValue, index: u64) -> RuntimeValue {
-    let tup = as_typed_ptr!(
-        tuple,
-        HeapObjectType::Tuple,
-        RuntimeTuple,
-        RuntimeValue::NIL
-    );
+    let tup = as_typed_ptr!(tuple, HeapObjectType::Tuple, RuntimeTuple, RuntimeValue::NIL);
     unsafe {
         if index >= (*tup).len {
             return RuntimeValue::NIL;
@@ -368,12 +351,7 @@ pub extern "C" fn rt_string_len(string: RuntimeValue) -> i64 {
 /// Get a pointer to the string data
 #[no_mangle]
 pub extern "C" fn rt_string_data(string: RuntimeValue) -> *const u8 {
-    let str_ptr = as_typed_ptr!(
-        string,
-        HeapObjectType::String,
-        RuntimeString,
-        std::ptr::null()
-    );
+    let str_ptr = as_typed_ptr!(string, HeapObjectType::String, RuntimeString, std::ptr::null());
     unsafe { str_ptr.add(1) as *const u8 }
 }
 
@@ -480,11 +458,7 @@ pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) ->
 /// Set a value in a collection (array, dict)
 /// Returns true on success, false on error
 #[no_mangle]
-pub extern "C" fn rt_index_set(
-    collection: RuntimeValue,
-    index: RuntimeValue,
-    value: RuntimeValue,
-) -> bool {
+pub extern "C" fn rt_index_set(collection: RuntimeValue, index: RuntimeValue, value: RuntimeValue) -> bool {
     if !collection.is_heap() {
         return false;
     }
@@ -508,12 +482,7 @@ pub extern "C" fn rt_index_set(
 /// Slice a collection (array, tuple, string)
 /// Returns a new collection with elements from start to end (exclusive)
 #[no_mangle]
-pub extern "C" fn rt_slice(
-    collection: RuntimeValue,
-    start: i64,
-    end: i64,
-    step: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step: i64) -> RuntimeValue {
     if !collection.is_heap() || step == 0 {
         return RuntimeValue::NIL;
     }
@@ -531,11 +500,7 @@ pub extern "C" fn rt_slice(
                 } else {
                     start.min(len)
                 };
-                let end = if end < 0 {
-                    (len + end).max(0)
-                } else {
-                    end.min(len)
-                };
+                let end = if end < 0 { (len + end).max(0) } else { end.min(len) };
 
                 if step > 0 && start >= end {
                     return rt_array_new(0);
@@ -610,8 +575,7 @@ pub extern "C" fn rt_contains(collection: RuntimeValue, value: RuntimeValue) -> 
                 // For dicts, 'in' checks if the key exists
                 let dict = ptr as *const RuntimeDict;
                 // Entries are stored after the RuntimeDict header as pairs of RuntimeValue
-                let entries_ptr = (dict as *const u8).add(std::mem::size_of::<RuntimeDict>())
-                    as *const RuntimeValue;
+                let entries_ptr = (dict as *const u8).add(std::mem::size_of::<RuntimeDict>()) as *const RuntimeValue;
                 for i in 0..(*dict).len as usize {
                     let key = *entries_ptr.add(i * 2);
                     if rt_value_eq(key, value) != 0 {

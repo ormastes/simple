@@ -15,8 +15,7 @@ pub struct Surface {
 impl Surface {
     /// Create a surface wrapper (takes ownership of existing surface)
     pub fn from_handle(instance: Arc<VulkanInstance>, surface: vk::SurfaceKHR) -> Self {
-        let surface_loader =
-            ash::khr::surface::Instance::new(instance.entry(), instance.instance());
+        let surface_loader = ash::khr::surface::Instance::new(instance.entry(), instance.instance());
 
         Self {
             instance,
@@ -31,47 +30,29 @@ impl Surface {
     }
 
     /// Query surface capabilities for a physical device
-    pub fn get_capabilities(
-        &self,
-        physical_device: &VulkanPhysicalDevice,
-    ) -> VulkanResult<vk::SurfaceCapabilitiesKHR> {
+    pub fn get_capabilities(&self, physical_device: &VulkanPhysicalDevice) -> VulkanResult<vk::SurfaceCapabilitiesKHR> {
         unsafe {
             self.surface_loader
                 .get_physical_device_surface_capabilities(physical_device.handle, self.surface)
-                .map_err(|e| {
-                    VulkanError::SurfaceError(format!(
-                        "Failed to get surface capabilities: {:?}",
-                        e
-                    ))
-                })
+                .map_err(|e| VulkanError::SurfaceError(format!("Failed to get surface capabilities: {:?}", e)))
         }
     }
 
     /// Query supported surface formats for a physical device
-    pub fn get_formats(
-        &self,
-        physical_device: &VulkanPhysicalDevice,
-    ) -> VulkanResult<Vec<vk::SurfaceFormatKHR>> {
+    pub fn get_formats(&self, physical_device: &VulkanPhysicalDevice) -> VulkanResult<Vec<vk::SurfaceFormatKHR>> {
         unsafe {
             self.surface_loader
                 .get_physical_device_surface_formats(physical_device.handle, self.surface)
-                .map_err(|e| {
-                    VulkanError::SurfaceError(format!("Failed to get surface formats: {:?}", e))
-                })
+                .map_err(|e| VulkanError::SurfaceError(format!("Failed to get surface formats: {:?}", e)))
         }
     }
 
     /// Query supported present modes for a physical device
-    pub fn get_present_modes(
-        &self,
-        physical_device: &VulkanPhysicalDevice,
-    ) -> VulkanResult<Vec<vk::PresentModeKHR>> {
+    pub fn get_present_modes(&self, physical_device: &VulkanPhysicalDevice) -> VulkanResult<Vec<vk::PresentModeKHR>> {
         unsafe {
             self.surface_loader
                 .get_physical_device_surface_present_modes(physical_device.handle, self.surface)
-                .map_err(|e| {
-                    VulkanError::SurfaceError(format!("Failed to get present modes: {:?}", e))
-                })
+                .map_err(|e| VulkanError::SurfaceError(format!("Failed to get present modes: {:?}", e)))
         }
     }
 
@@ -83,17 +64,8 @@ impl Surface {
     ) -> VulkanResult<bool> {
         unsafe {
             self.surface_loader
-                .get_physical_device_surface_support(
-                    physical_device.handle,
-                    queue_family_index,
-                    self.surface,
-                )
-                .map_err(|e| {
-                    VulkanError::SurfaceError(format!(
-                        "Failed to check queue family support: {:?}",
-                        e
-                    ))
-                })
+                .get_physical_device_surface_support(physical_device.handle, queue_family_index, self.surface)
+                .map_err(|e| VulkanError::SurfaceError(format!("Failed to check queue family support: {:?}", e)))
         }
     }
 
@@ -113,9 +85,7 @@ impl Surface {
         let formats = self.get_formats(physical_device)?;
 
         if formats.is_empty() {
-            return Err(VulkanError::SurfaceError(
-                "No surface formats available".to_string(),
-            ));
+            return Err(VulkanError::SurfaceError("No surface formats available".to_string()));
         }
 
         // If HDR is preferred, try to find an HDR format
@@ -128,19 +98,19 @@ impl Surface {
         }
 
         // Try BGRA8_SRGB with SRGB_NONLINEAR (preferred for SDR)
-        if let Some(format) = formats.iter().find(|f| {
-            f.format == vk::Format::B8G8R8A8_SRGB
-                && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-        }) {
+        if let Some(format) = formats
+            .iter()
+            .find(|f| f.format == vk::Format::B8G8R8A8_SRGB && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
+        {
             tracing::info!("Selected preferred format: BGRA8_SRGB with SRGB_NONLINEAR");
             return Ok(*format);
         }
 
         // Try BGRA8_UNORM with SRGB_NONLINEAR
-        if let Some(format) = formats.iter().find(|f| {
-            f.format == vk::Format::B8G8R8A8_UNORM
-                && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-        }) {
+        if let Some(format) = formats
+            .iter()
+            .find(|f| f.format == vk::Format::B8G8R8A8_UNORM && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
+        {
             tracing::info!("Selected format: BGRA8_UNORM with SRGB_NONLINEAR");
             return Ok(*format);
         }
@@ -173,14 +143,8 @@ impl Surface {
                 vk::ColorSpaceKHR::HDR10_ST2084_EXT,
             ),
             // HDR10 HLG
-            (
-                vk::Format::A2B10G10R10_UNORM_PACK32,
-                vk::ColorSpaceKHR::HDR10_HLG_EXT,
-            ),
-            (
-                vk::Format::A2R10G10B10_UNORM_PACK32,
-                vk::ColorSpaceKHR::HDR10_HLG_EXT,
-            ),
+            (vk::Format::A2B10G10R10_UNORM_PACK32, vk::ColorSpaceKHR::HDR10_HLG_EXT),
+            (vk::Format::A2R10G10B10_UNORM_PACK32, vk::ColorSpaceKHR::HDR10_HLG_EXT),
             // Extended sRGB (scRGB - linear with extended range)
             (
                 vk::Format::R16G16B16A16_SFLOAT,
@@ -225,9 +189,7 @@ impl Surface {
         let modes = self.get_present_modes(physical_device)?;
 
         if modes.is_empty() {
-            return Err(VulkanError::SurfaceError(
-                "No present modes available".to_string(),
-            ));
+            return Err(VulkanError::SurfaceError("No present modes available".to_string()));
         }
 
         // If no vsync is preferred, try IMMEDIATE first
@@ -274,10 +236,7 @@ impl Surface {
 
         // Otherwise, clamp to min/max extent
         vk::Extent2D {
-            width: desired_width.clamp(
-                capabilities.min_image_extent.width,
-                capabilities.max_image_extent.width,
-            ),
+            width: desired_width.clamp(capabilities.min_image_extent.width, capabilities.max_image_extent.width),
             height: desired_height.clamp(
                 capabilities.min_image_extent.height,
                 capabilities.max_image_extent.height,
@@ -315,10 +274,7 @@ mod tests {
     #[test]
     fn test_select_extent() {
         let caps = vk::SurfaceCapabilitiesKHR {
-            min_image_extent: vk::Extent2D {
-                width: 1,
-                height: 1,
-            },
+            min_image_extent: vk::Extent2D { width: 1, height: 1 },
             max_image_extent: vk::Extent2D {
                 width: 4096,
                 height: 4096,
@@ -394,10 +350,7 @@ mod tests {
     #[test]
     fn test_select_extent_with_defined_extent() {
         let caps = vk::SurfaceCapabilitiesKHR {
-            min_image_extent: vk::Extent2D {
-                width: 1,
-                height: 1,
-            },
+            min_image_extent: vk::Extent2D { width: 1, height: 1 },
             max_image_extent: vk::Extent2D {
                 width: 4096,
                 height: 4096,

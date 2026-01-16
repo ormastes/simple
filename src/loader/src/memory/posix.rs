@@ -1,8 +1,6 @@
 use super::common::{align_size, check_unix_result, default_free, get_page_size};
 use super::{ExecutableMemory, MemoryAllocator, Protection};
-use libc::{
-    mmap, mprotect, munmap, MAP_ANON, MAP_FAILED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE,
-};
+use libc::{mmap, mprotect, munmap, MAP_ANON, MAP_FAILED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
 use std::ptr;
 
 /// POSIX-compliant memory allocator for Unix systems (Linux, macOS, BSD)

@@ -104,10 +104,7 @@ bind on pc{ type(Repository) } -> MockRepository singleton priority 10
         .find(|f| f.name == "create_test_service")
         .expect("Should have create_test_service function");
 
-    assert!(
-        service_fn.inject,
-        "create_test_service should have inject=true"
-    );
+    assert!(service_fn.inject, "create_test_service should have inject=true");
 
     // Verify DI binding
     assert_eq!(hir_module.di_bindings.len(), 1, "Should have 1 DI binding");

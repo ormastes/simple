@@ -8,8 +8,7 @@ use std::cell::{Cell, RefCell};
 use typed_arena::Arena;
 
 use crate::ast::{
-    Block, ClassDef, EnumDef, Expr, FunctionDef, ImplBlock, Module, Node, Parameter, Pattern,
-    StructDef, TraitDef, Type,
+    Block, ClassDef, EnumDef, Expr, FunctionDef, ImplBlock, Module, Node, Parameter, Pattern, StructDef, TraitDef, Type,
 };
 
 /// Arena allocator for AST nodes.

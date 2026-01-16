@@ -347,11 +347,7 @@ pub extern "C" fn ratatui_textbuffer_newline(_buffer_handle: u64) {
 /// Actual length of text (may be longer than output_len if truncated)
 #[no_mangle]
 #[cfg(feature = "ratatui-tui")]
-pub extern "C" fn ratatui_textbuffer_get_text(
-    buffer_handle: u64,
-    output: *mut u8,
-    output_len: usize,
-) -> usize {
+pub extern "C" fn ratatui_textbuffer_get_text(buffer_handle: u64, output: *mut u8, output_len: usize) -> usize {
     if output.is_null() {
         return 0;
     }
@@ -374,11 +370,7 @@ pub extern "C" fn ratatui_textbuffer_get_text(
 
 #[no_mangle]
 #[cfg(not(feature = "ratatui-tui"))]
-pub extern "C" fn ratatui_textbuffer_get_text(
-    _buffer_handle: u64,
-    _output: *mut u8,
-    _output_len: usize,
-) -> usize {
+pub extern "C" fn ratatui_textbuffer_get_text(_buffer_handle: u64, _output: *mut u8, _output_len: usize) -> usize {
     0
 }
 
@@ -390,11 +382,7 @@ pub extern "C" fn ratatui_textbuffer_get_text(
 /// * `text_len` - Length of text
 #[no_mangle]
 #[cfg(feature = "ratatui-tui")]
-pub extern "C" fn ratatui_textbuffer_set_text(
-    buffer_handle: u64,
-    text: *const u8,
-    text_len: usize,
-) {
+pub extern "C" fn ratatui_textbuffer_set_text(buffer_handle: u64, text: *const u8, text_len: usize) {
     if text.is_null() {
         return;
     }
@@ -413,11 +401,7 @@ pub extern "C" fn ratatui_textbuffer_set_text(
 
 #[no_mangle]
 #[cfg(not(feature = "ratatui-tui"))]
-pub extern "C" fn ratatui_textbuffer_set_text(
-    _buffer_handle: u64,
-    _text: *const u8,
-    _text_len: usize,
-) {
+pub extern "C" fn ratatui_textbuffer_set_text(_buffer_handle: u64, _text: *const u8, _text_len: usize) {
     // No-op
 }
 
@@ -638,10 +622,7 @@ mod tests {
     #[cfg(feature = "ratatui-tui")]
     fn test_textbuffer_creation() {
         let handle = ratatui_textbuffer_new();
-        assert_ne!(
-            handle, 0,
-            "TextBuffer creation should return non-zero handle"
-        );
+        assert_ne!(handle, 0, "TextBuffer creation should return non-zero handle");
         ratatui_object_destroy(handle);
     }
 

@@ -68,9 +68,7 @@ fn test_runner_compile_to_smf() {
     let smf_path = dir.path().join("output.smf");
 
     let runner = Runner::new();
-    runner
-        .compile_to_smf("main = 77", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 77", &smf_path).expect("compile ok");
     assert!(smf_path.exists(), "SMF should exist");
 }
 

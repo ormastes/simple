@@ -1,6 +1,6 @@
 use simple_parser::ast::{
-    BinOp, Expr, ImplBlock, MacroConstRange, MacroDef, MacroIntroDecl, MacroIntroSpec, MacroTarget,
-    Node, Pattern, PointerKind, Type as AstType, UnaryOp,
+    BinOp, Expr, ImplBlock, MacroConstRange, MacroDef, MacroIntroDecl, MacroIntroSpec, MacroTarget, Node, Pattern,
+    PointerKind, Type as AstType, UnaryOp,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -12,9 +12,7 @@ pub mod route_params;
 pub mod tagged_union;
 
 pub use bitfield::{BackingType, Bitfield, BitfieldField};
-pub use effects::{
-    build_effect_env, infer_function_effect, validate_sync_constraint, Effect, EffectEnv,
-};
+pub use effects::{build_effect_env, infer_function_effect, validate_sync_constraint, Effect, EffectEnv};
 pub use http_status::{StatusCode, StatusCodeCategory};
 pub use response_builder::{Response, ResponseBuilder};
 pub use route_params::{ParamValue, RouteParamError, RouteParams};
@@ -369,41 +367,23 @@ impl Type {
         match self {
             Type::TypeParam(name) => subst.get(name).cloned().unwrap_or_else(|| self.clone()),
             Type::Function { params, ret } => Type::Function {
-                params: params
-                    .iter()
-                    .map(|p| p.substitute_type_params(subst))
-                    .collect(),
+                params: params.iter().map(|p| p.substitute_type_params(subst)).collect(),
                 ret: Box::new(ret.substitute_type_params(subst)),
             },
             Type::Array(elem) => Type::Array(Box::new(elem.substitute_type_params(subst))),
-            Type::Union(types) => Type::Union(
-                types
-                    .iter()
-                    .map(|t| t.substitute_type_params(subst))
-                    .collect(),
-            ),
+            Type::Union(types) => Type::Union(types.iter().map(|t| t.substitute_type_params(subst)).collect()),
             Type::Generic { name, args } => Type::Generic {
                 name: name.clone(),
-                args: args
-                    .iter()
-                    .map(|a| a.substitute_type_params(subst))
-                    .collect(),
+                args: args.iter().map(|a| a.substitute_type_params(subst)).collect(),
             },
-            Type::Tuple(types) => Type::Tuple(
-                types
-                    .iter()
-                    .map(|t| t.substitute_type_params(subst))
-                    .collect(),
-            ),
+            Type::Tuple(types) => Type::Tuple(types.iter().map(|t| t.substitute_type_params(subst)).collect()),
             Type::Dict { key, value } => Type::Dict {
                 key: Box::new(key.substitute_type_params(subst)),
                 value: Box::new(value.substitute_type_params(subst)),
             },
             Type::Optional(inner) => Type::Optional(Box::new(inner.substitute_type_params(subst))),
             Type::Borrow(inner) => Type::Borrow(Box::new(inner.substitute_type_params(subst))),
-            Type::BorrowMut(inner) => {
-                Type::BorrowMut(Box::new(inner.substitute_type_params(subst)))
-            }
+            Type::BorrowMut(inner) => Type::BorrowMut(Box::new(inner.substitute_type_params(subst))),
             Type::Constructor { target, args } => Type::Constructor {
                 target: Box::new(target.substitute_type_params(subst)),
                 args: args
@@ -423,9 +403,7 @@ impl Type {
     pub fn contains_var(&self, var_id: usize) -> bool {
         match self {
             Type::Var(id) => *id == var_id,
-            Type::Function { params, ret } => {
-                params.iter().any(|p| p.contains_var(var_id)) || ret.contains_var(var_id)
-            }
+            Type::Function { params, ret } => params.iter().any(|p| p.contains_var(var_id)) || ret.contains_var(var_id),
             Type::Array(elem) => elem.contains_var(var_id),
             Type::Union(types) => types.iter().any(|t| t.contains_var(var_id)),
             Type::Generic { args, .. } => args.iter().any(|a| a.contains_var(var_id)),
@@ -484,9 +462,7 @@ pub struct Substitution {
 
 impl Substitution {
     pub fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
+        Self { map: HashMap::new() }
     }
 
     pub fn get(&self, id: usize) -> Option<&Type> {
@@ -595,11 +571,7 @@ impl RequiredMethodSig {
     pub fn substitute_type_params(&self, subst: &HashMap<String, Type>) -> Self {
         RequiredMethodSig {
             name: self.name.clone(),
-            params: self
-                .params
-                .iter()
-                .map(|p| p.substitute_type_params(subst))
-                .collect(),
+            params: self.params.iter().map(|p| p.substitute_type_params(subst)).collect(),
             ret: self.ret.substitute_type_params(subst),
         }
     }
@@ -616,11 +588,7 @@ impl FunctionType {
     /// Substitute type parameters in this function type (Feature #2201)
     pub fn substitute_type_params(&self, subst: &HashMap<String, Type>) -> Self {
         FunctionType {
-            params: self
-                .params
-                .iter()
-                .map(|p| p.substitute_type_params(subst))
-                .collect(),
+            params: self.params.iter().map(|p| p.substitute_type_params(subst)).collect(),
             ret: self.ret.substitute_type_params(subst),
         }
     }
@@ -710,9 +678,7 @@ mod mixin_type_tests {
             required_methods: vec![],
         };
 
-        let instantiated = mixin
-            .instantiate(&[Type::Int])
-            .expect("Instantiation should succeed");
+        let instantiated = mixin.instantiate(&[Type::Int]).expect("Instantiation should succeed");
 
         assert_eq!(instantiated.type_params.len(), 0);
         assert_eq!(instantiated.fields.len(), 1);
@@ -735,9 +701,7 @@ mod mixin_type_tests {
             required_methods: vec![],
         };
 
-        let instantiated = mixin
-            .instantiate(&[Type::Int])
-            .expect("Instantiation should succeed");
+        let instantiated = mixin.instantiate(&[Type::Int]).expect("Instantiation should succeed");
 
         assert_eq!(instantiated.fields[0].1, Type::Array(Box::new(Type::Int)));
     }
@@ -760,9 +724,7 @@ mod mixin_type_tests {
             required_methods: vec![],
         };
 
-        let instantiated = mixin
-            .instantiate(&[Type::Str])
-            .expect("Instantiation should succeed");
+        let instantiated = mixin.instantiate(&[Type::Str]).expect("Instantiation should succeed");
 
         assert_eq!(instantiated.methods[0].1.params[0], Type::Str);
         assert_eq!(instantiated.methods[0].1.ret, Type::Str);
@@ -806,15 +768,11 @@ mod mixin_type_tests {
         // Try with 0 args (should fail)
         let result = mixin.instantiate(&[]);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("expects 1 type arguments, got 0"));
+        assert!(result.unwrap_err().contains("expects 1 type arguments, got 0"));
 
         // Try with 2 args (should fail)
         let result = mixin.instantiate(&[Type::Int, Type::Str]);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("expects 1 type arguments, got 2"));
+        assert!(result.unwrap_err().contains("expects 1 type arguments, got 2"));
     }
 }

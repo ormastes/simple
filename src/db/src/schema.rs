@@ -55,22 +55,18 @@ impl ColumnType {
     pub fn from_postgres(type_name: &str) -> Self {
         let lower = type_name.to_lowercase();
         match lower.as_str() {
-            "int2" | "int4" | "int8" | "smallint" | "integer" | "bigint" | "serial"
-            | "bigserial" => ColumnType::Integer,
-            "float4" | "float8" | "real" | "double precision" | "numeric" | "decimal" => {
-                ColumnType::Real
+            "int2" | "int4" | "int8" | "smallint" | "integer" | "bigint" | "serial" | "bigserial" => {
+                ColumnType::Integer
             }
-            "text" | "varchar" | "char" | "character varying" | "character" | "name" => {
-                ColumnType::Text
-            }
+            "float4" | "float8" | "real" | "double precision" | "numeric" | "decimal" => ColumnType::Real,
+            "text" | "varchar" | "char" | "character varying" | "character" | "name" => ColumnType::Text,
             "bytea" => ColumnType::Blob,
             "bool" | "boolean" => ColumnType::Boolean,
             "date" => ColumnType::Date,
             "time" | "time without time zone" | "time with time zone" => ColumnType::Time,
-            "timestamp"
-            | "timestamp without time zone"
-            | "timestamp with time zone"
-            | "timestamptz" => ColumnType::Timestamp,
+            "timestamp" | "timestamp without time zone" | "timestamp with time zone" | "timestamptz" => {
+                ColumnType::Timestamp
+            }
             "json" | "jsonb" => ColumnType::Json,
             "uuid" => ColumnType::Uuid,
             _ => ColumnType::Unknown(type_name.to_string()),
@@ -181,10 +177,9 @@ impl<C: Connection + ?Sized> SchemaIntrospector for SqliteIntrospector<'_, C> {
     }
 
     fn describe_table(&self, table_name: &str) -> DbResult<TableInfo> {
-        let rows = self.conn.query(
-            &format!("PRAGMA table_info('{}')", table_name.replace('\'', "''")),
-            &[],
-        )?;
+        let rows = self
+            .conn
+            .query(&format!("PRAGMA table_info('{}')", table_name.replace('\'', "''")), &[])?;
 
         let mut columns = Vec::new();
         let mut primary_key = Vec::new();
@@ -212,10 +207,7 @@ impl<C: Connection + ?Sized> SchemaIntrospector for SqliteIntrospector<'_, C> {
         }
 
         if columns.is_empty() {
-            return Err(DbError::NotFound(format!(
-                "Table '{}' not found",
-                table_name
-            )));
+            return Err(DbError::NotFound(format!("Table '{}' not found", table_name)));
         }
 
         Ok(TableInfo {
@@ -226,10 +218,9 @@ impl<C: Connection + ?Sized> SchemaIntrospector for SqliteIntrospector<'_, C> {
     }
 
     fn list_indexes(&self, table_name: &str) -> DbResult<Vec<IndexInfo>> {
-        let rows = self.conn.query(
-            &format!("PRAGMA index_list('{}')", table_name.replace('\'', "''")),
-            &[],
-        )?;
+        let rows = self
+            .conn
+            .query(&format!("PRAGMA index_list('{}')", table_name.replace('\'', "''")), &[])?;
 
         let mut indexes = Vec::new();
         for row in rows {
@@ -238,10 +229,9 @@ impl<C: Connection + ?Sized> SchemaIntrospector for SqliteIntrospector<'_, C> {
             let unique: i64 = row.get_opt_by_name("unique")?.unwrap_or(0);
 
             // Get columns for this index
-            let col_rows = self.conn.query(
-                &format!("PRAGMA index_info('{}')", name.replace('\'', "''")),
-                &[],
-            )?;
+            let col_rows = self
+                .conn
+                .query(&format!("PRAGMA index_info('{}')", name.replace('\'', "''")), &[])?;
 
             let mut columns = Vec::new();
             for col_row in col_rows {
@@ -264,10 +254,7 @@ impl<C: Connection + ?Sized> SchemaIntrospector for SqliteIntrospector<'_, C> {
 
     fn list_foreign_keys(&self, table_name: &str) -> DbResult<Vec<ForeignKeyInfo>> {
         let rows = self.conn.query(
-            &format!(
-                "PRAGMA foreign_key_list('{}')",
-                table_name.replace('\'', "''")
-            ),
+            &format!("PRAGMA foreign_key_list('{}')", table_name.replace('\'', "''")),
             &[],
         )?;
 
@@ -343,9 +330,7 @@ impl<C: Connection + ?Sized> SchemaIntrospector for PostgresIntrospector<'_, C> 
             let row = row?;
             let name: String = row.get_by_name("column_name")?;
             let type_name: String = row.get_opt_by_name("data_type")?.unwrap_or_default();
-            let nullable_str: String = row
-                .get_opt_by_name("is_nullable")?
-                .unwrap_or_else(|| "YES".to_string());
+            let nullable_str: String = row.get_opt_by_name("is_nullable")?.unwrap_or_else(|| "YES".to_string());
             let dflt: Option<String> = row.get_opt_by_name("column_default")?;
 
             columns.push(ColumnInfo {
@@ -358,10 +343,7 @@ impl<C: Connection + ?Sized> SchemaIntrospector for PostgresIntrospector<'_, C> 
         }
 
         if columns.is_empty() {
-            return Err(DbError::NotFound(format!(
-                "Table '{}' not found",
-                table_name
-            )));
+            return Err(DbError::NotFound(format!("Table '{}' not found", table_name)));
         }
 
         // Get primary key columns

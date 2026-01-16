@@ -153,12 +153,10 @@ impl SimdInstruction {
     pub fn result_type(&self) -> SimdType {
         match self.op {
             // Comparisons return bool vectors
-            SimdOp::Eq | SimdOp::Ne | SimdOp::Lt | SimdOp::Le | SimdOp::Gt | SimdOp::Ge => {
-                SimdType {
-                    element: SimdElementType::Bool,
-                    lanes: self.lanes,
-                }
-            }
+            SimdOp::Eq | SimdOp::Ne | SimdOp::Lt | SimdOp::Le | SimdOp::Gt | SimdOp::Ge => SimdType {
+                element: SimdElementType::Bool,
+                lanes: self.lanes,
+            },
             // Reductions return scalars (represented as single-lane)
             SimdOp::Sum | SimdOp::Product | SimdOp::Min | SimdOp::Max => SimdType {
                 element: self.element_type,

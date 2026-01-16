@@ -89,12 +89,7 @@ where
     // Check if result is a boolean
     let is_true = match result {
         Value::Bool(b) => b,
-        _ => {
-            return Err(format!(
-                "Contract condition must evaluate to boolean, got {:?}",
-                result
-            ))
-        }
+        _ => return Err(format!("Contract condition must evaluate to boolean, got {:?}", result)),
     };
 
     // Check the condition and panic if it fails
@@ -111,10 +106,7 @@ where
 ///
 /// # Returns
 /// OldValueCapture with all old() values evaluated and stored
-pub fn capture_old_values<F>(
-    contract: &HirContract,
-    mut eval_fn: F,
-) -> Result<OldValueCapture, String>
+pub fn capture_old_values<F>(contract: &HirContract, mut eval_fn: F) -> Result<OldValueCapture, String>
 where
     F: FnMut(&HirExpr) -> Result<Value, String>,
 {
@@ -134,11 +126,7 @@ where
 /// * `contract` - The function contract to check
 /// * `eval_fn` - Function to evaluate expressions
 /// * `func_name` - Function name for error messages
-pub fn check_entry_contracts<F>(
-    contract: &HirContract,
-    eval_fn: F,
-    func_name: &str,
-) -> Result<(), String>
+pub fn check_entry_contracts<F>(contract: &HirContract, eval_fn: F, func_name: &str) -> Result<(), String>
 where
     F: FnMut(&HirExpr) -> Result<Value, String> + Clone,
 {
@@ -161,11 +149,7 @@ where
 /// * `contract` - The function contract to check
 /// * `eval_fn` - Function to evaluate expressions
 /// * `func_name` - Function name for error messages
-pub fn check_exit_contracts<F>(
-    contract: &HirContract,
-    eval_fn: F,
-    func_name: &str,
-) -> Result<(), String>
+pub fn check_exit_contracts<F>(contract: &HirContract, eval_fn: F, func_name: &str) -> Result<(), String>
 where
     F: FnMut(&HirExpr) -> Result<Value, String> + Clone,
 {

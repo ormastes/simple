@@ -32,10 +32,9 @@ impl<'a> MirLowerer<'a> {
             let dest = self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
-                block.instructions.push(MirInst::ContractOldCapture {
-                    dest,
-                    value: value_reg,
-                });
+                block
+                    .instructions
+                    .push(MirInst::ContractOldCapture { dest, value: value_reg });
                 dest
             })?;
             let ctx = self.try_contract_ctx_mut()?;
@@ -106,11 +105,7 @@ impl<'a> MirLowerer<'a> {
     }
 
     /// Emit error contract checks: error postconditions (for error returns)
-    pub(super) fn emit_error_contracts(
-        &mut self,
-        contract: &HirContract,
-        error_value: VReg,
-    ) -> MirLowerResult<()> {
+    pub(super) fn emit_error_contracts(&mut self, contract: &HirContract, error_value: VReg) -> MirLowerResult<()> {
         let func_name = self.try_contract_ctx()?.func_name.clone();
 
         // Store error value in contract context for error postcondition expressions

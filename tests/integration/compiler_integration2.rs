@@ -63,14 +63,8 @@ fn test_data_section_kind_mutable() {
 #[test]
 fn test_data_section_kind_to_section_type() {
     use simple_compiler::linker::{DataSectionKind, SectionType};
-    assert_eq!(
-        DataSectionKind::ReadOnly.to_section_type(),
-        SectionType::RoData
-    );
-    assert_eq!(
-        DataSectionKind::Mutable.to_section_type(),
-        SectionType::Data
-    );
+    assert_eq!(DataSectionKind::ReadOnly.to_section_type(), SectionType::RoData);
+    assert_eq!(DataSectionKind::Mutable.to_section_type(), SectionType::Data);
 }
 
 // =============================================================================
@@ -245,11 +239,7 @@ fn test_parser_hex_with_underscore() {
 
     let mut parser = Parser::new("main = 0xFF_FF");
     let ast = parser.parse();
-    assert!(
-        ast.is_ok(),
-        "Should parse hex with underscore: {:?}",
-        ast.err()
-    );
+    assert!(ast.is_ok(), "Should parse hex with underscore: {:?}", ast.err());
 }
 
 #[test]
@@ -258,11 +248,7 @@ fn test_parser_binary_with_underscore() {
 
     let mut parser = Parser::new("main = 0b1111_0000");
     let ast = parser.parse();
-    assert!(
-        ast.is_ok(),
-        "Should parse binary with underscore: {:?}",
-        ast.err()
-    );
+    assert!(ast.is_ok(), "Should parse binary with underscore: {:?}", ast.err());
 }
 
 // Feature #81: Range Patterns (if parser supports)
@@ -426,9 +412,7 @@ fn test_module_loader_load_and_entry() {
     let smf_path = dir.path().join("entry_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 123", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 123", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -449,9 +433,7 @@ fn test_module_loader_exports() {
     let smf_path = dir.path().join("exports_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 0", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 0", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -471,9 +453,7 @@ fn test_loaded_module_source_hash_it() {
     let smf_path = dir.path().join("hash_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 99", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 99", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -494,9 +474,7 @@ fn test_loaded_module_is_reloadable_it() {
     let smf_path = dir.path().join("reload_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 50", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 50", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -511,9 +489,7 @@ fn test_loaded_module_is_reloadable_it() {
 
 #[test]
 fn test_smf_writer_multiple_sections() {
-    use simple_compiler::linker::{
-        DataSectionKind, SmfSymbol, SmfWriter, SymbolBinding, SymbolType,
-    };
+    use simple_compiler::linker::{DataSectionKind, SmfSymbol, SmfWriter, SymbolBinding, SymbolType};
     use std::io::Cursor;
 
     let mut writer = SmfWriter::new();

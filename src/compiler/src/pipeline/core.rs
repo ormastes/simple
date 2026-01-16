@@ -89,10 +89,7 @@ impl CompilerPipeline {
     }
 
     /// Create a pipeline with both GC and project context
-    pub fn with_gc_and_project(
-        gc: Arc<dyn GcAllocator>,
-        project: ProjectContext,
-    ) -> Result<Self, CompileError> {
+    pub fn with_gc_and_project(gc: Arc<dyn GcAllocator>, project: ProjectContext) -> Result<Self, CompileError> {
         let lint_config = Some(project.lint_config.clone());
         Ok(Self {
             gc: Some(gc),

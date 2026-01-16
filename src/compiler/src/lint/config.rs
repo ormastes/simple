@@ -27,8 +27,7 @@ impl LintConfig {
     pub fn from_sdn_file(path: &std::path::Path) -> Result<Self, String> {
         use std::fs;
 
-        let content =
-            fs::read_to_string(path).map_err(|e| format!("Failed to read lint config: {}", e))?;
+        let content = fs::read_to_string(path).map_err(|e| format!("Failed to read lint config: {}", e))?;
 
         Self::from_sdn_string(&content)
     }
@@ -68,10 +67,7 @@ impl LintConfig {
                         if let Some(level) = LintLevel::from_str(level_str) {
                             config.set_level(lint, level);
                         } else {
-                            return Err(format!(
-                                "Invalid lint level '{}' for lint '{}'",
-                                level_str, lint_name
-                            ));
+                            return Err(format!("Invalid lint level '{}' for lint '{}'", level_str, lint_name));
                         }
                     } else {
                         // Unknown lint name - could be a warning in the future
@@ -91,10 +87,7 @@ impl LintConfig {
 
     /// Get the effective level for a lint
     pub fn get_level(&self, lint: LintName) -> LintLevel {
-        self.levels
-            .get(&lint)
-            .copied()
-            .unwrap_or_else(|| lint.default_level())
+        self.levels.get(&lint).copied().unwrap_or_else(|| lint.default_level())
     }
 
     /// Parse lint attributes and update config

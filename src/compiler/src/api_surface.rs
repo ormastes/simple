@@ -4,9 +4,7 @@
 //! This prevents accidental API changes and makes diffs reviewable.
 
 use serde::{Deserialize, Serialize};
-use simple_parser::ast::{
-    ClassDef, EnumDef, FunctionDef, Node, Parameter, StructDef, TraitDef, Type, Visibility,
-};
+use simple_parser::ast::{ClassDef, EnumDef, FunctionDef, Node, Parameter, StructDef, TraitDef, Type, Visibility};
 use std::collections::BTreeMap;
 
 /// Public API surface of a module
@@ -279,8 +277,7 @@ impl ApiSurface {
             match other.functions.get(name) {
                 None => diff.removed_functions.push(name.clone()),
                 Some(other_sig)
-                    if sig.params.len() != other_sig.params.len()
-                        || sig.return_type != other_sig.return_type =>
+                    if sig.params.len() != other_sig.params.len() || sig.return_type != other_sig.return_type =>
                 {
                     diff.modified_functions.push(name.clone())
                 }
@@ -335,9 +332,7 @@ impl ApiDiff {
     }
 
     pub fn has_breaking_changes(&self) -> bool {
-        !self.removed_functions.is_empty()
-            || !self.modified_functions.is_empty()
-            || !self.removed_structs.is_empty()
+        !self.removed_functions.is_empty() || !self.modified_functions.is_empty() || !self.removed_structs.is_empty()
     }
 }
 
@@ -353,38 +348,20 @@ fn type_to_string(ty: &Type) -> String {
                 format!(
                     "{}[{}]",
                     name,
-                    args.iter()
-                        .map(type_to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    args.iter().map(type_to_string).collect::<Vec<_>>().join(", ")
                 )
             }
         }
-        Type::Tuple(types) => format!(
-            "({})",
-            types
-                .iter()
-                .map(type_to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        Type::Tuple(types) => format!("({})", types.iter().map(type_to_string).collect::<Vec<_>>().join(", ")),
         Type::Function { params, ret } => format!(
             "({}) -> {}",
-            params
-                .iter()
-                .map(type_to_string)
-                .collect::<Vec<_>>()
-                .join(", "),
+            params.iter().map(type_to_string).collect::<Vec<_>>().join(", "),
             ret.as_ref()
                 .map(|r| type_to_string(r))
                 .unwrap_or_else(|| "void".to_string())
         ),
         Type::Pointer { inner, .. } => format!("*{}", type_to_string(inner)),
-        Type::Union(types) => types
-            .iter()
-            .map(type_to_string)
-            .collect::<Vec<_>>()
-            .join(" | "),
+        Type::Union(types) => types.iter().map(type_to_string).collect::<Vec<_>>().join(" | "),
         Type::DynTrait(name) => format!("dyn {}", name),
         Type::Capability { inner, .. } => type_to_string(inner),
         _ => "unknown".to_string(),

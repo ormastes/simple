@@ -218,11 +218,7 @@ mod tests {
         )
         .unwrap();
 
-        fs::write(
-            dir.path().join("src/repos/user_repo.spl"),
-            "fn find_user(): ...",
-        )
-        .unwrap();
+        fs::write(dir.path().join("src/repos/user_repo.spl"), "fn find_user(): ...").unwrap();
 
         dir
     }

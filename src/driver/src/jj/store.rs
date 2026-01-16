@@ -82,8 +82,8 @@ impl StateStore {
     }
 
     fn save_record(&self, record: &StateRecord) -> io::Result<()> {
-        let content = serde_json::to_string_pretty(record)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let content =
+            serde_json::to_string_pretty(record).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let mut file = fs::File::create(&self.store_path)?;
         file.write_all(content.as_bytes())?;
         Ok(())
@@ -150,9 +150,7 @@ mod tests {
 
         assert!(store.latest().unwrap().is_none());
 
-        store
-            .store(BuildState::new().with_commit("first".to_string()))
-            .unwrap();
+        store.store(BuildState::new().with_commit("first".to_string())).unwrap();
         store
             .store(BuildState::new().with_commit("second".to_string()))
             .unwrap();

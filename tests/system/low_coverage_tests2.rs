@@ -589,9 +589,7 @@ fn test_import_kind_variants() {
 // =============================================================================
 
 use simple_dependency_tracker::macro_import::{MacroDirManifest, MacroSymbol};
-use simple_dependency_tracker::{
-    explicit_import, glob_import, is_auto_imported, AutoImport, MacroExports, SymKind,
-};
+use simple_dependency_tracker::{explicit_import, glob_import, is_auto_imported, AutoImport, MacroExports, SymKind};
 
 #[test]
 fn test_sym_kind_is_macro() {
@@ -753,13 +751,7 @@ fn test_symbol_table_new() {
 #[test]
 fn test_symbol_table_define() {
     let mut table = SymbolTable::new("mod");
-    let entry = SymbolEntry::local(
-        "func",
-        "mod::func",
-        SymbolKind::Function,
-        Visibility::Public,
-        "mod",
-    );
+    let entry = SymbolEntry::local("func", "mod::func", SymbolKind::Function, Visibility::Public, "mod");
 
     let result = table.define(entry);
     assert!(result.is_ok());

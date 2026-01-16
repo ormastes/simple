@@ -305,10 +305,7 @@ impl ParallelLinker {
         });
 
         // Phase 2: Collect sections in parallel
-        let sections: Vec<_> = modules
-            .par_iter()
-            .flat_map(|m| m.sections.clone())
-            .collect();
+        let sections: Vec<_> = modules.par_iter().flat_map(|m| m.sections.clone()).collect();
 
         // Phase 3: Build output writer (sequential - SmfWriter is not thread-safe)
         let mut writer = SmfWriter::new();
@@ -346,10 +343,7 @@ pub fn link_modules_parallel(modules: &[LinkModule]) -> SmfWriter {
 }
 
 /// Link multiple modules with custom config.
-pub fn link_modules_parallel_with_config(
-    modules: &[LinkModule],
-    config: ParallelLinkConfig,
-) -> SmfWriter {
+pub fn link_modules_parallel_with_config(modules: &[LinkModule], config: ParallelLinkConfig) -> SmfWriter {
     let linker = ParallelLinker::with_config(config);
     linker.link(modules)
 }

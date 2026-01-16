@@ -17,12 +17,7 @@ use super::{rt_torch_ones, rt_torch_zeros};
 /// momentum: momentum for running mean/var updates
 /// affine: 1 to use learnable affine parameters (gamma, beta), 0 otherwise
 #[no_mangle]
-pub extern "C" fn rt_torch_batchnorm2d_new(
-    num_features: i64,
-    eps: f64,
-    momentum: f64,
-    affine: i32,
-) -> u64 {
+pub extern "C" fn rt_torch_batchnorm2d_new(num_features: i64, eps: f64, momentum: f64, affine: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         if num_features <= 0 {
@@ -69,9 +64,7 @@ pub extern "C" fn rt_torch_batchnorm2d_new(
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY
-            .lock()
-            .insert(handle, std::sync::Arc::new(module));
+        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(module));
 
         tracing::debug!(
             "rt_torch_batchnorm2d_new: num_features={} eps={} momentum={} affine={} -> {}",
@@ -93,11 +86,7 @@ pub extern "C" fn rt_torch_batchnorm2d_new(
 /// Forward pass through BatchNorm2d
 /// training: 1 for training mode (update running stats), 0 for eval mode
 #[no_mangle]
-pub extern "C" fn rt_torch_batchnorm2d_forward(
-    module_handle: u64,
-    input_handle: u64,
-    training: i32,
-) -> u64 {
+pub extern "C" fn rt_torch_batchnorm2d_forward(module_handle: u64, input_handle: u64, training: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let module_registry = MODULE_REGISTRY.lock();

@@ -62,22 +62,14 @@ impl VerificationRule {
             VerificationRule::VReflect => "verified code cannot use reflection",
             VerificationRule::VGhost => "ghost code can only access ghost state",
             VerificationRule::VTrusted => "trusted boundary functions must have contracts",
-            VerificationRule::VPartial => {
-                "recursive functions in verified code need termination proof"
-            }
+            VerificationRule::VPartial => "recursive functions in verified code need termination proof",
         }
     }
 }
 
 impl std::fmt::Display for VerificationViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "[{}] {}: {}",
-            self.rule.code(),
-            self.location,
-            self.message
-        )
+        write!(f, "[{}] {}: {}", self.rule.code(), self.location, self.message)
     }
 }
 
@@ -161,11 +153,7 @@ impl VerificationChecker {
                     "function '{}' is marked @verify but has impure effects: [{}]. \
                      Verified code must be @pure or have no effects.",
                     func.name,
-                    impure_effects
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    impure_effects.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
                 ),
             );
         }
@@ -270,10 +258,7 @@ pub fn can_call(caller: VerificationMode, callee: VerificationMode) -> bool {
         VerificationMode::Unverified => true, // Unverified can call anything
         VerificationMode::Verified => {
             // Verified can only call verified or trusted
-            matches!(
-                callee,
-                VerificationMode::Verified | VerificationMode::Trusted
-            )
+            matches!(callee, VerificationMode::Verified | VerificationMode::Trusted)
         }
         VerificationMode::Trusted => true, // Trusted can call anything (it's a boundary)
     }
@@ -293,54 +278,27 @@ mod tests {
     #[test]
     fn test_can_call_verified() {
         // Verified can call verified
-        assert!(can_call(
-            VerificationMode::Verified,
-            VerificationMode::Verified
-        ));
+        assert!(can_call(VerificationMode::Verified, VerificationMode::Verified));
         // Verified can call trusted
-        assert!(can_call(
-            VerificationMode::Verified,
-            VerificationMode::Trusted
-        ));
+        assert!(can_call(VerificationMode::Verified, VerificationMode::Trusted));
         // Verified cannot call unverified
-        assert!(!can_call(
-            VerificationMode::Verified,
-            VerificationMode::Unverified
-        ));
+        assert!(!can_call(VerificationMode::Verified, VerificationMode::Unverified));
     }
 
     #[test]
     fn test_can_call_unverified() {
         // Unverified can call anything
-        assert!(can_call(
-            VerificationMode::Unverified,
-            VerificationMode::Unverified
-        ));
-        assert!(can_call(
-            VerificationMode::Unverified,
-            VerificationMode::Verified
-        ));
-        assert!(can_call(
-            VerificationMode::Unverified,
-            VerificationMode::Trusted
-        ));
+        assert!(can_call(VerificationMode::Unverified, VerificationMode::Unverified));
+        assert!(can_call(VerificationMode::Unverified, VerificationMode::Verified));
+        assert!(can_call(VerificationMode::Unverified, VerificationMode::Trusted));
     }
 
     #[test]
     fn test_can_call_trusted() {
         // Trusted can call anything (it's a boundary)
-        assert!(can_call(
-            VerificationMode::Trusted,
-            VerificationMode::Unverified
-        ));
-        assert!(can_call(
-            VerificationMode::Trusted,
-            VerificationMode::Verified
-        ));
-        assert!(can_call(
-            VerificationMode::Trusted,
-            VerificationMode::Trusted
-        ));
+        assert!(can_call(VerificationMode::Trusted, VerificationMode::Unverified));
+        assert!(can_call(VerificationMode::Trusted, VerificationMode::Verified));
+        assert!(can_call(VerificationMode::Trusted, VerificationMode::Trusted));
     }
 
     #[test]

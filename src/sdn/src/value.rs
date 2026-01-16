@@ -423,10 +423,7 @@ mod tests {
         server.insert("port", SdnValue::int(8080));
         root.insert("server", server);
 
-        assert_eq!(
-            root.get_path("server.port").and_then(|v| v.as_i64()),
-            Some(8080)
-        );
+        assert_eq!(root.get_path("server.port").and_then(|v| v.as_i64()), Some(8080));
     }
 
     #[test]
@@ -435,9 +432,6 @@ mod tests {
         assert_eq!(format!("{}", SdnValue::Bool(true)), "true");
         assert_eq!(format!("{}", SdnValue::Int(42)), "42");
         assert_eq!(format!("{}", SdnValue::String("hello".into())), "hello");
-        assert_eq!(
-            format!("{}", SdnValue::String("hello world".into())),
-            "\"hello world\""
-        );
+        assert_eq!(format!("{}", SdnValue::String("hello world".into())), "\"hello world\"");
     }
 }

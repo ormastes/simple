@@ -31,14 +31,8 @@ pub extern "C" fn rt_torch_linalg_det(tensor_handle: u64) -> u64 {
 
         let result = tensor.0.linalg_det();
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!(
-            "rt_torch_linalg_det: {} -> handle={}",
-            tensor_handle,
-            handle
-        );
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!("rt_torch_linalg_det: {} -> handle={}", tensor_handle, handle);
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -63,14 +57,8 @@ pub extern "C" fn rt_torch_linalg_inv(tensor_handle: u64) -> u64 {
 
         let result = tensor.0.linalg_inv();
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!(
-            "rt_torch_linalg_inv: {} -> handle={}",
-            tensor_handle,
-            handle
-        );
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!("rt_torch_linalg_inv: {} -> handle={}", tensor_handle, handle);
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -100,15 +88,8 @@ pub extern "C" fn rt_torch_linalg_solve(a_handle: u64, b_handle: u64) -> u64 {
 
         let result = a.0.linalg_solve(&b.0);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!(
-            "rt_torch_linalg_solve: A={} b={} -> x={}",
-            a_handle,
-            b_handle,
-            handle
-        );
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!("rt_torch_linalg_solve: A={} b={} -> x={}", a_handle, b_handle, handle);
         handle
     }
     #[cfg(not(feature = "pytorch"))]

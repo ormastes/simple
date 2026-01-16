@@ -510,12 +510,7 @@ fn test_parse_function_call_named_args() {
 #[test]
 fn test_parse_method_call() {
     let module = parse("obj.method(x)").unwrap();
-    if let Node::Expression(Expr::MethodCall {
-        receiver,
-        method,
-        args,
-    }) = &module.items[0]
-    {
+    if let Node::Expression(Expr::MethodCall { receiver, method, args }) = &module.items[0] {
         assert!(matches!(**receiver, Expr::Identifier(ref name) if name == "obj"));
         assert_eq!(method, "method");
         assert_eq!(args.len(), 1);
@@ -527,10 +522,7 @@ fn test_parse_method_call() {
 #[test]
 fn test_parse_method_chain() {
     let module = parse("a.b().c()").unwrap();
-    if let Node::Expression(Expr::MethodCall {
-        receiver, method, ..
-    }) = &module.items[0]
-    {
+    if let Node::Expression(Expr::MethodCall { receiver, method, .. }) = &module.items[0] {
         assert_eq!(method, "c");
         assert!(matches!(**receiver, Expr::MethodCall { .. }));
     } else {

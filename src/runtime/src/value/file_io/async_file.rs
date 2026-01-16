@@ -262,9 +262,7 @@ fn load_file_mmap(path: &str, mode: i32, prefault: bool) -> Result<MmapRegion, S
         #[cfg(target_family = "windows")]
         {
             use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-            use windows_sys::Win32::Storage::FileSystem::{
-                CreateFileA, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
-            };
+            use windows_sys::Win32::Storage::FileSystem::{CreateFileA, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING};
 
             let access = if mode & 0x1 != 0 { 0x80000000 } else { 0 }  // GENERIC_READ
                        | if mode & 0x2 != 0 { 0x40000000 } else { 0 }; // GENERIC_WRITE

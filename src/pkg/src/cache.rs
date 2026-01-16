@@ -170,10 +170,7 @@ mod tests {
         let cache = Cache::at(PathBuf::from("/tmp/simple-cache"));
         assert_eq!(cache.root(), Path::new("/tmp/simple-cache"));
         assert_eq!(cache.git_dir(), PathBuf::from("/tmp/simple-cache/git"));
-        assert_eq!(
-            cache.packages_dir(),
-            PathBuf::from("/tmp/simple-cache/packages")
-        );
+        assert_eq!(cache.packages_dir(), PathBuf::from("/tmp/simple-cache/packages"));
     }
 
     #[test]

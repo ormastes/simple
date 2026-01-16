@@ -100,9 +100,7 @@ impl<'a> super::Lexer<'a> {
                 match self.process_escape(false) {
                     EscapeResult::Char(c) => value.push(c),
                     EscapeResult::Error(msg) => return TokenKind::Error(msg),
-                    EscapeResult::Unterminated => {
-                        return TokenKind::Error("Unterminated string".to_string())
-                    }
+                    EscapeResult::Unterminated => return TokenKind::Error("Unterminated string".to_string()),
                 }
             } else if ch == '\n' {
                 return TokenKind::Error("Unterminated string".to_string());
@@ -254,9 +252,7 @@ impl<'a> super::Lexer<'a> {
                 match self.process_escape(true) {
                     EscapeResult::Char(c) => current_literal.push(c),
                     EscapeResult::Error(msg) => return TokenKind::Error(msg),
-                    EscapeResult::Unterminated => {
-                        return TokenKind::Error("Unterminated f-string".to_string())
-                    }
+                    EscapeResult::Unterminated => return TokenKind::Error("Unterminated f-string".to_string()),
                 }
             } else if ch == '\n' {
                 if is_triple {

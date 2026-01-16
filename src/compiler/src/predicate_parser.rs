@@ -114,9 +114,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
     Ok(tokens)
 }
 
-fn parse_selector_args(
-    chars: &mut std::iter::Peekable<std::str::Chars>,
-) -> Result<Vec<String>, String> {
+fn parse_selector_args(chars: &mut std::iter::Peekable<std::str::Chars>) -> Result<Vec<String>, String> {
     let mut args = Vec::new();
     let mut current_arg = String::new();
     let mut depth = 0;
@@ -226,10 +224,7 @@ impl Parser {
             // Weaving selectors
             "execution" => {
                 if args.len() != 1 {
-                    return Err(format!(
-                        "execution() expects 1 argument, got {}",
-                        args.len()
-                    ));
+                    return Err(format!("execution() expects 1 argument, got {}", args.len()));
                 }
                 let sig_pattern = parse_signature_pattern(&args[0])?;
                 Ok(Selector::Execution(sig_pattern))
@@ -260,19 +255,13 @@ impl Parser {
             }
             "decision" => {
                 if !args.is_empty() {
-                    return Err(format!(
-                        "decision() expects 0 arguments, got {}",
-                        args.len()
-                    ));
+                    return Err(format!("decision() expects 0 arguments, got {}", args.len()));
                 }
                 Ok(Selector::Decision)
             }
             "condition" => {
                 if !args.is_empty() {
-                    return Err(format!(
-                        "condition() expects 0 arguments, got {}",
-                        args.len()
-                    ));
+                    return Err(format!("condition() expects 0 arguments, got {}", args.len()));
                 }
                 Ok(Selector::Condition)
             }
@@ -362,10 +351,7 @@ fn parse_signature_pattern(input: &str) -> Result<SignaturePattern, String> {
         .ok_or_else(|| format!("invalid signature pattern '{}': missing '('", trimmed))?;
 
     if !trimmed.ends_with(')') {
-        return Err(format!(
-            "invalid signature pattern '{}': missing closing ')'",
-            trimmed
-        ));
+        return Err(format!("invalid signature pattern '{}': missing closing ')'", trimmed));
     }
 
     // Extract arguments (between parentheses)
@@ -396,10 +382,7 @@ fn parse_signature_pattern(input: &str) -> Result<SignaturePattern, String> {
     } else if parts.len() == 2 {
         (parts[0].to_string(), parts[1].to_string())
     } else {
-        return Err(format!(
-            "invalid signature pattern '{}': too many parts",
-            trimmed
-        ));
+        return Err(format!("invalid signature pattern '{}': too many parts", trimmed));
     };
 
     Ok(SignaturePattern {

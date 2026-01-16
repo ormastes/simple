@@ -131,10 +131,7 @@ pub fn generate_sequence_from_events(events: &[SequenceEvent], options: &Diagram
             output.push_str(&format!("    deactivate {}\n", callee_alias));
             if options.include_returns {
                 if let Some(ref ret_val) = event.return_value {
-                    output.push_str(&format!(
-                        "    {}-->>{}:{}\n",
-                        callee_alias, caller_alias, ret_val
-                    ));
+                    output.push_str(&format!("    {}-->>{}:{}\n", callee_alias, caller_alias, ret_val));
                 }
             }
         } else {
@@ -153,10 +150,7 @@ pub fn generate_sequence_from_events(events: &[SequenceEvent], options: &Diagram
                 event.callee.clone()
             };
 
-            output.push_str(&format!(
-                "    {}->>{}:{}\n",
-                caller_alias, callee_alias, label
-            ));
+            output.push_str(&format!("    {}->>{}:{}\n", caller_alias, callee_alias, label));
             output.push_str(&format!("    activate {}\n", callee_alias));
         }
     }
@@ -186,10 +180,7 @@ pub fn generate_class_from_events(events: &[SequenceEvent], options: &DiagramOpt
 
         // Track callee class
         if let Some(ref cls) = event.callee_class {
-            classes
-                .entry(cls.clone())
-                .or_default()
-                .insert(event.callee.clone());
+            classes.entry(cls.clone()).or_default().insert(event.callee.clone());
         }
 
         // Track relationships
@@ -285,11 +276,7 @@ pub fn generate_arch_from_events(
         for member in members {
             if !emitted.contains(member) {
                 let short_name = member.split('.').last().unwrap_or(member);
-                output.push_str(&format!(
-                    "        {}[{}]\n",
-                    sanitize_id(member),
-                    short_name
-                ));
+                output.push_str(&format!("        {}[{}]\n", sanitize_id(member), short_name));
                 emitted.insert(member.clone());
             }
         }
@@ -307,11 +294,7 @@ pub fn generate_arch_from_events(
 
     // Emit dependencies
     for (from, to) in &dependencies {
-        output.push_str(&format!(
-            "    {} --> {}\n",
-            sanitize_id(from),
-            sanitize_id(to)
-        ));
+        output.push_str(&format!("    {} --> {}\n", sanitize_id(from), sanitize_id(to)));
     }
 
     output.push_str("```\n");
@@ -337,13 +320,7 @@ fn create_alias(name: &str) -> String {
 
 fn sanitize_id(name: &str) -> String {
     name.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
         .collect()
 }
 

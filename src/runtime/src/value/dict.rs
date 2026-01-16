@@ -35,8 +35,7 @@ pub struct RuntimeDict {
 #[no_mangle]
 pub extern "C" fn rt_dict_new(capacity: u64) -> RuntimeValue {
     let capacity = capacity.max(8); // Minimum capacity
-    let size = std::mem::size_of::<RuntimeDict>()
-        + capacity as usize * 2 * std::mem::size_of::<RuntimeValue>();
+    let size = std::mem::size_of::<RuntimeDict>() + capacity as usize * 2 * std::mem::size_of::<RuntimeValue>();
     let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
 
     unsafe {
@@ -102,9 +101,7 @@ pub(super) fn keys_equal(a: RuntimeValue, b: RuntimeValue) -> bool {
             let ptr_a = a.as_heap_ptr();
             let ptr_b = b.as_heap_ptr();
 
-            if (*ptr_a).object_type == HeapObjectType::String
-                && (*ptr_b).object_type == HeapObjectType::String
-            {
+            if (*ptr_a).object_type == HeapObjectType::String && (*ptr_b).object_type == HeapObjectType::String {
                 let str_a = ptr_a as *const RuntimeString;
                 let str_b = ptr_b as *const RuntimeString;
 

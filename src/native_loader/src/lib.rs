@@ -16,8 +16,6 @@ pub use simple_common::{DynLoader, DynModule};
 // Re-export runtime symbol provider types
 pub use chained_provider::ChainedProvider;
 pub use dynamic_provider::{DynLoadError, DynamicSymbolProvider};
-pub use provider::{
-    create_runtime_provider, default_runtime_provider, static_provider, RuntimeLoadMode,
-};
+pub use provider::{create_runtime_provider, default_runtime_provider, static_provider, RuntimeLoadMode};
 pub use simple_common::{AbiVersion, RuntimeSymbolProvider, RUNTIME_SYMBOL_NAMES};
 pub use static_provider::StaticSymbolProvider;

@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 // Re-export helpers from native_io_helpers module
 pub(crate) use super::native_io_helpers::{
-    create_dir_entry, create_file_metadata, extract_bool, extract_bytes, extract_int,
-    extract_open_mode, extract_path, io_err, io_err_msg, io_ok, make_timestamp_option,
+    create_dir_entry, create_file_metadata, extract_bool, extract_bytes, extract_int, extract_open_mode, extract_path,
+    io_err, io_err_msg, io_ok, make_timestamp_option,
 };
 
 //==============================================================================
@@ -46,10 +46,7 @@ where
         let mut handles = handles.borrow_mut();
         match handles.get_mut(&id) {
             Some(file) => f(file),
-            None => Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                "invalid file handle",
-            )),
+            None => Err(io::Error::new(ErrorKind::InvalidInput, "invalid file handle")),
         }
     })
 }
@@ -203,10 +200,7 @@ pub fn native_fs_read_dir(args: &[Value]) -> Result<Value, CompileError> {
 
     match std::fs::read_dir(&path) {
         Ok(entries) => {
-            let dir_entries: Vec<Value> = entries
-                .flatten()
-                .map(|entry| create_dir_entry(&entry))
-                .collect();
+            let dir_entries: Vec<Value> = entries.flatten().map(|entry| create_dir_entry(&entry)).collect();
 
             // Return DirEntries struct
             let mut result_fields = HashMap::new();
@@ -311,9 +305,7 @@ pub fn native_file_seek(args: &[Value]) -> Result<Value, CompileError> {
 
     // Extract SeekFrom enum
     let seek_from = match args.get(1) {
-        Some(Value::Enum {
-            variant, payload, ..
-        }) => {
+        Some(Value::Enum { variant, payload, .. }) => {
             let pos = payload.as_ref().and_then(|p| p.as_int().ok()).unwrap_or(0);
             match variant.as_str() {
                 "Start" => SeekFrom::Start(pos as u64),
@@ -346,10 +338,7 @@ pub fn native_file_close(args: &[Value]) -> Result<Value, CompileError> {
     if release_handle(handle) {
         Ok(io_ok(Value::Nil))
     } else {
-        Ok(io_err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "invalid file handle",
-        )))
+        Ok(io_err(io::Error::new(ErrorKind::InvalidInput, "invalid file handle")))
     }
 }
 
@@ -504,10 +493,7 @@ pub fn native_term_write(args: &[Value]) -> Result<Value, CompileError> {
         s.as_bytes().to_vec()
     } else {
         // For ptr/len style calls, we just write to stdout/stderr directly
-        let s = args
-            .get(1)
-            .map(|v| v.to_display_string())
-            .unwrap_or_default();
+        let s = args.get(1).map(|v| v.to_display_string()).unwrap_or_default();
         s.into_bytes()
     };
 

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use simple_common::gc::GcAllocator;
 use simple_common::target::Target;
 use simple_loader::smf::{
-    hash_name, Arch, SectionType, SmfHeader, SmfSection, SmfSymbol, SymbolBinding, SymbolType,
-    SECTION_FLAG_EXEC, SECTION_FLAG_READ, SMF_FLAG_EXECUTABLE, SMF_MAGIC,
+    hash_name, Arch, SectionType, SmfHeader, SmfSection, SmfSymbol, SymbolBinding, SymbolType, SECTION_FLAG_EXEC,
+    SECTION_FLAG_READ, SMF_FLAG_EXECUTABLE, SMF_MAGIC,
 };
 
 use crate::elf_utils::extract_code_from_object;
@@ -45,11 +45,7 @@ fn build_smf_with_code(code_bytes: &[u8], gc: Option<&Arc<dyn GcAllocator>>) -> 
 }
 
 /// Build an SMF module with the given code bytes for a specific target architecture.
-fn build_smf_with_code_for_target(
-    code_bytes: &[u8],
-    gc: Option<&Arc<dyn GcAllocator>>,
-    target: Target,
-) -> Vec<u8> {
+fn build_smf_with_code_for_target(code_bytes: &[u8], gc: Option<&Arc<dyn GcAllocator>>, target: Target) -> Vec<u8> {
     let section_table_offset = SmfHeader::SIZE as u64;
     let section_table_size = std::mem::size_of::<SmfSection>() as u64;
     let code_offset = section_table_offset + section_table_size;
@@ -121,11 +117,7 @@ fn build_smf_with_code_for_target(
 /// Generate SMF bytes for a given return value and target architecture.
 ///
 /// This generates architecture-specific code that returns the given value.
-pub fn generate_smf_bytes_for_target(
-    return_value: i32,
-    gc: Option<&Arc<dyn GcAllocator>>,
-    target: Target,
-) -> Vec<u8> {
+pub fn generate_smf_bytes_for_target(return_value: i32, gc: Option<&Arc<dyn GcAllocator>>, target: Target) -> Vec<u8> {
     use simple_common::target::TargetArch;
 
     let code_bytes = match target.arch {
@@ -234,8 +226,6 @@ pub fn generate_smf_from_object(object_code: &[u8], gc: Option<&Arc<dyn GcAlloca
 
 /// Helper to write a struct to a byte buffer.
 fn push_struct<T: Copy>(buf: &mut Vec<u8>, value: &T) {
-    let bytes = unsafe {
-        std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>())
-    };
+    let bytes = unsafe { std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>()) };
     buf.extend_from_slice(bytes);
 }

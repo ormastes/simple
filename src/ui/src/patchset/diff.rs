@@ -135,11 +135,7 @@ pub fn diff_text(node_id: NodeId, old: &str, new: &str) -> Option<PatchOp> {
 }
 
 /// Diff two attribute maps
-pub fn diff_attrs(
-    node_id: NodeId,
-    old: &[(String, String)],
-    new: &[(String, String)],
-) -> Vec<PatchOp> {
+pub fn diff_attrs(node_id: NodeId, old: &[(String, String)], new: &[(String, String)]) -> Vec<PatchOp> {
     let mut patches = Vec::new();
 
     let old_map: HashMap<&str, &str> = old.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
@@ -206,10 +202,7 @@ mod tests {
         let new = vec![make_child(1, Some("a")), make_child(2, Some("b"))];
         let patches = diff_children(NodeId(0), &old, &new);
         assert_eq!(patches.len(), 1);
-        assert!(matches!(
-            &patches.ops[0],
-            PatchOp::InsertChild { index: 1, .. }
-        ));
+        assert!(matches!(&patches.ops[0], PatchOp::InsertChild { index: 1, .. }));
     }
 
     #[test]

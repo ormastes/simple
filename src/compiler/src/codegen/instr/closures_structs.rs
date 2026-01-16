@@ -31,9 +31,7 @@ pub(super) fn compile_closure_create<M: Module>(
     if let Some(&func_id) = ctx.func_ids.get(func_name) {
         let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
         let fn_addr = builder.ins().func_addr(types::I64, func_ref);
-        builder
-            .ins()
-            .store(MemFlags::new(), fn_addr, closure_ptr, 0);
+        builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
     } else {
         let null = builder.ins().iconst(types::I64, 0);
         builder.ins().store(MemFlags::new(), null, closure_ptr, 0);
@@ -59,20 +57,16 @@ pub(super) fn compile_indirect_call<M: Module>(
     args: &[VReg],
 ) {
     let closure_ptr = ctx.vreg_values[&callee];
-    let fn_ptr = builder
-        .ins()
-        .load(types::I64, MemFlags::new(), closure_ptr, 0);
+    let fn_ptr = builder.ins().load(types::I64, MemFlags::new(), closure_ptr, 0);
 
     let call_conv = CallConv::SystemV;
     let mut sig = Signature::new(call_conv);
     sig.params.push(AbiParam::new(types::I64));
     for param_ty in param_types {
-        sig.params
-            .push(AbiParam::new(type_id_to_cranelift(*param_ty)));
+        sig.params.push(AbiParam::new(type_id_to_cranelift(*param_ty)));
     }
     if return_type != TypeId::VOID {
-        sig.returns
-            .push(AbiParam::new(type_id_to_cranelift(return_type)));
+        sig.returns.push(AbiParam::new(type_id_to_cranelift(return_type)));
     }
 
     let sig_ref = builder.import_signature(sig);
@@ -104,9 +98,7 @@ pub(super) fn compile_struct_init<M: Module>(
     for (i, (offset, field_type)) in field_offsets.iter().zip(field_types.iter()).enumerate() {
         let field_val = ctx.vreg_values[&field_values[i]];
         let _cranelift_ty = type_id_to_cranelift(*field_type);
-        builder
-            .ins()
-            .store(MemFlags::new(), field_val, ptr, *offset as i32);
+        builder.ins().store(MemFlags::new(), field_val, ptr, *offset as i32);
     }
 
     ctx.vreg_values.insert(dest, ptr);
@@ -164,20 +156,16 @@ pub(super) fn compile_method_call_virtual<M: Module>(
     let recv_ptr = ctx.vreg_values[&receiver];
     let vtable_ptr = builder.ins().load(types::I64, MemFlags::new(), recv_ptr, 0);
     let slot_offset = (vtable_slot as i32) * 8;
-    let method_ptr = builder
-        .ins()
-        .load(types::I64, MemFlags::new(), vtable_ptr, slot_offset);
+    let method_ptr = builder.ins().load(types::I64, MemFlags::new(), vtable_ptr, slot_offset);
 
     let call_conv = CallConv::SystemV;
     let mut sig = Signature::new(call_conv);
     sig.params.push(AbiParam::new(types::I64));
     for param_ty in param_types {
-        sig.params
-            .push(AbiParam::new(type_id_to_cranelift(*param_ty)));
+        sig.params.push(AbiParam::new(type_id_to_cranelift(*param_ty)));
     }
     if return_type != TypeId::VOID {
-        sig.returns
-            .push(AbiParam::new(type_id_to_cranelift(return_type)));
+        sig.returns.push(AbiParam::new(type_id_to_cranelift(return_type)));
     }
 
     let sig_ref = builder.import_signature(sig);

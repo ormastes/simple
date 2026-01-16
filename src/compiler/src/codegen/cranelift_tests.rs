@@ -35,8 +35,9 @@ fn test_compile_comparison() {
 #[test]
 fn test_compile_if_else() {
     let obj = compile_to_object(
-        "fn max(a: i64, b: i64) -> i64:\n    if a > b:\n        return a\n    else:\n        return b\n"
-    ).unwrap();
+        "fn max(a: i64, b: i64) -> i64:\n    if a > b:\n        return a\n    else:\n        return b\n",
+    )
+    .unwrap();
     assert!(!obj.is_empty());
 }
 

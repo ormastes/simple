@@ -9,8 +9,8 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use super::super::interpreter_eval::PRELUDE_EXTERN_FUNCTIONS;
 use super::super::{
-    evaluate_expr, exec_block, exec_function, Control, Enums, ImplMethods, ACTOR_INBOX,
-    ACTOR_OUTBOX, ACTOR_SPAWNER, EXTERN_FUNCTIONS,
+    evaluate_expr, exec_block, exec_function, Control, Enums, ImplMethods, ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER,
+    EXTERN_FUNCTIONS,
 };
 
 pub(crate) fn create_range_object(start: i64, end: i64, bound: RangeBound) -> Value {
@@ -68,9 +68,7 @@ pub(crate) fn spawn_actor_with_expr(
                 Ok(value) => {
                     // If it's a function or lambda, call it with no arguments
                     match value {
-                        Value::Function {
-                            def, captured_env, ..
-                        } => {
+                        Value::Function { def, captured_env, .. } => {
                             let mut local_env = captured_env.clone();
                             let _ = exec_block(
                                 &def.body,
@@ -82,9 +80,7 @@ pub(crate) fn spawn_actor_with_expr(
                             );
                         }
                         Value::Lambda {
-                            body,
-                            env: lambda_env,
-                            ..
+                            body, env: lambda_env, ..
                         } => {
                             let _ = evaluate_expr(
                                 &body,

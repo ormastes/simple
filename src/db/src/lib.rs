@@ -50,8 +50,8 @@ pub use error::{DbError, DbResult};
 pub use pool::{Pool, PoolConfig, PoolStats};
 pub use row::{Row, Rows};
 pub use schema::{
-    ColumnInfo, ColumnType, ForeignKeyInfo, IndexInfo, PostgresIntrospector, SchemaIntrospector,
-    SqliteIntrospector, TableInfo,
+    ColumnInfo, ColumnType, ForeignKeyInfo, IndexInfo, PostgresIntrospector, SchemaIntrospector, SqliteIntrospector,
+    TableInfo,
 };
 #[cfg(feature = "sdn-table")]
 pub use sdn_table::{export_table_sdn, import_table_sdn};

@@ -190,9 +190,7 @@ impl RecordingSession {
 
     /// Get elapsed time in microseconds
     fn elapsed_us(&self) -> u64 {
-        self.start_time
-            .map(|t| t.elapsed().as_micros() as u64)
-            .unwrap_or(0)
+        self.start_time.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0)
     }
 
     /// Get the first frame threshold for phase inference
@@ -207,14 +205,7 @@ impl RecordingSession {
 
         self.functions
             .values()
-            .map(|r| {
-                RecordedFunction::new(
-                    &r.name,
-                    r.inferred_phase(threshold),
-                    r.estimated_size,
-                    r.call_count,
-                )
-            })
+            .map(|r| RecordedFunction::new(&r.name, r.inferred_phase(threshold), r.estimated_size, r.call_count))
             .collect()
     }
 

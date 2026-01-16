@@ -77,10 +77,7 @@ impl<'a> Parser<'a> {
         self.parse_impl_with_attrs(Vec::new())
     }
 
-    pub(crate) fn parse_impl_with_attrs(
-        &mut self,
-        attributes: Vec<Attribute>,
-    ) -> Result<Node, ParseError> {
+    pub(crate) fn parse_impl_with_attrs(&mut self, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Impl)?;
 
@@ -418,18 +415,17 @@ impl<'a> Parser<'a> {
         let where_clause = self.parse_where_clause()?;
 
         // Check if this is an abstract method (newline) or has default body (colon)
-        let (body, is_abstract) =
-            if self.check(&TokenKind::Newline) || self.check(&TokenKind::Dedent) {
-                // Abstract method - no body
-                if self.check(&TokenKind::Newline) {
-                    self.advance();
-                }
-                (Block::default(), true)
-            } else {
-                // Default implementation - has body
-                self.expect(&TokenKind::Colon)?;
-                (self.parse_block()?, false)
-            };
+        let (body, is_abstract) = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Dedent) {
+            // Abstract method - no body
+            if self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            (Block::default(), true)
+        } else {
+            // Default implementation - has body
+            self.expect(&TokenKind::Colon)?;
+            (self.parse_block()?, false)
+        };
 
         Ok(FunctionDef {
             span: self.make_span(start_span),

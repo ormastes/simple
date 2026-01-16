@@ -242,11 +242,7 @@ impl<'a> ContractTranslator<'a> {
                 hypotheses,
                 conclusion,
                 proof: None,
-                doc: Some(format!(
-                    "Postcondition {} for function {}",
-                    i + 1,
-                    func.name
-                )),
+                doc: Some(format!("Postcondition {} for function {}", i + 1, func.name)),
             };
             theorems.push(theorem);
         }
@@ -428,17 +424,11 @@ mod tests {
             hypotheses: vec![
                 (
                     "hx".to_string(),
-                    LeanProp::Gt(
-                        LeanExpr::Var("x".to_string()),
-                        LeanExpr::Lit(LeanLit::Int(0)),
-                    ),
+                    LeanProp::Gt(LeanExpr::Var("x".to_string()), LeanExpr::Lit(LeanLit::Int(0))),
                 ),
                 (
                     "hy".to_string(),
-                    LeanProp::Gt(
-                        LeanExpr::Var("y".to_string()),
-                        LeanExpr::Lit(LeanLit::Int(0)),
-                    ),
+                    LeanProp::Gt(LeanExpr::Var("y".to_string()), LeanExpr::Lit(LeanLit::Int(0))),
                 ),
             ],
             conclusion: LeanProp::Gt(

@@ -338,10 +338,7 @@ impl Selector {
                     | Selector::Init(_) // Runtime weaving via DI proxies
             ),
             PredicateContext::DependencyInjection => {
-                matches!(
-                    self,
-                    Selector::Type(_) | Selector::Within(_) | Selector::Attr(_)
-                )
+                matches!(self, Selector::Type(_) | Selector::Within(_) | Selector::Attr(_))
             }
             PredicateContext::Mock => {
                 matches!(
@@ -474,11 +471,7 @@ impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ValidationError::InvalidSelectorForContext { selector, context } => {
-                write!(
-                    f,
-                    "Selector {} is not valid in {:?} context",
-                    selector, context
-                )
+                write!(f, "Selector {} is not valid in {:?} context", selector, context)
             }
         }
     }
@@ -605,9 +598,7 @@ mod tests {
         assert!(exec.validate(PredicateContext::Weaving).is_ok());
 
         // Invalid in DI context
-        assert!(exec
-            .validate(PredicateContext::DependencyInjection)
-            .is_err());
+        assert!(exec.validate(PredicateContext::DependencyInjection).is_err());
     }
 
     #[test]

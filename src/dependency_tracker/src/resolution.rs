@@ -103,10 +103,7 @@ pub enum ResolutionResult {
     /// Successfully resolved to a unique path.
     Unique { kind: FileKind, path: PathBuf },
     /// Ambiguous: both file and directory forms exist.
-    Ambiguous {
-        file_path: PathBuf,
-        dir_path: PathBuf,
-    },
+    Ambiguous { file_path: PathBuf, dir_path: PathBuf },
     /// Module not found.
     NotFound,
 }
@@ -210,10 +207,7 @@ pub fn resolve(fs: &FileSystem, root: &Path, mp: &ModPath) -> ResolutionResult {
     let dir_exists = fs.exists(&dir_path);
 
     match (file_exists, dir_exists) {
-        (true, true) => ResolutionResult::Ambiguous {
-            file_path,
-            dir_path,
-        },
+        (true, true) => ResolutionResult::Ambiguous { file_path, dir_path },
         (true, false) => ResolutionResult::Unique {
             kind: FileKind::File,
             path: file_path,
@@ -270,10 +264,7 @@ pub fn resolve_on_disk(root: &Path, mp: &ModPath) -> std::io::Result<ResolutionR
     let dir_exists = dir_path.exists();
 
     Ok(match (file_exists, dir_exists) {
-        (true, true) => ResolutionResult::Ambiguous {
-            file_path,
-            dir_path,
-        },
+        (true, true) => ResolutionResult::Ambiguous { file_path, dir_path },
         (true, false) => ResolutionResult::Unique {
             kind: FileKind::File,
             path: file_path,
@@ -374,10 +365,7 @@ mod tests {
         fs.add_file("/project/src/foo.spl");
         fs.add_file("/project/src/foo/__init__.spl");
         assert!(!well_formed(&fs, root));
-        assert!(matches!(
-            resolve(&fs, root, &mp),
-            ResolutionResult::Ambiguous { .. }
-        ));
+        assert!(matches!(resolve(&fs, root, &mp), ResolutionResult::Ambiguous { .. }));
     }
 
     // Theorem: unique_path_form
@@ -426,10 +414,7 @@ mod tests {
 
         let fs = FileSystem::new();
 
-        assert!(matches!(
-            resolve(&fs, root, &mp),
-            ResolutionResult::NotFound
-        ));
+        assert!(matches!(resolve(&fs, root, &mp), ResolutionResult::NotFound));
         assert!(!fs.exists(&to_file_path(root, &mp)));
         assert!(!fs.exists(&to_dir_path(root, &mp)));
     }

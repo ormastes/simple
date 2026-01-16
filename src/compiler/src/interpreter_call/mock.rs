@@ -94,62 +94,32 @@ pub(super) fn eval_mock_builtin(
                 Value::Symbol(s) => s.clone(),
                 _ => "Spy".to_string(),
             };
-            Ok(Some(Value::Mock(crate::value::MockValue::new_spy(
-                type_str,
-            ))))
+            Ok(Some(Value::Mock(crate::value::MockValue::new_spy(type_str))))
         }
         "any" => Ok(Some(Value::Matcher(crate::value::MatcherValue::Any))),
         "eq" | "be" => {
-            let val = eval_arg(
-                args,
-                0,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
-            Ok(Some(Value::Matcher(crate::value::MatcherValue::Exact(
-                Box::new(val),
-            ))))
+            let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::Exact(Box::new(val)))))
         }
         "be_gt" => {
             let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            Ok(Some(Value::Matcher(
-                crate::value::MatcherValue::GreaterThan(n),
-            )))
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::GreaterThan(n))))
         }
         "be_lt" => {
             let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            Ok(Some(Value::Matcher(crate::value::MatcherValue::LessThan(
-                n,
-            ))))
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::LessThan(n))))
         }
-        "be_nil" => Ok(Some(Value::Matcher(crate::value::MatcherValue::Exact(
-            Box::new(Value::Nil),
-        )))),
-        "be_empty" => Ok(Some(Value::Matcher(crate::value::MatcherValue::Custom(
-            Box::new(Value::Nil),
-        )))),
+        "be_nil" => Ok(Some(Value::Matcher(crate::value::MatcherValue::Exact(Box::new(
+            Value::Nil,
+        ))))),
+        "be_empty" => Ok(Some(Value::Matcher(crate::value::MatcherValue::Custom(Box::new(
+            Value::Nil,
+        ))))),
         "include" => {
-            let val = eval_arg(
-                args,
-                0,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             match &val {
-                Value::Str(s) => Ok(Some(Value::Matcher(crate::value::MatcherValue::Contains(
-                    s.clone(),
-                )))),
-                _ => Ok(Some(Value::Matcher(crate::value::MatcherValue::Exact(
-                    Box::new(val),
-                )))),
+                Value::Str(s) => Ok(Some(Value::Matcher(crate::value::MatcherValue::Contains(s.clone())))),
+                _ => Ok(Some(Value::Matcher(crate::value::MatcherValue::Exact(Box::new(val))))),
             }
         }
         "start_with" => {
@@ -167,9 +137,7 @@ pub(super) fn eval_mock_builtin(
                 Value::Str(s) => s.clone(),
                 _ => "".to_string(),
             };
-            Ok(Some(Value::Matcher(
-                crate::value::MatcherValue::StartsWith(s_str),
-            )))
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::StartsWith(s_str))))
         }
         "end_with" => {
             let s = eval_arg(
@@ -186,33 +154,23 @@ pub(super) fn eval_mock_builtin(
                 Value::Str(s) => s.clone(),
                 _ => "".to_string(),
             };
-            Ok(Some(Value::Matcher(crate::value::MatcherValue::EndsWith(
-                s_str,
-            ))))
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::EndsWith(s_str))))
         }
         "gt" => {
             let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            Ok(Some(Value::Matcher(
-                crate::value::MatcherValue::GreaterThan(n),
-            )))
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::GreaterThan(n))))
         }
         "lt" => {
             let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            Ok(Some(Value::Matcher(crate::value::MatcherValue::LessThan(
-                n,
-            ))))
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::LessThan(n))))
         }
         "gte" => {
             let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            Ok(Some(Value::Matcher(
-                crate::value::MatcherValue::GreaterOrEqual(n),
-            )))
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::GreaterOrEqual(n))))
         }
         "lte" => {
             let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            Ok(Some(Value::Matcher(
-                crate::value::MatcherValue::LessOrEqual(n),
-            )))
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::LessOrEqual(n))))
         }
         "contains" => {
             let s = eval_arg(
@@ -229,9 +187,7 @@ pub(super) fn eval_mock_builtin(
                 Value::Str(s) => s.clone(),
                 _ => "".to_string(),
             };
-            Ok(Some(Value::Matcher(crate::value::MatcherValue::Contains(
-                s_str,
-            ))))
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::Contains(s_str))))
         }
         "starts_with" => {
             let s = eval_arg(
@@ -248,9 +204,7 @@ pub(super) fn eval_mock_builtin(
                 Value::Str(s) => s.clone(),
                 _ => "".to_string(),
             };
-            Ok(Some(Value::Matcher(
-                crate::value::MatcherValue::StartsWith(s_str),
-            )))
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::StartsWith(s_str))))
         }
         "ends_with" => {
             let s = eval_arg(
@@ -267,9 +221,7 @@ pub(super) fn eval_mock_builtin(
                 Value::Str(s) => s.clone(),
                 _ => "".to_string(),
             };
-            Ok(Some(Value::Matcher(crate::value::MatcherValue::EndsWith(
-                s_str,
-            ))))
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::EndsWith(s_str))))
         }
         "of_type" => {
             let type_name = eval_arg(
@@ -286,9 +238,7 @@ pub(super) fn eval_mock_builtin(
                 Value::Str(s) => s.clone(),
                 _ => "".to_string(),
             };
-            Ok(Some(Value::Matcher(crate::value::MatcherValue::OfType(
-                type_str,
-            ))))
+            Ok(Some(Value::Matcher(crate::value::MatcherValue::OfType(type_str))))
         }
         _ => Ok(None),
     }

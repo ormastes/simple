@@ -10,9 +10,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-fn spawn_repl(
-    use_tui: bool,
-) -> Result<(Box<dyn Read + Send>, Box<dyn Write + Send>), Box<dyn std::error::Error>> {
+fn spawn_repl(use_tui: bool) -> Result<(Box<dyn Read + Send>, Box<dyn Write + Send>), Box<dyn std::error::Error>> {
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_simple"));
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
@@ -113,9 +111,7 @@ fn test_comparison_rustyline_vs_tui() {
                     let output = String::from_utf8_lossy(&buf[..n]);
 
                     // Check for debug output showing 4 spaces deleted
-                    if output.contains("Deleting 4 spaces")
-                        && output.contains("cursor=0, buffer=''")
-                    {
+                    if output.contains("Deleting 4 spaces") && output.contains("cursor=0, buffer=''") {
                         println!("Result: ✅ WORKING - Deleted all 4 spaces!");
                         println!(
                             "Debug: {}",

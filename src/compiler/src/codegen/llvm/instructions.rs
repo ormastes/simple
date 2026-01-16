@@ -23,10 +23,7 @@ impl LlvmBackend {
 
         // Both operands must be the same type
         match (left, right) {
-            (
-                inkwell::values::BasicValueEnum::IntValue(l),
-                inkwell::values::BasicValueEnum::IntValue(r),
-            ) => {
+            (inkwell::values::BasicValueEnum::IntValue(l), inkwell::values::BasicValueEnum::IntValue(r)) => {
                 let result = match op {
                     BinOp::Add => builder
                         .build_int_add(l, r, "add")
@@ -37,9 +34,9 @@ impl LlvmBackend {
                     BinOp::Mul => builder
                         .build_int_mul(l, r, "mul")
                         .map_err(|e| CompileError::Semantic(format!("build_int_mul: {}", e)))?,
-                    BinOp::Div => builder.build_int_signed_div(l, r, "div").map_err(|e| {
-                        CompileError::Semantic(format!("build_int_signed_div: {}", e))
-                    })?,
+                    BinOp::Div => builder
+                        .build_int_signed_div(l, r, "div")
+                        .map_err(|e| CompileError::Semantic(format!("build_int_signed_div: {}", e)))?,
                     BinOp::Eq => builder
                         .build_int_compare(IntPredicate::EQ, l, r, "eq")
                         .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
@@ -58,28 +55,20 @@ impl LlvmBackend {
                     BinOp::GtEq => builder
                         .build_int_compare(IntPredicate::SGE, l, r, "ge")
                         .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
-                    BinOp::Mod => builder.build_int_signed_rem(l, r, "mod").map_err(|e| {
-                        CompileError::Semantic(format!("build_int_signed_rem: {}", e))
-                    })?,
+                    BinOp::Mod => builder
+                        .build_int_signed_rem(l, r, "mod")
+                        .map_err(|e| CompileError::Semantic(format!("build_int_signed_rem: {}", e)))?,
                     BinOp::And => builder
                         .build_and(l, r, "and")
                         .map_err(|e| CompileError::Semantic(format!("build_and: {}", e)))?,
                     BinOp::Or => builder
                         .build_or(l, r, "or")
                         .map_err(|e| CompileError::Semantic(format!("build_or: {}", e)))?,
-                    _ => {
-                        return Err(CompileError::Semantic(format!(
-                            "Unsupported integer binop: {:?}",
-                            op
-                        )))
-                    }
+                    _ => return Err(CompileError::Semantic(format!("Unsupported integer binop: {:?}", op))),
                 };
                 Ok(result.into())
             }
-            (
-                inkwell::values::BasicValueEnum::FloatValue(l),
-                inkwell::values::BasicValueEnum::FloatValue(r),
-            ) => {
+            (inkwell::values::BasicValueEnum::FloatValue(l), inkwell::values::BasicValueEnum::FloatValue(r)) => {
                 let result = match op {
                     BinOp::Add => builder
                         .build_float_add(l, r, "fadd")
@@ -93,18 +82,11 @@ impl LlvmBackend {
                     BinOp::Div => builder
                         .build_float_div(l, r, "fdiv")
                         .map_err(|e| CompileError::Semantic(format!("build_float_div: {}", e)))?,
-                    _ => {
-                        return Err(CompileError::Semantic(format!(
-                            "Unsupported float binop: {:?}",
-                            op
-                        )))
-                    }
+                    _ => return Err(CompileError::Semantic(format!("Unsupported float binop: {:?}", op))),
                 };
                 Ok(result.into())
             }
-            _ => Err(CompileError::Semantic(
-                "Type mismatch in binary operation".to_string(),
-            )),
+            _ => Err(CompileError::Semantic("Type mismatch in binary operation".to_string())),
         }
     }
 
@@ -141,12 +123,7 @@ impl LlvmBackend {
                     UnaryOp::Neg => builder
                         .build_float_neg(val, "fneg")
                         .map_err(|e| CompileError::Semantic(format!("build_float_neg: {}", e)))?,
-                    _ => {
-                        return Err(CompileError::Semantic(format!(
-                            "Unsupported float unary op: {:?}",
-                            op
-                        )))
-                    }
+                    _ => return Err(CompileError::Semantic(format!("Unsupported float unary op: {:?}", op))),
                 };
                 Ok(result.into())
             }
@@ -161,14 +138,8 @@ impl LlvmBackend {
     pub(super) fn compile_terminator(
         &self,
         term: &crate::mir::Terminator,
-        llvm_blocks: &std::collections::HashMap<
-            crate::mir::BlockId,
-            inkwell::basic_block::BasicBlock,
-        >,
-        vreg_map: &std::collections::HashMap<
-            crate::mir::VReg,
-            inkwell::values::BasicValueEnum<'static>,
-        >,
+        llvm_blocks: &std::collections::HashMap<crate::mir::BlockId, inkwell::basic_block::BasicBlock>,
+        vreg_map: &std::collections::HashMap<crate::mir::VReg, inkwell::values::BasicValueEnum<'static>>,
         builder: &Builder<'static>,
     ) -> Result<(), CompileError> {
         use crate::mir::Terminator;
@@ -180,10 +151,7 @@ impl LlvmBackend {
                         .build_return(Some(val))
                         .map_err(|e| CompileError::Semantic(format!("build_return: {}", e)))?;
                 } else {
-                    return Err(CompileError::Semantic(format!(
-                        "Undefined return value: {:?}",
-                        vreg
-                    )));
+                    return Err(CompileError::Semantic(format!("Undefined return value: {:?}", vreg)));
                 }
             }
             Terminator::Return(None) => {
@@ -192,41 +160,35 @@ impl LlvmBackend {
                     .map_err(|e| CompileError::Semantic(format!("build_return: {}", e)))?;
             }
             Terminator::Jump(block_id) => {
-                let target_bb = llvm_blocks.get(block_id).ok_or_else(|| {
-                    CompileError::Semantic(format!("Undefined block: {:?}", block_id))
-                })?;
+                let target_bb = llvm_blocks
+                    .get(block_id)
+                    .ok_or_else(|| CompileError::Semantic(format!("Undefined block: {:?}", block_id)))?;
                 builder
                     .build_unconditional_branch(*target_bb)
-                    .map_err(|e| {
-                        CompileError::Semantic(format!("build_unconditional_branch: {}", e))
-                    })?;
+                    .map_err(|e| CompileError::Semantic(format!("build_unconditional_branch: {}", e)))?;
             }
             Terminator::Branch {
                 cond,
                 then_block,
                 else_block,
             } => {
-                let cond_val = vreg_map.get(cond).ok_or_else(|| {
-                    CompileError::Semantic(format!("Undefined condition: {:?}", cond))
-                })?;
+                let cond_val = vreg_map
+                    .get(cond)
+                    .ok_or_else(|| CompileError::Semantic(format!("Undefined condition: {:?}", cond)))?;
 
                 if let inkwell::values::BasicValueEnum::IntValue(cond_int) = cond_val {
-                    let then_bb = llvm_blocks.get(then_block).ok_or_else(|| {
-                        CompileError::Semantic(format!("Undefined block: {:?}", then_block))
-                    })?;
-                    let else_bb = llvm_blocks.get(else_block).ok_or_else(|| {
-                        CompileError::Semantic(format!("Undefined block: {:?}", else_block))
-                    })?;
+                    let then_bb = llvm_blocks
+                        .get(then_block)
+                        .ok_or_else(|| CompileError::Semantic(format!("Undefined block: {:?}", then_block)))?;
+                    let else_bb = llvm_blocks
+                        .get(else_block)
+                        .ok_or_else(|| CompileError::Semantic(format!("Undefined block: {:?}", else_block)))?;
 
                     builder
                         .build_conditional_branch(*cond_int, *then_bb, *else_bb)
-                        .map_err(|e| {
-                            CompileError::Semantic(format!("build_conditional_branch: {}", e))
-                        })?;
+                        .map_err(|e| CompileError::Semantic(format!("build_conditional_branch: {}", e)))?;
                 } else {
-                    return Err(CompileError::Semantic(
-                        "Branch condition must be boolean".to_string(),
-                    ));
+                    return Err(CompileError::Semantic("Branch condition must be boolean".to_string()));
                 }
             }
             Terminator::Unreachable => {
@@ -274,25 +236,19 @@ impl LlvmBackend {
         let i64_type = self.context.i64_type();
         let current = builder
             .build_load(i64_type, counter_global.as_pointer_value(), "cov_load")
-            .map_err(|e| {
-                CompileError::Semantic(format!("Failed to load coverage counter: {}", e))
-            })?;
+            .map_err(|e| CompileError::Semantic(format!("Failed to load coverage counter: {}", e)))?;
 
         // Increment
         if let inkwell::values::BasicValueEnum::IntValue(current_int) = current {
             let one = i64_type.const_int(1, false);
             let incremented = builder
                 .build_int_add(current_int, one, "cov_inc")
-                .map_err(|e| {
-                    CompileError::Semantic(format!("Failed to increment coverage counter: {}", e))
-                })?;
+                .map_err(|e| CompileError::Semantic(format!("Failed to increment coverage counter: {}", e)))?;
 
             // Store back
             builder
                 .build_store(counter_global.as_pointer_value(), incremented)
-                .map_err(|e| {
-                    CompileError::Semantic(format!("Failed to store coverage counter: {}", e))
-                })?;
+                .map_err(|e| CompileError::Semantic(format!("Failed to store coverage counter: {}", e)))?;
         }
 
         // Track counter for later retrieval

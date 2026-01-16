@@ -51,14 +51,8 @@ where
         let handles = handles.borrow();
         match handles.get(&id) {
             Some(SocketHandle::TcpListener(listener)) => f(listener),
-            Some(_) => Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "not a TCP listener",
-            )),
-            None => Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "invalid socket handle",
-            )),
+            Some(_) => Err(std::io::Error::new(ErrorKind::InvalidInput, "not a TCP listener")),
+            None => Err(std::io::Error::new(ErrorKind::InvalidInput, "invalid socket handle")),
         }
     })
 }
@@ -71,14 +65,8 @@ where
         let handles = handles.borrow();
         match handles.get(&id) {
             Some(SocketHandle::TcpStream(stream)) => f(stream),
-            Some(_) => Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "not a TCP stream",
-            )),
-            None => Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "invalid socket handle",
-            )),
+            Some(_) => Err(std::io::Error::new(ErrorKind::InvalidInput, "not a TCP stream")),
+            None => Err(std::io::Error::new(ErrorKind::InvalidInput, "invalid socket handle")),
         }
     })
 }
@@ -91,14 +79,8 @@ where
         let mut handles = handles.borrow_mut();
         match handles.get_mut(&id) {
             Some(SocketHandle::TcpStream(stream)) => f(stream),
-            Some(_) => Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "not a TCP stream",
-            )),
-            None => Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "invalid socket handle",
-            )),
+            Some(_) => Err(std::io::Error::new(ErrorKind::InvalidInput, "not a TCP stream")),
+            None => Err(std::io::Error::new(ErrorKind::InvalidInput, "invalid socket handle")),
         }
     })
 }
@@ -111,14 +93,8 @@ where
         let handles = handles.borrow();
         match handles.get(&id) {
             Some(SocketHandle::UdpSocket(socket)) => f(socket),
-            Some(_) => Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "not a UDP socket",
-            )),
-            None => Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "invalid socket handle",
-            )),
+            Some(_) => Err(std::io::Error::new(ErrorKind::InvalidInput, "not a UDP socket")),
+            None => Err(std::io::Error::new(ErrorKind::InvalidInput, "invalid socket handle")),
         }
     })
 }
@@ -170,9 +146,7 @@ macro_rules! set_timeout_op {
     ($args:expr, $with_fn:ident, $setter:ident) => {{
         let handle = extract_handle($args, 0)?;
         let timeout = extract_timeout($args, 1);
-        net_result!($with_fn(handle, |socket| socket
-            .$setter(timeout)
-            .map(|_| Value::Nil)))
+        net_result!($with_fn(handle, |socket| socket.$setter(timeout).map(|_| Value::Nil)))
     }};
 }
 
@@ -181,9 +155,7 @@ macro_rules! set_bool_op {
     ($args:expr, $with_fn:ident, $setter:ident, $default:expr) => {{
         let handle = extract_handle($args, 0)?;
         let flag = $args.get(1).map(|v| v.truthy()).unwrap_or($default);
-        net_result!($with_fn(handle, |socket| socket
-            .$setter(flag)
-            .map(|_| Value::Nil)))
+        net_result!($with_fn(handle, |socket| socket.$setter(flag).map(|_| Value::Nil)))
     }};
 }
 
@@ -402,10 +374,7 @@ pub fn native_tcp_bind_interp(args: &[Value]) -> Result<Value, CompileError> {
             // Return tuple (handle, error_code) - 0 means success
             Ok(Value::Tuple(vec![Value::Int(handle), Value::Int(0)]))
         }
-        Err(e) => Ok(Value::Tuple(vec![
-            Value::Int(-1),
-            Value::Int(io_error_to_code(&e)),
-        ])),
+        Err(e) => Ok(Value::Tuple(vec![Value::Int(-1), Value::Int(io_error_to_code(&e))])),
     }
 }
 
@@ -430,10 +399,7 @@ pub fn native_tcp_connect_interp(args: &[Value]) -> Result<Value, CompileError> 
 
     match TcpStream::connect(addr) {
         Ok(stream) => {
-            let local_addr = stream
-                .local_addr()
-                .map(|a| a.to_string())
-                .unwrap_or_default();
+            let local_addr = stream.local_addr().map(|a| a.to_string()).unwrap_or_default();
             let handle = allocate_socket(SocketHandle::TcpStream(stream));
             // Return tuple (handle, local_addr, error_code) - 0 means success
             Ok(Value::Tuple(vec![
@@ -455,10 +421,7 @@ pub fn native_tcp_connect_timeout_interp(args: &[Value]) -> Result<Value, Compil
     let timeout = extract_timeout(args, 1).unwrap_or(Duration::from_secs(30));
 
     net_result!(TcpStream::connect_timeout(&addr, timeout).map(|stream| {
-        let local_addr = stream
-            .local_addr()
-            .map(|a| a.to_string())
-            .unwrap_or_default();
+        let local_addr = stream.local_addr().map(|a| a.to_string()).unwrap_or_default();
         let handle = allocate_socket(SocketHandle::TcpStream(stream));
         Value::Array(vec![Value::Int(handle), Value::Str(local_addr)])
     }))
@@ -470,9 +433,7 @@ pub fn native_tcp_read_interp(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn native_tcp_write_interp(args: &[Value]) -> Result<Value, CompileError> {
     let data = extract_bytes(args, 1)?;
-    with_tcp_stream_mut_op!(args, 0, |stream| stream
-        .write(&data)
-        .map(|n| Value::Int(n as i64)))
+    with_tcp_stream_mut_op!(args, 0, |stream| stream.write(&data).map(|n| Value::Int(n as i64)))
 }
 
 pub fn native_tcp_flush_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -527,10 +488,7 @@ pub fn native_udp_bind_interp(args: &[Value]) -> Result<Value, CompileError> {
             // Return tuple (handle, error_code) - 0 means success
             Ok(Value::Tuple(vec![Value::Int(handle), Value::Int(0)]))
         }
-        Err(e) => Ok(Value::Tuple(vec![
-            Value::Int(-1),
-            Value::Int(io_error_to_code(&e)),
-        ])),
+        Err(e) => Ok(Value::Tuple(vec![Value::Int(-1), Value::Int(io_error_to_code(&e))])),
     }
 }
 
@@ -556,18 +514,13 @@ pub fn native_udp_send_to_interp(args: &[Value]) -> Result<Value, CompileError> 
     match with_udp_socket(handle, |socket| socket.send_to(&data, addr)) {
         // Return tuple (bytes_sent, error_code) - error_code 0 means success
         Ok(n) => Ok(Value::Tuple(vec![Value::Int(n as i64), Value::Int(0)])),
-        Err(e) => Ok(Value::Tuple(vec![
-            Value::Int(0),
-            Value::Int(io_error_to_code(&e)),
-        ])),
+        Err(e) => Ok(Value::Tuple(vec![Value::Int(0), Value::Int(io_error_to_code(&e))])),
     }
 }
 
 pub fn native_udp_send_interp(args: &[Value]) -> Result<Value, CompileError> {
     let data = extract_bytes(args, 1)?;
-    with_udp_socket_op!(args, 0, |socket| socket
-        .send(&data)
-        .map(|n| Value::Int(n as i64)))
+    with_udp_socket_op!(args, 0, |socket| socket.send(&data).map(|n| Value::Int(n as i64)))
 }
 
 pub fn native_udp_set_broadcast_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -626,9 +579,7 @@ pub fn native_udp_set_multicast_loop_interp(args: &[Value]) -> Result<Value, Com
 
 pub fn native_udp_set_multicast_ttl_interp(args: &[Value]) -> Result<Value, CompileError> {
     let ttl = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(1) as u32;
-    with_udp_socket_op!(args, 0, |socket| socket
-        .set_multicast_ttl_v4(ttl)
-        .map(|_| Value::Nil))
+    with_udp_socket_op!(args, 0, |socket| socket.set_multicast_ttl_v4(ttl).map(|_| Value::Nil))
 }
 
 pub fn native_udp_set_read_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -644,9 +595,7 @@ pub fn native_udp_get_broadcast_interp(args: &[Value]) -> Result<Value, CompileE
 }
 
 pub fn native_udp_get_ttl_interp(args: &[Value]) -> Result<Value, CompileError> {
-    with_udp_socket_op!(args, 0, |socket| socket
-        .ttl()
-        .map(|ttl| Value::Int(ttl as i64)))
+    with_udp_socket_op!(args, 0, |socket| socket.ttl().map(|ttl| Value::Int(ttl as i64)))
 }
 
 pub fn native_udp_join_multicast_v4_interp(args: &[Value]) -> Result<Value, CompileError> {

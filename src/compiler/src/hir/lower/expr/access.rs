@@ -92,11 +92,7 @@ impl Lowerer {
     /// Lower SIMD neighbor access (.left_neighbor, .right_neighbor)
     ///
     /// Returns Some(HirExpr) if the receiver is an array/SIMD type, None otherwise.
-    fn lower_neighbor_access(
-        &mut self,
-        recv_hir: &HirExpr,
-        field: &str,
-    ) -> LowerResult<Option<HirExpr>> {
+    fn lower_neighbor_access(&mut self, recv_hir: &HirExpr, field: &str) -> LowerResult<Option<HirExpr>> {
         if let Some(element_ty) = self.module.types.get_array_element(recv_hir.ty) {
             let direction = if field == "left_neighbor" {
                 NeighborDirection::Left
@@ -118,11 +114,7 @@ impl Lowerer {
     /// Lower SIMD swizzle patterns (.xyzw, .rgba, etc.)
     ///
     /// Returns Some(HirExpr) if the receiver is a SIMD type and field is a valid swizzle, None otherwise.
-    fn lower_simd_swizzle(
-        &mut self,
-        recv_hir: &HirExpr,
-        field: &str,
-    ) -> LowerResult<Option<HirExpr>> {
+    fn lower_simd_swizzle(&mut self, recv_hir: &HirExpr, field: &str) -> LowerResult<Option<HirExpr>> {
         if let Some(HirType::Simd { lanes, element }) = self.module.types.get(recv_hir.ty) {
             let lanes = *lanes;
             let element = *element;

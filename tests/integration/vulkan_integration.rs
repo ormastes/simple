@@ -77,10 +77,7 @@ fn test_vulkan_backend_creation() {
         }
         Err(e) => {
             // If creation fails, it should be due to Vulkan unavailability
-            println!(
-                "Vulkan backend creation failed (expected if no drivers): {:?}",
-                e
-            );
+            println!("Vulkan backend creation failed (expected if no drivers): {:?}", e);
         }
     }
 }
@@ -243,14 +240,10 @@ fn test_spirv_validation_with_spirv_val() {
 
     // Write SPIR-V to stdin
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(&spirv)
-            .expect("Failed to write to spirv-val");
+        stdin.write_all(&spirv).expect("Failed to write to spirv-val");
     }
 
-    let output = child
-        .wait_with_output()
-        .expect("Failed to wait for spirv-val");
+    let output = child.wait_with_output().expect("Failed to wait for spirv-val");
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

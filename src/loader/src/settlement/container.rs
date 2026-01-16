@@ -8,9 +8,7 @@ use std::sync::Arc;
 
 use crate::memory::{ExecutableMemory, MemoryAllocator, Protection};
 use crate::module::LoadedModule;
-use crate::smf::settlement::{
-    SettlementHeader, SSMF_FLAG_EXECUTABLE, SSMF_FLAG_HAS_NATIVES, SSMF_FLAG_RELOADABLE,
-};
+use crate::smf::settlement::{SettlementHeader, SSMF_FLAG_EXECUTABLE, SSMF_FLAG_HAS_NATIVES, SSMF_FLAG_RELOADABLE};
 
 use super::linker::SettlementLinker;
 use super::native::{NativeHandle, NativeLibManager, NativeLibSpec};

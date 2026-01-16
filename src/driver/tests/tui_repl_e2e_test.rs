@@ -357,10 +357,7 @@ fn test_tui_two_if_statements_backspace() -> Result<(), Box<dyn std::error::Erro
     session.send_backspace()?;
     thread::sleep(Duration::from_millis(200));
     let output6 = session.read_output(200)?;
-    log_event(
-        "STEP 7: Press Backspace #2 (4→3 spaces, PREVENT EMPTY)",
-        &output6,
-    )?;
+    log_event("STEP 7: Press Backspace #2 (4→3 spaces, PREVENT EMPTY)", &output6)?;
     println!("Output after second backspace:\n{}", output6);
 
     // Check for empty buffer prevention
@@ -398,7 +395,9 @@ fn test_tui_two_if_statements_backspace() -> Result<(), Box<dyn std::error::Erro
     println!("\nTo view the log:");
     println!("  cat two_if_backspace_detailed.log");
     println!("\nTo see just the key events:");
-    println!("  grep -E 'BUFFER:|CURSOR_COLUMN:|BACKSPACE_EVENT|EMPTY_BUFFER_PREVENTION' two_if_backspace_detailed.log");
+    println!(
+        "  grep -E 'BUFFER:|CURSOR_COLUMN:|BACKSPACE_EVENT|EMPTY_BUFFER_PREVENTION' two_if_backspace_detailed.log"
+    );
 
     Ok(())
 }
@@ -495,8 +494,7 @@ fn test_tui_visibility_fixes() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 #[cfg(feature = "tui")]
-fn test_tui_repl_two_if_statements_backspace_normal_baseline(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn test_tui_repl_two_if_statements_backspace_normal_baseline() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Testing TUI REPL: Two If Statements + Backspace (Normal Mode Baseline) ===\n");
 
     let mut session = PtySession::new()?;

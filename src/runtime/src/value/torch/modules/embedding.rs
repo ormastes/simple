@@ -19,11 +19,7 @@ use tch::Kind as TchKind;
 /// embedding_dim: size of each embedding vector
 /// padding_idx: if specified, entries at this index do not contribute to gradient (-1 for none)
 #[no_mangle]
-pub extern "C" fn rt_torch_embedding_new(
-    num_embeddings: i64,
-    embedding_dim: i64,
-    padding_idx: i64,
-) -> u64 {
+pub extern "C" fn rt_torch_embedding_new(num_embeddings: i64, embedding_dim: i64, padding_idx: i64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         if num_embeddings <= 0 || embedding_dim <= 0 {
@@ -47,11 +43,7 @@ pub extern "C" fn rt_torch_embedding_new(
             // PyTorch does: weight[padding_idx].fill_(0)
         }
 
-        let padding = if padding_idx >= 0 {
-            Some(padding_idx)
-        } else {
-            None
-        };
+        let padding = if padding_idx >= 0 { Some(padding_idx) } else { None };
 
         let module = ModuleState::Embedding {
             num_embeddings,
@@ -61,9 +53,7 @@ pub extern "C" fn rt_torch_embedding_new(
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY
-            .lock()
-            .insert(handle, std::sync::Arc::new(module));
+        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(module));
 
         tracing::debug!(
             "rt_torch_embedding_new: handle={} vocab={} dim={} pad={:?}",
@@ -96,9 +86,7 @@ pub extern "C" fn rt_torch_embedding_forward(module_handle: u64, input_handle: u
         drop(module_registry);
 
         let ModuleState::Embedding {
-            weight,
-            embedding_dim,
-            ..
+            weight, embedding_dim, ..
         } = module.as_ref()
         else {
             return 0;
@@ -176,11 +164,7 @@ pub extern "C" fn rt_torch_embedding_get_weight(module_handle: u64) -> u64 {
 /// freeze: whether to freeze the embeddings (1) or allow training (0)
 /// padding_idx: optional padding index (-1 for none)
 #[no_mangle]
-pub extern "C" fn rt_torch_embedding_from_pretrained(
-    weight_handle: u64,
-    freeze: i32,
-    padding_idx: i64,
-) -> u64 {
+pub extern "C" fn rt_torch_embedding_from_pretrained(weight_handle: u64, freeze: i32, padding_idx: i64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let tensor_registry = TENSOR_REGISTRY.lock();
@@ -207,11 +191,7 @@ pub extern "C" fn rt_torch_embedding_from_pretrained(
             rt_torch_set_requires_grad(weight_handle, 1)
         };
 
-        let padding = if padding_idx >= 0 {
-            Some(padding_idx)
-        } else {
-            None
-        };
+        let padding = if padding_idx >= 0 { Some(padding_idx) } else { None };
 
         let module = ModuleState::Embedding {
             num_embeddings,
@@ -221,9 +201,7 @@ pub extern "C" fn rt_torch_embedding_from_pretrained(
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY
-            .lock()
-            .insert(handle, std::sync::Arc::new(module));
+        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(module));
 
         tracing::debug!(
             "rt_torch_embedding_from_pretrained: handle={} freeze={} pad={:?}",

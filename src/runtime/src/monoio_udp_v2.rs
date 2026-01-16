@@ -77,17 +77,12 @@ pub extern "C" fn monoio_udp_send_to(
             bytes
         }
         None => {
-            tracing::error!(
-                "monoio_udp_send_to: Invalid buffer (not a RuntimeArray or RuntimeString)"
-            );
+            tracing::error!("monoio_udp_send_to: Invalid buffer (not a RuntimeArray or RuntimeString)");
             return RuntimeValue::from_int(-1);
         }
     };
 
-    tracing::debug!(
-        "monoio_udp_send_to: Extracted {} bytes from buffer",
-        data.len()
-    );
+    tracing::debug!("monoio_udp_send_to: Extracted {} bytes from buffer", data.len());
 
     // Send request to runtime thread
     let response = send_request(IoRequest::UdpSendTo {
@@ -168,10 +163,7 @@ pub extern "C" fn monoio_udp_recv_from(
 
 /// Connect UDP socket to a peer (for send/recv without address)
 #[no_mangle]
-pub extern "C" fn monoio_udp_connect(
-    _socket_handle: RuntimeValue,
-    _addr: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn monoio_udp_connect(_socket_handle: RuntimeValue, _addr: RuntimeValue) -> RuntimeValue {
     // TODO: [runtime][P1] Implement connected UDP
     tracing::warn!("monoio_udp_connect: Not yet implemented");
     RuntimeValue::from_int(1)
@@ -179,11 +171,7 @@ pub extern "C" fn monoio_udp_connect(
 
 /// Send data to connected peer
 #[no_mangle]
-pub extern "C" fn monoio_udp_send(
-    _socket_handle: RuntimeValue,
-    _buffer: RuntimeValue,
-    _len: i64,
-) -> RuntimeValue {
+pub extern "C" fn monoio_udp_send(_socket_handle: RuntimeValue, _buffer: RuntimeValue, _len: i64) -> RuntimeValue {
     // TODO: [runtime][P1] Implement connected send
     tracing::warn!("monoio_udp_send: Not yet implemented");
     RuntimeValue::from_int(-1)
@@ -191,11 +179,7 @@ pub extern "C" fn monoio_udp_send(
 
 /// Receive data from connected peer
 #[no_mangle]
-pub extern "C" fn monoio_udp_recv(
-    _socket_handle: RuntimeValue,
-    _buffer: RuntimeValue,
-    _max_len: i64,
-) -> RuntimeValue {
+pub extern "C" fn monoio_udp_recv(_socket_handle: RuntimeValue, _buffer: RuntimeValue, _max_len: i64) -> RuntimeValue {
     // TODO: [runtime][P1] Implement connected recv
     tracing::warn!("monoio_udp_recv: Not yet implemented");
     RuntimeValue::from_int(-1)
@@ -257,10 +241,7 @@ pub extern "C" fn monoio_udp_local_addr(socket_handle: RuntimeValue) -> RuntimeV
 
 /// Set broadcast option
 #[no_mangle]
-pub extern "C" fn monoio_udp_set_broadcast(
-    socket_handle: RuntimeValue,
-    broadcast: bool,
-) -> RuntimeValue {
+pub extern "C" fn monoio_udp_set_broadcast(socket_handle: RuntimeValue, broadcast: bool) -> RuntimeValue {
     let socket_id = socket_handle.as_int();
 
     // Send request to runtime thread
@@ -292,17 +273,11 @@ pub extern "C" fn monoio_udp_set_broadcast(
 
 /// Set multicast TTL
 #[no_mangle]
-pub extern "C" fn monoio_udp_set_multicast_ttl(
-    socket_handle: RuntimeValue,
-    ttl: i64,
-) -> RuntimeValue {
+pub extern "C" fn monoio_udp_set_multicast_ttl(socket_handle: RuntimeValue, ttl: i64) -> RuntimeValue {
     let socket_id = socket_handle.as_int();
 
     if ttl < 0 || ttl > 255 {
-        tracing::error!(
-            "monoio_udp_set_multicast_ttl: Invalid TTL {}, must be 0-255",
-            ttl
-        );
+        tracing::error!("monoio_udp_set_multicast_ttl: Invalid TTL {}, must be 0-255", ttl);
         return RuntimeValue::from_int(-1);
     }
 
@@ -315,11 +290,7 @@ pub extern "C" fn monoio_udp_set_multicast_ttl(
 
     match response {
         IoResponse::Success { .. } => {
-            tracing::debug!(
-                "monoio_udp_set_multicast_ttl: Set TTL={} for socket {}",
-                ttl,
-                socket_id
-            );
+            tracing::debug!("monoio_udp_set_multicast_ttl: Set TTL={} for socket {}", ttl, socket_id);
             RuntimeValue::from_int(1)
         }
         IoResponse::Error { code, message } => {

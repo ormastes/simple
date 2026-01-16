@@ -364,12 +364,8 @@ mod tests {
         let r2 = func.new_vreg();
 
         let entry = func.block_mut(BlockId(0)).unwrap();
-        entry
-            .instructions
-            .push(MirInst::ConstInt { dest: r0, value: 1 });
-        entry
-            .instructions
-            .push(MirInst::ConstInt { dest: r1, value: 2 });
+        entry.instructions.push(MirInst::ConstInt { dest: r0, value: 1 });
+        entry.instructions.push(MirInst::ConstInt { dest: r1, value: 2 });
         entry.instructions.push(MirInst::BinOp {
             dest: r2,
             op: BinOp::Add,

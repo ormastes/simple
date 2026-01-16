@@ -93,11 +93,9 @@ pub fn lower_generator(func: &MirFunction, body_block: BlockId) -> GeneratorLowe
                     for inst_after in orig_block.instructions.iter().skip(idx + 1) {
                         resume_block.instructions.push(inst_after.clone());
                     }
-                    resume_block.terminator = state_machine_utils::remap_terminator(
-                        orig_block.terminator.clone(),
-                        &block_map,
-                    )
-                    .unwrap_or_else(|| Terminator::Return(None));
+                    resume_block.terminator =
+                        state_machine_utils::remap_terminator(orig_block.terminator.clone(), &block_map)
+                            .unwrap_or_else(|| Terminator::Return(None));
                     state_machine_utils::write_block(&mut rewritten, resume_block);
                     resume
                 } else {
@@ -142,9 +140,8 @@ pub fn lower_generator(func: &MirFunction, body_block: BlockId) -> GeneratorLowe
 
         // If the block ended without a yield, copy the original terminator.
         if !current_block.terminator.is_sealed() {
-            current_block.terminator =
-                state_machine_utils::remap_terminator(orig_block.terminator.clone(), &block_map)
-                    .unwrap_or(Terminator::Return(None));
+            current_block.terminator = state_machine_utils::remap_terminator(orig_block.terminator.clone(), &block_map)
+                .unwrap_or(Terminator::Return(None));
             state_machine_utils::write_block(&mut rewritten, current_block);
         } else {
             state_machine_utils::write_block(&mut rewritten, current_block);
@@ -215,10 +212,7 @@ mod tests {
 
         // Dispatcher is block 0, completion is block 1, mapped entry starts after that.
         assert_eq!(lowered.rewritten.entry_block, BlockId(0));
-        let dispatcher = lowered
-            .rewritten
-            .block(BlockId(0))
-            .expect("dispatcher present");
+        let dispatcher = lowered.rewritten.block(BlockId(0)).expect("dispatcher present");
         if let Terminator::Jump(target) = dispatcher.terminator {
             assert_ne!(target, lowered.complete_block);
         } else {

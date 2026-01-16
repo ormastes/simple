@@ -213,11 +213,7 @@ impl<'a> CallSiteAnalyzer<'a> {
     }
 
     /// Try to infer type arguments from function call arguments.
-    fn infer_type_args(
-        &self,
-        func: &FunctionDef,
-        args: &[simple_parser::ast::Argument],
-    ) -> Option<Vec<ConcreteType>> {
+    fn infer_type_args(&self, func: &FunctionDef, args: &[simple_parser::ast::Argument]) -> Option<Vec<ConcreteType>> {
         let mut type_args = Vec::new();
 
         for type_param in &func.generic_params {
@@ -227,9 +223,7 @@ impl<'a> CallSiteAnalyzer<'a> {
                     if type_uses_param(ty, type_param) {
                         // Get the actual argument value
                         if let Some(arg) = args.get(i) {
-                            if let Some(concrete) =
-                                infer_concrete_type(&arg.value, &self.type_context)
-                            {
+                            if let Some(concrete) = infer_concrete_type(&arg.value, &self.type_context) {
                                 type_args.push(concrete);
                                 break;
                             }
@@ -256,8 +250,7 @@ impl<'a> CallSiteAnalyzer<'a> {
         // Handle additional cases not in shared util
         match expr {
             Expr::Tuple(elems) => {
-                let elem_types: Option<Vec<_>> =
-                    elems.iter().map(|e| self.infer_concrete_type(e)).collect();
+                let elem_types: Option<Vec<_>> = elems.iter().map(|e| self.infer_concrete_type(e)).collect();
                 elem_types.map(ConcreteType::Tuple)
             }
             _ => None,

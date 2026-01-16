@@ -83,8 +83,7 @@ impl ModuleCache {
 
         // Check if we need to evict entries
         let mut current_size = self.current_size.write().unwrap();
-        while *current_size + module_size > self.max_size && !self.cache.read().unwrap().is_empty()
-        {
+        while *current_size + module_size > self.max_size && !self.cache.read().unwrap().is_empty() {
             // Evict oldest entry (simple LRU would be better)
             if let Some(evicted_path) = self.cache.read().unwrap().keys().next().cloned() {
                 self.evict_internal(&evicted_path, &mut current_size);

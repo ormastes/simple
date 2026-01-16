@@ -1,12 +1,9 @@
-use simple_runtime::value::{
-    rt_generator_new, rt_generator_next, rt_value_as_int, rt_value_is_nil, RuntimeValue,
-};
+use simple_runtime::value::{rt_generator_new, rt_generator_next, rt_value_as_int, rt_value_is_nil, RuntimeValue};
 
 use simple_compiler::codegen::JitCompiler;
 use simple_compiler::hir::TypeId;
 use simple_compiler::mir::{
-    lower_generator, BlockId, LocalKind, MirBlock, MirFunction, MirInst, MirLocal, MirModule,
-    Terminator, VReg,
+    lower_generator, BlockId, LocalKind, MirBlock, MirFunction, MirInst, MirLocal, MirModule, Terminator, VReg,
 };
 use simple_parser::Visibility;
 
@@ -50,9 +47,7 @@ fn jit_generator_dispatcher_yields_and_restores() {
 
     let mut jit = JitCompiler::new().expect("jit init");
     jit.compile_module(&module).expect("compile");
-    let func_ptr = jit
-        .get_function_ptr("gen_dispatcher")
-        .expect("dispatcher available");
+    let func_ptr = jit.get_function_ptr("gen_dispatcher").expect("dispatcher available");
 
     // Create runtime generator with compiled dispatcher pointer and run it.
     let gen = rt_generator_new(func_ptr as u64, slot_count, RuntimeValue::NIL);
@@ -60,12 +55,7 @@ fn jit_generator_dispatcher_yields_and_restores() {
     assert_eq!(rt_value_as_int(first), 1, "first raw {}", first.to_raw());
 
     let second = rt_generator_next(gen);
-    assert_eq!(
-        rt_value_as_int(second),
-        10,
-        "second raw {}",
-        second.to_raw()
-    );
+    assert_eq!(rt_value_as_int(second), 10, "second raw {}", second.to_raw());
 
     let exhausted = rt_generator_next(gen);
     assert!(rt_value_is_nil(exhausted));

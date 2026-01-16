@@ -42,9 +42,7 @@ fn test_runner_large_negative() {
 #[test]
 fn test_runner_nested_parentheses() {
     let runner = Runner::new();
-    let result = runner
-        .run_source("main = ((((1 + 2) * 3) - 4) + 5)")
-        .expect("run ok");
+    let result = runner.run_source("main = ((((1 + 2) * 3) - 4) + 5)").expect("run ok");
     assert_eq!(result, 10);
 }
 
@@ -128,11 +126,7 @@ fn test_runner_interpreter_consistency_multiple() {
 
         assert_eq!(runner_result, expected, "Runner: {}", source);
         assert_eq!(interp_result.exit_code, expected, "Interpreter: {}", source);
-        assert_eq!(
-            runner_result, interp_result.exit_code,
-            "Consistency: {}",
-            source
-        );
+        assert_eq!(runner_result, interp_result.exit_code, "Consistency: {}", source);
     }
 }
 
@@ -143,9 +137,7 @@ fn test_compile_load_roundtrip() {
     let smf_path = dir.path().join("roundtrip.smf");
 
     let runner = Runner::new();
-    runner
-        .compile_to_smf("main = 99", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 99", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -172,12 +164,7 @@ fn test_multiple_file_compilation() {
 
         let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
         let result = pipeline.compile(&source_path, &smf_path);
-        assert!(
-            result.is_ok(),
-            "Should compile prog{}: {:?}",
-            i,
-            result.err()
-        );
+        assert!(result.is_ok(), "Should compile prog{}: {:?}", i, result.err());
         assert!(smf_path.exists(), "SMF {} should exist", i);
     }
 }
@@ -319,9 +306,7 @@ fn test_actor_multiple_messages() {
     });
 
     for i in 0..3 {
-        handle
-            .send(Message::Value(format!("msg-{}", i)))
-            .expect("send ok");
+        handle.send(Message::Value(format!("msg-{}", i))).expect("send ok");
         let response = handle.recv().expect("recv ok");
         match response {
             Message::Value(s) => assert_eq!(s, format!("echo: msg-{}", i)),
@@ -340,9 +325,7 @@ fn test_actor_bytes_message() {
     let spawner = ThreadSpawner::new();
 
     let handle = spawner.spawn(|_inbox, outbox| {
-        outbox
-            .send(Message::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]))
-            .unwrap();
+        outbox.send(Message::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])).unwrap();
     });
 
     let msg = handle.recv().expect("recv ok");
@@ -372,8 +355,7 @@ fn test_run_code_various_args() {
     let result = run_code("main = 10", &[], "").expect("run ok");
     assert_eq!(result.exit_code, 10);
 
-    let result =
-        run_code("main = 20", &["arg1".to_string(), "arg2".to_string()], "").expect("run ok");
+    let result = run_code("main = 20", &["arg1".to_string(), "arg2".to_string()], "").expect("run ok");
     assert_eq!(result.exit_code, 20);
 }
 

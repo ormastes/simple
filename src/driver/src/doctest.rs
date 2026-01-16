@@ -76,8 +76,7 @@ pub fn is_definition_like(line: &str) -> bool {
         let prev = trimmed[..idx].chars().rev().find(|c| !c.is_whitespace());
         let next = chars.clone().map(|(_, c)| c).find(|c| !c.is_whitespace());
 
-        let is_comparison = matches!(prev, Some('=') | Some('!') | Some('<') | Some('>'))
-            || matches!(next, Some('='));
+        let is_comparison = matches!(prev, Some('=') | Some('!') | Some('<') | Some('>')) || matches!(next, Some('='));
         if !is_comparison {
             return true;
         }
@@ -306,9 +305,7 @@ fn parse_docstring_fences(docstring: &str, source: impl AsRef<Path>) -> Vec<Doct
         let trimmed = line.trim_start();
 
         // Check for code fence opening
-        if (trimmed.starts_with("```sdoctest") || trimmed.starts_with("```simple-doctest"))
-            && !in_fence
-        {
+        if (trimmed.starts_with("```sdoctest") || trimmed.starts_with("```simple-doctest")) && !in_fence {
             in_fence = true;
             fence_content.clear();
             fence_start_line = line_num;
@@ -599,11 +596,7 @@ pub fn discover_md_doctests(root_path: &Path) -> std::io::Result<Vec<DoctestExam
         if root_path.extension().and_then(|s| s.to_str()) == Some("md") {
             let content = fs::read_to_string(root_path)?;
             let parsed = parse_readme_config(&content);
-            examples.extend(extract_md_code_blocks(
-                &parsed.content,
-                root_path,
-                &parsed.config,
-            ));
+            examples.extend(extract_md_code_blocks(&parsed.content, root_path, &parsed.config));
         }
         return Ok(examples);
     }
@@ -617,10 +610,7 @@ pub fn discover_md_doctests(root_path: &Path) -> std::io::Result<Vec<DoctestExam
 }
 
 /// Discover doctests from a README.md and its linked files
-fn discover_from_readme(
-    readme_path: &Path,
-    parent_config: &ReadmeConfig,
-) -> std::io::Result<Vec<DoctestExample>> {
+fn discover_from_readme(readme_path: &Path, parent_config: &ReadmeConfig) -> std::io::Result<Vec<DoctestExample>> {
     let mut examples = Vec::new();
 
     if !readme_path.exists() {
@@ -683,11 +673,7 @@ fn discover_from_readme(
 }
 
 /// Extract code blocks from markdown content that should be tested
-fn extract_md_code_blocks(
-    content: &str,
-    source: &Path,
-    config: &ReadmeConfig,
-) -> Vec<DoctestExample> {
+fn extract_md_code_blocks(content: &str, source: &Path, config: &ReadmeConfig) -> Vec<DoctestExample> {
     let mut examples = Vec::new();
     let mut in_block = false;
     let mut block_lines: Vec<String> = Vec::new();
@@ -726,16 +712,11 @@ fn extract_md_code_blocks(
             in_block = false;
 
             // Only process Simple code blocks
-            if !block_skip
-                && (block_lang == "simple" || block_lang == config.lang || block_lang.is_empty())
-            {
+            if !block_skip && (block_lang == "simple" || block_lang == config.lang || block_lang.is_empty()) {
                 let code = block_lines.join("\n");
 
                 // Check for doctest marker or assertions
-                if code.contains("# doctest")
-                    || code.contains("assert ")
-                    || code.contains("assert(")
-                {
+                if code.contains("# doctest") || code.contains("assert ") || code.contains("assert(") {
                     // Convert to DoctestExample
                     let commands = extract_commands_from_block(&code);
                     if !commands.is_empty() {
@@ -826,9 +807,7 @@ pub fn discover_doctests(path: &Path) -> std::io::Result<Vec<DoctestExample>> {
                 let ext = p.extension().and_then(|s| s.to_str());
                 match ext {
                     Some("sdt") => examples.extend(parse_doctest_text(&fs::read_to_string(p)?, p)),
-                    Some("md") => {
-                        examples.extend(parse_markdown_doctests(&fs::read_to_string(p)?, p))
-                    }
+                    Some("md") => examples.extend(parse_markdown_doctests(&fs::read_to_string(p)?, p)),
                     Some("spl") | Some("simple") | Some("sscript") => {
                         examples.extend(parse_spl_doctests(&fs::read_to_string(p)?, p))
                     }
@@ -858,12 +837,10 @@ pub fn run_examples(examples: &[DoctestExample]) -> Vec<DoctestResult> {
     let mut states: HashMap<PathBuf, EvalState> = HashMap::new();
 
     for example in examples {
-        let state = states
-            .entry(example.source.clone())
-            .or_insert_with(|| EvalState {
-                prelude: String::new(),
-                interpreter: Interpreter::new_no_gc(),
-            });
+        let state = states.entry(example.source.clone()).or_insert_with(|| EvalState {
+            prelude: String::new(),
+            interpreter: Interpreter::new_no_gc(),
+        });
         results.push(run_example(example, state));
     }
 
@@ -978,11 +955,7 @@ fn contains_assignment(snippet: &str) -> bool {
         if chars[i] == '=' {
             // Check if it's part of a comparison operator
             let before = if i > 0 { chars[i - 1] } else { ' ' };
-            let after = if i + 1 < chars.len() {
-                chars[i + 1]
-            } else {
-                ' '
-            };
+            let after = if i + 1 < chars.len() { chars[i + 1] } else { ' ' };
             if before != '=' && before != '!' && before != '<' && before != '>' && after != '=' {
                 return true;
             }
@@ -1002,18 +975,7 @@ fn is_prelude_definition(snippet: &str) -> bool {
         // Only add actual definitions, not control flow
         if matches!(
             first,
-            "let"
-                | "mut"
-                | "fn"
-                | "struct"
-                | "class"
-                | "enum"
-                | "trait"
-                | "impl"
-                | "use"
-                | "type"
-                | "actor"
-                | "import"
+            "let" | "mut" | "fn" | "struct" | "class" | "enum" | "trait" | "impl" | "use" | "type" | "actor" | "import"
         ) {
             return true;
         }
@@ -1051,18 +1013,14 @@ fn match_matches(actual: &str, expected: &Expected) -> Result<(), String> {
             if wildcard_match(actual.trim(), pattern.trim()) {
                 Ok(())
             } else {
-                Err(format!(
-                    "Output mismatch:\n  Expected: {pattern}\n  Got: {actual}"
-                ))
+                Err(format!("Output mismatch:\n  Expected: {pattern}\n  Got: {actual}"))
             }
         }
         Expected::Error(pattern) => {
             if actual.starts_with("Error:") && actual.contains(pattern) {
                 Ok(())
             } else {
-                Err(format!(
-                    "Expected error containing '{pattern}', got: {actual}"
-                ))
+                Err(format!("Expected error containing '{pattern}', got: {actual}"))
             }
         }
     }
@@ -1084,8 +1042,7 @@ fn wildcard_match_impl(text: &[u8], pattern: &[u8], ti: usize, pi: usize) -> boo
     let tc = text[ti];
 
     if pc == b'*' {
-        wildcard_match_impl(text, pattern, ti, pi + 1)
-            || wildcard_match_impl(text, pattern, ti + 1, pi)
+        wildcard_match_impl(text, pattern, ti, pi + 1) || wildcard_match_impl(text, pattern, ti + 1, pi)
     } else if pc == b'.' || pc == tc {
         wildcard_match_impl(text, pattern, ti + 1, pi + 1)
     } else {

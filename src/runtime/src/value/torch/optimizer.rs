@@ -315,10 +315,9 @@ pub extern "C" fn rt_torch_optimizer_step(optimizer_handle: u64) -> i32 {
                             // velocity = momentum * velocity + grad
                             let new_vel = &vel.0 * mom + &d_p;
                             let new_vel_handle = next_handle();
-                            TENSOR_REGISTRY.lock().insert(
-                                new_vel_handle,
-                                Arc::new(TensorWrapper(new_vel.shallow_clone())),
-                            );
+                            TENSOR_REGISTRY
+                                .lock()
+                                .insert(new_vel_handle, Arc::new(TensorWrapper(new_vel.shallow_clone())));
                             new_velocity[i] = Some(new_vel_handle);
                             d_p = new_vel;
                         } else {
@@ -359,10 +358,7 @@ pub extern "C" fn rt_torch_optimizer_step(optimizer_handle: u64) -> i32 {
                     }
                 }
 
-                tracing::debug!(
-                    "rt_torch_optimizer_step: SGD optimizer={}",
-                    optimizer_handle
-                );
+                tracing::debug!("rt_torch_optimizer_step: SGD optimizer={}", optimizer_handle);
                 TorchFfiError::Success as i32
             }
             OptimizerType::Adam {
@@ -679,11 +675,7 @@ pub extern "C" fn rt_torch_optimizer_get_lr(optimizer_handle: u64) -> f64 {
         let lr = opt_state.lr;
         drop(opt_registry);
 
-        tracing::debug!(
-            "rt_torch_optimizer_get_lr: optimizer={} lr={}",
-            optimizer_handle,
-            lr
-        );
+        tracing::debug!("rt_torch_optimizer_get_lr: optimizer={} lr={}", optimizer_handle, lr);
         lr
     }
     #[cfg(not(feature = "pytorch"))]
@@ -777,10 +769,7 @@ pub extern "C" fn rt_torch_optimizer_free(optimizer_handle: u64) -> i32 {
     {
         let mut opt_registry = OPTIMIZER_REGISTRY.lock();
         if opt_registry.remove(&optimizer_handle).is_some() {
-            tracing::debug!(
-                "rt_torch_optimizer_free: freed optimizer={}",
-                optimizer_handle
-            );
+            tracing::debug!("rt_torch_optimizer_free: freed optimizer={}", optimizer_handle);
             TorchFfiError::Success as i32
         } else {
             TorchFfiError::InvalidHandle as i32

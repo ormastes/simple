@@ -136,10 +136,7 @@ impl Default for ParallelMirLowerer {
 pub fn lower_modules_parallel(modules: &[HirModule]) -> Vec<MirLowerResult<MirModule>> {
     let lowerer = ParallelMirLowerer::new();
 
-    modules
-        .par_iter()
-        .map(|m| lowerer.lower_module(m))
-        .collect()
+    modules.par_iter().map(|m| lowerer.lower_module(m)).collect()
 }
 
 /// Lower multiple HIR modules with custom config.
@@ -149,10 +146,7 @@ pub fn lower_modules_parallel_with_config(
 ) -> Vec<MirLowerResult<MirModule>> {
     let lowerer = ParallelMirLowerer::with_config(config);
 
-    modules
-        .par_iter()
-        .map(|m| lowerer.lower_module(m))
-        .collect()
+    modules.par_iter().map(|m| lowerer.lower_module(m)).collect()
 }
 
 /// Batch MIR lowerer that tracks statistics across multiple modules.

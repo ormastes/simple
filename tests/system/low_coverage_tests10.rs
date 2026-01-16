@@ -124,8 +124,7 @@ mod module_resolver_tests {
 
     #[test]
     fn test_module_resolver_new() {
-        let resolver =
-            ModuleResolver::new(PathBuf::from("/project"), PathBuf::from("/project/src"));
+        let resolver = ModuleResolver::new(PathBuf::from("/project"), PathBuf::from("/project/src"));
         let _ = resolver;
     }
 
@@ -252,18 +251,14 @@ mod lexer_tests {
     fn test_lexer_tokenize_integer() {
         let mut lexer = Lexer::new("42");
         let tokens = lexer.tokenize();
-        assert!(tokens
-            .iter()
-            .any(|t| matches!(t.kind, TokenKind::Integer(_))));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Integer(_))));
     }
 
     #[test]
     fn test_lexer_tokenize_identifier() {
         let mut lexer = Lexer::new("foo");
         let tokens = lexer.tokenize();
-        assert!(tokens
-            .iter()
-            .any(|t| matches!(t.kind, TokenKind::Identifier(_))));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Identifier(_))));
     }
 
     #[test]

@@ -47,9 +47,7 @@ pub fn hydrate(manifest: &HydrationManifest) -> Result<HydrationResult, Hydratio
 
         // Log any potential issues
         if selector.is_empty() {
-            result
-                .warnings
-                .push(format!("Empty selector for node {:?}", node_id));
+            result.warnings.push(format!("Empty selector for node {:?}", node_id));
         }
     }
 

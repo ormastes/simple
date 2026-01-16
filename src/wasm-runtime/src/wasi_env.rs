@@ -181,9 +181,9 @@ impl WasiConfig {
         wasi_state.stderr(Box::new(stderr_clone));
 
         // Finalize WASI environment
-        let wasi_env = wasi_state.finalize(store).map_err(|e| {
-            WasmError::WasiError(format!("Failed to create WASI environment: {}", e))
-        })?;
+        let wasi_env = wasi_state
+            .finalize(store)
+            .map_err(|e| WasmError::WasiError(format!("Failed to create WASI environment: {}", e)))?;
 
         Ok((wasi_env, pipes))
     }
@@ -235,9 +235,7 @@ mod tests {
 
     #[test]
     fn test_wasi_config_with_env() {
-        let config = WasiConfig::new()
-            .with_env("KEY1", "VALUE1")
-            .with_env("KEY2", "VALUE2");
+        let config = WasiConfig::new().with_env("KEY1", "VALUE1").with_env("KEY2", "VALUE2");
         assert_eq!(config.env.get("KEY1"), Some(&"VALUE1".to_string()));
         assert_eq!(config.env.get("KEY2"), Some(&"VALUE2".to_string()));
     }

@@ -32,10 +32,7 @@ mod parser_unit_def_tests {
 // Parser Arithmetic Types
 // ============================================================================
 mod parser_arithmetic_tests {
-    use simple_parser::{
-        BinaryArithmeticOp, BinaryArithmeticRule, UnaryArithmeticOp, UnaryArithmeticRule,
-        UnitArithmetic,
-    };
+    use simple_parser::{BinaryArithmeticOp, BinaryArithmeticRule, UnaryArithmeticOp, UnaryArithmeticRule, UnitArithmetic};
 
     #[test]
     fn test_binary_arithmetic_op_size() {

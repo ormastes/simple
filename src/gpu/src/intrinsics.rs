@@ -195,9 +195,7 @@ impl GpuIntrinsic {
             | GpuIntrinsic::NumGroups
             | GpuIntrinsic::NumGroupsDim => "u32",
 
-            GpuIntrinsic::Barrier | GpuIntrinsic::MemFence | GpuIntrinsic::BarrierAndFence => {
-                "unit"
-            }
+            GpuIntrinsic::Barrier | GpuIntrinsic::MemFence | GpuIntrinsic::BarrierAndFence => "unit",
 
             GpuIntrinsic::AtomicAdd
             | GpuIntrinsic::AtomicSub

@@ -103,9 +103,7 @@ pub extern "C" fn monoio_block_on(_future: RuntimeValue) -> RuntimeValue {
     // For now, we'll have each TCP/UDP operation create its own runtime instance
 
     tracing::warn!("monoio_block_on: Direct future execution not yet supported");
-    tracing::info!(
-        "monoio_block_on: Use TCP/UDP functions which internally handle async execution"
-    );
+    tracing::info!("monoio_block_on: Use TCP/UDP functions which internally handle async execution");
 
     RuntimeValue::from_int(0)
 }
@@ -120,12 +118,7 @@ where
     let mut rt = RuntimeBuilder::<monoio::FusionDriver>::new()
         .with_entries(entries)
         .build()
-        .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to create runtime: {}", e),
-            )
-        })?;
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create runtime: {}", e)))?;
 
     // Execute the future
     rt.block_on(future)

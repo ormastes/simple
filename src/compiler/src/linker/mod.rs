@@ -37,26 +37,21 @@ pub use native::{LinkOptions, NativeLinker};
 
 // Symbol interning exports
 pub use interner::{
-    CommonSymbols, InternedSymbolTable, SharedSymbolInterner,
-    SymbolBinding as InternedSymbolBinding, SymbolInfo, SymbolInterner, SymbolKey,
-    SymbolType as InternedSymbolType,
+    CommonSymbols, InternedSymbolTable, SharedSymbolInterner, SymbolBinding as InternedSymbolBinding, SymbolInfo,
+    SymbolInterner, SymbolKey, SymbolType as InternedSymbolType,
 };
 
 // Parallel linking exports
 pub use parallel::{
-    link_modules_parallel, link_modules_parallel_with_config, BatchLinker, LinkModule, LinkStats,
-    ParallelLinkConfig, ParallelLinker, ParallelSymbolTable, SymbolEntry,
+    link_modules_parallel, link_modules_parallel_with_config, BatchLinker, LinkModule, LinkStats, ParallelLinkConfig,
+    ParallelLinker, ParallelSymbolTable, SymbolEntry,
 };
 
 // Symbol analysis exports
-pub use analysis::{
-    AnalysisStats, AnalyzedSymbol, RefKind, SymbolAnalyzer, SymbolGraph, SymbolVisibility,
-};
+pub use analysis::{AnalysisStats, AnalyzedSymbol, RefKind, SymbolAnalyzer, SymbolGraph, SymbolVisibility};
 
 // Layout optimization exports (4KB page locality)
 pub use layout::{LayoutOptimizer, LayoutSegment, LayoutStats, LayoutSymbol};
 
 // Native binary exports (standalone executables)
-pub use native_binary::{
-    compile_to_native_binary, NativeBinaryBuilder, NativeBinaryOptions, NativeBinaryResult,
-};
+pub use native_binary::{compile_to_native_binary, NativeBinaryBuilder, NativeBinaryOptions, NativeBinaryResult};

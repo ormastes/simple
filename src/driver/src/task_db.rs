@@ -72,14 +72,8 @@ fn parse_task_db(doc: &SdnDocument) -> Result<TaskDb, String> {
             category: row_map.get("category").cloned().unwrap_or_default(),
             name: row_map.get("name").cloned().unwrap_or_default(),
             description: row_map.get("description").cloned().unwrap_or_default(),
-            priority: row_map
-                .get("priority")
-                .cloned()
-                .unwrap_or_else(|| "medium".to_string()),
-            status: row_map
-                .get("status")
-                .cloned()
-                .unwrap_or_else(|| "planned".to_string()),
+            priority: row_map.get("priority").cloned().unwrap_or_else(|| "medium".to_string()),
+            status: row_map.get("status").cloned().unwrap_or_else(|| "planned".to_string()),
             valid: parse_bool_field(row_map.get("valid")).unwrap_or(true),
         };
         db.records.insert(id, record);
@@ -122,8 +116,8 @@ pub fn save_task_db(path: &Path, db: &TaskDb) -> Result<(), std::io::Error> {
     let mut dict = IndexMap::new();
     dict.insert("tasks".to_string(), table);
 
-    let mut doc = SdnDocument::parse("tasks |id|")
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    let mut doc =
+        SdnDocument::parse("tasks |id|").map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
     *doc.root_mut() = SdnValue::Dict(dict);
 
     let content = doc.to_sdn();
@@ -138,13 +132,7 @@ pub fn generate_task_docs(db: &TaskDb, output_dir: &Path) -> Result<(), String> 
     let mut records: Vec<&TaskRecord> = db.records.values().filter(|r| r.valid).collect();
     records.sort_by(|a, b| a.id.cmp(&b.id));
 
-    let last_id = db
-        .records
-        .values()
-        .map(|r| &r.id)
-        .max()
-        .cloned()
-        .unwrap_or_default();
+    let last_id = db.records.values().map(|r| &r.id).max().cloned().unwrap_or_default();
 
     // Count by category
     let mut categories: BTreeMap<String, CategoryCounts> = BTreeMap::new();
@@ -193,10 +181,7 @@ pub fn generate_task_docs(db: &TaskDb, output_dir: &Path) -> Result<(), String> 
     md.push_str("| ID | Name | Status |\n");
     md.push_str("|----|------|--------|\n");
     for record in records.iter().rev().take(10) {
-        md.push_str(&format!(
-            "| {} | {} | {} |\n",
-            record.id, record.name, record.status
-        ));
+        md.push_str(&format!("| {} | {} | {} |\n", record.id, record.name, record.status));
     }
 
     let path = output_dir.join("task.md");

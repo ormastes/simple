@@ -134,9 +134,7 @@ pub fn print_help() {
     eprintln!();
     eprintln!("Deterministic Builds (#911) & Replay Logs (#912):");
     eprintln!("  --deterministic              Enable deterministic build mode");
-    eprintln!(
-        "  --build-timestamp=<ISO8601>  Override build timestamp (e.g., 2025-01-15T10:00:00Z)"
-    );
+    eprintln!("  --build-timestamp=<ISO8601>  Override build timestamp (e.g., 2025-01-15T10:00:00Z)");
     eprintln!("  --log=<file.json>            Save build log for replay and debugging");
     eprintln!();
     eprintln!("Target Architectures:");

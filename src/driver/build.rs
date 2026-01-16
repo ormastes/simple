@@ -44,7 +44,9 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
     generated.push('\n');
     generated.push_str("use std::path::Path;\n");
     generated.push_str("use simple_driver::simple_test::{run_test_file, SimpleTestResult};\n");
-    generated.push_str("use simple_compiler::{init_coverage, is_coverage_enabled, save_global_coverage, get_coverage_output_path};\n");
+    generated.push_str(
+        "use simple_compiler::{init_coverage, is_coverage_enabled, save_global_coverage, get_coverage_output_path};\n",
+    );
     generated.push('\n');
     generated.push_str("// Initialize coverage once at module load if enabled\n");
     generated.push_str("#[cfg(test)]\n");
@@ -73,10 +75,7 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
 
     if !test_root.exists() {
         // No test directory - generate empty module
-        generated.push_str(&format!(
-            "// No test directory found at: {}\n",
-            test_root.display()
-        ));
+        generated.push_str(&format!("// No test directory found at: {}\n", test_root.display()));
         generated.push_str("// Tests will be generated when the directory is populated.\n");
     } else {
         let mut test_count = 0;
@@ -98,9 +97,7 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
                 return false;
             }
             // Skip language/ directory (contains unimplemented syntax specs)
-            if path.to_string_lossy().contains("/language/")
-                || path.to_string_lossy().contains("\\language\\")
-            {
+            if path.to_string_lossy().contains("/language/") || path.to_string_lossy().contains("\\language\\") {
                 return false;
             }
             true
@@ -115,10 +112,7 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
             let path = entry.path();
 
             // Generate test name from path
-            let relative = path
-                .strip_prefix(test_root)
-                .unwrap_or(path)
-                .to_string_lossy();
+            let relative = path.strip_prefix(test_root).unwrap_or(path).to_string_lossy();
             let test_name = sanitize_test_name(&relative);
             let path_str = path.display().to_string().replace('\\', "/");
 

@@ -15,9 +15,7 @@ fn test_complete_function_compilation() {
     backend.create_module("complete_fn").unwrap();
 
     // Compile function: fn answer() -> i32 { return 42; }
-    backend
-        .compile_simple_function("answer", &[], &T::I32, 42)
-        .unwrap();
+    backend.compile_simple_function("answer", &[], &T::I32, 42).unwrap();
 
     let ir = backend.get_ir().unwrap();
 
@@ -47,9 +45,7 @@ fn test_32bit_function_compilation() {
     backend.create_module("i686_test").unwrap();
 
     // Compile function for 32-bit target
-    backend
-        .compile_simple_function("get_value", &[], &T::I32, 100)
-        .unwrap();
+    backend.compile_simple_function("get_value", &[], &T::I32, 100).unwrap();
 
     let ir = backend.get_ir().unwrap();
 

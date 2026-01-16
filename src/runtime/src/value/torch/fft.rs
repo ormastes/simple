@@ -44,9 +44,7 @@ pub extern "C" fn rt_torch_fft(tensor_handle: u64, n: i64, dim: i64, norm: i32) 
         let n_opt = if n > 0 { Some(n) } else { None };
         let result = tensor.0.fft_fft(n_opt, dim, norm_str);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
             "rt_torch_fft: {} n={} dim={} norm={} -> handle={}",
             tensor_handle,
@@ -87,9 +85,7 @@ pub extern "C" fn rt_torch_ifft(tensor_handle: u64, n: i64, dim: i64, norm: i32)
         let n_opt = if n > 0 { Some(n) } else { None };
         let result = tensor.0.fft_ifft(n_opt, dim, norm_str);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
             "rt_torch_ifft: {} n={} dim={} norm={} -> handle={}",
             tensor_handle,
@@ -130,9 +126,7 @@ pub extern "C" fn rt_torch_rfft(tensor_handle: u64, n: i64, dim: i64, norm: i32)
         let n_opt = if n > 0 { Some(n) } else { None };
         let result = tensor.0.fft_rfft(n_opt, dim, norm_str);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
             "rt_torch_rfft: {} n={} dim={} norm={} -> handle={}",
             tensor_handle,
@@ -173,9 +167,7 @@ pub extern "C" fn rt_torch_irfft(tensor_handle: u64, n: i64, dim: i64, norm: i32
         let n_opt = if n > 0 { Some(n) } else { None };
         let result = tensor.0.fft_irfft(n_opt, dim, norm_str);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
             "rt_torch_irfft: {} n={} dim={} norm={} -> handle={}",
             tensor_handle,
@@ -198,12 +190,7 @@ pub extern "C" fn rt_torch_irfft(tensor_handle: u64, n: i64, dim: i64, norm: i32
 /// dims_ptr: dimensions to transform, ndim: number of dimensions
 /// Returns handle to N-D frequency-domain tensor, or 0 on failure
 #[no_mangle]
-pub extern "C" fn rt_torch_fftn(
-    tensor_handle: u64,
-    dims_ptr: *const i64,
-    ndim: i32,
-    norm: i32,
-) -> u64 {
+pub extern "C" fn rt_torch_fftn(tensor_handle: u64, dims_ptr: *const i64, ndim: i32, norm: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
@@ -228,9 +215,7 @@ pub extern "C" fn rt_torch_fftn(
         let dims_vec: Vec<i64> = dims.to_vec();
         let result = tensor.0.fft_fftn(Some(&dims_vec), None, norm_str);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
             "rt_torch_fftn: {} dims={:?} norm={} -> handle={}",
             tensor_handle,
@@ -267,15 +252,8 @@ pub extern "C" fn rt_torch_fftshift(tensor_handle: u64, dim: i64) -> u64 {
             tensor.0.fft_fftshift(Some(&[dim]))
         };
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!(
-            "rt_torch_fftshift: {} dim={} -> handle={}",
-            tensor_handle,
-            dim,
-            handle
-        );
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!("rt_torch_fftshift: {} dim={} -> handle={}", tensor_handle, dim, handle);
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -305,15 +283,8 @@ pub extern "C" fn rt_torch_ifftshift(tensor_handle: u64, dim: i64) -> u64 {
             tensor.0.fft_ifftshift(Some(&[dim]))
         };
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!(
-            "rt_torch_ifftshift: {} dim={} -> handle={}",
-            tensor_handle,
-            dim,
-            handle
-        );
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!("rt_torch_ifftshift: {} dim={} -> handle={}", tensor_handle, dim, handle);
         handle
     }
     #[cfg(not(feature = "pytorch"))]

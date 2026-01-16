@@ -34,11 +34,7 @@ pub(crate) fn slice_collection<T: Clone>(items: &[T], start: i64, end: i64, step
     } else {
         // Negative step: go backwards
         let mut result = Vec::new();
-        let actual_start = if start == 0 {
-            len - 1
-        } else {
-            start.min(len - 1)
-        };
+        let actual_start = if start == 0 { len - 1 } else { start.min(len - 1) };
         let actual_end = if end == len { -1 } else { end };
         let mut i = actual_start;
         while i > actual_end && i >= 0 {
@@ -53,9 +49,7 @@ pub(crate) fn slice_collection<T: Clone>(items: &[T], start: i64, end: i64, step
 
 /// Convert a Control result to a Value result for function return.
 /// This is used by multiple interpreter modules to handle function return values.
-pub(crate) fn control_to_value(
-    result: Result<Control, CompileError>,
-) -> Result<Value, CompileError> {
+pub(crate) fn control_to_value(result: Result<Control, CompileError>) -> Result<Value, CompileError> {
     match result {
         Ok(Control::Return(v)) => Ok(v),
         Ok(Control::Next) => Ok(Value::Nil),
@@ -90,14 +84,7 @@ pub(crate) fn comprehension_iterate(
 
         // Check condition if present
         if let Some(cond) = condition {
-            let cond_val = evaluate_expr(
-                cond,
-                &mut inner_env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let cond_val = evaluate_expr(cond, &mut inner_env, functions, classes, enums, impl_methods)?;
             if !cond_val.truthy() {
                 continue;
             }

@@ -17,9 +17,7 @@ pub struct Runner {
 
 impl Runner {
     pub fn new() -> Self {
-        Self {
-            core: ExecCore::new(),
-        }
+        Self { core: ExecCore::new() }
     }
 
     pub fn with_gc_runtime(gc: GcRuntime) -> Self {
@@ -72,11 +70,7 @@ impl Runner {
     ///
     /// The args are made available to the Simple program via `sys_get_args()`.
     #[instrument(skip(self, args), fields(path = %path.display()))]
-    pub fn run_file_interpreted_with_args(
-        &self,
-        path: &Path,
-        args: Vec<String>,
-    ) -> Result<i32, String> {
+    pub fn run_file_interpreted_with_args(&self, path: &Path, args: Vec<String>) -> Result<i32, String> {
         self.core.run_file_interpreted_with_args(path, args)
     }
 
@@ -118,19 +112,13 @@ impl Runner {
         out: &Path,
         options: &crate::CompileOptions,
     ) -> Result<(), String> {
-        self.core
-            .compile_file_with_options(source_path, out, options)
+        self.core.compile_file_with_options(source_path, out, options)
     }
 
     /// Compile source to an SMF at the given path for a specific target architecture.
     /// This enables cross-compilation to different architectures.
     #[instrument(skip(self, source))]
-    pub fn compile_to_smf_for_target(
-        &self,
-        source: &str,
-        out: &Path,
-        target: Target,
-    ) -> Result<(), String> {
+    pub fn compile_to_smf_for_target(&self, source: &str, out: &Path, target: Target) -> Result<(), String> {
         self.core.compile_source_for_target(source, out, target)
     }
 

@@ -170,18 +170,12 @@ impl Column {
 
     /// Check if column is not null.
     pub fn is_not_null(&self) -> bool {
-        self.constraints
-            .iter()
-            .any(|c| matches!(c, Constraint::NotNull))
-            || self.is_primary_key()
+        self.constraints.iter().any(|c| matches!(c, Constraint::NotNull)) || self.is_primary_key()
     }
 
     /// Check if column is unique.
     pub fn is_unique(&self) -> bool {
-        self.constraints
-            .iter()
-            .any(|c| matches!(c, Constraint::Unique))
-            || self.is_primary_key()
+        self.constraints.iter().any(|c| matches!(c, Constraint::Unique)) || self.is_primary_key()
     }
 }
 
@@ -257,11 +251,7 @@ impl Relation {
     }
 
     /// Create a many_to_many relationship.
-    pub fn many_to_many(
-        name: impl Into<String>,
-        model: impl Into<String>,
-        join_table: impl Into<String>,
-    ) -> Self {
+    pub fn many_to_many(name: impl Into<String>, model: impl Into<String>, join_table: impl Into<String>) -> Self {
         let name = name.into();
         let model = model.into();
         let fk = crate::naming::to_foreign_key(&model);
@@ -348,9 +338,7 @@ impl ModelDef {
             name,
             table_name,
             primary_key: "id".to_string(),
-            columns: vec![Column::new("id", ColumnType::Integer)
-                .primary_key()
-                .auto_increment()],
+            columns: vec![Column::new("id", ColumnType::Integer).primary_key().auto_increment()],
             relations: Vec::new(),
             indexes: Vec::new(),
             formal_mode: false,
@@ -537,11 +525,7 @@ mod tests {
                     .primary_key()
                     .auto_increment(),
             )
-            .column(
-                Column::new("full_name", ColumnType::Text)
-                    .column("name")
-                    .not_null(),
-            );
+            .column(Column::new("full_name", ColumnType::Text).column("name").not_null());
 
         assert_eq!(model.name, "User");
         assert_eq!(model.table_name, "app_users");

@@ -102,11 +102,7 @@ impl SdnError {
         }
     }
 
-    pub fn unexpected_token(
-        expected: impl Into<String>,
-        found: impl Into<String>,
-        span: Span,
-    ) -> Self {
+    pub fn unexpected_token(expected: impl Into<String>, found: impl Into<String>, span: Span) -> Self {
         Self::UnexpectedToken {
             expected: expected.into(),
             found: found.into(),

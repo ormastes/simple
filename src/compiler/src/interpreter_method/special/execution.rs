@@ -119,13 +119,10 @@ pub fn exec_function_with_self_return(
     ));
 
     // Get the potentially modified self
-    let updated_self = local_env
-        .get("self")
-        .cloned()
-        .unwrap_or_else(|| Value::Object {
-            class: class_name.to_string(),
-            fields: fields.clone(),
-        });
+    let updated_self = local_env.get("self").cloned().unwrap_or_else(|| Value::Object {
+        class: class_name.to_string(),
+        fields: fields.clone(),
+    });
 
     Ok((result, updated_self))
 }

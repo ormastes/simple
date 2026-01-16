@@ -37,14 +37,11 @@ mod util;
 pub use analyzer::CallSiteAnalyzer;
 pub use binding_specializer::{specialize_bindings, BindingSpecializer};
 pub use cache::{
-    CacheEntryMeta, CachedClass, CachedFunction, CachedStruct, LocalMonoCache, MonoCache,
-    MonoCacheConfig, MonoCacheStats,
+    CacheEntryMeta, CachedClass, CachedFunction, CachedStruct, LocalMonoCache, MonoCache, MonoCacheConfig,
+    MonoCacheStats,
 };
 pub use engine::Monomorphizer;
-pub use parallel::{
-    monomorphize_modules_parallel, MonoStats, ParallelMonoConfig, ParallelMonoTable,
-    ParallelMonomorphizer,
-};
+pub use parallel::{monomorphize_modules_parallel, MonoStats, ParallelMonoConfig, ParallelMonoTable, ParallelMonomorphizer};
 pub use rewriter::monomorphize_module;
 pub use table::MonomorphizationTable;
 pub use types::{ConcreteType, PointerKind, SpecializationKey, TypeBindings};

@@ -48,8 +48,7 @@ fn has_decorator_named(func: &simple_parser::ast::FunctionDef, name: &str) -> bo
 
 /// Helper to check if argument with name exists
 fn has_arg_named(args: &[simple_parser::ast::Argument], name: &str) -> bool {
-    args.iter()
-        .any(|arg| arg.name.as_ref().map_or(false, |n| n == name))
+    args.iter().any(|arg| arg.name.as_ref().map_or(false, |n| n == name))
 }
 
 #[test]
@@ -181,10 +180,7 @@ fn test_idempotent(x: String):
 
     let func = parse_and_get_function(input);
     assert!(func.is_property_test());
-    assert!(
-        func.property_test_config().is_none(),
-        "Should have no config params"
-    );
+    assert!(func.property_test_config().is_none(), "Should have no config params");
 }
 
 #[test]

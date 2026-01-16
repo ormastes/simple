@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 // Import shared test helpers
 mod test_helpers;
 use test_helpers::{
-    run_expect, run_expect_compile_error, run_expect_compile_error_at, run_expect_error,
-    run_expect_interp, run_expect_parity, run_expect_runtime_error,
+    run_expect, run_expect_compile_error, run_expect_compile_error_at, run_expect_error, run_expect_interp,
+    run_expect_parity, run_expect_runtime_error,
 };
 
 #[test]
@@ -123,10 +123,7 @@ counter = counter + 1
 main = counter
 "#;
     let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(
-        exit, 2,
-        "static mut counter should be 2 after two increments"
-    );
+    assert_eq!(exit, 2, "static mut counter should be 2 after two increments");
 
     // Static (non-mut) cannot be reassigned (should error)
     let src = r#"

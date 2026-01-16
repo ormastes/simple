@@ -48,9 +48,7 @@ impl<'a> MirLowerer<'a> {
 
         self.with_func(|func, current_block| {
             let block = func.block_mut(current_block).unwrap();
-            block
-                .instructions
-                .push(MirInst::PathProbe { path_id, block_id });
+            block.instructions.push(MirInst::PathProbe { path_id, block_id });
         })?;
 
         Ok(())

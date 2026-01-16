@@ -38,11 +38,7 @@ impl ContextPack {
     }
 
     /// Extract context from a module, focusing on symbols used by target
-    pub fn from_target(
-        target: impl Into<String>,
-        nodes: &[Node],
-        all_symbols: &ApiSurface,
-    ) -> Self {
+    pub fn from_target(target: impl Into<String>, nodes: &[Node], all_symbols: &ApiSurface) -> Self {
         let target_str = target.into();
         let mut pack = Self::new(target_str.clone());
 
@@ -89,11 +85,7 @@ impl ContextPack {
     }
 
     /// Extract context with minimal mode (only directly used symbols)
-    pub fn from_target_minimal(
-        target: impl Into<String>,
-        nodes: &[Node],
-        all_symbols: &ApiSurface,
-    ) -> Self {
+    pub fn from_target_minimal(target: impl Into<String>, nodes: &[Node], all_symbols: &ApiSurface) -> Self {
         let target_str = target.into();
         let mut pack = Self::new(target_str.clone());
 
@@ -130,9 +122,7 @@ impl ContextPack {
             Type::Array { element, .. } => {
                 self.collect_types(element);
             }
-            Type::Optional(inner)
-            | Type::Pointer { inner, .. }
-            | Type::Capability { inner, .. } => {
+            Type::Optional(inner) | Type::Pointer { inner, .. } | Type::Capability { inner, .. } => {
                 self.collect_types(inner);
             }
             Type::Tuple(types) | Type::Union(types) => {

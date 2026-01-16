@@ -46,9 +46,7 @@ pub extern "C" fn rt_vk_buffer_alloc(device_handle: u64, size: u64) -> u64 {
                 Ok(buffer) => {
                     drop(registry); // Release device registry lock
                     let handle = next_handle();
-                    BUFFER_REGISTRY
-                        .lock()
-                        .insert(handle, std::sync::Arc::new(buffer));
+                    BUFFER_REGISTRY.lock().insert(handle, std::sync::Arc::new(buffer));
                     tracing::debug!("Vulkan buffer {} allocated ({} bytes)", handle, size);
                     handle
                 }
@@ -233,11 +231,7 @@ pub extern "C" fn rt_vk_buffer_download(buffer_handle: u64, data: *mut u8, size:
             match buffer.download(size) {
                 Ok(downloaded) => {
                     if downloaded.len() != size as usize {
-                        tracing::error!(
-                            "Downloaded size mismatch: expected {}, got {}",
-                            size,
-                            downloaded.len()
-                        );
+                        tracing::error!("Downloaded size mismatch: expected {}, got {}", size, downloaded.len());
                         return VulkanFfiError::BufferTooSmall as i32;
                     }
                     unsafe {

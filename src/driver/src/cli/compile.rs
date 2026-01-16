@@ -227,11 +227,7 @@ pub fn list_linkers() -> i32 {
             "mold",
             "Modern, fastest linker (Linux only, ~4x faster than lld)",
         ),
-        (
-            NativeLinker::Lld,
-            "lld",
-            "LLVM's linker (cross-platform, fast)",
-        ),
+        (NativeLinker::Lld, "lld", "LLVM's linker (cross-platform, fast)"),
         (NativeLinker::Ld, "ld", "GNU ld (traditional fallback)"),
     ];
 

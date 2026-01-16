@@ -133,9 +133,7 @@ impl Parser<'_> {
 
     /// Parse optional let-pattern syntax: `let PATTERN =`
     /// Used by if-let and while-let constructs
-    pub(crate) fn parse_optional_let_pattern(
-        &mut self,
-    ) -> Result<(Option<Pattern>, Expr), ParseError> {
+    pub(crate) fn parse_optional_let_pattern(&mut self) -> Result<(Option<Pattern>, Expr), ParseError> {
         if self.check(&TokenKind::Let) || self.check(&TokenKind::Val) {
             self.advance(); // consume let or val
             let pattern = self.parse_pattern()?;
@@ -149,9 +147,7 @@ impl Parser<'_> {
 
     /// Parse use path and target (shared by use, common use, export use)
     /// Supports both Python-style (module.{A, B}) and Rust-style (module::{A, B})
-    pub(crate) fn parse_use_path_and_target(
-        &mut self,
-    ) -> Result<(ModulePath, ImportTarget), ParseError> {
+    pub(crate) fn parse_use_path_and_target(&mut self) -> Result<(ModulePath, ImportTarget), ParseError> {
         let path = self.parse_module_path()?;
 
         // Check for Rust-style :: before { or *
@@ -576,19 +572,13 @@ impl Parser<'_> {
                     Ok(repr)
                 } else {
                     Err(ParseError::syntax_error_with_span(
-                        format!(
-                            "Invalid repr type '{}'. Expected format: u8, i12, f32, etc.",
-                            s
-                        ),
+                        format!("Invalid repr type '{}'. Expected format: u8, i12, f32, etc.", s),
                         self.current.span,
                     ))
                 }
             }
             _ => Err(ParseError::syntax_error_with_span(
-                format!(
-                    "Expected repr type (u8, i12, f32, etc.), got {:?}",
-                    self.current.kind
-                ),
+                format!("Expected repr type (u8, i12, f32, etc.), got {:?}", self.current.kind),
                 self.current.span,
             )),
         }
@@ -646,10 +636,7 @@ impl Parser<'_> {
                 "abs" => UnaryArithmeticOp::Abs,
                 _ => {
                     return Err(ParseError::syntax_error_with_span(
-                        format!(
-                            "Unknown unary arithmetic operation '{}'. Expected: neg, abs",
-                            op_name
-                        ),
+                        format!("Unknown unary arithmetic operation '{}'. Expected: neg, abs", op_name),
                         self.previous.span,
                     ));
                 }
@@ -743,10 +730,7 @@ impl Parser<'_> {
                             }
                         } else {
                             return Err(ParseError::syntax_error_with_span(
-                                format!(
-                                    "Unknown handle_pool field '{}', expected 'capacity'",
-                                    field_name
-                                ),
+                                format!("Unknown handle_pool field '{}', expected 'capacity'", field_name),
                                 self.previous.span,
                             ));
                         }

@@ -97,9 +97,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    pub(super) fn parse_macro_contract_items(
-        &mut self,
-    ) -> Result<Vec<MacroContractItem>, ParseError> {
+    pub(super) fn parse_macro_contract_items(&mut self) -> Result<Vec<MacroContractItem>, ParseError> {
         let mut items = Vec::new();
         while !self.check(&TokenKind::RParen) && !self.is_at_end() {
             while self.check(&TokenKind::Newline) {
@@ -183,22 +181,15 @@ impl<'a> Parser<'a> {
             let body = self.parse_macro_intro_spec_block(&[TokenKind::Comma, TokenKind::RParen])?;
             Ok(MacroIntroSpec::For {
                 name,
-                range: MacroConstRange {
-                    start,
-                    end,
-                    inclusive,
-                },
+                range: MacroConstRange { start, end, inclusive },
                 body,
             })
         } else if self.check(&TokenKind::If) {
             self.advance();
             let condition = self.parse_expression()?;
             self.expect(&TokenKind::Colon)?;
-            let then_body = self.parse_macro_intro_spec_block(&[
-                TokenKind::Else,
-                TokenKind::Comma,
-                TokenKind::RParen,
-            ])?;
+            let then_body =
+                self.parse_macro_intro_spec_block(&[TokenKind::Else, TokenKind::Comma, TokenKind::RParen])?;
             let else_body = if self.check(&TokenKind::Else) {
                 self.advance();
                 self.expect(&TokenKind::Colon)?;

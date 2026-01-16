@@ -17,8 +17,7 @@ impl Weaver {
         let mut result = WeavingResult::default();
 
         // Track which advice rules were used
-        let mut used_advice_rules: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut used_advice_rules: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         // Group join points by block for efficient insertion
         let mut insertions: HashMap<BlockId, Vec<(usize, Vec<MatchedAdvice>)>> = HashMap::new();
@@ -97,7 +96,7 @@ impl Weaver {
     /// Create a MIR instruction for calling an advice function.
     fn create_advice_call(&self, advice_function: &str, args: Vec<VReg>) -> MirInst {
         MirInst::Call {
-            dest: None, // Advice functions don't return values (for now)
+            dest: None,                                          // Advice functions don't return values (for now)
             target: CallTarget::Io(advice_function.to_string()), // Use Io effect by default
             args,
         }
@@ -105,27 +104,13 @@ impl Weaver {
 
     /// Insert advice calls into a block at a specific instruction index.
     /// Returns the number of instructions inserted.
-    fn insert_advice_calls(
-        &self,
-        block: &mut MirBlock,
-        instruction_index: usize,
-        advices: &[MatchedAdvice],
-    ) -> usize {
+    fn insert_advice_calls(&self, block: &mut MirBlock, instruction_index: usize, advices: &[MatchedAdvice]) -> usize {
         let mut inserted = 0;
 
         // Separate advices by form
-        let before_advices: Vec<_> = advices
-            .iter()
-            .filter(|a| a.form == AdviceForm::Before)
-            .collect();
-        let after_success_advices: Vec<_> = advices
-            .iter()
-            .filter(|a| a.form == AdviceForm::AfterSuccess)
-            .collect();
-        let after_error_advices: Vec<_> = advices
-            .iter()
-            .filter(|a| a.form == AdviceForm::AfterError)
-            .collect();
+        let before_advices: Vec<_> = advices.iter().filter(|a| a.form == AdviceForm::Before).collect();
+        let after_success_advices: Vec<_> = advices.iter().filter(|a| a.form == AdviceForm::AfterSuccess).collect();
+        let after_error_advices: Vec<_> = advices.iter().filter(|a| a.form == AdviceForm::AfterError).collect();
 
         // Insert Before advices before the join point instruction
         for (i, advice) in before_advices.iter().enumerate() {
@@ -173,10 +158,7 @@ impl Weaver {
         // Note: Around advice uses the runtime proceed mechanism (rt_aop_invoke_around)
         // True compile-time around would require extracting the join point into a continuation,
         // which needs complex MIR transformations. For now, we document this limitation.
-        let around_advices: Vec<_> = advices
-            .iter()
-            .filter(|a| a.form == AdviceForm::Around)
-            .collect();
+        let around_advices: Vec<_> = advices.iter().filter(|a| a.form == AdviceForm::Around).collect();
 
         if !around_advices.is_empty() {
             // Around advice requires wrapping the join point in a continuation

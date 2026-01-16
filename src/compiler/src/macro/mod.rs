@@ -34,6 +34,4 @@ mod substitution;
 pub(crate) use helpers::{build_macro_const_bindings, const_value_to_string};
 pub(crate) use invocation::evaluate_macro_invocation;
 pub use state::set_macro_trace;
-pub(crate) use state::{
-    enter_block_scope, exit_block_scope, queue_tail_injection, take_macro_introduced_symbols,
-};
+pub(crate) use state::{enter_block_scope, exit_block_scope, queue_tail_injection, take_macro_introduced_symbols};

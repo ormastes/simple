@@ -208,12 +208,7 @@ impl<'a> SuiLexer<'a> {
             self.advance();
             self.mode_stack.push(self.mode);
             self.mode = LexerMode::Tag;
-            return self.make_token(
-                SuiTokenKind::TagEndOpen,
-                start_pos,
-                start_line,
-                start_column,
-            );
+            return self.make_token(SuiTokenKind::TagEndOpen, start_pos, start_line, start_column);
         }
 
         self.mode_stack.push(self.mode);
@@ -243,12 +238,7 @@ impl<'a> SuiLexer<'a> {
                 self.advance();
                 self.advance();
                 self.mode = self.mode_stack.pop().unwrap_or(LexerMode::Html);
-                self.make_token(
-                    SuiTokenKind::TagSelfClose,
-                    start_pos,
-                    start_line,
-                    start_column,
-                )
+                self.make_token(SuiTokenKind::TagSelfClose, start_pos, start_line, start_column)
             }
             '=' => {
                 self.advance();
@@ -263,9 +253,7 @@ impl<'a> SuiLexer<'a> {
                 self.advance();
                 self.make_token(SuiTokenKind::LBrace, start_pos, start_line, start_column)
             }
-            _ if ch.is_alphabetic() || ch == '_' || ch == ':' || ch == '-' => {
-                self.scan_identifier()
-            }
+            _ if ch.is_alphabetic() || ch == '_' || ch == ':' || ch == '-' => self.scan_identifier(),
             _ => {
                 self.advance();
                 self.make_token(
@@ -615,8 +603,7 @@ impl<'a> SuiLexer<'a> {
         }
 
         // Check for keywords
-        let kind = SuiTokenKind::keyword_from_str(&value)
-            .unwrap_or_else(|| SuiTokenKind::Identifier(value.clone()));
+        let kind = SuiTokenKind::keyword_from_str(&value).unwrap_or_else(|| SuiTokenKind::Identifier(value.clone()));
 
         SuiToken::new(
             kind,
@@ -663,13 +650,7 @@ impl<'a> SuiLexer<'a> {
         }
     }
 
-    fn make_token(
-        &self,
-        kind: SuiTokenKind,
-        start_pos: usize,
-        start_line: usize,
-        start_column: usize,
-    ) -> SuiToken {
+    fn make_token(&self, kind: SuiTokenKind, start_pos: usize, start_line: usize, start_column: usize) -> SuiToken {
         let lexeme = self.source[start_pos..self.current_pos].to_string();
         SuiToken::new(
             kind,

@@ -75,11 +75,7 @@ mod tests {
 
         // Verify phase - Check mock interactions
         let mut dao_verify = MockVerify::new("UserDao");
-        dao_verify
-            .method("find_by_id")
-            .was_called()
-            .with_args(&[123])
-            .once();
+        dao_verify.method("find_by_id").was_called().with_args(&[123]).once();
 
         // Simulate actual call count (in real code, the mock framework provides this)
         dao_verify.verifications_mut()[0].set_actual_calls(1);
@@ -169,9 +165,7 @@ mod tests {
         let mut setup = MockSetup::new("Counter");
 
         // Return different values on successive calls
-        setup
-            .when("next")
-            .returns_seq(vec!["1", "2", "3", "4", "5"]);
+        setup.when("next").returns_seq(vec!["1", "2", "3", "4", "5"]);
 
         let returns = setup.setups()[0].return_values();
         assert_eq!(returns.len(), 5);
@@ -212,10 +206,7 @@ mod tests {
             .when("authenticate")
             .with_args(&["admin", "secret"])
             .returns("token123");
-        setup
-            .when("authorize")
-            .with_args(&["token123", "read"])
-            .returns("true");
+        setup.when("authorize").with_args(&["token123", "read"]).returns("true");
         setup
             .when("execute")
             .with_args(&["token123", "query"])
@@ -235,10 +226,7 @@ mod tests {
         let mut setup = MockSetup::new("Library");
 
         // Mock a deep call chain: library.getHeadLibrarian().getName()
-        setup
-            .when("getHeadLibrarian")
-            .chain("getName")
-            .returns("Jane Doe");
+        setup.when("getHeadLibrarian").chain("getName").returns("Jane Doe");
 
         // Mock another chain: company.getDepartment("Engineering").getManager().getName()
         setup
@@ -260,10 +248,7 @@ mod tests {
         let second = &setup.setups()[1];
         assert_eq!(second.method_name(), "getDepartment");
         assert_eq!(second.method_chain().len(), 2);
-        assert_eq!(
-            second.full_method_path(),
-            "getDepartment().getManager().getName"
-        );
+        assert_eq!(second.full_method_path(), "getDepartment().getManager().getName");
 
         println!("Deep call chain mocking:");
         for s in setup.setups() {

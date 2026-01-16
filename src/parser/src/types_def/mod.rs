@@ -24,10 +24,7 @@ impl<'a> Parser<'a> {
         self.parse_struct_with_attrs(vec![])
     }
 
-    pub(crate) fn parse_struct_with_attrs(
-        &mut self,
-        attributes: Vec<Attribute>,
-    ) -> Result<Node, ParseError> {
+    pub(crate) fn parse_struct_with_attrs(&mut self, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Struct)?;
         let name = self.expect_identifier()?;
@@ -56,10 +53,7 @@ impl<'a> Parser<'a> {
         self.parse_class_with_attrs(vec![])
     }
 
-    pub(crate) fn parse_class_with_attrs(
-        &mut self,
-        attributes: Vec<Attribute>,
-    ) -> Result<Node, ParseError> {
+    pub(crate) fn parse_class_with_attrs(&mut self, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Class)?;
         let name = self.expect_identifier()?;
@@ -107,8 +101,7 @@ impl<'a> Parser<'a> {
         }
 
         let where_clause = self.parse_where_clause()?;
-        let (fields, methods, invariant, macro_invocations, mut mixins, doc_comment) =
-            self.parse_class_body()?;
+        let (fields, methods, invariant, macro_invocations, mut mixins, doc_comment) = self.parse_class_body()?;
 
         // Prepend explicit mixins from `with` clause
         mixins.splice(0..0, explicit_mixins);
@@ -148,8 +141,7 @@ impl<'a> Parser<'a> {
         };
 
         let _where_clause = self.parse_where_clause()?;
-        let (fields, methods, _invariant, _macro_invocations, _mixins, doc_comment) =
-            self.parse_class_body()?;
+        let (fields, methods, _invariant, _macro_invocations, _mixins, doc_comment) = self.parse_class_body()?;
 
         // Parse required methods (methods without bodies)
         let required_methods = methods
@@ -223,8 +215,7 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Actor)?;
         let name = self.expect_identifier()?;
 
-        let (fields, methods, _invariant, _doc_comment) =
-            self.parse_indented_fields_and_methods()?;
+        let (fields, methods, _invariant, _doc_comment) = self.parse_indented_fields_and_methods()?;
 
         Ok(Node::Actor(ActorDef {
             span: self.make_span(start_span),
@@ -344,15 +335,7 @@ impl<'a> Parser<'a> {
     /// Parse fields and methods in an indented block (class, actor, struct)
     fn parse_indented_fields_and_methods(
         &mut self,
-    ) -> Result<
-        (
-            Vec<Field>,
-            Vec<FunctionDef>,
-            Option<InvariantBlock>,
-            Option<DocComment>,
-        ),
-        ParseError,
-    > {
+    ) -> Result<(Vec<Field>, Vec<FunctionDef>, Option<InvariantBlock>, Option<DocComment>), ParseError> {
         self.debug_enter("parse_indented_fields_and_methods");
         self.expect_block_start()?;
         let mut fields = Vec::new();
@@ -412,8 +395,7 @@ impl<'a> Parser<'a> {
                 || self.check(&TokenKind::At)
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
-                || (self.check(&TokenKind::Pub)
-                    && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async)))
+                || (self.check(&TokenKind::Pub) && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async)))
             {
                 // Method (optionally async/decorated/attributed/pub/static).
                 let start_span = self.current.span;
@@ -428,10 +410,7 @@ impl<'a> Parser<'a> {
                 if let Node::Function(mut f) = item {
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present
                     // Skip auto-injection for constructors (methods named "new")
-                    if !is_static
-                        && f.name != "new"
-                        && (f.params.is_empty() || f.params[0].name != "self")
-                    {
+                    if !is_static && f.name != "new" && (f.params.is_empty() || f.params[0].name != "self") {
                         // Inject implicit self parameter at the beginning
                         let self_param = Parameter {
                             span: f.span,
@@ -558,8 +537,7 @@ impl<'a> Parser<'a> {
                 || self.check(&TokenKind::At)
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
-                || (self.check(&TokenKind::Pub)
-                    && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async)))
+                || (self.check(&TokenKind::Pub) && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async)))
             {
                 let start_span = self.current.span;
                 // Handle optional `static` keyword for static methods
@@ -573,10 +551,7 @@ impl<'a> Parser<'a> {
                 if let Node::Function(mut f) = item {
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present
                     // Skip auto-injection for constructors (methods named "new")
-                    if !is_static
-                        && f.name != "new"
-                        && (f.params.is_empty() || f.params[0].name != "self")
-                    {
+                    if !is_static && f.name != "new" && (f.params.is_empty() || f.params[0].name != "self") {
                         // Inject implicit self parameter at the beginning
                         let self_param = Parameter {
                             span: f.span,
@@ -605,14 +580,7 @@ impl<'a> Parser<'a> {
         }
         self.consume_dedent();
         self.debug_exit("parse_class_body");
-        Ok((
-            fields,
-            methods,
-            invariant,
-            macro_invocations,
-            mixins,
-            doc_comment,
-        ))
+        Ok((fields, methods, invariant, macro_invocations, mixins, doc_comment))
     }
 
     /// Check if current position is at a macro invocation (identifier followed by !)

@@ -106,12 +106,7 @@ impl<'a> super::Lexer<'a> {
         self.next_token().kind
     }
 
-    pub(super) fn read_doc_block_comment(
-        &mut self,
-        start_pos: usize,
-        start_line: usize,
-        start_column: usize,
-    ) -> Token {
+    pub(super) fn read_doc_block_comment(&mut self, start_pos: usize, start_line: usize, start_column: usize) -> Token {
         // Read doc comment content until */ is found
         let content = self.parse_nested_comment();
         // Trim leading/trailing whitespace from each line and remove leading *
@@ -124,12 +119,7 @@ impl<'a> super::Lexer<'a> {
         )
     }
 
-    pub(super) fn read_doc_line_comment(
-        &mut self,
-        start_pos: usize,
-        start_line: usize,
-        start_column: usize,
-    ) -> Token {
+    pub(super) fn read_doc_line_comment(&mut self, start_pos: usize, start_line: usize, start_column: usize) -> Token {
         // Skip leading whitespace after ///
         while let Some(ch) = self.peek() {
             if ch == ' ' || ch == '\t' {

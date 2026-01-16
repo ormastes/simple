@@ -9,9 +9,7 @@ use crate::manifest::{Dependency, DependencyDetail, Manifest};
 fn load_manifest(dir: &Path) -> PkgResult<(std::path::PathBuf, Manifest)> {
     let manifest_path = dir.join("simple.toml");
     if !manifest_path.exists() {
-        return Err(PkgError::ManifestNotFound(
-            manifest_path.display().to_string(),
-        ));
+        return Err(PkgError::ManifestNotFound(manifest_path.display().to_string()));
     }
     let manifest = Manifest::load(&manifest_path)?;
     Ok((manifest_path, manifest))

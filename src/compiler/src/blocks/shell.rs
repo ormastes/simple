@@ -37,17 +37,11 @@ impl BlockHandler for ShellBlock {
 #[derive(Debug, Clone)]
 pub enum ShellCommand {
     /// Simple command with arguments
-    Simple {
-        command: String,
-        args: Vec<String>,
-    },
+    Simple { command: String, args: Vec<String> },
     /// Pipeline of commands
     Pipeline(Vec<ShellCommand>),
     /// Variable assignment
-    Assignment {
-        name: String,
-        value: String,
-    },
+    Assignment { name: String, value: String },
     /// Command sequence (separated by ;)
     Sequence(Vec<ShellCommand>),
 }

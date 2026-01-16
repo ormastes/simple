@@ -122,11 +122,7 @@ fn resolve_single(name: &str, dep: &Dependency, context_dir: &Path) -> PkgResult
                     version: Version::default(),
                     source: ResolvedSource::Git {
                         url: git.clone(),
-                        rev: d
-                            .rev
-                            .clone()
-                            .or_else(|| d.tag.clone())
-                            .or_else(|| d.branch.clone()),
+                        rev: d.rev.clone().or_else(|| d.tag.clone()).or_else(|| d.branch.clone()),
                     },
                     dependencies: Vec::new(),
                 })
@@ -315,11 +311,7 @@ json = "^2.0"
         let lib_c = temp.join("lib_c");
 
         // myapp -> lib_a, lib_b; lib_a -> lib_c; lib_b -> lib_c
-        create_manifest(
-            &temp,
-            "myapp",
-            &[("lib_a", "./lib_a"), ("lib_b", "./lib_b")],
-        );
+        create_manifest(&temp, "myapp", &[("lib_a", "./lib_a"), ("lib_b", "./lib_b")]);
         create_manifest(&lib_a, "lib_a", &[("lib_c", "../lib_c")]);
         create_manifest(&lib_b, "lib_b", &[("lib_c", "../lib_c")]);
         create_manifest(&lib_c, "lib_c", &[]);

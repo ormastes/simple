@@ -44,16 +44,12 @@ fn apply_network_isolation(mode: &NetworkMode) -> SandboxResult<()> {
             Ok(())
         }
         NetworkMode::None => {
-            tracing::warn!(
-                "Network isolation on macOS requires sandbox-exec re-execution or Docker"
-            );
+            tracing::warn!("Network isolation on macOS requires sandbox-exec re-execution or Docker");
             tracing::info!("Consider using: simple run --sandbox=docker script.spl");
             Ok(())
         }
         NetworkMode::AllowList | NetworkMode::BlockList => {
-            tracing::warn!(
-                "Domain filtering on macOS requires sandbox-exec re-execution or Docker"
-            );
+            tracing::warn!("Domain filtering on macOS requires sandbox-exec re-execution or Docker");
             Ok(())
         }
     }
@@ -72,9 +68,7 @@ fn apply_filesystem_isolation(
         }
         FilesystemMode::ReadOnly => {
             tracing::debug!("Filesystem: Read-only with {} paths", read_paths.len());
-            tracing::warn!(
-                "Filesystem isolation on macOS requires sandbox-exec re-execution or Docker"
-            );
+            tracing::warn!("Filesystem isolation on macOS requires sandbox-exec re-execution or Docker");
             Ok(())
         }
         FilesystemMode::Restricted => {
@@ -83,9 +77,7 @@ fn apply_filesystem_isolation(
                 read_paths.len(),
                 write_paths.len()
             );
-            tracing::warn!(
-                "Filesystem isolation on macOS requires sandbox-exec re-execution or Docker"
-            );
+            tracing::warn!("Filesystem isolation on macOS requires sandbox-exec re-execution or Docker");
             Ok(())
         }
         FilesystemMode::Overlay => {
@@ -137,24 +129,15 @@ pub fn generate_sandbox_profile(config: &SandboxConfig) -> String {
         }
         FilesystemMode::ReadOnly => {
             for path in &config.filesystem.read_paths {
-                profile.push_str(&format!(
-                    "(allow file-read* (subpath \"{}\"))\n",
-                    path.display()
-                ));
+                profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", path.display()));
             }
         }
         FilesystemMode::Restricted => {
             for path in &config.filesystem.read_paths {
-                profile.push_str(&format!(
-                    "(allow file-read* (subpath \"{}\"))\n",
-                    path.display()
-                ));
+                profile.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", path.display()));
             }
             for path in &config.filesystem.write_paths {
-                profile.push_str(&format!(
-                    "(allow file-write* (subpath \"{}\"))\n",
-                    path.display()
-                ));
+                profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", path.display()));
             }
         }
         FilesystemMode::Overlay => {

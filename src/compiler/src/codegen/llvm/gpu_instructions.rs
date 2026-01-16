@@ -101,12 +101,10 @@ impl LlvmBackend {
         let i64_type = self.context.i64_type();
         let i32_type = self.context.i32_type();
 
-        let gpu_global_size = module
-            .get_function("rt_gpu_global_size")
-            .unwrap_or_else(|| {
-                let fn_type = i64_type.fn_type(&[i32_type.into()], false);
-                module.add_function("rt_gpu_global_size", fn_type, None)
-            });
+        let gpu_global_size = module.get_function("rt_gpu_global_size").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i32_type.into()], false);
+            module.add_function("rt_gpu_global_size", fn_type, None)
+        });
 
         let dim_val = i32_type.const_int(dim as u64, false);
         let call_site = builder
@@ -282,22 +280,13 @@ impl LlvmBackend {
         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
 
         // CmpXchg takes 3 arguments: ptr, expected, desired
-        let cmpxchg_fn = module
-            .get_function("rt_gpu_atomic_cmpxchg_i64")
-            .unwrap_or_else(|| {
-                let fn_type = i64_type.fn_type(
-                    &[i8_ptr_type.into(), i64_type.into(), i64_type.into()],
-                    false,
-                );
-                module.add_function("rt_gpu_atomic_cmpxchg_i64", fn_type, None)
-            });
+        let cmpxchg_fn = module.get_function("rt_gpu_atomic_cmpxchg_i64").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i8_ptr_type.into(), i64_type.into(), i64_type.into()], false);
+            module.add_function("rt_gpu_atomic_cmpxchg_i64", fn_type, None)
+        });
 
         let call_site = builder
-            .build_call(
-                cmpxchg_fn,
-                &[ptr.into(), expected.into(), desired.into()],
-                "cmpxchg",
-            )
+            .build_call(cmpxchg_fn, &[ptr.into(), expected.into(), desired.into()], "cmpxchg")
             .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
 
         call_site
@@ -317,12 +306,10 @@ impl LlvmBackend {
         let i64_type = self.context.i64_type();
         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
 
-        let gpu_shared_alloc = module
-            .get_function("rt_gpu_shared_alloc")
-            .unwrap_or_else(|| {
-                let fn_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
-                module.add_function("rt_gpu_shared_alloc", fn_type, None)
-            });
+        let gpu_shared_alloc = module.get_function("rt_gpu_shared_alloc").unwrap_or_else(|| {
+            let fn_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
+            module.add_function("rt_gpu_shared_alloc", fn_type, None)
+        });
 
         let size_val = i64_type.const_int(size as u64, false);
         let call_site = builder

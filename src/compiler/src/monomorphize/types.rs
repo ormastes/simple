@@ -111,20 +111,12 @@ impl std::fmt::Display for ConcreteType {
             ConcreteType::Named(name) => write!(f, "{}", name),
             ConcreteType::Array(elem) => write!(f, "Array_{}", elem),
             ConcreteType::Tuple(elems) => {
-                let s = elems
-                    .iter()
-                    .map(|e| e.to_string())
-                    .collect::<Vec<_>>()
-                    .join("_");
+                let s = elems.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("_");
                 write!(f, "Tuple_{}", s)
             }
             ConcreteType::Dict { key, value } => write!(f, "Dict_{}_{}", key, value),
             ConcreteType::Function { params, ret } => {
-                let p = params
-                    .iter()
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>()
-                    .join("_");
+                let p = params.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("_");
                 write!(f, "Fn_{}_{}", p, ret)
             }
             ConcreteType::Optional(inner) => write!(f, "Opt_{}", inner),
@@ -140,11 +132,7 @@ impl std::fmt::Display for ConcreteType {
                 write!(f, "{}_{}", k, inner)
             }
             ConcreteType::Specialized { name, args } => {
-                let a = args
-                    .iter()
-                    .map(|a| a.to_string())
-                    .collect::<Vec<_>>()
-                    .join("_");
+                let a = args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join("_");
                 write!(f, "{}_{}", name, a)
             }
         }

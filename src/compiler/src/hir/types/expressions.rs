@@ -210,10 +210,7 @@ impl HirExprKind {
             },
             HirExprKind::Call { func, args } => HirExprKind::Call {
                 func: Box::new(func.substitute_local(from_idx, to_idx)),
-                args: args
-                    .iter()
-                    .map(|a| a.substitute_local(from_idx, to_idx))
-                    .collect(),
+                args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
             },
             HirExprKind::MethodCall {
                 receiver,
@@ -223,16 +220,10 @@ impl HirExprKind {
             } => HirExprKind::MethodCall {
                 receiver: Box::new(receiver.substitute_local(from_idx, to_idx)),
                 method: method.clone(),
-                args: args
-                    .iter()
-                    .map(|a| a.substitute_local(from_idx, to_idx))
-                    .collect(),
+                args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
                 dispatch: *dispatch,
             },
-            HirExprKind::FieldAccess {
-                receiver,
-                field_index,
-            } => HirExprKind::FieldAccess {
+            HirExprKind::FieldAccess { receiver, field_index } => HirExprKind::FieldAccess {
                 receiver: Box::new(receiver.substitute_local(from_idx, to_idx)),
                 field_index: *field_index,
             },
@@ -240,24 +231,15 @@ impl HirExprKind {
                 receiver: Box::new(receiver.substitute_local(from_idx, to_idx)),
                 index: Box::new(index.substitute_local(from_idx, to_idx)),
             },
-            HirExprKind::Tuple(elements) => HirExprKind::Tuple(
-                elements
-                    .iter()
-                    .map(|e| e.substitute_local(from_idx, to_idx))
-                    .collect(),
-            ),
-            HirExprKind::Array(elements) => HirExprKind::Array(
-                elements
-                    .iter()
-                    .map(|e| e.substitute_local(from_idx, to_idx))
-                    .collect(),
-            ),
+            HirExprKind::Tuple(elements) => {
+                HirExprKind::Tuple(elements.iter().map(|e| e.substitute_local(from_idx, to_idx)).collect())
+            }
+            HirExprKind::Array(elements) => {
+                HirExprKind::Array(elements.iter().map(|e| e.substitute_local(from_idx, to_idx)).collect())
+            }
             HirExprKind::StructInit { ty, fields } => HirExprKind::StructInit {
                 ty: *ty,
-                fields: fields
-                    .iter()
-                    .map(|f| f.substitute_local(from_idx, to_idx))
-                    .collect(),
+                fields: fields.iter().map(|f| f.substitute_local(from_idx, to_idx)).collect(),
             },
             HirExprKind::If {
                 condition,
@@ -270,12 +252,8 @@ impl HirExprKind {
                     .as_ref()
                     .map(|e| Box::new(e.substitute_local(from_idx, to_idx))),
             },
-            HirExprKind::Ref(inner) => {
-                HirExprKind::Ref(Box::new(inner.substitute_local(from_idx, to_idx)))
-            }
-            HirExprKind::Deref(inner) => {
-                HirExprKind::Deref(Box::new(inner.substitute_local(from_idx, to_idx)))
-            }
+            HirExprKind::Ref(inner) => HirExprKind::Ref(Box::new(inner.substitute_local(from_idx, to_idx))),
+            HirExprKind::Deref(inner) => HirExprKind::Deref(Box::new(inner.substitute_local(from_idx, to_idx))),
             HirExprKind::PointerNew { kind, value } => HirExprKind::PointerNew {
                 kind: *kind,
                 value: Box::new(value.substitute_local(from_idx, to_idx)),
@@ -289,17 +267,11 @@ impl HirExprKind {
             }
             HirExprKind::BuiltinCall { name, args } => HirExprKind::BuiltinCall {
                 name: name.clone(),
-                args: args
-                    .iter()
-                    .map(|a| a.substitute_local(from_idx, to_idx))
-                    .collect(),
+                args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
             },
             HirExprKind::GpuIntrinsic { intrinsic, args } => HirExprKind::GpuIntrinsic {
                 intrinsic: *intrinsic,
-                args: args
-                    .iter()
-                    .map(|a| a.substitute_local(from_idx, to_idx))
-                    .collect(),
+                args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
             },
 
             HirExprKind::NeighborAccess { array, direction } => HirExprKind::NeighborAccess {
@@ -330,10 +302,7 @@ impl HirExprKind {
             },
             HirExprKind::Call { func, args } => HirExprKind::Call {
                 func: Box::new(func.substitute_self_with_result()),
-                args: args
-                    .iter()
-                    .map(|a| a.substitute_self_with_result())
-                    .collect(),
+                args: args.iter().map(|a| a.substitute_self_with_result()).collect(),
             },
             HirExprKind::MethodCall {
                 receiver,
@@ -343,16 +312,10 @@ impl HirExprKind {
             } => HirExprKind::MethodCall {
                 receiver: Box::new(receiver.substitute_self_with_result()),
                 method: method.clone(),
-                args: args
-                    .iter()
-                    .map(|a| a.substitute_self_with_result())
-                    .collect(),
+                args: args.iter().map(|a| a.substitute_self_with_result()).collect(),
                 dispatch: *dispatch,
             },
-            HirExprKind::FieldAccess {
-                receiver,
-                field_index,
-            } => HirExprKind::FieldAccess {
+            HirExprKind::FieldAccess { receiver, field_index } => HirExprKind::FieldAccess {
                 receiver: Box::new(receiver.substitute_self_with_result()),
                 field_index: *field_index,
             },
@@ -360,24 +323,15 @@ impl HirExprKind {
                 receiver: Box::new(receiver.substitute_self_with_result()),
                 index: Box::new(index.substitute_self_with_result()),
             },
-            HirExprKind::Tuple(elements) => HirExprKind::Tuple(
-                elements
-                    .iter()
-                    .map(|e| e.substitute_self_with_result())
-                    .collect(),
-            ),
-            HirExprKind::Array(elements) => HirExprKind::Array(
-                elements
-                    .iter()
-                    .map(|e| e.substitute_self_with_result())
-                    .collect(),
-            ),
+            HirExprKind::Tuple(elements) => {
+                HirExprKind::Tuple(elements.iter().map(|e| e.substitute_self_with_result()).collect())
+            }
+            HirExprKind::Array(elements) => {
+                HirExprKind::Array(elements.iter().map(|e| e.substitute_self_with_result()).collect())
+            }
             HirExprKind::StructInit { ty, fields } => HirExprKind::StructInit {
                 ty: *ty,
-                fields: fields
-                    .iter()
-                    .map(|f| f.substitute_self_with_result())
-                    .collect(),
+                fields: fields.iter().map(|f| f.substitute_self_with_result()).collect(),
             },
             HirExprKind::If {
                 condition,
@@ -386,16 +340,10 @@ impl HirExprKind {
             } => HirExprKind::If {
                 condition: Box::new(condition.substitute_self_with_result()),
                 then_branch: Box::new(then_branch.substitute_self_with_result()),
-                else_branch: else_branch
-                    .as_ref()
-                    .map(|e| Box::new(e.substitute_self_with_result())),
+                else_branch: else_branch.as_ref().map(|e| Box::new(e.substitute_self_with_result())),
             },
-            HirExprKind::Ref(inner) => {
-                HirExprKind::Ref(Box::new(inner.substitute_self_with_result()))
-            }
-            HirExprKind::Deref(inner) => {
-                HirExprKind::Deref(Box::new(inner.substitute_self_with_result()))
-            }
+            HirExprKind::Ref(inner) => HirExprKind::Ref(Box::new(inner.substitute_self_with_result())),
+            HirExprKind::Deref(inner) => HirExprKind::Deref(Box::new(inner.substitute_self_with_result())),
             HirExprKind::PointerNew { kind, value } => HirExprKind::PointerNew {
                 kind: *kind,
                 value: Box::new(value.substitute_self_with_result()),
@@ -404,22 +352,14 @@ impl HirExprKind {
                 expr: Box::new(expr.substitute_self_with_result()),
                 target: *target,
             },
-            HirExprKind::ContractOld(inner) => {
-                HirExprKind::ContractOld(Box::new(inner.substitute_self_with_result()))
-            }
+            HirExprKind::ContractOld(inner) => HirExprKind::ContractOld(Box::new(inner.substitute_self_with_result())),
             HirExprKind::BuiltinCall { name, args } => HirExprKind::BuiltinCall {
                 name: name.clone(),
-                args: args
-                    .iter()
-                    .map(|a| a.substitute_self_with_result())
-                    .collect(),
+                args: args.iter().map(|a| a.substitute_self_with_result()).collect(),
             },
             HirExprKind::GpuIntrinsic { intrinsic, args } => HirExprKind::GpuIntrinsic {
                 intrinsic: *intrinsic,
-                args: args
-                    .iter()
-                    .map(|a| a.substitute_self_with_result())
-                    .collect(),
+                args: args.iter().map(|a| a.substitute_self_with_result()).collect(),
             },
 
             HirExprKind::NeighborAccess { array, direction } => HirExprKind::NeighborAccess {

@@ -32,10 +32,7 @@ pub fn lower_to_mir(
 }
 
 /// Parse source, lower to HIR, and lower to MIR with DI config
-pub fn parse_and_lower_with_di(
-    source: &str,
-    di_toml: &str,
-) -> Result<mir::MirModule, mir::MirLowerError> {
+pub fn parse_and_lower_with_di(source: &str, di_toml: &str) -> Result<mir::MirModule, mir::MirLowerError> {
     let hir_module = parse_and_lower(source);
     let di_config = parse_di_toml(di_toml);
     lower_to_mir(&hir_module, Some(di_config))
@@ -54,18 +51,12 @@ pub fn empty_di_config() -> di::DiConfig {
 // ============================================================================
 
 /// Find a function in HIR module by name
-pub fn find_hir_function<'a>(
-    module: &'a hir::HirModule,
-    name: &str,
-) -> Option<&'a hir::HirFunction> {
+pub fn find_hir_function<'a>(module: &'a hir::HirModule, name: &str) -> Option<&'a hir::HirFunction> {
     module.functions.iter().find(|f| f.name == name)
 }
 
 /// Find a function in MIR module by name
-pub fn find_mir_function<'a>(
-    module: &'a mir::MirModule,
-    name: &str,
-) -> Option<&'a mir::MirFunction> {
+pub fn find_mir_function<'a>(module: &'a mir::MirModule, name: &str) -> Option<&'a mir::MirFunction> {
     module.functions.iter().find(|f| f.name == name)
 }
 
@@ -75,20 +66,13 @@ pub fn find_mir_function<'a>(
 
 /// Assert that a function is marked as @inject in HIR
 pub fn assert_inject(module: &hir::HirModule, function_name: &str) {
-    let func = find_hir_function(module, function_name)
-        .unwrap_or_else(|| panic!("Function '{}' not found", function_name));
-    assert!(
-        func.inject,
-        "Function '{}' should be marked as @inject",
-        function_name
-    );
+    let func =
+        find_hir_function(module, function_name).unwrap_or_else(|| panic!("Function '{}' not found", function_name));
+    assert!(func.inject, "Function '{}' should be marked as @inject", function_name);
 }
 
 /// Assert that MIR lowering fails with a message containing the expected text
-pub fn assert_mir_error_contains(
-    result: Result<mir::MirModule, mir::MirLowerError>,
-    expected: &str,
-) {
+pub fn assert_mir_error_contains(result: Result<mir::MirModule, mir::MirLowerError>, expected: &str) {
     match result {
         Ok(_) => panic!("Expected MIR lowering to fail, but it succeeded"),
         Err(e) => {
@@ -107,10 +91,7 @@ pub fn assert_mir_error_contains(
 pub fn assert_mir_success(result: Result<mir::MirModule, mir::MirLowerError>) -> mir::MirModule {
     match result {
         Ok(module) => {
-            assert!(
-                !module.functions.is_empty(),
-                "MIR module should have functions"
-            );
+            assert!(!module.functions.is_empty(), "MIR module should have functions");
             module
         }
         Err(e) => panic!("Expected MIR lowering to succeed, but got error: {:?}", e),

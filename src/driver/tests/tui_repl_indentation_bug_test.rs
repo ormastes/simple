@@ -140,10 +140,7 @@ fn test_tui_indentation_bug_reproduction() -> Result<(), Box<dyn std::error::Err
         println!("   Got: Text merged with previous line");
     } else {
         println!("⚠️  UNKNOWN STATE: Cannot determine where text appeared");
-        println!(
-            "   Output: {}",
-            output3.lines().take(5).collect::<Vec<_>>().join("\n")
-        );
+        println!("   Output: {}", output3.lines().take(5).collect::<Vec<_>>().join("\n"));
     }
     println!();
 

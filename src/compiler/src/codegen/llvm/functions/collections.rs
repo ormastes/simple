@@ -70,9 +70,7 @@ impl LlvmBackend {
 
             let gep = builder
                 .build_struct_gep(struct_type, alloc, i as u32, "tuple_elem")
-                .map_err(|e| {
-                    CompileError::Semantic(format!("Failed to build struct gep: {}", e))
-                })?;
+                .map_err(|e| CompileError::Semantic(format!("Failed to build struct gep: {}", e)))?;
 
             builder
                 .build_store(gep, elem_val)
@@ -105,10 +103,10 @@ impl LlvmBackend {
 
         // Declare rt_dict_insert if not exists
         let dict_insert = module.get_function("rt_dict_insert").unwrap_or_else(|| {
-            let fn_type = self.context.void_type().fn_type(
-                &[i8_ptr_type.into(), i64_type.into(), i64_type.into()],
-                false,
-            );
+            let fn_type = self
+                .context
+                .void_type()
+                .fn_type(&[i8_ptr_type.into(), i64_type.into(), i64_type.into()], false);
             module.add_function("rt_dict_insert", fn_type, None)
         });
 
@@ -127,14 +125,8 @@ impl LlvmBackend {
             let value_val = self.get_vreg(value, vreg_map)?;
 
             builder
-                .build_call(
-                    dict_insert,
-                    &[dict_ptr.into(), key_val.into(), value_val.into()],
-                    "",
-                )
-                .map_err(|e| {
-                    CompileError::Semantic(format!("Failed to build dict_insert call: {}", e))
-                })?;
+                .build_call(dict_insert, &[dict_ptr.into(), key_val.into(), value_val.into()], "")
+                .map_err(|e| CompileError::Semantic(format!("Failed to build dict_insert call: {}", e)))?;
         }
 
         vreg_map.insert(dest, dict_ptr);
@@ -222,12 +214,7 @@ impl LlvmBackend {
         // Declare rt_slice if not exists
         let slice_fn = module.get_function("rt_slice").unwrap_or_else(|| {
             let fn_type = i8_ptr_type.fn_type(
-                &[
-                    i8_ptr_type.into(),
-                    i64_type.into(),
-                    i64_type.into(),
-                    i64_type.into(),
-                ],
+                &[i8_ptr_type.into(), i64_type.into(), i64_type.into(), i64_type.into()],
                 false,
             );
             module.add_function("rt_slice", fn_type, None)
@@ -259,12 +246,7 @@ impl LlvmBackend {
         let call_site = builder
             .build_call(
                 slice_fn,
-                &[
-                    coll_val.into(),
-                    start_val.into(),
-                    end_val.into(),
-                    step_val.into(),
-                ],
+                &[coll_val.into(), start_val.into(), end_val.into(), step_val.into()],
                 "slice",
             )
             .map_err(|e| CompileError::Semantic(format!("Failed to build slice call: {}", e)))?;

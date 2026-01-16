@@ -35,13 +35,11 @@ fn optimize_wasm(wasm_path: &Path) -> Result<usize, String> {
     let wasm_opt_available = Command::new("wasm-opt").arg("--version").output().is_ok();
 
     if !wasm_opt_available {
-        return Err(
-            "wasm-opt not found. Install binaryen for WASM optimization.\n\
+        return Err("wasm-opt not found. Install binaryen for WASM optimization.\n\
                     Ubuntu/Debian: sudo apt install binaryen\n\
                     macOS: brew install binaryen\n\
                     Or download from: https://github.com/WebAssembly/binaryen/releases"
-                .to_string(),
-        );
+            .to_string());
     }
 
     // Run wasm-opt with optimization level -O3
@@ -61,8 +59,7 @@ fn optimize_wasm(wasm_path: &Path) -> Result<usize, String> {
     }
 
     // Get optimized file size
-    let metadata =
-        fs::metadata(wasm_path).map_err(|e| format!("Failed to read optimized WASM: {}", e))?;
+    let metadata = fs::metadata(wasm_path).map_err(|e| format!("Failed to read optimized WASM: {}", e))?;
 
     Ok(metadata.len() as usize)
 }
@@ -106,11 +103,7 @@ impl Default for WebServeOptions {
 /// ```
 /// simple web serve app.sui --port 3000 --watch
 /// ```
-pub fn web_serve(
-    source: &PathBuf,
-    build_options: WebBuildOptions,
-    serve_options: WebServeOptions,
-) -> i32 {
+pub fn web_serve(source: &PathBuf, build_options: WebBuildOptions, serve_options: WebServeOptions) -> i32 {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
@@ -142,9 +135,7 @@ pub fn web_serve(
     if serve_options.watch {
         let source_clone = source.clone();
         let build_options_clone = build_options.clone();
-        let last_modified = Arc::new(Mutex::new(
-            fs::metadata(&source_clone).and_then(|m| m.modified()).ok(),
-        ));
+        let last_modified = Arc::new(Mutex::new(fs::metadata(&source_clone).and_then(|m| m.modified()).ok()));
         let last_modified_clone = last_modified.clone();
 
         thread::spawn(move || {
@@ -386,9 +377,7 @@ pub fn web_build(source: &PathBuf, options: WebBuildOptions) -> i32 {
 
     // Write WASM binary if client code exists
     if !result.client_binary.is_empty() {
-        let wasm_path = options
-            .output_dir
-            .join(format!("{}.wasm", options.module_name));
+        let wasm_path = options.output_dir.join(format!("{}.wasm", options.module_name));
 
         // Write initial WASM binary
         if let Err(e) = fs::write(&wasm_path, &result.client_binary) {
@@ -443,9 +432,7 @@ pub fn web_build(source: &PathBuf, options: WebBuildOptions) -> i32 {
         }
 
         // Write hydration script as separate file (optional)
-        let hydration_path = options
-            .output_dir
-            .join(format!("{}.hydration.js", options.module_name));
+        let hydration_path = options.output_dir.join(format!("{}.hydration.js", options.module_name));
         if let Err(e) = fs::write(&hydration_path, &result.hydration_script) {
             eprintln!("warning: failed to write hydration script: {}", e);
             // Continue - this is optional
@@ -583,10 +570,7 @@ dom.getElementById("btn").addEventListener("click", increment)
 "#;
 
     let app_sui_path = project_dir.join("app.sui");
-    if let Err(e) = fs::write(
-        &app_sui_path,
-        example_sui.replace("{{ project_name }}", project_name),
-    ) {
+    if let Err(e) = fs::write(&app_sui_path, example_sui.replace("{{ project_name }}", project_name)) {
         eprintln!("error: failed to write app.sui: {}", e);
         return 1;
     }
@@ -689,10 +673,7 @@ mod tests {
         let project_path = temp.path().join(project_name);
         assert_eq!(result, 0, "web_init should return 0");
         assert!(project_path.exists(), "Project directory should exist");
-        assert!(
-            project_path.join("app.sui").exists(),
-            "app.sui should exist"
-        );
+        assert!(project_path.join("app.sui").exists(), "app.sui should exist");
         // README and .gitignore are optional (warnings on failure)
         // Don't assert on them to avoid test flakiness
     }

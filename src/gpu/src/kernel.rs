@@ -4,10 +4,7 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelParamType {
     /// Storage buffer (read-write).
-    StorageBuffer {
-        element_type: String,
-        readonly: bool,
-    },
+    StorageBuffer { element_type: String, readonly: bool },
     /// Uniform buffer (read-only constants).
     UniformBuffer { element_type: String },
     /// Scalar value.
@@ -92,12 +89,7 @@ impl Kernel {
     }
 
     /// Add a uniform buffer parameter.
-    pub fn add_uniform_buffer(
-        &mut self,
-        name: impl Into<String>,
-        element_type: impl Into<String>,
-        binding: u32,
-    ) {
+    pub fn add_uniform_buffer(&mut self, name: impl Into<String>, element_type: impl Into<String>, binding: u32) {
         self.params.push(KernelParam {
             name: name.into(),
             param_type: KernelParamType::UniformBuffer {
@@ -108,12 +100,7 @@ impl Kernel {
     }
 
     /// Add a scalar parameter.
-    pub fn add_scalar(
-        &mut self,
-        name: impl Into<String>,
-        element_type: impl Into<String>,
-        binding: u32,
-    ) {
+    pub fn add_scalar(&mut self, name: impl Into<String>, element_type: impl Into<String>, binding: u32) {
         self.params.push(KernelParam {
             name: name.into(),
             param_type: KernelParamType::Scalar {
@@ -149,12 +136,7 @@ impl Kernel {
     }
 
     /// Add a shared memory declaration.
-    pub fn add_shared_memory(
-        &mut self,
-        name: impl Into<String>,
-        element_type: impl Into<String>,
-        size: usize,
-    ) {
+    pub fn add_shared_memory(&mut self, name: impl Into<String>, element_type: impl Into<String>, size: usize) {
         self.shared_memory.push(SharedMemoryDecl {
             name: name.into(),
             element_type: element_type.into(),

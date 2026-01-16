@@ -265,9 +265,7 @@ pub fn declare_wasi_imports(module: &Module) -> Result<(), CompileError> {
 
 #[cfg(not(feature = "llvm"))]
 pub fn declare_wasi_imports(_module: &()) -> Result<(), CompileError> {
-    Err(CompileError::Semantic(
-        "LLVM feature not enabled".to_string(),
-    ))
+    Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
 }
 
 #[cfg(test)]

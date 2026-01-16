@@ -25,9 +25,7 @@ fn manual_gc_tracks_unique_lifetimes() {
     let gc = ManualGc::new();
 
     {
-        let ptr = gc.alloc(DropCounter {
-            drops: drops.clone(),
-        });
+        let ptr = gc.alloc(DropCounter { drops: drops.clone() });
         assert_eq!(gc.live(), 1);
         assert!(ptr.is_valid());
         assert_eq!(drops.load(Ordering::SeqCst), 0);

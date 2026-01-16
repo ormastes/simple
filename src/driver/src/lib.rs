@@ -21,8 +21,8 @@ pub mod watcher;
 pub use compile_options::{CompileOptions, CompileProfiler};
 pub use early_startup::{parse_early_args, AppType, EarlyConfig, WindowHints};
 pub use gpu_init::{
-    display_loading_indicator, start_gpu_init, GpuContext, GpuInitHandle, GpuInitPhase,
-    GpuInitState, StartupEvent, StartupProgress, WindowConfig,
+    display_loading_indicator, start_gpu_init, GpuContext, GpuInitHandle, GpuInitPhase, GpuInitState, StartupEvent,
+    StartupProgress, WindowConfig,
 };
 pub use interpreter::{run_code, run_jit, Interpreter, RunConfig, RunResult, RunningType};
 pub use jj::{BuildEvent, BuildState, JJConnector, MessageFormatter, StateStore};
@@ -30,17 +30,13 @@ pub use jj_state::{BuildMetadata, BuildMode, JjStateManager, TestLevel, TestMeta
 pub use lazy_init::{global_scheduler, DeferredTask, LazyInit, LazyScheduler};
 pub use prefetch::{prefetch_file, prefetch_files, PrefetchHandle};
 pub use resource_manager::{
-    CliResources, GuiResources, PreAllocatedResources, ReplResources, ServiceResources,
-    TuiResources,
+    CliResources, GuiResources, PreAllocatedResources, ReplResources, ServiceResources, TuiResources,
 };
 pub use runner::Runner;
 pub use simple_test::{
-    discover_tests, run_all_tests, run_test_file, SimpleTestFile, SimpleTestResult, TestCategory,
-    TestFailure,
+    discover_tests, run_all_tests, run_test_file, SimpleTestFile, SimpleTestResult, TestCategory, TestFailure,
 };
-pub use startup_metrics::{
-    enable_metrics, metrics_enabled, PhaseTimer, StartupMetrics, StartupPhase,
-};
+pub use startup_metrics::{enable_metrics, metrics_enabled, PhaseTimer, StartupMetrics, StartupPhase};
 pub use watcher::watch;
 
 // Workaround for Wasmer probestack linker issue on stable Rust

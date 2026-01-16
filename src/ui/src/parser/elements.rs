@@ -13,10 +13,7 @@ impl<'a> super::SuiParser<'a> {
         element.span = start;
 
         // Parse attributes
-        while !matches!(
-            self.peek_kind(),
-            SuiTokenKind::TagClose | SuiTokenKind::TagSelfClose
-        ) {
+        while !matches!(self.peek_kind(), SuiTokenKind::TagClose | SuiTokenKind::TagSelfClose) {
             if self.is_at_end() {
                 return Err(ParseError::UnclosedBlock {
                     block_type: format!("<{}>", tag),
@@ -53,10 +50,7 @@ impl<'a> super::SuiParser<'a> {
                 let closing_tag = self.expect_identifier()?;
                 if closing_tag != tag {
                     return Err(ParseError::InvalidTemplate {
-                        message: format!(
-                            "Mismatched closing tag: expected </{}>, found </{}>",
-                            tag, closing_tag
-                        ),
+                        message: format!("Mismatched closing tag: expected </{}>, found </{}>", tag, closing_tag),
                         line: self.previous().span.line,
                         column: self.previous().span.column,
                     });

@@ -207,9 +207,7 @@ fn test_udp_loopback() {
     // Create a receiver socket in Rust
     let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
     let receiver_addr = receiver.local_addr().unwrap();
-    receiver
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
 
     // Start receiver thread
     let receiver_thread = thread::spawn(move || {

@@ -60,9 +60,7 @@ pub extern "C" fn rt_torch_linear_new(in_features: i64, out_features: i64, use_b
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY
-            .lock()
-            .insert(handle, std::sync::Arc::new(state));
+        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(state));
 
         tracing::debug!(
             "rt_torch_linear_new: handle={} in={} out={} use_bias={}",

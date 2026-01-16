@@ -68,8 +68,7 @@ impl<'a> Transaction<'a> {
         if self.finalized.load(Ordering::Acquire) {
             return Err(DbError::transaction_failed("Transaction already finalized"));
         }
-        self.executor
-            .execute_raw(&format!("SAVEPOINT {}", name), &[])?;
+        self.executor.execute_raw(&format!("SAVEPOINT {}", name), &[])?;
         Ok(Savepoint {
             executor: self.executor,
             name: name.to_string(),

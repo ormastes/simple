@@ -49,8 +49,7 @@ use inkwell::context::Context;
 use inkwell::module::Module;
 #[cfg(feature = "llvm")]
 use inkwell::targets::{
-    CodeModel, FileType, InitializationConfig, RelocMode, Target as LlvmTarget, TargetMachine,
-    TargetTriple,
+    CodeModel, FileType, InitializationConfig, RelocMode, Target as LlvmTarget, TargetMachine, TargetTriple,
 };
 #[cfg(feature = "llvm")]
 use inkwell::types::BasicTypeEnum;
@@ -212,9 +211,7 @@ impl LlvmGpuBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn create_kernel_module(&self, _name: &str) -> Result<(), CompileError> {
-        Err(CompileError::Semantic(
-            "LLVM feature not enabled".to_string(),
-        ))
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
 
     /// Declare NVPTX intrinsics in the module
@@ -292,14 +289,8 @@ impl LlvmGpuBackend {
     }
 
     #[cfg(not(feature = "llvm"))]
-    pub fn create_kernel_function(
-        &self,
-        _name: &str,
-        _param_types: &[()],
-    ) -> Result<(), CompileError> {
-        Err(CompileError::Semantic(
-            "LLVM feature not enabled".to_string(),
-        ))
+    pub fn create_kernel_function(&self, _name: &str, _param_types: &[()]) -> Result<(), CompileError> {
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
 
     /// Add kernel metadata for NVPTX
@@ -335,11 +326,7 @@ impl LlvmGpuBackend {
 
     /// Emit a call to get thread ID for a dimension
     #[cfg(feature = "llvm")]
-    pub fn emit_thread_id(
-        &self,
-        builder: &Builder<'static>,
-        dim: u8,
-    ) -> Result<IntValue<'static>, CompileError> {
+    pub fn emit_thread_id(&self, builder: &Builder<'static>, dim: u8) -> Result<IntValue<'static>, CompileError> {
         let module = self.module.borrow();
         let module = module
             .as_ref()
@@ -352,29 +339,23 @@ impl LlvmGpuBackend {
             _ => return Err(CompileError::Semantic("Invalid dimension".to_string())),
         };
 
-        let func = module.get_function(intrinsic_name).ok_or_else(|| {
-            CompileError::Semantic(format!("Intrinsic {} not declared", intrinsic_name))
-        })?;
+        let func = module
+            .get_function(intrinsic_name)
+            .ok_or_else(|| CompileError::Semantic(format!("Intrinsic {} not declared", intrinsic_name)))?;
 
-        let call = builder.build_call(func, &[], "tid").map_err(|e| {
-            CompileError::Semantic(format!("Failed to call thread ID intrinsic: {}", e))
-        })?;
+        let call = builder
+            .build_call(func, &[], "tid")
+            .map_err(|e| CompileError::Semantic(format!("Failed to call thread ID intrinsic: {}", e)))?;
 
         call.try_as_basic_value()
             .left()
             .and_then(|v| v.into_int_value().into())
-            .ok_or_else(|| {
-                CompileError::Semantic("Thread ID intrinsic returned unexpected type".to_string())
-            })
+            .ok_or_else(|| CompileError::Semantic("Thread ID intrinsic returned unexpected type".to_string()))
     }
 
     /// Emit a call to get block ID for a dimension
     #[cfg(feature = "llvm")]
-    pub fn emit_block_id(
-        &self,
-        builder: &Builder<'static>,
-        dim: u8,
-    ) -> Result<IntValue<'static>, CompileError> {
+    pub fn emit_block_id(&self, builder: &Builder<'static>, dim: u8) -> Result<IntValue<'static>, CompileError> {
         let module = self.module.borrow();
         let module = module
             .as_ref()
@@ -387,29 +368,23 @@ impl LlvmGpuBackend {
             _ => return Err(CompileError::Semantic("Invalid dimension".to_string())),
         };
 
-        let func = module.get_function(intrinsic_name).ok_or_else(|| {
-            CompileError::Semantic(format!("Intrinsic {} not declared", intrinsic_name))
-        })?;
+        let func = module
+            .get_function(intrinsic_name)
+            .ok_or_else(|| CompileError::Semantic(format!("Intrinsic {} not declared", intrinsic_name)))?;
 
-        let call = builder.build_call(func, &[], "ctaid").map_err(|e| {
-            CompileError::Semantic(format!("Failed to call block ID intrinsic: {}", e))
-        })?;
+        let call = builder
+            .build_call(func, &[], "ctaid")
+            .map_err(|e| CompileError::Semantic(format!("Failed to call block ID intrinsic: {}", e)))?;
 
         call.try_as_basic_value()
             .left()
             .and_then(|v| v.into_int_value().into())
-            .ok_or_else(|| {
-                CompileError::Semantic("Block ID intrinsic returned unexpected type".to_string())
-            })
+            .ok_or_else(|| CompileError::Semantic("Block ID intrinsic returned unexpected type".to_string()))
     }
 
     /// Emit a call to get block dimension for a dimension
     #[cfg(feature = "llvm")]
-    pub fn emit_block_dim(
-        &self,
-        builder: &Builder<'static>,
-        dim: u8,
-    ) -> Result<IntValue<'static>, CompileError> {
+    pub fn emit_block_dim(&self, builder: &Builder<'static>, dim: u8) -> Result<IntValue<'static>, CompileError> {
         let module = self.module.borrow();
         let module = module
             .as_ref()
@@ -422,29 +397,23 @@ impl LlvmGpuBackend {
             _ => return Err(CompileError::Semantic("Invalid dimension".to_string())),
         };
 
-        let func = module.get_function(intrinsic_name).ok_or_else(|| {
-            CompileError::Semantic(format!("Intrinsic {} not declared", intrinsic_name))
-        })?;
+        let func = module
+            .get_function(intrinsic_name)
+            .ok_or_else(|| CompileError::Semantic(format!("Intrinsic {} not declared", intrinsic_name)))?;
 
-        let call = builder.build_call(func, &[], "ntid").map_err(|e| {
-            CompileError::Semantic(format!("Failed to call block dim intrinsic: {}", e))
-        })?;
+        let call = builder
+            .build_call(func, &[], "ntid")
+            .map_err(|e| CompileError::Semantic(format!("Failed to call block dim intrinsic: {}", e)))?;
 
         call.try_as_basic_value()
             .left()
             .and_then(|v| v.into_int_value().into())
-            .ok_or_else(|| {
-                CompileError::Semantic("Block dim intrinsic returned unexpected type".to_string())
-            })
+            .ok_or_else(|| CompileError::Semantic("Block dim intrinsic returned unexpected type".to_string()))
     }
 
     /// Emit a call to get grid dimension for a dimension
     #[cfg(feature = "llvm")]
-    pub fn emit_grid_dim(
-        &self,
-        builder: &Builder<'static>,
-        dim: u8,
-    ) -> Result<IntValue<'static>, CompileError> {
+    pub fn emit_grid_dim(&self, builder: &Builder<'static>, dim: u8) -> Result<IntValue<'static>, CompileError> {
         let module = self.module.borrow();
         let module = module
             .as_ref()
@@ -457,29 +426,23 @@ impl LlvmGpuBackend {
             _ => return Err(CompileError::Semantic("Invalid dimension".to_string())),
         };
 
-        let func = module.get_function(intrinsic_name).ok_or_else(|| {
-            CompileError::Semantic(format!("Intrinsic {} not declared", intrinsic_name))
-        })?;
+        let func = module
+            .get_function(intrinsic_name)
+            .ok_or_else(|| CompileError::Semantic(format!("Intrinsic {} not declared", intrinsic_name)))?;
 
-        let call = builder.build_call(func, &[], "nctaid").map_err(|e| {
-            CompileError::Semantic(format!("Failed to call grid dim intrinsic: {}", e))
-        })?;
+        let call = builder
+            .build_call(func, &[], "nctaid")
+            .map_err(|e| CompileError::Semantic(format!("Failed to call grid dim intrinsic: {}", e)))?;
 
         call.try_as_basic_value()
             .left()
             .and_then(|v| v.into_int_value().into())
-            .ok_or_else(|| {
-                CompileError::Semantic("Grid dim intrinsic returned unexpected type".to_string())
-            })
+            .ok_or_else(|| CompileError::Semantic("Grid dim intrinsic returned unexpected type".to_string()))
     }
 
     /// Compute global thread ID: blockIdx * blockDim + threadIdx
     #[cfg(feature = "llvm")]
-    pub fn emit_global_id(
-        &self,
-        builder: &Builder<'static>,
-        dim: u8,
-    ) -> Result<IntValue<'static>, CompileError> {
+    pub fn emit_global_id(&self, builder: &Builder<'static>, dim: u8) -> Result<IntValue<'static>, CompileError> {
         let block_id = self.emit_block_id(builder, dim)?;
         let block_dim = self.emit_block_dim(builder, dim)?;
         let thread_id = self.emit_thread_id(builder, dim)?;
@@ -507,9 +470,9 @@ impl LlvmGpuBackend {
             .get_function("llvm.nvvm.barrier0")
             .ok_or_else(|| CompileError::Semantic("Barrier intrinsic not declared".to_string()))?;
 
-        builder.build_call(func, &[], "").map_err(|e| {
-            CompileError::Semantic(format!("Failed to call barrier intrinsic: {}", e))
-        })?;
+        builder
+            .build_call(func, &[], "")
+            .map_err(|e| CompileError::Semantic(format!("Failed to call barrier intrinsic: {}", e)))?;
 
         Ok(())
     }
@@ -532,16 +495,13 @@ impl LlvmGpuBackend {
             crate::mir::GpuMemoryScope::All => "llvm.nvvm.membar.sys",
         };
 
-        let func = module.get_function(intrinsic_name).ok_or_else(|| {
-            CompileError::Semantic(format!(
-                "Memory fence intrinsic {} not declared",
-                intrinsic_name
-            ))
-        })?;
+        let func = module
+            .get_function(intrinsic_name)
+            .ok_or_else(|| CompileError::Semantic(format!("Memory fence intrinsic {} not declared", intrinsic_name)))?;
 
-        builder.build_call(func, &[], "").map_err(|e| {
-            CompileError::Semantic(format!("Failed to call memory fence intrinsic: {}", e))
-        })?;
+        builder
+            .build_call(func, &[], "")
+            .map_err(|e| CompileError::Semantic(format!("Failed to call memory fence intrinsic: {}", e)))?;
 
         Ok(())
     }
@@ -572,8 +532,8 @@ impl LlvmGpuBackend {
 
         // Create global variable in address space 3 (shared memory)
         // NVPTX address spaces: 0=generic, 1=global, 3=shared, 4=constant, 5=local
-        let shared_addr_space = AddressSpace::try_from(3u16)
-            .map_err(|_| CompileError::Semantic("Invalid address space".to_string()))?;
+        let shared_addr_space =
+            AddressSpace::try_from(3u16).map_err(|_| CompileError::Semantic("Invalid address space".to_string()))?;
 
         // Generate unique name for shared memory
         let name = format!("__shared_mem_{}", self.kernel_functions.borrow().len());
@@ -596,9 +556,7 @@ impl LlvmGpuBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn get_ir(&self) -> Result<String, CompileError> {
-        Err(CompileError::Semantic(
-            "LLVM feature not enabled".to_string(),
-        ))
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
 
     /// Emit PTX code from the module
@@ -629,9 +587,7 @@ impl LlvmGpuBackend {
                 RelocMode::Default,
                 CodeModel::Default,
             )
-            .ok_or_else(|| {
-                CompileError::Semantic("Failed to create NVPTX target machine".to_string())
-            })?;
+            .ok_or_else(|| CompileError::Semantic("Failed to create NVPTX target machine".to_string()))?;
 
         // Emit assembly (PTX)
         let buffer = target_machine
@@ -648,9 +604,7 @@ impl LlvmGpuBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn emit_ptx(&self) -> Result<String, CompileError> {
-        Err(CompileError::Semantic(
-            "LLVM feature not enabled".to_string(),
-        ))
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
 
     /// Verify the module
@@ -669,9 +623,7 @@ impl LlvmGpuBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn verify(&self) -> Result<(), CompileError> {
-        Err(CompileError::Semantic(
-            "LLVM feature not enabled".to_string(),
-        ))
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
 }
 

@@ -184,10 +184,7 @@ pub fn has_effect(effect: Effect) -> bool {
 /// - @pure functions can only call @pure functions (no side effects allowed)
 /// - @async functions can call any function (no restrictions on callee)
 /// - Functions without effects can call anything (unrestricted)
-pub fn check_call_compatibility(
-    callee_name: &str,
-    callee_effects: &[Effect],
-) -> Result<(), CompileError> {
+pub fn check_call_compatibility(callee_name: &str, callee_effects: &[Effect]) -> Result<(), CompileError> {
     CURRENT_EFFECTS.with(|cell| {
         let caller_effects = cell.borrow();
 
@@ -210,10 +207,7 @@ pub fn check_call_compatibility(
 
             // If callee has any side-effecting decorators, reject
             for effect in callee_effects {
-                if matches!(
-                    effect,
-                    Effect::Io | Effect::Net | Effect::Fs | Effect::Unsafe
-                ) {
+                if matches!(effect, Effect::Io | Effect::Net | Effect::Fs | Effect::Unsafe) {
                     return Err(CompileError::Semantic(format!(
                         "pure function cannot call '{}' with @{} effect\n\
                          help: remove @pure decorator from caller or remove @{} from callee",

@@ -210,16 +210,12 @@ impl SymbolTable {
 
     /// Get all public non-macro symbols.
     pub fn public_non_macros(&self) -> impl Iterator<Item = &SymbolEntry> {
-        self.symbols
-            .values()
-            .filter(|s| s.is_public() && !s.kind.is_macro())
+        self.symbols.values().filter(|s| s.is_public() && !s.kind.is_macro())
     }
 
     /// Get all public macros.
     pub fn public_macros(&self) -> impl Iterator<Item = &SymbolEntry> {
-        self.symbols
-            .values()
-            .filter(|s| s.is_public() && s.kind.is_macro())
+        self.symbols.values().filter(|s| s.is_public() && s.kind.is_macro())
     }
 
     /// Check if a symbol exists.
@@ -288,9 +284,7 @@ impl ProjectSymbols {
         if let Some(dot_pos) = qualified_name.rfind('.') {
             let module_path = &qualified_name[..dot_pos];
             let symbol_name = &qualified_name[dot_pos + 1..];
-            self.tables
-                .get(module_path)
-                .and_then(|t| t.lookup(symbol_name))
+            self.tables.get(module_path).and_then(|t| t.lookup(symbol_name))
         } else {
             None
         }

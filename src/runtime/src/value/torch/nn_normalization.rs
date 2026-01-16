@@ -25,16 +25,11 @@ pub extern "C" fn rt_torch_layer_norm(
         };
         drop(registry);
 
-        let normalized_shape =
-            unsafe { std::slice::from_raw_parts(normalized_shape_ptr, normalized_ndim as usize) };
+        let normalized_shape = unsafe { std::slice::from_raw_parts(normalized_shape_ptr, normalized_ndim as usize) };
 
-        let result = input
-            .0
-            .layer_norm::<&Tensor>(normalized_shape, None, None, 1e-5, false);
+        let result = input.0.layer_norm::<&Tensor>(normalized_shape, None, None, 1e-5, false);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
             "rt_torch_layer_norm: {} shape={:?} -> handle={}",
             input_handle,
@@ -63,9 +58,7 @@ pub extern "C" fn rt_torch_dropout(input_handle: u64, p: f64, training: i32) -> 
 
         let result = input.0.dropout(p, training != 0);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
             "rt_torch_dropout: {} p={} training={} -> handle={}",
             input_handle,

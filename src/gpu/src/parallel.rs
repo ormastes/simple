@@ -24,9 +24,7 @@ pub struct ParallelConfig {
 impl Default for ParallelConfig {
     fn default() -> Self {
         ParallelConfig {
-            num_threads: thread::available_parallelism()
-                .map(|p| p.get())
-                .unwrap_or(4),
+            num_threads: thread::available_parallelism().map(|p| p.get()).unwrap_or(4),
             simulate_warps: true,
             warp_size: 32,
         }
@@ -73,17 +71,11 @@ impl WorkGroupExecutor {
     /// Execute a kernel function across all work items.
     ///
     /// The kernel function receives the work item state and can access shared data.
-    pub fn execute<F>(
-        &self,
-        global_size: [u32; 3],
-        local_size: [u32; 3],
-        kernel: F,
-    ) -> GpuResult<()>
+    pub fn execute<F>(&self, global_size: [u32; 3], local_size: [u32; 3], kernel: F) -> GpuResult<()>
     where
         F: Fn(&WorkItemState) + Sync + Send,
     {
-        let total_items =
-            global_size[0] as usize * global_size[1] as usize * global_size[2] as usize;
+        let total_items = global_size[0] as usize * global_size[1] as usize * global_size[2] as usize;
 
         if total_items == 0 {
             return Ok(());
@@ -118,10 +110,8 @@ impl WorkGroupExecutor {
                         // Convert linear group ID to 3D
                         let group_id = [
                             (group_linear % num_groups[0] as usize) as u32,
-                            ((group_linear / num_groups[0] as usize) % num_groups[1] as usize)
-                                as u32,
-                            (group_linear / (num_groups[0] as usize * num_groups[1] as usize))
-                                as u32,
+                            ((group_linear / num_groups[0] as usize) % num_groups[1] as usize) as u32,
+                            (group_linear / (num_groups[0] as usize * num_groups[1] as usize)) as u32,
                         ];
 
                         // Execute all work items in this work group
@@ -143,13 +133,8 @@ impl WorkGroupExecutor {
                                         continue;
                                     }
 
-                                    let state = WorkItemState::new(
-                                        global_id,
-                                        local_id,
-                                        group_id,
-                                        global_size,
-                                        local_size,
-                                    );
+                                    let state =
+                                        WorkItemState::new(global_id, local_id, group_id, global_size, local_size);
 
                                     kernel(&state);
                                 }
@@ -274,9 +259,7 @@ where
     }
 
     // Use parallel reduction with work stealing
-    let num_threads = thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(4);
+    let num_threads = thread::available_parallelism().map(|p| p.get()).unwrap_or(4);
 
     let chunk_size = data.len().div_ceil(num_threads);
     let results: Arc<Mutex<Vec<T>>> = Arc::new(Mutex::new(Vec::with_capacity(num_threads)));
@@ -288,10 +271,7 @@ where
 
             s.spawn(move || {
                 // Local reduction
-                let local_result = chunk
-                    .iter()
-                    .skip(1)
-                    .fold(chunk[0].clone(), |acc, x| op(&acc, x));
+                let local_result = chunk.iter().skip(1).fold(chunk[0].clone(), |acc, x| op(&acc, x));
                 results.lock().unwrap().push(local_result);
             });
         }

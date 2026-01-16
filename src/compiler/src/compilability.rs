@@ -84,16 +84,10 @@ impl CompilabilityStatus {
     pub fn merge(&mut self, other: CompilabilityStatus) {
         match (self, other) {
             (CompilabilityStatus::Compilable, CompilabilityStatus::Compilable) => {}
-            (
-                status @ CompilabilityStatus::Compilable,
-                CompilabilityStatus::RequiresInterpreter(reasons),
-            ) => {
+            (status @ CompilabilityStatus::Compilable, CompilabilityStatus::RequiresInterpreter(reasons)) => {
                 *status = CompilabilityStatus::RequiresInterpreter(reasons);
             }
-            (
-                CompilabilityStatus::RequiresInterpreter(existing),
-                CompilabilityStatus::RequiresInterpreter(new),
-            ) => {
+            (CompilabilityStatus::RequiresInterpreter(existing), CompilabilityStatus::RequiresInterpreter(new)) => {
                 for reason in new {
                     if !existing.contains(&reason) {
                         existing.push(reason);
@@ -514,17 +508,11 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
 
         // Contract expressions - not yet implemented
         Expr::ContractResult => {
-            add_reason(
-                reasons,
-                FallbackReason::NotYetImplemented("contract result".into()),
-            );
+            add_reason(reasons, FallbackReason::NotYetImplemented("contract result".into()));
         }
         Expr::ContractOld(inner) => {
             analyze_expr(inner, reasons);
-            add_reason(
-                reasons,
-                FallbackReason::NotYetImplemented("contract old()".into()),
-            );
+            add_reason(reasons, FallbackReason::NotYetImplemented("contract old()".into()));
         }
 
         // DoBlock - a sequence of statements (used for BDD DSL colon-blocks)
@@ -563,10 +551,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         // Custom block expressions: m{...}, sh{...}, sql{...}, re{...}, etc.
         // These require block-specific runtime handlers
         Expr::BlockExpr { kind, .. } => {
-            add_reason(
-                reasons,
-                FallbackReason::NotYetImplemented(format!("{} block", kind)),
-            );
+            add_reason(reasons, FallbackReason::NotYetImplemented(format!("{} block", kind)));
         }
     }
 }
@@ -641,9 +626,7 @@ mod tests {
         let results = parse_and_analyze("fn make_array():\n    return [1, 2, 3]\n");
         let status = results.get("make_array").unwrap();
         assert!(!status.is_compilable());
-        assert!(status
-            .reasons()
-            .contains(&FallbackReason::CollectionLiteral));
+        assert!(status.reasons().contains(&FallbackReason::CollectionLiteral));
     }
 
     #[test]
@@ -660,9 +643,7 @@ mod tests {
         status.merge(CompilabilityStatus::Compilable);
         assert!(status.is_compilable());
 
-        status.merge(CompilabilityStatus::RequiresInterpreter(vec![
-            FallbackReason::Closure,
-        ]));
+        status.merge(CompilabilityStatus::RequiresInterpreter(vec![FallbackReason::Closure]));
         assert!(!status.is_compilable());
         assert!(status.reasons().contains(&FallbackReason::Closure));
 

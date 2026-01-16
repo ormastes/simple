@@ -66,11 +66,10 @@ impl ArchRulesConfig {
                 // Silently skip rules with invalid predicates during filter_map
                 // Predicate syntax is validated during HIR lowering where proper
                 // error reporting occurs
-                let predicate =
-                    match crate::predicate_parser::parse_predicate(&hir_rule.predicate_text) {
-                        Ok(pred) => pred,
-                        Err(_) => return None,
-                    };
+                let predicate = match crate::predicate_parser::parse_predicate(&hir_rule.predicate_text) {
+                    Ok(pred) => pred,
+                    Err(_) => return None,
+                };
 
                 Some(ArchRule {
                     action,
@@ -108,18 +107,11 @@ impl Dependency {
     /// Create a match context for predicate evaluation
     pub fn to_match_context(&self) -> MatchContext<'_> {
         match &self.kind {
-            DependencyKind::Import { from, to } => MatchContext::new()
-                .with_module_path(from)
-                .with_type_name(to),
-            DependencyKind::Depend { from, to } => MatchContext::new()
-                .with_module_path(from)
-                .with_type_name(to),
-            DependencyKind::Use {
-                type_name,
-                location,
-            } => MatchContext::new()
-                .with_type_name(type_name)
-                .with_module_path(location),
+            DependencyKind::Import { from, to } => MatchContext::new().with_module_path(from).with_type_name(to),
+            DependencyKind::Depend { from, to } => MatchContext::new().with_module_path(from).with_type_name(to),
+            DependencyKind::Use { type_name, location } => {
+                MatchContext::new().with_type_name(type_name).with_module_path(location)
+            }
         }
     }
 }
@@ -175,10 +167,7 @@ impl ArchRulesChecker {
                 // Glob import: use foo.bar.*
                 let to = import.from_path.join(".");
                 deps.push(Dependency {
-                    kind: DependencyKind::Import {
-                        from: from.clone(),
-                        to,
-                    },
+                    kind: DependencyKind::Import { from: from.clone(), to },
                     source_file: module_name.to_string(),
                     // Line number tracking requires adding source location fields to HIR structures
                     // (HirImport, HirFunction, LocalVar, etc.) and threading this information
@@ -193,10 +182,7 @@ impl ArchRulesChecker {
                     let to = to_path.join(".");
 
                     deps.push(Dependency {
-                        kind: DependencyKind::Import {
-                            from: from.clone(),
-                            to,
-                        },
+                        kind: DependencyKind::Import { from: from.clone(), to },
                         source_file: module_name.to_string(),
                         line: 0, // Requires HIR source location fields
                     });
@@ -253,11 +239,7 @@ impl ArchRulesChecker {
     /// Get the type name from a TypeId for dependency tracking.
     /// Returns the type name for named types (struct, class, enum).
     /// Built-in types (i64, bool, etc.) are not tracked since they're not architectural dependencies.
-    fn get_type_name(
-        &self,
-        type_id: crate::hir::TypeId,
-        types: &crate::hir::TypeRegistry,
-    ) -> Option<String> {
+    fn get_type_name(&self, type_id: crate::hir::TypeId, types: &crate::hir::TypeRegistry) -> Option<String> {
         types.get_type_name(type_id).map(|s| s.to_string())
     }
 
@@ -269,12 +251,7 @@ impl ArchRulesChecker {
         let mut matched_rules: Vec<(RuleAction, i64, &ArchRule)> = Vec::new();
 
         for rule in &self.config.rules {
-            if rule
-                .predicate
-                .validate(PredicateContext::Architecture)
-                .is_ok()
-                && rule.predicate.matches(&match_ctx)
-            {
+            if rule.predicate.validate(PredicateContext::Architecture).is_ok() && rule.predicate.matches(&match_ctx) {
                 matched_rules.push((rule.action, rule.priority, rule));
             }
         }
@@ -408,10 +385,7 @@ mod tests {
         };
 
         let violation = checker.check_dependency(&dep);
-        assert!(
-            violation.is_none(),
-            "Higher priority allow should override forbid"
-        );
+        assert!(violation.is_none(), "Higher priority allow should override forbid");
     }
 
     #[test]
@@ -498,10 +472,7 @@ mod tests {
         };
 
         let violation2 = checker.check_dependency(&dep2);
-        assert!(
-            violation2.is_none(),
-            "Use selector should not match outside domain"
-        );
+        assert!(violation2.is_none(), "Use selector should not match outside domain");
     }
 
     #[test]
@@ -653,8 +624,7 @@ mod tests {
     #[test]
     fn test_combined_use_and_within() {
         // Test combining use() with within() to restrict type usage in specific modules
-        let predicate =
-            parse_predicate("pc{ use(DatabaseConnection) & within(domain.**) }").unwrap();
+        let predicate = parse_predicate("pc{ use(DatabaseConnection) & within(domain.**) }").unwrap();
 
         let rule = ArchRule {
             action: RuleAction::Forbid,
@@ -677,10 +647,7 @@ mod tests {
         };
 
         let violation = checker.check_dependency(&dep);
-        assert!(
-            violation.is_some(),
-            "Should detect database usage in domain layer"
-        );
+        assert!(violation.is_some(), "Should detect database usage in domain layer");
 
         // Test with same type but in infrastructure layer
         let dep2 = Dependency {
@@ -693,9 +660,6 @@ mod tests {
         };
 
         let violation2 = checker.check_dependency(&dep2);
-        assert!(
-            violation2.is_none(),
-            "Infrastructure layer can use database"
-        );
+        assert!(violation2.is_none(), "Infrastructure layer can use database");
     }
 }

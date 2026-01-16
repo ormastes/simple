@@ -154,10 +154,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
 
-        Commands::Check {
-            coverage,
-            threshold,
-        } => {
+        Commands::Check { coverage, threshold } => {
             println!(
                 "Checking coverage in {:?} against {:.1}% threshold",
                 coverage, threshold
@@ -183,16 +180,10 @@ fn main() -> anyhow::Result<()> {
             };
 
             if report.meets_threshold(threshold) {
-                println!(
-                    "PASS: Coverage {:.1}% meets threshold {:.1}%",
-                    percent, threshold
-                );
+                println!("PASS: Coverage {:.1}% meets threshold {:.1}%", percent, threshold);
                 Ok(())
             } else {
-                println!(
-                    "FAIL: Coverage {:.1}% below threshold {:.1}%",
-                    percent, threshold
-                );
+                println!("FAIL: Coverage {:.1}% below threshold {:.1}%", percent, threshold);
                 std::process::exit(1);
             }
         }

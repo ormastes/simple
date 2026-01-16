@@ -59,12 +59,7 @@ fn test_orphan_rule_allows_local_trait_foreign_type() {
     let mut checker = CoherenceChecker::new();
     checker.register_trait("MyTrait".to_string());
 
-    let impl_block = make_impl_block(
-        Some("MyTrait".to_string()),
-        make_type("String"),
-        vec![],
-        vec![],
-    );
+    let impl_block = make_impl_block(Some("MyTrait".to_string()), make_type("String"), vec![], vec![]);
 
     assert!(checker.check_impl(&impl_block).is_ok());
 }
@@ -74,12 +69,7 @@ fn test_orphan_rule_allows_foreign_trait_local_type() {
     let mut checker = CoherenceChecker::new();
     checker.register_type("MyType".to_string());
 
-    let impl_block = make_impl_block(
-        Some("Display".to_string()),
-        make_type("MyType"),
-        vec![],
-        vec![],
-    );
+    let impl_block = make_impl_block(Some("Display".to_string()), make_type("MyType"), vec![], vec![]);
 
     assert!(checker.check_impl(&impl_block).is_ok());
 }
@@ -88,12 +78,7 @@ fn test_orphan_rule_allows_foreign_trait_local_type() {
 fn test_orphan_rule_rejects_foreign_trait_foreign_type() {
     let mut checker = CoherenceChecker::new();
 
-    let impl_block = make_impl_block(
-        Some("Display".to_string()),
-        make_type("String"),
-        vec![],
-        vec![],
-    );
+    let impl_block = make_impl_block(Some("Display".to_string()), make_type("String"), vec![], vec![]);
 
     let result = checker.check_impl(&impl_block);
     assert!(result.is_err());
@@ -117,20 +102,10 @@ fn test_overlap_detection_same_type() {
     checker.register_trait("Process".to_string());
     checker.register_type("i32".to_string());
 
-    let impl1 = make_impl_block(
-        Some("Process".to_string()),
-        make_type("i32"),
-        vec![],
-        vec![],
-    );
+    let impl1 = make_impl_block(Some("Process".to_string()), make_type("i32"), vec![], vec![]);
     assert!(checker.check_impl(&impl1).is_ok());
 
-    let impl2 = make_impl_block(
-        Some("Process".to_string()),
-        make_type("i32"),
-        vec![],
-        vec![],
-    );
+    let impl2 = make_impl_block(Some("Process".to_string()), make_type("i32"), vec![], vec![]);
     let result = checker.check_impl(&impl2);
     assert!(result.is_err());
 
@@ -155,12 +130,7 @@ fn test_overlap_detection_generic_vs_concrete() {
     checker.register_trait("Process".to_string());
     checker.register_type("i32".to_string());
 
-    let impl1 = make_impl_block(
-        Some("Process".to_string()),
-        make_type("i32"),
-        vec![],
-        vec![],
-    );
+    let impl1 = make_impl_block(Some("Process".to_string()), make_type("i32"), vec![], vec![]);
     assert!(checker.check_impl(&impl1).is_ok());
 
     let impl2 = make_impl_block(
@@ -180,20 +150,10 @@ fn test_no_overlap_different_types() {
     checker.register_type("i32".to_string());
     checker.register_type("String".to_string());
 
-    let impl1 = make_impl_block(
-        Some("Process".to_string()),
-        make_type("i32"),
-        vec![],
-        vec![],
-    );
+    let impl1 = make_impl_block(Some("Process".to_string()), make_type("i32"), vec![], vec![]);
     assert!(checker.check_impl(&impl1).is_ok());
 
-    let impl2 = make_impl_block(
-        Some("Process".to_string()),
-        make_type("String"),
-        vec![],
-        vec![],
-    );
+    let impl2 = make_impl_block(Some("Process".to_string()), make_type("String"), vec![], vec![]);
     assert!(checker.check_impl(&impl2).is_ok());
 }
 
@@ -253,12 +213,7 @@ fn test_blanket_impl_conflict() {
     checker.register_trait("Process".to_string());
     checker.register_type("i32".to_string());
 
-    let specific = make_impl_block(
-        Some("Process".to_string()),
-        make_type("i32"),
-        vec![],
-        vec![],
-    );
+    let specific = make_impl_block(Some("Process".to_string()), make_type("i32"), vec![], vec![]);
     assert!(checker.check_impl(&specific).is_ok());
 
     let blanket = make_impl_block(
@@ -313,18 +268,9 @@ fn test_check_module_integration() {
         invariant: None,
     };
 
-    let impl_block = make_impl_block(
-        Some("Printable".to_string()),
-        make_type("Person"),
-        vec![],
-        vec![],
-    );
+    let impl_block = make_impl_block(Some("Printable".to_string()), make_type("Person"), vec![], vec![]);
 
-    let nodes = vec![
-        Node::Trait(trait_def),
-        Node::Struct(struct_def),
-        Node::Impl(impl_block),
-    ];
+    let nodes = vec![Node::Trait(trait_def), Node::Struct(struct_def), Node::Impl(impl_block)];
 
     let errors = checker.check_module(&nodes);
     assert_eq!(errors.len(), 0);
@@ -334,12 +280,7 @@ fn test_check_module_integration() {
 fn test_check_module_with_orphan_error() {
     let mut checker = CoherenceChecker::new();
 
-    let impl_block = make_impl_block(
-        Some("Display".to_string()),
-        make_type("String"),
-        vec![],
-        vec![],
-    );
+    let impl_block = make_impl_block(Some("Display".to_string()), make_type("String"), vec![], vec![]);
 
     let nodes = vec![Node::Impl(impl_block)];
 
@@ -376,20 +317,10 @@ fn test_multiple_traits_same_type() {
     checker.register_trait("Comparable".to_string());
     checker.register_type("Point".to_string());
 
-    let impl1 = make_impl_block(
-        Some("Printable".to_string()),
-        make_type("Point"),
-        vec![],
-        vec![],
-    );
+    let impl1 = make_impl_block(Some("Printable".to_string()), make_type("Point"), vec![], vec![]);
     assert!(checker.check_impl(&impl1).is_ok());
 
-    let impl2 = make_impl_block(
-        Some("Comparable".to_string()),
-        make_type("Point"),
-        vec![],
-        vec![],
-    );
+    let impl2 = make_impl_block(Some("Comparable".to_string()), make_type("Point"), vec![], vec![]);
     assert!(checker.check_impl(&impl2).is_ok());
 }
 
@@ -431,12 +362,7 @@ fn test_specialization_with_default_attribute() {
     assert!(checker.check_impl(&blanket).is_ok());
 
     // Specific impl (specializes the default)
-    let specific = make_impl_block(
-        Some("Process".to_string()),
-        make_type("i32"),
-        vec![],
-        vec![],
-    );
+    let specific = make_impl_block(Some("Process".to_string()), make_type("i32"), vec![], vec![]);
 
     // Should succeed - specialization allowed with #[default]
     assert!(
@@ -454,12 +380,7 @@ fn test_extension_trait_pattern() {
     checker.register_trait("StringExt".to_string());
 
     // Implement for foreign type String - should be allowed
-    let impl_block = make_impl_block(
-        Some("StringExt".to_string()),
-        make_type("String"),
-        vec![],
-        vec![],
-    );
+    let impl_block = make_impl_block(Some("StringExt".to_string()), make_type("String"), vec![], vec![]);
 
     assert!(
         checker.check_impl(&impl_block).is_ok(),

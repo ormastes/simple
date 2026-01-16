@@ -21,10 +21,7 @@ fn test_gpu_global_id() {
             assert_eq!(*intrinsic, GpuIntrinsicKind::GlobalId);
             assert!(args.is_empty());
         } else {
-            panic!(
-                "Expected GpuIntrinsic for gpu.global_id(), got {:?}",
-                expr.kind
-            );
+            panic!("Expected GpuIntrinsic for gpu.global_id(), got {:?}", expr.kind);
         }
     } else {
         panic!("Expected Return statement");
@@ -51,10 +48,7 @@ fn test_gpu_global_id_with_dim() {
                 panic!("Expected Integer for dimension, got {:?}", args[0].kind);
             }
         } else {
-            panic!(
-                "Expected GpuIntrinsic for gpu.global_id(1), got {:?}",
-                expr.kind
-            );
+            panic!("Expected GpuIntrinsic for gpu.global_id(1), got {:?}", expr.kind);
         }
     } else {
         panic!("Expected Return statement");
@@ -74,10 +68,7 @@ fn test_gpu_barrier() {
             assert_eq!(*intrinsic, GpuIntrinsicKind::Barrier);
             assert!(args.is_empty());
         } else {
-            panic!(
-                "Expected GpuIntrinsic for gpu.barrier(), got {:?}",
-                expr.kind
-            );
+            panic!("Expected GpuIntrinsic for gpu.barrier(), got {:?}", expr.kind);
         }
     } else {
         panic!("Expected Expr statement");
@@ -97,10 +88,7 @@ fn test_gpu_local_size() {
         if let HirExprKind::GpuIntrinsic { intrinsic, .. } = &expr.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::LocalSize);
         } else {
-            panic!(
-                "Expected GpuIntrinsic for gpu.local_size(), got {:?}",
-                expr.kind
-            );
+            panic!("Expected GpuIntrinsic for gpu.local_size(), got {:?}", expr.kind);
         }
     } else {
         panic!("Expected Return statement");
@@ -110,10 +98,9 @@ fn test_gpu_local_size() {
 #[test]
 fn test_gpu_atomic_add() {
     // Test GPU atomic_add intrinsic - uses i64 as raw address
-    let module = parse_and_lower(
-        "fn test_atomic_add(addr: i64, value: i64) -> i64:\n    return gpu.atomic_add(addr, value)\n",
-    )
-    .unwrap();
+    let module =
+        parse_and_lower("fn test_atomic_add(addr: i64, value: i64) -> i64:\n    return gpu.atomic_add(addr, value)\n")
+            .unwrap();
 
     let func = &module.functions[0];
     if let HirStmt::Return(Some(expr)) = &func.body[0] {
@@ -131,10 +118,9 @@ fn test_gpu_atomic_add() {
 #[test]
 fn test_gpu_atomic_sub() {
     // Test GPU atomic_sub intrinsic
-    let module = parse_and_lower(
-        "fn test_atomic_sub(addr: i64, value: i64) -> i64:\n    return gpu.atomic_sub(addr, value)\n",
-    )
-    .unwrap();
+    let module =
+        parse_and_lower("fn test_atomic_sub(addr: i64, value: i64) -> i64:\n    return gpu.atomic_sub(addr, value)\n")
+            .unwrap();
 
     let func = &module.functions[0];
     if let HirStmt::Return(Some(expr)) = &func.body[0] {
@@ -152,10 +138,9 @@ fn test_gpu_atomic_sub() {
 #[test]
 fn test_gpu_atomic_min_max() {
     // Test GPU atomic_min intrinsic
-    let module = parse_and_lower(
-        "fn test_atomic_min(addr: i64, value: i64) -> i64:\n    return gpu.atomic_min(addr, value)\n",
-    )
-    .unwrap();
+    let module =
+        parse_and_lower("fn test_atomic_min(addr: i64, value: i64) -> i64:\n    return gpu.atomic_min(addr, value)\n")
+            .unwrap();
 
     let func = &module.functions[0];
     if let HirStmt::Return(Some(expr)) = &func.body[0] {
@@ -173,10 +158,9 @@ fn test_gpu_atomic_min_max() {
 #[test]
 fn test_gpu_atomic_bitwise() {
     // Test GPU atomic_and intrinsic
-    let module = parse_and_lower(
-        "fn test_atomic_and(addr: i64, value: i64) -> i64:\n    return gpu.atomic_and(addr, value)\n",
-    )
-    .unwrap();
+    let module =
+        parse_and_lower("fn test_atomic_and(addr: i64, value: i64) -> i64:\n    return gpu.atomic_and(addr, value)\n")
+            .unwrap();
 
     let func = &module.functions[0];
     if let HirStmt::Return(Some(expr)) = &func.body[0] {

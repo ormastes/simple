@@ -136,10 +136,7 @@ fn test_repl_backspace_deletes_indent() {
     drop(pair.slave);
 
     // Get I/O handles
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .expect("Failed to clone reader");
+    let mut reader = pair.master.try_clone_reader().expect("Failed to clone reader");
     let mut writer = pair.master.take_writer().expect("Failed to get writer");
 
     // Wait for REPL to start

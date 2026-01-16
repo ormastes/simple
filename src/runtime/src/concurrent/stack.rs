@@ -142,10 +142,7 @@ pub unsafe extern "C" fn simple_concurrent_stack_free(stack: *mut ConcurrentStac
 
 /// Push a value onto the stack
 #[no_mangle]
-pub unsafe extern "C" fn simple_concurrent_stack_push(
-    stack: *mut ConcurrentStack,
-    value: RuntimeValue,
-) {
+pub unsafe extern "C" fn simple_concurrent_stack_push(stack: *mut ConcurrentStack, value: RuntimeValue) {
     if let Some(s) = stack.as_ref() {
         s.push(value);
     }
@@ -155,9 +152,7 @@ pub unsafe extern "C" fn simple_concurrent_stack_push(
 ///
 /// Returns the value, or RuntimeValue::NIL if empty
 #[no_mangle]
-pub unsafe extern "C" fn simple_concurrent_stack_try_pop(
-    stack: *mut ConcurrentStack,
-) -> RuntimeValue {
+pub unsafe extern "C" fn simple_concurrent_stack_try_pop(stack: *mut ConcurrentStack) -> RuntimeValue {
     if let Some(s) = stack.as_ref() {
         s.try_pop().unwrap_or(RuntimeValue::NIL)
     } else {

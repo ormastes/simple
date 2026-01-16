@@ -81,26 +81,17 @@ impl ParallelModuleLowerer {
     pub fn lower_modules(&self, modules: &[Module]) -> Vec<LowerResult<HirModule>> {
         if modules.len() < self.config.parallel_threshold {
             // Sequential lowering for small batches
-            modules
-                .iter()
-                .map(|m| Lowerer::new().lower_module(m))
-                .collect()
+            modules.iter().map(|m| Lowerer::new().lower_module(m)).collect()
         } else {
             // Parallel lowering
-            modules
-                .par_iter()
-                .map(|m| Lowerer::new().lower_module(m))
-                .collect()
+            modules.par_iter().map(|m| Lowerer::new().lower_module(m)).collect()
         }
     }
 
     /// Lower multiple modules in parallel, collecting errors.
     ///
     /// Returns all successful results and a list of errors.
-    pub fn lower_modules_with_errors(
-        &self,
-        modules: &[Module],
-    ) -> (Vec<HirModule>, Vec<(usize, LowerError)>) {
+    pub fn lower_modules_with_errors(&self, modules: &[Module]) -> (Vec<HirModule>, Vec<(usize, LowerError)>) {
         let results = self.lower_modules(modules);
 
         let mut successes = Vec::new();
@@ -272,9 +263,7 @@ mod tests {
 
     #[test]
     fn test_parallel_lower_config() {
-        let config = ParallelLowerConfig::new()
-            .with_threshold(10)
-            .with_threads(2);
+        let config = ParallelLowerConfig::new().with_threshold(10).with_threads(2);
 
         assert_eq!(config.parallel_threshold, 10);
         assert_eq!(config.num_threads, Some(2));

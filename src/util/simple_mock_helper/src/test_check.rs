@@ -27,10 +27,7 @@ pub enum TestLevel {
 impl TestLevel {
     /// Returns true if this test level allows any mocks.
     pub fn allows_mocks(&self) -> bool {
-        matches!(
-            self,
-            TestLevel::Unit | TestLevel::Integration | TestLevel::Environment
-        )
+        matches!(self, TestLevel::Unit | TestLevel::Integration | TestLevel::Environment)
     }
 
     /// Returns true if this test level allows mocks only in HAL layers.
@@ -117,11 +114,7 @@ pub fn try_get_test_level() -> Option<TestLevel> {
 
 /// Get the custom test level name if set.
 pub fn get_test_level_name() -> Option<String> {
-    TEST_LEVEL_NAME
-        .read()
-        .expect("lock poisoned")
-        .as_ref()
-        .cloned()
+    TEST_LEVEL_NAME.read().expect("lock poisoned").as_ref().cloned()
 }
 
 /// Assert that the current test level is as expected.
@@ -246,9 +239,7 @@ pub fn validate_test_config() -> TestCheckResult {
         TestLevel::Environment => {
             // Environment tests should have mocks enabled for HAL/external/lib
             if !are_mocks_enabled() {
-                errors.push(
-                    "Environment tests should have mocks enabled (HAL/external/lib)".to_string(),
-                );
+                errors.push("Environment tests should have mocks enabled (HAL/external/lib)".to_string());
             }
             if !is_policy_initialized() {
                 errors.push("Mock policy not initialized for environment tests".to_string());
@@ -288,10 +279,7 @@ macro_rules! init_integration_tests {
         $crate::mock_policy::init_mocks_for_only_default();
     };
     ($name:expr) => {
-        $crate::test_check::init_test_level_named(
-            $crate::test_check::TestLevel::Integration,
-            $name,
-        );
+        $crate::test_check::init_test_level_named($crate::test_check::TestLevel::Integration, $name);
         $crate::mock_policy::init_mocks_for_only_default();
     };
     (patterns: $patterns:expr) => {
@@ -326,10 +314,7 @@ macro_rules! init_env_tests {
         $crate::mock_policy::init_mocks_for_only($crate::mock_policy::DEFAULT_ENV_PATTERNS);
     };
     ($name:expr) => {
-        $crate::test_check::init_test_level_named(
-            $crate::test_check::TestLevel::Environment,
-            $name,
-        );
+        $crate::test_check::init_test_level_named($crate::test_check::TestLevel::Environment, $name);
         $crate::mock_policy::init_mocks_for_only($crate::mock_policy::DEFAULT_ENV_PATTERNS);
     };
     (patterns: $patterns:expr) => {
@@ -407,10 +392,7 @@ mod tests {
         let result = validate_test_config();
         assert!(!result.passed);
         assert!(result.level.is_none());
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| e.contains("Test level not initialized")));
+        assert!(result.errors.iter().any(|e| e.contains("Test level not initialized")));
     }
 
     #[test]

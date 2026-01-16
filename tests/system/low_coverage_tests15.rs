@@ -18,15 +18,9 @@ mod compiler_builtin_class_tests {
     #[test]
     fn test_builtin_class_from_name() {
         assert_eq!(BuiltinClass::from_name("Range"), Some(BuiltinClass::Range));
-        assert_eq!(
-            BuiltinClass::from_name("__range__"),
-            Some(BuiltinClass::Range)
-        );
+        assert_eq!(BuiltinClass::from_name("__range__"), Some(BuiltinClass::Range));
         assert_eq!(BuiltinClass::from_name("Array"), Some(BuiltinClass::Array));
-        assert_eq!(
-            BuiltinClass::from_name("__array__"),
-            Some(BuiltinClass::Array)
-        );
+        assert_eq!(BuiltinClass::from_name("__array__"), Some(BuiltinClass::Array));
         assert_eq!(BuiltinClass::from_name("Unknown"), None);
     }
 
@@ -87,14 +81,8 @@ mod compiler_special_enum_tests {
 
     #[test]
     fn test_special_enum_type_from_name() {
-        assert_eq!(
-            SpecialEnumType::from_name("Option"),
-            Some(SpecialEnumType::Option)
-        );
-        assert_eq!(
-            SpecialEnumType::from_name("Result"),
-            Some(SpecialEnumType::Result)
-        );
+        assert_eq!(SpecialEnumType::from_name("Option"), Some(SpecialEnumType::Option));
+        assert_eq!(SpecialEnumType::from_name("Result"), Some(SpecialEnumType::Result));
         assert_eq!(SpecialEnumType::from_name("Unknown"), None);
     }
 
@@ -226,9 +214,8 @@ mod loader_cross_test_types {
 // ============================================================================
 mod compiler_value_constants_tests {
     use simple_compiler::value::{
-        ACTOR_BUILTINS, ATTR_STRONG, BLOCKING_BUILTINS, BUILTIN_ARRAY, BUILTIN_CHANNEL,
-        BUILTIN_RANGE, BUILTIN_SPAWN, CLASS_ARRAY, CLASS_RANGE, FUNC_MAIN, GENERATOR_BUILTINS,
-        METHOD_MISSING, METHOD_NEW, METHOD_SELF,
+        ACTOR_BUILTINS, ATTR_STRONG, BLOCKING_BUILTINS, BUILTIN_ARRAY, BUILTIN_CHANNEL, BUILTIN_RANGE, BUILTIN_SPAWN,
+        CLASS_ARRAY, CLASS_RANGE, FUNC_MAIN, GENERATOR_BUILTINS, METHOD_MISSING, METHOD_NEW, METHOD_SELF,
     };
 
     #[test]
@@ -293,10 +280,7 @@ mod loader_load_error_tests {
 
     #[test]
     fn test_load_error_io() {
-        let err = LoadError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "not found",
-        ));
+        let err = LoadError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "not found"));
         let _ = format!("{:?}", err);
     }
 }

@@ -68,10 +68,7 @@ impl RuntimeLoadMode {
     /// Useful for development where the runtime library might be in
     /// different locations depending on the build setup.
     pub fn with_fallback_paths(paths: Vec<String>) -> Self {
-        let mut modes: Vec<RuntimeLoadMode> = paths
-            .into_iter()
-            .map(RuntimeLoadMode::DynamicPath)
-            .collect();
+        let mut modes: Vec<RuntimeLoadMode> = paths.into_iter().map(RuntimeLoadMode::DynamicPath).collect();
         modes.push(Self::Dynamic);
         modes.push(Self::Static);
         Self::Chained(modes)
@@ -82,17 +79,13 @@ impl RuntimeLoadMode {
 ///
 /// Returns an `Arc<dyn RuntimeSymbolProvider>` that can be shared
 /// across threads and used by the JIT compiler, interpreter, etc.
-pub fn create_runtime_provider(
-    mode: RuntimeLoadMode,
-) -> Result<Arc<dyn RuntimeSymbolProvider>, DynLoadError> {
+pub fn create_runtime_provider(mode: RuntimeLoadMode) -> Result<Arc<dyn RuntimeSymbolProvider>, DynLoadError> {
     match mode {
         RuntimeLoadMode::Static => Ok(Arc::new(StaticSymbolProvider::default())),
 
         RuntimeLoadMode::Dynamic => Ok(Arc::new(DynamicSymbolProvider::load_default()?)),
 
-        RuntimeLoadMode::DynamicPath(path) => {
-            Ok(Arc::new(DynamicSymbolProvider::load(Path::new(&path))?))
-        }
+        RuntimeLoadMode::DynamicPath(path) => Ok(Arc::new(DynamicSymbolProvider::load(Path::new(&path))?)),
 
         RuntimeLoadMode::Chained(modes) => {
             let mut chained = ChainedProvider::new();
@@ -107,9 +100,7 @@ pub fn create_runtime_provider(
             }
 
             if chained.is_empty() {
-                return Err(DynLoadError::LoadError(
-                    "no providers could be loaded".to_string(),
-                ));
+                return Err(DynLoadError::LoadError("no providers could be loaded".to_string()));
             }
 
             Ok(Arc::new(chained))

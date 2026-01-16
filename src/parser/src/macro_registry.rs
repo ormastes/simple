@@ -6,10 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{
-    BinOp, Expr, MacroContractItem, MacroDef, MacroIntro, MacroIntroDecl, MacroIntroSpec, Type,
-    UnaryOp,
-};
+use crate::ast::{BinOp, Expr, MacroContractItem, MacroDef, MacroIntro, MacroIntroDecl, MacroIntroSpec, Type, UnaryOp};
 
 /// A symbol introduced by a macro (function, field, type, or variable).
 #[derive(Debug, Clone, PartialEq)]
@@ -281,11 +278,7 @@ impl MacroRegistry {
                 let end_val = end.as_i64().ok_or("For loop end must be an integer")?;
 
                 // Unroll the loop
-                let end_bound = if range.inclusive {
-                    end_val + 1
-                } else {
-                    end_val
-                };
+                let end_bound = if range.inclusive { end_val + 1 } else { end_val };
                 for i in start_val..end_bound {
                     // Bind loop variable
                     ctx.bindings.insert(name.clone(), ConstValue::Int(i));
@@ -334,11 +327,8 @@ impl MacroRegistry {
         match &decl.stub {
             MacroDeclStub::Fn(fn_stub) => {
                 let name = self.substitute_templates(&fn_stub.name, ctx);
-                let params: Vec<(String, Type)> = fn_stub
-                    .params
-                    .iter()
-                    .map(|p| (p.name.clone(), p.ty.clone()))
-                    .collect();
+                let params: Vec<(String, Type)> =
+                    fn_stub.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
                 introduced.push(IntroducedSymbol::Function {
                     name,
                     params,
@@ -380,9 +370,7 @@ impl MacroRegistry {
         let mut result = template.to_string();
 
         // Strip surrounding quotes if present
-        if (result.starts_with('"') && result.ends_with('"'))
-            || (result.starts_with('\'') && result.ends_with('\''))
-        {
+        if (result.starts_with('"') && result.ends_with('"')) || (result.starts_with('\'') && result.ends_with('\'')) {
             result = result[1..result.len() - 1].to_string();
         }
 
@@ -425,12 +413,7 @@ impl MacroRegistry {
     }
 
     /// Evaluate a binary operation on const values
-    fn eval_binary_op(
-        &self,
-        left: &ConstValue,
-        op: &BinOp,
-        right: &ConstValue,
-    ) -> Result<ConstValue, String> {
+    fn eval_binary_op(&self, left: &ConstValue, op: &BinOp, right: &ConstValue) -> Result<ConstValue, String> {
         match (left, right) {
             (ConstValue::Int(l), ConstValue::Int(r)) => match op {
                 BinOp::Add => Ok(ConstValue::Int(l + r)),
@@ -456,10 +439,7 @@ impl MacroRegistry {
                 BinOp::LtEq => Ok(ConstValue::Bool(l <= r)),
                 BinOp::Gt => Ok(ConstValue::Bool(l > r)),
                 BinOp::GtEq => Ok(ConstValue::Bool(l >= r)),
-                _ => Err(format!(
-                    "Unsupported binary operator for integers: {:?}",
-                    op
-                )),
+                _ => Err(format!("Unsupported binary operator for integers: {:?}", op)),
             },
             (ConstValue::Str(l), ConstValue::Str(r)) => match op {
                 BinOp::Add => Ok(ConstValue::Str(format!("{}{}", l, r))),
@@ -472,10 +452,7 @@ impl MacroRegistry {
                 BinOp::Or => Ok(ConstValue::Bool(*l || *r)),
                 BinOp::Eq => Ok(ConstValue::Bool(l == r)),
                 BinOp::NotEq => Ok(ConstValue::Bool(l != r)),
-                _ => Err(format!(
-                    "Unsupported binary operator for booleans: {:?}",
-                    op
-                )),
+                _ => Err(format!("Unsupported binary operator for booleans: {:?}", op)),
             },
             _ => Err(format!(
                 "Type mismatch in binary operation: {:?} {:?} {:?}",
@@ -489,19 +466,13 @@ impl MacroRegistry {
         match (op, value) {
             (UnaryOp::Neg, ConstValue::Int(n)) => Ok(ConstValue::Int(-n)),
             (UnaryOp::Not, ConstValue::Bool(b)) => Ok(ConstValue::Bool(!b)),
-            _ => Err(format!(
-                "Unsupported unary operator {:?} for value {:?}",
-                op, value
-            )),
+            _ => Err(format!("Unsupported unary operator {:?} for value {:?}", op, value)),
         }
     }
 
     /// Get introduced symbols for a scope
     pub fn get_introduced_symbols(&self, scope: &str) -> &[IntroducedSymbol] {
-        self.introduced_symbols
-            .get(scope)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.introduced_symbols.get(scope).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Get all introduced symbols across all scopes

@@ -9,9 +9,7 @@ use crate::vulkan::ComputePipeline;
 #[cfg(feature = "vulkan")]
 use std::sync::Arc;
 
-use super::common::{
-    next_handle, VulkanFfiError, BUFFER_REGISTRY, DEVICE_REGISTRY, PIPELINE_REGISTRY,
-};
+use super::common::{next_handle, VulkanFfiError, BUFFER_REGISTRY, DEVICE_REGISTRY, PIPELINE_REGISTRY};
 
 /// Compile a SPIR-V kernel into a compute pipeline
 ///
@@ -32,11 +30,7 @@ use super::common::{
 /// - `spirv_data` must point to valid SPIR-V bytecode
 /// - `device_handle` must be a valid handle from rt_vk_device_create
 #[no_mangle]
-pub extern "C" fn rt_vk_kernel_compile(
-    device_handle: u64,
-    spirv_data: *const u8,
-    spirv_len: u64,
-) -> u64 {
+pub extern "C" fn rt_vk_kernel_compile(device_handle: u64, spirv_data: *const u8, spirv_len: u64) -> u64 {
     #[cfg(feature = "vulkan")]
     {
         if spirv_data.is_null() {
@@ -53,11 +47,7 @@ pub extern "C" fn rt_vk_kernel_compile(
                     drop(registry); // Release device registry lock
                     let handle = next_handle();
                     PIPELINE_REGISTRY.lock().insert(handle, Arc::new(pipeline));
-                    tracing::info!(
-                        "Vulkan pipeline {} compiled ({} bytes SPIR-V)",
-                        handle,
-                        spirv_len
-                    );
+                    tracing::info!("Vulkan pipeline {} compiled ({} bytes SPIR-V)", handle, spirv_len);
                     handle
                 }
                 Err(e) => {
@@ -160,13 +150,11 @@ pub extern "C" fn rt_vk_kernel_launch(
         let pipeline_registry = PIPELINE_REGISTRY.lock();
         if let Some(pipeline) = pipeline_registry.get(&pipeline_handle) {
             // Get buffer handles array
-            let handle_slice =
-                unsafe { std::slice::from_raw_parts(buffer_handles, buffer_count as usize) };
+            let handle_slice = unsafe { std::slice::from_raw_parts(buffer_handles, buffer_count as usize) };
 
             // Look up buffers from registry
             let buffer_registry = BUFFER_REGISTRY.lock();
-            let mut buffers: Vec<Arc<crate::vulkan::VulkanBuffer>> =
-                Vec::with_capacity(buffer_count as usize);
+            let mut buffers: Vec<Arc<crate::vulkan::VulkanBuffer>> = Vec::with_capacity(buffer_count as usize);
 
             for &handle in handle_slice {
                 if let Some(buffer) = buffer_registry.get(&handle) {
@@ -178,8 +166,7 @@ pub extern "C" fn rt_vk_kernel_launch(
             }
 
             // Convert Arc<VulkanBuffer> to &VulkanBuffer for execute()
-            let buffer_refs: Vec<&crate::vulkan::VulkanBuffer> =
-                buffers.iter().map(|b| b.as_ref()).collect();
+            let buffer_refs: Vec<&crate::vulkan::VulkanBuffer> = buffers.iter().map(|b| b.as_ref()).collect();
 
             // Execute kernel
             match pipeline.execute(

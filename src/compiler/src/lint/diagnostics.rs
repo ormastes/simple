@@ -73,12 +73,7 @@ impl LintDiagnostic {
             LintLevel::Deny => Severity::Error,
         };
 
-        let common_span = CommonSpan::new(
-            self.span.start,
-            self.span.end,
-            self.span.line,
-            self.span.column,
-        );
+        let common_span = CommonSpan::new(self.span.start, self.span.end, self.span.line, self.span.column);
 
         let mut diag = Diagnostic::new(severity, self.message.clone())
             .with_code(format!("L:{}", self.lint.as_str()))

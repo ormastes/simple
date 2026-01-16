@@ -5,9 +5,7 @@
 //! - Not-covered code (not executed) as not covered
 
 use simple_driver::Interpreter;
-use simple_mock_helper::coverage::{
-    compute_class_coverage, parse_llvm_cov_export, parse_public_api_spec, CoverageSummary,
-};
+use simple_mock_helper::coverage::{compute_class_coverage, parse_llvm_cov_export, parse_public_api_spec, CoverageSummary};
 
 // =============================================================================
 // Coverage Data Verification Tests
@@ -128,10 +126,7 @@ types:
     let not_covered_count = service_cov.methods.iter().filter(|m| !m.covered).count();
 
     assert_eq!(covered_count, 1, "Should have exactly 1 covered method");
-    assert_eq!(
-        not_covered_count, 2,
-        "Should have exactly 2 not-covered methods"
-    );
+    assert_eq!(not_covered_count, 2, "Should have exactly 2 not-covered methods");
 }
 
 /// Test coverage with multiple data entries (merged coverage)
@@ -171,21 +166,9 @@ types:
     // tokenize: NOT covered in first, but covered in second -> should be covered
     // validate: NOT covered in either -> should NOT be covered
 
-    let parse_method = parser_cov
-        .methods
-        .iter()
-        .find(|m| m.method_name == "parse")
-        .unwrap();
-    let tokenize_method = parser_cov
-        .methods
-        .iter()
-        .find(|m| m.method_name == "tokenize")
-        .unwrap();
-    let validate_method = parser_cov
-        .methods
-        .iter()
-        .find(|m| m.method_name == "validate")
-        .unwrap();
+    let parse_method = parser_cov.methods.iter().find(|m| m.method_name == "parse").unwrap();
+    let tokenize_method = parser_cov.methods.iter().find(|m| m.method_name == "tokenize").unwrap();
+    let validate_method = parser_cov.methods.iter().find(|m| m.method_name == "validate").unwrap();
 
     assert!(parse_method.covered, "parse should be covered");
     assert!(
@@ -234,19 +217,10 @@ types:
     );
 
     // Threshold checks
-    assert!(
-        summary.meets_threshold(40.0),
-        "Should meet 40% threshold (exactly)"
-    );
+    assert!(summary.meets_threshold(40.0), "Should meet 40% threshold (exactly)");
     assert!(summary.meets_threshold(39.0), "Should meet 39% threshold");
-    assert!(
-        !summary.meets_threshold(41.0),
-        "Should NOT meet 41% threshold"
-    );
-    assert!(
-        !summary.meets_threshold(80.0),
-        "Should NOT meet 80% threshold"
-    );
+    assert!(!summary.meets_threshold(41.0), "Should NOT meet 41% threshold");
+    assert!(!summary.meets_threshold(80.0), "Should NOT meet 80% threshold");
 }
 
 /// Test empty coverage (no functions executed)
@@ -283,11 +257,7 @@ types:
 
     // All methods should be marked not covered
     for method in &dead_cov.methods {
-        assert!(
-            !method.covered,
-            "Method {} should NOT be covered",
-            method.method_name
-        );
+        assert!(!method.covered, "Method {} should NOT be covered", method.method_name);
     }
 }
 
@@ -316,10 +286,7 @@ types:
 
     let complete_cov = &results[0];
 
-    assert_eq!(
-        complete_cov.covered_methods, 3,
-        "All methods should be covered"
-    );
+    assert_eq!(complete_cov.covered_methods, 3, "All methods should be covered");
     assert_eq!(complete_cov.total_methods, 3);
     assert!(
         (complete_cov.coverage_percent() - 100.0).abs() < 0.01,
@@ -328,11 +295,7 @@ types:
 
     // All methods should be marked covered
     for method in &complete_cov.methods {
-        assert!(
-            method.covered,
-            "Method {} should be covered",
-            method.method_name
-        );
+        assert!(method.covered, "Method {} should be covered", method.method_name);
     }
 }
 
@@ -443,10 +406,7 @@ types:
         .iter()
         .find(|m| m.method_name == "method3")
         .expect("find method3");
-    assert!(
-        !method3.covered,
-        "method3 should NOT be covered (not in coverage data)"
-    );
+    assert!(!method3.covered, "method3 should NOT be covered (not in coverage data)");
 }
 
 // =============================================================================

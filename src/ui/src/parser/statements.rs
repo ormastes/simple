@@ -74,10 +74,7 @@ impl<'a> super::SuiParser<'a> {
                 if self.peek_kind() == SuiTokenKind::Assign {
                     self.advance();
                     let value = self.parse_expression()?;
-                    Ok(Statement::Assignment {
-                        target: name,
-                        value,
-                    })
+                    Ok(Statement::Assignment { target: name, value })
                 } else {
                     // It's an expression starting with identifier
                     // Put it back and parse as expression

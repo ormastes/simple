@@ -289,9 +289,8 @@ fn test_state_store_clear() {
 
 use simple_compiler::hir::TypeId;
 use simple_compiler::mir::{
-    BindingStep, BlockId, CaptureMode, CapturedVar, ContractKind, FStringPart, GpuAtomicOp,
-    GpuMemoryScope, MirInst, MirLiteral, MirPattern, ParallelBackend, PatternBinding,
-    UnitOverflowBehavior, VReg,
+    BindingStep, BlockId, CaptureMode, CapturedVar, ContractKind, FStringPart, GpuAtomicOp, GpuMemoryScope, MirInst,
+    MirLiteral, MirPattern, ParallelBackend, PatternBinding, UnitOverflowBehavior, VReg,
 };
 
 #[test]

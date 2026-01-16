@@ -170,10 +170,7 @@ fn is_banner_print(line: &str) -> bool {
     }
 
     // Check for repeated separator characters
-    line.contains("====")
-        || line.contains("----")
-        || line.contains("####")
-        || line.contains("****")
+    line.contains("====") || line.contains("----") || line.contains("####") || line.contains("****")
 }
 
 #[cfg(test)]
@@ -214,8 +211,12 @@ mod tests {
 
     #[test]
     fn test_is_banner_print() {
-        assert!(is_banner_print("print('============================================================')"));
-        assert!(is_banner_print("print('------------------------------------------------------------')"));
+        assert!(is_banner_print(
+            "print('============================================================')"
+        ));
+        assert!(is_banner_print(
+            "print('------------------------------------------------------------')"
+        ));
         assert!(!is_banner_print("print('regular message')"));
     }
 

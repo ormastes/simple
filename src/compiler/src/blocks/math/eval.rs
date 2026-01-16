@@ -65,7 +65,12 @@ fn tensor_to_value(tensor: &Tensor) -> Value {
     // Multi-dimensional: build nested arrays
     fn build_nested(data: &[f64], shape: &[usize], offset: usize) -> Value {
         if shape.len() == 1 {
-            Value::Array(data[offset..offset + shape[0]].iter().map(|&x| Value::Float(x)).collect())
+            Value::Array(
+                data[offset..offset + shape[0]]
+                    .iter()
+                    .map(|&x| Value::Float(x))
+                    .collect(),
+            )
         } else {
             let inner_size: usize = shape[1..].iter().product();
             Value::Array(
@@ -119,10 +124,7 @@ fn eval_with_env(expr: &MathExpr, env: &mut HashMap<String, MathValue>) -> Resul
                 return Ok(MathValue::Float(val));
             }
             // Unknown variable - return as error
-            Err(CompileError::Semantic(format!(
-                "undefined math variable: {}",
-                name
-            )))
+            Err(CompileError::Semantic(format!("undefined math variable: {}", name)))
         }
 
         MathExpr::Add(left, right) => {
@@ -154,9 +156,7 @@ fn eval_with_env(expr: &MathExpr, env: &mut HashMap<String, MathValue>) -> Resul
             let e = eval_with_env(exp, env)?;
             // Power operations always return Float (transcendental operation)
             match (&b, &e) {
-                (MathValue::Tensor(a), MathValue::Tensor(b)) => {
-                    Ok(MathValue::Tensor(a.pow(b)?))
-                }
+                (MathValue::Tensor(a), MathValue::Tensor(b)) => Ok(MathValue::Tensor(a.pow(b)?)),
                 (MathValue::Tensor(t), scalar) => {
                     let s = scalar.as_f64()?;
                     // t^s element-wise
@@ -290,10 +290,7 @@ fn flatten_to_tensor(values: &[MathValue]) -> Result<(Vec<f64>, Vec<usize>), Com
     match &values[0] {
         MathValue::Int(_) | MathValue::Float(_) | MathValue::Bool(_) => {
             // All elements should be scalars
-            let data: Vec<f64> = values
-                .iter()
-                .map(|v| v.as_f64())
-                .collect::<Result<_, _>>()?;
+            let data: Vec<f64> = values.iter().map(|v| v.as_f64()).collect::<Result<_, _>>()?;
             Ok((data, vec![values.len()]))
         }
         MathValue::Tensor(t) => {
@@ -312,9 +309,7 @@ fn flatten_to_tensor(values: &[MathValue]) -> Result<(Vec<f64>, Vec<usize>), Com
                         data.extend(&t2.data);
                     }
                     _ => {
-                        return Err(CompileError::Semantic(
-                            "mixed scalar and tensor in array".to_string(),
-                        ));
+                        return Err(CompileError::Semantic("mixed scalar and tensor in array".to_string()));
                     }
                 }
             }
@@ -405,8 +400,16 @@ fn broadcast_shapes(a: &[usize], b: &[usize]) -> Result<Vec<usize>, CompileError
     let mut result = vec![0; max_len];
 
     for i in 0..max_len {
-        let a_dim = if i < max_len - a.len() { 1 } else { a[i - (max_len - a.len())] };
-        let b_dim = if i < max_len - b.len() { 1 } else { b[i - (max_len - b.len())] };
+        let a_dim = if i < max_len - a.len() {
+            1
+        } else {
+            a[i - (max_len - a.len())]
+        };
+        let b_dim = if i < max_len - b.len() {
+            1
+        } else {
+            b[i - (max_len - b.len())]
+        };
 
         if a_dim == b_dim {
             result[i] = a_dim;
@@ -493,10 +496,7 @@ fn eval_function(
     env: &mut HashMap<String, MathValue>,
 ) -> Result<MathValue, CompileError> {
     // Evaluate all arguments first
-    let eval_args: Vec<MathValue> = args
-        .iter()
-        .map(|a| eval_with_env(a, env))
-        .collect::<Result<_, _>>()?;
+    let eval_args: Vec<MathValue> = args.iter().map(|a| eval_with_env(a, env)).collect::<Result<_, _>>()?;
 
     match name {
         // ==========================================================================
@@ -632,7 +632,10 @@ fn eval_function(
             require_tensor_args(name, &eval_args, 1)?;
             let t = get_tensor(&eval_args[0])?;
             let shape_data: Vec<f64> = t.shape.iter().map(|&s| s as f64).collect();
-            Ok(MathValue::Tensor(Tensor::new(shape_data.clone(), vec![shape_data.len()])?))
+            Ok(MathValue::Tensor(Tensor::new(
+                shape_data.clone(),
+                vec![shape_data.len()],
+            )?))
         }
 
         "ndim" => {
@@ -948,7 +951,9 @@ fn require_tensor_args(name: &str, args: &[MathValue], expected: usize) -> Resul
     if args.len() != expected {
         return Err(CompileError::Semantic(format!(
             "{} requires {} argument(s), got {}",
-            name, expected, args.len()
+            name,
+            expected,
+            args.len()
         )));
     }
     Ok(())
@@ -1038,16 +1043,28 @@ fn eval_integral(
 // ==========================================================================
 
 fn gcd(a: i64, b: i64) -> i64 {
-    if b == 0 { a } else { gcd(b, a % b) }
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
 }
 
 fn factorial(n: u64) -> u64 {
-    if n <= 1 { 1 } else { n * factorial(n - 1) }
+    if n <= 1 {
+        1
+    } else {
+        n * factorial(n - 1)
+    }
 }
 
 fn binomial(n: u64, k: u64) -> u64 {
-    if k > n { return 0; }
-    if k == 0 || k == n { return 1; }
+    if k > n {
+        return 0;
+    }
+    if k == 0 || k == n {
+        return 1;
+    }
     let k = if k > n - k { n - k } else { k };
     let mut result: u64 = 1;
     for i in 0..k {
@@ -1057,7 +1074,9 @@ fn binomial(n: u64, k: u64) -> u64 {
 }
 
 fn gamma(x: f64) -> f64 {
-    if x <= 0.0 { return f64::NAN; }
+    if x <= 0.0 {
+        return f64::NAN;
+    }
     if x.fract() == 0.0 && x <= 21.0 {
         return factorial((x - 1.0) as u64) as f64;
     }

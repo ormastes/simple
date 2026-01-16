@@ -78,9 +78,7 @@ mod parser_contract_tests {
 // Parser Macro Extended Types
 // ============================================================================
 mod parser_macro_extended_tests {
-    use simple_parser::{
-        MacroContractItem, MacroInject, MacroIntro, MacroParam, MacroReturns, MacroStmt,
-    };
+    use simple_parser::{MacroContractItem, MacroInject, MacroIntro, MacroParam, MacroReturns, MacroStmt};
 
     #[test]
     fn test_macro_stmt_size() {

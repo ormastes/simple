@@ -20,17 +20,14 @@ use std::sync::Arc;
 /// # Safety
 /// Safe to call from FFI context. Uses thread-safe globals with proper locking.
 #[cfg(feature = "vulkan")]
-fn get_or_init_window_manager(
-) -> Result<Arc<parking_lot::Mutex<crate::vulkan::WindowManager>>, VulkanFfiError> {
+fn get_or_init_window_manager() -> Result<Arc<parking_lot::Mutex<crate::vulkan::WindowManager>>, VulkanFfiError> {
     let mut manager_opt = WINDOW_MANAGER.lock();
 
     if manager_opt.is_none() {
         // Initialize window manager
-        let instance = crate::vulkan::VulkanInstance::get_or_init()
-            .map_err(|_| VulkanFfiError::NotAvailable)?;
+        let instance = crate::vulkan::VulkanInstance::get_or_init().map_err(|_| VulkanFfiError::NotAvailable)?;
 
-        let mut manager =
-            crate::vulkan::WindowManager::new(instance).map_err(|_| VulkanFfiError::WindowError)?;
+        let mut manager = crate::vulkan::WindowManager::new(instance).map_err(|_| VulkanFfiError::WindowError)?;
 
         // Start event loop thread
         manager
@@ -72,11 +69,7 @@ fn serialize_window_event(
 
     unsafe {
         match event {
-            WindowEvent::Resized {
-                window,
-                width,
-                height,
-            } => {
+            WindowEvent::Resized { window, width, height } => {
                 *out_window = window as i64;
                 *out_type = 1;
 
@@ -212,16 +205,10 @@ pub extern "C" fn rt_vk_window_create(
                         // Get surface and store it
                         if let Ok(surface) = mgr.get_surface(handle) {
                             let instance = crate::vulkan::VulkanInstance::get_or_init().unwrap();
-                            let surface_obj =
-                                Arc::new(crate::vulkan::Surface::from_handle(instance, surface));
+                            let surface_obj = Arc::new(crate::vulkan::Surface::from_handle(instance, surface));
                             WINDOW_SURFACES.lock().insert(handle, surface_obj);
                         }
-                        tracing::info!(
-                            "Window created: handle={}, size={}x{}",
-                            handle,
-                            width,
-                            height
-                        );
+                        tracing::info!("Window created: handle={}, size={}x{}", handle, width, height);
                         handle as i64
                     }
                     Err(e) => {
@@ -310,11 +297,7 @@ pub extern "C" fn rt_vk_window_destroy(window_handle: i64) -> i32 {
 /// # Safety
 /// Safe to call with valid output pointers. Must not be null.
 #[no_mangle]
-pub extern "C" fn rt_vk_window_get_size(
-    window_handle: i64,
-    out_width: *mut u32,
-    out_height: *mut u32,
-) -> i32 {
+pub extern "C" fn rt_vk_window_get_size(window_handle: i64, out_width: *mut u32, out_height: *mut u32) -> i32 {
     #[cfg(feature = "vulkan")]
     {
         if window_handle < 0 {
@@ -393,19 +376,11 @@ pub extern "C" fn rt_vk_window_set_fullscreen(window_handle: i64, mode: i32) -> 
                 let mut mgr = manager.lock();
                 match mgr.set_fullscreen(window_handle as u64, fullscreen_mode) {
                     Ok(()) => {
-                        tracing::info!(
-                            "Window {} fullscreen mode set to {:?}",
-                            window_handle,
-                            mode
-                        );
+                        tracing::info!("Window {} fullscreen mode set to {:?}", window_handle, mode);
                         0
                     }
                     Err(e) => {
-                        tracing::error!(
-                            "Failed to set fullscreen mode for window {}: {:?}",
-                            window_handle,
-                            e
-                        );
+                        tracing::error!("Failed to set fullscreen mode for window {}: {:?}", window_handle, e);
                         VulkanFfiError::from(e) as i32
                     }
                 }
@@ -465,13 +440,7 @@ pub extern "C" fn rt_vk_window_poll_event(
             Ok(manager) => {
                 let mgr = manager.lock();
                 match mgr.poll_event() {
-                    Some(event) => serialize_window_event(
-                        event,
-                        out_window,
-                        out_type,
-                        out_data_ptr,
-                        out_data_len,
-                    ),
+                    Some(event) => serialize_window_event(event, out_window, out_type, out_data_ptr, out_data_len),
                     None => 0, // No events available
                 }
             }
@@ -532,13 +501,7 @@ pub extern "C" fn rt_vk_window_wait_event(
             Ok(manager) => {
                 let mgr = manager.lock();
                 match mgr.wait_event(timeout_ms) {
-                    Some(event) => serialize_window_event(
-                        event,
-                        out_window,
-                        out_type,
-                        out_data_ptr,
-                        out_data_len,
-                    ),
+                    Some(event) => serialize_window_event(event, out_window, out_type, out_data_ptr, out_data_len),
                     None => 0, // Timeout
                 }
             }

@@ -7,7 +7,7 @@
 //! - Helpful error messages for newcomers
 
 use crate::error::ParseError;
-use crate::token::{Span, Token, TokenKind};
+use crate::token::{NamePattern, Span, Token, TokenKind};
 
 /// Common programming mistakes from other languages
 #[derive(Debug, Clone, PartialEq)]
@@ -172,13 +172,11 @@ impl CommonMistake {
                 .to_string(),
 
             // C-style
-            Self::CSemicolon => {
-                "Semicolons are optional in Simple (only needed for same-line statements).\n\
+            Self::CSemicolon => "Semicolons are optional in Simple (only needed for same-line statements).\n\
                  \n\
                  C:       int x = 5;\n\
                  Simple:  val x = 5  # no semicolon needed"
-                    .to_string()
-            }
+                .to_string(),
             Self::CTypeFirst => "Type comes after the variable name in Simple.\n\
                  \n\
                  C:       int x = 5;\n\
@@ -192,25 +190,21 @@ impl CommonMistake {
                  Missing: fn foo()\n\
                  Correct: fn foo():"
                 .to_string(),
-            Self::WrongBrackets => {
-                "Use angle brackets <> for generic types (not square brackets).\n\
+            Self::WrongBrackets => "Use angle brackets <> for generic types (not square brackets).\n\
                  \n\
                  Old:     List[T]\n\
                  New:     List<T>  # industry standard"
-                    .to_string()
-            }
+                .to_string(),
             Self::ExplicitSelf => "The 'self' parameter is implicit in methods. Don't write it.\n\
                  \n\
                  Explicit:  fn get_x(self) -> i32:  # redundant\n\
                  Implicit:  fn get_x() -> i32:      # self is automatic"
                 .to_string(),
-            Self::VerboseReturnType => {
-                "Return type can be inferred. Only specify when needed for clarity.\n\
+            Self::VerboseReturnType => "Return type can be inferred. Only specify when needed for clarity.\n\
                  \n\
                  Verbose:  fn add(a: i32, b: i32) -> i32: a + b\n\
                  Concise:  fn add(a: i32, b: i32): a + b  # return type inferred"
-                    .to_string()
-            }
+                .to_string(),
             Self::SemicolonAfterBlock => "Don't use semicolons after block closures.\n\
                  \n\
                  Wrong:  if x > 0: { ... };\n\
@@ -241,9 +235,7 @@ impl CommonMistake {
             Self::MissingColon => "Add ':' before the function body".to_string(),
             Self::WrongBrackets => "Use <> instead of [] for generics".to_string(),
             Self::ExplicitSelf => "Remove the 'self' parameter (it's implicit)".to_string(),
-            Self::VerboseReturnType => {
-                "Consider omitting return type (type inference works)".to_string()
-            }
+            Self::VerboseReturnType => "Consider omitting return type (type inference works)".to_string(),
             Self::CTypeFirst => "Use 'val' or 'var' with type after name".to_string(),
             _ => "See error message for details".to_string(),
         }
@@ -251,11 +243,7 @@ impl CommonMistake {
 }
 
 /// Detect common mistakes from token sequences
-pub fn detect_common_mistake(
-    current: &Token,
-    previous: &Token,
-    next: Option<&Token>,
-) -> Option<CommonMistake> {
+pub fn detect_common_mistake(current: &Token, previous: &Token, next: Option<&Token>) -> Option<CommonMistake> {
     // Check for Python-style 'def'
     if current.lexeme == "def" && matches!(current.kind, TokenKind::Identifier { .. }) {
         return Some(CommonMistake::PythonDef);
@@ -376,9 +364,7 @@ pub fn detect_common_mistake(
     }
 
     // Check for Python-style explicit self.x (when 'self' keyword is followed by dot)
-    if matches!(current.kind, TokenKind::Self_)
-        && !matches!(previous.kind, TokenKind::Fn | TokenKind::Me)
-    {
+    if matches!(current.kind, TokenKind::Self_) && !matches!(previous.kind, TokenKind::Fn | TokenKind::Me) {
         // This is 'self' being used explicitly (not in method signature)
         if let Some(next_token) = next {
             if matches!(next_token.kind, TokenKind::Dot) {
@@ -393,9 +379,7 @@ pub fn detect_common_mistake(
     }
 
     // Check for wrong brackets in generics: identifier[
-    if matches!(current.kind, TokenKind::LBracket)
-        && matches!(previous.kind, TokenKind::Identifier { .. })
-    {
+    if matches!(current.kind, TokenKind::LBracket) && matches!(previous.kind, TokenKind::Identifier { .. }) {
         // This could be array indexing, but if followed by type-like identifier, likely generic
         if let Some(next_token) = next {
             // Check if next token looks like a type (capitalized identifier)
@@ -424,9 +408,8 @@ pub fn detect_common_mistake(
     if let TokenKind::Identifier { name: type_name, .. } = &current.kind {
         // Common C/C++/Java type names
         let c_types = [
-            "int", "uint", "float", "double", "char", "long", "short", "byte", "boolean", "void",
-            "string", "String", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32",
-            "uint64", "float32", "float64",
+            "int", "uint", "float", "double", "char", "long", "short", "byte", "boolean", "void", "string", "String",
+            "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32", "float64",
         ];
 
         if c_types.contains(&type_name.as_str()) {
@@ -532,7 +515,10 @@ mod tests {
     #[test]
     fn test_python_def_detection() {
         let token = Token::new(
-            TokenKind::Identifier("def".to_string()),
+            TokenKind::Identifier {
+                name: "def".to_string(),
+                pattern: NamePattern::detect("def"),
+            },
             Span::new(0, 3, 1, 1),
             "def".to_string(),
         );

@@ -20,9 +20,7 @@ pub(super) fn lookup_unit_family(suffix: &str) -> Option<String> {
 
 /// Look up unit family with SI prefix info
 /// Returns (family_name, si_multiplier, base_suffix) if SI prefix was used
-pub(super) fn lookup_unit_family_with_si(
-    suffix: &str,
-) -> (Option<String>, Option<f64>, Option<String>) {
+pub(super) fn lookup_unit_family_with_si(suffix: &str) -> (Option<String>, Option<f64>, Option<String>) {
     // First try direct lookup
     if let Some(family) = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned()) {
         return (Some(family), None, None);
@@ -35,11 +33,7 @@ pub(super) fn lookup_unit_family_with_si(
 }
 
 /// Perform a binary operation on the inner values of two units
-pub(super) fn evaluate_unit_binary_inner(
-    left: &Value,
-    right: &Value,
-    op: BinOp,
-) -> Result<Value, CompileError> {
+pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp) -> Result<Value, CompileError> {
     match op {
         BinOp::Add => match (left, right) {
             (Value::Int(l), Value::Int(r)) => Ok(Value::Int(l + r)),
@@ -204,12 +198,8 @@ pub(super) fn evaluate_unit_unary_inner(value: &Value, op: UnaryOp) -> Result<Va
                 value.type_name()
             ))),
         },
-        UnaryOp::Not => Err(CompileError::Semantic(
-            "cannot apply logical NOT to unit value".into(),
-        )),
-        UnaryOp::BitNot => Err(CompileError::Semantic(
-            "cannot apply bitwise NOT to unit value".into(),
-        )),
+        UnaryOp::Not => Err(CompileError::Semantic("cannot apply logical NOT to unit value".into())),
+        UnaryOp::BitNot => Err(CompileError::Semantic("cannot apply bitwise NOT to unit value".into())),
         _ => Err(CompileError::Semantic(format!(
             "unsupported unary operation {:?} on unit value",
             op

@@ -6,11 +6,7 @@ use std::collections::HashMap;
 /// Trait for architecture access rules
 pub trait AccessRule: std::fmt::Debug + Send + Sync {
     /// Check the rule against the module tree
-    fn check(
-        &self,
-        module_tree: &ModuleTree,
-        layers: &HashMap<String, Layer>,
-    ) -> Result<(), Vec<Violation>>;
+    fn check(&self, module_tree: &ModuleTree, layers: &HashMap<String, Layer>) -> Result<(), Vec<Violation>>;
 
     /// Get rule name
     fn name(&self) -> &str;
@@ -32,11 +28,7 @@ pub struct MayOnlyAccess {
 }
 
 impl AccessRule for MayOnlyAccess {
-    fn check(
-        &self,
-        module_tree: &ModuleTree,
-        layers: &HashMap<String, Layer>,
-    ) -> Result<(), Vec<Violation>> {
+    fn check(&self, module_tree: &ModuleTree, layers: &HashMap<String, Layer>) -> Result<(), Vec<Violation>> {
         let mut violations = Vec::new();
 
         let source_layer = match layers.get(&self.layer) {
@@ -97,11 +89,7 @@ pub struct MayNotAccess {
 }
 
 impl AccessRule for MayNotAccess {
-    fn check(
-        &self,
-        module_tree: &ModuleTree,
-        layers: &HashMap<String, Layer>,
-    ) -> Result<(), Vec<Violation>> {
+    fn check(&self, module_tree: &ModuleTree, layers: &HashMap<String, Layer>) -> Result<(), Vec<Violation>> {
         let mut violations = Vec::new();
 
         let source_layer = match layers.get(&self.layer) {
@@ -124,10 +112,7 @@ impl AccessRule for MayNotAccess {
                     if self.forbidden.iter().any(|f| f == dep_layer_name) {
                         violations.push(Violation {
                             rule: self.name().to_string(),
-                            message: format!(
-                                "Layer '{}' may not access '{}', but does",
-                                self.layer, dep_layer_name
-                            ),
+                            message: format!("Layer '{}' may not access '{}', but does", self.layer, dep_layer_name),
                             source: Some(module.clone()),
                             target: Some(dep.clone()),
                         });
@@ -156,11 +141,7 @@ pub struct MayNotBeAccessedBy {
 }
 
 impl AccessRule for MayNotBeAccessedBy {
-    fn check(
-        &self,
-        module_tree: &ModuleTree,
-        layers: &HashMap<String, Layer>,
-    ) -> Result<(), Vec<Violation>> {
+    fn check(&self, module_tree: &ModuleTree, layers: &HashMap<String, Layer>) -> Result<(), Vec<Violation>> {
         let mut violations = Vec::new();
 
         let target_layer = match layers.get(&self.layer) {
@@ -176,11 +157,7 @@ impl AccessRule for MayNotBeAccessedBy {
                 .map(|l| l.name.as_str());
 
             if let Some(source_layer_name) = source_layer {
-                if self
-                    .forbidden_accessors
-                    .iter()
-                    .any(|f| f == source_layer_name)
-                {
+                if self.forbidden_accessors.iter().any(|f| f == source_layer_name) {
                     // Check if any dep is in the protected layer
                     for dep in deps {
                         if target_layer.contains_module(dep) {
@@ -219,11 +196,7 @@ pub struct MayOnlyBeAccessedBy {
 }
 
 impl AccessRule for MayOnlyBeAccessedBy {
-    fn check(
-        &self,
-        module_tree: &ModuleTree,
-        layers: &HashMap<String, Layer>,
-    ) -> Result<(), Vec<Violation>> {
+    fn check(&self, module_tree: &ModuleTree, layers: &HashMap<String, Layer>) -> Result<(), Vec<Violation>> {
         let mut violations = Vec::new();
 
         let target_layer = match layers.get(&self.layer) {
@@ -244,11 +217,7 @@ impl AccessRule for MayOnlyBeAccessedBy {
                 }
 
                 // Check if accessor is in allowed list
-                if !self
-                    .allowed_accessors
-                    .iter()
-                    .any(|a| a == source_layer_name)
-                {
+                if !self.allowed_accessors.iter().any(|a| a == source_layer_name) {
                     // Check if any dep is in the protected layer
                     for dep in deps {
                         if target_layer.contains_module(dep) {
@@ -284,11 +253,7 @@ impl AccessRule for MayOnlyBeAccessedBy {
 pub struct NoLayerCycles;
 
 impl AccessRule for NoLayerCycles {
-    fn check(
-        &self,
-        module_tree: &ModuleTree,
-        layers: &HashMap<String, Layer>,
-    ) -> Result<(), Vec<Violation>> {
+    fn check(&self, module_tree: &ModuleTree, layers: &HashMap<String, Layer>) -> Result<(), Vec<Violation>> {
         // Build layer-level dependency graph
         let mut layer_deps: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
 
@@ -300,10 +265,7 @@ impl AccessRule for NoLayerCycles {
 
             if let Some(src) = source_layer {
                 for dep in deps {
-                    let target_layer = layers
-                        .values()
-                        .find(|l| l.contains_module(dep))
-                        .map(|l| l.name.clone());
+                    let target_layer = layers.values().find(|l| l.contains_module(dep)).map(|l| l.name.clone());
 
                     if let Some(tgt) = target_layer {
                         if src != tgt {
@@ -397,21 +359,13 @@ impl Default for NoMockInProduction {
                 "**/*_test.spl".to_string(),
                 "**/*_spec.spl".to_string(),
             ],
-            mock_patterns: vec![
-                "@mock".to_string(),
-                "#[mock]".to_string(),
-                "mock!".to_string(),
-            ],
+            mock_patterns: vec!["@mock".to_string(), "#[mock]".to_string(), "mock!".to_string()],
         }
     }
 }
 
 impl AccessRule for NoMockInProduction {
-    fn check(
-        &self,
-        module_tree: &ModuleTree,
-        _layers: &HashMap<String, Layer>,
-    ) -> Result<(), Vec<Violation>> {
+    fn check(&self, module_tree: &ModuleTree, _layers: &HashMap<String, Layer>) -> Result<(), Vec<Violation>> {
         let mut violations = Vec::new();
 
         let prod_patterns: Vec<glob::Pattern> = self
@@ -439,10 +393,7 @@ impl AccessRule for NoMockInProduction {
                     if content.contains(mock_pattern) {
                         violations.push(Violation {
                             rule: self.name().to_string(),
-                            message: format!(
-                                "Mock pattern '{}' found in production code",
-                                mock_pattern
-                            ),
+                            message: format!("Mock pattern '{}' found in production code", mock_pattern),
                             source: Some(module.clone()),
                             target: None,
                         });
@@ -489,11 +440,7 @@ impl NoSkipLayerAccess {
 }
 
 impl AccessRule for NoSkipLayerAccess {
-    fn check(
-        &self,
-        module_tree: &ModuleTree,
-        layers: &HashMap<String, Layer>,
-    ) -> Result<(), Vec<Violation>> {
+    fn check(&self, module_tree: &ModuleTree, layers: &HashMap<String, Layer>) -> Result<(), Vec<Violation>> {
         let mut violations = Vec::new();
 
         // Create layer index map
@@ -578,10 +525,7 @@ mod tests {
 
     fn create_test_layers() -> HashMap<String, Layer> {
         let mut layers = HashMap::new();
-        layers.insert(
-            "ui".to_string(),
-            Layer::new("ui", vec!["src/ui/**".to_string()]),
-        );
+        layers.insert("ui".to_string(), Layer::new("ui", vec!["src/ui/**".to_string()]));
         layers.insert(
             "services".to_string(),
             Layer::new("services", vec!["src/services/**".to_string()]),
@@ -608,9 +552,7 @@ mod tests {
         assert!(result.is_err());
 
         let violations = result.unwrap_err();
-        assert!(violations
-            .iter()
-            .any(|v| v.source == Some("src/ui/admin".to_string())));
+        assert!(violations.iter().any(|v| v.source == Some("src/ui/admin".to_string())));
     }
 
     #[test]
@@ -633,11 +575,7 @@ mod tests {
         let tree = create_test_module_tree();
         let layers = create_test_layers();
 
-        let rule = NoSkipLayerAccess::new(vec![
-            "ui".to_string(),
-            "services".to_string(),
-            "repos".to_string(),
-        ]);
+        let rule = NoSkipLayerAccess::new(vec!["ui".to_string(), "services".to_string(), "repos".to_string()]);
 
         let result = rule.check(&tree, &layers);
         assert!(result.is_err());
@@ -650,10 +588,7 @@ mod tests {
     fn test_no_mock_in_production() {
         let mut tree = ModuleTree::new();
         tree.add_file_content("src/services/user", "@mock fn get_user(): ...".to_string());
-        tree.add_file_content(
-            "src/test/user_test",
-            "@mock fn mock_user(): ...".to_string(),
-        );
+        tree.add_file_content("src/test/user_test", "@mock fn mock_user(): ...".to_string());
 
         let rule = NoMockInProduction::default();
         let layers = HashMap::new();

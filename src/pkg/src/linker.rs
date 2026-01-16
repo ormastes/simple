@@ -78,13 +78,7 @@ impl Linker {
             self.project_dir
                 .join(source_path)
                 .canonicalize()
-                .map_err(|e| {
-                    PkgError::Link(format!(
-                        "Failed to resolve path '{}': {}",
-                        source_path.display(),
-                        e
-                    ))
-                })?
+                .map_err(|e| PkgError::Link(format!("Failed to resolve path '{}': {}", source_path.display(), e)))?
         };
 
         // Create symlink
@@ -248,9 +242,7 @@ where
     for entry in walkdir::WalkDir::new(src) {
         let entry = entry.map_err(|e| PkgError::Link(e.to_string()))?;
         let src_path = entry.path();
-        let rel_path = src_path
-            .strip_prefix(src)
-            .map_err(|e| PkgError::Link(e.to_string()))?;
+        let rel_path = src_path.strip_prefix(src).map_err(|e| PkgError::Link(e.to_string()))?;
         let dst_path = dst.join(rel_path);
 
         if entry.file_type().is_dir() {
@@ -268,11 +260,7 @@ fn try_hard_link_dir(src: &Path, dst: &Path) -> PkgResult<()> {
     walk_dir_apply(src, dst, |src_path, dst_path| {
         std::fs::hard_link(src_path, dst_path).map_err(|e| {
             let _ = std::fs::remove_dir_all(dst);
-            PkgError::Link(format!(
-                "Hard link failed for {}: {}",
-                src_path.display(),
-                e
-            ))
+            PkgError::Link(format!("Hard link failed for {}: {}", src_path.display(), e))
         })
     })
 }

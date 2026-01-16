@@ -153,9 +153,7 @@ mod tests {
 
     #[test]
     fn test_build() {
-        let (sql, params) = raw("SELECT * FROM users WHERE name = ?")
-            .bind("Alice")
-            .build();
+        let (sql, params) = raw("SELECT * FROM users WHERE name = ?").bind("Alice").build();
         assert_eq!(sql, "SELECT * FROM users WHERE name = ?");
         assert_eq!(params.len(), 1);
     }

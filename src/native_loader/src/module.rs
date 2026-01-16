@@ -14,11 +14,7 @@ pub struct LoadedModule {
 
 impl LoadedModule {
     pub(crate) fn new(path: PathBuf, lib: Library) -> Self {
-        Self {
-            path,
-            lib,
-            version: 1,
-        }
+        Self { path, lib, version: 1 }
     }
 
     /// Get function pointer by name

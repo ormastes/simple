@@ -49,12 +49,10 @@ fn main() {
 
     // Parse arguments
     let source_path = PathBuf::from(&args[1]);
-    let target = args.get(2).map(|s| s.as_str()).unwrap_or_else(|| {
-        source_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("main")
-    });
+    let target = args
+        .get(2)
+        .map(|s| s.as_str())
+        .unwrap_or_else(|| source_path.file_stem().and_then(|s| s.to_str()).unwrap_or("main"));
 
     // Parse flags
     let mut format = "markdown";
@@ -121,10 +119,7 @@ fn main() {
         eprintln!("Context Statistics:");
         eprintln!("  Full module symbols: {}", full_count);
         eprintln!("  Extracted symbols:   {}", context.symbol_count);
-        eprintln!(
-            "  Reduction:           {:.1}%",
-            context.token_savings(full_count)
-        );
+        eprintln!("  Reduction:           {:.1}%", context.token_savings(full_count));
         eprintln!();
     }
 

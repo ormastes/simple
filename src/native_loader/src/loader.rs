@@ -21,11 +21,7 @@ impl ModuleLoader {
     }
 
     /// Load a native library with a resolver compatible signature (unused for native libs).
-    pub fn load_with_resolver<F>(
-        &self,
-        path: &Path,
-        _resolver: F,
-    ) -> Result<LoadedModule, LoadError>
+    pub fn load_with_resolver<F>(&self, path: &Path, _resolver: F) -> Result<LoadedModule, LoadError>
     where
         F: Fn(&str) -> Option<usize>,
     {

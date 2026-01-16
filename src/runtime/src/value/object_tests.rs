@@ -81,11 +81,7 @@ fn test_object_invalid_value() {
     assert_eq!(rt_object_class_id(not_an_object), -1);
     assert_eq!(rt_object_field_count(not_an_object), -1);
     assert!(rt_object_field_get(not_an_object, 0).is_nil());
-    assert!(!rt_object_field_set(
-        not_an_object,
-        0,
-        RuntimeValue::from_int(99)
-    ));
+    assert!(!rt_object_field_set(not_an_object, 0, RuntimeValue::from_int(99)));
 }
 
 #[test]
@@ -142,21 +138,9 @@ fn test_closure_captures() {
     let closure = rt_closure_new(func_ptr, 3);
 
     // Set capture values
-    assert!(rt_closure_set_capture(
-        closure,
-        0,
-        RuntimeValue::from_int(10)
-    ));
-    assert!(rt_closure_set_capture(
-        closure,
-        1,
-        RuntimeValue::from_int(20)
-    ));
-    assert!(rt_closure_set_capture(
-        closure,
-        2,
-        RuntimeValue::from_int(30)
-    ));
+    assert!(rt_closure_set_capture(closure, 0, RuntimeValue::from_int(10)));
+    assert!(rt_closure_set_capture(closure, 1, RuntimeValue::from_int(20)));
+    assert!(rt_closure_set_capture(closure, 2, RuntimeValue::from_int(30)));
 
     // Get capture values
     assert_eq!(rt_closure_get_capture(closure, 0).as_int(), 10);
@@ -183,11 +167,7 @@ fn test_closure_capture_out_of_bounds() {
     assert!(val.is_nil());
 
     // Set out of bounds should return false
-    assert!(!rt_closure_set_capture(
-        closure,
-        10,
-        RuntimeValue::from_int(99)
-    ));
+    assert!(!rt_closure_set_capture(closure, 10, RuntimeValue::from_int(99)));
 }
 
 #[test]
@@ -196,11 +176,7 @@ fn test_closure_invalid_value() {
 
     assert!(rt_closure_func_ptr(not_a_closure).is_null());
     assert!(rt_closure_get_capture(not_a_closure, 0).is_nil());
-    assert!(!rt_closure_set_capture(
-        not_a_closure,
-        0,
-        RuntimeValue::from_int(99)
-    ));
+    assert!(!rt_closure_set_capture(not_a_closure, 0, RuntimeValue::from_int(99)));
 }
 
 #[test]

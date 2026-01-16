@@ -55,57 +55,47 @@ pub use collections::{RuntimeArray, RuntimeString, RuntimeTuple};
 pub use dict::RuntimeDict;
 
 // Re-export object types
-pub use objects::{
-    RuntimeClosure, RuntimeEnum, RuntimeObject, RuntimeShared, RuntimeUnique, RuntimeWeak,
-};
+pub use objects::{RuntimeClosure, RuntimeEnum, RuntimeObject, RuntimeShared, RuntimeUnique, RuntimeWeak};
 
 // Re-export channel types
 pub use channels::RuntimeChannel;
 
 // Re-export collection FFI functions
 pub use collections::{
-    rt_array_clear, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push,
-    rt_array_set, rt_contains, rt_index_get, rt_index_set, rt_slice, rt_string_concat,
-    rt_string_data, rt_string_len, rt_string_new, rt_tuple_get, rt_tuple_len, rt_tuple_new,
-    rt_tuple_set,
+    rt_array_clear, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push, rt_array_set, rt_contains,
+    rt_index_get, rt_index_set, rt_slice, rt_string_concat, rt_string_data, rt_string_len, rt_string_new, rt_tuple_get,
+    rt_tuple_len, rt_tuple_new, rt_tuple_set,
 };
 
 // Re-export dict FFI functions
-pub use dict::{
-    rt_dict_clear, rt_dict_get, rt_dict_keys, rt_dict_len, rt_dict_new, rt_dict_set, rt_dict_values,
-};
+pub use dict::{rt_dict_clear, rt_dict_get, rt_dict_keys, rt_dict_len, rt_dict_new, rt_dict_set, rt_dict_values};
 
 // Re-export object FFI functions
 pub use objects::{
-    rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_set_capture,
-    rt_enum_discriminant, rt_enum_new, rt_enum_payload, rt_object_class_id, rt_object_field_count,
-    rt_object_field_get, rt_object_field_set, rt_object_new,
+    rt_closure_func_ptr, rt_closure_get_capture, rt_closure_new, rt_closure_set_capture, rt_enum_discriminant,
+    rt_enum_new, rt_enum_payload, rt_object_class_id, rt_object_field_count, rt_object_field_get, rt_object_field_set,
+    rt_object_new,
 };
 
 // Re-export unique pointer FFI functions
-pub use objects::{
-    rt_unique_free, rt_unique_get, rt_unique_needs_trace, rt_unique_new, rt_unique_set,
-};
+pub use objects::{rt_unique_free, rt_unique_get, rt_unique_needs_trace, rt_unique_new, rt_unique_set};
 
 // Re-export shared pointer FFI functions
 pub use objects::{
-    rt_shared_clone, rt_shared_downgrade, rt_shared_get, rt_shared_needs_trace, rt_shared_new,
-    rt_shared_ref_count, rt_shared_release,
+    rt_shared_clone, rt_shared_downgrade, rt_shared_get, rt_shared_needs_trace, rt_shared_new, rt_shared_ref_count,
+    rt_shared_release,
 };
 
 // Re-export weak pointer FFI functions
 pub use objects::{rt_weak_free, rt_weak_is_valid, rt_weak_new, rt_weak_upgrade};
 
 // Re-export actor FFI functions
-pub use actors::{
-    rt_actor_id, rt_actor_is_alive, rt_actor_join, rt_actor_recv, rt_actor_send, rt_actor_spawn,
-    rt_wait,
-};
+pub use actors::{rt_actor_id, rt_actor_is_alive, rt_actor_join, rt_actor_recv, rt_actor_send, rt_actor_spawn, rt_wait};
 
 // Re-export channel FFI functions
 pub use channels::{
-    rt_channel_close, rt_channel_free, rt_channel_id, rt_channel_is_closed, rt_channel_new,
-    rt_channel_recv, rt_channel_recv_timeout, rt_channel_send, rt_channel_try_recv,
+    rt_channel_close, rt_channel_free, rt_channel_id, rt_channel_is_closed, rt_channel_new, rt_channel_recv,
+    rt_channel_recv_timeout, rt_channel_send, rt_channel_try_recv,
 };
 
 // Re-export synchronization primitives FFI functions
@@ -145,20 +135,18 @@ pub use sync::{RuntimeBarrier, RuntimeMutex, RuntimeRwLock, RuntimeSemaphore};
 
 // Re-export async/generator FFI functions
 pub use async_gen::{
-    rt_async_get_ctx, rt_async_get_state, rt_async_mark_done, rt_async_set_state, rt_future_all,
-    rt_future_await, rt_future_get_result, rt_future_is_ready, rt_future_new, rt_future_race,
-    rt_future_reject, rt_future_resolve, rt_generator_get_ctx, rt_generator_get_state,
-    rt_generator_load_slot, rt_generator_mark_done, rt_generator_new, rt_generator_next,
-    rt_generator_set_state, rt_generator_store_slot,
+    rt_async_get_ctx, rt_async_get_state, rt_async_mark_done, rt_async_set_state, rt_future_all, rt_future_await,
+    rt_future_get_result, rt_future_is_ready, rt_future_new, rt_future_race, rt_future_reject, rt_future_resolve,
+    rt_generator_get_ctx, rt_generator_get_state, rt_generator_load_slot, rt_generator_mark_done, rt_generator_new,
+    rt_generator_next, rt_generator_set_state, rt_generator_store_slot,
 };
 
 // Re-export core FFI functions
 pub use ffi::{
-    rt_alloc, rt_free, rt_function_not_found, rt_interp_call, rt_interp_eval, rt_method_not_found,
-    rt_ptr_to_value, rt_value_as_bool, rt_value_as_float, rt_value_as_int, rt_value_bool,
-    rt_value_eq, rt_value_float, rt_value_int, rt_value_is_bool, rt_value_is_float,
-    rt_value_is_heap, rt_value_is_int, rt_value_is_nil, rt_value_nil, rt_value_to_ptr,
-    rt_value_truthy,
+    rt_alloc, rt_free, rt_function_not_found, rt_interp_call, rt_interp_eval, rt_method_not_found, rt_ptr_to_value,
+    rt_value_as_bool, rt_value_as_float, rt_value_as_int, rt_value_bool, rt_value_eq, rt_value_float, rt_value_int,
+    rt_value_is_bool, rt_value_is_float, rt_value_is_heap, rt_value_is_int, rt_value_is_nil, rt_value_nil,
+    rt_value_to_ptr, rt_value_truthy,
 };
 
 // Re-export interpreter bridge handler setters (for compiler crate)
@@ -169,20 +157,18 @@ pub use args::{rt_clear_args, rt_get_argc, rt_get_args, rt_set_args, rt_set_args
 
 // Re-export I/O capture functions (for testing)
 pub use ffi::{
-    rt_capture_stderr_start, rt_capture_stderr_stop, rt_capture_stdout_start,
-    rt_capture_stdout_stop, rt_clear_captured_stderr, rt_clear_captured_stdout,
-    rt_get_captured_stderr, rt_get_captured_stdout, rt_is_stderr_capturing, rt_is_stdout_capturing,
+    rt_capture_stderr_start, rt_capture_stderr_stop, rt_capture_stdout_start, rt_capture_stdout_stop,
+    rt_clear_captured_stderr, rt_clear_captured_stdout, rt_get_captured_stderr, rt_get_captured_stdout,
+    rt_is_stderr_capturing, rt_is_stdout_capturing,
 };
 
 // Re-export stdin mock functions (for testing)
-pub use ffi::{
-    rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_stdin_line, rt_set_stdin,
-};
+pub use ffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_stdin_line, rt_set_stdin};
 
 // Re-export print FFI functions
 pub use ffi::{
-    rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str,
-    rt_print_value, rt_println_str, rt_println_value,
+    rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str, rt_print_value, rt_println_str,
+    rt_println_value,
 };
 
 // Re-export time FFI functions
@@ -190,25 +176,24 @@ pub use ffi::rt_time_now_seconds;
 
 // Re-export atomic operations FFI functions
 pub use ffi::{
-    rt_atomic_bool_free, rt_atomic_bool_load, rt_atomic_bool_new, rt_atomic_bool_store,
-    rt_atomic_bool_swap, rt_atomic_flag_clear, rt_atomic_flag_free, rt_atomic_flag_new,
-    rt_atomic_flag_test_and_set, rt_atomic_int_compare_exchange, rt_atomic_int_fetch_add,
-    rt_atomic_int_fetch_and, rt_atomic_int_fetch_or, rt_atomic_int_fetch_sub,
-    rt_atomic_int_fetch_xor, rt_atomic_int_free, rt_atomic_int_load, rt_atomic_int_new,
+    rt_atomic_bool_free, rt_atomic_bool_load, rt_atomic_bool_new, rt_atomic_bool_store, rt_atomic_bool_swap,
+    rt_atomic_flag_clear, rt_atomic_flag_free, rt_atomic_flag_new, rt_atomic_flag_test_and_set,
+    rt_atomic_int_compare_exchange, rt_atomic_int_fetch_add, rt_atomic_int_fetch_and, rt_atomic_int_fetch_or,
+    rt_atomic_int_fetch_sub, rt_atomic_int_fetch_xor, rt_atomic_int_free, rt_atomic_int_load, rt_atomic_int_new,
     rt_atomic_int_store, rt_atomic_int_swap,
 };
 
 // Re-export doctest I/O FFI functions
 pub use doctest_io::{
-    doctest_is_dir, doctest_is_file, doctest_path_contains, doctest_path_exists,
-    doctest_path_has_extension, doctest_read_file, doctest_walk_directory,
+    doctest_is_dir, doctest_is_file, doctest_path_contains, doctest_path_exists, doctest_path_has_extension,
+    doctest_read_file, doctest_walk_directory,
 };
 
 // Re-export contract violation types and FFI functions (CTR-050-054)
 pub use contracts::{
     rt_contract_violation_free, rt_contract_violation_func_name, rt_contract_violation_kind,
-    rt_contract_violation_message, rt_contract_violation_new, rt_is_contract_violation,
-    ContractViolationKind, RuntimeContractViolation,
+    rt_contract_violation_message, rt_contract_violation_new, rt_is_contract_violation, ContractViolationKind,
+    RuntimeContractViolation,
 };
 
 // Re-export GPU runtime FFI functions
@@ -587,19 +572,17 @@ pub use file_io::{
 
 // Re-export diagram FFI functions (for spec framework)
 pub use diagram_ffi::{
-    rt_diagram_clear, rt_diagram_disable, rt_diagram_enable, rt_diagram_free_string,
-    rt_diagram_generate_arch, rt_diagram_generate_class, rt_diagram_generate_sequence,
-    rt_diagram_is_enabled, rt_diagram_mark_architectural, rt_diagram_trace_method,
-    rt_diagram_trace_method_with_args, rt_diagram_trace_return,
+    rt_diagram_clear, rt_diagram_disable, rt_diagram_enable, rt_diagram_free_string, rt_diagram_generate_arch,
+    rt_diagram_generate_class, rt_diagram_generate_sequence, rt_diagram_is_enabled, rt_diagram_mark_architectural,
+    rt_diagram_trace_method, rt_diagram_trace_method_with_args, rt_diagram_trace_return,
 };
 
 // Re-export screenshot FFI functions (for spec framework)
 pub use screenshot_ffi::{
-    rt_screenshot_capture_after_terminal, rt_screenshot_capture_before_terminal,
-    rt_screenshot_capture_count, rt_screenshot_clear_captures, rt_screenshot_clear_context,
-    rt_screenshot_disable, rt_screenshot_enable, rt_screenshot_exists, rt_screenshot_free_string,
-    rt_screenshot_get_output_dir, rt_screenshot_get_path, rt_screenshot_is_enabled,
-    rt_screenshot_is_refresh, rt_screenshot_set_context, rt_screenshot_set_output_dir,
+    rt_screenshot_capture_after_terminal, rt_screenshot_capture_before_terminal, rt_screenshot_capture_count,
+    rt_screenshot_clear_captures, rt_screenshot_clear_context, rt_screenshot_disable, rt_screenshot_enable,
+    rt_screenshot_exists, rt_screenshot_free_string, rt_screenshot_get_output_dir, rt_screenshot_get_path,
+    rt_screenshot_is_enabled, rt_screenshot_is_refresh, rt_screenshot_set_context, rt_screenshot_set_output_dir,
     rt_screenshot_set_refresh,
 };
 pub use screenshot_ffi::{CaptureType, ImageFormat};

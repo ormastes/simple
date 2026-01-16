@@ -79,9 +79,7 @@ impl VulkanSwapchain {
         let images = unsafe {
             swapchain_loader
                 .get_swapchain_images(swapchain)
-                .map_err(|e| {
-                    VulkanError::SurfaceError(format!("Failed to get swapchain images: {:?}", e))
-                })?
+                .map_err(|e| VulkanError::SurfaceError(format!("Failed to get swapchain images: {:?}", e)))?
         };
 
         let actual_image_count = images.len() as u32;
@@ -159,16 +157,13 @@ impl VulkanSwapchain {
         self.images = unsafe {
             self.swapchain_loader
                 .get_swapchain_images(self.swapchain)
-                .map_err(|e| {
-                    VulkanError::SurfaceError(format!("Failed to get swapchain images: {:?}", e))
-                })?
+                .map_err(|e| VulkanError::SurfaceError(format!("Failed to get swapchain images: {:?}", e)))?
         };
 
         self.image_count = self.images.len() as u32;
 
         // Create new image views
-        self.image_views =
-            Self::create_image_views(&self.device, &self.images, self.format.format)?;
+        self.image_views = Self::create_image_views(&self.device, &self.images, self.format.format)?;
 
         tracing::info!("Swapchain recreated successfully");
 
@@ -191,17 +186,12 @@ impl VulkanSwapchain {
         ))?;
 
         // Determine queue family indices
-        let graphics_family = device
-            .graphics_queue_family()
-            .ok_or(VulkanError::NoDeviceFound)?;
+        let graphics_family = device.graphics_queue_family().ok_or(VulkanError::NoDeviceFound)?;
         let present_family = device.present_queue_family().unwrap_or(graphics_family);
 
         // Queue family sharing mode
         let (sharing_mode, queue_families) = if graphics_family != present_family {
-            (
-                vk::SharingMode::CONCURRENT,
-                vec![graphics_family, present_family],
-            )
+            (vk::SharingMode::CONCURRENT, vec![graphics_family, present_family])
         } else {
             (vk::SharingMode::EXCLUSIVE, vec![])
         };
@@ -226,9 +216,7 @@ impl VulkanSwapchain {
         unsafe {
             swapchain_loader
                 .create_swapchain(&create_info, None)
-                .map_err(|e| {
-                    VulkanError::SurfaceError(format!("Failed to create swapchain: {:?}", e))
-                })
+                .map_err(|e| VulkanError::SurfaceError(format!("Failed to create swapchain: {:?}", e)))
         }
     }
 
@@ -263,12 +251,7 @@ impl VulkanSwapchain {
                     device
                         .handle()
                         .create_image_view(&create_info, None)
-                        .map_err(|e| {
-                            VulkanError::SurfaceError(format!(
-                                "Failed to create image view: {:?}",
-                                e
-                            ))
-                        })
+                        .map_err(|e| VulkanError::SurfaceError(format!("Failed to create image view: {:?}", e)))
                 }
             })
             .collect()
@@ -284,23 +267,16 @@ impl VulkanSwapchain {
         signal_semaphore: Option<&Semaphore>,
         timeout_ns: u64,
     ) -> VulkanResult<(u32, bool)> {
-        let semaphore = signal_semaphore
-            .map(|s| s.handle())
-            .unwrap_or(vk::Semaphore::null());
+        let semaphore = signal_semaphore.map(|s| s.handle()).unwrap_or(vk::Semaphore::null());
 
         unsafe {
-            match self.swapchain_loader.acquire_next_image(
-                self.swapchain,
-                timeout_ns,
-                semaphore,
-                vk::Fence::null(),
-            ) {
+            match self
+                .swapchain_loader
+                .acquire_next_image(self.swapchain, timeout_ns, semaphore, vk::Fence::null())
+            {
                 Ok((index, suboptimal)) => Ok((index, suboptimal)),
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => Err(VulkanError::SwapchainOutOfDate),
-                Err(e) => Err(VulkanError::SurfaceError(format!(
-                    "Failed to acquire image: {:?}",
-                    e
-                ))),
+                Err(e) => Err(VulkanError::SurfaceError(format!("Failed to acquire image: {:?}", e))),
             }
         }
     }
@@ -319,11 +295,7 @@ impl VulkanSwapchain {
             .swapchains(&swapchains)
             .image_indices(&image_indices);
 
-        let queue = self
-            .device
-            .present_queue()
-            .ok_or(VulkanError::NoDeviceFound)?
-            .lock();
+        let queue = self.device.present_queue().ok_or(VulkanError::NoDeviceFound)?.lock();
 
         unsafe {
             match self.swapchain_loader.queue_present(*queue, &present_info) {
@@ -331,10 +303,7 @@ impl VulkanSwapchain {
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                     Ok(true) // Needs recreation
                 }
-                Err(e) => Err(VulkanError::SurfaceError(format!(
-                    "Failed to present: {:?}",
-                    e
-                ))),
+                Err(e) => Err(VulkanError::SurfaceError(format!("Failed to present: {:?}", e))),
             }
         }
     }
@@ -392,8 +361,7 @@ impl Drop for VulkanSwapchain {
             }
 
             // Destroy swapchain
-            self.swapchain_loader
-                .destroy_swapchain(self.swapchain, None);
+            self.swapchain_loader.destroy_swapchain(self.swapchain, None);
         }
         tracing::info!("Swapchain destroyed");
     }
@@ -434,10 +402,7 @@ mod tests {
         let present_family = 0u32;
 
         let (sharing_mode, queue_families) = if graphics_family != present_family {
-            (
-                vk::SharingMode::CONCURRENT,
-                vec![graphics_family, present_family],
-            )
+            (vk::SharingMode::CONCURRENT, vec![graphics_family, present_family])
         } else {
             (vk::SharingMode::EXCLUSIVE, vec![])
         };
@@ -453,10 +418,7 @@ mod tests {
         let present_family = 1u32;
 
         let (sharing_mode, queue_families) = if graphics_family != present_family {
-            (
-                vk::SharingMode::CONCURRENT,
-                vec![graphics_family, present_family],
-            )
+            (vk::SharingMode::CONCURRENT, vec![graphics_family, present_family])
         } else {
             (vk::SharingMode::EXCLUSIVE, vec![])
         };

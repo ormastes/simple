@@ -68,11 +68,8 @@ pub fn parse_sspec_file(path: &Path) -> Result<SspecDoc, Box<dyn std::error::Err
             if found_end {
                 // Extract feature title from first doc block if present
                 if feature_title.is_none() && block_content.contains("# ") {
-                    if let Some(title_line) =
-                        block_content.lines().find(|l| l.trim().starts_with("# "))
-                    {
-                        feature_title =
-                            Some(title_line.trim().trim_start_matches('#').trim().to_string());
+                    if let Some(title_line) = block_content.lines().find(|l| l.trim().starts_with("# ")) {
+                        feature_title = Some(title_line.trim().trim_start_matches('#').trim().to_string());
                     }
                 }
 
@@ -96,10 +93,7 @@ pub fn parse_sspec_file(path: &Path) -> Result<SspecDoc, Box<dyn std::error::Err
 }
 
 /// Generate markdown documentation from sspec files
-pub fn generate_sspec_docs(
-    sspec_files: &[PathBuf],
-    output_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn generate_sspec_docs(sspec_files: &[PathBuf], output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(output_dir)?;
 
     // Parse all sspec files
@@ -123,10 +117,7 @@ pub fn generate_sspec_docs(
 }
 
 /// Generate documentation for a single feature
-fn generate_feature_doc(
-    sspec_doc: &SspecDoc,
-    output_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn generate_feature_doc(sspec_doc: &SspecDoc, output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let file_name = sspec_doc
         .file_path
         .file_stem()
@@ -139,10 +130,7 @@ fn generate_feature_doc(
 
     // Add header
     md.push_str(&format!("# {}\n\n", feature_name));
-    md.push_str(&format!(
-        "*Source: `{}`*\n\n",
-        sspec_doc.file_path.display()
-    ));
+    md.push_str(&format!("*Source: `{}`*\n\n", sspec_doc.file_path.display()));
     if !sspec_doc.feature_ids.is_empty() {
         md.push_str("## Feature IDs\n\n");
         for id in &sspec_doc.feature_ids {
@@ -171,10 +159,7 @@ fn generate_feature_doc(
 }
 
 fn parse_id_attr(line: &str) -> Option<String> {
-    let line = line
-        .trim_start_matches("#[id(")
-        .trim_end_matches(")]")
-        .trim();
+    let line = line.trim_start_matches("#[id(").trim_end_matches(")]").trim();
     if line.starts_with('"') && line.ends_with('"') && line.len() >= 2 {
         Some(line[1..line.len() - 1].to_string())
     } else {
@@ -183,10 +168,7 @@ fn parse_id_attr(line: &str) -> Option<String> {
 }
 
 /// Generate index page for all features
-fn generate_index_page(
-    parsed_files: &[SspecDoc],
-    output_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn generate_index_page(parsed_files: &[SspecDoc], output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut md = String::new();
 
     md.push_str("# Test Specification Index\n\n");

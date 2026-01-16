@@ -10,18 +10,14 @@ use cranelift_jit::{JITBuilder, JITModule};
 
 use crate::mir::MirModule;
 
-use super::common_backend::{
-    create_isa_and_flags, BackendError, BackendResult, BackendSettings, CodegenBackend,
-};
+use super::common_backend::{create_isa_and_flags, BackendError, BackendResult, BackendSettings, CodegenBackend};
 
 // Re-export error types for backwards compatibility
 pub use super::common_backend::BackendError as JitError;
 pub type JitResult<T> = BackendResult<T>;
 
 // Re-export provider types for convenience
-pub use simple_native_loader::{
-    default_runtime_provider, static_provider, RuntimeLoadMode, RuntimeSymbolProvider,
-};
+pub use simple_native_loader::{default_runtime_provider, static_provider, RuntimeLoadMode, RuntimeSymbolProvider};
 
 /// JIT compiler for Simple functions.
 ///
@@ -162,10 +158,7 @@ impl Default for JitCompiler {
 /// This allows the JIT to resolve external function calls to runtime FFI functions
 /// like print, array operations, etc. The symbols are obtained from the provider,
 /// which can be static (compiled-in) or dynamic (loaded from shared library).
-fn register_runtime_symbols_from_provider(
-    builder: &mut JITBuilder,
-    provider: &dyn RuntimeSymbolProvider,
-) {
+fn register_runtime_symbols_from_provider(builder: &mut JITBuilder, provider: &dyn RuntimeSymbolProvider) {
     use simple_native_loader::RUNTIME_SYMBOL_NAMES;
 
     for &name in RUNTIME_SYMBOL_NAMES {

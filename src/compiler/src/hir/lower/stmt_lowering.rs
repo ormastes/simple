@@ -6,11 +6,7 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
 impl Lowerer {
-    pub(super) fn lower_block(
-        &mut self,
-        block: &ast::Block,
-        ctx: &mut FunctionContext,
-    ) -> LowerResult<Vec<HirStmt>> {
+    pub(super) fn lower_block(&mut self, block: &ast::Block, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
         let mut stmts = Vec::new();
         for node in &block.statements {
             stmts.extend(self.lower_node(node, ctx)?);
@@ -45,11 +41,7 @@ impl Lowerer {
 
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
 
-                Ok(vec![HirStmt::Let {
-                    local_index,
-                    ty,
-                    value,
-                }])
+                Ok(vec![HirStmt::Let { local_index, ty, value }])
             }
 
             Node::Assignment(assign) => {

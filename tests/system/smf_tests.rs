@@ -21,9 +21,7 @@ fn test_smf_header_has_debug_info() {
     let smf_path = dir.path().join("debug_info_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 0", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 0", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -55,10 +53,7 @@ fn test_config_env_from_env() {
     std::env::set_var("SIMPLE_TEST_VAR_12345", "test_value");
 
     let config = ConfigEnv::from_env();
-    assert!(
-        config.get("SIMPLE_TEST_VAR_12345").is_some()
-            || config.get("SIMPLE_TEST_VAR_12345").is_none()
-    );
+    assert!(config.get("SIMPLE_TEST_VAR_12345").is_some() || config.get("SIMPLE_TEST_VAR_12345").is_none());
 
     std::env::remove_var("SIMPLE_TEST_VAR_12345");
 }
@@ -251,9 +246,7 @@ fn test_compile_and_run_smf_directly() {
 
     // Step 1: Compile source to SMF
     let runner = Runner::new();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     // Step 2: Run SMF directly using new method
     let result = runner.run_smf(&smf_path).expect("run smf ok");
@@ -279,9 +272,7 @@ fn test_run_smf_various_values() {
 
     for (i, (source, expected)) in test_cases.iter().enumerate() {
         let smf_path = dir.path().join(format!("test{}.smf", i));
-        runner
-            .compile_to_smf(source, &smf_path)
-            .expect("compile ok");
+        runner.compile_to_smf(source, &smf_path).expect("compile ok");
         let result = runner.run_smf(&smf_path).expect("run smf ok");
         assert_eq!(result, *expected, "Test case {}: '{}'", i, source);
     }
@@ -294,9 +285,7 @@ fn test_run_file_auto_detects_smf() {
     let smf_path = dir.path().join("auto_detect.smf");
 
     let runner = Runner::new();
-    runner
-        .compile_to_smf("main = 99", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 99", &smf_path).expect("compile ok");
 
     // run_file should detect .smf and run directly
     let result = runner.run_file(&smf_path).expect("run file ok");
@@ -378,9 +367,7 @@ fn test_smf_roundtrip_complex_program() {
     let source = "let x = 10\nlet y = 20\nlet z = x + y * 2\nmain = z";
 
     let runner = Runner::new();
-    runner
-        .compile_to_smf(source, &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf(source, &smf_path).expect("compile ok");
 
     let result = runner.run_smf(&smf_path).expect("run smf ok");
     assert_eq!(result, 50); // 10 + 20 * 2 = 50
@@ -393,9 +380,7 @@ fn test_smf_multiple_runs() {
     let smf_path = dir.path().join("reusable.smf");
 
     let runner = Runner::new();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     // Run multiple times - should always return same result
     for _ in 0..5 {
@@ -412,9 +397,7 @@ fn test_smf_different_runners() {
 
     // Compile with one runner (no GC to avoid thread conflicts)
     let runner1 = Runner::new_no_gc();
-    runner1
-        .compile_to_smf("main = 123", &smf_path)
-        .expect("compile ok");
+    runner1.compile_to_smf("main = 123", &smf_path).expect("compile ok");
 
     // Run with different no-GC runners (can't have multiple GC contexts per thread)
     let runner2 = Runner::new_no_gc();
@@ -462,19 +445,13 @@ fn test_smf_machine_code_correctness() {
     // mov eax, imm32 = B8 + value (little-endian) + C3 (ret)
     let expected_code = [0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3];
     let found = smf_bytes.windows(6).any(|w| w == expected_code);
-    assert!(
-        found,
-        "SMF should contain correct x86-64 code for returning 42"
-    );
+    assert!(found, "SMF should contain correct x86-64 code for returning 42");
 
     // Test negative value -1 (0xFFFFFFFF)
     let smf_bytes = runner.compile_to_memory("main = -1").expect("compile ok");
     let expected_code = [0xB8, 0xFF, 0xFF, 0xFF, 0xFF, 0xC3];
     let found = smf_bytes.windows(6).any(|w| w == expected_code);
-    assert!(
-        found,
-        "SMF should contain correct x86-64 code for returning -1"
-    );
+    assert!(found, "SMF should contain correct x86-64 code for returning -1");
 }
 
 /// Test SMF symbol table contains main
@@ -672,19 +649,12 @@ fn test_cli_compiles_to_smf() {
     fs::write(&source_path, "main = 55").expect("write ok");
 
     let mut cmd = Command::cargo_bin("simple").expect("binary exists");
-    cmd.arg("compile")
-        .arg(&source_path)
-        .arg("-o")
-        .arg(&smf_path);
+    cmd.arg("compile").arg(&source_path).arg("-o").arg(&smf_path);
 
     let output = cmd.output().expect("command ok");
 
     // Should succeed
-    assert!(
-        output.status.success(),
-        "Compile should succeed: {:?}",
-        output
-    );
+    assert!(output.status.success(), "Compile should succeed: {:?}", output);
 
     // SMF file should exist
     assert!(smf_path.exists(), "SMF file should be created");
@@ -704,9 +674,7 @@ fn test_cli_runs_smf_directly() {
 
     // First compile
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 33", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 33", &smf_path).expect("compile ok");
 
     // Then run via CLI
     let mut cmd = Command::cargo_bin("simple").expect("binary exists");
@@ -807,11 +775,7 @@ fn test_exec_core_compile_to_memory() {
     let smf_bytes = core.compile_to_memory("main = 42").expect("compile ok");
 
     assert!(!smf_bytes.is_empty(), "SMF bytes should not be empty");
-    assert_eq!(
-        &smf_bytes[0..4],
-        b"SMF\0",
-        "SMF magic header should be correct"
-    );
+    assert_eq!(&smf_bytes[0..4], b"SMF\0", "SMF magic header should be correct");
 }
 
 /// Test ExecCore::run_source_in_memory()
@@ -859,8 +823,7 @@ fn test_exec_core_run_smf() {
     let smf_path = dir.path().join("run_smf_test.smf");
 
     let core = ExecCore::new_no_gc();
-    core.compile_source("main = 200", &smf_path)
-        .expect("compile ok");
+    core.compile_source("main = 200", &smf_path).expect("compile ok");
 
     let result = core.run_smf(&smf_path).expect("run ok");
     assert_eq!(result, 200);
@@ -889,8 +852,7 @@ fn test_exec_core_run_file_smf() {
     let smf_path = dir.path().join("auto_smf.smf");
 
     let core = ExecCore::new_no_gc();
-    core.compile_source("main = 175", &smf_path)
-        .expect("compile ok");
+    core.compile_source("main = 175", &smf_path).expect("compile ok");
 
     let result = core.run_file(&smf_path).expect("run ok");
     assert_eq!(result, 175);
@@ -908,10 +870,7 @@ fn test_exec_core_run_file_unsupported() {
     let core = ExecCore::new_no_gc();
     let result = core.run_file(&bad_path);
     assert!(result.is_err(), "Unsupported extension should error");
-    assert!(
-        result.unwrap_err().contains(".xyz"),
-        "Error should mention extension"
-    );
+    assert!(result.unwrap_err().contains(".xyz"), "Error should mention extension");
 }
 
 /// Test ExecCore::run_file() with no extension (treated as .spl)
@@ -936,9 +895,7 @@ fn test_in_memory_roundtrip() {
     let core = ExecCore::new_no_gc();
 
     // Compile to memory
-    let smf_bytes = core
-        .compile_to_memory("main = 1 + 2 + 3")
-        .expect("compile ok");
+    let smf_bytes = core.compile_to_memory("main = 1 + 2 + 3").expect("compile ok");
 
     // Load from memory
     let module = core.load_module_from_memory(&smf_bytes).expect("load ok");

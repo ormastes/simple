@@ -93,10 +93,7 @@ pub fn run_replay(args: &[String]) -> i32 {
             println!();
         }
 
-        println!(
-            "  Duration difference: {:+} ms",
-            comparison.duration_difference_ms
-        );
+        println!("  Duration difference: {:+} ms", comparison.duration_difference_ms);
         println!();
 
         if !comparison.phase_differences.is_empty() {
@@ -106,11 +103,7 @@ pub fn run_replay(args: &[String]) -> i32 {
                     "    {}: {:+} ms{}",
                     diff.phase_name,
                     diff.duration_diff_ms,
-                    if diff.result_changed {
-                        " (result changed)"
-                    } else {
-                        ""
-                    }
+                    if diff.result_changed { " (result changed)" } else { "" }
                 );
             }
         } else {
@@ -148,10 +141,7 @@ pub fn run_replay(args: &[String]) -> i32 {
             };
 
             if let (Some(file), Some(line), Some(column)) = (&diag.file, diag.line, diag.column) {
-                println!(
-                    "{}:{}:{}: {}: {}",
-                    file, line, column, level_str, diag.message
-                );
+                println!("{}:{}:{}: {}: {}", file, line, column, level_str, diag.message);
             } else {
                 println!("{}: {}", level_str, diag.message);
             }
@@ -214,11 +204,7 @@ pub fn run_replay(args: &[String]) -> i32 {
             result_str,
             phase.name,
             phase.duration_ms,
-            phase
-                .error
-                .as_ref()
-                .map(|e| format!(" ({})", e))
-                .unwrap_or_default()
+            phase.error.as_ref().map(|e| format!(" ({})", e)).unwrap_or_default()
         );
     }
     println!();

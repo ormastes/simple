@@ -247,18 +247,12 @@ impl<'a> SuiParser<'a> {
         // private, only called internally
         let mut args = Vec::new();
 
-        if !matches!(
-            self.peek_kind(),
-            SuiTokenKind::RParen | SuiTokenKind::RBracket
-        ) {
+        if !matches!(self.peek_kind(), SuiTokenKind::RParen | SuiTokenKind::RBracket) {
             args.push(self.parse_expression()?);
 
             while self.peek_kind() == SuiTokenKind::Comma {
                 self.advance();
-                if matches!(
-                    self.peek_kind(),
-                    SuiTokenKind::RParen | SuiTokenKind::RBracket
-                ) {
+                if matches!(self.peek_kind(), SuiTokenKind::RParen | SuiTokenKind::RBracket) {
                     break; // Allow trailing comma
                 }
                 args.push(self.parse_expression()?);

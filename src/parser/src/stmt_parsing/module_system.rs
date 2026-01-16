@@ -74,10 +74,7 @@ impl<'a> Parser<'a> {
 
     /// Parse an import target: single item, alias, group, or glob
     /// Called after the module path is parsed
-    pub(crate) fn parse_import_target(
-        &mut self,
-        last_segment: Option<String>,
-    ) -> Result<ImportTarget, ParseError> {
+    pub(crate) fn parse_import_target(&mut self, last_segment: Option<String>) -> Result<ImportTarget, ParseError> {
         // Check for glob: *
         if self.check(&TokenKind::Star) {
             self.advance();
@@ -186,11 +183,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse mod declaration: mod name or pub mod name
-    pub(crate) fn parse_mod(
-        &mut self,
-        visibility: Visibility,
-        attributes: Vec<Attribute>,
-    ) -> Result<Node, ParseError> {
+    pub(crate) fn parse_mod(&mut self, visibility: Visibility, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Mod)?;
         let name = self.expect_identifier()?;
@@ -279,10 +272,7 @@ impl<'a> Parser<'a> {
             let module_path = self.parse_module_path()?;
 
             // Create export use statement with group import
-            let targets: Vec<ImportTarget> = items
-                .into_iter()
-                .map(|name| ImportTarget::Single(name))
-                .collect();
+            let targets: Vec<ImportTarget> = items.into_iter().map(|name| ImportTarget::Single(name)).collect();
 
             Ok(Node::ExportUseStmt(ExportUseStmt {
                 span: Span::new(
@@ -318,10 +308,7 @@ impl<'a> Parser<'a> {
                 let module_path = self.parse_module_path()?;
 
                 // Create export use statement with group import
-                let targets: Vec<ImportTarget> = items
-                    .into_iter()
-                    .map(|name| ImportTarget::Single(name))
-                    .collect();
+                let targets: Vec<ImportTarget> = items.into_iter().map(|name| ImportTarget::Single(name)).collect();
 
                 Ok(Node::ExportUseStmt(ExportUseStmt {
                     span: Span::new(
@@ -337,10 +324,7 @@ impl<'a> Parser<'a> {
                 // Style 2: bare export (export X, Y, Z)
                 // Create export use statement with empty path
                 // This marks the symbols for export without importing them
-                let targets: Vec<ImportTarget> = items
-                    .into_iter()
-                    .map(|name| ImportTarget::Single(name))
-                    .collect();
+                let targets: Vec<ImportTarget> = items.into_iter().map(|name| ImportTarget::Single(name)).collect();
 
                 Ok(Node::ExportUseStmt(ExportUseStmt {
                     span: Span::new(

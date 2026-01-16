@@ -82,10 +82,7 @@ impl PostgresConnection {
     fn query_internal(&self, sql: &str, params: &[SqlValue]) -> DbResult<Rows> {
         let client = self.client.lock();
         let pg_params = to_pg_params(params);
-        let param_refs: Vec<&(dyn PgToSql + Sync)> = pg_params
-            .iter()
-            .map(|p| p as &(dyn PgToSql + Sync))
-            .collect();
+        let param_refs: Vec<&(dyn PgToSql + Sync)> = pg_params.iter().map(|p| p as &(dyn PgToSql + Sync)).collect();
 
         let result = self.runtime.block_on(async {
             let rows = client
@@ -95,11 +92,7 @@ impl PostgresConnection {
 
             // Get column names from first row or empty
             let columns: Vec<String> = if !rows.is_empty() {
-                rows[0]
-                    .columns()
-                    .iter()
-                    .map(|c| c.name().to_string())
-                    .collect()
+                rows[0].columns().iter().map(|c| c.name().to_string()).collect()
             } else {
                 Vec::new()
             };
@@ -129,10 +122,7 @@ impl PostgresConnection {
     fn execute_internal(&self, sql: &str, params: &[SqlValue]) -> DbResult<u64> {
         let client = self.client.lock();
         let pg_params = to_pg_params(params);
-        let param_refs: Vec<&(dyn PgToSql + Sync)> = pg_params
-            .iter()
-            .map(|p| p as &(dyn PgToSql + Sync))
-            .collect();
+        let param_refs: Vec<&(dyn PgToSql + Sync)> = pg_params.iter().map(|p| p as &(dyn PgToSql + Sync)).collect();
 
         self.runtime.block_on(async {
             client

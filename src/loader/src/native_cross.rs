@@ -133,14 +133,10 @@ impl Toolchain {
     /// Set the sysroot.
     pub fn with_sysroot(mut self, sysroot: impl Into<PathBuf>) -> Self {
         self.sysroot = Some(sysroot.into());
-        self.cflags.push(format!(
-            "--sysroot={}",
-            self.sysroot.as_ref().unwrap().display()
-        ));
-        self.ldflags.push(format!(
-            "--sysroot={}",
-            self.sysroot.as_ref().unwrap().display()
-        ));
+        self.cflags
+            .push(format!("--sysroot={}", self.sysroot.as_ref().unwrap().display()));
+        self.ldflags
+            .push(format!("--sysroot={}", self.sysroot.as_ref().unwrap().display()));
         self
     }
 
@@ -279,8 +275,7 @@ impl NativeLibConfig {
             ""
         };
 
-        self.output_dir
-            .join(format!("{}{}.{}", prefix, self.name, ext))
+        self.output_dir.join(format!("{}{}.{}", prefix, self.name, ext))
     }
 }
 
@@ -337,9 +332,9 @@ impl NativeLibBuilder {
 
     /// Compile a single source file to object.
     fn compile_source(&self, source: &Path) -> Result<PathBuf, CrossCompileError> {
-        let stem = source.file_stem().ok_or_else(|| {
-            CrossCompileError::ConfigError("Invalid source file name".to_string())
-        })?;
+        let stem = source
+            .file_stem()
+            .ok_or_else(|| CrossCompileError::ConfigError("Invalid source file name".to_string()))?;
         let obj = self.obj_dir.join(format!("{}.o", stem.to_string_lossy()));
 
         let mut cmd = Command::new(&self.toolchain.cc);
@@ -413,10 +408,7 @@ impl NativeLibBuilder {
         let output_result = cmd.output()?;
         if !output_result.status.success() {
             let stderr = String::from_utf8_lossy(&output_result.stderr);
-            return Err(CrossCompileError::BuildFailed(format!(
-                "Linking failed: {}",
-                stderr
-            )));
+            return Err(CrossCompileError::BuildFailed(format!("Linking failed: {}", stderr)));
         }
 
         Ok(output)

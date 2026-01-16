@@ -157,11 +157,7 @@ impl LoadedNativeLib {
     #[cfg(unix)]
     pub fn load_system(name: String) -> Result<Self, String> {
         // Try common library naming conventions
-        let lib_names = [
-            format!("lib{}.so", name),
-            format!("lib{}.dylib", name),
-            name.clone(),
-        ];
+        let lib_names = [format!("lib{}.so", name), format!("lib{}.dylib", name), name.clone()];
 
         for lib_name in &lib_names {
             let c_name = match CString::new(lib_name.as_str()) {
@@ -169,8 +165,7 @@ impl LoadedNativeLib {
                 Err(_) => continue,
             };
 
-            let handle =
-                unsafe { libc::dlopen(c_name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+            let handle = unsafe { libc::dlopen(c_name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
 
             if !handle.is_null() {
                 return Ok(Self {
@@ -190,10 +185,7 @@ impl LoadedNativeLib {
         use std::os::windows::ffi::OsStrExt;
 
         let dll_name = format!("{}.dll", name);
-        let wide_name: Vec<u16> = std::ffi::OsStr::new(&dll_name)
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
+        let wide_name: Vec<u16> = std::ffi::OsStr::new(&dll_name).encode_wide().chain(Some(0)).collect();
 
         let handle = unsafe { winapi::um::libloaderapi::LoadLibraryW(wide_name.as_ptr()) };
 

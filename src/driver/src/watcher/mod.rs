@@ -77,12 +77,7 @@ pub fn watch(entry: &Path, verbose: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn rebuild(
-    source: &Path,
-    runner: &Runner,
-    cache: &mut BuildCache,
-    verbose: bool,
-) -> Result<(), String> {
+fn rebuild(source: &Path, runner: &Runner, cache: &mut BuildCache, verbose: bool) -> Result<(), String> {
     let out = source.with_extension("smf");
     runner.run_file(source)?;
 

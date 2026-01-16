@@ -44,9 +44,7 @@ impl std::fmt::Display for GhostErasureError {
 ///
 /// This is a post-MIR-lowering pass that removes all ghost variables
 /// and related instructions before code generation.
-pub fn erase_ghost_from_module(
-    module: &mut MirModule,
-) -> (GhostErasureStats, Vec<GhostErasureError>) {
+pub fn erase_ghost_from_module(module: &mut MirModule) -> (GhostErasureStats, Vec<GhostErasureError>) {
     let mut stats = GhostErasureStats::default();
     let mut errors = Vec::new();
 
@@ -65,9 +63,7 @@ pub fn erase_ghost_from_module(
 }
 
 /// Erase ghost variables from a single MIR function.
-fn erase_ghost_from_function(
-    func: &mut MirFunction,
-) -> (GhostErasureStats, Vec<GhostErasureError>) {
+fn erase_ghost_from_function(func: &mut MirFunction) -> (GhostErasureStats, Vec<GhostErasureError>) {
     let mut stats = GhostErasureStats::default();
     let errors = Vec::new();
 
@@ -126,8 +122,7 @@ pub fn has_ghost_variables(func: &MirFunction) -> bool {
 
 /// Get the count of ghost variables in a function.
 pub fn ghost_variable_count(func: &MirFunction) -> usize {
-    func.params.iter().filter(|p| p.is_ghost).count()
-        + func.locals.iter().filter(|l| l.is_ghost).count()
+    func.params.iter().filter(|p| p.is_ghost).count() + func.locals.iter().filter(|l| l.is_ghost).count()
 }
 
 #[cfg(test)]

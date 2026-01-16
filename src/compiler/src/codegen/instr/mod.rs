@@ -13,8 +13,8 @@ use cranelift_module::Module;
 
 use crate::hir::{BinOp, PointerKind, TypeId, UnaryOp};
 use crate::mir::{
-    BindingStep, BlockId, ContractKind, FStringPart, MirFunction, MirInst, MirLiteral, MirPattern,
-    ParallelBackend, PatternBinding, Terminator, UnitOverflowBehavior, VReg,
+    BindingStep, BlockId, ContractKind, FStringPart, MirFunction, MirInst, MirLiteral, MirPattern, ParallelBackend,
+    PatternBinding, Terminator, UnitOverflowBehavior, VReg,
 };
 
 use super::shared::get_func_block_addr;
@@ -47,46 +47,35 @@ use actors::{
     compile_actor_join, compile_actor_recv, compile_actor_reply, compile_actor_send, compile_await,
     compile_generator_next,
 };
-use async_ops::{
-    compile_actor_spawn, compile_future_create, compile_generator_create, compile_yield,
-};
+use async_ops::{compile_actor_spawn, compile_future_create, compile_generator_create, compile_yield};
 use closures_structs::{
-    compile_closure_create, compile_indirect_call, compile_method_call_static,
-    compile_method_call_virtual, compile_struct_init,
+    compile_closure_create, compile_indirect_call, compile_method_call_static, compile_method_call_virtual,
+    compile_struct_init,
 };
 use collections::{
-    compile_array_lit, compile_const_string, compile_dict_lit, compile_fstring_format,
-    compile_gpu_atomic, compile_gpu_atomic_cmpxchg, compile_index_get, compile_index_set,
-    compile_slice_op, compile_tuple_lit, compile_vec_blend, compile_vec_extract, compile_vec_lit,
-    compile_vec_math, compile_vec_reduction, compile_vec_select, compile_vec_shuffle,
-    compile_vec_with,
+    compile_array_lit, compile_const_string, compile_dict_lit, compile_fstring_format, compile_gpu_atomic,
+    compile_gpu_atomic_cmpxchg, compile_index_get, compile_index_set, compile_slice_op, compile_tuple_lit,
+    compile_vec_blend, compile_vec_extract, compile_vec_lit, compile_vec_math, compile_vec_reduction,
+    compile_vec_select, compile_vec_shuffle, compile_vec_with,
 };
 use contracts::compile_contract_check;
 use core::{compile_binop, compile_builtin_io_call, compile_interp_call};
 use enum_union::{
-    compile_enum_discriminant, compile_enum_payload, compile_union_discriminant,
-    compile_union_payload, compile_union_wrap,
+    compile_enum_discriminant, compile_enum_payload, compile_union_discriminant, compile_union_payload,
+    compile_union_wrap,
 };
-use memory::{
-    compile_gc_alloc, compile_get_element_ptr, compile_load, compile_local_addr, compile_store,
-    compile_wait,
-};
+use memory::{compile_gc_alloc, compile_get_element_ptr, compile_load, compile_local_addr, compile_store, compile_wait};
 use methods::compile_builtin_method;
 use parallel::{compile_par_filter, compile_par_for_each, compile_par_map, compile_par_reduce};
 use pattern::{compile_enum_unit, compile_enum_with, compile_pattern_bind, compile_pattern_test};
 use pointers::{compile_pointer_deref, compile_pointer_new, compile_pointer_ref};
-use result::{
-    compile_option_none, compile_option_some, compile_result_err, compile_result_ok,
-    compile_try_unwrap,
-};
+use result::{compile_option_none, compile_option_some, compile_result_err, compile_result_ok, compile_try_unwrap};
 use simd_stubs::{
-    compile_neighbor_load, compile_vec_clamp, compile_vec_fma, compile_vec_gather,
-    compile_vec_load, compile_vec_masked_load, compile_vec_masked_store, compile_vec_max_vec,
-    compile_vec_min_vec, compile_vec_recip, compile_vec_scatter, compile_vec_store,
+    compile_neighbor_load, compile_vec_clamp, compile_vec_fma, compile_vec_gather, compile_vec_load,
+    compile_vec_masked_load, compile_vec_masked_store, compile_vec_max_vec, compile_vec_min_vec, compile_vec_recip,
+    compile_vec_scatter, compile_vec_store,
 };
-use units::{
-    compile_unit_bound_check, compile_unit_narrow, compile_unit_saturate, compile_unit_widen,
-};
+use units::{compile_unit_bound_check, compile_unit_narrow, compile_unit_saturate, compile_unit_widen};
 
 /// Context for instruction compilation, holding all state needed to compile MIR instructions.
 pub struct InstrContext<'a, M: Module> {
@@ -133,12 +122,7 @@ pub fn compile_instruction<M: Module>(
             ctx.vreg_values.insert(*dest, val);
         }
 
-        MirInst::BinOp {
-            dest,
-            op,
-            left,
-            right,
-        } => {
+        MirInst::BinOp { dest, op, left, right } => {
             let lhs = ctx.vreg_values[left];
             let rhs = ctx.vreg_values[right];
             let val = compile_binop(ctx, builder, *op, lhs, rhs)?;
@@ -153,10 +137,8 @@ pub fn compile_instruction<M: Module>(
         } => {
             let src_val = ctx.vreg_values[source];
             // Determine source and target types
-            let is_from_float =
-                *from_ty == crate::hir::TypeId::F64 || *from_ty == crate::hir::TypeId::F32;
-            let is_to_float =
-                *to_ty == crate::hir::TypeId::F64 || *to_ty == crate::hir::TypeId::F32;
+            let is_from_float = *from_ty == crate::hir::TypeId::F64 || *from_ty == crate::hir::TypeId::F32;
+            let is_to_float = *to_ty == crate::hir::TypeId::F64 || *to_ty == crate::hir::TypeId::F32;
             let is_to_i64 = *to_ty == crate::hir::TypeId::I64;
 
             let val = if is_from_float && !is_to_float {
@@ -198,11 +180,9 @@ pub fn compile_instruction<M: Module>(
             let val = ctx.vreg_values[operand];
             let result = match op {
                 UnaryOp::Neg => builder.ins().ineg(val),
-                UnaryOp::Not => {
-                    builder
-                        .ins()
-                        .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 0)
-                }
+                UnaryOp::Not => builder
+                    .ins()
+                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 0),
                 UnaryOp::BitNot => builder.ins().bnot(val),
             };
             ctx.vreg_values.insert(*dest, result);
@@ -253,19 +233,13 @@ pub fn compile_instruction<M: Module>(
             compile_wait(ctx, builder, *dest, *target)?;
         }
 
-        MirInst::InterpCall {
-            dest,
-            func_name,
-            args,
-        } => {
+        MirInst::InterpCall { dest, func_name, args } => {
             compile_interp_call(ctx, builder, dest, func_name, args)?;
         }
 
         MirInst::InterpEval { dest, expr_index } => {
             let interp_eval_id = ctx.runtime_funcs["rt_interp_eval"];
-            let interp_eval_ref = ctx
-                .module
-                .declare_func_in_func(interp_eval_id, builder.func);
+            let interp_eval_ref = ctx.module.declare_func_in_func(interp_eval_id, builder.func);
             let idx = builder.ins().iconst(types::I64, *expr_index as i64);
             let call = builder.ins().call(interp_eval_ref, &[idx]);
             let result = builder.inst_results(call)[0];
@@ -308,11 +282,7 @@ pub fn compile_instruction<M: Module>(
             compile_vec_reduction(ctx, builder, *dest, *source, "rt_vec_any");
         }
 
-        MirInst::VecExtract {
-            dest,
-            vector,
-            index,
-        } => {
+        MirInst::VecExtract { dest, vector, index } => {
             compile_vec_extract(ctx, builder, *dest, *vector, *index);
         }
 
@@ -345,11 +315,7 @@ pub fn compile_instruction<M: Module>(
             compile_vec_math(ctx, builder, *dest, *source, "rt_vec_round");
         }
 
-        MirInst::VecShuffle {
-            dest,
-            source,
-            indices,
-        } => {
+        MirInst::VecShuffle { dest, source, indices } => {
             compile_vec_shuffle(ctx, builder, *dest, *source, *indices);
         }
 
@@ -371,12 +337,7 @@ pub fn compile_instruction<M: Module>(
             compile_vec_select(ctx, builder, *dest, *mask, *if_true, *if_false);
         }
 
-        MirInst::GpuAtomic {
-            dest,
-            op,
-            ptr,
-            value,
-        } => {
+        MirInst::GpuAtomic { dest, op, ptr, value } => {
             compile_gpu_atomic(ctx, builder, *dest, *op, *ptr, *value);
         }
 
@@ -497,10 +458,9 @@ pub fn compile_instruction<M: Module>(
         } => {
             let obj_ptr = ctx.vreg_values[object];
             let cranelift_ty = type_id_to_cranelift(*field_type);
-            let val =
-                builder
-                    .ins()
-                    .load(cranelift_ty, MemFlags::new(), obj_ptr, *byte_offset as i32);
+            let val = builder
+                .ins()
+                .load(cranelift_ty, MemFlags::new(), obj_ptr, *byte_offset as i32);
             ctx.vreg_values.insert(*dest, val);
         }
 
@@ -512,9 +472,7 @@ pub fn compile_instruction<M: Module>(
         } => {
             let obj_ptr = ctx.vreg_values[object];
             let val = ctx.vreg_values[value];
-            builder
-                .ins()
-                .store(MemFlags::new(), val, obj_ptr, *byte_offset as i32);
+            builder.ins().store(MemFlags::new(), val, obj_ptr, *byte_offset as i32);
         }
 
         MirInst::MethodCallStatic {
@@ -556,19 +514,11 @@ pub fn compile_instruction<M: Module>(
             compile_builtin_method(ctx, builder, dest, *receiver, receiver_type, method, args)?;
         }
 
-        MirInst::PatternTest {
-            dest,
-            subject,
-            pattern,
-        } => {
+        MirInst::PatternTest { dest, subject, pattern } => {
             compile_pattern_test(ctx, builder, *dest, *subject, pattern);
         }
 
-        MirInst::PatternBind {
-            dest,
-            subject,
-            binding,
-        } => {
+        MirInst::PatternBind { dest, subject, binding } => {
             compile_pattern_bind(ctx, builder, *dest, *subject, binding);
         }
 
@@ -689,14 +639,7 @@ pub fn compile_instruction<M: Module>(
             func_name,
             message,
         } => {
-            compile_contract_check(
-                ctx,
-                builder,
-                *condition,
-                *kind,
-                func_name,
-                message.as_deref(),
-            )?;
+            compile_contract_check(ctx, builder, *condition, *kind, func_name, message.as_deref())?;
         }
 
         MirInst::ContractOldCapture { dest, value } => {
@@ -725,9 +668,7 @@ pub fn compile_instruction<M: Module>(
             let decision_id_val = builder.ins().iconst(types::I64, *decision_id as i64);
             let probe_func_id = ctx.runtime_funcs["rt_decision_probe"];
             let probe_func_ref = ctx.module.declare_func_in_func(probe_func_id, builder.func);
-            builder
-                .ins()
-                .call(probe_func_ref, &[decision_id_val, result_val]);
+            builder.ins().call(probe_func_ref, &[decision_id_val, result_val]);
 
             let _ = (file, line, column); // Keep metadata for future use
         }
@@ -744,10 +685,7 @@ pub fn compile_instruction<M: Module>(
             let result_val = match ctx.vreg_values.get(result) {
                 Some(&v) => v,
                 None => {
-                    return Err(format!(
-                        "ConditionProbe: result vreg {:?} not found",
-                        result
-                    ));
+                    return Err(format!("ConditionProbe: result vreg {:?} not found", result));
                 }
             };
 
@@ -755,10 +693,9 @@ pub fn compile_instruction<M: Module>(
             let condition_id_val = builder.ins().iconst(types::I32, *condition_id as i64);
             let probe_func_id = ctx.runtime_funcs["rt_condition_probe"];
             let probe_func_ref = ctx.module.declare_func_in_func(probe_func_id, builder.func);
-            builder.ins().call(
-                probe_func_ref,
-                &[decision_id_val, condition_id_val, result_val],
-            );
+            builder
+                .ins()
+                .call(probe_func_ref, &[decision_id_val, condition_id_val, result_val]);
 
             let _ = (file, line, column); // Keep metadata for future use
         }
@@ -769,9 +706,7 @@ pub fn compile_instruction<M: Module>(
             let block_id_val = builder.ins().iconst(types::I32, *block_id as i64);
             let probe_func_id = ctx.runtime_funcs["rt_path_probe"];
             let probe_func_ref = ctx.module.declare_func_in_func(probe_func_id, builder.func);
-            builder
-                .ins()
-                .call(probe_func_ref, &[path_id_val, block_id_val]);
+            builder.ins().call(probe_func_ref, &[path_id_val, block_id_val]);
         }
 
         MirInst::UnitBoundCheck {
@@ -802,17 +737,10 @@ pub fn compile_instruction<M: Module>(
             signed,
             overflow,
         } => {
-            compile_unit_narrow(
-                ctx, builder, *dest, *value, *from_bits, *to_bits, *signed, *overflow,
-            )?;
+            compile_unit_narrow(ctx, builder, *dest, *value, *from_bits, *to_bits, *signed, *overflow)?;
         }
 
-        MirInst::UnitSaturate {
-            dest,
-            value,
-            min,
-            max,
-        } => {
+        MirInst::UnitSaturate { dest, value, min, max } => {
             compile_unit_saturate(ctx, builder, *dest, *value, *min, *max)?;
         }
 
@@ -827,11 +755,7 @@ pub fn compile_instruction<M: Module>(
             compile_pointer_ref(ctx, builder, *dest, *kind, *source)?;
         }
 
-        MirInst::PointerDeref {
-            dest,
-            pointer,
-            kind,
-        } => {
+        MirInst::PointerDeref { dest, pointer, kind } => {
             compile_pointer_deref(ctx, builder, *dest, *pointer, *kind)?;
         }
 
@@ -878,44 +802,24 @@ pub fn compile_instruction<M: Module>(
             super::instr_gpu::compile_gpu_shared_alloc(ctx, builder, *dest, *element_type, *size)?;
         }
 
-        MirInst::NeighborLoad {
-            dest,
-            array,
-            direction,
-        } => {
+        MirInst::NeighborLoad { dest, array, direction } => {
             compile_neighbor_load(ctx, builder, *dest, *array, *direction)?;
         }
 
         // SIMD load/store operations
-        MirInst::VecLoad {
-            dest,
-            array,
-            offset,
-        } => {
+        MirInst::VecLoad { dest, array, offset } => {
             compile_vec_load(ctx, builder, *dest, *array, *offset)?;
         }
 
-        MirInst::VecStore {
-            source,
-            array,
-            offset,
-        } => {
+        MirInst::VecStore { source, array, offset } => {
             compile_vec_store(ctx, builder, *source, *array, *offset)?;
         }
 
-        MirInst::VecGather {
-            dest,
-            array,
-            indices,
-        } => {
+        MirInst::VecGather { dest, array, indices } => {
             compile_vec_gather(ctx, builder, *dest, *array, *indices)?;
         }
 
-        MirInst::VecScatter {
-            source,
-            array,
-            indices,
-        } => {
+        MirInst::VecScatter { source, array, indices } => {
             compile_vec_scatter(ctx, builder, *source, *array, *indices)?;
         }
 
@@ -954,12 +858,7 @@ pub fn compile_instruction<M: Module>(
             compile_vec_max_vec(ctx, builder, *dest, *a, *b)?;
         }
 
-        MirInst::VecClamp {
-            dest,
-            source,
-            lo,
-            hi,
-        } => {
+        MirInst::VecClamp { dest, source, lo, hi } => {
             compile_vec_clamp(ctx, builder, *dest, *source, *lo, *hi)?;
         }
 

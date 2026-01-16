@@ -37,11 +37,7 @@ impl WasmRunner {
         let store = Store::default();
         let cache = Arc::new(ModuleCache::new());
 
-        Ok(Self {
-            config,
-            cache,
-            store,
-        })
+        Ok(Self { config, cache, store })
     }
 
     /// Run a WASM module from a file
@@ -71,13 +67,10 @@ impl WasmRunner {
 
         // Load and compile module
         let wasm_bytes = std::fs::read(path)?;
-        let module = Module::new(&self.store, wasm_bytes)
-            .map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
+        let module = Module::new(&self.store, wasm_bytes).map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
 
         // Serialize and cache
-        let serialized = module
-            .serialize()
-            .map_err(|e| WasmError::CacheError(e.to_string()))?;
+        let serialized = module.serialize().map_err(|e| WasmError::CacheError(e.to_string()))?;
         self.cache.put(path.to_path_buf(), serialized.to_vec())?;
 
         Ok(module)
@@ -127,10 +120,7 @@ impl WasmRunner {
                 match import.ty() {
                     ExternType::Memory(mem_type) => {
                         let memory = Memory::new(&mut self.store, *mem_type).map_err(|e| {
-                            WasmError::InstantiationFailed(format!(
-                                "Failed to create memory {}: {}",
-                                name, e
-                            ))
+                            WasmError::InstantiationFailed(format!("Failed to create memory {}: {}", name, e))
                         })?;
                         import_object.define(namespace, name, memory);
                     }

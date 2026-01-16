@@ -229,14 +229,8 @@ impl<'a> Parser<'a> {
                     level: ErrorHintLevel::Warning,
                     message: "Deprecated syntax for type parameters".to_string(),
                     span: bracket_span,
-                    suggestion: Some(format!(
-                        "Use angle brackets: {}<...> instead of {}[...]",
-                        name, name
-                    )),
-                    help: Some(
-                        "Run `simple migrate --fix-generics` to automatically update your code"
-                            .to_string(),
-                    ),
+                    suggestion: Some(format!("Use angle brackets: {}<...> instead of {}[...]", name, name)),
+                    help: Some("Run `simple migrate --fix-generics` to automatically update your code".to_string()),
                 };
                 self.error_hints.push(warning);
             }
@@ -395,19 +389,13 @@ impl<'a> Parser<'a> {
                     Ok(repr)
                 } else {
                     Err(ParseError::syntax_error_with_span(
-                        format!(
-                            "Invalid repr type '{}'. Expected format: u8, i12, f32, etc.",
-                            s
-                        ),
+                        format!("Invalid repr type '{}'. Expected format: u8, i12, f32, etc.", s),
                         self.current.span,
                     ))
                 }
             }
             _ => Err(ParseError::syntax_error_with_span(
-                format!(
-                    "Expected repr type (u8, i12, f32, etc.), got {:?}",
-                    self.current.kind
-                ),
+                format!("Expected repr type (u8, i12, f32, etc.), got {:?}", self.current.kind),
                 self.current.span,
             )),
         }
@@ -432,10 +420,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a single unit constraint: range, checked, saturate, wrap, default
-    fn parse_unit_constraint(
-        &mut self,
-        constraints: &mut UnitReprConstraints,
-    ) -> Result<(), ParseError> {
+    fn parse_unit_constraint(&mut self, constraints: &mut UnitReprConstraints) -> Result<(), ParseError> {
         match &self.current.kind {
             TokenKind::Identifier { name: s, .. } => {
                 let s = s.clone();

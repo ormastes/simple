@@ -99,8 +99,7 @@ fn format_value_for_message(val: &Value) -> String {
         Value::Str(s) => format!("\"{}\"", s),
         Value::Nil => "nil".to_string(),
         Value::Array(items) => {
-            let items_str: Vec<String> =
-                items.iter().map(|v| format_value_for_message(v)).collect();
+            let items_str: Vec<String> = items.iter().map(|v| format_value_for_message(v)).collect();
             format!("[{}]", items_str.join(", "))
         }
         _ => format!("{:?}", val),
@@ -135,10 +134,9 @@ pub(crate) fn exec_block_value(
             enums,
             impl_methods,
         ),
-        Value::BlockClosure {
-            nodes,
-            env: captured,
-        } => exec_block_closure(&nodes, &captured, functions, classes, enums, impl_methods),
+        Value::BlockClosure { nodes, env: captured } => {
+            exec_block_closure(&nodes, &captured, functions, classes, enums, impl_methods)
+        }
         _ => Ok(Value::Nil),
     }
 }
@@ -191,16 +189,7 @@ pub(super) fn eval_bdd_builtin(
                 _ => ("unnamed".to_string(), None),
             };
 
-            let block = eval_arg(
-                args,
-                1,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
 
             let indent = BDD_INDENT.with(|cell| *cell.borrow());
             let indent_str = "  ".repeat(indent);
@@ -262,16 +251,7 @@ pub(super) fn eval_bdd_builtin(
                 Value::Str(s) => s.clone(),
                 _ => "unnamed".to_string(),
             };
-            let block = eval_arg(
-                args,
-                1,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
 
             BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
             BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
@@ -283,25 +263,16 @@ pub(super) fn eval_bdd_builtin(
                 }
             });
 
-            let before_hooks: Vec<Value> = BDD_BEFORE_EACH.with(|cell| {
-                cell.borrow()
-                    .iter()
-                    .flat_map(|level| level.clone())
-                    .collect()
-            });
+            let before_hooks: Vec<Value> =
+                BDD_BEFORE_EACH.with(|cell| cell.borrow().iter().flat_map(|level| level.clone()).collect());
             for hook in before_hooks {
                 exec_block_value(hook, env, functions, classes, enums, impl_methods)?;
             }
 
             let result = exec_block_value(block, env, functions, classes, enums, impl_methods);
 
-            let after_hooks: Vec<Value> = BDD_AFTER_EACH.with(|cell| {
-                cell.borrow()
-                    .iter()
-                    .rev()
-                    .flat_map(|level| level.clone())
-                    .collect()
-            });
+            let after_hooks: Vec<Value> =
+                BDD_AFTER_EACH.with(|cell| cell.borrow().iter().rev().flat_map(|level| level.clone()).collect());
             for hook in after_hooks {
                 let _ = exec_block_value(hook, env, functions, classes, enums, impl_methods);
             }
@@ -385,14 +356,7 @@ pub(super) fn eval_bdd_builtin(
                 BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
 
                 let failure_msg = if !args.is_empty() {
-                    build_expect_failure_message(
-                        &args[0].value,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )
+                    build_expect_failure_message(&args[0].value, env, functions, classes, enums, impl_methods)
                 } else {
                     "expected true, got false".to_string()
                 };
@@ -435,16 +399,7 @@ pub(super) fn eval_bdd_builtin(
                 Value::Symbol(s) => s.clone(),
                 _ => "unnamed".to_string(),
             };
-            let block = eval_arg(
-                args,
-                1,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
 
             BDD_SHARED_EXAMPLES.with(|cell| {
                 cell.borrow_mut().insert(name_str.clone(), block);
@@ -478,8 +433,7 @@ pub(super) fn eval_bdd_builtin(
                     println!("{}behaves like {}", indent_str, name_str);
 
                     BDD_INDENT.with(|cell| *cell.borrow_mut() += 1);
-                    let result =
-                        exec_block_value(block, env, functions, classes, enums, impl_methods);
+                    let result = exec_block_value(block, env, functions, classes, enums, impl_methods);
                     BDD_INDENT.with(|cell| *cell.borrow_mut() -= 1);
 
                     Ok(Some(result?))
@@ -490,16 +444,7 @@ pub(super) fn eval_bdd_builtin(
             }
         }
         "before_each" => {
-            let block = eval_arg(
-                args,
-                0,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let block = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
 
             BDD_BEFORE_EACH.with(|cell| {
                 let mut hooks = cell.borrow_mut();
@@ -511,16 +456,7 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "after_each" => {
-            let block = eval_arg(
-                args,
-                0,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let block = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
 
             BDD_AFTER_EACH.with(|cell| {
                 let mut hooks = cell.borrow_mut();
@@ -547,16 +483,7 @@ pub(super) fn eval_bdd_builtin(
                 Value::Str(s) => s.clone(),
                 _ => "unnamed".to_string(),
             };
-            let block = eval_arg(
-                args,
-                1,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
 
             BDD_CONTEXT_DEFS.with(|cell| {
                 cell.borrow_mut().insert(name_str, vec![block]);
@@ -580,16 +507,7 @@ pub(super) fn eval_bdd_builtin(
                 Value::Str(s) => s.clone(),
                 _ => "unnamed".to_string(),
             };
-            let block = eval_arg(
-                args,
-                1,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
 
             BDD_LAZY_VALUES.with(|cell| {
                 cell.borrow_mut().insert(name_str, (block, None));
@@ -598,21 +516,11 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "given" => {
-            let first_arg = eval_arg(
-                args,
-                0,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let first_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
 
             match &first_arg {
                 Value::Symbol(ctx_name) => {
-                    let ctx_block =
-                        BDD_CONTEXT_DEFS.with(|cell| cell.borrow().get(ctx_name).cloned());
+                    let ctx_block = BDD_CONTEXT_DEFS.with(|cell| cell.borrow().get(ctx_name).cloned());
                     if let Some(blocks) = ctx_block {
                         for block in blocks {
                             exec_block_value(block, env, functions, classes, enums, impl_methods)?;
@@ -621,16 +529,7 @@ pub(super) fn eval_bdd_builtin(
                 }
                 _ => {
                     if args.len() >= 2 {
-                        let block = eval_arg(
-                            args,
-                            1,
-                            Value::Nil,
-                            env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?;
+                        let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
                         exec_block_value(block, env, functions, classes, enums, impl_methods)?;
                     } else {
                         exec_block_value(first_arg, env, functions, classes, enums, impl_methods)?;
@@ -656,16 +555,7 @@ pub(super) fn eval_bdd_builtin(
                 Value::Str(s) => s.clone(),
                 _ => "unnamed".to_string(),
             };
-            let block = eval_arg(
-                args,
-                1,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
 
             BDD_LAZY_VALUES.with(|cell| {
                 cell.borrow_mut().insert(name_str, (block, None));
@@ -695,14 +585,7 @@ pub(super) fn eval_bdd_builtin(
             match cached {
                 Some((_block, Some(value))) => Ok(Some(value)),
                 Some((block, None)) => {
-                    let value = exec_block_value(
-                        block.clone(),
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )?;
+                    let value = exec_block_value(block.clone(), env, functions, classes, enums, impl_methods)?;
                     BDD_LAZY_VALUES.with(|cell| {
                         if let Some(entry) = cell.borrow_mut().get_mut(&name_str) {
                             entry.1 = Some(value.clone());

@@ -106,11 +106,7 @@ fn test_token_kind_delimiters() {
 
 #[test]
 fn test_token_creation() {
-    let token = Token::new(
-        TokenKind::Integer(42),
-        Span::new(0, 2, 1, 1),
-        "42".to_string(),
-    );
+    let token = Token::new(TokenKind::Integer(42), Span::new(0, 2, 1, 1), "42".to_string());
     assert!(matches!(token.kind, TokenKind::Integer(42)));
 }
 
@@ -161,8 +157,7 @@ fn test_token_kind_raw_string() {
 // =============================================================================
 
 use simple_dependency_tracker::{
-    resolve, to_dir_path, to_file_path, well_formed, FileKind, FileSystem, ModPath,
-    ResolutionResult, Segment,
+    resolve, to_dir_path, to_file_path, well_formed, FileKind, FileSystem, ModPath, ResolutionResult, Segment,
 };
 
 #[test]
@@ -350,8 +345,8 @@ fn test_well_formed_empty() {
 // =============================================================================
 
 use simple_dependency_tracker::{
-    ancestor_visibility, effective_visibility, visibility_meet, DirManifest, EffectiveVisibility,
-    ModDecl, ModuleContents, Symbol, SymbolId, Visibility,
+    ancestor_visibility, effective_visibility, visibility_meet, DirManifest, EffectiveVisibility, ModDecl,
+    ModuleContents, Symbol, SymbolId, Visibility,
 };
 
 #[test]
@@ -515,9 +510,7 @@ fn test_ancestor_visibility_with_private() {
 // Type Crate Coverage (type/src/lib.rs)
 // =============================================================================
 
-use simple_type::{
-    lean_infer, LeanExpr, LeanTy, Substitution, Type, TypeChecker, TypeError, TypeScheme,
-};
+use simple_type::{lean_infer, LeanExpr, LeanTy, Substitution, Type, TypeChecker, TypeError, TypeScheme};
 
 #[test]
 fn test_type_int() {

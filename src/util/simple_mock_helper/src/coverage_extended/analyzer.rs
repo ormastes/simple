@@ -7,8 +7,8 @@ use crate::coverage::{LlvmCovExport, PublicApiSpec};
 
 use super::report::ExtendedCoverageReport;
 use super::types::{
-    CoverageType, ExternalLibCoverage, FunctionCoverage, InterfaceCoverage, MethodCoverage,
-    TypeCoverage, TypeMethodSummary, UncoveredItem,
+    CoverageType, ExternalLibCoverage, FunctionCoverage, InterfaceCoverage, MethodCoverage, TypeCoverage,
+    TypeMethodSummary, UncoveredItem,
 };
 use super::utils::{demangle_rust_name, matches_type_method};
 
@@ -22,12 +22,7 @@ pub struct CoverageAnalyzer {
 
 impl CoverageAnalyzer {
     /// Create analyzer from parsed data
-    pub fn new(
-        llvm_cov: LlvmCovExport,
-        api_spec: PublicApiSpec,
-        llvm_file: &str,
-        api_file: &str,
-    ) -> Self {
+    pub fn new(llvm_cov: LlvmCovExport, api_spec: PublicApiSpec, llvm_file: &str, api_file: &str) -> Self {
         Self {
             llvm_cov,
             api_spec,
@@ -37,10 +32,7 @@ impl CoverageAnalyzer {
     }
 
     /// Load analyzer from files
-    pub fn from_files<P1: AsRef<Path>, P2: AsRef<Path>>(
-        llvm_cov_path: P1,
-        api_spec_path: P2,
-    ) -> anyhow::Result<Self> {
+    pub fn from_files<P1: AsRef<Path>, P2: AsRef<Path>>(llvm_cov_path: P1, api_spec_path: P2) -> anyhow::Result<Self> {
         let llvm_cov = crate::coverage::load_llvm_cov_export(&llvm_cov_path)?;
         let api_spec = crate::coverage::load_public_api_spec(&api_spec_path)?;
         Ok(Self::new(
@@ -70,8 +62,7 @@ impl CoverageAnalyzer {
 
     /// Generate system test coverage report (type/method coverage)
     pub fn generate_system_report(&self) -> ExtendedCoverageReport {
-        let mut report =
-            ExtendedCoverageReport::new(CoverageType::System, &self.llvm_file, &self.api_file);
+        let mut report = ExtendedCoverageReport::new(CoverageType::System, &self.llvm_file, &self.api_file);
 
         let fn_counts = self.build_function_counts();
 
@@ -187,8 +178,7 @@ impl CoverageAnalyzer {
 
     /// Generate integration test coverage report (function coverage)
     pub fn generate_integration_report(&self) -> ExtendedCoverageReport {
-        let mut report =
-            ExtendedCoverageReport::new(CoverageType::Integration, &self.llvm_file, &self.api_file);
+        let mut report = ExtendedCoverageReport::new(CoverageType::Integration, &self.llvm_file, &self.api_file);
 
         let fn_counts = self.build_function_counts();
 
@@ -197,11 +187,7 @@ impl CoverageAnalyzer {
             .api_spec
             .types
             .iter()
-            .flat_map(|(type_name, spec)| {
-                spec.methods
-                    .iter()
-                    .map(move |m| format!("{}::{}", type_name, m))
-            })
+            .flat_map(|(type_name, spec)| spec.methods.iter().map(move |m| format!("{}::{}", type_name, m)))
             .collect();
 
         // Process all functions in coverage data
@@ -212,11 +198,7 @@ impl CoverageAnalyzer {
             let covered = *count > 0;
 
             let func_cov = FunctionCoverage {
-                name: func_name
-                    .split("::")
-                    .last()
-                    .unwrap_or(func_name)
-                    .to_string(),
+                name: func_name.split("::").last().unwrap_or(func_name).to_string(),
                 qualified_name: func_name.clone(),
                 file: None,
                 line_start: None,
@@ -251,8 +233,7 @@ impl CoverageAnalyzer {
         report.summary.function_coverage_percent = if report.summary.total_functions == 0 {
             100.0
         } else {
-            (report.summary.covered_functions as f64 / report.summary.total_functions as f64)
-                * 100.0
+            (report.summary.covered_functions as f64 / report.summary.total_functions as f64) * 100.0
         };
 
         report
@@ -260,8 +241,7 @@ impl CoverageAnalyzer {
 
     /// Generate merged coverage report (all coverage data)
     pub fn generate_merged_report(&self) -> ExtendedCoverageReport {
-        let mut report =
-            ExtendedCoverageReport::new(CoverageType::Merged, &self.llvm_file, &self.api_file);
+        let mut report = ExtendedCoverageReport::new(CoverageType::Merged, &self.llvm_file, &self.api_file);
 
         // Get system and integration reports
         let system_report = self.generate_system_report();
@@ -276,8 +256,7 @@ impl CoverageAnalyzer {
         report.summary.method_coverage_percent = system_report.summary.method_coverage_percent;
         report.summary.total_functions = integration_report.summary.total_functions;
         report.summary.covered_functions = integration_report.summary.covered_functions;
-        report.summary.function_coverage_percent =
-            integration_report.summary.function_coverage_percent;
+        report.summary.function_coverage_percent = integration_report.summary.function_coverage_percent;
 
         // Copy types and functions
         report.types = system_report.types;
@@ -305,8 +284,7 @@ impl CoverageAnalyzer {
 
     /// Generate service test coverage report (interface + external lib coverage)
     pub fn generate_service_report(&self) -> ExtendedCoverageReport {
-        let mut report =
-            ExtendedCoverageReport::new(CoverageType::Service, &self.llvm_file, &self.api_file);
+        let mut report = ExtendedCoverageReport::new(CoverageType::Service, &self.llvm_file, &self.api_file);
 
         let fn_counts = self.build_function_counts();
 
@@ -375,16 +353,13 @@ impl CoverageAnalyzer {
         report.summary.interface_coverage_percent = if report.summary.total_interfaces == 0 {
             100.0
         } else {
-            (report.summary.covered_interfaces as f64 / report.summary.total_interfaces as f64)
-                * 100.0
+            (report.summary.covered_interfaces as f64 / report.summary.total_interfaces as f64) * 100.0
         };
 
         report.summary.external_lib_coverage_percent = if report.summary.total_external_libs == 0 {
             100.0
         } else {
-            (report.summary.covered_external_libs as f64
-                / report.summary.total_external_libs as f64)
-                * 100.0
+            (report.summary.covered_external_libs as f64 / report.summary.total_external_libs as f64) * 100.0
         };
 
         report
@@ -480,12 +455,7 @@ types:
         // Should have 2 uncovered methods
         assert_eq!(report.uncovered.methods.len(), 2);
 
-        let uncovered_names: Vec<&str> = report
-            .uncovered
-            .methods
-            .iter()
-            .map(|u| u.name.as_str())
-            .collect();
+        let uncovered_names: Vec<&str> = report.uncovered.methods.iter().map(|u| u.name.as_str()).collect();
         assert!(uncovered_names.contains(&"method2"));
         assert!(uncovered_names.contains(&"stop"));
     }

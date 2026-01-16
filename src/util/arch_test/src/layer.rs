@@ -17,10 +17,7 @@ pub struct Layer {
 impl Layer {
     /// Create a new layer
     pub fn new(name: &str, patterns: Vec<String>) -> Self {
-        let compiled_patterns = patterns
-            .iter()
-            .filter_map(|p| Pattern::new(p).ok())
-            .collect();
+        let compiled_patterns = patterns.iter().filter_map(|p| Pattern::new(p).ok()).collect();
 
         Self {
             name: name.to_string(),

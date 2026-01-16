@@ -272,10 +272,7 @@ mod tests {
     fn test_backend_kind_copy() {
         let backend = BackendKind::Cranelift;
         let copied = backend; // Copy, not move
-        assert_eq!(
-            backend, copied,
-            "Copy should produce equal value and not move"
-        );
+        assert_eq!(backend, copied, "Copy should produce equal value and not move");
         // If Copy wasn't implemented, this line would fail:
         assert_eq!(backend, BackendKind::Cranelift);
     }
@@ -312,10 +309,7 @@ mod tests {
 
         let llvm = BackendKind::Llvm;
         let debug_str = format!("{:?}", llvm);
-        assert!(
-            debug_str.contains("Llvm"),
-            "Debug output should contain variant name"
-        );
+        assert!(debug_str.contains("Llvm"), "Debug output should contain variant name");
 
         let software = BackendKind::Software;
         let debug_str = format!("{:?}", software);
@@ -328,10 +322,7 @@ mod tests {
         {
             let vulkan = BackendKind::Vulkan;
             let debug_str = format!("{:?}", vulkan);
-            assert!(
-                debug_str.contains("Vulkan"),
-                "Debug output should contain variant name"
-            );
+            assert!(debug_str.contains("Vulkan"), "Debug output should contain variant name");
         }
     }
 

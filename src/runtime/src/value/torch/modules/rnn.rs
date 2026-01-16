@@ -16,11 +16,7 @@ use tch::Tensor;
 
 /// Helper function to initialize RNN weights for a single direction
 #[cfg(feature = "pytorch")]
-fn init_rnn_weights(
-    num_gates: i64,
-    hidden_size: i64,
-    input_dim: i64,
-) -> Option<(u64, u64, u64, u64)> {
+fn init_rnn_weights(num_gates: i64, hidden_size: i64, input_dim: i64) -> Option<(u64, u64, u64, u64)> {
     let weight_ih_shape = vec![num_gates * hidden_size, input_dim];
     let weight_ih = rt_torch_randn(weight_ih_shape.as_ptr(), 2, 0, 0);
 
@@ -72,8 +68,7 @@ fn init_rnn_layers(
 
         // Backward direction weights (if bidirectional)
         if bidirectional {
-            let Some(layer_weights_rev) = init_rnn_weights(num_gates, hidden_size, input_dim)
-            else {
+            let Some(layer_weights_rev) = init_rnn_weights(num_gates, hidden_size, input_dim) else {
                 // Cleanup on failure
                 for (wih, whh, bih, bhh) in &weights {
                     rt_torch_free(*wih);
@@ -130,12 +125,7 @@ fn get_or_create_hidden_state(
 /// num_layers: number of recurrent layers
 /// bidirectional: 1 for bidirectional, 0 for unidirectional
 #[no_mangle]
-pub extern "C" fn rt_torch_lstm_new(
-    input_size: i64,
-    hidden_size: i64,
-    num_layers: i64,
-    bidirectional: i32,
-) -> u64 {
+pub extern "C" fn rt_torch_lstm_new(input_size: i64, hidden_size: i64, num_layers: i64, bidirectional: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         if input_size <= 0 || hidden_size <= 0 || num_layers <= 0 {
@@ -145,9 +135,7 @@ pub extern "C" fn rt_torch_lstm_new(
         let is_bidirectional = bidirectional != 0;
 
         // LSTM has 4 gates: input, forget, cell, output
-        let Some(weights) =
-            init_rnn_layers(4, input_size, hidden_size, num_layers, is_bidirectional)
-        else {
+        let Some(weights) = init_rnn_layers(4, input_size, hidden_size, num_layers, is_bidirectional) else {
             return 0;
         };
 
@@ -160,9 +148,7 @@ pub extern "C" fn rt_torch_lstm_new(
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY
-            .lock()
-            .insert(handle, std::sync::Arc::new(module));
+        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(module));
 
         tracing::debug!(
             "rt_torch_lstm_new: input={} hidden={} layers={} bidir={} -> {}",
@@ -187,12 +173,7 @@ pub extern "C" fn rt_torch_lstm_new(
 /// c0_handle: initial cell state (0 for zeros)
 /// Returns: (output_handle, (hn_handle, cn_handle)) encoded as a tuple - for now just output
 #[no_mangle]
-pub extern "C" fn rt_torch_lstm_forward(
-    module_handle: u64,
-    input_handle: u64,
-    h0_handle: u64,
-    c0_handle: u64,
-) -> u64 {
+pub extern "C" fn rt_torch_lstm_forward(module_handle: u64, input_handle: u64, h0_handle: u64, c0_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let module_registry = MODULE_REGISTRY.lock();
@@ -227,22 +208,14 @@ pub extern "C" fn rt_torch_lstm_forward(
                 let batch_size = input_shape[1];
 
                 // Initialize h0 and c0 if not provided
-                let Some(h0) = get_or_create_hidden_state(
-                    h0_handle,
-                    *num_layers,
-                    num_directions,
-                    batch_size,
-                    *hidden_size,
-                ) else {
+                let Some(h0) =
+                    get_or_create_hidden_state(h0_handle, *num_layers, num_directions, batch_size, *hidden_size)
+                else {
                     return 0;
                 };
-                let Some(c0) = get_or_create_hidden_state(
-                    c0_handle,
-                    *num_layers,
-                    num_directions,
-                    batch_size,
-                    *hidden_size,
-                ) else {
+                let Some(c0) =
+                    get_or_create_hidden_state(c0_handle, *num_layers, num_directions, batch_size, *hidden_size)
+                else {
                     return 0;
                 };
 
@@ -286,12 +259,7 @@ pub extern "C" fn rt_torch_lstm_forward(
 
 /// Create a GRU module
 #[no_mangle]
-pub extern "C" fn rt_torch_gru_new(
-    input_size: i64,
-    hidden_size: i64,
-    num_layers: i64,
-    bidirectional: i32,
-) -> u64 {
+pub extern "C" fn rt_torch_gru_new(input_size: i64, hidden_size: i64, num_layers: i64, bidirectional: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         if input_size <= 0 || hidden_size <= 0 || num_layers <= 0 {
@@ -301,9 +269,7 @@ pub extern "C" fn rt_torch_gru_new(
         let is_bidirectional = bidirectional != 0;
 
         // GRU has 3 gates: reset, input, new
-        let Some(weights) =
-            init_rnn_layers(3, input_size, hidden_size, num_layers, is_bidirectional)
-        else {
+        let Some(weights) = init_rnn_layers(3, input_size, hidden_size, num_layers, is_bidirectional) else {
             return 0;
         };
 
@@ -316,9 +282,7 @@ pub extern "C" fn rt_torch_gru_new(
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY
-            .lock()
-            .insert(handle, std::sync::Arc::new(module));
+        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(module));
 
         tracing::debug!(
             "rt_torch_gru_new: input={} hidden={} layers={} bidir={} -> {}",
@@ -340,11 +304,7 @@ pub extern "C" fn rt_torch_gru_new(
 /// GRU forward pass
 /// Returns output tensor: [seq_len, batch, hidden_size * num_directions]
 #[no_mangle]
-pub extern "C" fn rt_torch_gru_forward(
-    module_handle: u64,
-    input_handle: u64,
-    h0_handle: u64,
-) -> u64 {
+pub extern "C" fn rt_torch_gru_forward(module_handle: u64, input_handle: u64, h0_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let module_registry = MODULE_REGISTRY.lock();
@@ -379,13 +339,9 @@ pub extern "C" fn rt_torch_gru_forward(
                 let batch_size = input_shape[1];
 
                 // Initialize h0 if not provided
-                let Some(h0) = get_or_create_hidden_state(
-                    h0_handle,
-                    *num_layers,
-                    num_directions,
-                    batch_size,
-                    *hidden_size,
-                ) else {
+                let Some(h0) =
+                    get_or_create_hidden_state(h0_handle, *num_layers, num_directions, batch_size, *hidden_size)
+                else {
                     return 0;
                 };
 

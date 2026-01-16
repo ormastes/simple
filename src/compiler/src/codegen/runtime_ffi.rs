@@ -18,16 +18,8 @@ pub struct RuntimeFuncSpec {
 }
 
 impl RuntimeFuncSpec {
-    pub const fn new(
-        name: &'static str,
-        params: &'static [types::Type],
-        returns: &'static [types::Type],
-    ) -> Self {
-        Self {
-            name,
-            params,
-            returns,
-        }
+    pub const fn new(name: &'static str, params: &'static [types::Type], returns: &'static [types::Type]) -> Self {
+        Self { name, params, returns }
     }
 
     /// Build a Cranelift signature from this spec.
@@ -289,18 +281,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // simple_contract_check(condition: i64, kind: i64, func_name_ptr: i64, func_name_len: i64)
     RuntimeFuncSpec::new("simple_contract_check", &[I64, I64, I64, I64], &[]),
     // simple_contract_check_msg(condition: i64, kind: i64, func_name_ptr: i64, func_name_len: i64, msg_ptr: i64, msg_len: i64)
-    RuntimeFuncSpec::new(
-        "simple_contract_check_msg",
-        &[I64, I64, I64, I64, I64, I64],
-        &[],
-    ),
+    RuntimeFuncSpec::new("simple_contract_check_msg", &[I64, I64, I64, I64, I64, I64], &[]),
     // Contract violation object functions (CTR-050-054)
     // rt_contract_violation_new(kind: i64, func_name_ptr: i64, func_name_len: i64, msg_ptr: i64, msg_len: i64) -> RuntimeValue
-    RuntimeFuncSpec::new(
-        "rt_contract_violation_new",
-        &[I64, I64, I64, I64, I64],
-        &[I64],
-    ),
+    RuntimeFuncSpec::new("rt_contract_violation_new", &[I64, I64, I64, I64, I64], &[I64]),
     // rt_contract_violation_kind(violation: RuntimeValue) -> i64
     RuntimeFuncSpec::new("rt_contract_violation_kind", &[I64], &[I64]),
     // rt_contract_violation_func_name(violation: RuntimeValue) -> RuntimeValue (string)
@@ -332,8 +316,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("doctest_is_file", &[I64], &[I64]),   // path -> bool (RuntimeValue)
     RuntimeFuncSpec::new("doctest_is_dir", &[I64], &[I64]),    // path -> bool (RuntimeValue)
     RuntimeFuncSpec::new("doctest_walk_directory", &[I64, I64, I64], &[I64]), // root, include, exclude -> array (RuntimeValue)
-    RuntimeFuncSpec::new("doctest_path_has_extension", &[I64, I64], &[I64]), // path, ext -> bool (RuntimeValue)
-    RuntimeFuncSpec::new("doctest_path_contains", &[I64, I64], &[I64]), // path, pattern -> bool (RuntimeValue)
+    RuntimeFuncSpec::new("doctest_path_has_extension", &[I64, I64], &[I64]),  // path, ext -> bool (RuntimeValue)
+    RuntimeFuncSpec::new("doctest_path_contains", &[I64, I64], &[I64]),       // path, pattern -> bool (RuntimeValue)
     // =========================================================================
     // GPU work item identification
     // =========================================================================
@@ -346,7 +330,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // GPU synchronization
     // =========================================================================
-    RuntimeFuncSpec::new("rt_gpu_barrier", &[], &[]), // () -> ()
+    RuntimeFuncSpec::new("rt_gpu_barrier", &[], &[]),      // () -> ()
     RuntimeFuncSpec::new("rt_gpu_mem_fence", &[I32], &[]), // scope -> ()
     // =========================================================================
     // GPU atomic operations (i64)
@@ -380,11 +364,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // GPU kernel launch
     // =========================================================================
-    RuntimeFuncSpec::new(
-        "rt_gpu_launch",
-        &[I64, I32, I32, I32, I32, I32, I32],
-        &[I32],
-    ), // kernel, gx,gy,gz, lx,ly,lz -> status
+    RuntimeFuncSpec::new("rt_gpu_launch", &[I64, I32, I32, I32, I32, I32, I32], &[I32]), // kernel, gx,gy,gz, lx,ly,lz -> status
     RuntimeFuncSpec::new("rt_gpu_launch_1d", &[I64, I32, I32], &[I32]), // kernel, global, local -> status
     // =========================================================================
     // Vulkan GPU backend operations
@@ -394,11 +374,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vk_device_free", &[I64], &[I32]), // device_handle -> status
     RuntimeFuncSpec::new("rt_vk_device_sync", &[I64], &[I32]), // device_handle -> status
     RuntimeFuncSpec::new("rt_vk_buffer_alloc", &[I64, I64], &[I64]), // device_handle, size -> buffer_handle
-    RuntimeFuncSpec::new("rt_vk_buffer_free", &[I64], &[I32]),       // buffer_handle -> status
+    RuntimeFuncSpec::new("rt_vk_buffer_free", &[I64], &[I32]), // buffer_handle -> status
     RuntimeFuncSpec::new("rt_vk_buffer_upload", &[I64, I64, I64], &[I32]), // buffer_handle, data_ptr, size -> status
     RuntimeFuncSpec::new("rt_vk_buffer_download", &[I64, I64, I64], &[I32]), // buffer_handle, data_ptr, size -> status
     RuntimeFuncSpec::new("rt_vk_kernel_compile", &[I64, I64, I64], &[I64]), // device_handle, spirv_ptr, spirv_len -> pipeline_handle
-    RuntimeFuncSpec::new("rt_vk_kernel_free", &[I64], &[I32]), // pipeline_handle -> status
+    RuntimeFuncSpec::new("rt_vk_kernel_free", &[I64], &[I32]),              // pipeline_handle -> status
     RuntimeFuncSpec::new(
         "rt_vk_kernel_launch",
         &[I64, I64, I64, I32, I32, I32, I32, I32, I32],
@@ -426,11 +406,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // native_tcp_connect(addr_ptr: i64, addr_len: i64) -> (handle: i64, local_addr_ptr: i64, error_code: i64)
     RuntimeFuncSpec::new("native_tcp_connect", &[I64, I64], &[I64, I64, I64]),
     // native_tcp_connect_timeout(addr_ptr: i64, addr_len: i64, timeout_ns: i64) -> (handle: i64, local_addr_ptr: i64, error_code: i64)
-    RuntimeFuncSpec::new(
-        "native_tcp_connect_timeout",
-        &[I64, I64, I64],
-        &[I64, I64, I64],
-    ),
+    RuntimeFuncSpec::new("native_tcp_connect_timeout", &[I64, I64, I64], &[I64, I64, I64]),
     // native_tcp_read(handle: i64, buf_ptr: i64, buf_len: i64) -> (bytes_read: i64, error_code: i64)
     RuntimeFuncSpec::new("native_tcp_read", &[I64, I64, I64], &[I64, I64]),
     // native_tcp_write(handle: i64, data_ptr: i64, data_len: i64) -> (bytes_written: i64, error_code: i64)
@@ -467,11 +443,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // native_udp_recv(handle: i64, buf_ptr: i64, buf_len: i64) -> (bytes_recv: i64, error_code: i64)
     RuntimeFuncSpec::new("native_udp_recv", &[I64, I64, I64], &[I64, I64]),
     // native_udp_send_to(handle: i64, data_ptr: i64, data_len: i64, addr_ptr: i64, addr_len: i64) -> (bytes_sent: i64, error_code: i64)
-    RuntimeFuncSpec::new(
-        "native_udp_send_to",
-        &[I64, I64, I64, I64, I64],
-        &[I64, I64],
-    ),
+    RuntimeFuncSpec::new("native_udp_send_to", &[I64, I64, I64, I64, I64], &[I64, I64]),
     // native_udp_send(handle: i64, data_ptr: i64, data_len: i64) -> (bytes_sent: i64, error_code: i64)
     RuntimeFuncSpec::new("native_udp_send", &[I64, I64, I64], &[I64, I64]),
     // native_udp_peek_from(handle: i64, buf_ptr: i64, buf_len: i64) -> (bytes_peeked: i64, peer_addr_ptr: i64, error_code: i64)
@@ -517,11 +489,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // rt_coverage_decision_probe(decision_id: u32, result: bool, file: *const i8, line: u32, column: u32) -> ()
     RuntimeFuncSpec::new("rt_coverage_decision_probe", &[I32, I8, I64, I32, I32], &[]),
     // rt_coverage_condition_probe(decision_id: u32, condition_id: u32, result: bool, file: *const i8, line: u32, column: u32) -> ()
-    RuntimeFuncSpec::new(
-        "rt_coverage_condition_probe",
-        &[I32, I32, I8, I64, I32, I32],
-        &[],
-    ),
+    RuntimeFuncSpec::new("rt_coverage_condition_probe", &[I32, I32, I8, I64, I32, I32], &[]),
     // rt_coverage_path_probe(path_id: u32, block_id: u32) -> ()
     RuntimeFuncSpec::new("rt_coverage_path_probe", &[I32, I32], &[]),
     // rt_coverage_path_finalize(path_id: u32) -> ()

@@ -53,18 +53,11 @@ fn render(): String = "Hello, World!"
         assert_eq!(exit_code, 0, "web_build should succeed");
 
         // Verify output files exist
-        assert!(
-            output_dir.join("app.html").exists(),
-            "HTML file should exist"
-        );
-        assert!(
-            output_dir.join("app.manifest.json").exists(),
-            "Manifest should exist"
-        );
+        assert!(output_dir.join("app.html").exists(), "HTML file should exist");
+        assert!(output_dir.join("app.manifest.json").exists(), "Manifest should exist");
 
         // Verify HTML content
-        let html_content =
-            fs::read_to_string(output_dir.join("app.html")).expect("Failed to read HTML");
+        let html_content = fs::read_to_string(output_dir.join("app.html")).expect("Failed to read HTML");
         assert!(
             html_content.contains("<h1>"),
             "HTML should contain server-rendered content"
@@ -105,10 +98,7 @@ dom.getElementById("btn").addEventListener("click", increment)
         assert_eq!(exit_code, 0, "web_build should succeed");
 
         // Verify WASM file exists
-        assert!(
-            output_dir.join("counter.wasm").exists(),
-            "WASM file should exist"
-        );
+        assert!(output_dir.join("counter.wasm").exists(), "WASM file should exist");
 
         // Verify hydration script exists
         assert!(
@@ -117,16 +107,9 @@ dom.getElementById("btn").addEventListener("click", increment)
         );
 
         // Verify HTML contains WASM loader
-        let html_content =
-            fs::read_to_string(output_dir.join("counter.html")).expect("Failed to read HTML");
-        assert!(
-            html_content.contains("loadWasm"),
-            "HTML should contain WASM loader"
-        );
-        assert!(
-            html_content.contains("hydrate"),
-            "HTML should contain hydration call"
-        );
+        let html_content = fs::read_to_string(output_dir.join("counter.html")).expect("Failed to read HTML");
+        assert!(html_content.contains("loadWasm"), "HTML should contain WASM loader");
+        assert!(html_content.contains("hydrate"), "HTML should contain hydration call");
     }
 
     #[test]
@@ -159,8 +142,7 @@ fn on_click():
         assert!(output_dir.join("app.wasm").exists());
 
         // Read HTML and verify minification
-        let html_content =
-            fs::read_to_string(output_dir.join("app.html")).expect("Failed to read HTML");
+        let html_content = fs::read_to_string(output_dir.join("app.html")).expect("Failed to read HTML");
 
         // Minified HTML should have less whitespace
         let line_count = html_content.lines().count();
@@ -210,26 +192,14 @@ dom.getElementById("form").addEventListener("reset", on_reset)
         assert_eq!(exit_code, 0, "web_build should succeed");
 
         // Read hydration script
-        let hydration_script = fs::read_to_string(output_dir.join("form.hydration.js"))
-            .expect("Failed to read hydration script");
+        let hydration_script =
+            fs::read_to_string(output_dir.join("form.hydration.js")).expect("Failed to read hydration script");
 
         // Verify both event bindings are present
-        assert!(
-            hydration_script.contains("submit"),
-            "Should bind submit event"
-        );
-        assert!(
-            hydration_script.contains("reset"),
-            "Should bind reset event"
-        );
-        assert!(
-            hydration_script.contains("on_submit"),
-            "Should call on_submit handler"
-        );
-        assert!(
-            hydration_script.contains("on_reset"),
-            "Should call on_reset handler"
-        );
+        assert!(hydration_script.contains("submit"), "Should bind submit event");
+        assert!(hydration_script.contains("reset"), "Should bind reset event");
+        assert!(hydration_script.contains("on_submit"), "Should call on_submit handler");
+        assert!(hydration_script.contains("on_reset"), "Should call on_reset handler");
     }
 
     #[test]
@@ -254,25 +224,12 @@ dom.getElementById("form").addEventListener("reset", on_reset)
         assert!(project_dir.join("app.sui").exists(), "app.sui should exist");
 
         // Verify app.sui contains all required blocks
-        let sui_content =
-            fs::read_to_string(project_dir.join("app.sui")).expect("Failed to read app.sui");
+        let sui_content = fs::read_to_string(project_dir.join("app.sui")).expect("Failed to read app.sui");
 
-        assert!(
-            sui_content.contains("{$ "),
-            "Should have shared state block"
-        );
-        assert!(
-            sui_content.contains("{- server -}"),
-            "Should have server block"
-        );
-        assert!(
-            sui_content.contains("{+ client +}"),
-            "Should have client block"
-        );
-        assert!(
-            sui_content.contains("{@ render @}"),
-            "Should have template block"
-        );
+        assert!(sui_content.contains("{$ "), "Should have shared state block");
+        assert!(sui_content.contains("{- server -}"), "Should have server block");
+        assert!(sui_content.contains("{+ client +}"), "Should have client block");
+        assert!(sui_content.contains("{@ render @}"), "Should have template block");
     }
 
     #[test]
@@ -349,18 +306,9 @@ dom.getElementById("btn").addEventListener("click", handler)
         let manifest_content = fs::read_to_string(manifest_path).expect("Failed to read manifest");
 
         // Verify manifest structure (basic JSON validation)
-        assert!(
-            manifest_content.contains("\"version\""),
-            "Should have version field"
-        );
-        assert!(
-            manifest_content.contains("\"exports\""),
-            "Should have exports field"
-        );
-        assert!(
-            manifest_content.contains("\"bindings\""),
-            "Should have bindings field"
-        );
+        assert!(manifest_content.contains("\"version\""), "Should have version field");
+        assert!(manifest_content.contains("\"exports\""), "Should have exports field");
+        assert!(manifest_content.contains("\"bindings\""), "Should have bindings field");
 
         // Verify specific binding
         assert!(
@@ -368,14 +316,8 @@ dom.getElementById("btn").addEventListener("click", handler)
             "Should have selector in bindings"
         );
         assert!(manifest_content.contains("\"#btn\""), "Should bind to #btn");
-        assert!(
-            manifest_content.contains("\"click\""),
-            "Should bind click event"
-        );
-        assert!(
-            manifest_content.contains("\"handler\""),
-            "Should call handler function"
-        );
+        assert!(manifest_content.contains("\"click\""), "Should bind click event");
+        assert!(manifest_content.contains("\"handler\""), "Should call handler function");
     }
 
     #[test]
@@ -509,8 +451,7 @@ dom.getElementById("btn").addEventListener("click", update_message)
         // Step 4: Verify file contents
         let html_content = fs::read_to_string(html_file).expect("Failed to read HTML");
         let manifest_content = fs::read_to_string(manifest_file).expect("Failed to read manifest");
-        let hydration_content =
-            fs::read_to_string(hydration_file).expect("Failed to read hydration");
+        let hydration_content = fs::read_to_string(hydration_file).expect("Failed to read hydration");
 
         // HTML should contain server-rendered message
         assert!(html_content.contains("Hello from Simple!"));
@@ -531,14 +472,8 @@ dom.getElementById("btn").addEventListener("click", update_message)
         assert!(hydration_content.contains("addEventListener('click'"));
 
         // Step 5: Verify file sizes are reasonable
-        let wasm_size = fs::metadata(wasm_file)
-            .expect("Failed to get WASM metadata")
-            .len();
-        assert!(
-            wasm_size > 0,
-            "WASM file should not be empty (got {} bytes)",
-            wasm_size
-        );
+        let wasm_size = fs::metadata(wasm_file).expect("Failed to get WASM metadata").len();
+        assert!(wasm_size > 0, "WASM file should not be empty (got {} bytes)", wasm_size);
         assert!(
             wasm_size < 1024 * 1024,
             "WASM file should be < 1MB (got {} bytes)",

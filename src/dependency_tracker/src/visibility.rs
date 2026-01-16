@@ -135,9 +135,7 @@ impl DirManifest {
     ///
     /// Corresponds to Lean: `def DirManifest.isChildPublic`
     pub fn is_child_public(&self, child_name: &str) -> bool {
-        self.children
-            .iter()
-            .any(|d| d.name == child_name && d.is_pub)
+        self.children.iter().any(|d| d.name == child_name && d.is_pub)
     }
 
     /// Check if a symbol is explicitly exported.
@@ -180,10 +178,7 @@ impl ModuleContents {
     ///
     /// Corresponds to Lean: `def ModuleContents.symbolVisibility`
     pub fn symbol_visibility(&self, sym: &SymbolId) -> Option<Visibility> {
-        self.symbols
-            .iter()
-            .find(|s| s.id == *sym)
-            .map(|s| s.visibility)
+        self.symbols.iter().find(|s| s.id == *sym).map(|s| s.visibility)
     }
 }
 
@@ -268,8 +263,7 @@ pub fn visibility_meet(v1: Visibility, v2: Visibility) -> Visibility {
 ///
 /// This computes the effective visibility by folding visibility_meet over the path.
 pub fn ancestor_visibility(path: &[Visibility]) -> Visibility {
-    path.iter()
-        .fold(Visibility::Public, |acc, &v| visibility_meet(acc, v))
+    path.iter().fold(Visibility::Public, |acc, &v| visibility_meet(acc, v))
 }
 
 #[cfg(test)]

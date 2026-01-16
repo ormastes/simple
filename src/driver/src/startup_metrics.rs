@@ -119,10 +119,7 @@ impl StartupMetrics {
 
     /// Get timing for a specific phase
     pub fn get_phase(&self, phase: StartupPhase) -> Option<Duration> {
-        self.timings
-            .iter()
-            .find(|t| t.phase == phase)
-            .map(|t| t.duration)
+        self.timings.iter().find(|t| t.phase == phase).map(|t| t.duration)
     }
 
     /// Get all timings
@@ -154,11 +151,7 @@ impl StartupMetrics {
         if let Some(total) = self.total_time() {
             let sum: Duration = self.timings.iter().map(|t| t.duration).sum();
             let overhead = total.saturating_sub(sum);
-            eprintln!(
-                "  {:25} {:>10.2}ms",
-                "Overhead",
-                overhead.as_secs_f64() * 1000.0
-            );
+            eprintln!("  {:25} {:>10.2}ms", "Overhead", overhead.as_secs_f64() * 1000.0);
         }
 
         eprintln!("======================\n");

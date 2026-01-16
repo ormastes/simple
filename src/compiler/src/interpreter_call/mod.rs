@@ -8,19 +8,17 @@ mod mock;
 
 // Re-export public items
 pub(crate) use bdd::{
-    exec_block_value, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT,
-    BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
+    exec_block_value, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES,
+    BDD_SHARED_EXAMPLES,
 };
 pub(crate) use core::{
-    bind_args, bind_args_with_injected, exec_function, exec_function_with_captured_env,
-    exec_function_with_values, exec_function_with_values_and_self, exec_lambda, instantiate_class,
-    ProceedContext, IN_NEW_METHOD,
+    bind_args, bind_args_with_injected, exec_function, exec_function_with_captured_env, exec_function_with_values,
+    exec_function_with_values_and_self, exec_lambda, instantiate_class, ProceedContext, IN_NEW_METHOD,
 };
 
 use crate::error::CompileError;
 use crate::interpreter::{
-    call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT,
-    EXTERN_FUNCTIONS,
+    call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT, EXTERN_FUNCTIONS,
 };
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef};
@@ -43,32 +41,24 @@ pub(crate) fn evaluate_call(
     // Try built-in functions first
     if let Expr::Identifier(name) = callee.as_ref() {
         // Try built-ins
-        if let Some(result) =
-            builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)?
-        {
+        if let Some(result) = builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)? {
             return Ok(result);
         }
 
         // Try BDD framework
-        if let Some(result) =
-            bdd::eval_bdd_builtin(name, args, env, functions, classes, enums, impl_methods)?
-        {
+        if let Some(result) = bdd::eval_bdd_builtin(name, args, env, functions, classes, enums, impl_methods)? {
             return Ok(result);
         }
 
         // Try mock library
-        if let Some(result) =
-            mock::eval_mock_builtin(name, args, env, functions, classes, enums, impl_methods)?
-        {
+        if let Some(result) = mock::eval_mock_builtin(name, args, env, functions, classes, enums, impl_methods)? {
             return Ok(result);
         }
 
         // Check env for decorated functions and closures
         if let Some(val) = env.get(name) {
             match val {
-                Value::Function {
-                    def, captured_env, ..
-                } => {
+                Value::Function { def, captured_env, .. } => {
                     return core::exec_function_with_captured_env(
                         &def,
                         args,
@@ -103,16 +93,7 @@ pub(crate) fn evaluate_call(
 
         // Check regular functions
         if let Some(func) = functions.get(name).cloned() {
-            return core::exec_function(
-                &func,
-                args,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-                None,
-            );
+            return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
         }
 
         // Check extern functions
@@ -124,16 +105,7 @@ pub(crate) fn evaluate_call(
         // Check context object
         let context_obj = CONTEXT_OBJECT.with(|cell| cell.borrow().clone());
         if let Some(ctx) = context_obj {
-            return dispatch_context_method(
-                &ctx,
-                name,
-                args,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            );
+            return dispatch_context_method(&ctx, name, args, env, functions, classes, enums, impl_methods);
         }
     }
 
@@ -145,10 +117,7 @@ pub(crate) fn evaluate_call(
                 if let Value::Dict(module_dict) = module_val {
                     // Look up function in the module's exports
                     if let Some(func_val) = module_dict.get(field) {
-                        if let Value::Function {
-                            def, captured_env, ..
-                        } = func_val
-                        {
+                        if let Value::Function { def, captured_env, .. } = func_val {
                             return core::exec_function_with_captured_env(
                                 def,
                                 args,
@@ -176,31 +145,11 @@ pub(crate) fn evaluate_call(
             }
             // Fall back to global functions if module lookup failed
             if let Some(func) = functions.get(field).cloned() {
-                return core::exec_function(
-                    &func,
-                    args,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                    None,
-                );
+                return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             } else if classes.contains_key(field) {
-                return core::instantiate_class(
-                    field,
-                    args,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                );
+                return core::instantiate_class(field, args, env, functions, classes, enums, impl_methods);
             } else if let Some(func) = env.get(field) {
-                if let Value::Function {
-                    def, captured_env, ..
-                } = func
-                {
+                if let Value::Function { def, captured_env, .. } = func {
                     return core::exec_function_with_captured_env(
                         def,
                         args,
@@ -240,14 +189,7 @@ pub(crate) fn evaluate_call(
                     } else {
                         let mut values = Vec::new();
                         for arg in args {
-                            values.push(evaluate_expr(
-                                &arg.value,
-                                env,
-                                functions,
-                                classes,
-                                enums,
-                                impl_methods,
-                            )?);
+                            values.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
                         }
                         Some(Box::new(Value::Tuple(values)))
                     };
@@ -262,57 +204,22 @@ pub(crate) fn evaluate_call(
             // Check for associated function call
             if let Some(methods) = impl_methods.get(type_name) {
                 if let Some(func) = methods.iter().find(|m| m.name == *method_name) {
-                    return core::exec_function(
-                        &func,
-                        args,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                        None,
-                    );
+                    return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
                 }
             }
 
             // Check for class associated function (static method)
             if let Some(class_def) = classes.get(type_name).cloned() {
                 if let Some(func) = class_def.methods.iter().find(|m| m.name == *method_name) {
-                    return core::exec_function(
-                        &func,
-                        args,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                        None,
-                    );
+                    return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
                 }
             }
 
             // Legacy fallbacks
             if let Some(func) = functions.get(method_name).cloned() {
-                return core::exec_function(
-                    &func,
-                    args,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                    None,
-                );
+                return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             } else if classes.contains_key(method_name) {
-                return core::instantiate_class(
-                    method_name,
-                    args,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                );
+                return core::instantiate_class(method_name, args, env, functions, classes, enums, impl_methods);
             }
         }
         bail_semantic!("unsupported path call: {:?}", segments);
@@ -361,20 +268,10 @@ pub(crate) fn evaluate_call(
             enums,
             impl_methods,
         ),
-        Value::BlockClosure {
-            nodes,
-            env: captured,
-        } => block_execution::exec_block_closure(
-            &nodes,
-            &captured,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        ),
-        Value::Function {
-            def, captured_env, ..
-        } => core::exec_function_with_captured_env(
+        Value::BlockClosure { nodes, env: captured } => {
+            block_execution::exec_block_closure(&nodes, &captured, functions, classes, enums, impl_methods)
+        }
+        Value::Function { def, captured_env, .. } => core::exec_function_with_captured_env(
             &def,
             args,
             env,
@@ -398,15 +295,9 @@ pub(crate) fn evaluate_call(
                 .collect::<Result<Vec<_>, _>>()?;
             (native.func)(&evaluated)
         }
-        Value::Constructor { class_name } => core::instantiate_class(
-            &class_name,
-            args,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        ),
+        Value::Constructor { class_name } => {
+            core::instantiate_class(&class_name, args, env, functions, classes, enums, impl_methods)
+        }
         Value::EnumVariantConstructor {
             enum_name,
             variant_name,
@@ -416,8 +307,7 @@ pub(crate) fn evaluate_call(
             let payload = if args.is_empty() {
                 None
             } else if args.len() == 1 {
-                let val =
-                    evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
+                let val = evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
                 Some(Box::new(val))
             } else {
                 // Multiple args - wrap in tuple

@@ -66,10 +66,7 @@ fn parse_regex(payload: &str) -> Result<Value, CompileError> {
         "flags".to_string(),
         Value::Dict({
             let mut flags_map = HashMap::new();
-            flags_map.insert(
-                "case_insensitive".to_string(),
-                Value::Bool(flags.case_insensitive),
-            );
+            flags_map.insert("case_insensitive".to_string(), Value::Bool(flags.case_insensitive));
             flags_map.insert("multiline".to_string(), Value::Bool(flags.multiline));
             flags_map.insert("dotall".to_string(), Value::Bool(flags.dotall));
             flags_map.insert("extended".to_string(), Value::Bool(flags.extended));
@@ -169,9 +166,7 @@ fn validate_regex(pattern: &str) -> Result<(), CompileError> {
             ')' => {
                 paren_depth -= 1;
                 if paren_depth < 0 {
-                    return Err(CompileError::Semantic(
-                        "unbalanced parentheses in regex".into(),
-                    ));
+                    return Err(CompileError::Semantic("unbalanced parentheses in regex".into()));
                 }
             }
             '[' => bracket_depth += 1,
@@ -186,26 +181,16 @@ fn validate_regex(pattern: &str) -> Result<(), CompileError> {
     }
 
     if paren_depth != 0 {
-        return Err(CompileError::Semantic(
-            "unbalanced parentheses in regex".into(),
-        ));
+        return Err(CompileError::Semantic("unbalanced parentheses in regex".into()));
     }
 
     if bracket_depth != 0 {
-        return Err(CompileError::Semantic(
-            "unbalanced brackets in regex".into(),
-        ));
+        return Err(CompileError::Semantic("unbalanced brackets in regex".into()));
     }
 
     // Check for invalid quantifier usage
-    if pattern.starts_with('*')
-        || pattern.starts_with('+')
-        || pattern.starts_with('?')
-        || pattern.starts_with('{')
-    {
-        return Err(CompileError::Semantic(
-            "regex cannot start with quantifier".into(),
-        ));
+    if pattern.starts_with('*') || pattern.starts_with('+') || pattern.starts_with('?') || pattern.starts_with('{') {
+        return Err(CompileError::Semantic("regex cannot start with quantifier".into()));
     }
 
     Ok(())

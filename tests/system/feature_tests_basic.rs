@@ -19,14 +19,10 @@ use tempfile::tempdir;
 fn test_feature_basic_types_integers() {
     let runner = Runner::new_no_gc();
     // i32 operations
-    let result = runner
-        .run_source("main = 100 + 200")
-        .expect("basic int add");
+    let result = runner.run_source("main = 100 + 200").expect("basic int add");
     assert_eq!(result, 300);
 
-    let result = runner
-        .run_source("main = 1000 - 750")
-        .expect("basic int sub");
+    let result = runner.run_source("main = 1000 - 750").expect("basic int sub");
     assert_eq!(result, 250);
 }
 
@@ -50,9 +46,7 @@ main = x + y
 #[test]
 fn test_feature_operators_arithmetic() {
     let runner = Runner::new_no_gc();
-    let result = runner
-        .run_source("main = 10 + 5 * 3 - 2")
-        .expect("precedence");
+    let result = runner.run_source("main = 10 + 5 * 3 - 2").expect("precedence");
     assert_eq!(result, 23); // 10 + 15 - 2
 }
 
@@ -91,9 +85,7 @@ main = if a and not b: 1 else: 0
 #[test]
 fn test_feature_operators_bitwise() {
     let runner = Runner::new_no_gc();
-    let result = runner
-        .run_source("main = (0xFF & 0x0F) | 0x10")
-        .expect("bitwise");
+    let result = runner.run_source("main = (0xFF & 0x0F) | 0x10").expect("bitwise");
     assert_eq!(result, 0x1F);
 }
 

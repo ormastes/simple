@@ -1,8 +1,6 @@
 //! Tests for actor functionality
 
-use super::{
-    rt_actor_id, rt_actor_is_alive, rt_actor_join, rt_actor_recv, rt_actor_send, rt_actor_spawn,
-};
+use super::{rt_actor_id, rt_actor_is_alive, rt_actor_join, rt_actor_recv, rt_actor_send, rt_actor_spawn};
 use crate::value::RuntimeValue;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::thread;

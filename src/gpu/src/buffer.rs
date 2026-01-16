@@ -296,8 +296,7 @@ mod tests {
 
     #[test]
     fn test_buffer_copy() {
-        let src: Buffer<f32> =
-            Buffer::with_data(1, vec![1.0, 2.0, 3.0, 4.0], BufferUsage::storage());
+        let src: Buffer<f32> = Buffer::with_data(1, vec![1.0, 2.0, 3.0, 4.0], BufferUsage::storage());
         let mut dst: Buffer<f32> = Buffer::new(2, 4, BufferUsage::storage());
 
         dst.copy_from(&src).unwrap();

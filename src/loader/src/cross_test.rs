@@ -171,10 +171,7 @@ impl TestMatrix {
 
     /// Generate fixtures for all targets.
     pub fn fixtures(&self) -> Vec<TargetFixture> {
-        self.targets
-            .iter()
-            .map(|&t| TargetFixture::new(t))
-            .collect()
+        self.targets.iter().map(|&t| TargetFixture::new(t)).collect()
     }
 
     /// Iterate over target/OS combinations for testing.
@@ -237,14 +234,12 @@ impl CrossTestResults {
 
     /// Record a failed test.
     pub fn record_fail(&mut self, target: Target, message: impl Into<String>) {
-        self.results
-            .push((target, TestOutcome::Failed(message.into())));
+        self.results.push((target, TestOutcome::Failed(message.into())));
     }
 
     /// Record a skipped test.
     pub fn record_skip(&mut self, target: Target, reason: impl Into<String>) {
-        self.results
-            .push((target, TestOutcome::Skipped(reason.into())));
+        self.results.push((target, TestOutcome::Skipped(reason.into())));
     }
 
     /// Check if all tests passed.
@@ -488,14 +483,8 @@ mod tests {
         let mut results = CrossTestResults::new();
 
         results.record_pass(Target::new(TargetArch::X86_64, TargetOS::Linux));
-        results.record_fail(
-            Target::new(TargetArch::Aarch64, TargetOS::Linux),
-            "test error",
-        );
-        results.record_skip(
-            Target::new(TargetArch::Riscv64, TargetOS::Linux),
-            "unsupported",
-        );
+        results.record_fail(Target::new(TargetArch::Aarch64, TargetOS::Linux), "test error");
+        results.record_skip(Target::new(TargetArch::Riscv64, TargetOS::Linux), "unsupported");
 
         assert_eq!(results.passed_count(), 1);
         assert_eq!(results.failed_count(), 1);
@@ -508,10 +497,7 @@ mod tests {
         let mut results = CrossTestResults::new();
 
         results.record_pass(Target::new(TargetArch::X86_64, TargetOS::Linux));
-        results.record_skip(
-            Target::new(TargetArch::Riscv64, TargetOS::Linux),
-            "unsupported",
-        );
+        results.record_skip(Target::new(TargetArch::Riscv64, TargetOS::Linux), "unsupported");
 
         assert!(results.all_passed());
     }

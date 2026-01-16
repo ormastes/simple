@@ -150,9 +150,7 @@ fn extract_crate_name(path: &Path) -> String {
                                 if let std::path::Component::Normal(nested) = &components[i + 2] {
                                     if nested.to_str() == Some("src") {
                                         // Check the directory between util and inner src
-                                        if let std::path::Component::Normal(nested_crate) =
-                                            &components[i + 3]
-                                        {
+                                        if let std::path::Component::Normal(nested_crate) = &components[i + 3] {
                                             if let Some(nested_name) = nested_crate.to_str() {
                                                 if nested_name.starts_with("simple_") {
                                                     return nested_name.to_string();
@@ -285,10 +283,7 @@ pub fn write_yaml(api: &ScannedApi, path: &Path) -> anyhow::Result<()> {
 }
 
 /// Load existing YAML and merge with scanned API.
-pub fn merge_with_existing(
-    scanned: &ScannedApi,
-    existing_path: &Path,
-) -> anyhow::Result<ScannedApi> {
+pub fn merge_with_existing(scanned: &ScannedApi, existing_path: &Path) -> anyhow::Result<ScannedApi> {
     if !existing_path.exists() {
         return Ok(scanned.clone());
     }
@@ -362,35 +357,17 @@ mod tests {
 
     #[test]
     fn test_extract_type_name() {
-        assert_eq!(
-            extract_type_name("pub struct Foo {"),
-            Some("Foo".to_string())
-        );
-        assert_eq!(
-            extract_type_name("pub struct Bar<T> {"),
-            Some("Bar".to_string())
-        );
+        assert_eq!(extract_type_name("pub struct Foo {"), Some("Foo".to_string()));
+        assert_eq!(extract_type_name("pub struct Bar<T> {"), Some("Bar".to_string()));
         assert_eq!(extract_type_name("pub enum Baz {"), Some("Baz".to_string()));
-        assert_eq!(
-            extract_type_name("pub struct Unit;"),
-            Some("Unit".to_string())
-        );
+        assert_eq!(extract_type_name("pub struct Unit;"), Some("Unit".to_string()));
     }
 
     #[test]
     fn test_extract_fn_name() {
-        assert_eq!(
-            extract_fn_name("pub fn new() -> Self {"),
-            Some("new".to_string())
-        );
-        assert_eq!(
-            extract_fn_name("pub fn run<T>(x: T) {"),
-            Some("run".to_string())
-        );
-        assert_eq!(
-            extract_fn_name("pub async fn fetch() {"),
-            Some("fetch".to_string())
-        );
+        assert_eq!(extract_fn_name("pub fn new() -> Self {"), Some("new".to_string()));
+        assert_eq!(extract_fn_name("pub fn run<T>(x: T) {"), Some("run".to_string()));
+        assert_eq!(extract_fn_name("pub async fn fetch() {"), Some("fetch".to_string()));
     }
 
     #[test]

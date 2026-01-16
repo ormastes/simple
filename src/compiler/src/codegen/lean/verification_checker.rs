@@ -3,9 +3,7 @@
 //! Checks HIR for verification rule violations before Lean code generation.
 //! Enforces the V-* and M-* rules defined in the Lean verification spec.
 
-use super::verification_diagnostics::{
-    VerificationDiagnostic, VerificationDiagnostics, VerificationErrorCode,
-};
+use super::verification_diagnostics::{VerificationDiagnostic, VerificationDiagnostics, VerificationErrorCode};
 use crate::hir::{HirExpr, HirExprKind, HirFunction, HirModule, HirStmt};
 use simple_common::diagnostic::Span;
 
@@ -100,23 +98,16 @@ impl<'a> VerificationChecker<'a> {
                 ..
             } => {
                 self.expr_calls_function(condition, name)
-                    || then_block
-                        .iter()
-                        .any(|s| self.statement_calls_function(s, name))
+                    || then_block.iter().any(|s| self.statement_calls_function(s, name))
                     || else_block
                         .as_ref()
                         .map(|b| b.iter().any(|s| self.statement_calls_function(s, name)))
                         .unwrap_or(false)
             }
-            HirStmt::While {
-                condition, body, ..
-            } => {
-                self.expr_calls_function(condition, name)
-                    || body.iter().any(|s| self.statement_calls_function(s, name))
+            HirStmt::While { condition, body, .. } => {
+                self.expr_calls_function(condition, name) || body.iter().any(|s| self.statement_calls_function(s, name))
             }
-            HirStmt::Loop { body, .. } => {
-                body.iter().any(|s| self.statement_calls_function(s, name))
-            }
+            HirStmt::Loop { body, .. } => body.iter().any(|s| self.statement_calls_function(s, name)),
             HirStmt::Return(value) => value
                 .as_ref()
                 .map(|e| self.expr_calls_function(e, name))
@@ -134,8 +125,7 @@ impl<'a> VerificationChecker<'a> {
                         return true;
                     }
                 }
-                self.expr_calls_function(func, name)
-                    || args.iter().any(|a| self.expr_calls_function(a, name))
+                self.expr_calls_function(func, name) || args.iter().any(|a| self.expr_calls_function(a, name))
             }
             HirExprKind::Binary { left, right, .. } => {
                 self.expr_calls_function(left, name) || self.expr_calls_function(right, name)
@@ -153,21 +143,15 @@ impl<'a> VerificationChecker<'a> {
                         .map(|e| self.expr_calls_function(e, name))
                         .unwrap_or(false)
             }
-            HirExprKind::Tuple(elements)
-            | HirExprKind::Array(elements)
-            | HirExprKind::VecLiteral(elements) => {
+            HirExprKind::Tuple(elements) | HirExprKind::Array(elements) | HirExprKind::VecLiteral(elements) => {
                 elements.iter().any(|e| self.expr_calls_function(e, name))
             }
-            HirExprKind::StructInit { fields, .. } => {
-                fields.iter().any(|e| self.expr_calls_function(e, name))
-            }
+            HirExprKind::StructInit { fields, .. } => fields.iter().any(|e| self.expr_calls_function(e, name)),
             HirExprKind::FieldAccess { receiver, .. } => self.expr_calls_function(receiver, name),
-            HirExprKind::Index {
-                receiver, index, ..
-            } => self.expr_calls_function(receiver, name) || self.expr_calls_function(index, name),
-            HirExprKind::Ref(inner) | HirExprKind::Deref(inner) => {
-                self.expr_calls_function(inner, name)
+            HirExprKind::Index { receiver, index, .. } => {
+                self.expr_calls_function(receiver, name) || self.expr_calls_function(index, name)
             }
+            HirExprKind::Ref(inner) | HirExprKind::Deref(inner) => self.expr_calls_function(inner, name),
             _ => false,
         }
     }
@@ -197,9 +181,7 @@ impl<'a> VerificationChecker<'a> {
                     }
                 }
             }
-            HirStmt::While {
-                condition, body, ..
-            } => {
+            HirStmt::While { condition, body, .. } => {
                 self.check_expr_effects(condition, func_name);
                 for s in body {
                     self.check_statement_effects(s, func_name);
@@ -376,13 +358,7 @@ impl<'a> VerificationChecker<'a> {
     }
 
     /// Report an error with context
-    fn report_with_context(
-        &mut self,
-        code: VerificationErrorCode,
-        span: Span,
-        item: Option<&str>,
-        context: String,
-    ) {
+    fn report_with_context(&mut self, code: VerificationErrorCode, span: Span, item: Option<&str>, context: String) {
         let mut diag = VerificationDiagnostic::new(code, span).with_context(context);
         if let Some(name) = item {
             diag = diag.with_item(name);

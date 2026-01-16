@@ -4,11 +4,7 @@ use simple_loader::ModuleLoader;
 /// Common compilation and execution helper
 fn compile_with_method<F>(src: &str, compile_fn: F) -> i32
 where
-    F: FnOnce(
-        &mut CompilerPipeline,
-        &std::path::Path,
-        &std::path::Path,
-    ) -> Result<(), simple_compiler::CompileError>,
+    F: FnOnce(&mut CompilerPipeline, &std::path::Path, &std::path::Path) -> Result<(), simple_compiler::CompileError>,
 {
     let dir = tempfile::tempdir().unwrap();
     let src_path = dir.path().join("main.simple");
@@ -29,9 +25,7 @@ where
 
 /// Helper to compile and run a simple program
 fn compile_and_run(src: &str) -> i32 {
-    compile_with_method(src, |compiler, src_path, out_path| {
-        compiler.compile(src_path, out_path)
-    })
+    compile_with_method(src, |compiler, src_path, out_path| compiler.compile(src_path, out_path))
 }
 
 #[test]

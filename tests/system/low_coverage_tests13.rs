@@ -268,9 +268,8 @@ mod common_config_env_tests {
 // ============================================================================
 mod runtime_value_ffi_tests {
     use simple_runtime::{
-        rt_value_as_bool, rt_value_as_float, rt_value_as_int, rt_value_bool, rt_value_float,
-        rt_value_int, rt_value_is_bool, rt_value_is_float, rt_value_is_int, rt_value_is_nil,
-        rt_value_nil,
+        rt_value_as_bool, rt_value_as_float, rt_value_as_int, rt_value_bool, rt_value_float, rt_value_int,
+        rt_value_is_bool, rt_value_is_float, rt_value_is_int, rt_value_is_nil, rt_value_nil,
     };
 
     #[test]
@@ -366,9 +365,7 @@ mod runtime_unique_ffi_tests {
 // Runtime Shared Pointer Tests
 // ============================================================================
 mod runtime_shared_ffi_tests {
-    use simple_runtime::{
-        rt_shared_clone, rt_shared_get, rt_shared_new, rt_shared_ref_count, rt_value_int,
-    };
+    use simple_runtime::{rt_shared_clone, rt_shared_get, rt_shared_new, rt_shared_ref_count, rt_value_int};
 
     #[test]
     fn test_shared_ptr() {
@@ -413,11 +410,7 @@ mod runtime_promise_tests {
 
     #[test]
     fn test_promise_state_variants() {
-        let states = [
-            PromiseState::Pending,
-            PromiseState::Fulfilled,
-            PromiseState::Rejected,
-        ];
+        let states = [PromiseState::Pending, PromiseState::Fulfilled, PromiseState::Rejected];
         for s in states {
             let _ = format!("{:?}", s);
         }
@@ -452,8 +445,8 @@ mod runtime_heap_tests {
 // ============================================================================
 mod runtime_types_tests {
     use simple_runtime::{
-        RuntimeArray, RuntimeChannel, RuntimeClosure, RuntimeDict, RuntimeEnum, RuntimeObject,
-        RuntimeShared, RuntimeString, RuntimeTuple, RuntimeUnique, RuntimeValue, RuntimeWeak,
+        RuntimeArray, RuntimeChannel, RuntimeClosure, RuntimeDict, RuntimeEnum, RuntimeObject, RuntimeShared,
+        RuntimeString, RuntimeTuple, RuntimeUnique, RuntimeValue, RuntimeWeak,
     };
 
     #[test]

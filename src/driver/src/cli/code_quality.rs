@@ -125,12 +125,7 @@ pub fn lint_file(path: &PathBuf, json_output: bool) -> i32 {
 pub fn lint_file_internal(
     path: &std::path::Path,
     json_output: bool,
-) -> Option<(
-    bool,
-    usize,
-    usize,
-    Vec<simple_common::diagnostic::Diagnostic>,
-)> {
+) -> Option<(bool, usize, usize, Vec<simple_common::diagnostic::Diagnostic>)> {
     // Read file
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
@@ -182,11 +177,7 @@ pub fn lint_file_internal(
             for diagnostic in diagnostics {
                 // Format: file:line:col: level: message
                 let span = &diagnostic.span;
-                let level_str = if diagnostic.is_error() {
-                    "error"
-                } else {
-                    "warning"
-                };
+                let level_str = if diagnostic.is_error() { "error" } else { "warning" };
                 println!(
                     "{}:{}:{}: {}: {} [{}]",
                     path.display(),

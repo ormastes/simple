@@ -70,23 +70,17 @@ impl KeyBindings {
             (KeyCode::Delete, _) => EditorAction::Delete,
 
             // Ctrl+U → Delete indent or to start of line
-            (KeyCode::Char('u'), mods) | (KeyCode::Char('U'), mods)
-                if mods.contains(KeyModifiers::CONTROL) =>
-            {
+            (KeyCode::Char('u'), mods) | (KeyCode::Char('U'), mods) if mods.contains(KeyModifiers::CONTROL) => {
                 EditorAction::DeleteIndent
             }
 
             // Ctrl+C → Cancel
-            (KeyCode::Char('c'), mods) | (KeyCode::Char('C'), mods)
-                if mods.contains(KeyModifiers::CONTROL) =>
-            {
+            (KeyCode::Char('c'), mods) | (KeyCode::Char('C'), mods) if mods.contains(KeyModifiers::CONTROL) => {
                 EditorAction::Cancel
             }
 
             // Ctrl+D → Exit
-            (KeyCode::Char('d'), mods) | (KeyCode::Char('D'), mods)
-                if mods.contains(KeyModifiers::CONTROL) =>
-            {
+            (KeyCode::Char('d'), mods) | (KeyCode::Char('D'), mods) if mods.contains(KeyModifiers::CONTROL) => {
                 EditorAction::Exit
             }
 

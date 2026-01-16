@@ -4,13 +4,10 @@
 
 use crate::error::CompileError;
 use crate::hir::{BinOp, TypeId};
-use crate::mir::{
-    BlockId, GpuAtomicOp, GpuMemoryScope, MirFunction, MirInst, MirModule, Terminator, VReg,
-};
+use crate::mir::{BlockId, GpuAtomicOp, GpuMemoryScope, MirFunction, MirInst, MirModule, Terminator, VReg};
 use rspirv::dr::{Builder, Module};
 use rspirv::spirv::{
-    AddressingModel, Capability, Decoration, ExecutionMode, ExecutionModel, MemoryModel,
-    StorageClass, Word,
+    AddressingModel, Capability, Decoration, ExecutionMode, ExecutionModel, MemoryModel, StorageClass, Word,
 };
 use std::collections::HashMap;
 
@@ -146,15 +143,8 @@ impl SpirvModule {
         // Create function
         let func_id = self
             .builder
-            .begin_function(
-                void_type,
-                None,
-                rspirv::spirv::FunctionControl::NONE,
-                func_type,
-            )
-            .map_err(|e| {
-                CompileError::Codegen(format!("Failed to create SPIR-V function: {}", e))
-            })?;
+            .begin_function(void_type, None, rspirv::spirv::FunctionControl::NONE, func_type)
+            .map_err(|e| CompileError::Codegen(format!("Failed to create SPIR-V function: {}", e)))?;
 
         self.func_id_map.insert(func.name.clone(), func_id);
 
@@ -166,12 +156,8 @@ impl SpirvModule {
         }
 
         // Mark as entry point for compute shader
-        self.builder.entry_point(
-            ExecutionModel::GLCompute,
-            func_id,
-            &func.name,
-            interface_vars,
-        );
+        self.builder
+            .entry_point(ExecutionModel::GLCompute, func_id, &func.name, interface_vars);
 
         // Set execution mode (local size will be set from kernel launch parameters)
         // For now, use a default 1x1x1 (will be overridden at runtime)
@@ -185,11 +171,7 @@ impl SpirvModule {
     ///
     /// In SPIR-V compute shaders, kernel parameters are represented as global variables
     /// in the StorageBuffer storage class, bound via descriptor sets.
-    fn create_buffer_parameter(
-        &mut self,
-        index: usize,
-        param: &crate::mir::MirLocal,
-    ) -> Result<Word, CompileError> {
+    fn create_buffer_parameter(&mut self, index: usize, param: &crate::mir::MirLocal) -> Result<Word, CompileError> {
         // Determine element type from parameter TypeId
         // For array/pointer types, we'd need to extract the element type
         // For now, use the parameter type directly (assumes primitive type buffers)
@@ -203,8 +185,7 @@ impl SpirvModule {
         let struct_type = self.builder.type_struct(vec![runtime_array_type]);
 
         // Decorate the struct
-        self.builder
-            .decorate(struct_type, Decoration::Block, vec![]);
+        self.builder.decorate(struct_type, Decoration::Block, vec![]);
 
         // Decorate the member (offset 0)
         self.builder.member_decorate(
@@ -220,9 +201,7 @@ impl SpirvModule {
             .type_pointer(None, StorageClass::StorageBuffer, struct_type);
 
         // Create the global variable
-        let var_id = self
-            .builder
-            .variable(ptr_type, None, StorageClass::StorageBuffer, None);
+        let var_id = self.builder.variable(ptr_type, None, StorageClass::StorageBuffer, None);
 
         // Decorate with descriptor set and binding
         self.builder.decorate(
@@ -263,9 +242,10 @@ impl SpirvModule {
             let block_id = BlockId(i.try_into().unwrap());
 
             // Start the block with its pre-allocated label
-            let label = *self.block_id_map.get(&block_id).ok_or_else(|| {
-                CompileError::Codegen(format!("Missing label for block {:?}", block_id))
-            })?;
+            let label = *self
+                .block_id_map
+                .get(&block_id)
+                .ok_or_else(|| CompileError::Codegen(format!("Missing label for block {:?}", block_id)))?;
 
             self.builder
                 .begin_block(Some(label))
@@ -298,19 +278,21 @@ impl SpirvModule {
             }
 
             Terminator::Return(Some(vreg)) => {
-                let value_id = *self.vreg_id_map.get(vreg).ok_or_else(|| {
-                    CompileError::Codegen(format!("Undefined return value register: {:?}", vreg))
-                })?;
+                let value_id = *self
+                    .vreg_id_map
+                    .get(vreg)
+                    .ok_or_else(|| CompileError::Codegen(format!("Undefined return value register: {:?}", vreg)))?;
 
-                self.builder.ret_value(value_id).map_err(|e| {
-                    CompileError::Codegen(format!("Failed to emit return value: {}", e))
-                })?;
+                self.builder
+                    .ret_value(value_id)
+                    .map_err(|e| CompileError::Codegen(format!("Failed to emit return value: {}", e)))?;
             }
 
             Terminator::Jump(target) => {
-                let target_label = *self.block_id_map.get(target).ok_or_else(|| {
-                    CompileError::Codegen(format!("Undefined jump target: {:?}", target))
-                })?;
+                let target_label = *self
+                    .block_id_map
+                    .get(target)
+                    .ok_or_else(|| CompileError::Codegen(format!("Undefined jump target: {:?}", target)))?;
 
                 self.builder
                     .branch(target_label)
@@ -322,29 +304,30 @@ impl SpirvModule {
                 then_block,
                 else_block,
             } => {
-                let cond_id = *self.vreg_id_map.get(cond).ok_or_else(|| {
-                    CompileError::Codegen(format!("Undefined condition register: {:?}", cond))
-                })?;
+                let cond_id = *self
+                    .vreg_id_map
+                    .get(cond)
+                    .ok_or_else(|| CompileError::Codegen(format!("Undefined condition register: {:?}", cond)))?;
 
-                let then_label = *self.block_id_map.get(then_block).ok_or_else(|| {
-                    CompileError::Codegen(format!("Undefined then block: {:?}", then_block))
-                })?;
+                let then_label = *self
+                    .block_id_map
+                    .get(then_block)
+                    .ok_or_else(|| CompileError::Codegen(format!("Undefined then block: {:?}", then_block)))?;
 
-                let else_label = *self.block_id_map.get(else_block).ok_or_else(|| {
-                    CompileError::Codegen(format!("Undefined else block: {:?}", else_block))
-                })?;
+                let else_label = *self
+                    .block_id_map
+                    .get(else_block)
+                    .ok_or_else(|| CompileError::Codegen(format!("Undefined else block: {:?}", else_block)))?;
 
                 self.builder
                     .branch_conditional(cond_id, then_label, else_label, vec![])
-                    .map_err(|e| {
-                        CompileError::Codegen(format!("Failed to emit conditional branch: {}", e))
-                    })?;
+                    .map_err(|e| CompileError::Codegen(format!("Failed to emit conditional branch: {}", e)))?;
             }
 
             Terminator::Unreachable => {
-                self.builder.unreachable().map_err(|e| {
-                    CompileError::Codegen(format!("Failed to emit unreachable: {}", e))
-                })?;
+                self.builder
+                    .unreachable()
+                    .map_err(|e| CompileError::Codegen(format!("Failed to emit unreachable: {}", e)))?;
             }
         }
 
@@ -445,9 +428,7 @@ impl SpirvModule {
             return id;
         }
         let vec3_u32 = self.get_vec3_u32_type();
-        let id = self
-            .builder
-            .type_pointer(None, StorageClass::Input, vec3_u32);
+        let id = self.builder.type_pointer(None, StorageClass::Input, vec3_u32);
         self.type_cache.ptr_input_vec3_u32 = Some(id);
         id
     }

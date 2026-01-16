@@ -18,10 +18,9 @@ fn test_mir_function_compilation() {
 
     // Add instruction: const i64 42 -> v0
     let v0 = VReg(0);
-    func.blocks[0].instructions.push(MirInst::ConstInt {
-        dest: v0,
-        value: 42,
-    });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::ConstInt { dest: v0, value: 42 });
 
     // Add terminator: return v0
     func.blocks[0].terminator = Terminator::Return(Some(v0));
@@ -130,10 +129,9 @@ fn test_mir_control_flow_compilation() {
     let v_false = VReg(2);
 
     // Block 0: check condition
-    func.blocks[0].instructions.push(MirInst::ConstBool {
-        dest: v0,
-        value: true,
-    });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::ConstBool { dest: v0, value: true });
     func.blocks[0].terminator = Terminator::Branch {
         cond: v0,
         then_block: BlockId(1),
@@ -142,10 +140,9 @@ fn test_mir_control_flow_compilation() {
 
     // Block 1: then branch
     let mut then_block = MirBlock::new(BlockId(1));
-    then_block.instructions.push(MirInst::ConstInt {
-        dest: v_true,
-        value: 1,
-    });
+    then_block
+        .instructions
+        .push(MirInst::ConstInt { dest: v_true, value: 1 });
     then_block.terminator = Terminator::Return(Some(v_true));
     func.blocks.push(then_block);
 
@@ -186,10 +183,9 @@ fn test_mir_float_const() {
     let mut func = MirFunction::new("test".to_string(), T::F64, Visibility::Public);
 
     let v0 = VReg(0);
-    func.blocks[0].instructions.push(MirInst::ConstFloat {
-        dest: v0,
-        value: 3.15,
-    });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::ConstFloat { dest: v0, value: 3.15 });
     func.blocks[0].terminator = Terminator::Return(Some(v0));
 
     backend.compile_function(&func).unwrap();
@@ -264,14 +260,12 @@ fn test_mir_memory_ops() {
     let v1 = VReg(1); // alloca
     let v2 = VReg(2); // loaded value
 
-    func.blocks[0].instructions.push(MirInst::ConstInt {
-        dest: v0,
-        value: 42,
-    });
-    func.blocks[0].instructions.push(MirInst::GcAlloc {
-        dest: v1,
-        ty: T::I32,
-    });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::ConstInt { dest: v0, value: 42 });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::GcAlloc { dest: v1, ty: T::I32 });
     func.blocks[0].instructions.push(MirInst::Store {
         addr: v1,
         value: v0,
@@ -349,14 +343,12 @@ fn test_mir_struct_ops() {
     let v2 = VReg(2); // struct
     let v3 = VReg(3); // field value
 
-    func.blocks[0].instructions.push(MirInst::ConstInt {
-        dest: v0,
-        value: 10,
-    });
-    func.blocks[0].instructions.push(MirInst::ConstInt {
-        dest: v1,
-        value: 20,
-    });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::ConstInt { dest: v0, value: 10 });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::ConstInt { dest: v1, value: 20 });
     func.blocks[0].instructions.push(MirInst::StructInit {
         dest: v2,
         fields: vec![("x".to_string(), v0), ("y".to_string(), v1)],
@@ -490,14 +482,12 @@ fn test_mir_function_call() {
     let v1 = VReg(1); // const 20
     let v2 = VReg(2); // result
 
-    func.blocks[0].instructions.push(MirInst::ConstInt {
-        dest: v0,
-        value: 10,
-    });
-    func.blocks[0].instructions.push(MirInst::ConstInt {
-        dest: v1,
-        value: 20,
-    });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::ConstInt { dest: v0, value: 10 });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::ConstInt { dest: v1, value: 20 });
     func.blocks[0].instructions.push(MirInst::Call {
         dest: Some(v2),
         target: CallTarget::Pure("add".to_string()),
@@ -534,10 +524,9 @@ fn test_mir_interp_call() {
     let v0 = VReg(0); // const 42
     let v1 = VReg(1); // result
 
-    func.blocks[0].instructions.push(MirInst::ConstInt {
-        dest: v0,
-        value: 42,
-    });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::ConstInt { dest: v0, value: 42 });
     func.blocks[0].instructions.push(MirInst::InterpCall {
         dest: Some(v1),
         func_name: "complex_fn".to_string(),

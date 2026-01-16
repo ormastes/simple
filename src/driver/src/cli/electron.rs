@@ -40,9 +40,7 @@ pub fn electron_build(source: &PathBuf, options: ElectronBuildOptions) -> i32 {
     // Compile Simple to WASM
     println!("Compiling {} to WASM...", source.display());
 
-    let wasm_path = options
-        .output_dir
-        .join(format!("{}.wasm", options.app_name));
+    let wasm_path = options.output_dir.join(format!("{}.wasm", options.app_name));
 
     // TODO: [driver][P3] Actually compile to WASM using existing compiler
     // For now, create placeholder

@@ -3,9 +3,7 @@
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
 use crate::error::CompileError;
-use crate::interpreter::{
-    evaluate_expr, exec_block_fn, find_and_exec_method, Control, Enums, ImplMethods,
-};
+use crate::interpreter::{evaluate_expr, exec_block_fn, find_and_exec_method, Control, Enums, ImplMethods};
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::cell::RefCell;
@@ -116,14 +114,8 @@ pub fn handle_constructor_methods(
             for param in &method_def.params {
                 if !local_env.contains_key(&param.name) {
                     if let Some(default_expr) = &param.default {
-                        let default_val = evaluate_expr(
-                            default_expr,
-                            &empty_env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?;
+                        let default_val =
+                            evaluate_expr(default_expr, &empty_env, functions, classes, enums, impl_methods)?;
                         local_env.insert(param.name.clone(), default_val);
                     }
                 }

@@ -136,11 +136,7 @@ pub fn extract_bytes(args: &[Value], idx: usize) -> Result<Vec<u8>, CompileError
             for v in arr {
                 match v {
                     Value::Int(i) => bytes.push(*i as u8),
-                    _ => {
-                        return Err(CompileError::Semantic(
-                            "byte array must contain integers".into(),
-                        ))
-                    }
+                    _ => return Err(CompileError::Semantic("byte array must contain integers".into())),
                 }
             }
             Ok(bytes)
@@ -167,10 +163,7 @@ pub fn extract_open_mode(args: &[Value], idx: usize) -> Result<String, CompileEr
     match args.get(idx) {
         Some(Value::Enum { variant, .. }) => Ok(variant.clone()),
         Some(Value::Str(s)) => Ok(s.clone()),
-        _ => Err(CompileError::Semantic(format!(
-            "argument {} must be an OpenMode",
-            idx
-        ))),
+        _ => Err(CompileError::Semantic(format!("argument {} must be an OpenMode", idx))),
     }
 }
 
@@ -182,10 +175,7 @@ pub fn extract_open_mode(args: &[Value], idx: usize) -> Result<String, CompileEr
 pub fn create_file_metadata(meta: &std::fs::Metadata) -> Value {
     let mut fields = HashMap::new();
     fields.insert("size".to_string(), Value::Int(meta.len() as i64));
-    fields.insert(
-        "readonly".to_string(),
-        Value::Bool(meta.permissions().readonly()),
-    );
+    fields.insert("readonly".to_string(), Value::Bool(meta.permissions().readonly()));
 
     // File type
     let file_type = if meta.is_file() {
@@ -207,24 +197,15 @@ pub fn create_file_metadata(meta: &std::fs::Metadata) -> Value {
     );
 
     // Timestamps (as Option)
-    fields.insert(
-        "modified".to_string(),
-        make_timestamp_option(meta.modified()),
-    );
+    fields.insert("modified".to_string(), make_timestamp_option(meta.modified()));
     fields.insert("created".to_string(), make_timestamp_option(meta.created()));
-    fields.insert(
-        "accessed".to_string(),
-        make_timestamp_option(meta.accessed()),
-    );
+    fields.insert("accessed".to_string(), make_timestamp_option(meta.accessed()));
 
     // Permissions (Unix mode)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fields.insert(
-            "permissions".to_string(),
-            Value::Int(meta.permissions().mode() as i64),
-        );
+        fields.insert("permissions".to_string(), Value::Int(meta.permissions().mode() as i64));
     }
     #[cfg(not(unix))]
     {

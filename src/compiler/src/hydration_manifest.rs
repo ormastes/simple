@@ -181,14 +181,8 @@ impl HydrationManifest {
         // Verify exports
         script.push_str("  // Verify WASM exports\n");
         for export in &self.exports {
-            script.push_str(&format!(
-                "  if (typeof wasm.{} !== 'function') {{\n",
-                export
-            ));
-            script.push_str(&format!(
-                "    console.warn('Missing WASM export: {}');\n",
-                export
-            ));
+            script.push_str(&format!("  if (typeof wasm.{} !== 'function') {{\n", export));
+            script.push_str(&format!("    console.warn('Missing WASM export: {}');\n", export));
             script.push_str("  }\n");
         }
         script.push('\n');
@@ -197,8 +191,7 @@ impl HydrationManifest {
         if !self.state.is_empty() {
             script.push_str("  // Restore initial state\n");
             script.push_str("  const state = ");
-            script
-                .push_str(&serde_json::to_string(&self.state).unwrap_or_else(|_| "{}".to_string()));
+            script.push_str(&serde_json::to_string(&self.state).unwrap_or_else(|_| "{}".to_string()));
             script.push_str(";\n");
             script.push_str("  if (wasm.restore_state) {\n");
             script.push_str("    wasm.restore_state(state);\n");
@@ -233,10 +226,7 @@ impl HydrationManifest {
                 sanitize_var_name(&binding.selector),
                 escape_js_string(&binding.selector)
             ));
-            script.push_str(&format!(
-                "  if (elem_{}) {{\n",
-                sanitize_var_name(&binding.selector)
-            ));
+            script.push_str(&format!("  if (elem_{}) {{\n", sanitize_var_name(&binding.selector)));
             script.push_str(&format!(
                 "    elem_{}.addEventListener('{}', wasm.{}, {});\n",
                 sanitize_var_name(&binding.selector),
@@ -310,8 +300,7 @@ impl ManifestBuilder {
         event: impl Into<String>,
         handler: impl Into<String>,
     ) -> Self {
-        self.manifest
-            .add_binding(selector.into(), event.into(), handler.into());
+        self.manifest.add_binding(selector.into(), event.into(), handler.into());
         self
     }
 
@@ -369,11 +358,7 @@ mod tests {
     #[test]
     fn test_add_binding() {
         let mut manifest = HydrationManifest::new();
-        manifest.add_binding(
-            "#btn".to_string(),
-            "click".to_string(),
-            "on_click".to_string(),
-        );
+        manifest.add_binding("#btn".to_string(), "click".to_string(), "on_click".to_string());
 
         assert_eq!(manifest.bindings.len(), 1);
         assert_eq!(manifest.bindings[0].selector, "#btn");
@@ -396,11 +381,7 @@ mod tests {
     fn test_to_json() {
         let mut manifest = HydrationManifest::new();
         manifest.add_export("increment".to_string());
-        manifest.add_binding(
-            "#btn".to_string(),
-            "click".to_string(),
-            "increment".to_string(),
-        );
+        manifest.add_binding("#btn".to_string(), "click".to_string(), "increment".to_string());
         manifest.set_state("count".to_string(), "0".to_string());
 
         let json = manifest.to_json().unwrap();
@@ -415,11 +396,7 @@ mod tests {
     #[test]
     fn test_generate_hydration_script() {
         let mut manifest = HydrationManifest::new();
-        manifest.add_binding(
-            "#btn".to_string(),
-            "click".to_string(),
-            "on_click".to_string(),
-        );
+        manifest.add_binding("#btn".to_string(), "click".to_string(), "on_click".to_string());
 
         let script = manifest.generate_hydration_script();
 
@@ -463,10 +440,7 @@ mod tests {
     #[test]
     fn test_sanitize_var_name() {
         assert_eq!(sanitize_var_name("#btn-submit"), "_btn_submit");
-        assert_eq!(
-            sanitize_var_name("input[type='text']"),
-            "input_type__text__"
-        );
+        assert_eq!(sanitize_var_name("input[type='text']"), "input_type__text__");
     }
 
     #[test]

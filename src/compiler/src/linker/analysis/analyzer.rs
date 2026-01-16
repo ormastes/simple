@@ -23,13 +23,7 @@ impl SymbolAnalyzer {
     }
 
     /// Add a symbol to analyze.
-    pub fn add_symbol(
-        &mut self,
-        name: &str,
-        visibility: SymbolVisibility,
-        size: usize,
-        section: &str,
-    ) {
+    pub fn add_symbol(&mut self, name: &str, visibility: SymbolVisibility, size: usize, section: &str) {
         let mut symbol = AnalyzedSymbol::new(name.to_string(), visibility);
         symbol.size = size;
         symbol.section = section.to_string();
@@ -102,18 +96,9 @@ mod tests {
     fn test_symbol_graph_reachability() {
         let mut graph = SymbolGraph::new();
 
-        graph.add_symbol(AnalyzedSymbol::new(
-            "main".to_string(),
-            SymbolVisibility::Export,
-        ));
-        graph.add_symbol(AnalyzedSymbol::new(
-            "used".to_string(),
-            SymbolVisibility::Local,
-        ));
-        graph.add_symbol(AnalyzedSymbol::new(
-            "unused".to_string(),
-            SymbolVisibility::Local,
-        ));
+        graph.add_symbol(AnalyzedSymbol::new("main".to_string(), SymbolVisibility::Export));
+        graph.add_symbol(AnalyzedSymbol::new("used".to_string(), SymbolVisibility::Local));
+        graph.add_symbol(AnalyzedSymbol::new("unused".to_string(), SymbolVisibility::Local));
 
         // main -> used
         if let Some(main) = graph.get_symbol_mut("main") {
@@ -164,14 +149,8 @@ mod tests {
         helper1.add_reference("helper2".to_string(), RefKind::Call);
         graph.add_symbol(helper1);
 
-        graph.add_symbol(AnalyzedSymbol::new(
-            "helper2".to_string(),
-            SymbolVisibility::Local,
-        ));
-        graph.add_symbol(AnalyzedSymbol::new(
-            "separate".to_string(),
-            SymbolVisibility::Local,
-        ));
+        graph.add_symbol(AnalyzedSymbol::new("helper2".to_string(), SymbolVisibility::Local));
+        graph.add_symbol(AnalyzedSymbol::new("separate".to_string(), SymbolVisibility::Local));
 
         graph.add_entry_point("main");
         graph.group_by_locality();
@@ -193,18 +172,9 @@ mod tests {
     fn test_imports_exports() {
         let mut graph = SymbolGraph::new();
 
-        graph.add_symbol(AnalyzedSymbol::new(
-            "exported".to_string(),
-            SymbolVisibility::Export,
-        ));
-        graph.add_symbol(AnalyzedSymbol::new(
-            "imported".to_string(),
-            SymbolVisibility::Import,
-        ));
-        graph.add_symbol(AnalyzedSymbol::new(
-            "local".to_string(),
-            SymbolVisibility::Local,
-        ));
+        graph.add_symbol(AnalyzedSymbol::new("exported".to_string(), SymbolVisibility::Export));
+        graph.add_symbol(AnalyzedSymbol::new("imported".to_string(), SymbolVisibility::Import));
+        graph.add_symbol(AnalyzedSymbol::new("local".to_string(), SymbolVisibility::Local));
 
         let (imports, exports) = graph.analyze_imports_exports();
 
@@ -279,10 +249,7 @@ mod tests {
         caller.add_reference("callee".to_string(), RefKind::Call);
         graph.add_symbol(caller);
 
-        graph.add_symbol(AnalyzedSymbol::new(
-            "callee".to_string(),
-            SymbolVisibility::Local,
-        ));
+        graph.add_symbol(AnalyzedSymbol::new("callee".to_string(), SymbolVisibility::Local));
 
         let referrers = graph.get_referrers("callee");
         assert!(referrers.is_some());
@@ -330,18 +297,9 @@ mod tests {
         main.add_reference("call_sym".to_string(), RefKind::Call);
         graph.add_symbol(main);
 
-        graph.add_symbol(AnalyzedSymbol::new(
-            "data_sym".to_string(),
-            SymbolVisibility::Local,
-        ));
-        graph.add_symbol(AnalyzedSymbol::new(
-            "call_sym".to_string(),
-            SymbolVisibility::Local,
-        ));
-        graph.add_symbol(AnalyzedSymbol::new(
-            "separate".to_string(),
-            SymbolVisibility::Local,
-        ));
+        graph.add_symbol(AnalyzedSymbol::new("data_sym".to_string(), SymbolVisibility::Local));
+        graph.add_symbol(AnalyzedSymbol::new("call_sym".to_string(), SymbolVisibility::Local));
+        graph.add_symbol(AnalyzedSymbol::new("separate".to_string(), SymbolVisibility::Local));
 
         graph.add_entry_point("main");
         graph.group_by_locality();
@@ -369,18 +327,9 @@ mod tests {
         entry2.add_reference("helper2".to_string(), RefKind::Call);
         graph.add_symbol(entry2);
 
-        graph.add_symbol(AnalyzedSymbol::new(
-            "helper1".to_string(),
-            SymbolVisibility::Local,
-        ));
-        graph.add_symbol(AnalyzedSymbol::new(
-            "helper2".to_string(),
-            SymbolVisibility::Local,
-        ));
-        graph.add_symbol(AnalyzedSymbol::new(
-            "unused".to_string(),
-            SymbolVisibility::Local,
-        ));
+        graph.add_symbol(AnalyzedSymbol::new("helper1".to_string(), SymbolVisibility::Local));
+        graph.add_symbol(AnalyzedSymbol::new("helper2".to_string(), SymbolVisibility::Local));
+        graph.add_symbol(AnalyzedSymbol::new("unused".to_string(), SymbolVisibility::Local));
 
         graph.add_entry_point("entry1");
         graph.add_entry_point("entry2");
@@ -444,14 +393,8 @@ mod tests {
         main.add_reference("func_a".to_string(), RefKind::Call);
         graph.add_symbol(main);
 
-        graph.add_symbol(AnalyzedSymbol::new(
-            "func_a".to_string(),
-            SymbolVisibility::Local,
-        ));
-        graph.add_symbol(AnalyzedSymbol::new(
-            "orphan".to_string(),
-            SymbolVisibility::Local,
-        ));
+        graph.add_symbol(AnalyzedSymbol::new("func_a".to_string(), SymbolVisibility::Local));
+        graph.add_symbol(AnalyzedSymbol::new("orphan".to_string(), SymbolVisibility::Local));
 
         graph.add_entry_point("main");
         graph.group_by_locality();
@@ -495,13 +438,7 @@ mod tests {
         analyzer.analyze();
 
         // callback should still be reachable
-        assert!(
-            analyzer
-                .graph()
-                .get_symbol("callback")
-                .unwrap()
-                .is_reachable
-        );
+        assert!(analyzer.graph().get_symbol("callback").unwrap().is_reachable);
     }
 
     #[test]
@@ -526,18 +463,9 @@ mod tests {
         analyzer.add_symbol("global_var", SymbolVisibility::Export, 8, ".data");
         analyzer.add_symbol("const_val", SymbolVisibility::Export, 4, ".rodata");
 
-        assert_eq!(
-            analyzer.graph().get_symbol("code_fn").unwrap().section,
-            ".text"
-        );
-        assert_eq!(
-            analyzer.graph().get_symbol("global_var").unwrap().section,
-            ".data"
-        );
-        assert_eq!(
-            analyzer.graph().get_symbol("const_val").unwrap().section,
-            ".rodata"
-        );
+        assert_eq!(analyzer.graph().get_symbol("code_fn").unwrap().section, ".text");
+        assert_eq!(analyzer.graph().get_symbol("global_var").unwrap().section, ".data");
+        assert_eq!(analyzer.graph().get_symbol("const_val").unwrap().section, ".rodata");
     }
 
     #[test]
@@ -597,18 +525,9 @@ mod tests {
     fn test_symbol_names_iterator() {
         let mut graph = SymbolGraph::new();
 
-        graph.add_symbol(AnalyzedSymbol::new(
-            "alpha".to_string(),
-            SymbolVisibility::Local,
-        ));
-        graph.add_symbol(AnalyzedSymbol::new(
-            "beta".to_string(),
-            SymbolVisibility::Local,
-        ));
-        graph.add_symbol(AnalyzedSymbol::new(
-            "gamma".to_string(),
-            SymbolVisibility::Local,
-        ));
+        graph.add_symbol(AnalyzedSymbol::new("alpha".to_string(), SymbolVisibility::Local));
+        graph.add_symbol(AnalyzedSymbol::new("beta".to_string(), SymbolVisibility::Local));
+        graph.add_symbol(AnalyzedSymbol::new("gamma".to_string(), SymbolVisibility::Local));
 
         let names: Vec<_> = graph.symbol_names().collect();
         assert_eq!(names.len(), 3);
@@ -628,9 +547,6 @@ mod tests {
         graph.analyze_reachability();
 
         let dead = graph.find_dead_symbols();
-        assert!(
-            dead.is_empty(),
-            "Import symbols should not be marked as dead"
-        );
+        assert!(dead.is_empty(), "Import symbols should not be marked as dead");
     }
 }

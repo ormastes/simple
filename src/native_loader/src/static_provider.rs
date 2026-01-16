@@ -38,10 +38,9 @@ macro_rules! match_runtime_symbol {
 impl RuntimeSymbolProvider for StaticSymbolProvider {
     fn get_symbol(&self, name: &str) -> Option<*const u8> {
         use simple_runtime::value::{
-            rt_array_clear, rt_capture_stderr_start, rt_capture_stdout_start, rt_contains,
-            rt_dict_clear, rt_dict_keys, rt_dict_values, rt_eprint_str, rt_eprint_value,
-            rt_eprintln_str, rt_eprintln_value, rt_function_not_found, rt_interp_call,
-            rt_interp_eval, rt_method_not_found, rt_print_str, rt_print_value, rt_println_str,
+            rt_array_clear, rt_capture_stderr_start, rt_capture_stdout_start, rt_contains, rt_dict_clear, rt_dict_keys,
+            rt_dict_values, rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_function_not_found,
+            rt_interp_call, rt_interp_eval, rt_method_not_found, rt_print_str, rt_print_value, rt_println_str,
             rt_println_value, rt_value_eq,
         };
         use simple_runtime::*;

@@ -69,10 +69,7 @@ fn test_enum_definition() {
 fn test_use_single_item() {
     let module = parse("use crate.core.Option").unwrap();
     if let Node::UseStmt(stmt) = &module.items[0] {
-        assert_eq!(
-            stmt.path.segments,
-            vec!["crate".to_string(), "core".to_string()]
-        );
+        assert_eq!(stmt.path.segments, vec!["crate".to_string(), "core".to_string()]);
         assert!(matches!(&stmt.target, ImportTarget::Single(name) if name == "Option"));
     } else {
         panic!("Expected use statement");
@@ -83,10 +80,7 @@ fn test_use_single_item() {
 fn test_use_group_items() {
     let module = parse("use crate.core.{Option, Result}").unwrap();
     if let Node::UseStmt(stmt) = &module.items[0] {
-        assert_eq!(
-            stmt.path.segments,
-            vec!["crate".to_string(), "core".to_string()]
-        );
+        assert_eq!(stmt.path.segments, vec!["crate".to_string(), "core".to_string()]);
         if let ImportTarget::Group(targets) = &stmt.target {
             assert_eq!(targets.len(), 2);
         } else {
@@ -101,10 +95,7 @@ fn test_use_group_items() {
 fn test_use_glob() {
     let module = parse("use crate.core.*").unwrap();
     if let Node::UseStmt(stmt) = &module.items[0] {
-        assert_eq!(
-            stmt.path.segments,
-            vec!["crate".to_string(), "core".to_string()]
-        );
+        assert_eq!(stmt.path.segments, vec!["crate".to_string(), "core".to_string()]);
         assert!(matches!(&stmt.target, ImportTarget::Glob));
     } else {
         panic!("Expected use statement");
@@ -485,10 +476,7 @@ fn calculate_tax(amount: i64) -> i64:
 "#;
     let module = parse(src).unwrap();
     if let Node::Function(func) = &module.items[0] {
-        assert!(
-            func.is_generated(),
-            "Function should be marked as generated"
-        );
+        assert!(func.is_generated(), "Function should be marked as generated");
         assert_eq!(func.name, "calculate_tax");
 
         let metadata = func.generated_by_metadata();
@@ -575,10 +563,7 @@ fn manual_function(x: i64) -> i64:
 "#;
     let module = parse(src).unwrap();
     if let Node::Function(func) = &module.items[0] {
-        assert!(
-            !func.is_generated(),
-            "Function should not be marked as generated"
-        );
+        assert!(!func.is_generated(), "Function should not be marked as generated");
         assert!(
             func.generated_by_metadata().is_none(),
             "Should have no provenance metadata"

@@ -302,8 +302,7 @@ impl InternedSymbolTable {
 
     /// Get all global symbols.
     pub fn globals(&self) -> impl Iterator<Item = (SymbolKey, &str, &SymbolInfo)> {
-        self.iter()
-            .filter(|(_, _, info)| info.binding == SymbolBinding::Global)
+        self.iter().filter(|(_, _, info)| info.binding == SymbolBinding::Global)
     }
 
     /// Get all undefined symbols (those with no section).
@@ -526,10 +525,7 @@ impl HashedInterner {
         let key = self.rodeo.get_or_intern(s);
 
         // Get or compute hash
-        let hash = self
-            .hashes
-            .entry(key)
-            .or_insert_with(|| PrecomputedHash::compute(s));
+        let hash = self.hashes.entry(key).or_insert_with(|| PrecomputedHash::compute(s));
 
         HashedSymbol::new(key, *hash)
     }

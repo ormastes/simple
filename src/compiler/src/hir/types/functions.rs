@@ -47,18 +47,12 @@ impl HirFunction {
     /// Get the layout phase for this function.
     /// Returns `Steady` (default) if no layout hint is specified.
     pub fn layout_phase(&self) -> LayoutPhase {
-        self.layout_hint
-            .as_ref()
-            .map(|h| h.phase)
-            .unwrap_or_default()
+        self.layout_hint.as_ref().map(|h| h.phase).unwrap_or_default()
     }
 
     /// Check if this function is marked as an event loop anchor.
     pub fn is_event_loop_anchor(&self) -> bool {
-        self.layout_hint
-            .as_ref()
-            .map(|h| h.is_event_loop())
-            .unwrap_or(false)
+        self.layout_hint.as_ref().map(|h| h.is_event_loop()).unwrap_or(false)
     }
 
     /// Check if this function's layout is pinned (should not be moved by optimizer).

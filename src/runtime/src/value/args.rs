@@ -221,11 +221,7 @@ mod tests {
     fn test_set_and_get_args_vec() {
         rt_clear_args();
 
-        let args = vec![
-            "program".to_string(),
-            "arg1".to_string(),
-            "arg2".to_string(),
-        ];
+        let args = vec!["program".to_string(), "arg1".to_string(), "arg2".to_string()];
 
         rt_set_args_vec(&args);
 

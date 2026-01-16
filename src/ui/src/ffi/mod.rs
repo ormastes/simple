@@ -334,14 +334,7 @@ pub extern "C" fn ui_native_window_set_pixel(win: *mut NativeWindow, x: u32, y: 
 
 /// Fill a rectangle in the framebuffer
 #[no_mangle]
-pub extern "C" fn ui_native_window_fill_rect(
-    win: *mut NativeWindow,
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
-    color: u32,
-) {
+pub extern "C" fn ui_native_window_fill_rect(win: *mut NativeWindow, x: u32, y: u32, w: u32, h: u32, color: u32) {
     if !win.is_null() {
         unsafe { (*win).fill_rect(x, y, w, h, color) };
     }
@@ -375,10 +368,7 @@ pub extern "C" fn ui_native_window_present(win: *mut NativeWindow) -> i32 {
 /// Poll for window events
 /// Returns event type: 0=none, 1=close, 2=resize, 3=key, 4=mouse
 #[no_mangle]
-pub extern "C" fn ui_native_window_poll_event(
-    _win: *mut NativeWindow,
-    _event_data: *mut u64,
-) -> i32 {
+pub extern "C" fn ui_native_window_poll_event(_win: *mut NativeWindow, _event_data: *mut u64) -> i32 {
     // In a real implementation, this would poll the event queue
     // and fill event_data with event-specific information
     0 // No event

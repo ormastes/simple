@@ -220,11 +220,7 @@ impl ModuleResolver {
     /// Filter glob imports to only include auto-imported macros.
     ///
     /// This implements the formal model's `globImport` function.
-    pub fn filter_glob_import(
-        &self,
-        dir_manifest: &DirectoryManifest,
-        exports: &MacroExports,
-    ) -> Vec<MacroSymbol> {
+    pub fn filter_glob_import(&self, dir_manifest: &DirectoryManifest, exports: &MacroExports) -> Vec<MacroSymbol> {
         use simple_dependency_tracker as tracker;
         let macro_manifest = dir_manifest.to_tracker_macro_manifest();
         tracker::macro_import::glob_import(&macro_manifest, exports)

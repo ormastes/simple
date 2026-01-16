@@ -34,14 +34,7 @@ impl CoverageData {
     }
 
     /// Record a decision probe (true or false outcome)
-    pub fn record_decision(
-        &mut self,
-        decision_id: u32,
-        result: bool,
-        file: &str,
-        line: u32,
-        column: u32,
-    ) {
+    pub fn record_decision(&mut self, decision_id: u32, result: bool, file: &str, line: u32, column: u32) {
         let key = (decision_id, file.to_string(), line, column);
         let entry = self.decisions.entry(key).or_insert((0, 0));
         if result {
@@ -114,9 +107,7 @@ impl CoverageData {
         // Condition coverage
         if !self.conditions.is_empty() {
             output.push_str("conditions |decision_id, condition_id, file, line, column, true_count, false_count|\n");
-            for ((decision_id, condition_id, file, line, column), (true_count, false_count)) in
-                &self.conditions
-            {
+            for ((decision_id, condition_id, file, line, column), (true_count, false_count)) in &self.conditions {
                 output.push_str(&format!(
                     "    {}, {}, {}, {}, {}, {}, {}\n",
                     decision_id, condition_id, file, line, column, true_count, false_count
@@ -130,29 +121,16 @@ impl CoverageData {
             output.push_str("paths |path_id, blocks, hit_count|\n");
             for ((path_id, blocks), hit_count) in &self.paths {
                 let blocks_str: Vec<String> = blocks.iter().map(|b| b.to_string()).collect();
-                output.push_str(&format!(
-                    "    {}, [{}], {}\n",
-                    path_id,
-                    blocks_str.join(" "),
-                    hit_count
-                ));
+                output.push_str(&format!("    {}, [{}], {}\n", path_id, blocks_str.join(" "), hit_count));
             }
             output.push('\n');
         }
 
         // Summary
         let total_decisions = self.decisions.len();
-        let covered_decisions = self
-            .decisions
-            .values()
-            .filter(|(t, f)| *t > 0 && *f > 0)
-            .count();
+        let covered_decisions = self.decisions.values().filter(|(t, f)| *t > 0 && *f > 0).count();
         let total_conditions = self.conditions.len();
-        let covered_conditions = self
-            .conditions
-            .values()
-            .filter(|(t, f)| *t > 0 && *f > 0)
-            .count();
+        let covered_conditions = self.conditions.values().filter(|(t, f)| *t > 0 && *f > 0).count();
         let total_paths = self.paths.len();
         let covered_paths = self.paths.values().filter(|&count| *count > 0).count();
 

@@ -9,18 +9,15 @@
 use std::collections::{HashMap, HashSet};
 
 use simple_parser::ast::{
-    Block, ClassDef, EnclosingTarget, Expr, Field, FunctionDef, MacroAnchor, MacroCodeKind,
-    MacroConstRange, MacroContractItem, MacroDeclStub, MacroDef, MacroFieldStub, MacroFnStub,
-    MacroInject, MacroInjectSpec, MacroIntro, MacroIntroDecl, MacroIntroKind, MacroIntroSpec,
-    MacroParamSig, MacroReturns, MacroTarget, MacroTypeStub, MacroVarStub, Mutability, Parameter,
-    Type, Visibility,
+    Block, ClassDef, EnclosingTarget, Expr, Field, FunctionDef, MacroAnchor, MacroCodeKind, MacroConstRange,
+    MacroContractItem, MacroDeclStub, MacroDef, MacroFieldStub, MacroFnStub, MacroInject, MacroInjectSpec, MacroIntro,
+    MacroIntroDecl, MacroIntroKind, MacroIntroSpec, MacroParamSig, MacroReturns, MacroTarget, MacroTypeStub,
+    MacroVarStub, Mutability, Parameter, Type, Visibility,
 };
 use simple_parser::token::Span;
 
 use crate::error::CompileError;
-use crate::macro_validation::{
-    extract_symbol_scope, validate_intro_no_shadowing, validate_macro_contract, SymbolScope,
-};
+use crate::macro_validation::{extract_symbol_scope, validate_intro_no_shadowing, validate_macro_contract, SymbolScope};
 use crate::value::{Env, Value};
 
 /// Result of processing macro contract items
@@ -100,10 +97,7 @@ pub fn process_macro_contract(
 }
 
 /// Process a returns contract item
-fn process_returns_item(
-    returns: &MacroReturns,
-    result: &mut MacroContractResult,
-) -> Result<(), CompileError> {
+fn process_returns_item(returns: &MacroReturns, result: &mut MacroContractResult) -> Result<(), CompileError> {
     result.return_type = Some(returns.ty.clone());
     result.return_label = returns.label.clone();
     Ok(())
@@ -215,11 +209,7 @@ fn process_intro_decl(
                     let func_def = create_function_from_stub(fn_stub, const_bindings)?;
 
                     // Validate shadowing (#1304)
-                    validate_intro_no_shadowing(
-                        &func_def.name,
-                        existing_symbols,
-                        introduced_symbols,
-                    )?;
+                    validate_intro_no_shadowing(&func_def.name, existing_symbols, introduced_symbols)?;
                     introduced_symbols.insert(func_def.name.clone());
 
                     // Record the mapping from intro label to public function name
@@ -228,9 +218,7 @@ fn process_intro_decl(
                         .intro_function_labels
                         .insert(intro_label.to_string(), func_def.name.clone());
 
-                    result
-                        .introduced_functions
-                        .insert(func_def.name.clone(), func_def);
+                    result.introduced_functions.insert(func_def.name.clone(), func_def);
                 }
                 MacroDeclStub::Field(field_stub) => {
                     let field = create_field_from_stub(field_stub, const_bindings)?;
@@ -248,9 +236,7 @@ fn process_intro_decl(
                     validate_intro_no_shadowing(&type_name, existing_symbols, introduced_symbols)?;
                     introduced_symbols.insert(type_name.clone());
 
-                    result
-                        .introduced_types
-                        .insert(type_name, Type::Simple("_".to_string()));
+                    result.introduced_types.insert(type_name, Type::Simple("_".to_string()));
                 }
                 MacroDeclStub::Var(var_stub) => {
                     let var_name = substitute_template(&var_stub.name, const_bindings);
@@ -260,9 +246,7 @@ fn process_intro_decl(
                     introduced_symbols.insert(var_name.clone());
 
                     let is_const = matches!(decl.kind, MacroIntroKind::Const);
-                    result
-                        .introduced_vars
-                        .push((var_name, var_stub.ty.clone(), is_const));
+                    result.introduced_vars.push((var_name, var_stub.ty.clone(), is_const));
                 }
             }
         }
@@ -278,9 +262,7 @@ fn process_intro_decl(
                     introduced_symbols.insert(var_name.clone());
 
                     let is_const = matches!(decl.kind, MacroIntroKind::Const);
-                    result
-                        .introduced_vars
-                        .push((var_name, var_stub.ty.clone(), is_const));
+                    result.introduced_vars.push((var_name, var_stub.ty.clone(), is_const));
                 }
                 _ => {
                     return Err(CompileError::Semantic(
@@ -295,10 +277,7 @@ fn process_intro_decl(
 }
 
 /// Process an inject contract item
-fn process_inject_item(
-    inject: &MacroInject,
-    result: &mut MacroContractResult,
-) -> Result<(), CompileError> {
+fn process_inject_item(inject: &MacroInject, result: &mut MacroContractResult) -> Result<(), CompileError> {
     // Store the mapping from emit label to inject anchor
     // This allows macro expansion to know which emit blocks contain injection code
     result
@@ -369,21 +348,14 @@ fn eval_const_condition(
 }
 
 /// Evaluate a const integer expression
-fn eval_const_int_expr(
-    expr: &Expr,
-    const_bindings: &HashMap<String, String>,
-    env: &Env,
-) -> Result<i64, CompileError> {
+fn eval_const_int_expr(expr: &Expr, const_bindings: &HashMap<String, String>, env: &Env) -> Result<i64, CompileError> {
     match expr {
         Expr::Integer(i) => Ok(*i),
         Expr::Identifier(name) => {
             // Check const bindings first
             if let Some(value_str) = const_bindings.get(name) {
                 value_str.parse::<i64>().map_err(|_| {
-                    CompileError::Semantic(format!(
-                        "Const binding '{}' is not an integer: {}",
-                        name, value_str
-                    ))
+                    CompileError::Semantic(format!("Const binding '{}' is not an integer: {}", name, value_str))
                 })
             } else {
                 Err(CompileError::Semantic(format!(
@@ -405,8 +377,7 @@ fn eval_const_int_expr(
                 BinOp::Mod => left_val % right_val,
                 _ => {
                     return Err(CompileError::Semantic(
-                        "Only arithmetic operators are supported in macro const expressions"
-                            .to_string(),
+                        "Only arithmetic operators are supported in macro const expressions".to_string(),
                     ))
                 }
             })
@@ -500,14 +471,8 @@ mod tests {
         bindings.insert("NAME".to_string(), "User".to_string());
         bindings.insert("COUNT".to_string(), "42".to_string());
 
-        assert_eq!(
-            substitute_template("{NAME}Counter", &bindings),
-            "UserCounter"
-        );
-        assert_eq!(
-            substitute_template("get_{NAME}_{COUNT}", &bindings),
-            "get_User_42"
-        );
+        assert_eq!(substitute_template("{NAME}Counter", &bindings), "UserCounter");
+        assert_eq!(substitute_template("get_{NAME}_{COUNT}", &bindings), "get_User_42");
         assert_eq!(substitute_template("no_template", &bindings), "no_template");
     }
 

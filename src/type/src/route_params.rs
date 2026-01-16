@@ -11,10 +11,7 @@ pub enum RouteParamError {
     /// Parameter not found in route
     MissingParameter(String),
     /// Failed to parse parameter to requested type
-    ParseError {
-        param: String,
-        expected_type: String,
-    },
+    ParseError { param: String, expected_type: String },
     /// Invalid route pattern
     InvalidPattern(String),
     /// Parameter appears multiple times
@@ -27,15 +24,8 @@ impl std::fmt::Display for RouteParamError {
             RouteParamError::MissingParameter(name) => {
                 write!(f, "Missing required parameter: {}", name)
             }
-            RouteParamError::ParseError {
-                param,
-                expected_type,
-            } => {
-                write!(
-                    f,
-                    "Failed to parse parameter '{}' as {}",
-                    param, expected_type
-                )
+            RouteParamError::ParseError { param, expected_type } => {
+                write!(f, "Failed to parse parameter '{}' as {}", param, expected_type)
             }
             RouteParamError::InvalidPattern(pattern) => {
                 write!(f, "Invalid route pattern: {}", pattern)
@@ -165,10 +155,9 @@ impl RouteParams {
                     return Err(RouteParamError::DuplicateParameter(param_name.to_string()));
                 }
 
-                params.path_params.insert(
-                    param_name.to_string(),
-                    ParamValue::String(path_seg.to_string()),
-                );
+                params
+                    .path_params
+                    .insert(param_name.to_string(), ParamValue::String(path_seg.to_string()));
             } else if pattern_seg != path_seg {
                 return Err(RouteParamError::InvalidPattern(format!(
                     "Segment '{}' doesn't match '{}'",
@@ -293,8 +282,7 @@ mod tests {
 
     #[test]
     fn test_path_params_extraction() {
-        let params =
-            RouteParams::from_path("/users/:id/posts/:post_id", "/users/123/posts/456").unwrap();
+        let params = RouteParams::from_path("/users/:id/posts/:post_id", "/users/123/posts/456").unwrap();
 
         assert_eq!(params.get("id").unwrap(), "123");
         assert_eq!(params.get("post_id").unwrap(), "456");
@@ -321,10 +309,7 @@ mod tests {
     fn test_missing_parameter() {
         let params = RouteParams::from_path("/users/:id", "/users/123").unwrap();
 
-        assert!(matches!(
-            params.get("name"),
-            Err(RouteParamError::MissingParameter(_))
-        ));
+        assert!(matches!(params.get("name"), Err(RouteParamError::MissingParameter(_))));
     }
 
     #[test]
@@ -336,10 +321,7 @@ mod tests {
     #[test]
     fn test_duplicate_parameter() {
         let result = RouteParams::from_path("/users/:id/posts/:id", "/users/123/posts/456");
-        assert!(matches!(
-            result,
-            Err(RouteParamError::DuplicateParameter(_))
-        ));
+        assert!(matches!(result, Err(RouteParamError::DuplicateParameter(_))));
     }
 
     #[test]
@@ -360,8 +342,7 @@ mod tests {
 
     #[test]
     fn test_parameter_names() {
-        let params =
-            RouteParams::from_path("/users/:user_id/posts/:post_id", "/users/1/posts/2").unwrap();
+        let params = RouteParams::from_path("/users/:user_id/posts/:post_id", "/users/1/posts/2").unwrap();
 
         let names = params.path_names();
         assert_eq!(names.len(), 2);

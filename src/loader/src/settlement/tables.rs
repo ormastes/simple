@@ -5,9 +5,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::smf::settlement::{
-    FuncTableEntry, GlobalTableEntry, TypeTableEntry, FUNC_FLAG_TOMBSTONE, FUNC_FLAG_VALID,
-};
+use crate::smf::settlement::{FuncTableEntry, GlobalTableEntry, TypeTableEntry, FUNC_FLAG_TOMBSTONE, FUNC_FLAG_VALID};
 
 /// A handle to an entry in an indirection table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -109,10 +107,7 @@ impl<T: Default + Clone> IndirectionTable<T> {
 
     /// Iterate over all entries with their indices.
     pub fn iter(&self) -> impl Iterator<Item = (TableIndex, &T)> {
-        self.entries
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (TableIndex(i as u32), e))
+        self.entries.iter().enumerate().map(|(i, e)| (TableIndex(i as u32), e))
     }
 
     /// Get raw slice of entries (for serialization).

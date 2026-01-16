@@ -27,10 +27,7 @@ fn run_expect_error(src: &str, expected_error: &str) {
 #[allow(dead_code)]
 fn run_expect_any_error(src: &str) {
     let result = run_code(src, &[], "");
-    assert!(
-        result.is_err(),
-        "Expected an error, but execution succeeded"
-    );
+    assert!(result.is_err(), "Expected an error, but execution succeeded");
 }
 
 // ============= Standalone Unit Tests =============

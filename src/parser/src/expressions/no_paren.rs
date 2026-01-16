@@ -126,10 +126,7 @@ impl<'a> Parser<'a> {
 
     /// Check if an expression can be a callee for no-parens calls
     fn is_callable_expr(&self, expr: &Expr) -> bool {
-        matches!(
-            expr,
-            Expr::Identifier(_) | Expr::FieldAccess { .. } | Expr::Path(_)
-        )
+        matches!(expr, Expr::Identifier(_) | Expr::FieldAccess { .. } | Expr::Path(_))
     }
 
     /// Check if we're at a colon-block pattern: `:` followed by newline and indent

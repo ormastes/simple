@@ -31,9 +31,7 @@ impl NamePattern {
         }
 
         // Check if ALL_CAPS (all uppercase letters, numbers, and underscores)
-        let is_all_caps = name
-            .chars()
-            .all(|c| c.is_uppercase() || c.is_numeric() || c == '_');
+        let is_all_caps = name.chars().all(|c| c.is_uppercase() || c.is_numeric() || c == '_');
 
         if is_all_caps && name.chars().any(|c| c.is_alphabetic()) {
             return NamePattern::Constant;
@@ -101,16 +99,19 @@ pub enum TokenKind {
     TypedInteger(i64, NumericSuffix),
     TypedFloat(f64, NumericSuffix),
     String(String),                 // Legacy: plain string (for backward compat)
-    FString(Vec<FStringToken>), // "hello {expr}" interpolated strings (now default for double quotes)
-    RawString(String),          // 'raw string' - no escapes, no interpolation
-    TypedString(String, String), // "value"_suffix - string with unit suffix (e.g., "127.0.0.1"_ip)
+    FString(Vec<FStringToken>),     // "hello {expr}" interpolated strings (now default for double quotes)
+    RawString(String),              // 'raw string' - no escapes, no interpolation
+    TypedString(String, String),    // "value"_suffix - string with unit suffix (e.g., "127.0.0.1"_ip)
     TypedRawString(String, String), // 'value'_suffix - raw string with unit suffix
     Bool(bool),
     Nil,
     Symbol(String), // :symbol
 
     // Identifiers and Keywords
-    Identifier { name: String, pattern: NamePattern },
+    Identifier {
+        name: String,
+        pattern: NamePattern,
+    },
 
     // Keywords
     Fn,
@@ -371,11 +372,7 @@ mod tests {
 
     #[test]
     fn test_token_creation() {
-        let token = Token::new(
-            TokenKind::Integer(42),
-            Span::new(0, 2, 1, 1),
-            "42".to_string(),
-        );
+        let token = Token::new(TokenKind::Integer(42), Span::new(0, 2, 1, 1), "42".to_string());
         assert_eq!(token.kind, TokenKind::Integer(42));
         assert_eq!(token.lexeme, "42");
     }

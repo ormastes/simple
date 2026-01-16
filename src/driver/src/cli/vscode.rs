@@ -44,9 +44,7 @@ pub fn vscode_build(source: &PathBuf, options: VsCodeBuildOptions) -> i32 {
     // Compile Simple to WASM
     println!("Compiling {} to WASM...", source.display());
 
-    let wasm_path = options
-        .output_dir
-        .join(format!("{}.wasm", options.extension_name));
+    let wasm_path = options.output_dir.join(format!("{}.wasm", options.extension_name));
 
     let wasm_result = compile_to_wasm(source, &wasm_path, options.optimize);
 
@@ -136,10 +134,7 @@ pub fn vscode_package(options: VsCodePackageOptions) -> i32 {
     let result = Command::new("vsce")
         .arg("package")
         .arg("--out")
-        .arg(format!(
-            "{}-{}.vsix",
-            options.extension_name, options.version
-        ))
+        .arg(format!("{}-{}.vsix", options.extension_name, options.version))
         .current_dir(&options.source_dir)
         .status();
 

@@ -100,9 +100,7 @@ fn test_llvm_ir_different_types() {
     backend.create_module("types_test").unwrap();
 
     // Test i64 function
-    backend
-        .create_function_signature("fn_i64", &[T::I64], &T::I64)
-        .unwrap();
+    backend.create_function_signature("fn_i64", &[T::I64], &T::I64).unwrap();
 
     // Test f32 function
     backend
@@ -110,9 +108,7 @@ fn test_llvm_ir_different_types() {
         .unwrap();
 
     // Test f64 function
-    backend
-        .create_function_signature("fn_f64", &[T::F64], &T::F64)
-        .unwrap();
+    backend.create_function_signature("fn_f64", &[T::F64], &T::F64).unwrap();
 
     let ir = backend.get_ir().unwrap();
 

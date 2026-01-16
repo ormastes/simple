@@ -119,9 +119,7 @@ impl rustyline::ConditionalEventHandler for DedentHandler {
                 if std::env::var("REPL_DEBUG").is_ok() {
                     eprintln!("[REPL_DEBUG]   Action: Delete {} spaces", spaces_before);
                 }
-                Some(Cmd::Kill(rustyline::Movement::BackwardChar(
-                    spaces_before.min(pos),
-                )))
+                Some(Cmd::Kill(rustyline::Movement::BackwardChar(spaces_before.min(pos))))
             } else {
                 if std::env::var("REPL_DEBUG").is_ok() {
                     eprintln!("[REPL_DEBUG]   Action: No spaces to delete");
@@ -395,9 +393,7 @@ pub fn run_repl(version: &str, mut runner: Runner) -> i32 {
                 // Check if we need more input
                 if needs_continuation(&accumulated_lines) {
                     if std::env::var("REPL_DEBUG").is_ok() {
-                        eprintln!(
-                            "[REPL_DEBUG] Needs continuation - entering/staying in multiline mode"
-                        );
+                        eprintln!("[REPL_DEBUG] Needs continuation - entering/staying in multiline mode");
                     }
                     in_multiline = true;
                     continue;

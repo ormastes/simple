@@ -84,15 +84,9 @@ pub enum ValidationError {
         host_arch: TargetArch,
     },
     /// Platform/OS mismatch between module and host.
-    PlatformMismatch {
-        module_os: TargetOS,
-        host_os: TargetOS,
-    },
+    PlatformMismatch { module_os: TargetOS, host_os: TargetOS },
     /// Pointer size mismatch.
-    PointerSizeMismatch {
-        module_bits: usize,
-        host_bits: usize,
-    },
+    PointerSizeMismatch { module_bits: usize, host_bits: usize },
     /// Invalid architecture in module header.
     InvalidArch(u8),
     /// Invalid platform in module header.
@@ -108,10 +102,7 @@ pub enum ValidationError {
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ValidationError::ArchMismatch {
-                module_arch,
-                host_arch,
-            } => {
+            ValidationError::ArchMismatch { module_arch, host_arch } => {
                 write!(
                     f,
                     "Architecture mismatch: module is {}, host is {}",
@@ -119,16 +110,9 @@ impl std::fmt::Display for ValidationError {
                 )
             }
             ValidationError::PlatformMismatch { module_os, host_os } => {
-                write!(
-                    f,
-                    "Platform mismatch: module is for {}, host is {}",
-                    module_os, host_os
-                )
+                write!(f, "Platform mismatch: module is for {}, host is {}", module_os, host_os)
             }
-            ValidationError::PointerSizeMismatch {
-                module_bits,
-                host_bits,
-            } => {
+            ValidationError::PointerSizeMismatch { module_bits, host_bits } => {
                 write!(
                     f,
                     "Pointer size mismatch: module is {}-bit, host is {}-bit",
@@ -173,10 +157,7 @@ impl std::fmt::Display for ValidationWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ValidationWarning::AnyPlatform => {
-                write!(
-                    f,
-                    "Module targets 'any' platform - may have portability issues"
-                )
+                write!(f, "Module targets 'any' platform - may have portability issues")
             }
             ValidationWarning::EndianMismatch => {
                 write!(f, "Module may have been built with different endianness")
@@ -259,9 +240,7 @@ impl ArchValidator {
             Some(platform) => platform.to_target_os(),
             None => {
                 result.passed = false;
-                result
-                    .errors
-                    .push(ValidationError::InvalidPlatform(header.platform));
+                result.errors.push(ValidationError::InvalidPlatform(header.platform));
                 return result;
             }
         };
@@ -451,10 +430,7 @@ mod tests {
         let validator = ArchValidator::for_target(Target::new(TargetArch::X86_64, TargetOS::Linux));
         let result = validator.validate_target(Target::new(TargetArch::Aarch64, TargetOS::Linux));
         assert!(result.is_err());
-        assert!(matches!(
-            result.errors[0],
-            ValidationError::ArchMismatch { .. }
-        ));
+        assert!(matches!(result.errors[0], ValidationError::ArchMismatch { .. }));
     }
 
     #[test]
@@ -462,16 +438,13 @@ mod tests {
         let validator = ArchValidator::for_target(Target::new(TargetArch::X86_64, TargetOS::Linux));
         let result = validator.validate_target(Target::new(TargetArch::X86_64, TargetOS::Windows));
         assert!(result.is_err());
-        assert!(matches!(
-            result.errors[0],
-            ValidationError::PlatformMismatch { .. }
-        ));
+        assert!(matches!(result.errors[0], ValidationError::PlatformMismatch { .. }));
     }
 
     #[test]
     fn test_validator_any_platform_warning() {
-        let validator = ArchValidator::for_target(Target::new(TargetArch::X86_64, TargetOS::Linux))
-            .allow_any_platform(true);
+        let validator =
+            ArchValidator::for_target(Target::new(TargetArch::X86_64, TargetOS::Linux)).allow_any_platform(true);
         let result = validator.validate_target(Target::new(TargetArch::X86_64, TargetOS::Any));
         assert!(result.is_ok());
         assert!(!result.warnings.is_empty());

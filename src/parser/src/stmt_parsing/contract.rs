@@ -97,10 +97,7 @@ impl Parser<'_> {
     }
 
     /// Helper to parse an indented contract clause block
-    fn parse_contract_clause_block(
-        &mut self,
-        clauses: &mut Vec<ContractClause>,
-    ) -> Result<(), ParseError> {
+    fn parse_contract_clause_block(&mut self, clauses: &mut Vec<ContractClause>) -> Result<(), ParseError> {
         self.debug_enter("parse_contract_clause_block");
         self.expect(&TokenKind::Colon)?;
         self.expect(&TokenKind::Newline)?;
@@ -136,10 +133,7 @@ impl Parser<'_> {
     /// ensures:
     ///     result > 0
     /// ```
-    pub(crate) fn parse_exit_contracts(
-        &mut self,
-        contract: &mut ContractBlock,
-    ) -> Result<(), ParseError> {
+    pub(crate) fn parse_exit_contracts(&mut self, contract: &mut ContractBlock) -> Result<(), ParseError> {
         // Parse out(ret): block (new spec)
         if self.check(&TokenKind::Out) {
             self.advance();

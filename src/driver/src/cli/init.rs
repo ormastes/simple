@@ -37,20 +37,14 @@ pub fn init_logging(metrics: &mut StartupMetrics) {
     #[cfg(not(debug_assertions))]
     simple_log::init();
 
-    metrics.record(
-        simple_driver::StartupPhase::LoggingInit,
-        log_start.elapsed(),
-    );
+    metrics.record(simple_driver::StartupPhase::LoggingInit, log_start.elapsed());
 }
 
 /// Initialize interpreter handlers for hybrid execution
 pub fn init_interpreter_handlers(metrics: &mut StartupMetrics) {
     let handler_start = std::time::Instant::now();
     simple_compiler::interpreter_ffi::init_interpreter_handlers();
-    metrics.record(
-        simple_driver::StartupPhase::HandlerInit,
-        handler_start.elapsed(),
-    );
+    metrics.record(simple_driver::StartupPhase::HandlerInit, handler_start.elapsed());
 }
 
 /// Install panic hook for detailed crash diagnostics (debug mode only)
@@ -95,10 +89,7 @@ pub fn init_panic_hook(metrics: &mut StartupMetrics) {
         let _ = stderr.flush();
     }));
 
-    metrics.record(
-        simple_driver::StartupPhase::PanicHookInit,
-        panic_start.elapsed(),
-    );
+    metrics.record(simple_driver::StartupPhase::PanicHookInit, panic_start.elapsed());
 }
 
 /// Install signal handlers for graceful interrupt (Ctrl-C) - debug mode only
@@ -108,10 +99,7 @@ pub fn init_signal_handlers(metrics: &mut StartupMetrics) {
     #[cfg(debug_assertions)]
     simple_compiler::interpreter::init_signal_handlers();
 
-    metrics.record(
-        simple_driver::StartupPhase::SignalHandlerInit,
-        signal_start.elapsed(),
-    );
+    metrics.record(simple_driver::StartupPhase::SignalHandlerInit, signal_start.elapsed());
 }
 
 /// Run all initialization phases in sequence

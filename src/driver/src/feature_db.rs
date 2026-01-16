@@ -56,9 +56,7 @@ impl ModeSupport {
     }
 
     pub fn any_supported(&self) -> bool {
-        self.modes
-            .values()
-            .any(|status| *status == SupportStatus::Supported)
+        self.modes.values().any(|status| *status == SupportStatus::Supported)
     }
 }
 
@@ -242,11 +240,7 @@ fn extract_description(doc_block: &str) -> String {
     doc_block.lines().next().unwrap_or("").trim().to_string()
 }
 
-pub fn update_feature_db_from_sspec(
-    db_path: &Path,
-    specs: &[PathBuf],
-    failed_specs: &[PathBuf],
-) -> Result<(), String> {
+pub fn update_feature_db_from_sspec(db_path: &Path, specs: &[PathBuf], failed_specs: &[PathBuf]) -> Result<(), String> {
     let mut db = load_feature_db(db_path).unwrap_or_else(|_| FeatureDb::new());
     let failed_set: BTreeMap<String, bool> = failed_specs
         .iter()
@@ -295,26 +289,19 @@ impl FeatureDb {
 
     pub fn upsert_from_sspec(&mut self, item: &SspecItem, path: &Path, failed: bool) {
         let derived_category = derive_category_from_path(path);
-        let entry = self
-            .records
-            .entry(item.id.clone())
-            .or_insert_with(|| FeatureRecord {
-                id: item.id.clone(),
-                category: derived_category
-                    .clone()
-                    .unwrap_or_else(|| "Uncategorized".to_string()),
-                name: item.name.clone(),
-                description: item.description.clone(),
-                spec: path.display().to_string(),
-                modes: ModeSupport::with_defaults(),
-                platforms: item.platforms.clone(),
-                status: "planned".to_string(),
-                valid: true,
-            });
+        let entry = self.records.entry(item.id.clone()).or_insert_with(|| FeatureRecord {
+            id: item.id.clone(),
+            category: derived_category.clone().unwrap_or_else(|| "Uncategorized".to_string()),
+            name: item.name.clone(),
+            description: item.description.clone(),
+            spec: path.display().to_string(),
+            modes: ModeSupport::with_defaults(),
+            platforms: item.platforms.clone(),
+            status: "planned".to_string(),
+            valid: true,
+        });
 
-        if (entry.category.is_empty() || entry.category == "Uncategorized")
-            && derived_category.is_some()
-        {
+        if (entry.category.is_empty() || entry.category == "Uncategorized") && derived_category.is_some() {
             entry.category = derived_category.unwrap_or_else(|| "Uncategorized".to_string());
         }
         if entry.name.is_empty() {
@@ -383,10 +370,7 @@ fn parse_feature_db(doc: &SdnDocument) -> Result<FeatureDb, String> {
             spec: row_map.get("spec").cloned().unwrap_or_default(),
             modes: parse_modes(&row_map),
             platforms: parse_list_field(row_map.get("platforms")),
-            status: row_map
-                .get("status")
-                .cloned()
-                .unwrap_or_else(|| "planned".to_string()),
+            status: row_map.get("status").cloned().unwrap_or_else(|| "planned".to_string()),
             valid: parse_bool_field(row_map.get("valid")).unwrap_or(true),
         };
         db.records.insert(id, record);
@@ -398,16 +382,9 @@ fn parse_feature_db(doc: &SdnDocument) -> Result<FeatureDb, String> {
 pub fn generate_feature_docs(db: &FeatureDb, output_dir: &Path) -> Result<(), String> {
     let mut all_records: Vec<&FeatureRecord> = db.records.values().collect();
     all_records.sort_by(|a, b| compare_feature_id(&a.id, &b.id));
-    let mut records: Vec<&FeatureRecord> = all_records
-        .iter()
-        .copied()
-        .filter(|record| record.valid)
-        .collect();
+    let mut records: Vec<&FeatureRecord> = all_records.iter().copied().filter(|record| record.valid).collect();
     records.sort_by(|a, b| compare_feature_id(&a.id, &b.id));
-    let last_id = all_records
-        .last()
-        .map(|record| record.id.clone())
-        .unwrap_or_default();
+    let last_id = all_records.last().map(|record| record.id.clone()).unwrap_or_default();
 
     generate_feature_index(output_dir, &records, &last_id)?;
     generate_category_docs(output_dir, &records)?;
@@ -415,11 +392,7 @@ pub fn generate_feature_docs(db: &FeatureDb, output_dir: &Path) -> Result<(), St
     Ok(())
 }
 
-fn generate_feature_index(
-    output_dir: &Path,
-    records: &[&FeatureRecord],
-    last_id: &str,
-) -> Result<(), String> {
+fn generate_feature_index(output_dir: &Path, records: &[&FeatureRecord], last_id: &str) -> Result<(), String> {
     let mut categories: BTreeMap<String, CategoryCounts> = BTreeMap::new();
     for record in records {
         let category = if record.category.is_empty() {
@@ -632,10 +605,7 @@ fn relative_path(from_dir: &Path, to: &Path) -> String {
     let from_parts = normalized_parts(from_dir);
     let to_parts = normalized_parts(to);
     let mut common = 0usize;
-    while common < from_parts.len()
-        && common < to_parts.len()
-        && from_parts[common] == to_parts[common]
-    {
+    while common < from_parts.len() && common < to_parts.len() && from_parts[common] == to_parts[common] {
         common += 1;
     }
     let mut rel_parts: Vec<String> = Vec::new();
@@ -700,10 +670,7 @@ pub fn save_feature_db(path: &Path, db: &FeatureDb) -> Result<(), std::io::Error
         row.push(SdnValue::String(record.spec.clone()));
         row.push(SdnValue::String(mode_status(&record.modes, "interpreter")));
         row.push(SdnValue::String(mode_status(&record.modes, "jit")));
-        row.push(SdnValue::String(mode_status(
-            &record.modes,
-            "smf_cranelift",
-        )));
+        row.push(SdnValue::String(mode_status(&record.modes, "smf_cranelift")));
         row.push(SdnValue::String(mode_status(&record.modes, "smf_llvm")));
         row.push(SdnValue::String(record.platforms.join(",")));
         row.push(SdnValue::String(record.status.clone()));
@@ -741,9 +708,7 @@ fn parse_modes(row: &BTreeMap<String, String>) -> ModeSupport {
         let key = format!("mode_{}", mode);
         if let Some(value) = row.get(&key) {
             if value == "not_supported" {
-                support
-                    .modes
-                    .insert(mode.to_string(), SupportStatus::NotSupported);
+                support.modes.insert(mode.to_string(), SupportStatus::NotSupported);
             }
         }
     }
@@ -830,11 +795,7 @@ fn title_case_category(value: &str) -> String {
         .map(|part| {
             let mut chars = part.chars();
             match chars.next() {
-                Some(first) => format!(
-                    "{}{}",
-                    first.to_ascii_uppercase(),
-                    chars.as_str().to_ascii_lowercase()
-                ),
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str().to_ascii_lowercase()),
                 None => String::new(),
             }
         })

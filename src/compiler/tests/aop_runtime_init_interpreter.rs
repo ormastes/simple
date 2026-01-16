@@ -64,7 +64,6 @@ around = [
         .expect("aop config present");
 
     let result =
-        evaluate_module_with_di_and_aop(&module.items, Some(&di_config), Some(&aop_config))
-            .expect("eval module");
+        evaluate_module_with_di_and_aop(&module.items, Some(&di_config), Some(&aop_config)).expect("eval module");
     assert_eq!(result, 1);
 }

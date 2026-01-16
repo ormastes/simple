@@ -20,9 +20,7 @@ pub(super) fn create_string_constant<M: Module>(
         .map_err(|e| e.to_string())?;
     let mut data_desc = cranelift_module::DataDescription::new();
     data_desc.define(bytes.to_vec().into_boxed_slice());
-    ctx.module
-        .define_data(data_id, &data_desc)
-        .map_err(|e| e.to_string())?;
+    ctx.module.define_data(data_id, &data_desc).map_err(|e| e.to_string())?;
 
     let global_val = ctx.module.declare_data_in_func(data_id, builder.func);
     let ptr = builder.ins().global_value(types::I64, global_val);

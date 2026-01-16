@@ -194,11 +194,7 @@ fn test_python_self_detection() {
 fn test_typescript_arrow_function_detection() {
     use simple_parser::token::{Span, Token, TokenKind};
 
-    let fat_arrow = Token::new(
-        TokenKind::FatArrow,
-        Span::new(8, 10, 1, 9),
-        "=>".to_string(),
-    );
+    let fat_arrow = Token::new(TokenKind::FatArrow, Span::new(8, 10, 1, 9), "=>".to_string());
     let rparen = Token::new(TokenKind::RParen, Span::new(7, 8, 1, 8), ")".to_string());
 
     let mistake = detect_common_mistake(&fat_arrow, &rparen, None);
@@ -211,11 +207,7 @@ fn test_rust_turbofish_detection() {
     use simple_parser::token::{Span, Token, TokenKind};
 
     let lt = Token::new(TokenKind::Lt, Span::new(4, 5, 1, 5), "<".to_string());
-    let double_colon = Token::new(
-        TokenKind::DoubleColon,
-        Span::new(2, 4, 1, 3),
-        "::".to_string(),
-    );
+    let double_colon = Token::new(TokenKind::DoubleColon, Span::new(2, 4, 1, 3), "::".to_string());
 
     let mistake = detect_common_mistake(&lt, &double_colon, None);
     assert_eq!(mistake, Some(CommonMistake::RustTurbofish));
@@ -294,8 +286,6 @@ fn test_c_type_first_detection() {
     assert_eq!(mistake, Some(CommonMistake::CTypeFirst));
 
     // Test message content
-    assert!(CommonMistake::CTypeFirst
-        .message()
-        .contains("Type comes after"));
+    assert!(CommonMistake::CTypeFirst.message().contains("Type comes after"));
     assert!(CommonMistake::CTypeFirst.suggestion().contains("val"));
 }

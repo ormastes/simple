@@ -19,10 +19,7 @@ fn test_simd_swizzle_xyzw() {
 
     let func = &module.functions[0];
     // Second statement should be the swizzle
-    if let HirStmt::Let {
-        value: Some(value), ..
-    } = &func.body[1]
-    {
+    if let HirStmt::Let { value: Some(value), .. } = &func.body[1] {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdShuffle);
             assert_eq!(args.len(), 2); // vector + indices array
@@ -44,10 +41,7 @@ fn test_simd_swizzle_broadcast() {
 
     let func = &module.functions[0];
     // Second statement should be the swizzle
-    if let HirStmt::Let {
-        value: Some(value), ..
-    } = &func.body[1]
-    {
+    if let HirStmt::Let { value: Some(value), .. } = &func.body[1] {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdShuffle);
             assert_eq!(args.len(), 2);
@@ -74,10 +68,7 @@ fn test_simd_swizzle_reverse() {
     .unwrap();
 
     let func = &module.functions[0];
-    if let HirStmt::Let {
-        value: Some(value), ..
-    } = &func.body[1]
-    {
+    if let HirStmt::Let { value: Some(value), .. } = &func.body[1] {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdShuffle);
             // Check indices are [3, 2, 1, 0]
@@ -111,10 +102,7 @@ fn test_simd_swizzle_rgba() {
     .unwrap();
 
     let func = &module.functions[0];
-    if let HirStmt::Let {
-        value: Some(value), ..
-    } = &func.body[1]
-    {
+    if let HirStmt::Let { value: Some(value), .. } = &func.body[1] {
         if let HirExprKind::GpuIntrinsic { intrinsic, .. } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdShuffle);
         } else {
@@ -134,10 +122,7 @@ fn test_simd_swizzle_partial() {
     .unwrap();
 
     let func = &module.functions[0];
-    if let HirStmt::Let {
-        value: Some(value), ..
-    } = &func.body[1]
-    {
+    if let HirStmt::Let { value: Some(value), .. } = &func.body[1] {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdShuffle);
             // Check indices array has 2 elements
@@ -163,10 +148,7 @@ fn test_simd_swizzle_single() {
     .unwrap();
 
     let func = &module.functions[0];
-    if let HirStmt::Let {
-        value: Some(value), ..
-    } = &func.body[1]
-    {
+    if let HirStmt::Let { value: Some(value), .. } = &func.body[1] {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdShuffle);
             // Check indices array has 1 element

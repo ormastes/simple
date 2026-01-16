@@ -121,10 +121,7 @@ impl<'a> Parser<'a> {
                 let item_pattern = self.parse_pattern()?;
 
                 // Create tuple pattern for (index, item)
-                let tuple_pattern = Pattern::Tuple(vec![
-                    Pattern::Identifier(index_name),
-                    item_pattern,
-                ]);
+                let tuple_pattern = Pattern::Tuple(vec![Pattern::Identifier(index_name), item_pattern]);
                 return Ok((tuple_pattern, true));
             }
 

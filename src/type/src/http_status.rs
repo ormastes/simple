@@ -312,10 +312,7 @@ mod tests {
 
     #[test]
     fn test_status_code_categories() {
-        assert!(matches!(
-            StatusCode::Ok.category(),
-            StatusCodeCategory::Success
-        ));
+        assert!(matches!(StatusCode::Ok.category(), StatusCodeCategory::Success));
         assert!(matches!(
             StatusCode::NotFound.category(),
             StatusCodeCategory::ClientError
@@ -351,10 +348,7 @@ mod tests {
     fn test_reason_phrases() {
         assert_eq!(StatusCode::Ok.reason_phrase(), "OK");
         assert_eq!(StatusCode::NotFound.reason_phrase(), "Not Found");
-        assert_eq!(
-            StatusCode::InternalServerError.reason_phrase(),
-            "Internal Server Error"
-        );
+        assert_eq!(StatusCode::InternalServerError.reason_phrase(), "Internal Server Error");
     }
 
     #[test]

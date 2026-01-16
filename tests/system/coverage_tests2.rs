@@ -20,9 +20,7 @@ fn test_loaded_module_get_function() {
     let smf_path = dir.path().join("getfn_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 123", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 123", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -39,9 +37,7 @@ fn test_loaded_module_is_reloadable() {
     let smf_path = dir.path().join("reloadable_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 0", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 0", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -57,9 +53,7 @@ fn test_loaded_module_source_hash() {
     let smf_path = dir.path().join("hash_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -76,9 +70,7 @@ fn test_loaded_module_exports() {
     let smf_path = dir.path().join("exports_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 0", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 0", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -156,9 +148,7 @@ fn test_scheduled_spawner() {
 
     let spawner = ScheduledSpawner::new();
     let handle = spawner.spawn(|_inbox, outbox| {
-        outbox
-            .send(Message::Value("scheduled".to_string()))
-            .unwrap();
+        outbox.send(Message::Value("scheduled".to_string())).unwrap();
     });
 
     let msg = handle.recv().expect("recv ok");
@@ -178,9 +168,7 @@ fn test_scheduled_spawner_default() {
 
     let spawner: ScheduledSpawner = Default::default();
     let handle = spawner.spawn(|_inbox, outbox| {
-        outbox
-            .send(Message::Value("default_scheduled".to_string()))
-            .unwrap();
+        outbox.send(Message::Value("default_scheduled".to_string())).unwrap();
     });
 
     let msg = handle.recv().expect("recv ok");
@@ -204,10 +192,7 @@ fn test_gc_runtime_heap_bytes() {
     let gc = GcRuntime::new();
     let bytes = gc.heap_bytes();
     // Should be >= 0
-    assert!(
-        bytes >= 0 || bytes == 0,
-        "heap_bytes should return valid size"
-    );
+    assert!(bytes >= 0 || bytes == 0, "heap_bytes should return valid size");
 }
 
 /// Test GcRuntime::heap()
@@ -250,10 +235,7 @@ fn test_gc_runtime_with_logger() {
     gc.collect("test_log");
 
     // Should have logged at least start and end events
-    assert!(
-        log_count.load(Ordering::SeqCst) >= 2,
-        "Should log collection events"
-    );
+    assert!(log_count.load(Ordering::SeqCst) >= 2, "Should log collection events");
 }
 
 /// Test GcLogEvent Display
@@ -304,11 +286,7 @@ fn test_exec_core_compile_file() {
 
     let core = ExecCore::new_no_gc();
     let result = core.compile_file(&src_path, &out_path);
-    assert!(
-        result.is_ok(),
-        "compile_file should succeed: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "compile_file should succeed: {:?}", result.err());
     assert!(out_path.exists(), "SMF should exist");
 }
 
@@ -321,15 +299,10 @@ fn test_exec_core_load_module() {
     let smf_path = dir.path().join("load_module_test.smf");
 
     let core = ExecCore::new_no_gc();
-    core.compile_source("main = 55", &smf_path)
-        .expect("compile ok");
+    core.compile_source("main = 55", &smf_path).expect("compile ok");
 
     let module = core.load_module(&smf_path);
-    assert!(
-        module.is_ok(),
-        "load_module should succeed: {:?}",
-        module.err()
-    );
+    assert!(module.is_ok(), "load_module should succeed: {:?}", module.err());
 }
 
 /// Test ExecCore::collect_gc() with no-gc mode
@@ -371,8 +344,7 @@ fn test_exec_core_run_main() {
     let smf_path = dir.path().join("run_main_test.smf");
 
     let core = ExecCore::new_no_gc();
-    core.compile_source("main = 77", &smf_path)
-        .expect("compile ok");
+    core.compile_source("main = 77", &smf_path).expect("compile ok");
 
     let module = core.load_module(&smf_path).expect("load ok");
     let exit_code = run_main(&module).expect("run_main ok");

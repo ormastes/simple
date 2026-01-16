@@ -43,9 +43,7 @@ impl LibsqlConnection {
         let runtime = Self::create_runtime()?;
         let (db, conn) = runtime.block_on(async {
             let db = Database::open(path).map_err(|e| DbError::connection_failed(e.to_string()))?;
-            let conn = db
-                .connect()
-                .map_err(|e| DbError::connection_failed(e.to_string()))?;
+            let conn = db.connect().map_err(|e| DbError::connection_failed(e.to_string()))?;
             Ok::<_, DbError>((db, conn))
         })?;
         Ok(Self {
@@ -60,11 +58,8 @@ impl LibsqlConnection {
     pub fn open_memory() -> DbResult<Self> {
         let runtime = Self::create_runtime()?;
         let (db, conn) = runtime.block_on(async {
-            let db = Database::open(":memory:")
-                .map_err(|e| DbError::connection_failed(e.to_string()))?;
-            let conn = db
-                .connect()
-                .map_err(|e| DbError::connection_failed(e.to_string()))?;
+            let db = Database::open(":memory:").map_err(|e| DbError::connection_failed(e.to_string()))?;
+            let conn = db.connect().map_err(|e| DbError::connection_failed(e.to_string()))?;
             Ok::<_, DbError>((db, conn))
         })?;
         Ok(Self {
@@ -79,11 +74,8 @@ impl LibsqlConnection {
     pub fn open_remote(url: &str, auth_token: &str) -> DbResult<Self> {
         let runtime = Self::create_runtime()?;
         let (db, conn) = runtime.block_on(async {
-            let db = Database::open_remote(url, auth_token)
-                .map_err(|e| DbError::connection_failed(e.to_string()))?;
-            let conn = db
-                .connect()
-                .map_err(|e| DbError::connection_failed(e.to_string()))?;
+            let db = Database::open_remote(url, auth_token).map_err(|e| DbError::connection_failed(e.to_string()))?;
+            let conn = db.connect().map_err(|e| DbError::connection_failed(e.to_string()))?;
             Ok::<_, DbError>((db, conn))
         })?;
         Ok(Self {
@@ -101,9 +93,7 @@ impl LibsqlConnection {
             let db = Database::open_with_remote_sync(path, url, auth_token, None)
                 .await
                 .map_err(|e| DbError::connection_failed(e.to_string()))?;
-            let conn = db
-                .connect()
-                .map_err(|e| DbError::connection_failed(e.to_string()))?;
+            let conn = db.connect().map_err(|e| DbError::connection_failed(e.to_string()))?;
             Ok::<_, DbError>((db, conn))
         })?;
         Ok(Self {
@@ -130,11 +120,7 @@ impl LibsqlConnection {
 
             // Get column names
             let columns: Vec<String> = (0..column_count)
-                .map(|i| {
-                    rows.column_name(i)
-                        .map(|s| s.to_string())
-                        .unwrap_or_default()
-                })
+                .map(|i| rows.column_name(i).map(|s| s.to_string()).unwrap_or_default())
                 .collect();
 
             // Collect all rows

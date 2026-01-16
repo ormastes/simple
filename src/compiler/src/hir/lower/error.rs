@@ -38,11 +38,15 @@ pub enum LowerError {
     Unsupported(String),
 
     /// CTR-032: Impure function call in contract expression
-    #[error("Impure function call '{func_name}' in contract expression. Only #[pure] functions can be called in contracts")]
+    #[error(
+        "Impure function call '{func_name}' in contract expression. Only #[pure] functions can be called in contracts"
+    )]
     ImpureFunctionInContract { func_name: String },
 
     /// CTR-060-062: Non-snapshot-safe type in old() expression
-    #[error("Type is not snapshot-safe for old() expression. Only primitives, enums, and immutable structs can be captured")]
+    #[error(
+        "Type is not snapshot-safe for old() expression. Only primitives, enums, and immutable structs can be captured"
+    )]
     NotSnapshotSafe,
 
     /// Capability error (aliasing, conversion, mode compatibility)

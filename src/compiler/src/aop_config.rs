@@ -19,11 +19,7 @@ pub struct AopAroundRule {
 }
 
 /// Helper to create a match context for AOP weaving.
-pub fn create_aop_match_context<'a>(
-    type_name: &'a str,
-    module_path: &'a str,
-    attrs: &'a [String],
-) -> MatchContext<'a> {
+pub fn create_aop_match_context<'a>(type_name: &'a str, module_path: &'a str, attrs: &'a [String]) -> MatchContext<'a> {
     MatchContext::new()
         .with_type_name(type_name)
         .with_module_path(module_path)
@@ -38,10 +34,7 @@ pub fn parse_aop_config(toml: &toml::Value) -> Result<Option<AopConfig>, String>
         return Ok(None);
     };
 
-    let runtime_enabled = runtime_table
-        .get("enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+    let runtime_enabled = runtime_table.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
 
     let around_values = match runtime_table.get("around") {
         None => Vec::new(),
@@ -68,10 +61,7 @@ pub fn parse_aop_config(toml: &toml::Value) -> Result<Option<AopConfig>, String>
             .and_then(|v| v.as_str())
             .ok_or_else(|| format!("aspects.runtime.around[{}] missing 'use' advice", idx))?;
 
-        let priority = rule
-            .get("priority")
-            .and_then(|v| v.as_integer())
-            .unwrap_or(0);
+        let priority = rule.get("priority").and_then(|v| v.as_integer()).unwrap_or(0);
 
         let predicate = predicate_parser::parse_predicate(predicate_raw)?;
         // Validate that the predicate is legal for weaving context

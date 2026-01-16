@@ -1,8 +1,8 @@
 //! Tests for async file I/O functionality
 
 use super::{
-    native_async_file_create, native_async_file_get_state, native_async_file_is_ready,
-    native_async_file_start_loading, native_async_file_wait, FileLoadState,
+    native_async_file_create, native_async_file_get_state, native_async_file_is_ready, native_async_file_start_loading,
+    native_async_file_wait, FileLoadState,
 };
 use crate::value::{rt_string_new, RuntimeValue};
 use std::fs::File;
@@ -46,10 +46,7 @@ fn test_async_file_loading_lifecycle() {
     assert!(handle_id > 0);
 
     // Initial state should be Pending
-    assert_eq!(
-        native_async_file_get_state(handle_id),
-        FileLoadState::Pending as i32
-    );
+    assert_eq!(native_async_file_get_state(handle_id), FileLoadState::Pending as i32);
     assert_eq!(native_async_file_is_ready(handle_id), 0);
 
     // Start loading
@@ -65,10 +62,7 @@ fn test_async_file_loading_lifecycle() {
 
     // Should be ready now
     assert_eq!(native_async_file_is_ready(handle_id), 1);
-    assert_eq!(
-        native_async_file_get_state(handle_id),
-        FileLoadState::Ready as i32
-    );
+    assert_eq!(native_async_file_get_state(handle_id), FileLoadState::Ready as i32);
 
     // Clean up
     std::fs::remove_file(test_path).ok();
@@ -93,10 +87,7 @@ fn test_async_file_invalid_path() {
     assert_eq!(result.as_int(), 0);
 
     // State should be Failed
-    assert_eq!(
-        native_async_file_get_state(handle_id),
-        FileLoadState::Failed as i32
-    );
+    assert_eq!(native_async_file_get_state(handle_id), FileLoadState::Failed as i32);
 }
 
 #[test]

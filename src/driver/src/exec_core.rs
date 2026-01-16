@@ -94,10 +94,10 @@ impl ExecCore {
         // Display hints to stderr
         for hint in hints {
             let level_str = match hint.level {
-                ErrorHintLevel::Error => "\x1b[31merror\x1b[0m", // red
+                ErrorHintLevel::Error => "\x1b[31merror\x1b[0m",     // red
                 ErrorHintLevel::Warning => "\x1b[33mwarning\x1b[0m", // yellow
-                ErrorHintLevel::Info => "\x1b[36minfo\x1b[0m",   // cyan
-                ErrorHintLevel::Hint => "\x1b[32mhint\x1b[0m",   // green
+                ErrorHintLevel::Info => "\x1b[36minfo\x1b[0m",       // cyan
+                ErrorHintLevel::Hint => "\x1b[32mhint\x1b[0m",       // green
             };
 
             eprintln!("{}: {}", level_str, hint.message);
@@ -145,20 +145,14 @@ impl ExecCore {
 
     /// Compile source string to SMF file for a specific target architecture.
     /// This enables cross-compilation.
-    pub fn compile_source_for_target(
-        &self,
-        source: &str,
-        out: &Path,
-        target: Target,
-    ) -> Result<(), String> {
+    pub fn compile_source_for_target(&self, source: &str, out: &Path, target: Target) -> Result<(), String> {
         let smf_bytes = self.compile_to_memory_for_target(source, target)?;
         fs::write(out, smf_bytes).map_err(|e| format!("write smf: {e}"))
     }
 
     /// Compile source string to SMF bytes in memory (no disk I/O)
     pub fn compile_to_memory(&self, source: &str) -> Result<Vec<u8>, String> {
-        let mut compiler =
-            CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
+        let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
         compiler
             .compile_source_to_memory(source)
             .map_err(|e| format!("compile failed: {e}"))
@@ -170,8 +164,7 @@ impl ExecCore {
         source: &str,
         options: &crate::CompileOptions,
     ) -> Result<Vec<u8>, String> {
-        let mut compiler =
-            CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
+        let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
 
         // Set emit options
         if let Some(path) = &options.emit_ast {
@@ -190,13 +183,8 @@ impl ExecCore {
     }
 
     /// Compile source string to SMF bytes for a specific target architecture.
-    pub fn compile_to_memory_for_target(
-        &self,
-        source: &str,
-        target: Target,
-    ) -> Result<Vec<u8>, String> {
-        let mut compiler =
-            CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
+    pub fn compile_to_memory_for_target(&self, source: &str, target: Target) -> Result<Vec<u8>, String> {
+        let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
         compiler
             .compile_source_to_memory_for_target(source, target)
             .map_err(|e| format!("compile failed: {e}"))
@@ -204,8 +192,7 @@ impl ExecCore {
 
     /// Compile source string to SMF bytes using native codegen (HIR → MIR → Cranelift)
     pub fn compile_to_memory_native(&self, source: &str) -> Result<Vec<u8>, String> {
-        let mut compiler =
-            CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
+        let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
         compiler
             .compile_source_to_memory_native(source)
             .map_err(|e| format!("compile failed: {e}"))
@@ -214,8 +201,7 @@ impl ExecCore {
     /// Compile file to SMF
     pub fn compile_file(&self, path: &Path, out: &Path) -> Result<(), String> {
         // Parse source to collect error hints
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        let source = std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
         let mut parser = Parser::new(&source);
         let parse_result = parser.parse();
 
@@ -225,11 +211,8 @@ impl ExecCore {
         // Now check if parsing succeeded
         let _ast = parse_result.map_err(|e| format!("parse error: {}", e))?;
 
-        let mut compiler =
-            CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
-        compiler
-            .compile(path, out)
-            .map_err(|e| format!("compile failed: {e}"))
+        let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
+        compiler.compile(path, out).map_err(|e| format!("compile failed: {e}"))
     }
 
     /// Compile a source file to SMF with compile options (LLM-friendly #885-887)
@@ -239,8 +222,7 @@ impl ExecCore {
         out: &Path,
         options: &crate::CompileOptions,
     ) -> Result<(), String> {
-        let mut compiler =
-            CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
+        let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
 
         // Apply options (flatten nested Option)
         if let Some(emit_ast) = &options.emit_ast {
@@ -253,9 +235,7 @@ impl ExecCore {
             compiler.set_emit_mir(emit_mir.clone());
         }
 
-        compiler
-            .compile(path, out)
-            .map_err(|e| format!("compile failed: {e}"))
+        compiler.compile(path, out).map_err(|e| format!("compile failed: {e}"))
     }
 
     // =========================================================================
@@ -264,9 +244,7 @@ impl ExecCore {
 
     /// Load an SMF module from file
     pub fn load_module(&self, path: &Path) -> Result<LoadedModule, String> {
-        self.loader
-            .load(path)
-            .map_err(|e| format!("load failed: {e}"))
+        self.loader.load(path).map_err(|e| format!("load failed: {e}"))
     }
 
     /// Load an SMF module from memory buffer
@@ -340,8 +318,7 @@ impl ExecCore {
         let hir_module = hir::lower(&ast).map_err(|e| format!("HIR lowering error: {}", e))?;
 
         // Lower to MIR
-        let mir_module =
-            lower_to_mir(&hir_module).map_err(|e| format!("MIR lowering error: {}", e))?;
+        let mir_module = lower_to_mir(&hir_module).map_err(|e| format!("MIR lowering error: {}", e))?;
 
         // Check if we have a proper main function
         let has_main_function = mir_module.functions.iter().any(|f| f.name == "main");
@@ -354,8 +331,8 @@ impl ExecCore {
         }
 
         // JIT compile using the configured symbol provider
-        let mut jit = JitCompiler::with_provider(self.symbol_provider.clone())
-            .map_err(|e| format!("JIT init error: {}", e))?;
+        let mut jit =
+            JitCompiler::with_provider(self.symbol_provider.clone()).map_err(|e| format!("JIT init error: {}", e))?;
 
         jit.compile_module(&mir_module)
             .map_err(|e| format!("JIT compile error: {}", e))?;
@@ -376,11 +353,7 @@ impl ExecCore {
     }
 
     /// Run SMF from memory buffer with arguments
-    pub fn run_smf_from_memory_with_args(
-        &self,
-        bytes: &[u8],
-        args: Vec<String>,
-    ) -> Result<i32, String> {
+    pub fn run_smf_from_memory_with_args(&self, bytes: &[u8], args: Vec<String>) -> Result<i32, String> {
         // Set arguments in runtime before loading module
         simple_runtime::value::rt_set_args_vec(&args);
 
@@ -419,8 +392,7 @@ impl ExecCore {
 
         // Create WasmRunner with WASI configuration
         let config = WasiConfig::new();
-        let mut runner =
-            WasmRunner::with_config(config).map_err(|e| format!("create wasm runner: {e}"))?;
+        let mut runner = WasmRunner::with_config(config).map_err(|e| format!("create wasm runner: {e}"))?;
 
         // Run the main function
         let result = runner
@@ -490,19 +462,14 @@ impl ExecCore {
     /// Run a .spl file using the interpreter with command-line arguments.
     ///
     /// The args are made available to the Simple program via `sys_get_args()`.
-    pub fn run_file_interpreted_with_args(
-        &self,
-        path: &Path,
-        args: Vec<String>,
-    ) -> Result<i32, String> {
+    pub fn run_file_interpreted_with_args(&self, path: &Path, args: Vec<String>) -> Result<i32, String> {
         use simple_compiler::interpreter::{evaluate_module, set_current_file};
         use simple_compiler::pipeline::module_loader::load_module_with_imports;
         use simple_compiler::set_interpreter_args;
         use std::collections::HashSet;
 
         // Parse source to collect error hints
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        let source = std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
         let mut parser = Parser::new(&source);
         let parse_result = parser.parse();
 
@@ -518,8 +485,8 @@ impl ExecCore {
         // Set current file for module resolution
         set_current_file(Some(path.to_path_buf()));
 
-        let module = load_module_with_imports(path, &mut HashSet::new())
-            .map_err(|e| format!("compile failed: {}", e))?;
+        let module =
+            load_module_with_imports(path, &mut HashSet::new()).map_err(|e| format!("compile failed: {}", e))?;
 
         let exit_code = evaluate_module(&module.items).map_err(|e| format!("{}", e))?;
 

@@ -110,9 +110,7 @@ impl<'a> Parser<'a> {
                         } else if self.check(&TokenKind::Colon) {
                             // It's a slice
                             self.advance();
-                            let end = if self.check(&TokenKind::Colon)
-                                || self.check(&TokenKind::RBracket)
-                            {
+                            let end = if self.check(&TokenKind::Colon) || self.check(&TokenKind::RBracket) {
                                 None
                             } else {
                                 Some(Box::new(self.parse_expression()?))

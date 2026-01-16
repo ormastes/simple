@@ -144,12 +144,7 @@ impl<'a> FunctionTranslator<'a> {
         let return_type = self.type_translator.translate(func.return_type)?;
 
         // Combine params and locals for expression translation
-        let all_locals: Vec<_> = func
-            .params
-            .iter()
-            .chain(func.locals.iter())
-            .cloned()
-            .collect();
+        let all_locals: Vec<_> = func.params.iter().chain(func.locals.iter()).cloned().collect();
 
         // Translate body
         let expr_translator = ExprTranslator::with_locals(self.type_translator, &all_locals);

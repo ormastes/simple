@@ -11,8 +11,8 @@ use crate::vulkan::DescriptorSet;
 use crate::vulkan::DescriptorSetLayout;
 
 use super::common::{
-    next_handle, VulkanFfiError, BUFFER_REGISTRY, DESCRIPTOR_LAYOUT_REGISTRY,
-    DESCRIPTOR_POOL_REGISTRY, DESCRIPTOR_SET_REGISTRY, DEVICE_REGISTRY,
+    next_handle, VulkanFfiError, BUFFER_REGISTRY, DESCRIPTOR_LAYOUT_REGISTRY, DESCRIPTOR_POOL_REGISTRY,
+    DESCRIPTOR_SET_REGISTRY, DEVICE_REGISTRY,
 };
 
 /// Create a descriptor set layout for uniform buffers
@@ -126,11 +126,7 @@ pub extern "C" fn rt_vk_descriptor_layout_create_sampler(device_handle: u64) -> 
 pub extern "C" fn rt_vk_descriptor_layout_free(layout_handle: u64) -> i32 {
     #[cfg(feature = "vulkan")]
     {
-        if DESCRIPTOR_LAYOUT_REGISTRY
-            .lock()
-            .remove(&layout_handle)
-            .is_some()
-        {
+        if DESCRIPTOR_LAYOUT_REGISTRY.lock().remove(&layout_handle).is_some() {
             tracing::debug!("Descriptor layout {} freed", layout_handle);
             VulkanFfiError::Success as i32
         } else {
@@ -210,11 +206,7 @@ pub extern "C" fn rt_vk_descriptor_pool_create(device_handle: u64, max_sets: u32
 pub extern "C" fn rt_vk_descriptor_pool_free(pool_handle: u64) -> i32 {
     #[cfg(feature = "vulkan")]
     {
-        if DESCRIPTOR_POOL_REGISTRY
-            .lock()
-            .remove(&pool_handle)
-            .is_some()
-        {
+        if DESCRIPTOR_POOL_REGISTRY.lock().remove(&pool_handle).is_some() {
             tracing::debug!("Descriptor pool {} freed", pool_handle);
             VulkanFfiError::Success as i32
         } else {
@@ -251,11 +243,7 @@ pub extern "C" fn rt_vk_descriptor_pool_free(pool_handle: u64) -> i32 {
 /// rt_vk_device_free(device);
 /// ```
 #[no_mangle]
-pub extern "C" fn rt_vk_descriptor_set_allocate(
-    device_handle: u64,
-    pool_handle: u64,
-    layout_handle: u64,
-) -> u64 {
+pub extern "C" fn rt_vk_descriptor_set_allocate(device_handle: u64, pool_handle: u64, layout_handle: u64) -> u64 {
     #[cfg(feature = "vulkan")]
     {
         let device_registry = DEVICE_REGISTRY.lock();
@@ -358,10 +346,7 @@ pub extern "C" fn rt_vk_descriptor_set_update_buffer(
         let set_registry = DESCRIPTOR_SET_REGISTRY.lock();
         let buffer_registry = BUFFER_REGISTRY.lock();
 
-        if let (Some(desc_set), Some(buffer)) = (
-            set_registry.get(&set_handle),
-            buffer_registry.get(&buffer_handle),
-        ) {
+        if let (Some(desc_set), Some(buffer)) = (set_registry.get(&set_handle), buffer_registry.get(&buffer_handle)) {
             match desc_set.update_buffer(binding, buffer.as_ref(), offset, range) {
                 Ok(()) => {
                     tracing::debug!(

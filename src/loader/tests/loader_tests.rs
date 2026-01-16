@@ -4,16 +4,13 @@ use std::sync::Arc;
 use simple_loader::loader::ModuleLoader;
 use simple_loader::registry::ModuleRegistry;
 use simple_loader::smf::{
-    apply_relocations, hash_name, Arch, Platform, RelocationType, SectionType, SmfHeader,
-    SmfRelocation, SmfSection, SmfSymbol, SymbolBinding, SymbolTable, SymbolType,
-    SECTION_FLAG_EXEC, SECTION_FLAG_READ, SECTION_FLAG_WRITE, SMF_FLAG_EXECUTABLE,
-    SMF_FLAG_RELOADABLE, SMF_MAGIC,
+    apply_relocations, hash_name, Arch, Platform, RelocationType, SectionType, SmfHeader, SmfRelocation, SmfSection,
+    SmfSymbol, SymbolBinding, SymbolTable, SymbolType, SECTION_FLAG_EXEC, SECTION_FLAG_READ, SECTION_FLAG_WRITE,
+    SMF_FLAG_EXECUTABLE, SMF_FLAG_RELOADABLE, SMF_MAGIC,
 };
 
 fn push_struct<T: Copy>(buf: &mut Vec<u8>, value: &T) {
-    let slice = unsafe {
-        std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>())
-    };
+    let slice = unsafe { std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>()) };
     buf.extend_from_slice(slice);
 }
 
@@ -93,8 +90,7 @@ impl SmfBuilder {
     }
 
     fn local_symbol(self) -> Self {
-        self.with_sym_binding(SymbolBinding::Local)
-            .with_exported_count(0)
+        self.with_sym_binding(SymbolBinding::Local).with_exported_count(0)
     }
 
     fn build(self) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -107,8 +103,7 @@ impl SmfBuilder {
         let code_offset = section_table_offset + section_table_size;
 
         let reloc_offset = code_offset + self.code_bytes.len() as u64;
-        let reloc_size =
-            std::mem::size_of::<SmfRelocation>() as u64 * self.relocations.len() as u64;
+        let reloc_size = std::mem::size_of::<SmfRelocation>() as u64 * self.relocations.len() as u64;
         let symbol_table_offset = reloc_offset + reloc_size;
 
         let header = SmfHeader {
@@ -402,8 +397,7 @@ fn section_flags_correctly_identify_permissions() {
     assert!(data_section.is_writable());
 
     // Read-only section
-    let ro_section =
-        SmfBuilder::make_section(b"rodata", SectionType::RoData, SECTION_FLAG_READ, 0, 0, 16);
+    let ro_section = SmfBuilder::make_section(b"rodata", SectionType::RoData, SECTION_FLAG_READ, 0, 0, 16);
     assert!(!ro_section.is_executable());
     assert!(!ro_section.is_writable());
 
@@ -434,10 +428,7 @@ fn module_get_function_returns_none_for_data_symbol() {
 
     // get_function should return None for data symbol
     let func: Option<unsafe extern "C" fn()> = module.get_function("data_sym");
-    assert!(
-        func.is_none(),
-        "get_function should return None for data symbol"
-    );
+    assert!(func.is_none(), "get_function should return None for data symbol");
 
     // source_hash should be readable
     assert_eq!(module.source_hash(), 12345);
@@ -484,9 +475,7 @@ fn module_is_reloadable_checks_flag() {
     assert!(!module1.is_reloadable());
 
     // Reloadable module
-    let (_dir2, path2) = SmfBuilder::new("reloadable.smf", "entry")
-        .reloadable()
-        .build();
+    let (_dir2, path2) = SmfBuilder::new("reloadable.smf", "entry").reloadable().build();
 
     let module2 = loader.load(&path2).expect("should load");
     assert!(module2.is_reloadable());
@@ -601,9 +590,7 @@ fn registry_resolve_symbol_returns_none_for_unknown() {
 
 #[test]
 fn registry_resolve_symbol_ignores_local_symbols() {
-    let (_dir, path) = SmfBuilder::new("local.smf", "local_fn")
-        .local_symbol()
-        .build();
+    let (_dir, path) = SmfBuilder::new("local.smf", "local_fn").local_symbol().build();
 
     let registry = ModuleRegistry::new();
     registry.load(&path).unwrap();

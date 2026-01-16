@@ -46,13 +46,12 @@ mod tests;
 // Re-export public API
 pub use config::{CallType, FunctionRuntimeStats, ProfileConfig, ProfileMode, SequenceEvent};
 pub use diagram::{
-    generate_arch_diagram, generate_arch_from_events, generate_class_diagram,
-    generate_class_from_events, generate_sequence_diagram, generate_sequence_from_events,
-    DiagramFormat, DiagramOptions,
+    generate_arch_diagram, generate_arch_from_events, generate_class_diagram, generate_class_from_events,
+    generate_sequence_diagram, generate_sequence_from_events, DiagramFormat, DiagramOptions,
 };
 pub use feedback::LayoutFeedback;
 pub use profiler::{
-    collect_global_metrics, generate_global_feedback, global_profiler, record_call,
-    start_profiling, stop_profiling, RuntimeProfiler,
+    collect_global_metrics, generate_global_feedback, global_profiler, record_call, start_profiling, stop_profiling,
+    RuntimeProfiler,
 };
 pub use stats::{FunctionStats, RuntimeMetrics};

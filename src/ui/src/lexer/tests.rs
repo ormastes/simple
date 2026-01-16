@@ -10,10 +10,7 @@ fn test_text_only() {
     let tokens = tokenize("Hello World");
     assert_eq!(
         tokens,
-        vec![
-            SuiTokenKind::Text("Hello World".to_string()),
-            SuiTokenKind::Eof,
-        ]
+        vec![SuiTokenKind::Text("Hello World".to_string()), SuiTokenKind::Eof,]
     );
 }
 

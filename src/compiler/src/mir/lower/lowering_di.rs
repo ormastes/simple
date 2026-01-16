@@ -50,12 +50,7 @@ impl<'a> MirLowerer<'a> {
                         profile
                             .bindings
                             .iter()
-                            .map(|b| {
-                                format!(
-                                    "  - {} (scope: {:?}, priority: {})",
-                                    b.impl_type, b.scope, b.priority
-                                )
-                            })
+                            .map(|b| format!("  - {} (scope: {:?}, priority: {})", b.impl_type, b.scope, b.priority))
                             .collect::<Vec<_>>()
                             .join("\n")
                     })
@@ -81,10 +76,7 @@ impl<'a> MirLowerer<'a> {
                                 .bindings
                                 .iter()
                                 .map(|b| {
-                                    format!(
-                                        "  - {} (scope: {:?}, priority: {})",
-                                        b.impl_type, b.scope, b.priority
-                                    )
+                                    format!("  - {} (scope: {:?}, priority: {})", b.impl_type, b.scope, b.priority)
                                 })
                                 .collect::<Vec<_>>()
                                 .join("\n")
@@ -123,44 +115,36 @@ impl<'a> MirLowerer<'a> {
 
         // Add to dependency graph for validation
         if let Some(current_type) = self.di_resolution_stack.last() {
-            tracing::debug!(
-                "DI: Adding dependency edge: {} -> {}",
-                current_type,
-                impl_name
-            );
+            tracing::debug!("DI: Adding dependency edge: {} -> {}", current_type, impl_name);
             self.dependency_graph
                 .add_dependency(current_type.clone(), impl_name.clone());
         }
 
         // Push current type onto resolution stack
         self.di_resolution_stack.push(impl_name.clone());
-        tracing::debug!(
-            "DI: Resolution stack depth: {}",
-            self.di_resolution_stack.len()
-        );
+        tracing::debug!("DI: Resolution stack depth: {}", self.di_resolution_stack.len());
 
         // Check if the constructor has injectable parameters that need to be resolved
-        let constructor_args =
-            if let Some(param_info) = self.inject_functions.get(&impl_name).cloned() {
-                let mut args = Vec::new();
-                for (param_idx, (param_ty, is_injectable)) in param_info.iter().enumerate() {
-                    if *is_injectable {
-                        // Recursively resolve this parameter's dependency
-                        let injected = self.resolve_di_arg(*param_ty, &impl_name, param_idx)?;
-                        args.push(injected);
-                    } else {
-                        // Non-injectable parameters in a DI constructor is an error (#1018)
-                        return Err(MirLowerError::Unsupported(format!(
-                            "DI constructor '{}' has non-injectable parameter #{}: \
+        let constructor_args = if let Some(param_info) = self.inject_functions.get(&impl_name).cloned() {
+            let mut args = Vec::new();
+            for (param_idx, (param_ty, is_injectable)) in param_info.iter().enumerate() {
+                if *is_injectable {
+                    // Recursively resolve this parameter's dependency
+                    let injected = self.resolve_di_arg(*param_ty, &impl_name, param_idx)?;
+                    args.push(injected);
+                } else {
+                    // Non-injectable parameters in a DI constructor is an error (#1018)
+                    return Err(MirLowerError::Unsupported(format!(
+                        "DI constructor '{}' has non-injectable parameter #{}: \
                          All parameters in an @inject constructor must be marked as injectable.",
-                            impl_name, param_idx
-                        )));
-                    }
+                        impl_name, param_idx
+                    )));
                 }
-                args
-            } else {
-                Vec::new()
-            };
+            }
+            args
+        } else {
+            Vec::new()
+        };
 
         // Create new instance with resolved dependencies
         let instance_reg = self.with_func(|func, current_block| {

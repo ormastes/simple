@@ -7,9 +7,7 @@ use crate::patchset::PatchOp;
 use crate::render::RenderBackend;
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{Event, KeyCode, KeyEvent, MouseEvent};
-use crossterm::style::{
-    Attribute as TermAttr, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
-};
+use crossterm::style::{Attribute as TermAttr, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::{self, Clear, ClearType};
 use crossterm::{execute, queue};
 use std::collections::HashMap;
@@ -224,11 +222,7 @@ impl TuiContext {
         match self.focus {
             Some(current) => {
                 if let Some(idx) = self.focus_order.iter().position(|&id| id == current) {
-                    let prev_idx = if idx == 0 {
-                        self.focus_order.len() - 1
-                    } else {
-                        idx - 1
-                    };
+                    let prev_idx = if idx == 0 { self.focus_order.len() - 1 } else { idx - 1 };
                     self.focus = Some(self.focus_order[prev_idx]);
                 }
             }
@@ -289,17 +283,8 @@ impl TuiRenderer {
     }
 
     /// Render a single node and its children
-    fn render_node(
-        &mut self,
-        ctx: &TuiContext,
-        node_id: NodeId,
-        x: u16,
-        y: u16,
-    ) -> Result<(u16, u16), TuiError> {
-        let node = ctx
-            .nodes
-            .get(&node_id)
-            .ok_or(TuiError::NodeNotFound(node_id))?;
+    fn render_node(&mut self, ctx: &TuiContext, node_id: NodeId, x: u16, y: u16) -> Result<(u16, u16), TuiError> {
+        let node = ctx.nodes.get(&node_id).ok_or(TuiError::NodeNotFound(node_id))?;
         let is_focused = ctx.focus == Some(node_id);
 
         match &node.kind {
@@ -362,11 +347,7 @@ impl TuiRenderer {
                 Ok((width, current_y - y))
             }
             TuiNodeKind::Text(content) => {
-                queue!(
-                    self.stdout,
-                    MoveTo(x, y),
-                    SetForegroundColor(self.theme.text_color)
-                )?;
+                queue!(self.stdout, MoveTo(x, y), SetForegroundColor(self.theme.text_color))?;
                 write!(self.stdout, "{}", content)?;
                 queue!(self.stdout, ResetColor)?;
                 Ok((content.len() as u16, 1))
@@ -413,8 +394,7 @@ impl TuiRenderer {
                 write!(self.stdout, "]")?;
 
                 if is_focused {
-                    let cursor_pos =
-                        (x + 1 + (*cursor).min(display_value.len()) as u16).min(x + width - 2);
+                    let cursor_pos = (x + 1 + (*cursor).min(display_value.len()) as u16).min(x + width - 2);
                     queue!(self.stdout, MoveTo(cursor_pos, y))?;
                 }
 
@@ -430,11 +410,7 @@ impl TuiRenderer {
                 Ok((0, current_y - y))
             }
             TuiNodeKind::ListItem { bullet } => {
-                queue!(
-                    self.stdout,
-                    MoveTo(x, y),
-                    SetForegroundColor(self.theme.text_color)
-                )?;
+                queue!(self.stdout, MoveTo(x, y), SetForegroundColor(self.theme.text_color))?;
                 write!(self.stdout, "{} ", bullet)?;
                 let mut width = 2u16;
                 for &child_id in &node.children {
@@ -535,19 +511,11 @@ impl RenderBackend for TuiRenderer {
     type Context = TuiContext;
     type Error = TuiError;
 
-    fn create_element(
-        &mut self,
-        ctx: &mut Self::Context,
-        tag: &str,
-    ) -> Result<Self::Node, Self::Error> {
+    fn create_element(&mut self, ctx: &mut Self::Context, tag: &str) -> Result<Self::Node, Self::Error> {
         let id = ctx.alloc_id();
         let kind = match tag {
-            "div" | "section" | "article" | "main" | "header" | "footer" | "nav" => {
-                TuiNodeKind::Box
-            }
-            "span" | "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
-                TuiNodeKind::Text(String::new())
-            }
+            "div" | "section" | "article" | "main" | "header" | "footer" | "nav" => TuiNodeKind::Box,
+            "span" | "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => TuiNodeKind::Text(String::new()),
             "button" => TuiNodeKind::Button {
                 label: String::new(),
                 focused: false,
@@ -577,11 +545,7 @@ impl RenderBackend for TuiRenderer {
         Ok(node)
     }
 
-    fn create_text(
-        &mut self,
-        ctx: &mut Self::Context,
-        text: &str,
-    ) -> Result<Self::Node, Self::Error> {
+    fn create_text(&mut self, ctx: &mut Self::Context, text: &str) -> Result<Self::Node, Self::Error> {
         let id = ctx.alloc_id();
         Ok(TuiNode {
             id,
@@ -593,12 +557,7 @@ impl RenderBackend for TuiRenderer {
         })
     }
 
-    fn set_attr(
-        &mut self,
-        node: &mut Self::Node,
-        name: &str,
-        value: &str,
-    ) -> Result<(), Self::Error> {
+    fn set_attr(&mut self, node: &mut Self::Node, name: &str, value: &str) -> Result<(), Self::Error> {
         node.attrs.insert(name.to_string(), value.to_string());
         Ok(())
     }
@@ -613,31 +572,18 @@ impl RenderBackend for TuiRenderer {
         Ok(())
     }
 
-    fn append_child(
-        &mut self,
-        parent: &mut Self::Node,
-        child: Self::Node,
-    ) -> Result<(), Self::Error> {
+    fn append_child(&mut self, parent: &mut Self::Node, child: Self::Node) -> Result<(), Self::Error> {
         parent.children.push(child.id);
         Ok(())
     }
 
-    fn insert_child(
-        &mut self,
-        parent: &mut Self::Node,
-        index: usize,
-        child: Self::Node,
-    ) -> Result<(), Self::Error> {
+    fn insert_child(&mut self, parent: &mut Self::Node, index: usize, child: Self::Node) -> Result<(), Self::Error> {
         let idx = index.min(parent.children.len());
         parent.children.insert(idx, child.id);
         Ok(())
     }
 
-    fn remove_child(
-        &mut self,
-        parent: &mut Self::Node,
-        child: &Self::Node,
-    ) -> Result<(), Self::Error> {
+    fn remove_child(&mut self, parent: &mut Self::Node, child: &Self::Node) -> Result<(), Self::Error> {
         parent.children.retain(|&id| id != child.id);
         Ok(())
     }
@@ -649,11 +595,7 @@ impl RenderBackend for TuiRenderer {
                     node.kind = TuiNodeKind::Text(text.clone());
                 }
             }
-            PatchOp::SetAttr {
-                node_id,
-                name,
-                value,
-            } => {
+            PatchOp::SetAttr { node_id, name, value } => {
                 if let Some(node) = ctx.nodes.get_mut(node_id) {
                     node.attrs.insert(name.clone(), value.clone());
                 }
@@ -663,10 +605,7 @@ impl RenderBackend for TuiRenderer {
                     node.attrs.remove(name);
                 }
             }
-            PatchOp::RemoveChild {
-                parent_id,
-                child_id,
-            } => {
+            PatchOp::RemoveChild { parent_id, child_id } => {
                 if let Some(parent) = ctx.nodes.get_mut(parent_id) {
                     parent.children.retain(|&id| id != *child_id);
                 }
@@ -681,11 +620,7 @@ impl RenderBackend for TuiRenderer {
         ctx.nodes.get(&id)
     }
 
-    fn get_node_mut<'a>(
-        &mut self,
-        ctx: &'a mut Self::Context,
-        id: NodeId,
-    ) -> Option<&'a mut Self::Node> {
+    fn get_node_mut<'a>(&mut self, ctx: &'a mut Self::Context, id: NodeId) -> Option<&'a mut Self::Node> {
         ctx.nodes.get_mut(&id)
     }
 }

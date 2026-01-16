@@ -125,10 +125,7 @@ impl Lowerer {
         let target = self.resolve_type(target_type)?;
 
         Ok(HirExpr {
-            kind: HirExprKind::Cast {
-                expr: expr_hir,
-                target,
-            },
+            kind: HirExprKind::Cast { expr: expr_hir, target },
             ty: target,
         })
     }

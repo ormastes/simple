@@ -150,10 +150,7 @@ pub unsafe extern "C" fn simple_concurrent_queue_free(queue: *mut ConcurrentQueu
 
 /// Push a value onto the queue
 #[no_mangle]
-pub unsafe extern "C" fn simple_concurrent_queue_push(
-    queue: *mut ConcurrentQueue,
-    value: RuntimeValue,
-) {
+pub unsafe extern "C" fn simple_concurrent_queue_push(queue: *mut ConcurrentQueue, value: RuntimeValue) {
     if let Some(q) = queue.as_ref() {
         q.push(value);
     }
@@ -163,9 +160,7 @@ pub unsafe extern "C" fn simple_concurrent_queue_push(
 ///
 /// Returns the value, or RuntimeValue::NIL if empty
 #[no_mangle]
-pub unsafe extern "C" fn simple_concurrent_queue_try_pop(
-    queue: *mut ConcurrentQueue,
-) -> RuntimeValue {
+pub unsafe extern "C" fn simple_concurrent_queue_try_pop(queue: *mut ConcurrentQueue) -> RuntimeValue {
     if let Some(q) = queue.as_ref() {
         q.try_pop().unwrap_or(RuntimeValue::NIL)
     } else {

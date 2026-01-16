@@ -3,9 +3,7 @@
 //! Re-exports the shared transport utilities from simple-common.
 
 use crate::protocol::Message;
-pub use simple_common::protocol::{
-    read_message as read_generic, write_message as write_generic, TransportError,
-};
+pub use simple_common::protocol::{read_message as read_generic, write_message as write_generic, TransportError};
 use std::io::{BufRead, Write};
 
 /// Read an LSP message from stdin

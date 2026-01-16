@@ -93,12 +93,7 @@ mod tests {
 
         let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
 
-        let path = ModulePath::new(vec![
-            "crate".into(),
-            "sys".into(),
-            "http".into(),
-            "router".into(),
-        ]);
+        let path = ModulePath::new(vec!["crate".into(), "sys".into(), "http".into(), "router".into()]);
         let resolved = resolver.resolve(&path, &src.join("main.spl")).unwrap();
 
         assert_eq!(resolved.path, http.join("router.spl"));
@@ -161,8 +156,7 @@ auto import router.route
         let mut features = std::collections::HashSet::new();
         features.insert("strict_null".into());
 
-        let resolver = ModuleResolver::new(dir.path().to_path_buf(), dir.path().join("src"))
-            .with_features(features);
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), dir.path().join("src")).with_features(features);
 
         assert!(resolver.is_feature_enabled("strict_null"));
         assert!(!resolver.is_feature_enabled("other_feature"));
@@ -241,9 +235,7 @@ auto import router.route
         assert!(result
             .iter()
             .any(|s| s.name == "Router" && s.kind == SymKind::ValueOrType));
-        assert!(result
-            .iter()
-            .any(|s| s.name == "route" && s.kind == SymKind::Macro));
+        assert!(result.iter().any(|s| s.name == "route" && s.kind == SymKind::Macro));
         assert!(!result.iter().any(|s| s.name == "get")); // Not in auto import
     }
 
@@ -263,10 +255,7 @@ auto import router.route
 
         let result = resolver.check_circular_dependencies();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Circular dependency"));
+        assert!(result.unwrap_err().to_string().contains("Circular dependency"));
     }
 
     // ========================================================================
@@ -387,12 +376,8 @@ auto import router.route
             ..Default::default()
         };
 
-        assert!(manifest
-            .validate_function_effects("test", &[Effect::Pure])
-            .is_ok());
-        assert!(manifest
-            .validate_function_effects("test", &[Effect::Io])
-            .is_ok());
+        assert!(manifest.validate_function_effects("test", &[Effect::Pure]).is_ok());
+        assert!(manifest.validate_function_effects("test", &[Effect::Io]).is_ok());
         assert!(manifest
             .validate_function_effects("test", &[Effect::Pure, Effect::Io])
             .is_ok());
@@ -429,9 +414,7 @@ auto import router.route
             ..Default::default()
         };
 
-        assert!(manifest
-            .validate_function_effects("test", &[Effect::Async])
-            .is_ok());
+        assert!(manifest.validate_function_effects("test", &[Effect::Async]).is_ok());
         assert!(manifest
             .validate_function_effects("test", &[Effect::Pure, Effect::Async])
             .is_ok());
@@ -492,11 +475,7 @@ auto import router.route
         fs::create_dir_all(&child).unwrap();
 
         // Child tries [pure, net] but parent only allows [pure, io]
-        fs::write(
-            child.join("__init__.spl"),
-            "mod child\nrequires [pure, net]",
-        )
-        .unwrap();
+        fs::write(child.join("__init__.spl"), "mod child\nrequires [pure, net]").unwrap();
 
         let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
 

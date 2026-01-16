@@ -93,9 +93,7 @@ fn configure_job_limits(job: &HANDLE, config: &SandboxConfig) -> SandboxResult<(
             &info as *const _ as *const _,
             std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
         )
-        .map_err(|e| {
-            SandboxError::ResourceLimit(format!("Failed to set Job Object limits: {}", e))
-        })?;
+        .map_err(|e| SandboxError::ResourceLimit(format!("Failed to set Job Object limits: {}", e)))?;
 
         tracing::debug!("Configured Job Object limits");
     }
@@ -108,9 +106,8 @@ fn assign_to_job(job: &HANDLE) -> SandboxResult<()> {
     unsafe {
         let process = GetCurrentProcess();
 
-        AssignProcessToJobObject(*job, process).map_err(|e| {
-            SandboxError::Config(format!("Failed to assign process to Job Object: {}", e))
-        })?;
+        AssignProcessToJobObject(*job, process)
+            .map_err(|e| SandboxError::Config(format!("Failed to assign process to Job Object: {}", e)))?;
 
         tracing::debug!("Assigned current process to Job Object");
     }
@@ -129,18 +126,12 @@ fn apply_network_isolation(mode: &NetworkMode) -> SandboxResult<()> {
             Ok(())
         }
         NetworkMode::None => {
-            tracing::warn!(
-                "Network isolation on Windows requires AppContainer or Windows Firewall rules"
-            );
-            tracing::info!(
-                "Consider using: simple run --sandbox=docker script.spl or configure Windows Firewall"
-            );
+            tracing::warn!("Network isolation on Windows requires AppContainer or Windows Firewall rules");
+            tracing::info!("Consider using: simple run --sandbox=docker script.spl or configure Windows Firewall");
             Ok(())
         }
         NetworkMode::AllowList | NetworkMode::BlockList => {
-            tracing::warn!(
-                "Domain filtering on Windows requires AppContainer or Windows Firewall rules"
-            );
+            tracing::warn!("Domain filtering on Windows requires AppContainer or Windows Firewall rules");
             Ok(())
         }
     }
@@ -161,9 +152,7 @@ fn apply_filesystem_isolation(
         }
         FilesystemMode::ReadOnly => {
             tracing::debug!("Filesystem: Read-only with {} paths", read_paths.len());
-            tracing::warn!(
-                "Filesystem isolation on Windows requires AppContainer or NTFS permissions"
-            );
+            tracing::warn!("Filesystem isolation on Windows requires AppContainer or NTFS permissions");
             Ok(())
         }
         FilesystemMode::Restricted => {
@@ -172,9 +161,7 @@ fn apply_filesystem_isolation(
                 read_paths.len(),
                 write_paths.len()
             );
-            tracing::warn!(
-                "Filesystem isolation on Windows requires AppContainer or NTFS permissions"
-            );
+            tracing::warn!("Filesystem isolation on Windows requires AppContainer or NTFS permissions");
             Ok(())
         }
         FilesystemMode::Overlay => {

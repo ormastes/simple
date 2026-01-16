@@ -238,9 +238,7 @@ impl CudaDevice {
             if err != 0 {
                 return Err(std::mem::transmute(err));
             }
-            let name = CStr::from_ptr(name_buf.as_ptr())
-                .to_string_lossy()
-                .into_owned();
+            let name = CStr::from_ptr(name_buf.as_ptr()).to_string_lossy().into_owned();
 
             // Get compute capability
             let mut major = 0i32;

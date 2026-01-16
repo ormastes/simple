@@ -85,9 +85,7 @@ pub extern "C" fn rt_db_open(url: *const c_char) -> u64 {
     match Database::open(url) {
         Ok(db) => {
             let handle_id = next_handle_id();
-            DB_HANDLES
-                .lock()
-                .insert(handle_id, Box::new(DbHandle { db }));
+            DB_HANDLES.lock().insert(handle_id, Box::new(DbHandle { db }));
             handle_id
         }
         Err(e) => {
@@ -161,12 +159,7 @@ pub extern "C" fn rt_db_query(
 ///
 /// Returns number of affected rows, or -1 on error.
 #[no_mangle]
-pub extern "C" fn rt_db_execute(
-    handle: u64,
-    sql: *const c_char,
-    params: *const u64,
-    param_count: usize,
-) -> i64 {
+pub extern "C" fn rt_db_execute(handle: u64, sql: *const c_char, params: *const u64, param_count: usize) -> i64 {
     let sql = unsafe {
         if sql.is_null() {
             return -1;
@@ -231,12 +224,7 @@ pub extern "C" fn rt_db_driver_name(handle: u64) -> *const c_char {
 
 /// Create a connection pool.
 #[no_mangle]
-pub extern "C" fn rt_db_pool_new(
-    url: *const c_char,
-    min_conns: u32,
-    max_conns: u32,
-    acquire_timeout_ms: u64,
-) -> u64 {
+pub extern "C" fn rt_db_pool_new(url: *const c_char, min_conns: u32, max_conns: u32, acquire_timeout_ms: u64) -> u64 {
     let url = unsafe {
         if url.is_null() {
             return 0;
@@ -255,9 +243,7 @@ pub extern "C" fn rt_db_pool_new(
     match Pool::new(url, config) {
         Ok(pool) => {
             let handle_id = next_handle_id();
-            POOL_HANDLES
-                .lock()
-                .insert(handle_id, Box::new(PoolHandle { pool }));
+            POOL_HANDLES.lock().insert(handle_id, Box::new(PoolHandle { pool }));
             handle_id
         }
         Err(e) => {
@@ -287,9 +273,7 @@ pub extern "C" fn rt_db_pool_acquire(pool_handle: u64) -> u64 {
     match Database::open(&url) {
         Ok(db) => {
             let handle_id = next_handle_id();
-            DB_HANDLES
-                .lock()
-                .insert(handle_id, Box::new(DbHandle { db }));
+            DB_HANDLES.lock().insert(handle_id, Box::new(DbHandle { db }));
             handle_id
         }
         Err(e) => {
@@ -577,8 +561,7 @@ thread_local! {
 }
 
 fn store_last_error(error: DbError) {
-    let msg =
-        CString::new(error.to_string()).unwrap_or_else(|_| CString::new("unknown error").unwrap());
+    let msg = CString::new(error.to_string()).unwrap_or_else(|_| CString::new("unknown error").unwrap());
     LAST_ERROR.with(|e| {
         *e.borrow_mut() = Some(msg);
     });

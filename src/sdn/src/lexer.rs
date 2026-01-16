@@ -245,11 +245,7 @@ impl<'a> Lexer<'a> {
 
         let end_pos = self.current_pos;
         let lexeme = self.source[start_pos..end_pos].to_string();
-        Token::new(
-            kind,
-            Span::new(start_pos, end_pos, start_line, start_column),
-            lexeme,
-        )
+        Token::new(kind, Span::new(start_pos, end_pos, start_line, start_column), lexeme)
     }
 
     fn peek(&mut self) -> Option<char> {
@@ -457,8 +453,7 @@ impl<'a> Lexer<'a> {
         while let Some(ch) = self.peek() {
             // Allow common path/URL characters in bare identifiers
             // This includes # for URL anchors (e.g., file.md#section)
-            if ch.is_alphanumeric() || ch == '_' || ch == '/' || ch == '.' || ch == '-' || ch == '#'
-            {
+            if ch.is_alphanumeric() || ch == '_' || ch == '/' || ch == '.' || ch == '-' || ch == '#' {
                 self.advance();
                 value.push(ch);
             } else {
@@ -515,10 +510,7 @@ mod tests {
         assert_eq!(lex("42"), vec![TokenKind::Integer(42), TokenKind::Eof]);
         assert_eq!(lex("-17"), vec![TokenKind::Integer(-17), TokenKind::Eof]);
         assert_eq!(lex("3.15"), vec![TokenKind::Float(3.15), TokenKind::Eof]);
-        assert_eq!(
-            lex("1_000_000"),
-            vec![TokenKind::Integer(1000000), TokenKind::Eof]
-        );
+        assert_eq!(lex("1_000_000"), vec![TokenKind::Integer(1000000), TokenKind::Eof]);
     }
 
     #[test]

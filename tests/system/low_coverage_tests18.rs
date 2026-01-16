@@ -175,8 +175,8 @@ mod loader_arch_validate_tests {
 // ============================================================================
 mod compiler_value_extended_tests {
     use simple_compiler::value::{
-        BorrowMutValue, BorrowValue, ChannelValue, FutureValue, GeneratorState, GeneratorValue,
-        ManualHandleValue, ManualSharedValue, ManualUniqueValue, ManualWeakValue, ThreadPoolValue,
+        BorrowMutValue, BorrowValue, ChannelValue, FutureValue, GeneratorState, GeneratorValue, ManualHandleValue,
+        ManualSharedValue, ManualUniqueValue, ManualWeakValue, ThreadPoolValue,
     };
 
     #[test]

@@ -9,14 +9,12 @@ use std::time::Instant;
 use simple_compiler::{
     get_coverage_output_path, get_global_coverage, init_coverage, is_coverage_enabled,
     runtime_profile::{
-        generate_arch_from_events, generate_class_from_events, generate_sequence_from_events,
-        global_profiler, DiagramOptions,
+        generate_arch_from_events, generate_class_from_events, generate_sequence_from_events, global_profiler,
+        DiagramOptions,
     },
     save_global_coverage,
 };
-use simple_driver::doctest::{
-    discover_doctests, discover_md_doctests, run_examples, DoctestStatus,
-};
+use simple_driver::doctest::{discover_doctests, discover_md_doctests, run_examples, DoctestStatus};
 use simple_driver::runner::Runner;
 
 use super::test_discovery::{discover_tests, is_test_file, matches_tag};
@@ -166,10 +164,7 @@ fn parse_test_output(output: &str) -> (usize, usize) {
         if line.contains("examples") && line.contains("failure") {
             // Extract numbers
             let parts: Vec<&str> = line.split(|c: char| !c.is_numeric()).collect();
-            let numbers: Vec<usize> = parts
-                .iter()
-                .filter_map(|p| p.parse::<usize>().ok())
-                .collect();
+            let numbers: Vec<usize> = parts.iter().filter_map(|p| p.parse::<usize>().ok()).collect();
 
             if numbers.len() >= 2 {
                 let total = numbers[0];
@@ -249,10 +244,7 @@ fn run_doctests(options: &TestOptions, quiet: bool) -> Vec<TestFileResult> {
     }
 
     if options.doctest_doc {
-        let doc_dir = options
-            .doctest_doc_dir
-            .clone()
-            .unwrap_or_else(|| cwd.join("doc"));
+        let doc_dir = options.doctest_doc_dir.clone().unwrap_or_else(|| cwd.join("doc"));
 
         if doc_dir.is_dir() {
             if !quiet {
@@ -271,11 +263,7 @@ fn run_doctests(options: &TestOptions, quiet: bool) -> Vec<TestFileResult> {
                 }
 
                 if !quiet {
-                    println!(
-                        "Found {} doctest example(s) in {}",
-                        examples.len(),
-                        path.display()
-                    );
+                    println!("Found {} doctest example(s) in {}", examples.len(), path.display());
                 }
 
                 let start = Instant::now();
@@ -283,10 +271,8 @@ fn run_doctests(options: &TestOptions, quiet: bool) -> Vec<TestFileResult> {
                 let duration_ms = start.elapsed().as_millis() as u64;
 
                 // Group results by source file
-                let mut file_results: std::collections::HashMap<
-                    PathBuf,
-                    (usize, usize, Vec<String>),
-                > = std::collections::HashMap::new();
+                let mut file_results: std::collections::HashMap<PathBuf, (usize, usize, Vec<String>)> =
+                    std::collections::HashMap::new();
 
                 for result in doctest_results {
                     let entry = file_results
@@ -305,11 +291,7 @@ fn run_doctests(options: &TestOptions, quiet: bool) -> Vec<TestFileResult> {
                                 .unwrap_or_default();
                             entry.2.push(format!(
                                 "Line {}{}:\n  Expected: {:?}\n  Actual: {}\n  Error: {}",
-                                result.example.start_line,
-                                section,
-                                result.example.expected,
-                                result.actual,
-                                msg
+                                result.example.start_line, section, result.example.expected, result.actual, msg
                             ));
                         }
                     }
@@ -348,11 +330,7 @@ fn run_doctests(options: &TestOptions, quiet: bool) -> Vec<TestFileResult> {
             }
             Err(e) => {
                 if !quiet {
-                    eprintln!(
-                        "Warning: Failed to discover doctests in {}: {}",
-                        path.display(),
-                        e
-                    );
+                    eprintln!("Warning: Failed to discover doctests in {}: {}", path.display(), e);
                 }
             }
         }
@@ -366,10 +344,7 @@ fn run_md_doctests(options: &TestOptions, quiet: bool) -> Vec<TestFileResult> {
     let mut results = Vec::new();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    let doc_dir = options
-        .doctest_md_dir
-        .clone()
-        .unwrap_or_else(|| cwd.join("doc"));
+    let doc_dir = options.doctest_md_dir.clone().unwrap_or_else(|| cwd.join("doc"));
 
     if !doc_dir.is_dir() {
         if !quiet {
@@ -392,10 +367,7 @@ fn run_md_doctests(options: &TestOptions, quiet: bool) -> Vec<TestFileResult> {
             }
 
             if !quiet {
-                println!(
-                    "Found {} doctest example(s) via README.md hierarchy",
-                    examples.len()
-                );
+                println!("Found {} doctest example(s) via README.md hierarchy", examples.len());
             }
 
             let start = Instant::now();
@@ -423,11 +395,7 @@ fn run_md_doctests(options: &TestOptions, quiet: bool) -> Vec<TestFileResult> {
                             .unwrap_or_default();
                         entry.2.push(format!(
                             "Line {}{}:\n  Expected: {:?}\n  Actual: {}\n  Error: {}",
-                            result.example.start_line,
-                            section,
-                            result.example.expected,
-                            result.actual,
-                            msg
+                            result.example.start_line, section, result.example.expected, result.actual, msg
                         ));
                     }
                 }
@@ -479,8 +447,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     let quiet = matches!(options.format, OutputFormat::Json);
 
     // Enable diagram recording if any diagram option is enabled
-    let diagrams_enabled =
-        options.seq_diagram || options.class_diagram || options.arch_diagram || options.diagram_all;
+    let diagrams_enabled = options.seq_diagram || options.class_diagram || options.arch_diagram || options.diagram_all;
     if diagrams_enabled {
         simple_runtime::value::diagram_ffi::enable_diagrams();
         simple_runtime::value::diagram_ffi::clear_diagram_data();
@@ -573,10 +540,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
                 .doctest_src_dir
                 .clone()
                 .unwrap_or_else(|| cwd.join("simple/std_lib/src"));
-            let doc_dir = options
-                .doctest_doc_dir
-                .clone()
-                .unwrap_or_else(|| cwd.join("doc"));
+            let doc_dir = options.doctest_doc_dir.clone().unwrap_or_else(|| cwd.join("doc"));
 
             if options.doctest_src && src_dir.is_dir() {
                 if let Ok(examples) = discover_doctests(&src_dir) {
@@ -592,10 +556,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
         if options.doctest_md {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let md_dir = options
-                .doctest_md_dir
-                .clone()
-                .unwrap_or_else(|| cwd.join("doc"));
+            let md_dir = options.doctest_md_dir.clone().unwrap_or_else(|| cwd.join("doc"));
 
             if md_dir.is_dir() {
                 if let Ok(examples) = discover_md_doctests(&md_dir) {
@@ -664,11 +625,9 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         .map(|result| result.path.clone())
         .collect();
 
-    if let Err(e) = simple_driver::feature_db::update_feature_db_from_sspec(
-        &feature_db_path,
-        &sspec_files,
-        &failed_specs,
-    ) {
+    if let Err(e) =
+        simple_driver::feature_db::update_feature_db_from_sspec(&feature_db_path, &sspec_files, &failed_specs)
+    {
         total_failed += 1;
         results.push(TestFileResult {
             path: feature_db_path,
@@ -872,11 +831,7 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
 }
 
 /// Generate diagrams from test execution using the global profiler and diagram_ffi
-fn generate_test_diagrams(
-    options: &TestOptions,
-    _results: &[TestFileResult],
-    quiet: bool,
-) -> Option<Vec<PathBuf>> {
+fn generate_test_diagrams(options: &TestOptions, _results: &[TestFileResult], quiet: bool) -> Option<Vec<PathBuf>> {
     use simple_runtime::value::diagram_ffi;
     use std::fs;
 
@@ -940,10 +895,7 @@ fn generate_test_diagrams(
     };
 
     if !quiet && has_ffi_events {
-        println!(
-            "Using {} events from interpreter call tracing",
-            ffi_events.len()
-        );
+        println!("Using {} events from interpreter call tracing", ffi_events.len());
     }
 
     // Setup output directory
@@ -1063,8 +1015,8 @@ pub fn watch_tests(options: TestOptions) -> Result<(), String> {
 
     // Set up filesystem watch
     let (tx, rx) = channel();
-    let mut watcher: RecommendedWatcher = RecommendedWatcher::new(tx, Config::default())
-        .map_err(|e| format!("Failed to initialize watcher: {}", e))?;
+    let mut watcher: RecommendedWatcher =
+        RecommendedWatcher::new(tx, Config::default()).map_err(|e| format!("Failed to initialize watcher: {}", e))?;
 
     watcher
         .watch(&test_path, RecursiveMode::Recursive)
@@ -1118,10 +1070,7 @@ pub fn watch_tests(options: TestOptions) -> Result<(), String> {
                 if !quiet {
                     print_summary(&result, options.format);
                     println!();
-                    println!(
-                        "Completed in {:.2}s. Watching for changes...",
-                        duration.as_secs_f64()
-                    );
+                    println!("Completed in {:.2}s. Watching for changes...", duration.as_secs_f64());
                 }
             }
             Ok(Err(e)) => {

@@ -90,9 +90,8 @@ pub extern "C" fn simple_runtime_abi_version() -> u32 {
 
 // Re-export runtime value types for codegen
 pub use value::{
-    HeapHeader, HeapObjectType, RuntimeArray, RuntimeChannel, RuntimeClosure, RuntimeEnum,
-    RuntimeObject, RuntimeShared, RuntimeString, RuntimeTuple, RuntimeUnique, RuntimeValue,
-    RuntimeWeak,
+    HeapHeader, HeapObjectType, RuntimeArray, RuntimeChannel, RuntimeClosure, RuntimeEnum, RuntimeObject,
+    RuntimeShared, RuntimeString, RuntimeTuple, RuntimeUnique, RuntimeValue, RuntimeWeak,
 };
 
 // Re-export AOP runtime FFI functions
@@ -234,8 +233,8 @@ pub use value::RuntimeDict;
 // Re-export contract violation types and FFI functions (CTR-050-054)
 pub use value::{
     rt_contract_violation_free, rt_contract_violation_func_name, rt_contract_violation_kind,
-    rt_contract_violation_message, rt_contract_violation_new, rt_is_contract_violation,
-    ContractViolationKind, RuntimeContractViolation,
+    rt_contract_violation_message, rt_contract_violation_new, rt_is_contract_violation, ContractViolationKind,
+    RuntimeContractViolation,
 };
 
 // Re-export GPU runtime FFI functions
@@ -287,8 +286,8 @@ pub use value::{
 
 // Re-export CUDA runtime types and FFI functions
 pub use cuda_runtime::{
-    get_device_count, rt_cuda_available, rt_cuda_device_count, rt_cuda_init, CudaDevice,
-    CudaDevicePtr, CudaError, CudaKernel, CudaModule, CudaResult,
+    get_device_count, rt_cuda_available, rt_cuda_device_count, rt_cuda_init, CudaDevice, CudaDevicePtr, CudaError,
+    CudaKernel, CudaModule, CudaResult,
 };
 
 // Re-export Vulkan runtime types and functions
@@ -386,9 +385,8 @@ pub use parallel::{
 
 // Re-export coverage instrumentation types and FFI functions
 pub use coverage::{
-    rt_coverage_clear, rt_coverage_condition_probe, rt_coverage_decision_probe,
-    rt_coverage_dump_sdn, rt_coverage_enabled, rt_coverage_free_sdn, rt_coverage_path_finalize,
-    rt_coverage_path_probe, CoverageData,
+    rt_coverage_clear, rt_coverage_condition_probe, rt_coverage_decision_probe, rt_coverage_dump_sdn,
+    rt_coverage_enabled, rt_coverage_free_sdn, rt_coverage_path_finalize, rt_coverage_path_probe, CoverageData,
 };
 
 // Re-export concurrent collections types and FFI functions (#1108-#1112)
@@ -432,8 +430,8 @@ pub use concurrent::{
 
 // Re-export sandbox types and functions (#916-923)
 pub use sandbox::{
-    apply_sandbox, FilesystemIsolation, FilesystemMode, NetworkIsolation, NetworkMode,
-    ResourceLimits, SandboxConfig, SandboxError, SandboxResult,
+    apply_sandbox, FilesystemIsolation, FilesystemMode, NetworkIsolation, NetworkMode, ResourceLimits, SandboxConfig,
+    SandboxError, SandboxResult,
 };
 
 // Re-export monoio runtime types and functions (#1730-1759)

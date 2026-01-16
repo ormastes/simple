@@ -19,10 +19,7 @@ impl<'a> Parser<'a> {
         self.parse_enum_with_attrs(vec![])
     }
 
-    pub(crate) fn parse_enum_with_attrs(
-        &mut self,
-        attributes: Vec<Attribute>,
-    ) -> Result<Node, ParseError> {
+    pub(crate) fn parse_enum_with_attrs(&mut self, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Enum)?;
         self.parse_enum_body(start_span, attributes)
@@ -34,21 +31,14 @@ impl<'a> Parser<'a> {
         self.parse_union_with_attrs(vec![])
     }
 
-    pub(crate) fn parse_union_with_attrs(
-        &mut self,
-        attributes: Vec<Attribute>,
-    ) -> Result<Node, ParseError> {
+    pub(crate) fn parse_union_with_attrs(&mut self, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Union)?;
         self.parse_enum_body(start_span, attributes)
     }
 
     /// Shared parsing logic for enum and union bodies
-    fn parse_enum_body(
-        &mut self,
-        start_span: Span,
-        attributes: Vec<Attribute>,
-    ) -> Result<Node, ParseError> {
+    fn parse_enum_body(&mut self, start_span: Span, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         let name = self.expect_identifier()?;
         let generic_params = self.parse_generic_params_as_strings()?;
         let where_clause = self.parse_where_clause()?;
@@ -73,9 +63,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse enum body: variants and optional methods
-    fn parse_enum_variants_and_methods(
-        &mut self,
-    ) -> Result<(Vec<EnumVariant>, Vec<FunctionDef>), ParseError> {
+    fn parse_enum_variants_and_methods(&mut self) -> Result<(Vec<EnumVariant>, Vec<FunctionDef>), ParseError> {
         self.debug_enter("parse_enum_variants_and_methods");
         let mut variants = Vec::new();
         let mut methods = Vec::new();
@@ -95,8 +83,7 @@ impl<'a> Parser<'a> {
                 || self.check(&TokenKind::Async)
                 || self.check(&TokenKind::At)
                 || self.check(&TokenKind::Hash)
-                || (self.check(&TokenKind::Pub)
-                    && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async)))
+                || (self.check(&TokenKind::Pub) && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async)))
             {
                 // Parse method
                 let item = self.parse_item()?;
@@ -162,10 +149,7 @@ impl<'a> Parser<'a> {
                         // This is a named field: `name: Type`
                         self.advance();
                         let ty = self.parse_type()?;
-                        EnumField {
-                            name: Some(name),
-                            ty,
-                        }
+                        EnumField { name: Some(name), ty }
                     } else {
                         // Not a named field, backtrack and parse as type
                         // Restore position (put current token back)

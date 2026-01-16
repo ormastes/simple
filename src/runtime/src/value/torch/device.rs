@@ -35,9 +35,7 @@ pub extern "C" fn rt_torch_to_device(tensor_handle: u64, device_code: i32) -> u6
 
         let result = tensor.0.to_device(device);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
             "rt_torch_to_device: {} -> device={:?} -> handle={}",
             tensor_handle,

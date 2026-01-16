@@ -144,8 +144,7 @@ impl<'a> PreloadBuilder<'a> {
                 // Child records have foreign_key pointing to parent
                 // e.g., posts.user_id IN (1, 2, 3)
                 if !self.primary_keys.is_empty() {
-                    let placeholders: Vec<String> =
-                        self.primary_keys.iter().map(|_| "?".to_string()).collect();
+                    let placeholders: Vec<String> = self.primary_keys.iter().map(|_| "?".to_string()).collect();
                     query = query.where_raw(
                         format!("{} IN ({})", relation.foreign_key, placeholders.join(", ")),
                         self.primary_keys
@@ -169,15 +168,9 @@ impl<'a> PreloadBuilder<'a> {
                     format!("{}.id = {}.{}", related_table, join_table, right_key),
                 );
                 if !self.primary_keys.is_empty() {
-                    let placeholders: Vec<String> =
-                        self.primary_keys.iter().map(|_| "?".to_string()).collect();
+                    let placeholders: Vec<String> = self.primary_keys.iter().map(|_| "?".to_string()).collect();
                     query = query.where_raw(
-                        format!(
-                            "{}.{} IN ({})",
-                            join_table,
-                            left_key,
-                            placeholders.join(", ")
-                        ),
+                        format!("{}.{} IN ({})", join_table, left_key, placeholders.join(", ")),
                         self.primary_keys
                             .iter()
                             .map(|id| simple_db::SqlValue::Integer(*id))
@@ -197,11 +190,7 @@ impl<'a> PreloadBuilder<'a> {
         query
     }
 
-    fn build_nested_queries(
-        &self,
-        _nested: &[Preload],
-        _parent_relation: &Relation,
-    ) -> HashMap<String, PreloadQuery> {
+    fn build_nested_queries(&self, _nested: &[Preload], _parent_relation: &Relation) -> HashMap<String, PreloadQuery> {
         // Nested preloads would be built recursively
         // For now, return empty map
         HashMap::new()
@@ -229,10 +218,7 @@ impl PreloadQuery {
 /// Group loaded records by their foreign key.
 ///
 /// This is used to associate preloaded records with their parent records.
-pub fn group_by_foreign_key<T>(
-    records: Vec<T>,
-    get_fk: impl Fn(&T) -> i64,
-) -> HashMap<i64, Vec<T>> {
+pub fn group_by_foreign_key<T>(records: Vec<T>, get_fk: impl Fn(&T) -> i64) -> HashMap<i64, Vec<T>> {
     let mut grouped: HashMap<i64, Vec<T>> = HashMap::new();
     for record in records {
         let fk = get_fk(&record);
@@ -348,9 +334,7 @@ mod tests {
 
     #[test]
     fn test_preload_config() {
-        let config = PreloadConfig::new()
-            .batch_size(500)
-            .strategy(PreloadStrategy::LeftJoin);
+        let config = PreloadConfig::new().batch_size(500).strategy(PreloadStrategy::LeftJoin);
 
         assert_eq!(config.batch_size, 500);
         assert_eq!(config.strategy, PreloadStrategy::LeftJoin);

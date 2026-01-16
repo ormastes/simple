@@ -69,54 +69,48 @@ pub mod test_helpers;
 
 // Re-export main types
 pub use build_log::{
-    BuildComparison, BuildDiagnostic, BuildEnvironment, BuildInputs, BuildLog, BuildLogger,
-    BuildOutput, BuildPhase, BuildResult, DiagnosticLevel, PhaseDifference, PhaseResult,
+    BuildComparison, BuildDiagnostic, BuildEnvironment, BuildInputs, BuildLog, BuildLogger, BuildOutput, BuildPhase,
+    BuildResult, DiagnosticLevel, PhaseDifference, PhaseResult,
 };
 pub use build_mode::{BuildMode, DeterministicConfig};
 pub use coverage::{
-    get_coverage_output_path, get_global_coverage, init_coverage, is_coverage_enabled,
-    save_global_coverage, Condition, CoverageCollector, CoverageReport, CoverageStats,
-    CoverageSummary, Decision, ExecutionPath, FunctionCoverage, ModuleCoverage, SourceLoc,
+    get_coverage_output_path, get_global_coverage, init_coverage, is_coverage_enabled, save_global_coverage, Condition,
+    CoverageCollector, CoverageReport, CoverageStats, CoverageSummary, Decision, ExecutionPath, FunctionCoverage,
+    ModuleCoverage, SourceLoc,
 };
 pub use di::{
-    create_di_match_context, parse_di_config, DependencyGraph, DiBindingRule, DiConfig,
-    DiContainer, DiMode, DiProfile, DiResolveError, DiScope,
+    create_di_match_context, parse_di_config, DependencyGraph, DiBindingRule, DiConfig, DiContainer, DiMode, DiProfile,
+    DiResolveError, DiScope,
 };
 pub use error::{codes as error_codes, typo, CompileError, ErrorContext};
 pub use formatter::{FormatConfig, Formatter};
 pub use interpreter::{
-    evaluate_module, get_interpreter_args, is_debug_mode, set_debug_mode, set_interpreter_args,
-    set_macro_trace,
+    evaluate_module, get_interpreter_args, is_debug_mode, set_debug_mode, set_interpreter_args, set_macro_trace,
 };
 pub use ir_export::{export_ast, export_hir, export_mir, ExportResult};
 pub use layout_recorder::{
-    clear_recording, export_layout_config, export_layout_sdn, is_recording, merge_with_config,
-    record_function_call, record_function_return, record_layout_marker, start_recording,
-    stop_recording,
+    clear_recording, export_layout_config, export_layout_sdn, is_recording, merge_with_config, record_function_call,
+    record_function_return, record_layout_marker, start_recording, stop_recording,
 };
 pub use lint::{LintChecker, LintConfig, LintDiagnostic, LintLevel, LintName};
 pub use mcp::{ExpandWhat, McpGenerator, McpMetadata, McpMode, McpOutput, McpTools};
 pub use mir::ContractMode;
 pub use module_resolver::{DirectoryManifest, ModuleResolver, ResolvedModule};
 pub use monomorphize::{
-    monomorphize_module, CallSiteAnalyzer, ConcreteType, MonomorphizationTable, Monomorphizer,
-    PointerKind, SpecializationKey, TypeBindings,
+    monomorphize_module, CallSiteAnalyzer, ConcreteType, MonomorphizationTable, Monomorphizer, PointerKind,
+    SpecializationKey, TypeBindings,
 };
 pub use parallel::{
-    load_module_parallel, parse_all_parallel, parse_files_parallel, ParallelConfig,
-    ParallelParseCache, ParsedFile,
+    load_module_parallel, parse_all_parallel, parse_files_parallel, ParallelConfig, ParallelParseCache, ParsedFile,
 };
 pub use pipeline::CompilerPipeline;
 pub use pipeline::{extract_startup_config, StartupAppType, StartupConfig, StartupWindowHints};
 pub use project::ProjectContext;
 pub use runtime_profile::{
-    collect_global_metrics, generate_global_feedback, global_profiler, record_call,
-    start_profiling, stop_profiling, FunctionStats, LayoutFeedback, ProfileConfig, RuntimeMetrics,
-    RuntimeProfiler,
+    collect_global_metrics, generate_global_feedback, global_profiler, record_call, start_profiling, stop_profiling,
+    FunctionStats, LayoutFeedback, ProfileConfig, RuntimeMetrics, RuntimeProfiler,
 };
-pub use semantic_diff::{
-    ChangeKind, DiffSummary, ImpactLevel, SemanticChange, SemanticDiff, SemanticDiffer,
-};
+pub use semantic_diff::{ChangeKind, DiffSummary, ImpactLevel, SemanticChange, SemanticDiff, SemanticDiffer};
 pub use spec_coverage::{find_spec_file, SpecCoverageReport};
 pub use text_diff::{DiffHunk, DiffLine, TextDiff};
 pub use trait_coherence::{CoherenceChecker, CoherenceError};
@@ -143,7 +137,6 @@ pub use value::{
     BUILTIN_RANGE,
 };
 pub use verification_checker::{
-    can_call, has_unsafe_effect, is_pure_effects, VerificationChecker, VerificationRule,
-    VerificationViolation,
+    can_call, has_unsafe_effect, is_pure_effects, VerificationChecker, VerificationRule, VerificationViolation,
 };
 pub use web_compiler::{SuiCompilationResult, WebCompiler};

@@ -15,15 +15,11 @@ pub fn print_coverage_summary(report: &ExtendedCoverageReport) {
         CoverageType::System => {
             println!(
                 "Types:   {:>4}/{:<4} ({:.1}%)",
-                report.summary.covered_types,
-                report.summary.total_types,
-                report.summary.type_coverage_percent
+                report.summary.covered_types, report.summary.total_types, report.summary.type_coverage_percent
             );
             println!(
                 "Methods: {:>4}/{:<4} ({:.1}%)",
-                report.summary.covered_methods,
-                report.summary.total_methods,
-                report.summary.method_coverage_percent
+                report.summary.covered_methods, report.summary.total_methods, report.summary.method_coverage_percent
             );
         }
         CoverageType::Service => {
@@ -57,15 +53,11 @@ pub fn print_coverage_summary(report: &ExtendedCoverageReport) {
         CoverageType::Merged => {
             println!(
                 "Types:         {:>4}/{:<4} ({:.1}%)",
-                report.summary.covered_types,
-                report.summary.total_types,
-                report.summary.type_coverage_percent
+                report.summary.covered_types, report.summary.total_types, report.summary.type_coverage_percent
             );
             println!(
                 "Methods:       {:>4}/{:<4} ({:.1}%)",
-                report.summary.covered_methods,
-                report.summary.total_methods,
-                report.summary.method_coverage_percent
+                report.summary.covered_methods, report.summary.total_methods, report.summary.method_coverage_percent
             );
             println!(
                 "Interfaces:    {:>4}/{:<4} ({:.1}%)",
@@ -93,9 +85,7 @@ pub fn print_coverage_summary(report: &ExtendedCoverageReport) {
             );
             println!(
                 "Lines:         {:>4}/{:<4} ({:.1}%)",
-                report.summary.covered_lines,
-                report.summary.total_lines,
-                report.summary.line_coverage_percent
+                report.summary.covered_lines, report.summary.total_lines, report.summary.line_coverage_percent
             );
         }
     }

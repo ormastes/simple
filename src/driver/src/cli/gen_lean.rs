@@ -123,9 +123,7 @@ fn read_existing_lean_files() -> Result<HashMap<String, String>, String> {
             break current;
         }
         if !current.pop() {
-            return Err(
-                "Could not find verification/ directory. Run from project root.".to_string(),
-            );
+            return Err("Could not find verification/ directory. Run from project root.".to_string());
         }
     };
 
@@ -185,10 +183,7 @@ fn main() -> Int:
     // Write runner to a temp file in std_lib/src to have correct module resolution
     let runner_path = std_lib_path.join("src/_gen_lean_runner.spl");
     if let Err(e) = fs::write(&runner_path, runner_code) {
-        eprintln!(
-            "Note: Could not create runner file ({}) - using existing Lean files",
-            e
-        );
+        eprintln!("Note: Could not create runner file ({}) - using existing Lean files", e);
         return read_existing_lean_files();
     }
 
@@ -381,11 +376,9 @@ fn check_completeness(
     existing_defs: &[LeanDefinition],
     generated_defs: &[LeanDefinition],
 ) -> (Vec<String>, Vec<String>) {
-    let generated_names: std::collections::HashSet<_> =
-        generated_defs.iter().map(|d| d.name.as_str()).collect();
+    let generated_names: std::collections::HashSet<_> = generated_defs.iter().map(|d| d.name.as_str()).collect();
 
-    let existing_names: std::collections::HashSet<_> =
-        existing_defs.iter().map(|d| d.name.as_str()).collect();
+    let existing_names: std::collections::HashSet<_> = existing_defs.iter().map(|d| d.name.as_str()).collect();
 
     // Find missing definitions (in existing but not in generated)
     let missing: Vec<String> = existing_defs
@@ -447,8 +440,7 @@ fn compare_lean_files(opts: &GenLeanOptions) -> i32 {
                         // Extract definitions for completeness check
                         let existing_defs = extract_lean_definitions(&existing);
                         let generated_defs = extract_lean_definitions(generated);
-                        let (missing, new_defs) =
-                            check_completeness(&existing_defs, &generated_defs);
+                        let (missing, new_defs) = check_completeness(&existing_defs, &generated_defs);
 
                         total_missing_defs += missing.len();
                         total_new_defs += new_defs.len();
@@ -457,11 +449,7 @@ fn compare_lean_files(opts: &GenLeanOptions) -> i32 {
                         if missing.is_empty() {
                             println!("  [complete]  {} (can replace)", rel_path);
                         } else {
-                            println!(
-                                "  [INCOMPLETE] {} (missing {} definitions)",
-                                rel_path,
-                                missing.len()
-                            );
+                            println!("  [INCOMPLETE] {} (missing {} definitions)", rel_path, missing.len());
                         }
                         different += 1;
 
@@ -496,10 +484,7 @@ fn compare_lean_files(opts: &GenLeanOptions) -> i32 {
                         } else {
                             // Brief summary
                             if !missing.is_empty() {
-                                println!(
-                                    "              WARNING: {} definitions missing",
-                                    missing.len()
-                                );
+                                println!("              WARNING: {} definitions missing", missing.len());
                             }
                         }
                     }
@@ -608,10 +593,7 @@ fn write_lean_files(opts: &GenLeanOptions) -> i32 {
         if let Some(parent) = full_path.parent() {
             if !parent.exists() {
                 if let Err(e) = fs::create_dir_all(parent) {
-                    eprintln!(
-                        "  [error]     {} - cannot create directory: {}",
-                        rel_path, e
-                    );
+                    eprintln!("  [error]     {} - cannot create directory: {}", rel_path, e);
                     continue;
                 }
             }

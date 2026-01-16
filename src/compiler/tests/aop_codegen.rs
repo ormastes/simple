@@ -1,9 +1,7 @@
 use simple_compiler::codegen::JitCompiler;
 use simple_compiler::hir::TypeId;
 use simple_compiler::mir::CallTarget;
-use simple_compiler::mir::{
-    BlockId, LocalKind, MirBlock, MirFunction, MirInst, MirLocal, MirModule, Terminator,
-};
+use simple_compiler::mir::{BlockId, LocalKind, MirBlock, MirFunction, MirInst, MirLocal, MirModule, Terminator};
 use simple_parser::Visibility;
 use simple_runtime::aop::{rt_aop_proceed, AopAroundFn, ProceedContext};
 use simple_runtime::value::RuntimeValue;
@@ -17,20 +15,12 @@ extern "C" fn target_sum(argc: u64, argv: *const RuntimeValue) -> RuntimeValue {
     RuntimeValue::from_int(sum)
 }
 
-extern "C" fn advice_add_one(
-    ctx: *mut ProceedContext,
-    _argc: u64,
-    _argv: *const RuntimeValue,
-) -> RuntimeValue {
+extern "C" fn advice_add_one(ctx: *mut ProceedContext, _argc: u64, _argv: *const RuntimeValue) -> RuntimeValue {
     let result = unsafe { rt_aop_proceed(ctx) };
     RuntimeValue::from_int(result.as_int() + 1)
 }
 
-extern "C" fn advice_mul_two(
-    ctx: *mut ProceedContext,
-    _argc: u64,
-    _argv: *const RuntimeValue,
-) -> RuntimeValue {
+extern "C" fn advice_mul_two(ctx: *mut ProceedContext, _argc: u64, _argv: *const RuntimeValue) -> RuntimeValue {
     let result = unsafe { rt_aop_proceed(ctx) };
     RuntimeValue::from_int(result.as_int() * 2)
 }
@@ -82,15 +72,12 @@ fn jit_can_call_rt_aop_invoke_around() {
 
     let mut jit = JitCompiler::new().expect("jit init");
     jit.compile_module(&module).expect("compile");
-    let func_ptr = jit
-        .get_function_ptr("aop_invoke_wrapper")
-        .expect("wrapper available");
+    let func_ptr = jit.get_function_ptr("aop_invoke_wrapper").expect("wrapper available");
 
     let advices: [AopAroundFn; 2] = [advice_add_one, advice_mul_two];
     let args = [RuntimeValue::from_int(1), RuntimeValue::from_int(2)];
 
-    let wrapper: extern "C" fn(i64, i64, i64, i64, i64) -> i64 =
-        unsafe { std::mem::transmute(func_ptr) };
+    let wrapper: extern "C" fn(i64, i64, i64, i64, i64) -> i64 = unsafe { std::mem::transmute(func_ptr) };
     let result_raw = wrapper(
         target_sum as usize as i64,
         advices.as_ptr() as usize as i64,

@@ -6,12 +6,10 @@
 // ============================================================================
 mod runtime_extended_tests {
     use simple_runtime::{
-        rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_dict_len, rt_dict_new,
-        rt_string_len, rt_string_new, rt_tuple_len, rt_tuple_new, rt_value_as_bool,
-        rt_value_as_float, rt_value_as_int, rt_value_bool, rt_value_float, rt_value_int,
-        rt_value_is_bool, rt_value_is_float, rt_value_is_int, rt_value_is_nil, rt_value_nil,
-        AsyncMode, ContractViolationKind, GpuWorkItemState, HeapObjectType, PromiseState,
-        RuntimeValue,
+        rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_dict_len, rt_dict_new, rt_string_len,
+        rt_string_new, rt_tuple_len, rt_tuple_new, rt_value_as_bool, rt_value_as_float, rt_value_as_int, rt_value_bool,
+        rt_value_float, rt_value_int, rt_value_is_bool, rt_value_is_float, rt_value_is_int, rt_value_is_nil,
+        rt_value_nil, AsyncMode, ContractViolationKind, GpuWorkItemState, HeapObjectType, PromiseState, RuntimeValue,
     };
 
     #[test]
@@ -128,11 +126,7 @@ mod runtime_extended_tests {
 
     #[test]
     fn test_promise_state_variants() {
-        let states = [
-            PromiseState::Pending,
-            PromiseState::Fulfilled,
-            PromiseState::Rejected,
-        ];
+        let states = [PromiseState::Pending, PromiseState::Fulfilled, PromiseState::Rejected];
         for state in states {
             let _ = format!("{:?}", state);
         }
@@ -172,8 +166,8 @@ mod runtime_extended_tests {
 // ============================================================================
 mod parser_ast_extended_tests {
     use simple_parser::{
-        AssignOp, BinOp, Effect, Lexer, ModulePath, MoveMode, Mutability, OverflowBehavior,
-        ParseError, Parser, PointerKind, RangeBound, Span, TokenKind, UnaryOp, Visibility,
+        AssignOp, BinOp, Effect, Lexer, ModulePath, MoveMode, Mutability, OverflowBehavior, ParseError, Parser,
+        PointerKind, RangeBound, Span, TokenKind, UnaryOp, Visibility,
     };
 
     #[test]
@@ -451,12 +445,7 @@ mod common_extended_tests {
 
     #[test]
     fn test_target_os_variants() {
-        let oses = [
-            TargetOS::Linux,
-            TargetOS::MacOS,
-            TargetOS::Windows,
-            TargetOS::None,
-        ];
+        let oses = [TargetOS::Linux, TargetOS::MacOS, TargetOS::Windows, TargetOS::None];
         for o in oses {
             let _ = format!("{:?}", o);
         }

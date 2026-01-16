@@ -86,10 +86,7 @@ impl NativeBackend for VulkanBackend {
         // Serialize to bytecode
         let bytes = spirv_module.into_bytes()?;
 
-        tracing::info!(
-            "Vulkan backend: Generated {} bytes of SPIR-V bytecode",
-            bytes.len()
-        );
+        tracing::info!("Vulkan backend: Generated {} bytes of SPIR-V bytecode", bytes.len());
 
         Ok(bytes)
     }
@@ -155,10 +152,7 @@ mod tests {
         // Verify SPIR-V magic number
         assert!(spirv.len() >= 4, "SPIR-V should be at least 4 bytes");
         let magic = u32::from_le_bytes([spirv[0], spirv[1], spirv[2], spirv[3]]);
-        assert_eq!(
-            magic, 0x07230203,
-            "SPIR-V magic number should be 0x07230203"
-        );
+        assert_eq!(magic, 0x07230203, "SPIR-V magic number should be 0x07230203");
     }
 
     #[test]
@@ -172,10 +166,7 @@ mod tests {
         };
 
         let result = backend.compile(&module);
-        assert!(
-            result.is_ok(),
-            "Module with name should compile successfully"
-        );
+        assert!(result.is_ok(), "Module with name should compile successfully");
     }
 
     #[test]
@@ -198,10 +189,7 @@ mod tests {
         // Results should be identical
         let spirv1 = result1.unwrap();
         let spirv2 = result2.unwrap();
-        assert_eq!(
-            spirv1, spirv2,
-            "Compiling same module should produce identical SPIR-V"
-        );
+        assert_eq!(spirv1, spirv2, "Compiling same module should produce identical SPIR-V");
     }
 
     #[test]
@@ -217,10 +205,7 @@ mod tests {
         let spirv = backend.compile(&module).unwrap();
 
         // SPIR-V header is 5 words (20 bytes minimum)
-        assert!(
-            spirv.len() >= 20,
-            "SPIR-V should have at least 20 bytes for header"
-        );
+        assert!(spirv.len() >= 20, "SPIR-V should have at least 20 bytes for header");
 
         // Word 0: Magic number (0x07230203)
         let magic = u32::from_le_bytes([spirv[0], spirv[1], spirv[2], spirv[3]]);
@@ -245,11 +230,7 @@ mod tests {
 
         for target in targets {
             let backend = VulkanBackend::new(target.clone()).unwrap();
-            assert_eq!(
-                backend.target(),
-                &target,
-                "Backend should preserve target architecture"
-            );
+            assert_eq!(backend.target(), &target, "Backend should preserve target architecture");
         }
     }
 
@@ -313,10 +294,7 @@ mod tests {
         );
 
         // But should have minimum size for valid SPIR-V
-        assert!(
-            spirv.len() >= 20,
-            "SPIR-V should be at least 20 bytes for header"
-        );
+        assert!(spirv.len() >= 20, "SPIR-V should be at least 20 bytes for header");
     }
 
     #[test]

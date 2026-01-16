@@ -42,13 +42,11 @@ macro_rules! tensor_unary_op {
 
 /// Sum all elements in tensor
 /// Returns handle to scalar tensor, or 0 on failure
-tensor_unary_op!(rt_torch_sum, "rt_torch_sum", |t: &Tensor| t
-    .sum(tch::Kind::Float));
+tensor_unary_op!(rt_torch_sum, "rt_torch_sum", |t: &Tensor| t.sum(tch::Kind::Float));
 
 /// Mean of all elements in tensor
 /// Returns handle to scalar tensor, or 0 on failure
-tensor_unary_op!(rt_torch_mean, "rt_torch_mean", |t: &Tensor| t
-    .mean(tch::Kind::Float));
+tensor_unary_op!(rt_torch_mean, "rt_torch_mean", |t: &Tensor| t.mean(tch::Kind::Float));
 
 /// Maximum value in tensor
 tensor_unary_op!(rt_torch_max, "rt_torch_max", |t: &Tensor| t.max());
@@ -57,9 +55,7 @@ tensor_unary_op!(rt_torch_max, "rt_torch_max", |t: &Tensor| t.max());
 tensor_unary_op!(rt_torch_min, "rt_torch_min", |t: &Tensor| t.min());
 
 /// Index of maximum value in flattened tensor
-tensor_unary_op!(rt_torch_argmax, "rt_torch_argmax", |t: &Tensor| t
-    .argmax(None, false));
+tensor_unary_op!(rt_torch_argmax, "rt_torch_argmax", |t: &Tensor| t.argmax(None, false));
 
 /// Index of minimum value in flattened tensor
-tensor_unary_op!(rt_torch_argmin, "rt_torch_argmin", |t: &Tensor| t
-    .argmin(None, false));
+tensor_unary_op!(rt_torch_argmin, "rt_torch_argmin", |t: &Tensor| t.argmin(None, false));

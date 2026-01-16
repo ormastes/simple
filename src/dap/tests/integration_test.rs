@@ -5,12 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 /// Helper to send a DAP message
-fn send_message(
-    stdin: &mut impl Write,
-    seq: i64,
-    command: &str,
-    arguments: Option<serde_json::Value>,
-) {
+fn send_message(stdin: &mut impl Write, seq: i64, command: &str, arguments: Option<serde_json::Value>) {
     let message = json!({
         "type": "request",
         "seq": seq,

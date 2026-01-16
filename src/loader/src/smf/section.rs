@@ -28,11 +28,7 @@ pub enum SectionType {
 
 impl SmfSection {
     pub fn name_str(&self) -> &str {
-        let end = self
-            .name
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(self.name.len());
+        let end = self.name.iter().position(|&b| b == 0).unwrap_or(self.name.len());
         std::str::from_utf8(&self.name[..end]).unwrap_or("")
     }
 

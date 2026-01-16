@@ -10,9 +10,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{Linkage, Module};
 
 use crate::hir::TypeId;
-use crate::mir::{
-    lower_generator, LocalKind, MirFunction, MirInst, MirLocal, MirModule, Terminator, Visibility,
-};
+use crate::mir::{lower_generator, LocalKind, MirFunction, MirInst, MirLocal, MirModule, Terminator, Visibility};
 
 use super::types_util::type_to_cranelift;
 
@@ -51,9 +49,7 @@ pub fn create_body_stub<M: Module>(
         builder.finalize();
     }
 
-    module
-        .define_function(func_id, ctx)
-        .map_err(|e| e.to_string())?;
+    module.define_function(func_id, ctx).map_err(|e| e.to_string())?;
     module.clear_context(ctx);
 
     Ok(func_id)
@@ -155,14 +151,8 @@ pub fn expand_with_outlined(mir: &MirModule) -> Vec<MirFunction> {
                     seen.insert(name.clone());
 
                     // Create outlined function from parent
-                    let outlined = create_outlined_function(
-                        func,
-                        &name,
-                        body_block,
-                        kind,
-                        &live_ins_map,
-                        &mut functions,
-                    );
+                    let outlined =
+                        create_outlined_function(func, &name, body_block, kind, &live_ins_map, &mut functions);
                     functions.push(outlined);
                 }
             }
@@ -177,10 +167,7 @@ fn create_outlined_function(
     name: &str,
     body_block: crate::mir::BlockId,
     kind: BodyKind,
-    live_ins_map: &std::collections::HashMap<
-        crate::mir::BlockId,
-        std::collections::HashSet<crate::mir::VReg>,
-    >,
+    live_ins_map: &std::collections::HashMap<crate::mir::BlockId, std::collections::HashSet<crate::mir::VReg>>,
     functions: &mut Vec<MirFunction>,
 ) -> MirFunction {
     let mut outlined = func.clone();

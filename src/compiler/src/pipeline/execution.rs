@@ -21,9 +21,7 @@ use crate::value::FUNC_MAIN;
 use crate::CompileError;
 
 // Re-export SMF generation functions for backward compatibility
-pub use crate::smf_builder::{
-    generate_smf_bytes, generate_smf_bytes_for_target, generate_smf_from_object_for_target,
-};
+pub use crate::smf_builder::{generate_smf_bytes, generate_smf_bytes_for_target, generate_smf_from_object_for_target};
 
 // Provide the old generate_smf_from_object function for compatibility
 pub fn generate_smf_from_object(object_code: &[u8], gc: Option<&Arc<dyn GcAllocator>>) -> Vec<u8> {
@@ -39,8 +37,7 @@ fn link_wasm_object(object_code: &[u8]) -> Result<Vec<u8>, CompileError> {
     use tempfile::TempDir;
 
     // Create temp directory for linking
-    let tmp = TempDir::new()
-        .map_err(|e| CompileError::Codegen(format!("Failed to create temp dir: {}", e)))?;
+    let tmp = TempDir::new().map_err(|e| CompileError::Codegen(format!("Failed to create temp dir: {}", e)))?;
 
     let obj_path = tmp.path().join("module.o");
     let wasm_path = tmp.path().join("module.wasm");
@@ -71,8 +68,7 @@ fn link_wasm_object(object_code: &[u8]) -> Result<Vec<u8>, CompileError> {
     }
 
     // Read the linked WASM module
-    fs::read(&wasm_path)
-        .map_err(|e| CompileError::Codegen(format!("Failed to read linked WASM: {}", e)))
+    fs::read(&wasm_path).map_err(|e| CompileError::Codegen(format!("Failed to read linked WASM: {}", e)))
 }
 
 impl CompilerPipeline {
@@ -97,11 +93,7 @@ impl CompilerPipeline {
     /// This method searches parent directories for simple.toml and
     /// sets up the project context for module resolution.
     #[instrument(skip(self, source_path, out))]
-    pub fn compile_with_project_detection(
-        &mut self,
-        source_path: &Path,
-        out: &Path,
-    ) -> Result<(), CompileError> {
+    pub fn compile_with_project_detection(&mut self, source_path: &Path, out: &Path) -> Result<(), CompileError> {
         // Detect project context if not already set
         if self.project.is_none() {
             let project = crate::project::ProjectContext::detect(source_path)?;
@@ -118,14 +110,11 @@ impl CompilerPipeline {
     #[instrument(skip(self, source))]
     pub fn compile_source_to_memory(&mut self, source: &str) -> Result<Vec<u8>, CompileError> {
         let mut parser = simple_parser::Parser::new(source);
-        let module = parser
-            .parse()
-            .map_err(|e| CompileError::Parse(format!("{e}")))?;
+        let module = parser.parse().map_err(|e| CompileError::Parse(format!("{e}")))?;
 
         // Emit AST if requested (LLM-friendly #885)
         if let Some(path) = &self.emit_ast {
-            crate::ir_export::export_ast(&module, path.as_deref())
-                .map_err(|e| CompileError::Semantic(e))?;
+            crate::ir_export::export_ast(&module, path.as_deref()).map_err(|e| CompileError::Semantic(e))?;
         }
 
         self.compile_module_to_memory(module)
@@ -182,19 +171,14 @@ impl CompilerPipeline {
 
             // Emit HIR if requested
             if let Some(path) = &self.emit_hir {
-                crate::ir_export::export_hir(&hir_module, path.as_deref())
-                    .map_err(|e| CompileError::Semantic(e))?;
+                crate::ir_export::export_hir(&hir_module, path.as_deref()).map_err(|e| CompileError::Semantic(e))?;
             }
 
             // Lower to MIR if requested
             if self.emit_mir.is_some() {
                 let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
-                let mir_module = crate::mir::lower_to_mir_with_mode_and_di(
-                    &hir_module,
-                    self.contract_mode,
-                    di_config,
-                )
-                .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
+                let mir_module = crate::mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
+                    .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
 
                 // Emit MIR if requested
                 if let Some(path) = &self.emit_mir {
@@ -206,8 +190,7 @@ impl CompilerPipeline {
             // If the module has script-style statements and no IR export needed, skip type_check
             if !has_script_statements(&module.items) {
                 // Type inference/checking (features #13/#14 scaffolding)
-                type_check(&module.items)
-                    .map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
+                type_check(&module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
             }
         }
 
@@ -224,8 +207,7 @@ impl CompilerPipeline {
     #[instrument(skip(self, source_path, out))]
     pub fn compile_native(&mut self, source_path: &Path, out: &Path) -> Result<(), CompileError> {
         let module = load_module_with_imports(source_path, &mut HashSet::new())?;
-        let smf_bytes =
-            self.compile_module_to_memory_native_with_context(module, Some(source_path))?;
+        let smf_bytes = self.compile_module_to_memory_native_with_context(module, Some(source_path))?;
         fs::write(out, smf_bytes).map_err(|e| CompileError::Io(format!("{e}")))
     }
 
@@ -235,19 +217,13 @@ impl CompilerPipeline {
     /// The resulting SMF can be executed directly.
     /// Lint diagnostics are stored and can be retrieved via `lint_diagnostics()`.
     #[instrument(skip(self, source))]
-    pub fn compile_source_to_memory_native(
-        &mut self,
-        source: &str,
-    ) -> Result<Vec<u8>, CompileError> {
+    pub fn compile_source_to_memory_native(&mut self, source: &str) -> Result<Vec<u8>, CompileError> {
         let mut parser = simple_parser::Parser::new(source);
-        let ast_module = parser
-            .parse()
-            .map_err(|e| CompileError::Parse(format!("{e}")))?;
+        let ast_module = parser.parse().map_err(|e| CompileError::Parse(format!("{e}")))?;
 
         // Emit AST if requested (LLM-friendly #885)
         if let Some(path) = &self.emit_ast {
-            crate::ir_export::export_ast(&ast_module, path.as_deref())
-                .map_err(|e| CompileError::Semantic(e))?;
+            crate::ir_export::export_ast(&ast_module, path.as_deref()).map_err(|e| CompileError::Semantic(e))?;
         }
 
         self.compile_module_to_memory_native(ast_module)
@@ -355,9 +331,7 @@ impl CompilerPipeline {
 
         // 1. Parse source to AST
         let mut parser = simple_parser::Parser::new(source);
-        let ast_module = parser
-            .parse()
-            .map_err(|e| CompileError::Parse(format!("{e}")))?;
+        let ast_module = parser.parse().map_err(|e| CompileError::Parse(format!("{e}")))?;
 
         // 2. Monomorphization: specialize generic functions for concrete types
         let ast_module = monomorphize_module(&ast_module);
@@ -377,11 +351,7 @@ impl CompilerPipeline {
         // If script-style statements exist, interpret directly and wrap result.
         if has_script_statements(&ast_module.items) {
             let main_value = self.evaluate_module_with_project(&ast_module.items)?;
-            return Ok(generate_smf_bytes_for_target(
-                main_value,
-                self.gc.as_ref(),
-                target,
-            ));
+            return Ok(generate_smf_bytes_for_target(main_value, self.gc.as_ref(), target));
         }
 
         // 4. Compilability analysis for hybrid execution
@@ -402,11 +372,7 @@ impl CompilerPipeline {
             // Fallback: evaluate via interpreter and wrap result
             // Note: Interpreter result is architecture-neutral (just an i32)
             let main_value = self.evaluate_module_with_project(&ast_module.items)?;
-            return Ok(generate_smf_bytes_for_target(
-                main_value,
-                self.gc.as_ref(),
-                target,
-            ));
+            return Ok(generate_smf_bytes_for_target(main_value, self.gc.as_ref(), target));
         }
 
         // 8. Apply hybrid transformation if needed
@@ -463,14 +429,11 @@ impl CompilerPipeline {
 
         // Parse source
         let mut parser = simple_parser::Parser::new(source);
-        let ast_module = parser
-            .parse()
-            .map_err(|e| CompileError::Parse(format!("{e}")))?;
+        let ast_module = parser.parse().map_err(|e| CompileError::Parse(format!("{e}")))?;
 
         // Emit AST if requested
         if let Some(path) = &self.emit_ast {
-            crate::ir_export::export_ast(&ast_module, path.as_deref())
-                .map_err(|e| CompileError::Semantic(e))?;
+            crate::ir_export::export_ast(&ast_module, path.as_deref()).map_err(|e| CompileError::Semantic(e))?;
         }
 
         // Monomorphization
@@ -539,9 +502,7 @@ impl CompilerPipeline {
         }
 
         // Build
-        builder
-            .build()
-            .map_err(|e| CompileError::Codegen(format!("{e}")))
+        builder.build().map_err(|e| CompileError::Codegen(format!("{e}")))
     }
 
     /// Compile a source file to a standalone native binary.
@@ -552,9 +513,8 @@ impl CompilerPipeline {
         output: &Path,
         options: Option<crate::linker::NativeBinaryOptions>,
     ) -> Result<crate::linker::NativeBinaryResult, CompileError> {
-        let source = fs::read_to_string(source_path).map_err(|e| {
-            CompileError::Io(format!("failed to read {}: {}", source_path.display(), e))
-        })?;
+        let source = fs::read_to_string(source_path)
+            .map_err(|e| CompileError::Io(format!("failed to read {}: {}", source_path.display(), e)))?;
         self.compile_to_native_binary(&source, output, options)
     }
 }

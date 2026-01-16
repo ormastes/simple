@@ -161,12 +161,7 @@ pub extern "C" fn rt_async_set_state(future: RuntimeValue, state: i64) {
 /// Get the context value from a future.
 #[no_mangle]
 pub extern "C" fn rt_async_get_ctx(future: RuntimeValue) -> RuntimeValue {
-    let f = validate_heap_type!(
-        future,
-        HeapObjectType::Future,
-        RuntimeFuture,
-        RuntimeValue::NIL
-    );
+    let f = validate_heap_type!(future, HeapObjectType::Future, RuntimeFuture, RuntimeValue::NIL);
     unsafe { (*f).ctx }
 }
 
@@ -282,10 +277,7 @@ pub extern "C" fn rt_generator_load_slot(generator: RuntimeValue, idx: i64) -> R
             return RuntimeValue::NIL;
         }
         let slots = &*(*gen).slots;
-        slots
-            .get(idx as usize)
-            .copied()
-            .unwrap_or(RuntimeValue::NIL)
+        slots.get(idx as usize).copied().unwrap_or(RuntimeValue::NIL)
     }
 }
 
@@ -321,8 +313,7 @@ pub extern "C" fn rt_generator_next(generator: RuntimeValue) -> RuntimeValue {
         if (*gen).done != 0 || (*gen).body_func == 0 {
             return RuntimeValue::NIL;
         }
-        let func: extern "C" fn(RuntimeValue) -> RuntimeValue =
-            std::mem::transmute((*gen).body_func as usize);
+        let func: extern "C" fn(RuntimeValue) -> RuntimeValue = std::mem::transmute((*gen).body_func as usize);
         let gen_val = RuntimeValue::from_heap_ptr(gen as *mut HeapHeader);
         func(gen_val)
     }
@@ -352,12 +343,7 @@ pub extern "C" fn rt_future_is_ready(future: RuntimeValue) -> i64 {
 /// Returns NIL if the future is not ready.
 #[no_mangle]
 pub extern "C" fn rt_future_get_result(future: RuntimeValue) -> RuntimeValue {
-    let fut = validate_heap_type!(
-        future,
-        HeapObjectType::Future,
-        RuntimeFuture,
-        RuntimeValue::NIL
-    );
+    let fut = validate_heap_type!(future, HeapObjectType::Future, RuntimeFuture, RuntimeValue::NIL);
     unsafe {
         if (*fut).state == 1 {
             (*fut).result

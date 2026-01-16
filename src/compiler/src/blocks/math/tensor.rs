@@ -228,13 +228,7 @@ impl Tensor {
 
     /// Element-wise division with broadcasting
     pub fn div(&self, other: &Tensor) -> Result<Tensor, CompileError> {
-        broadcast_binary_op(self, other, |a, b| {
-            if b == 0.0 {
-                f64::NAN
-            } else {
-                a / b
-            }
-        })
+        broadcast_binary_op(self, other, |a, b| if b == 0.0 { f64::NAN } else { a / b })
     }
 
     /// Element-wise power
@@ -426,9 +420,7 @@ impl Tensor {
     /// Matrix multiplication (2D tensors)
     pub fn matmul(&self, other: &Tensor) -> Result<Tensor, CompileError> {
         if self.ndim() != 2 || other.ndim() != 2 {
-            return Err(CompileError::Semantic(
-                "matmul requires 2D tensors".to_string(),
-            ));
+            return Err(CompileError::Semantic("matmul requires 2D tensors".to_string()));
         }
 
         let (m, k1) = (self.shape[0], self.shape[1]);
@@ -466,12 +458,7 @@ impl Tensor {
                 self.shape[0], other.shape[0]
             )));
         }
-        Ok(self
-            .data
-            .iter()
-            .zip(other.data.iter())
-            .map(|(a, b)| a * b)
-            .sum())
+        Ok(self.data.iter().zip(other.data.iter()).map(|(a, b)| a * b).sum())
     }
 
     /// Transpose (swap last two dimensions)
@@ -544,11 +531,7 @@ impl Tensor {
         let strides = compute_strides(&new_shape);
         Tensor {
             data: self.data.clone(),
-            shape: if new_shape.is_empty() {
-                vec![]
-            } else {
-                new_shape
-            },
+            shape: if new_shape.is_empty() { vec![] } else { new_shape },
             strides,
         }
     }
@@ -694,8 +677,16 @@ where
             b_idx += coord * b_strides[i];
         }
 
-        let a_val = if a.data.is_empty() { 0.0 } else { a.data[a_idx % a.data.len()] };
-        let b_val = if b.data.is_empty() { 0.0 } else { b.data[b_idx % b.data.len()] };
+        let a_val = if a.data.is_empty() {
+            0.0
+        } else {
+            a.data[a_idx % a.data.len()]
+        };
+        let b_val = if b.data.is_empty() {
+            0.0
+        } else {
+            b.data[b_idx % b.data.len()]
+        };
         result_data[flat_idx] = op(a_val, b_val);
     }
 

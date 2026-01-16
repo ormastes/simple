@@ -25,16 +25,9 @@ pub extern "C" fn rt_torch_dropout_new(p: f64, inplace: i32) -> u64 {
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY
-            .lock()
-            .insert(handle, std::sync::Arc::new(module));
+        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(module));
 
-        tracing::debug!(
-            "rt_torch_dropout_new: handle={} p={} inplace={}",
-            handle,
-            p,
-            inplace
-        );
+        tracing::debug!("rt_torch_dropout_new: handle={} p={} inplace={}", handle, p, inplace);
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -49,11 +42,7 @@ pub extern "C" fn rt_torch_dropout_new(p: f64, inplace: i32) -> u64 {
 /// input_handle: handle to input tensor
 /// training: 1 for training mode (apply dropout), 0 for eval mode (no dropout)
 #[no_mangle]
-pub extern "C" fn rt_torch_dropout_forward(
-    module_handle: u64,
-    input_handle: u64,
-    training: i32,
-) -> u64 {
+pub extern "C" fn rt_torch_dropout_forward(module_handle: u64, input_handle: u64, training: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let module_registry = MODULE_REGISTRY.lock();

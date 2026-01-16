@@ -62,18 +62,8 @@ extern "C" {
     fn cuMemcpyHtoD_v2(dst: CUdeviceptr, src: *const c_void, bytecount: usize) -> CUresult;
     fn cuMemcpyDtoH_v2(dst: *mut c_void, src: CUdeviceptr, bytecount: usize) -> CUresult;
     fn cuMemcpyDtoD_v2(dst: CUdeviceptr, src: CUdeviceptr, bytecount: usize) -> CUresult;
-    fn cuMemcpyHtoDAsync_v2(
-        dst: CUdeviceptr,
-        src: *const c_void,
-        bytecount: usize,
-        stream: CUstream,
-    ) -> CUresult;
-    fn cuMemcpyDtoHAsync_v2(
-        dst: *mut c_void,
-        src: CUdeviceptr,
-        bytecount: usize,
-        stream: CUstream,
-    ) -> CUresult;
+    fn cuMemcpyHtoDAsync_v2(dst: CUdeviceptr, src: *const c_void, bytecount: usize, stream: CUstream) -> CUresult;
+    fn cuMemcpyDtoHAsync_v2(dst: *mut c_void, src: CUdeviceptr, bytecount: usize, stream: CUstream) -> CUresult;
     fn cuMemsetD8_v2(dst: CUdeviceptr, value: u8, n: usize) -> CUresult;
     fn cuModuleLoadData(module: *mut CUmodule, image: *const c_void) -> CUresult;
     fn cuModuleUnload(hmod: CUmodule) -> CUresult;
@@ -151,8 +141,7 @@ impl CudaBackend {
     }
 
     fn next_handle(&self) -> u64 {
-        self.next_handle
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        self.next_handle.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Get device attribute.
@@ -185,9 +174,7 @@ impl Backend for CudaBackend {
             // Initialize CUDA
             let result = cuInit(0);
             if result == CUDA_ERROR_NOT_INITIALIZED || result != CUDA_SUCCESS {
-                return Err(GpuError::BackendError(
-                    "Failed to initialize CUDA".to_string(),
-                ));
+                return Err(GpuError::BackendError("Failed to initialize CUDA".to_string()));
             }
 
             // Get device count
@@ -359,26 +346,15 @@ impl Backend for CudaBackend {
             cuda_check(cuDeviceGet(&mut device, index as i32))?;
 
             Ok(DeviceCapabilities {
-                max_work_group_size_x: self
-                    .get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X)?
+                max_work_group_size_x: self.get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X)? as u32,
+                max_work_group_size_y: self.get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y)? as u32,
+                max_work_group_size_z: self.get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z)? as u32,
+                max_work_group_invocations: self.get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)?
                     as u32,
-                max_work_group_size_y: self
-                    .get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y)?
-                    as u32,
-                max_work_group_size_z: self
-                    .get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z)?
-                    as u32,
-                max_work_group_invocations: self
-                    .get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)?
-                    as u32,
-                max_work_groups_x: self.get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X)?
-                    as u32,
-                max_work_groups_y: self.get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y)?
-                    as u32,
-                max_work_groups_z: self.get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z)?
-                    as u32,
-                shared_memory_size: self
-                    .get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)?
+                max_work_groups_x: self.get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X)? as u32,
+                max_work_groups_y: self.get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y)? as u32,
+                max_work_groups_z: self.get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z)? as u32,
+                shared_memory_size: self.get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)?
                     as usize,
                 supports_f64: true, // Most NVIDIA GPUs support f64
                 supports_atomics: true,
@@ -417,25 +393,13 @@ impl Backend for CudaBackend {
         unsafe {
             match kind {
                 MemcpyKind::HostToDevice => {
-                    cuda_check(cuMemcpyHtoD_v2(
-                        dst as CUdeviceptr,
-                        src as *const c_void,
-                        size,
-                    ))?;
+                    cuda_check(cuMemcpyHtoD_v2(dst as CUdeviceptr, src as *const c_void, size))?;
                 }
                 MemcpyKind::DeviceToHost => {
-                    cuda_check(cuMemcpyDtoH_v2(
-                        dst as *mut c_void,
-                        src as CUdeviceptr,
-                        size,
-                    ))?;
+                    cuda_check(cuMemcpyDtoH_v2(dst as *mut c_void, src as CUdeviceptr, size))?;
                 }
                 MemcpyKind::DeviceToDevice => {
-                    cuda_check(cuMemcpyDtoD_v2(
-                        dst as CUdeviceptr,
-                        src as CUdeviceptr,
-                        size,
-                    ))?;
+                    cuda_check(cuMemcpyDtoD_v2(dst as CUdeviceptr, src as CUdeviceptr, size))?;
                 }
                 MemcpyKind::HostToHost => {
                     std::ptr::copy_nonoverlapping(src, dst, size);
@@ -518,13 +482,10 @@ impl Backend for CudaBackend {
         let mut function: CUfunction = ptr::null_mut();
 
         unsafe {
-            cuda_check(cuModuleLoadData(
-                &mut module,
-                binary.as_ptr() as *const c_void,
-            ))?;
+            cuda_check(cuModuleLoadData(&mut module, binary.as_ptr() as *const c_void))?;
 
-            let c_name = CString::new(name)
-                .map_err(|_| GpuError::InvalidArgument("Invalid kernel name".to_string()))?;
+            let c_name =
+                CString::new(name).map_err(|_| GpuError::InvalidArgument("Invalid kernel name".to_string()))?;
             cuda_check(cuModuleGetFunction(&mut function, module, c_name.as_ptr()))?;
         }
 
@@ -580,8 +541,7 @@ impl Backend for CudaBackend {
 
         unsafe {
             // Convert args to mutable pointers (CUDA API requirement)
-            let mut kernel_params: Vec<*mut c_void> =
-                args.iter().map(|&p| p as *mut c_void).collect();
+            let mut kernel_params: Vec<*mut c_void> = args.iter().map(|&p| p as *mut c_void).collect();
 
             cuda_check(cuLaunchKernel(
                 info,

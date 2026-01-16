@@ -113,10 +113,7 @@ impl StructLayout {
 
     /// Get field offset by name (O(n))
     pub fn field_offset_by_name(&self, name: &str) -> Option<u32> {
-        self.fields
-            .iter()
-            .find(|f| f.name == name)
-            .map(|f| f.offset)
+        self.fields.iter().find(|f| f.name == name).map(|f| f.offset)
     }
 
     /// Get field index by name
@@ -158,8 +155,6 @@ impl LayoutRegistry {
 
     /// Get layout by name
     pub fn get_by_name(&self, name: &str) -> Option<&StructLayout> {
-        self.name_to_type
-            .get(name)
-            .and_then(|id| self.layouts.get(id))
+        self.name_to_type.get(name).and_then(|id| self.layouts.get(id))
     }
 }

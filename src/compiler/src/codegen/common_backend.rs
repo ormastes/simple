@@ -207,9 +207,7 @@ impl<M: Module> CodegenBackend<M> {
     }
 
     /// Declare external runtime functions for FFI using shared specifications.
-    pub fn declare_runtime_functions(
-        module: &mut M,
-    ) -> BackendResult<HashMap<&'static str, cranelift_module::FuncId>> {
+    pub fn declare_runtime_functions(module: &mut M) -> BackendResult<HashMap<&'static str, cranelift_module::FuncId>> {
         let mut funcs = HashMap::new();
         let call_conv = CallConv::SystemV;
 
@@ -232,8 +230,8 @@ impl<M: Module> CodegenBackend<M> {
         }
 
         let mut ctx = self.module.make_context();
-        let func_id = create_body_stub(&mut self.module, &mut ctx, "__simple_body_stub")
-            .map_err(BackendError::ModuleError)?;
+        let func_id =
+            create_body_stub(&mut self.module, &mut ctx, "__simple_body_stub").map_err(BackendError::ModuleError)?;
 
         self.body_stub = Some(func_id);
         Ok(func_id)
@@ -241,8 +239,8 @@ impl<M: Module> CodegenBackend<M> {
 
     /// Declare all functions from a MIR module
     pub fn declare_functions(&mut self, functions: &[MirFunction]) -> BackendResult<()> {
-        self.func_ids = super::shared::declare_functions(&mut self.module, functions)
-            .map_err(BackendError::ModuleError)?;
+        self.func_ids =
+            super::shared::declare_functions(&mut self.module, functions).map_err(BackendError::ModuleError)?;
         Ok(())
     }
 
@@ -269,10 +267,7 @@ impl<M: Module> CodegenBackend<M> {
 
         // Verify the function before defining
         if let Err(errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
-            return Err(BackendError::ModuleError(format!(
-                "Verifier errors:\n{}",
-                errors
-            )));
+            return Err(BackendError::ModuleError(format!("Verifier errors:\n{}", errors)));
         }
 
         // Define the function

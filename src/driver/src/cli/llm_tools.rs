@@ -19,10 +19,7 @@ pub fn run_context(args: &[String]) -> i32 {
     }
 
     let path = PathBuf::from(&args[1]);
-    let target = args
-        .get(2)
-        .filter(|s| !s.starts_with("--"))
-        .map(|s| s.as_str());
+    let target = args.get(2).filter(|s| !s.starts_with("--")).map(|s| s.as_str());
     let minimal = args.iter().any(|a| a == "--minimal");
     let json_output = args.iter().any(|a| a == "--json");
     let markdown_output = args.iter().any(|a| a == "--markdown");
@@ -86,10 +83,7 @@ pub fn run_context(args: &[String]) -> i32 {
             let savings = pack.token_savings(full_count);
             eprintln!();
             eprintln!("Context reduction: {:.1}%", savings);
-            eprintln!(
-                "Symbols: {} / {} (extracted / total)",
-                pack.symbol_count, full_count
-            );
+            eprintln!("Symbols: {} / {} (extracted / total)", pack.symbol_count, full_count);
         }
         0
     }
@@ -149,8 +143,7 @@ pub fn run_diff(args: &[String]) -> i32 {
             }
         };
 
-        let differ =
-            SemanticDiffer::new(format!("{} -> {}", old_path.display(), new_path.display()));
+        let differ = SemanticDiffer::new(format!("{} -> {}", old_path.display(), new_path.display()));
         let diff = differ.diff_modules(&old_module, &new_module);
 
         if json_output {
@@ -183,11 +176,7 @@ pub fn run_diff(args: &[String]) -> i32 {
             println!("{}", serde_json::to_string_pretty(&json).unwrap());
             0
         } else {
-            let output = diff.format_unified(
-                &old_path.display().to_string(),
-                &new_path.display().to_string(),
-                3,
-            );
+            let output = diff.format_unified(&old_path.display().to_string(), &new_path.display().to_string(), 3);
             print!("{}", output);
             0
         }
@@ -199,9 +188,7 @@ pub fn run_mcp(args: &[String]) -> i32 {
     // Parse arguments
     if args.len() < 2 {
         eprintln!("error: mcp requires a source file");
-        eprintln!(
-            "Usage: simple mcp <file.spl> [--expand <symbol>] [--search <query>] [--show-coverage]"
-        );
+        eprintln!("Usage: simple mcp <file.spl> [--expand <symbol>] [--search <query>] [--show-coverage]");
         return 1;
     }
 

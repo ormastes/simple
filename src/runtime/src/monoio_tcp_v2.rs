@@ -28,11 +28,7 @@ pub extern "C" fn monoio_tcp_listen(addr: RuntimeValue) -> RuntimeValue {
 
     match response {
         IoResponse::Success { id } => {
-            tracing::info!(
-                "monoio_tcp_listen: Bound to {} with handle {}",
-                addr_str,
-                id
-            );
+            tracing::info!("monoio_tcp_listen: Bound to {} with handle {}", addr_str, id);
             RuntimeValue::from_int(id)
         }
         IoResponse::Error { code, message } => {
@@ -95,11 +91,7 @@ pub extern "C" fn monoio_tcp_connect(addr: RuntimeValue) -> RuntimeValue {
 
     match response {
         IoResponse::Success { id } => {
-            tracing::info!(
-                "monoio_tcp_connect: Connected to {} with handle {}",
-                addr_str,
-                id
-            );
+            tracing::info!("monoio_tcp_connect: Connected to {} with handle {}", addr_str, id);
             RuntimeValue::from_int(id)
         }
         IoResponse::Error { code, message } => {
@@ -116,11 +108,7 @@ pub extern "C" fn monoio_tcp_connect(addr: RuntimeValue) -> RuntimeValue {
 /// Read data from a TCP stream into buffer
 /// Feature #1747: Zero-copy TCP read
 #[no_mangle]
-pub extern "C" fn monoio_tcp_read(
-    stream_handle: RuntimeValue,
-    buffer: RuntimeValue,
-    max_len: i64,
-) -> RuntimeValue {
+pub extern "C" fn monoio_tcp_read(stream_handle: RuntimeValue, buffer: RuntimeValue, max_len: i64) -> RuntimeValue {
     let stream_id = stream_handle.as_int();
 
     if max_len <= 0 {
@@ -144,11 +132,7 @@ pub extern "C" fn monoio_tcp_read(
                 return RuntimeValue::from_int(-1);
             }
 
-            tracing::debug!(
-                "monoio_tcp_read: Read {} bytes, copied {} to buffer",
-                len,
-                copied
-            );
+            tracing::debug!("monoio_tcp_read: Read {} bytes, copied {} to buffer", len, copied);
             RuntimeValue::from_int(len as i64)
         }
         IoResponse::Error { code, message } => {
@@ -165,11 +149,7 @@ pub extern "C" fn monoio_tcp_read(
 /// Write data to a TCP stream from buffer
 /// Feature #1748: Zero-copy TCP write
 #[no_mangle]
-pub extern "C" fn monoio_tcp_write(
-    stream_handle: RuntimeValue,
-    buffer: RuntimeValue,
-    len: i64,
-) -> RuntimeValue {
+pub extern "C" fn monoio_tcp_write(stream_handle: RuntimeValue, buffer: RuntimeValue, len: i64) -> RuntimeValue {
     let stream_id = stream_handle.as_int();
 
     if len <= 0 {
@@ -187,17 +167,12 @@ pub extern "C" fn monoio_tcp_write(
             bytes
         }
         None => {
-            tracing::error!(
-                "monoio_tcp_write: Invalid buffer (not a RuntimeArray or RuntimeString)"
-            );
+            tracing::error!("monoio_tcp_write: Invalid buffer (not a RuntimeArray or RuntimeString)");
             return RuntimeValue::from_int(-1);
         }
     };
 
-    tracing::debug!(
-        "monoio_tcp_write: Extracted {} bytes from buffer",
-        data.len()
-    );
+    tracing::debug!("monoio_tcp_write: Extracted {} bytes from buffer", data.len());
 
     // Send request to runtime thread
     let response = send_request(IoRequest::TcpWrite {
@@ -244,11 +219,7 @@ pub extern "C" fn monoio_tcp_shutdown(stream_handle: RuntimeValue, how: i64) -> 
 
     match response {
         IoResponse::Success { .. } => {
-            tracing::debug!(
-                "monoio_tcp_shutdown: Shutdown stream {} with mode {}",
-                stream_id,
-                how
-            );
+            tracing::debug!("monoio_tcp_shutdown: Shutdown stream {} with mode {}", stream_id, how);
             RuntimeValue::from_int(1)
         }
         IoResponse::Error { code, message } => {
@@ -372,10 +343,7 @@ pub extern "C" fn monoio_tcp_peer_addr(stream_handle: RuntimeValue) -> RuntimeVa
 
 /// Set TCP_NODELAY option
 #[no_mangle]
-pub extern "C" fn monoio_tcp_set_nodelay(
-    stream_handle: RuntimeValue,
-    nodelay: bool,
-) -> RuntimeValue {
+pub extern "C" fn monoio_tcp_set_nodelay(stream_handle: RuntimeValue, nodelay: bool) -> RuntimeValue {
     let stream_id = stream_handle.as_int();
 
     // Send request to runtime thread

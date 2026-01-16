@@ -36,11 +36,7 @@ main = builder.get_count()
 "#;
 
     let result = parse_and_eval(source);
-    assert_eq!(
-        result.unwrap(),
-        3,
-        "Context should have called increment 3 times"
-    );
+    assert_eq!(result.unwrap(), 3, "Context should have called increment 3 times");
 }
 
 #[test]

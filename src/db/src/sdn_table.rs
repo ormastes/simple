@@ -13,10 +13,7 @@ pub fn export_table_sdn(db: &Database, table: &str, path: &Path) -> DbResult<()>
     let rows = db.query(&sql, &[])?;
     let columns = rows.columns().to_vec();
     if columns.is_empty() {
-        return Err(DbError::NotFound(format!(
-            "table '{}' has no columns",
-            table
-        )));
+        return Err(DbError::NotFound(format!("table '{}' has no columns", table)));
     }
 
     let row_vec = rows.collect_all()?;
@@ -50,20 +47,14 @@ pub fn import_table_sdn(db: &Database, table: &str, path: &Path) -> DbResult<usi
             ..
         } => (fields.clone(), rows.clone()),
         SdnValue::Table { .. } => {
-            return Err(DbError::type_mismatch(
-                "named table with fields",
-                "typed table",
-            ));
+            return Err(DbError::type_mismatch("named table with fields", "typed table"));
         }
         other => {
             return Err(DbError::type_mismatch("table", other.type_name()));
         }
     };
 
-    let placeholders = std::iter::repeat("?")
-        .take(fields.len())
-        .collect::<Vec<_>>()
-        .join(", ");
+    let placeholders = std::iter::repeat("?").take(fields.len()).collect::<Vec<_>>().join(", ");
     let sql = format!(
         "INSERT INTO {} ({}) VALUES ({})",
         table,
@@ -125,11 +116,7 @@ fn render_named_table(name: &str, fields: &[String], rows: &[Vec<SdnValue>]) -> 
     output.push('\n');
 
     for row in rows {
-        let values = row
-            .iter()
-            .map(render_sdn_value)
-            .collect::<Vec<_>>()
-            .join(", ");
+        let values = row.iter().map(render_sdn_value).collect::<Vec<_>>().join(", ");
         output.push_str("    ");
         output.push_str(&values);
         output.push('\n');

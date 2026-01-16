@@ -97,11 +97,7 @@ fn render_control(output: &mut String, ctrl: &ControlNode) {
         ControlNode::For(for_node) => {
             // For SSR, we'd iterate here
             // For now, just mark the loop
-            let _ = write!(
-                output,
-                "<!-- for {} in {:?} -->",
-                for_node.binding, for_node.iterable
-            );
+            let _ = write!(output, "<!-- for {} in {:?} -->", for_node.binding, for_node.iterable);
             for node in &for_node.body {
                 render_node(output, node);
             }

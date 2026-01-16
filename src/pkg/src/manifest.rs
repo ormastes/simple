@@ -181,8 +181,8 @@ impl Default for RegistryConfig {
 impl Manifest {
     /// Load manifest from a file
     pub fn load(path: &Path) -> PkgResult<Self> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|_| PkgError::ManifestNotFound(path.display().to_string()))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|_| PkgError::ManifestNotFound(path.display().to_string()))?;
         Self::parse(&content)
     }
 
@@ -381,10 +381,7 @@ strict = true
 "#;
         let manifest = Manifest::parse(content).unwrap();
         assert!(manifest.verify.enabled);
-        assert_eq!(
-            manifest.verify.lean_path,
-            Some("/opt/lean/bin/lean".to_string())
-        );
+        assert_eq!(manifest.verify.lean_path, Some("/opt/lean/bin/lean".to_string()));
         assert_eq!(manifest.verify.output_dir, Some("target/lean".to_string()));
         assert!(!manifest.verify.generate_stubs);
         assert_eq!(manifest.verify.modules, vec!["core", "math"]);

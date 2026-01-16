@@ -14,8 +14,8 @@ use crate::value::Value;
 
 // Thread-local references needed by this module
 use crate::interpreter::{
-    BASE_UNIT_DIMENSIONS, COMPOUND_UNIT_DIMENSIONS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC,
-    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY,
+    BASE_UNIT_DIMENSIONS, COMPOUND_UNIT_DIMENSIONS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
+    UNIT_SUFFIX_TO_FAMILY,
 };
 
 /// SI prefix definitions: (prefix_char, multiplier)
@@ -90,16 +90,12 @@ pub(crate) fn validate_unit_type(value: &Value, expected_type: &str) -> Result<(
     match value {
         Value::Unit { family, suffix, .. } => {
             // Check if the unit's family matches the expected type
-            let actual_family = family
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or(suffix.as_str());
+            let actual_family = family.as_ref().map(|s| s.as_str()).unwrap_or(suffix.as_str());
             if actual_family == expected_type {
                 Ok(())
             } else {
                 // Check if the suffix itself indicates membership in the expected family
-                let suffix_family =
-                    UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned());
+                let suffix_family = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned());
                 if suffix_family.as_deref() == Some(expected_type) {
                     Ok(())
                 } else {
@@ -128,12 +124,8 @@ pub(crate) fn validate_unit_constraints(
     // Extract the numeric value from the Unit
     let inner_value = match &value {
         Value::Unit { value: inner, .. } => inner.as_ref(),
-        Value::Int(n) => {
-            return validate_int_constraints(*n, unit_name, constraints).map(Value::Int)
-        }
-        Value::Float(f) => {
-            return validate_float_constraints(*f, unit_name, constraints).map(Value::Float)
-        }
+        Value::Int(n) => return validate_int_constraints(*n, unit_name, constraints).map(Value::Int),
+        Value::Float(f) => return validate_float_constraints(*f, unit_name, constraints).map(Value::Float),
         _ => return Ok(value), // Non-numeric types pass through unchanged
     };
 
@@ -151,8 +143,7 @@ pub(crate) fn validate_unit_constraints(
 
         if numeric < min_f || numeric > max_f {
             match constraints.overflow {
-                simple_parser::ast::OverflowBehavior::Checked
-                | simple_parser::ast::OverflowBehavior::Default => {
+                simple_parser::ast::OverflowBehavior::Checked | simple_parser::ast::OverflowBehavior::Default => {
                     return Err(format!(
                         "unit '{}' value {} out of range [{}, {}]",
                         unit_name, numeric, min, max
@@ -185,8 +176,7 @@ fn validate_int_constraints(
     if let Some((min, max)) = constraints.range {
         if value < min || value > max {
             match constraints.overflow {
-                simple_parser::ast::OverflowBehavior::Checked
-                | simple_parser::ast::OverflowBehavior::Default => {
+                simple_parser::ast::OverflowBehavior::Checked | simple_parser::ast::OverflowBehavior::Default => {
                     return Err(format!(
                         "unit '{}' value {} out of range [{}, {}]",
                         unit_name, value, min, max
@@ -216,8 +206,7 @@ fn validate_float_constraints(
         let max_f = max as f64;
         if value < min_f || value > max_f {
             match constraints.overflow {
-                simple_parser::ast::OverflowBehavior::Checked
-                | simple_parser::ast::OverflowBehavior::Default => {
+                simple_parser::ast::OverflowBehavior::Checked | simple_parser::ast::OverflowBehavior::Default => {
                     return Err(format!(
                         "unit '{}' value {} out of range [{}, {}]",
                         unit_name, value, min, max
@@ -388,11 +377,7 @@ pub(crate) fn type_to_family_name(ty: &Type) -> String {
 
 /// Check if a binary operation is allowed between two unit values
 /// Returns Ok(result_family) if allowed, Err with error message if not
-pub(crate) fn check_unit_binary_op(
-    left_family: &str,
-    right_family: &str,
-    op: BinOp,
-) -> Result<Option<String>, String> {
+pub(crate) fn check_unit_binary_op(left_family: &str, right_family: &str, op: BinOp) -> Result<Option<String>, String> {
     // Convert BinOp to BinaryArithmeticOp
     let arith_op = match op {
         BinOp::Add => BinaryArithmeticOp::Add,
@@ -449,10 +434,8 @@ pub(crate) fn check_unit_binary_op(
                 }
                 BinaryArithmeticOp::Mul | BinaryArithmeticOp::Div => {
                     // Dimensional analysis: compute the resulting dimension
-                    let left_dim = get_unit_dimension(left_family)
-                        .unwrap_or_else(|| Dimension::base(left_family));
-                    let right_dim = get_unit_dimension(right_family)
-                        .unwrap_or_else(|| Dimension::base(right_family));
+                    let left_dim = get_unit_dimension(left_family).unwrap_or_else(|| Dimension::base(left_family));
+                    let right_dim = get_unit_dimension(right_family).unwrap_or_else(|| Dimension::base(right_family));
 
                     let result_dim = if arith_op == BinaryArithmeticOp::Mul {
                         left_dim.mul(&right_dim)
@@ -464,9 +447,7 @@ pub(crate) fn check_unit_binary_op(
                     if result_dim.is_dimensionless() {
                         // Result is dimensionless (e.g., length / length)
                         Ok(None) // Returns a plain number, not a unit
-                    } else if let Some(compound_name) =
-                        find_compound_unit_for_dimension(&result_dim)
-                    {
+                    } else if let Some(compound_name) = find_compound_unit_for_dimension(&result_dim) {
                         // Found a matching compound unit
                         Ok(Some(compound_name))
                     } else {
@@ -513,10 +494,7 @@ pub(crate) fn check_unit_unary_op(family: &str, op: UnaryOp) -> Result<Option<St
                 }
             }
             // No rule found for this operation
-            Err(format!(
-                "Operation '{:?}' not allowed for unit family '{}'",
-                op, family
-            ))
+            Err(format!("Operation '{:?}' not allowed for unit family '{}'", op, family))
         } else {
             // No arithmetic rules defined for this family
             // Allow negation by default (permissive mode for ad-hoc units)

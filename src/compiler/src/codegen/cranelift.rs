@@ -6,9 +6,7 @@ use simple_common::target::Target;
 
 use crate::mir::MirModule;
 
-use super::common_backend::{
-    create_isa_and_flags, BackendError, BackendResult, BackendSettings, CodegenBackend,
-};
+use super::common_backend::{create_isa_and_flags, BackendError, BackendResult, BackendSettings, CodegenBackend};
 
 // Re-export error types for backwards compatibility
 pub use super::common_backend::BackendError as CodegenError;
@@ -32,12 +30,8 @@ impl Codegen {
         let settings = BackendSettings::aot_for_target(target);
         let (_flags, isa) = create_isa_and_flags(&settings)?;
 
-        let builder = ObjectBuilder::new(
-            isa,
-            "simple_module",
-            cranelift_module::default_libcall_names(),
-        )
-        .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+        let builder = ObjectBuilder::new(isa, "simple_module", cranelift_module::default_libcall_names())
+            .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
         let module = ObjectModule::new(builder);
         let backend = CodegenBackend::with_module_and_target(module, target)?;
@@ -57,9 +51,7 @@ impl Codegen {
 
         // Emit object code
         let product = self.backend.module.finish();
-        product
-            .emit()
-            .map_err(|e| BackendError::ModuleError(e.to_string()))
+        product.emit().map_err(|e| BackendError::ModuleError(e.to_string()))
     }
 
     /// Finish compilation and get the raw object code.

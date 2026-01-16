@@ -312,11 +312,7 @@ mod tests {
 
     fn make_allocator(total_slots: usize) -> SlotAllocator {
         // Use a dummy base address for testing
-        SlotAllocator::new(
-            0x10000 as *mut u8,
-            total_slots * CODE_SLOT_SIZE,
-            CODE_SLOT_SIZE,
-        )
+        SlotAllocator::new(0x10000 as *mut u8, total_slots * CODE_SLOT_SIZE, CODE_SLOT_SIZE)
     }
 
     #[test]

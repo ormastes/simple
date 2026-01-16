@@ -90,8 +90,7 @@ pub struct RuntimeEnum {
 /// Allocate a new object with the given number of fields
 #[no_mangle]
 pub extern "C" fn rt_object_new(class_id: u32, field_count: u32) -> RuntimeValue {
-    let size = std::mem::size_of::<RuntimeObject>()
-        + field_count as usize * std::mem::size_of::<RuntimeValue>();
+    let size = std::mem::size_of::<RuntimeObject>() + field_count as usize * std::mem::size_of::<RuntimeValue>();
     let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
 
     unsafe {
@@ -130,11 +129,7 @@ pub extern "C" fn rt_object_field_get(object: RuntimeValue, field_index: u32) ->
 
 /// Set a field on an object by index
 #[no_mangle]
-pub extern "C" fn rt_object_field_set(
-    object: RuntimeValue,
-    field_index: u32,
-    value: RuntimeValue,
-) -> bool {
+pub extern "C" fn rt_object_field_set(object: RuntimeValue, field_index: u32, value: RuntimeValue) -> bool {
     let Some(obj) = get_typed_ptr_mut::<RuntimeObject>(object, HeapObjectType::Object) else {
         return false;
     };
@@ -150,15 +145,13 @@ pub extern "C" fn rt_object_field_set(
 /// Get the class ID of an object
 #[no_mangle]
 pub extern "C" fn rt_object_class_id(object: RuntimeValue) -> i64 {
-    get_typed_ptr::<RuntimeObject>(object, HeapObjectType::Object)
-        .map_or(-1, |p| unsafe { (*p).class_id as i64 })
+    get_typed_ptr::<RuntimeObject>(object, HeapObjectType::Object).map_or(-1, |p| unsafe { (*p).class_id as i64 })
 }
 
 /// Get the field count of an object
 #[no_mangle]
 pub extern "C" fn rt_object_field_count(object: RuntimeValue) -> i64 {
-    get_typed_ptr::<RuntimeObject>(object, HeapObjectType::Object)
-        .map_or(-1, |p| unsafe { (*p).field_count as i64 })
+    get_typed_ptr::<RuntimeObject>(object, HeapObjectType::Object).map_or(-1, |p| unsafe { (*p).field_count as i64 })
 }
 
 // ============================================================================
@@ -168,8 +161,7 @@ pub extern "C" fn rt_object_field_count(object: RuntimeValue) -> i64 {
 /// Allocate a new closure with the given function pointer and captures
 #[no_mangle]
 pub extern "C" fn rt_closure_new(func_ptr: *const u8, capture_count: u32) -> RuntimeValue {
-    let size = std::mem::size_of::<RuntimeClosure>()
-        + capture_count as usize * std::mem::size_of::<RuntimeValue>();
+    let size = std::mem::size_of::<RuntimeClosure>() + capture_count as usize * std::mem::size_of::<RuntimeValue>();
     let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
 
     unsafe {
@@ -189,11 +181,7 @@ pub extern "C" fn rt_closure_new(func_ptr: *const u8, capture_count: u32) -> Run
 
 /// Set a captured variable in a closure
 #[no_mangle]
-pub extern "C" fn rt_closure_set_capture(
-    closure: RuntimeValue,
-    index: u32,
-    value: RuntimeValue,
-) -> bool {
+pub extern "C" fn rt_closure_set_capture(closure: RuntimeValue, index: u32, value: RuntimeValue) -> bool {
     let Some(clos) = get_typed_ptr_mut::<RuntimeClosure>(closure, HeapObjectType::Closure) else {
         return false;
     };
@@ -233,11 +221,7 @@ pub extern "C" fn rt_closure_func_ptr(closure: RuntimeValue) -> *const u8 {
 
 /// Allocate a new enum value
 #[no_mangle]
-pub extern "C" fn rt_enum_new(
-    enum_id: u32,
-    discriminant: u32,
-    payload: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeValue) -> RuntimeValue {
     let size = std::mem::size_of::<RuntimeEnum>();
     let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
 
@@ -259,15 +243,13 @@ pub extern "C" fn rt_enum_new(
 /// Get the discriminant of an enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_discriminant(value: RuntimeValue) -> i64 {
-    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
-        .map_or(-1, |p| unsafe { (*p).discriminant as i64 })
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).map_or(-1, |p| unsafe { (*p).discriminant as i64 })
 }
 
 /// Get the payload of an enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {
-    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
-        .map_or(RuntimeValue::NIL, |p| unsafe { (*p).payload })
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).map_or(RuntimeValue::NIL, |p| unsafe { (*p).payload })
 }
 
 // ============================================================================

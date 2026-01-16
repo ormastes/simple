@@ -219,9 +219,7 @@ impl BridgeValue {
             if self.extended.is_null() {
                 ""
             } else {
-                CStr::from_ptr(self.extended as *const c_char)
-                    .to_str()
-                    .unwrap_or("")
+                CStr::from_ptr(self.extended as *const c_char).to_str().unwrap_or("")
             }
         } else {
             ""
@@ -244,8 +242,7 @@ impl BridgeValue {
                 if !self.extended.is_null() {
                     // Extended points to a Vec<BridgeValue>
                     let len = self.payload as usize;
-                    let slice =
-                        std::slice::from_raw_parts_mut(self.extended as *mut BridgeValue, len);
+                    let slice = std::slice::from_raw_parts_mut(self.extended as *mut BridgeValue, len);
                     for item in slice {
                         item.free();
                     }
@@ -292,9 +289,7 @@ impl From<&Value> for BridgeValue {
                 payload: 0,
                 extended: CString::new(class.as_str()).unwrap().into_raw() as *mut u8,
             },
-            Value::Enum {
-                enum_name, variant, ..
-            } => {
+            Value::Enum { enum_name, variant, .. } => {
                 // Store enum_name::variant as extended
                 let full_name = format!("{}::{}", enum_name, variant);
                 BridgeValue {

@@ -205,12 +205,7 @@ impl LintChecker {
                         Some(name) => format!("{}::{}.{}", e.name, variant.name, name),
                         None => format!("{}::{}.{}", e.name, variant.name, i),
                     };
-                    self.check_type_in_public_api(
-                        &field.ty,
-                        variant.span,
-                        &field_desc,
-                        "variant field",
-                    );
+                    self.check_type_in_public_api(&field.ty, variant.span, &field_desc, "variant field");
                 }
             }
         }
@@ -260,10 +255,7 @@ impl LintChecker {
             self.emit(
                 LintName::PrimitiveApi,
                 span,
-                format!(
-                    "bare primitive `{}` in public API {} `{}`",
-                    type_name, context, name
-                ),
+                format!("bare primitive `{}` in public API {} `{}`", type_name, context, name),
                 Some(format!(
                     "consider using a unit type or newtype wrapper instead of `{}`",
                     type_name

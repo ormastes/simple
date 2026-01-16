@@ -57,8 +57,8 @@ use crate::aop_config::AopConfig;
 use crate::di::DiScope;
 use crate::error::CompileError;
 use crate::interpreter::{
-    evaluate_expr, exec_block, exec_block_fn, get_aop_config, get_di_config, with_effect_context,
-    Control, DI_SINGLETONS,
+    evaluate_expr, exec_block, exec_block_fn, get_aop_config, get_di_config, with_effect_context, Control,
+    DI_SINGLETONS,
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
@@ -134,14 +134,7 @@ pub(crate) fn bind_args_with_injected(
         // Check if this is a spread expression (args...)
         if let Expr::Spread(inner) = &arg.value {
             // Evaluate the inner expression (should be variadic/array/tuple)
-            let spread_val = evaluate_expr(
-                inner,
-                outer_env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let spread_val = evaluate_expr(inner, outer_env, functions, classes, enums, impl_methods)?;
 
             // Extract values from spread
             let spread_values: Vec<Value> = match spread_val {
@@ -162,11 +155,7 @@ pub(crate) fn bind_args_with_injected(
                         // Regular parameter before variadic
                         let param = params_to_bind[positional_idx];
                         let val = wrap_trait_object!(spread_item, param.ty.as_ref());
-                        validate_unit!(
-                            &val,
-                            param.ty.as_ref(),
-                            format!("parameter '{}'", param.name)
-                        );
+                        validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                         bound.insert(param.name.clone(), val);
                     } else {
                         bail_semantic!("too many arguments");
@@ -178,25 +167,14 @@ pub(crate) fn bind_args_with_injected(
                     }
                     let param = params_to_bind[positional_idx];
                     let val = wrap_trait_object!(spread_item, param.ty.as_ref());
-                    validate_unit!(
-                        &val,
-                        param.ty.as_ref(),
-                        format!("parameter '{}'", param.name)
-                    );
+                    validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                     bound.insert(param.name.clone(), val);
                 }
                 positional_idx += 1;
             }
         } else {
             // Normal argument (not spread)
-            let val = evaluate_expr(
-                &arg.value,
-                outer_env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let val = evaluate_expr(&arg.value, outer_env, functions, classes, enums, impl_methods)?;
 
             if let Some(name) = &arg.name {
                 // Named argument
@@ -205,11 +183,7 @@ pub(crate) fn bind_args_with_injected(
                     bail_semantic!("unknown argument {}", name);
                 }
                 let val = wrap_trait_object!(val, param.and_then(|p| p.ty.as_ref()));
-                validate_unit!(
-                    &val,
-                    param.and_then(|p| p.ty.as_ref()),
-                    format!("parameter '{}'", name)
-                );
+                validate_unit!(&val, param.and_then(|p| p.ty.as_ref()), format!("parameter '{}'", name));
                 bound.insert(name.clone(), val);
             } else {
                 // Positional argument
@@ -221,11 +195,7 @@ pub(crate) fn bind_args_with_injected(
                         // Regular positional parameter before variadic
                         let param = params_to_bind[positional_idx];
                         let val = wrap_trait_object!(val, param.ty.as_ref());
-                        validate_unit!(
-                            &val,
-                            param.ty.as_ref(),
-                            format!("parameter '{}'", param.name)
-                        );
+                        validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                         bound.insert(param.name.clone(), val);
                     }
                 } else {
@@ -235,11 +205,7 @@ pub(crate) fn bind_args_with_injected(
                     }
                     let param = params_to_bind[positional_idx];
                     let val = wrap_trait_object!(val, param.ty.as_ref());
-                    validate_unit!(
-                        &val,
-                        param.ty.as_ref(),
-                        format!("parameter '{}'", param.name)
-                    );
+                    validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                     bound.insert(param.name.clone(), val);
                 }
                 positional_idx += 1;
@@ -256,14 +222,7 @@ pub(crate) fn bind_args_with_injected(
     for param in params_to_bind {
         if !bound.contains_key(&param.name) {
             if let Some(default_expr) = &param.default {
-                let v = evaluate_expr(
-                    default_expr,
-                    outer_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
+                let v = evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?;
                 let v = wrap_trait_object!(v, param.ty.as_ref());
                 validate_unit!(
                     &v,
@@ -306,24 +265,13 @@ fn bind_args_with_values(
         let value = if idx < args.len() {
             args[idx].clone()
         } else if let Some(default_expr) = &param.default {
-            evaluate_expr(
-                default_expr,
-                outer_env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?
+            evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?
         } else {
             bail_semantic!("missing argument {}", param.name);
         };
 
         let value = wrap_trait_object!(value, param.ty.as_ref());
-        validate_unit!(
-            &value,
-            param.ty.as_ref(),
-            format!("parameter '{}'", param.name)
-        );
+        validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
         bound.insert(param.name.clone(), value);
     }
 
@@ -353,14 +301,7 @@ pub(crate) fn exec_lambda(
     let mut positional_idx = 0usize;
 
     for arg in args {
-        let val = evaluate_expr(
-            &arg.value,
-            call_env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?;
+        let val = evaluate_expr(&arg.value, call_env, functions, classes, enums, impl_methods)?;
         if let Some(name) = &arg.name {
             local_env.insert(name.clone(), val);
         } else {
@@ -396,16 +337,7 @@ pub(crate) fn exec_function(
     self_ctx: Option<(&str, &HashMap<String, Value>)>,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
-        exec_function_inner(
-            func,
-            args,
-            outer_env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-            self_ctx,
-        )
+        exec_function_inner(func, args, outer_env, functions, classes, enums, impl_methods, self_ctx)
     })
 }
 
@@ -419,15 +351,7 @@ pub(crate) fn exec_function_with_values(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
-        exec_function_with_values_inner(
-            func,
-            args,
-            outer_env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )
+        exec_function_with_values_inner(func, args, outer_env, functions, classes, enums, impl_methods)
     })
 }
 
@@ -871,12 +795,8 @@ fn resolve_injected_args(
         }
         let type_name = param_type_name(param)
             .ok_or_else(|| semantic_err!("injectable parameter '{}' missing type", param.name))?;
-        let di_config = get_di_config().ok_or_else(|| {
-            semantic_err!(
-                "missing di config for injectable parameter '{}'",
-                param.name
-            )
-        })?;
+        let di_config = get_di_config()
+            .ok_or_else(|| semantic_err!("missing di config for injectable parameter '{}'", param.name))?;
         let ctx = create_di_match_context(&type_name, class_name, &[]);
         let binding = di_config
             .select_binding("default", &ctx)
@@ -955,8 +875,7 @@ fn resolve_binding_instance(
 
     if scope == DiScope::Singleton {
         DI_SINGLETONS.with(|cell| {
-            cell.borrow_mut()
-                .insert(impl_type.to_string(), instance.clone());
+            cell.borrow_mut().insert(impl_type.to_string(), instance.clone());
         });
     }
 
@@ -979,11 +898,7 @@ fn collect_runtime_init_advices(
     if !aop_config.runtime_enabled {
         return Vec::new();
     }
-    let attrs: Vec<String> = class_def
-        .attributes
-        .iter()
-        .map(|attr| attr.name.clone())
-        .collect();
+    let attrs: Vec<String> = class_def.attributes.iter().map(|attr| attr.name.clone()).collect();
     let ctx = crate::aop_config::create_aop_match_context(impl_type, impl_type, &attrs);
     let mut matches: Vec<_> = aop_config
         .around
@@ -1041,21 +956,14 @@ fn invoke_runtime_around_chain(
         name: "proceed".to_string(),
         func: Arc::new(move |args: &[Value]| {
             if !args.is_empty() {
-                return Err(CompileError::Semantic(
-                    "proceed() takes no arguments".to_string(),
-                ));
+                return Err(CompileError::Semantic("proceed() takes no arguments".to_string()));
             }
             if called_marker.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 return Err(CompileError::Semantic(
                     "around advice called proceed() more than once".to_string(),
                 ));
             }
-            invoke_runtime_around_chain(
-                Arc::clone(&advices_clone),
-                next_idx,
-                &impl_name,
-                Arc::clone(&ctx_clone),
-            )
+            invoke_runtime_around_chain(Arc::clone(&advices_clone), next_idx, &impl_name, Arc::clone(&ctx_clone))
         }),
     });
 

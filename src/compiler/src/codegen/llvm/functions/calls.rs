@@ -83,14 +83,11 @@ impl LlvmBackend {
         if let inkwell::values::BasicValueEnum::PointerValue(closure_ptr) = callee_val {
             let base_ptr = builder
                 .build_pointer_cast(closure_ptr, i8_ptr_type, "closure_ptr")
-                .map_err(|e| {
-                    CompileError::Semantic(format!("Failed to cast closure ptr: {}", e))
-                })?;
+                .map_err(|e| CompileError::Semantic(format!("Failed to cast closure ptr: {}", e)))?;
 
             let offset_val = self.context.i32_type().const_int(0, false);
-            let fn_ptr_slot =
-                unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "fn_ptr_slot") }
-                    .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
+            let fn_ptr_slot = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "fn_ptr_slot") }
+                .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
 
             let fn_ptr_slot = builder
                 .build_pointer_cast(
@@ -98,9 +95,7 @@ impl LlvmBackend {
                     i8_ptr_type.ptr_type(inkwell::AddressSpace::default()),
                     "fn_ptr_slot_cast",
                 )
-                .map_err(|e| {
-                    CompileError::Semantic(format!("Failed to cast fn slot ptr: {}", e))
-                })?;
+                .map_err(|e| CompileError::Semantic(format!("Failed to cast fn slot ptr: {}", e)))?;
 
             let func_ptr = builder
                 .build_load(i8_ptr_type, fn_ptr_slot, "loaded_func")
@@ -113,10 +108,7 @@ impl LlvmBackend {
                     arg_vals.push(val.into());
                 }
 
-                let llvm_param_types: Result<
-                    Vec<inkwell::types::BasicMetadataTypeEnum>,
-                    CompileError,
-                > = param_types
+                let llvm_param_types: Result<Vec<inkwell::types::BasicMetadataTypeEnum>, CompileError> = param_types
                     .iter()
                     .map(|ty| self.llvm_type(ty).map(|t| t.into()))
                     .collect();
@@ -130,19 +122,13 @@ impl LlvmBackend {
                         BasicTypeEnum::IntType(t) => t.fn_type(&llvm_param_types, false),
                         BasicTypeEnum::FloatType(t) => t.fn_type(&llvm_param_types, false),
                         BasicTypeEnum::PointerType(t) => t.fn_type(&llvm_param_types, false),
-                        _ => {
-                            return Err(CompileError::Semantic(
-                                "Unsupported return type".to_string(),
-                            ))
-                        }
+                        _ => return Err(CompileError::Semantic("Unsupported return type".to_string())),
                     }
                 };
 
                 let call_site = builder
                     .build_indirect_call(fn_type, fn_ptr, &arg_vals, "indirect_call")
-                    .map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build indirect call: {}", e))
-                    })?;
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build indirect call: {}", e)))?;
 
                 if let Some(d) = dest {
                     if let Some(ret_val) = call_site.try_as_basic_value().left() {
@@ -176,12 +162,7 @@ impl LlvmBackend {
         // Declare rt_interp_call if not exists
         let interp_call = module.get_function("rt_interp_call").unwrap_or_else(|| {
             let fn_type = i64_type.fn_type(
-                &[
-                    i8_ptr_type.into(),
-                    i64_type.into(),
-                    i64_type.into(),
-                    i8_ptr_type.into(),
-                ],
+                &[i8_ptr_type.into(), i64_type.into(), i64_type.into(), i8_ptr_type.into()],
                 false,
             );
             module.add_function("rt_interp_call", fn_type, None)

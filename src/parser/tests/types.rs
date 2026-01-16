@@ -1,6 +1,5 @@
 use simple_parser::ast::{
-    BinaryArithmeticOp, Node, OverflowBehavior, ReferenceCapability, Type, UnaryArithmeticOp,
-    UnitExpr,
+    BinaryArithmeticOp, Node, OverflowBehavior, ReferenceCapability, Type, UnaryArithmeticOp, UnitExpr,
 };
 use simple_parser::Parser;
 
@@ -478,10 +477,7 @@ fn test_capability_nested() {
         } = &f.params[0].ty.as_ref().unwrap()
         {
             assert_eq!(*cap1, ReferenceCapability::Exclusive);
-            if let Type::Capability {
-                capability: cap2, ..
-            } = &**inner1
-            {
+            if let Type::Capability { capability: cap2, .. } = &**inner1 {
                 assert_eq!(*cap2, ReferenceCapability::Exclusive);
             } else {
                 panic!("expected nested Capability");

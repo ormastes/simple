@@ -79,10 +79,7 @@ fn parse_sql_query(payload: &str) -> Result<Value, CompileError> {
 
     // Build result structure
     let mut result = HashMap::new();
-    result.insert(
-        "query_type".to_string(),
-        Value::Str(query_type.as_str().to_string()),
-    );
+    result.insert("query_type".to_string(), Value::Str(query_type.as_str().to_string()));
     result.insert("raw_query".to_string(), Value::Str(payload.to_string()));
     result.insert(
         "positional_params".to_string(),
@@ -196,18 +193,14 @@ fn validate_sql(query: &str) -> Result<(), CompileError> {
             ')' => {
                 paren_depth -= 1;
                 if paren_depth < 0 {
-                    return Err(CompileError::Semantic(
-                        "unbalanced parentheses in SQL query".into(),
-                    ));
+                    return Err(CompileError::Semantic("unbalanced parentheses in SQL query".into()));
                 }
             }
             _ => {}
         }
     }
     if paren_depth != 0 {
-        return Err(CompileError::Semantic(
-            "unbalanced parentheses in SQL query".into(),
-        ));
+        return Err(CompileError::Semantic("unbalanced parentheses in SQL query".into()));
     }
 
     // Check for unclosed string literals
@@ -220,9 +213,7 @@ fn validate_sql(query: &str) -> Result<(), CompileError> {
         prev = ch;
     }
     if in_string {
-        return Err(CompileError::Semantic(
-            "unclosed string literal in SQL query".into(),
-        ));
+        return Err(CompileError::Semantic("unclosed string literal in SQL query".into()));
     }
 
     Ok(())
@@ -234,10 +225,7 @@ mod tests {
 
     #[test]
     fn test_detect_select() {
-        assert_eq!(
-            detect_query_type("SELECT * FROM users"),
-            SqlQueryType::Select
-        );
+        assert_eq!(detect_query_type("SELECT * FROM users"), SqlQueryType::Select);
     }
 
     #[test]

@@ -52,9 +52,7 @@ pub(super) fn compile_try_unwrap<M: Module>(
     let success_block = builder.create_block();
     let err_block = *ctx.blocks.get(&error_block).unwrap();
 
-    builder
-        .ins()
-        .brif(is_error, err_block, &[], success_block, &[]);
+    builder.ins().brif(is_error, err_block, &[], success_block, &[]);
 
     builder.switch_to_block(success_block);
     let payload = builder.ins().load(types::I64, MemFlags::new(), val, 8);
@@ -71,11 +69,7 @@ pub(super) fn compile_option_some<M: Module>(
     alloc_tagged_object(ctx, builder, dest, 1, Some(value));
 }
 
-pub(super) fn compile_option_none<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-    dest: VReg,
-) {
+pub(super) fn compile_option_none<M: Module>(ctx: &mut InstrContext<'_, M>, builder: &mut FunctionBuilder, dest: VReg) {
     alloc_tagged_object(ctx, builder, dest, 0, None);
 }
 

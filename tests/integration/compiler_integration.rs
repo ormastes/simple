@@ -122,11 +122,7 @@ main = x + y
 "#;
     let mut parser = Parser::new(source);
     let result = parser.parse();
-    assert!(
-        result.is_ok(),
-        "Should parse let bindings: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Should parse let bindings: {:?}", result.err());
 }
 
 #[test]
@@ -448,11 +444,7 @@ fn test_mir_lowerer_lower_module() {
 fn test_codegen_new() {
     use simple_compiler::codegen::Codegen;
     let codegen = Codegen::new();
-    assert!(
-        codegen.is_ok(),
-        "Should create codegen: {:?}",
-        codegen.err()
-    );
+    assert!(codegen.is_ok(), "Should create codegen: {:?}", codegen.err());
 }
 
 #[test]
@@ -494,11 +486,7 @@ fn test_codegen_with_arithmetic() {
 
     let codegen = Codegen::new().expect("codegen ok");
     let result = codegen.compile_module(&mir);
-    assert!(
-        result.is_ok(),
-        "Should compile arithmetic: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Should compile arithmetic: {:?}", result.err());
 }
 
 // =============================================================================
@@ -521,10 +509,7 @@ fn test_smf_writer_add_string() {
     let offset3 = writer.add_string("hello"); // Duplicate should return same offset
     assert!(offset1 > 0, "First string should have positive offset");
     assert!(offset2 > offset1, "Second string should have larger offset");
-    assert_eq!(
-        offset1, offset3,
-        "Duplicate string should return same offset"
-    );
+    assert_eq!(offset1, offset3, "Duplicate string should return same offset");
 }
 
 #[test]
@@ -607,10 +592,7 @@ fn test_smf_writer_write() {
     let mut output = Cursor::new(Vec::new());
     let result = writer.write(&mut output);
     assert!(result.is_ok(), "Should write SMF: {:?}", result.err());
-    assert!(
-        !output.into_inner().is_empty(),
-        "Output should not be empty"
-    );
+    assert!(!output.into_inner().is_empty(), "Output should not be empty");
 }
 
 #[test]
@@ -643,11 +625,7 @@ fn test_smf_writer_from_object_code() {
     let mut writer = writer_result.unwrap();
     let mut output = Cursor::new(Vec::new());
     let result = writer.write(&mut output);
-    assert!(
-        result.is_ok(),
-        "Should write from object code: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Should write from object code: {:?}", result.err());
 }
 
 // =============================================================================
@@ -775,10 +753,7 @@ fn test_effect_set_push() {
 fn test_effect_set_is_pipeline_safe() {
     use simple_compiler::mir::EffectSet;
     let effects = EffectSet::new();
-    assert!(
-        effects.is_pipeline_safe(),
-        "Empty effect set should be pipeline safe"
-    );
+    assert!(effects.is_pipeline_safe(), "Empty effect set should be pipeline safe");
 }
 
 #[test]

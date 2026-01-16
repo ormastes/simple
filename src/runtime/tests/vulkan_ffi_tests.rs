@@ -16,10 +16,7 @@ use std::ptr;
 fn test_vk_available() {
     let available = rt_vk_available();
     // Result depends on system, just verify it returns 0 or 1
-    assert!(
-        available == 0 || available == 1,
-        "rt_vk_available should return 0 or 1"
-    );
+    assert!(available == 0 || available == 1, "rt_vk_available should return 0 or 1");
     println!("Vulkan available: {}", available == 1);
 }
 
@@ -80,11 +77,7 @@ fn test_device_sync() {
 
     // Sync on idle device (should succeed)
     let result = rt_vk_device_sync(device);
-    assert_eq!(
-        result,
-        VulkanFfiError::Success as i32,
-        "Device sync should succeed"
-    );
+    assert_eq!(result, VulkanFfiError::Success as i32, "Device sync should succeed");
 
     rt_vk_device_free(device);
 }
@@ -214,11 +207,7 @@ fn test_buffer_upload_download() {
 
     // Upload data
     let upload_result = rt_vk_buffer_upload(buffer, data.as_ptr() as *const u8, size);
-    assert_eq!(
-        upload_result,
-        VulkanFfiError::Success as i32,
-        "Upload should succeed"
-    );
+    assert_eq!(upload_result, VulkanFfiError::Success as i32, "Upload should succeed");
 
     // Download data
     let mut output = vec![0.0f32; data.len()];

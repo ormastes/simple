@@ -49,10 +49,7 @@ pub(crate) fn compute_live_outs(
 ///
 /// Returns a vector where element i contains the set of live registers
 /// after instruction i. The final element is the live-out set for the block.
-pub(crate) fn live_after_each_inst(
-    block: &MirBlock,
-    live_out: Option<&HashSet<VReg>>,
-) -> Vec<HashSet<VReg>> {
+pub(crate) fn live_after_each_inst(block: &MirBlock, live_out: Option<&HashSet<VReg>>) -> Vec<HashSet<VReg>> {
     let mut live = live_out.cloned().unwrap_or_default();
     let mut states = Vec::with_capacity(block.instructions.len() + 1);
     states.push(live.clone()); // After the final instruction
@@ -74,10 +71,7 @@ pub(crate) fn live_after_each_inst(
 /// Remap block IDs in a terminator using the provided mapping.
 ///
 /// Returns None if the terminator becomes unreachable after remapping.
-pub(crate) fn remap_terminator(
-    term: Terminator,
-    map: &HashMap<BlockId, BlockId>,
-) -> Option<Terminator> {
+pub(crate) fn remap_terminator(term: Terminator, map: &HashMap<BlockId, BlockId>) -> Option<Terminator> {
     match term {
         Terminator::Jump(target) => map.get(&target).copied().map(Terminator::Jump),
         Terminator::Branch {

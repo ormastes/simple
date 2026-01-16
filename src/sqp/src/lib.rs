@@ -40,15 +40,12 @@ pub use query::{JoinType, Order, Query};
 pub use raw::RawSql;
 
 // Model re-exports
-pub use model::{
-    Column, ColumnType, Constraint, Index, ModelDef, ModelRegistry, Relation, RelationType,
-};
+pub use model::{Column, ColumnType, Constraint, Index, ModelDef, ModelRegistry, Relation, RelationType};
 
 // Migration re-exports
 pub use migration::{Direction, Migration, MigrationRecord, MigrationStatus, Migrator, Operation};
 
 // Preload re-exports
 pub use preload::{
-    group_by_foreign_key, parse_preload, Preload, PreloadBuilder, PreloadConfig, PreloadQuery,
-    PreloadStrategy,
+    group_by_foreign_key, parse_preload, Preload, PreloadBuilder, PreloadConfig, PreloadQuery, PreloadStrategy,
 };

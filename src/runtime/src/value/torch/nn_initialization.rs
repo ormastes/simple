@@ -37,12 +37,7 @@ pub extern "C" fn rt_torch_normal_(tensor_handle: u64, mean: f64, std: f64) -> i
             .lock()
             .insert(tensor_handle, Arc::new(TensorWrapper(scaled)));
 
-        tracing::debug!(
-            "rt_torch_normal_: {} mean={} std={}",
-            tensor_handle,
-            mean,
-            std
-        );
+        tracing::debug!("rt_torch_normal_: {} mean={} std={}", tensor_handle, mean, std);
         TorchFfiError::Success as i32
     }
     #[cfg(not(feature = "pytorch"))]

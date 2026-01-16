@@ -2,8 +2,8 @@
 
 #[cfg(feature = "vulkan")]
 use crate::vulkan::{
-    ComputePipeline, DescriptorPool, DescriptorSet, DescriptorSetLayout, Surface, VulkanBuffer,
-    VulkanDevice, VulkanError, VulkanSwapchain, WindowManager,
+    ComputePipeline, DescriptorPool, DescriptorSet, DescriptorSetLayout, Surface, VulkanBuffer, VulkanDevice,
+    VulkanError, VulkanSwapchain, WindowManager,
 };
 #[cfg(feature = "vulkan")]
 use parking_lot::Mutex;

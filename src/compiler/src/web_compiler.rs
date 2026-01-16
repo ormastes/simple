@@ -65,10 +65,7 @@ impl WebCompiler {
     }
 
     /// Compile a .sui file from source string
-    pub fn compile_sui_source(
-        &mut self,
-        source: &str,
-    ) -> Result<SuiCompilationResult, CompileError> {
+    pub fn compile_sui_source(&mut self, source: &str) -> Result<SuiCompilationResult, CompileError> {
         // Parse .sui file
         let mut parser = SuiParser::new(source.to_string());
         let sui_file = parser
@@ -80,10 +77,7 @@ impl WebCompiler {
     }
 
     /// Compile a .sui file from path
-    pub fn compile_sui_file(
-        &mut self,
-        path: impl AsRef<Path>,
-    ) -> Result<SuiCompilationResult, CompileError> {
+    pub fn compile_sui_file(&mut self, path: impl AsRef<Path>) -> Result<SuiCompilationResult, CompileError> {
         let source = std::fs::read_to_string(path.as_ref())
             .map_err(|e| CompileError::Io(format!("Failed to read .sui file: {}", e)))?;
 
@@ -91,10 +85,7 @@ impl WebCompiler {
     }
 
     /// Compile a parsed .sui file
-    fn compile_sui_file_parsed(
-        &mut self,
-        sui_file: SuiFile,
-    ) -> Result<SuiCompilationResult, CompileError> {
+    fn compile_sui_file_parsed(&mut self, sui_file: SuiFile) -> Result<SuiCompilationResult, CompileError> {
         // Extract all client exports
         let client_exports = sui_file
             .client_blocks
@@ -208,11 +199,7 @@ impl WebCompiler {
     }
 
     /// Generate hydration manifest from client blocks
-    fn generate_hydration_manifest(
-        &self,
-        sui_file: &SuiFile,
-        wasm_size: usize,
-    ) -> HydrationManifest {
+    fn generate_hydration_manifest(&self, sui_file: &SuiFile, wasm_size: usize) -> HydrationManifest {
         let mut builder = ManifestBuilder::new();
 
         // Add all client exports
@@ -324,12 +311,7 @@ impl WebCompiler {
     ///
     /// If template has a </body> tag, inject before it.
     /// Otherwise, wrap template in a complete HTML document.
-    fn inject_hydration_into_template(
-        &self,
-        template: &str,
-        hydration_script: &str,
-        wasm_module_name: &str,
-    ) -> String {
+    fn inject_hydration_into_template(&self, template: &str, hydration_script: &str, wasm_module_name: &str) -> String {
         let wasm_loader = self.generate_wasm_loader(wasm_module_name, hydration_script);
 
         // Check if template has a closing </body> tag
@@ -596,10 +578,7 @@ fn on_click() -> i64:
         assert_eq!(compiled.hydration_manifest.version, 2);
 
         // Should have client exports
-        assert!(compiled
-            .hydration_manifest
-            .exports
-            .contains(&"on_click".to_string()));
+        assert!(compiled.hydration_manifest.exports.contains(&"on_click".to_string()));
 
         // State parsing not yet implemented in sui_parser, so state may be empty
         // This will work once SharedStateDecl parsing is complete
@@ -655,8 +634,7 @@ dom.querySelector(".menu-item").addEventListener("mouseover", show_menu)
 </html>"#;
         let hydration_script = "export async function hydrate(wasm) { }";
 
-        let result =
-            compiler.inject_hydration_into_template(template, hydration_script, "test_app");
+        let result = compiler.inject_hydration_into_template(template, hydration_script, "test_app");
 
         assert!(result.contains("<h1>Hello</h1>"));
         assert!(result.contains("<script type=\"module\">"));
@@ -677,8 +655,7 @@ dom.querySelector(".menu-item").addEventListener("mouseover", show_menu)
 </html>"#;
         let hydration_script = "export async function hydrate(wasm) { }";
 
-        let result =
-            compiler.inject_hydration_into_template(template, hydration_script, "test_app");
+        let result = compiler.inject_hydration_into_template(template, hydration_script, "test_app");
 
         assert!(result.contains("<h1>Hello</h1>"));
         assert!(result.contains("<script type=\"module\">"));
@@ -695,8 +672,7 @@ dom.querySelector(".menu-item").addEventListener("mouseover", show_menu)
         let template = "<h1>Hello World</h1>";
         let hydration_script = "export async function hydrate(wasm) { }";
 
-        let result =
-            compiler.inject_hydration_into_template(template, hydration_script, "test_app");
+        let result = compiler.inject_hydration_into_template(template, hydration_script, "test_app");
 
         assert!(result.contains("<!DOCTYPE html>"));
         assert!(result.contains("<html lang=\"en\">"));
@@ -753,13 +729,9 @@ fn on_click() -> i64:
         assert!(!compiled.client_binary.is_empty());
 
         // Template should have injected script
-        assert!(compiled
-            .template_html
-            .contains("<button id=\"btn\">Click me</button>"));
+        assert!(compiled.template_html.contains("<button id=\"btn\">Click me</button>"));
         assert!(compiled.template_html.contains("<script type=\"module\">"));
-        assert!(compiled
-            .template_html
-            .contains("async function hydrate(wasm)"));
+        assert!(compiled.template_html.contains("async function hydrate(wasm)"));
         assert!(compiled.template_html.contains("fetch('./app.wasm')"));
 
         // Script should be before </body>

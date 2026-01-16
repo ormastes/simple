@@ -140,12 +140,7 @@ impl NativeLinker {
     /// # Returns
     ///
     /// Returns `Ok(())` on success, or a `LinkerError` on failure.
-    pub fn link(
-        &self,
-        objects: &[PathBuf],
-        output: &Path,
-        options: &LinkOptions,
-    ) -> LinkerResult<()> {
+    pub fn link(&self, objects: &[PathBuf], output: &Path, options: &LinkOptions) -> LinkerResult<()> {
         // Verify all input files exist
         for obj in objects {
             if !obj.exists() {

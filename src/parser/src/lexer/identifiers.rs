@@ -259,7 +259,11 @@ impl<'a> super::Lexer<'a> {
                 }
             }
             'h' => {
-                if self.peek() == Some('t') && self.peek_ahead(1) == Some('m') && self.peek_ahead(2) == Some('l') && self.peek_ahead(3) == Some('{') {
+                if self.peek() == Some('t')
+                    && self.peek_ahead(1) == Some('m')
+                    && self.peek_ahead(2) == Some('l')
+                    && self.peek_ahead(3) == Some('{')
+                {
                     self.advance(); // consume 't'
                     self.advance(); // consume 'm'
                     self.advance(); // consume 'l'
@@ -268,7 +272,12 @@ impl<'a> super::Lexer<'a> {
                 }
             }
             'g' => {
-                if self.peek() == Some('r') && self.peek_ahead(1) == Some('a') && self.peek_ahead(2) == Some('p') && self.peek_ahead(3) == Some('h') && self.peek_ahead(4) == Some('{') {
+                if self.peek() == Some('r')
+                    && self.peek_ahead(1) == Some('a')
+                    && self.peek_ahead(2) == Some('p')
+                    && self.peek_ahead(3) == Some('h')
+                    && self.peek_ahead(4) == Some('{')
+                {
                     self.advance(); // consume 'r'
                     self.advance(); // consume 'a'
                     self.advance(); // consume 'p'

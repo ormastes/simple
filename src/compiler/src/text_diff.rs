@@ -73,11 +73,7 @@ impl TextDiff {
         // Backtrack through LCS table to find differences
         while i > 0 || j > 0 {
             if i > 0 && j > 0 && old_lines[i - 1] == new_lines[j - 1] {
-                changes.push((
-                    i - 1,
-                    j - 1,
-                    DiffLine::Context(old_lines[i - 1].to_string()),
-                ));
+                changes.push((i - 1, j - 1, DiffLine::Context(old_lines[i - 1].to_string())));
                 i -= 1;
                 j -= 1;
             } else if j > 0 && (i == 0 || lcs[i][j - 1] >= lcs[i - 1][j]) {

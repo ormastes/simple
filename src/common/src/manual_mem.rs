@@ -232,10 +232,7 @@ impl<T> HandlePool<T> {
         let mut slots = self.inner.slots.lock().unwrap();
         let gen = self.inner.next_gen.fetch_add(1, Ordering::SeqCst);
         let value = Arc::new(value);
-        let entry = HandleEntry {
-            generation: gen,
-            value,
-        };
+        let entry = HandleEntry { generation: gen, value };
         let idx = slots.iter().position(|s| s.is_none()).unwrap_or_else(|| {
             slots.push(None);
             slots.len() - 1

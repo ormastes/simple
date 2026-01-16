@@ -99,9 +99,7 @@ fn test_expect_rustyline_bug_exists() {
 
     // Wait for REPL to start
     println!("Waiting for REPL startup...");
-    session
-        .wait_for_prompt(1000)
-        .expect("Failed to wait for prompt");
+    session.wait_for_prompt(1000).expect("Failed to wait for prompt");
 
     // Press Tab (should insert 4 spaces)
     println!("=== Pressing Tab (expect 4 spaces) ===");
@@ -112,9 +110,7 @@ fn test_expect_rustyline_bug_exists() {
     // Press Backspace (bug: should only delete 1 space, not 4)
     println!("\n=== Pressing Backspace (expect bug: only 1 space deleted) ===");
     session.send_backspace().expect("Failed to send backspace");
-    let after_backspace = session
-        .read_output(200)
-        .expect("Failed to read after backspace");
+    let after_backspace = session.read_output(200).expect("Failed to read after backspace");
     println!("After Backspace: {}", after_backspace.escape_debug());
 
     // Analyze the result
@@ -164,9 +160,7 @@ fn test_verify_indent_backspace_does_not_work() {
     println!("╚════════════════════════════════════════════════════════╝\n");
 
     let mut session = PtySession::new().expect("Failed to create PTY session");
-    session
-        .wait_for_prompt(1000)
-        .expect("Failed to wait for prompt");
+    session.wait_for_prompt(1000).expect("Failed to wait for prompt");
 
     // Press Tab
     println!("Step 1: Press Tab");
@@ -185,9 +179,7 @@ fn test_verify_indent_backspace_does_not_work() {
     // Press Backspace
     println!("\nStep 2: Press Backspace");
     session.send_backspace().expect("Failed to send backspace");
-    let after_backspace = session
-        .read_output(200)
-        .expect("Failed to read after backspace");
+    let after_backspace = session.read_output(200).expect("Failed to read after backspace");
 
     // Count remaining spaces
     let remaining_spaces = after_backspace.chars().filter(|&c| c == ' ').count();
@@ -228,9 +220,7 @@ fn test_workaround_multiple_backspaces_needed() {
     println!("╚════════════════════════════════════════════════════════╝\n");
 
     let mut session = PtySession::new().expect("Failed to create PTY session");
-    session
-        .wait_for_prompt(1000)
-        .expect("Failed to wait for prompt");
+    session.wait_for_prompt(1000).expect("Failed to wait for prompt");
 
     // Press Tab to insert 4 spaces
     println!("Step 1: Press Tab (insert 4 spaces)");
