@@ -95,4 +95,85 @@ impl Lowerer {
             ty,
         })
     }
+
+    /// Lower a spawn expression to HIR
+    ///
+    /// `spawn expr` lowers to ActorSpawn
+    pub(super) fn lower_spawn(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+        let body_hir = Box::new(self.lower_expr(expr, ctx)?);
+        Ok(HirExpr {
+            kind: HirExprKind::ActorSpawn { body: body_hir },
+            ty: TypeId::I64, // Returns thread handle
+        })
+    }
+
+    /// Lower a go expression to HIR
+    ///
+    /// `go(args) \params: body` or `go |captures| \: body`
+    /// Both forms lower to spawn_isolated with a lambda
+    pub(super) fn lower_go(
+        &mut self,
+        args: &[Expr],
+        params: &[String],
+        is_capture_form: bool,
+        body: &Expr,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        // For go expressions, we create a lambda and spawn it
+        // go(x, y) \a, b: expr  =>  spawn_isolated(\a, b: expr)(x, y)
+        // go |x, y| \: expr     =>  spawn_isolated(\: expr using captured x, y)
+
+        if is_capture_form {
+            // Capture form: go |x, y| \: body
+            // The args are identifiers that should be captured
+            // We create a lambda with no parameters that uses the captures
+            let lambda_params: Vec<ast::LambdaParam> = Vec::new();
+            let lambda_hir = self.lower_lambda(&lambda_params, body, ctx)?;
+
+            // Spawn the lambda
+            Ok(HirExpr {
+                kind: HirExprKind::ActorSpawn {
+                    body: Box::new(lambda_hir),
+                },
+                ty: TypeId::I64, // Returns thread handle
+            })
+        } else {
+            // Args form: go(x, y) \a, b: body
+            // Create a lambda with the parameters
+            let lambda_params: Vec<ast::LambdaParam> = params
+                .iter()
+                .map(|name| ast::LambdaParam {
+                    name: name.clone(),
+                    ty: None,
+                    capability: None,
+                })
+                .collect();
+
+            let lambda_hir = self.lower_lambda(&lambda_params, body, ctx)?;
+
+            // Lower the arguments
+            let mut arg_hirs = Vec::new();
+            for arg in args {
+                arg_hirs.push(self.lower_expr(arg, ctx)?);
+            }
+
+            // Create a call to the lambda with the arguments
+            // This is effectively: (lambda)(args...)
+            let call_hir = HirExpr {
+                kind: HirExprKind::Call {
+                    callee: Box::new(lambda_hir),
+                    args: arg_hirs,
+                },
+                ty: TypeId::I64, // The result type of the body
+            };
+
+            // Spawn the call
+            Ok(HirExpr {
+                kind: HirExprKind::ActorSpawn {
+                    body: Box::new(call_hir),
+                },
+                ty: TypeId::I64, // Returns thread handle
+            })
+        }
+    }
 }

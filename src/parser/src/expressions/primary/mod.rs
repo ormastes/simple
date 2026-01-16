@@ -48,6 +48,7 @@ impl<'a> Parser<'a> {
             TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => self.parse_primary_collection(),
             TokenKind::Old
             | TokenKind::Spawn
+            | TokenKind::Go
             | TokenKind::New
             | TokenKind::If
             | TokenKind::Elif

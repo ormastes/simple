@@ -13,6 +13,8 @@ pub struct LintChecker {
     config: LintConfig,
     /// Collected diagnostics
     diagnostics: Vec<LintDiagnostic>,
+    /// Source file path (for file-based lints)
+    source_file: Option<std::path::PathBuf>,
 }
 
 impl LintChecker {
@@ -20,6 +22,7 @@ impl LintChecker {
         Self {
             config: LintConfig::new(),
             diagnostics: Vec::new(),
+            source_file: None,
         }
     }
 
@@ -27,7 +30,13 @@ impl LintChecker {
         Self {
             config,
             diagnostics: Vec::new(),
+            source_file: None,
         }
+    }
+
+    pub fn with_source_file(mut self, source_file: Option<std::path::PathBuf>) -> Self {
+        self.source_file = source_file;
+        self
     }
 
     /// Get collected diagnostics
@@ -88,6 +97,18 @@ impl LintChecker {
 
     /// Check a module for lint violations
     pub fn check_module(&mut self, items: &[Node]) {
+        // Run file-based lints first
+        if let Some(ref source_file) = self.source_file {
+            // Check for print in test spec files
+            if source_file.to_string_lossy().ends_with("_spec.spl") {
+                self.check_print_in_test_spec(items);
+            }
+
+            // Check TODO format
+            self.check_todo_format(source_file);
+        }
+
+        // Run AST-based lints
         for item in items {
             self.check_node(item);
         }
@@ -301,6 +322,244 @@ impl LintChecker {
                 self.check_type_in_public_api(element, span, name, context);
             }
             _ => {}
+        }
+    }
+
+    /// Check for print() calls in test spec files
+    fn check_print_in_test_spec(&mut self, items: &[Node]) {
+        use simple_parser::ast::Expr;
+
+        // Helper to check expressions for print calls
+        fn check_expr(checker: &mut LintChecker, expr: &Expr) {
+            match expr {
+                Expr::Call { callee, .. } => {
+                    // Check if callee is "print"
+                    if let Expr::Identifier(name) = &**callee {
+                        if name == "print" {
+                            checker.emit(
+                                LintName::PrintInTestSpec,
+                                Span::default(), // TODO: Use actual span from expr
+                                "print() call in test spec file".to_string(),
+                                Some("use triple-quoted strings \"\"\" for test output, or add #[allow(print_in_test_spec)] if print is needed".to_string()),
+                            );
+                        }
+                    }
+                    // Recursively check callee and arguments
+                    check_expr(checker, callee);
+                }
+                Expr::Binary { left, right, .. } => {
+                    check_expr(checker, left);
+                    check_expr(checker, right);
+                }
+                Expr::Unary { operand, .. } => {
+                    check_expr(checker, operand);
+                }
+                Expr::MethodCall { receiver, args, .. } => {
+                    check_expr(checker, receiver);
+                    for arg in args {
+                        if let Some(ref value) = arg.value {
+                            check_expr(checker, value);
+                        }
+                    }
+                }
+                Expr::FieldAccess { receiver, .. } => {
+                    check_expr(checker, receiver);
+                }
+                Expr::Index { receiver, index } => {
+                    check_expr(checker, receiver);
+                    check_expr(checker, index);
+                }
+                Expr::TupleIndex { receiver, .. } => {
+                    check_expr(checker, receiver);
+                }
+                Expr::Lambda { body, .. } => {
+                    check_expr(checker, body);
+                }
+                Expr::Array(elements) => {
+                    for elem in elements {
+                        check_expr(checker, elem);
+                    }
+                }
+                Expr::Tuple(elements) => {
+                    for elem in elements {
+                        check_expr(checker, elem);
+                    }
+                }
+                Expr::Ternary {
+                    condition,
+                    then_expr,
+                    else_expr,
+                } => {
+                    check_expr(checker, condition);
+                    check_expr(checker, then_expr);
+                    check_expr(checker, else_expr);
+                }
+                Expr::Block { statements, .. } => {
+                    for stmt in statements {
+                        check_stmt(checker, stmt);
+                    }
+                }
+                Expr::DoBlock { statements, .. } => {
+                    for stmt in statements {
+                        check_stmt(checker, stmt);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Helper to check statements
+        fn check_stmt(checker: &mut LintChecker, node: &Node) {
+            use simple_parser::ast::{IfStmt, LetStmt, MatchStmt, ReturnStmt};
+
+            match node {
+                Node::Expression(expr) => check_expr(checker, expr),
+                Node::Let(LetStmt { value, .. }) => {
+                    if let Some(ref v) = value {
+                        check_expr(checker, v);
+                    }
+                }
+                Node::Assignment(assign) => {
+                    check_expr(checker, &assign.value);
+                }
+                Node::Return(ReturnStmt { value, .. }) => {
+                    if let Some(ref v) = value {
+                        check_expr(checker, v);
+                    }
+                }
+                Node::If(IfStmt {
+                    condition,
+                    then_branch,
+                    else_branch,
+                    ..
+                }) => {
+                    check_expr(checker, condition);
+                    for stmt in then_branch {
+                        check_stmt(checker, stmt);
+                    }
+                    if let Some(ref else_stmts) = else_branch {
+                        for stmt in else_stmts {
+                            check_stmt(checker, stmt);
+                        }
+                    }
+                }
+                Node::Match(MatchStmt { expr, arms, .. }) => {
+                    check_expr(checker, expr);
+                    for arm in arms {
+                        for stmt in &arm.body {
+                            check_stmt(checker, stmt);
+                        }
+                    }
+                }
+                Node::For(for_stmt) => {
+                    check_expr(checker, &for_stmt.iterable);
+                    for stmt in &for_stmt.body {
+                        check_stmt(checker, stmt);
+                    }
+                }
+                Node::While(while_stmt) => {
+                    check_expr(checker, &while_stmt.condition);
+                    for stmt in &while_stmt.body {
+                        check_stmt(checker, stmt);
+                    }
+                }
+                Node::Loop(loop_stmt) => {
+                    for stmt in &loop_stmt.body {
+                        check_stmt(checker, stmt);
+                    }
+                }
+                Node::Function(func) => {
+                    for stmt in &func.body {
+                        check_stmt(checker, stmt);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Check all top-level items
+        for item in items {
+            check_stmt(self, item);
+        }
+    }
+
+    /// Check TODO/FIXME comment format
+    fn check_todo_format(&mut self, source_file: &std::path::Path) {
+        // Read the source file
+        let source = match std::fs::read_to_string(source_file) {
+            Ok(s) => s,
+            Err(_) => return, // Can't read file, skip this lint
+        };
+
+        // Valid areas and priorities (from .claude/skills/todo.md)
+        const TODO_AREAS: &[&str] = &[
+            "runtime", "codegen", "compiler", "parser", "type", "stdlib", "gpu", "ui", "test", "driver", "loader",
+            "pkg", "doc",
+        ];
+        const TODO_PRIORITIES: &[&str] = &["P0", "P1", "P2", "P3", "critical", "high", "medium", "low"];
+
+        // Regex pattern for TODO format: TODO: [area][priority] description
+        let todo_pattern = regex::Regex::new(r"(TODO|FIXME):\s*\[([^\]]+)\]\[([^\]]+)\]\s*(.+)").unwrap();
+
+        // Check each line
+        for (line_num, line) in source.lines().enumerate() {
+            let line_num = line_num + 1; // 1-indexed
+
+            // Skip if not a comment
+            let trimmed = line.trim();
+            if !trimmed.starts_with('#') {
+                continue;
+            }
+
+            // Check if contains TODO or FIXME
+            if !trimmed.contains("TODO") && !trimmed.contains("FIXME") {
+                continue;
+            }
+
+            // Extract the comment content (after #)
+            let comment = trimmed.trim_start_matches('#').trim();
+
+            // Check if it starts with TODO: or FIXME:
+            if !comment.starts_with("TODO:") && !comment.starts_with("FIXME:") {
+                continue; // Not a standard TODO comment
+            }
+
+            // Try to match the required format
+            if let Some(captures) = todo_pattern.captures(comment) {
+                let area = captures.get(2).map(|m| m.as_str()).unwrap_or("");
+                let priority = captures.get(3).map(|m| m.as_str()).unwrap_or("");
+
+                // Validate area
+                if !TODO_AREAS.contains(&area) {
+                    self.emit(
+                        LintName::TodoFormat,
+                        Span::default(), // TODO: Use actual span
+                        format!("TODO/FIXME has invalid area '{}'", area),
+                        Some(format!("valid areas: {}", TODO_AREAS.join(", "))),
+                    );
+                }
+
+                // Validate priority
+                if !TODO_PRIORITIES.contains(&priority) {
+                    self.emit(
+                        LintName::TodoFormat,
+                        Span::default(), // TODO: Use actual span
+                        format!("TODO/FIXME has invalid priority '{}'", priority),
+                        Some(format!("valid priorities: {}", TODO_PRIORITIES.join(", "))),
+                    );
+                }
+            } else {
+                // Doesn't match format
+                self.emit(
+                    LintName::TodoFormat,
+                    Span::default(), // TODO: Use actual span
+                    "TODO/FIXME missing [area][priority] format".to_string(),
+                    Some(
+                        "use format: TODO: [area][P0-P3] description (e.g., TODO: [runtime][P1] implement feature)"
+                            .to_string(),
+                    ),
+                );
+            }
         }
     }
 }

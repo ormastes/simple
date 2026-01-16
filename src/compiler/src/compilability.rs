@@ -553,6 +553,15 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         Expr::BlockExpr { kind, .. } => {
             add_reason(reasons, FallbackReason::NotYetImplemented(format!("{} block", kind)));
         }
+
+        // Go statement (concurrency)
+        Expr::Go { expr, .. } => {
+            analyze_expr(expr, reasons);
+            add_reason(
+                reasons,
+                FallbackReason::NotYetImplemented("go statement (concurrency)".into()),
+            );
+        }
     }
 }
 
