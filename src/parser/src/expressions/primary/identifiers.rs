@@ -12,7 +12,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Identifier("result".to_string()))
             }
-            TokenKind::Identifier { name: name, .. } => self.parse_identifier_or_struct(name),
+            TokenKind::Identifier { name, .. } => self.parse_identifier_or_struct(name),
             TokenKind::Self_ => {
                 self.advance();
                 Ok(Expr::Identifier("self".to_string()))
