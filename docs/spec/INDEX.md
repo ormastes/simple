@@ -1,13 +1,13 @@
 # Test Specification Index
 
-*Generated: 2026-01-16 09:37:07*
+*Generated: 2026-01-16 09:42:38*
 
 ## Quick Stats
 
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 256
+- **Total Lines:** 227
 
 ---
 
@@ -15,5 +15,5 @@
 
 | Feature | Status | Difficulty | Coverage | Details |
 |---------|--------|------------|----------|----------|
-| [Integer Literals Specification](basic_types_integer_literals_spec.md) | ✅ Complete | 1/5 | 80% | 256 lines |
+| [No-Parentheses Function Calls Specification](no_paren_calls_spec.md) | ✅ Complete | 2/5 | 80% | 227 lines |
 
