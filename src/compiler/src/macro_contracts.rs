@@ -428,6 +428,7 @@ fn create_function_from_stub(
         contract: None,
         is_abstract: false,
         is_sync: false,
+        is_me_method: false,
         bounds_block: None,
     })
 }

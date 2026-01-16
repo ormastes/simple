@@ -282,7 +282,7 @@ impl<'a> Parser<'a> {
         match &self.current.kind {
             TokenKind::Hash => self.parse_attributed_item_with_doc(doc_comment),
             TokenKind::At => self.parse_decorated_function_with_doc(doc_comment),
-            TokenKind::Fn => self.parse_function_with_doc(doc_comment),
+            TokenKind::Fn | TokenKind::Me => self.parse_function_with_doc(doc_comment),
             TokenKind::Async => self.parse_async_function_with_doc(doc_comment),
             TokenKind::Sync => self.parse_sync_function_with_doc(doc_comment),
             TokenKind::Struct => self.parse_struct_with_doc(doc_comment),

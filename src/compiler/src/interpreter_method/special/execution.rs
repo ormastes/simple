@@ -46,7 +46,16 @@ pub fn find_and_exec_method_with_self(
                 class,
                 fields,
             )?;
-            return Ok(Some((result, updated_self)));
+            // Only return updated self for `me` methods (mutable methods)
+            if func.is_me_method {
+                return Ok(Some((result, updated_self)));
+            } else {
+                // For regular `fn` methods, return the original self (no mutation persisted)
+                return Ok(Some((result, Value::Object {
+                    class: class.to_string(),
+                    fields: fields.clone(),
+                })));
+            }
         }
     }
     // Check impl methods
@@ -63,7 +72,16 @@ pub fn find_and_exec_method_with_self(
                 class,
                 fields,
             )?;
-            return Ok(Some((result, updated_self)));
+            // Only return updated self for `me` methods (mutable methods)
+            if func.is_me_method {
+                return Ok(Some((result, updated_self)));
+            } else {
+                // For regular `fn` methods, return the original self (no mutation persisted)
+                return Ok(Some((result, Value::Object {
+                    class: class.to_string(),
+                    fields: fields.clone(),
+                })));
+            }
         }
     }
     Ok(None)

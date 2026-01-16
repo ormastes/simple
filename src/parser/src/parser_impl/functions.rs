@@ -53,10 +53,6 @@ impl<'a> Parser<'a> {
             false
         };
 
-        // Note: is_me_method is currently stored but not used
-        // Future: can be used to enforce mutable self parameter
-        let _ = is_me_method; // Suppress unused warning
-
         // Allow keywords like 'new', 'type', etc. as function names
         let name = self.expect_method_name()?;
         // Parse optional generic parameters: fn foo<T, U>(...)
@@ -157,6 +153,7 @@ impl<'a> Parser<'a> {
             contract,
             is_abstract,
             is_sync: false,
+            is_me_method,
             bounds_block,
         }))
     }

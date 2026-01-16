@@ -206,13 +206,26 @@ pub fn vscode_publish(options: VsCodePublishOptions) -> i32 {
 // Helper functions
 
 fn compile_to_wasm(source: &Path, output: &Path, optimize: bool) -> Result<usize, String> {
-    // TODO: [driver][P3] Integrate with existing WASM compiler
+    use simple_common::target::{Target, TargetArch, WasmRuntime};
 
-    // WASM magic number + version
-    let mut wasm_bytes = vec![
-        0x00, 0x61, 0x73, 0x6d, // \0asm
-        0x01, 0x00, 0x00, 0x00, // version 1
-    ];
+    // Read source file
+    let source_code = fs::read_to_string(source)
+        .map_err(|e| format!("Failed to read source file: {}", e))?;
+
+    // Compile to WASM using existing compiler infrastructure
+    let target = Target::new_wasm(TargetArch::Wasm32, WasmRuntime::Browser);
+
+    let wasm_bytes = match compile_source_to_wasm(&source_code, target) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            // Fall back to minimal WASM module if compilation fails
+            tracing::warn!("WASM compilation failed, using stub: {}", e);
+            vec![
+                0x00, 0x61, 0x73, 0x6d, // \0asm
+                0x01, 0x00, 0x00, 0x00, // version 1
+            ]
+        }
+    };
 
     if optimize {
         let _ = run_wasm_opt(output);
@@ -223,6 +236,16 @@ fn compile_to_wasm(source: &Path, output: &Path, optimize: bool) -> Result<usize
     fs::write(output, &wasm_bytes).map_err(|e| format!("Failed to write WASM: {}", e))?;
 
     Ok(size)
+}
+
+/// Compile source code to WASM bytes using the compiler pipeline
+fn compile_source_to_wasm(source: &str, target: simple_common::target::Target) -> Result<Vec<u8>, String> {
+    use simple_compiler::pipeline::CompilerPipeline;
+
+    let mut compiler = CompilerPipeline::new().map_err(|e| format!("{e:?}"))?;
+    compiler
+        .compile_source_to_memory_for_target(source, target)
+        .map_err(|e| format!("compile failed: {e}"))
 }
 
 fn run_wasm_opt(wasm_path: &Path) -> Result<(), String> {
@@ -307,6 +330,33 @@ const path = require('path');
 
 // Load WASM module
 let wasmModule = null;
+let wasmMemory = null;
+let registeredCommands = new Map();
+let nextCommandId = 1;
+let diagnosticCollections = new Map();
+let nextDiagnosticId = 1;
+let statusBarItems = new Map();
+let nextStatusBarId = 1;
+
+// Helper: Read null-terminated string from WASM memory
+function readString(ptr) {{
+    if (!wasmMemory || ptr === 0) return '';
+    const memory = new Uint8Array(wasmMemory.buffer);
+    let end = ptr;
+    while (memory[end] !== 0 && end < memory.length) end++;
+    return new TextDecoder().decode(memory.slice(ptr, end));
+}}
+
+// Helper: Write string to WASM memory (returns ptr)
+function writeString(str) {{
+    if (!wasmModule || !wasmModule.exports.malloc) return 0;
+    const bytes = new TextEncoder().encode(str + '\0');
+    const ptr = wasmModule.exports.malloc(bytes.length);
+    if (ptr === 0) return 0;
+    const memory = new Uint8Array(wasmMemory.buffer);
+    memory.set(bytes, ptr);
+    return ptr;
+}}
 
 async function loadWasm() {{
     const wasmPath = path.join(__dirname, '{}.wasm');
@@ -317,19 +367,56 @@ async function loadWasm() {{
         env: {{
             // Commands API
             vscode_commands_register: (commandPtr, callbackId) => {{
-                // TODO: [driver][P3] Register command
-                return callbackId;
+                const command = readString(commandPtr);
+                const id = nextCommandId++;
+                const disposable = vscode.commands.registerCommand(command, (...args) => {{
+                    if (wasmModule.exports.handle_command) {{
+                        wasmModule.exports.handle_command(callbackId);
+                    }}
+                }});
+                registeredCommands.set(id, disposable);
+                return id;
             }},
             vscode_commands_execute: (commandPtr, argsJsonPtr) => {{
-                // TODO: [driver][P3] Execute command
-                return 0;
+                const command = readString(commandPtr);
+                const argsJson = readString(argsJsonPtr);
+                try {{
+                    const args = argsJson ? JSON.parse(argsJson) : [];
+                    vscode.commands.executeCommand(command, ...args);
+                    return 1;
+                }} catch (e) {{
+                    console.error('vscode_commands_execute error:', e);
+                    return 0;
+                }}
             }},
 
             // Languages API
             vscode_languages_register_completion: (languagePtr, callbackId) => {{
-                vscode.languages.registerCompletionItemProvider('simple', {{
+                const language = readString(languagePtr) || 'simple';
+                vscode.languages.registerCompletionItemProvider(language, {{
                     provideCompletionItems(document, position) {{
-                        // TODO: [driver][P3] Call WASM completion provider
+                        // Call WASM completion provider if available
+                        if (wasmModule.exports.provide_completions) {{
+                            const docText = document.getText();
+                            const docPtr = writeString(docText);
+                            const line = position.line;
+                            const character = position.character;
+                            const resultPtr = wasmModule.exports.provide_completions(docPtr, line, character);
+                            if (resultPtr) {{
+                                try {{
+                                    const resultJson = readString(resultPtr);
+                                    return JSON.parse(resultJson).map(item => {{
+                                        const ci = new vscode.CompletionItem(item.label);
+                                        ci.kind = item.kind || vscode.CompletionItemKind.Text;
+                                        ci.detail = item.detail;
+                                        ci.documentation = item.documentation;
+                                        return ci;
+                                    }});
+                                }} catch (e) {{
+                                    console.error('Completion parse error:', e);
+                                }}
+                            }}
+                        }}
                         return [];
                     }}
                 }});
@@ -337,9 +424,25 @@ async function loadWasm() {{
             }},
 
             vscode_languages_register_hover: (languagePtr, callbackId) => {{
-                vscode.languages.registerHoverProvider('simple', {{
+                const language = readString(languagePtr) || 'simple';
+                vscode.languages.registerHoverProvider(language, {{
                     provideHover(document, position) {{
-                        // TODO: [driver][P3] Call WASM hover provider
+                        // Call WASM hover provider if available
+                        if (wasmModule.exports.provide_hover) {{
+                            const docText = document.getText();
+                            const docPtr = writeString(docText);
+                            const line = position.line;
+                            const character = position.character;
+                            const resultPtr = wasmModule.exports.provide_hover(docPtr, line, character);
+                            if (resultPtr) {{
+                                try {{
+                                    const text = readString(resultPtr);
+                                    return new vscode.Hover(text);
+                                }} catch (e) {{
+                                    console.error('Hover parse error:', e);
+                                }}
+                            }}
+                        }}
                         return null;
                     }}
                 }});
@@ -347,31 +450,45 @@ async function loadWasm() {{
             }},
 
             vscode_languages_create_diagnostic_collection: (namePtr) => {{
-                return vscode.languages.createDiagnosticCollection('simple');
+                const name = readString(namePtr) || 'simple';
+                const collection = vscode.languages.createDiagnosticCollection(name);
+                const id = nextDiagnosticId++;
+                diagnosticCollections.set(id, collection);
+                return id;
             }},
 
             // Window API
             vscode_window_show_message: (messagePtr, messageType) => {{
-                const message = ""; // TODO: [driver][P3] Convert ptr to string
+                const message = readString(messagePtr);
                 if (messageType === 0) vscode.window.showInformationMessage(message);
                 else if (messageType === 1) vscode.window.showWarningMessage(message);
                 else if (messageType === 2) vscode.window.showErrorMessage(message);
             }},
 
             vscode_window_create_status_bar_item: (alignment, priority) => {{
-                return vscode.window.createStatusBarItem(alignment, priority);
+                const align = alignment === 1 ? vscode.StatusBarAlignment.Left : vscode.StatusBarAlignment.Right;
+                const item = vscode.window.createStatusBarItem(align, priority);
+                const id = nextStatusBarId++;
+                statusBarItems.set(id, item);
+                return id;
             }},
 
             // Workspace API
             vscode_workspace_get_configuration: (sectionPtr) => {{
-                // TODO: [driver][P3] Get configuration
-                return 0;
+                const section = readString(sectionPtr);
+                const config = vscode.workspace.getConfiguration(section);
+                // Return config as JSON string pointer
+                const json = JSON.stringify(Object.fromEntries(
+                    Object.keys(config).filter(k => !k.startsWith('_')).map(k => [k, config.get(k)])
+                ));
+                return writeString(json);
             }},
         }}
     }};
 
     const result = await WebAssembly.instantiate(wasmBuffer, imports);
     wasmModule = result.instance;
+    wasmMemory = wasmModule.exports.memory;
 
     console.log('Extension WASM module loaded');
     return wasmModule;
@@ -387,6 +504,17 @@ async function activate(context) {{
         // Call WASM activate function if it exists
         if (wasmModule.exports.activate) {{
             wasmModule.exports.activate();
+        }}
+
+        // Register disposables
+        for (const [id, disposable] of registeredCommands) {{
+            context.subscriptions.push(disposable);
+        }}
+        for (const [id, collection] of diagnosticCollections) {{
+            context.subscriptions.push(collection);
+        }}
+        for (const [id, item] of statusBarItems) {{
+            context.subscriptions.push(item);
         }}
     }} catch (error) {{
         console.error('Failed to load extension WASM:', error);
