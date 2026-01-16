@@ -27,10 +27,19 @@ pub struct HirArchRule {
     pub priority: i64,
 }
 
+/// HIR representation of a mock expectation.
+#[derive(Debug, Clone)]
+pub struct HirMockExpectation {
+    pub method_name: String,
+    pub params: Vec<super::LocalVar>,
+    pub return_type: crate::hir::TypeId,
+    pub body: Vec<super::HirStmt>,
+}
+
 /// HIR representation of a mock declaration.
 #[derive(Debug, Clone)]
 pub struct HirMockDecl {
     pub name: String,
     pub trait_name: String,
-    pub expectations: Vec<String>,
+    pub expectations: Vec<HirMockExpectation>,
 }
