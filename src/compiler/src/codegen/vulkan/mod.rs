@@ -49,3 +49,7 @@ mod instr_graphics;
 
 #[cfg(feature = "vulkan")]
 pub use backend::VulkanBackend;
+#[cfg(feature = "vulkan")]
+pub use spirv_builder::SpirvModule;
+#[cfg(feature = "vulkan")]
+pub use types::TypeMapper;

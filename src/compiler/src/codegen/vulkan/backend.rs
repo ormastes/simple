@@ -38,7 +38,8 @@ impl VulkanBackend {
                 Ok(entry) => {
                     // Check if we can get the instance version
                     // This is a lightweight check that confirms Vulkan loader is present
-                    match entry.try_enumerate_instance_version() {
+                    // Safety: entry is valid and the function only reads system info
+                    match unsafe { entry.try_enumerate_instance_version() } {
                         Ok(Some(_version)) => {
                             // Vulkan 1.1+ loader found
                             true
