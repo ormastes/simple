@@ -134,7 +134,7 @@ pub(crate) fn handle_method_call_with_self_update(
             // Evaluate the arguments first
             let mut eval_args = Vec::new();
             for arg in args {
-                let val = evaluate_expr(&arg.value, &working_env, functions, classes, enums, impl_methods)?;
+                let val = evaluate_expr(&arg.value, &mut working_env, functions, classes, enums, impl_methods)?;
                 eval_args.push(val);
             }
 

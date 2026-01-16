@@ -110,7 +110,7 @@ pub(crate) fn bind_args(
 pub(crate) fn bind_args_with_injected(
     params: &[Parameter],
     args: &[Argument],
-    outer_env: &Env,
+    outer_env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -134,7 +134,7 @@ pub(crate) fn bind_args_with_injected(
         // Check if this is a spread expression (args...)
         if let Expr::Spread(inner) = &arg.value {
             // Evaluate the inner expression (should be variadic/array/tuple)
-            let spread_val = evaluate_expr(inner, outer_env, functions, classes, enums, impl_methods)?;
+            let spread_val = evaluate_expr(inner, &mut outer_env, functions, classes, enums, impl_methods)?;
 
             // Extract values from spread
             let spread_values: Vec<Value> = match spread_val {
@@ -174,7 +174,7 @@ pub(crate) fn bind_args_with_injected(
             }
         } else {
             // Normal argument (not spread)
-            let val = evaluate_expr(&arg.value, outer_env, functions, classes, enums, impl_methods)?;
+            let val = evaluate_expr(&arg.value, &mut outer_env, functions, classes, enums, impl_methods)?;
 
             if let Some(name) = &arg.name {
                 // Named argument
@@ -222,7 +222,7 @@ pub(crate) fn bind_args_with_injected(
     for param in params_to_bind {
         if !bound.contains_key(&param.name) {
             if let Some(default_expr) = &param.default {
-                let v = evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?;
+                let v = evaluate_expr(default_expr, &mut outer_env, functions, classes, enums, impl_methods)?;
                 let v = wrap_trait_object!(v, param.ty.as_ref());
                 validate_unit!(
                     &v,
@@ -244,7 +244,7 @@ pub(crate) fn bind_args_with_injected(
 fn bind_args_with_values(
     params: &[Parameter],
     args: &[Value],
-    outer_env: &Env,
+    outer_env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -265,7 +265,7 @@ fn bind_args_with_values(
         let value = if idx < args.len() {
             args[idx].clone()
         } else if let Some(default_expr) = &param.default {
-            evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?
+            evaluate_expr(default_expr, &mut outer_env, functions, classes, enums, impl_methods)?
         } else {
             bail_semantic!("missing argument {}", param.name);
         };
@@ -351,7 +351,7 @@ pub(crate) fn exec_function_with_values(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
-        exec_function_with_values_inner(func, args, outer_env, functions, classes, enums, impl_methods)
+        exec_function_with_values_inner(func, args, &mut outer_env, functions, classes, enums, impl_methods)
     })
 }
 

@@ -269,7 +269,7 @@ pub(crate) fn evaluate_call(
             impl_methods,
         ),
         Value::BlockClosure { nodes, env: captured } => {
-            block_execution::exec_block_closure(&nodes, &captured, functions, classes, enums, impl_methods)
+            block_execution::exec_block_closure(&nodes, &mut captured, functions, classes, enums, impl_methods)
         }
         Value::Function { def, captured_env, .. } => core::exec_function_with_captured_env(
             &def,

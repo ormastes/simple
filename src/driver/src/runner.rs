@@ -103,6 +103,12 @@ impl Runner {
         self.core.compile_source_with_options(source, out, options)
     }
 
+    /// Compile a source file to an SMF at the given path.
+    #[instrument(skip(self))]
+    pub fn compile_file(&self, path: &Path, out: &Path) -> Result<(), String> {
+        self.core.compile_file(path, out)
+    }
+
     /// Compile source file to an SMF at the given path with compile options.
     /// This version takes a file path which enables module resolution for imports.
     #[instrument(skip(self, source_path))]
