@@ -264,9 +264,13 @@ fn test_token_kind_string() {
 
 #[test]
 fn test_token_kind_identifier() {
-    let kind = TokenKind::Identifier("main".to_string());
+    use simple_parser::token::NamePattern;
+    let kind = TokenKind::Identifier {
+        name: "main".to_string(),
+        pattern: NamePattern::Immutable,
+    };
     match kind {
-        TokenKind::Identifier(s) => assert_eq!(s, "main"),
+        TokenKind::Identifier { name, .. } => assert_eq!(name, "main"),
         _ => panic!("Expected Identifier"),
     }
 }

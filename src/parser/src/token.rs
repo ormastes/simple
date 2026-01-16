@@ -277,8 +277,9 @@ pub enum TokenKind {
     ShiftLeft,  // <<
     ShiftRight, // >>
 
-    Arrow,    // ->
-    FatArrow, // =>
+    Arrow,        // ->
+    FatArrow,     // =>
+    ChannelArrow, // <-
 
     // Delimiters
     LParen,   // (

@@ -395,9 +395,9 @@ mod tests {
 
     #[test]
     fn test_tokenize_float() {
-        let lexer = MathLexer::new("3.14");
+        let lexer = MathLexer::new("1.234");
         let (tokens, _) = lexer.tokenize();
-        assert_eq!(tokens[0], MathToken::Float(3.14));
+        assert_eq!(tokens[0], MathToken::Float(1.234));
     }
 
     #[test]
