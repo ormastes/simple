@@ -15,6 +15,125 @@ describe "Calculator":
 
 Run: `simple test` or `cargo test -p simple-driver simple_stdlib`
 
+## Complete Workflow: Test → Documentation
+
+### 1. Create Spec File from Template
+
+```bash
+# Copy template to your feature directory
+cp .claude/templates/sspec_template.spl simple/test/system/features/my_feature/my_feature_spec.spl
+```
+
+### 2. Write Module-Level Documentation
+
+**REQUIRED format** at the top of every spec file:
+
+```simple
+"""
+# Feature Name Specification
+
+**Feature IDs:** #100-110
+**Category:** Language | Syntax | Stdlib | Runtime | Testing | Tooling
+**Difficulty:** 1-5/5
+**Status:** Draft | In Progress | Implemented | Complete
+
+## Overview
+
+High-level description of what this feature does and why it exists.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Term1   | Definition |
+
+## Related Specifications
+
+- [Types](types.md) - Related spec
+- [Memory](memory.md) - Related spec
+
+## Examples
+
+Basic usage examples.
+"""
+```
+
+### 3. Write Tests with Documentation
+
+```simple
+import std.spec
+
+describe "MyFeature":
+    """
+    ## Basic Usage
+
+    Description of test group.
+    """
+
+    context "when condition":
+        """
+        ### Scenario: Specific Case
+
+        Detailed explanation of what this tests.
+        """
+
+        it "does expected behavior":
+            expect actual to eq expected
+```
+
+### 4. Run Tests
+
+```bash
+# Run your spec
+cargo test -p simple-driver simple_stdlib_system_my_feature
+
+# Or run directly
+./target/debug/simple simple/test/system/features/my_feature/my_feature_spec.spl
+```
+
+### 5. Generate Documentation
+
+**TWO options:**
+
+#### Option A: Full Generation (Recommended)
+
+Uses the newer `sspec_docgen` system with metadata extraction and validation:
+
+```bash
+# Generate docs for all feature specs
+cargo run --bin gen-sspec-docs -- simple/test/system/features/**/*_spec.spl
+
+# Output: docs/spec/*.md + docs/spec/README.md (index)
+```
+
+#### Option B: Simple Generation
+
+Uses the older system for quick single-file docs:
+
+```bash
+# Generate single spec
+simple spec-gen --input simple/test/system/features/ --output doc/spec/generated/
+```
+
+**Use Option A** for feature specs - it extracts metadata, validates completeness, and generates an organized index.
+
+### 6. Review Generated Docs
+
+```bash
+# Open the index
+cat docs/spec/README.md
+
+# View your feature doc
+cat docs/spec/my_feature_spec.md
+```
+
+The generator:
+- Extracts `"""..."""` docstrings as markdown
+- Preserves all markdown formatting (tables, code blocks, lists)
+- Adds metadata (Feature IDs, source file, timestamp)
+- Creates navigable index by category
+- Validates completeness and warns about issues
+
 ## Test File Structure
 
 ### Location
@@ -164,38 +283,73 @@ feature Calculator:
 
 SSpec uses triple-quoted strings (`"""`) as **full markdown docstrings** that get extracted into generated documentation.
 
-### Docstring Format
+### Module-Level Docstring (REQUIRED)
+
+**Every spec file MUST start with a module-level docstring** containing metadata and overview:
 
 ```simple
 """
 # Feature Name Specification
 
-**Status:** Stable
-**Feature IDs:** #10-19
-**Keywords:** syntax, parsing
-**Topics:** core-language
+**Feature IDs:** #100-110              ← REQUIRED: Your feature ID range
+**Category:** Language                 ← REQUIRED: Choose one category
+**Difficulty:** 3/5                    ← OPTIONAL: 1-5 rating
+**Status:** Implemented                ← REQUIRED: Current status
 
-## Overview
+## Overview                            ← REQUIRED: What & Why
 
-Full markdown content supported here including:
-- Bullet lists
-- **Bold** and *italic*
-- Code blocks with ```simple ... ```
-- Tables
+High-level description of the feature and its purpose.
 
-## Related Specifications
-
-- [Types](types.md) - Type annotations
-- [Functions](functions.md) - Function syntax
-- See also: [External Doc](https://example.com)
-
-## Key Concepts
+## Key Concepts                        ← RECOMMENDED
 
 | Concept | Description |
 |---------|-------------|
-| Tokens  | Lexical units |
-| AST     | Syntax tree  |
+| Term1   | Definition  |
+
+## Related Specifications               ← OPTIONAL
+
+- [Types](types.md) - Related spec
+- [Functions](functions.md) - Related spec
+
+## Examples                             ← RECOMMENDED
+
+```simple
+# Working code example
+val result = use_feature()
+```
 """
+```
+
+**Metadata Fields:**
+
+| Field | Required | Values | Purpose |
+|-------|----------|--------|---------|
+| Feature IDs | Yes | `#100-110` | Tracking & cross-reference |
+| Category | Yes | `Infrastructure`, `Language`, `Syntax`, `Stdlib`, `Runtime`, `Testing`, `Tooling` | Index organization |
+| Difficulty | No | `1-5/5` | Complexity indicator |
+| Status | Yes | `Draft`, `In Progress`, `Implemented`, `Complete` | Development stage |
+
+### Test Group Docstrings (RECOMMENDED)
+
+Add docstrings to `describe` and `context` blocks:
+
+```simple
+describe "MyFeature":
+    """
+    ## Test Group Title
+
+    Explanation of what this group validates.
+    """
+
+    context "when condition":
+        """
+        ### Scenario: Specific Case
+
+        Detailed scenario description.
+        """
+
+        it "does something":
+            pass
 ```
 
 ### Making Links
