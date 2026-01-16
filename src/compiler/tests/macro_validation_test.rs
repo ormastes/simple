@@ -30,42 +30,36 @@ fn expect_error(source: &str, expected_code: &str) -> bool {
 }
 
 #[test]
-#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_macro_defined_before_use_success() {
-    let source = r#"
-        macro greet(name):
-            contract:
-                intro: let greeting: str
-            const_eval:
-                pass
-            emit result:
-                let greeting = "Hello, " + name
+    let source = r#"macro greet(name: String) -> (
+    intro result:
+        enclosing.module.let greeting: String
+):
+    emit result:
+        val greeting = "Hello, " + name
 
-        # Use macro after definition - should succeed
-        greet!("World")
-        main = 0
-    "#;
+# Use macro after definition - should succeed
+greet!("World")
+main = 0
+"#;
 
     assert!(check_compiles(source).is_ok());
 }
 
 #[test]
-#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_macro_used_before_definition_error() {
-    let source = r#"
-        # Use macro before definition - should fail with E1402
-        greet!("World")
+    let source = r#"# Use macro before definition - should fail with E1402
+greet!("World")
 
-        macro greet(name):
-            contract:
-                intro: let greeting: str
-            const_eval:
-                pass
-            emit result:
-                let greeting = "Hello"
+macro greet(name: String) -> (
+    intro result:
+        enclosing.module.let greeting: String
+):
+    emit result:
+        val greeting = "Hello"
 
-        main = 0
-    "#;
+main = 0
+"#;
 
     assert!(expect_error(source, "E1402"));
 }

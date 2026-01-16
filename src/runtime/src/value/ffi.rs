@@ -3613,6 +3613,82 @@ fn remove_tensor(handle: i64) -> Option<Tensor> {
     TENSOR_MAP.lock().unwrap().remove(&handle)
 }
 
+// Autograd Context Storage
+// An autograd context stores tensors saved during forward pass for use in backward pass
+
+#[cfg(feature = "pytorch")]
+#[derive(Clone)]
+struct AutogradContext {
+    saved_tensors: Vec<i64>,  // Tensor handles
+    saved_values: HashMap<String, RuntimeValue>,
+}
+
+#[cfg(feature = "pytorch")]
+impl AutogradContext {
+    fn new() -> Self {
+        AutogradContext {
+            saved_tensors: Vec::new(),
+            saved_values: HashMap::new(),
+        }
+    }
+}
+
+#[cfg(feature = "pytorch")]
+lazy_static::lazy_static! {
+    static ref AUTOGRAD_CTX_MAP: Mutex<HashMap<i64, AutogradContext>> = Mutex::new(HashMap::new());
+}
+
+#[cfg(feature = "pytorch")]
+static mut AUTOGRAD_CTX_COUNTER: i64 = 1;
+
+#[cfg(feature = "pytorch")]
+fn store_autograd_ctx(ctx: AutogradContext) -> i64 {
+    unsafe {
+        let handle = AUTOGRAD_CTX_COUNTER;
+        AUTOGRAD_CTX_COUNTER += 1;
+        AUTOGRAD_CTX_MAP.lock().unwrap().insert(handle, ctx);
+        handle
+    }
+}
+
+#[cfg(feature = "pytorch")]
+fn get_autograd_ctx(handle: i64) -> Option<AutogradContext> {
+    AUTOGRAD_CTX_MAP.lock().unwrap().get(&handle).cloned()
+}
+
+#[cfg(feature = "pytorch")]
+fn get_autograd_ctx_mut<F, R>(handle: i64, f: F) -> Option<R>
+where
+    F: FnOnce(&mut AutogradContext) -> R,
+{
+    AUTOGRAD_CTX_MAP.lock().unwrap().get_mut(&handle).map(f)
+}
+
+// Tensor List Storage (for operations like stack that take multiple tensors)
+
+#[cfg(feature = "pytorch")]
+lazy_static::lazy_static! {
+    static ref TENSOR_LIST_MAP: Mutex<HashMap<i64, Vec<i64>>> = Mutex::new(HashMap::new());
+}
+
+#[cfg(feature = "pytorch")]
+static mut TENSOR_LIST_COUNTER: i64 = 1;
+
+#[cfg(feature = "pytorch")]
+fn store_tensor_list(handles: Vec<i64>) -> i64 {
+    unsafe {
+        let handle = TENSOR_LIST_COUNTER;
+        TENSOR_LIST_COUNTER += 1;
+        TENSOR_LIST_MAP.lock().unwrap().insert(handle, handles);
+        handle
+    }
+}
+
+#[cfg(feature = "pytorch")]
+fn get_tensor_list(handle: i64) -> Option<Vec<i64>> {
+    TENSOR_LIST_MAP.lock().unwrap().get(&handle).cloned()
+}
+
 // Helper to convert RuntimeValue to tensor handle
 #[cfg(feature = "pytorch")]
 fn value_to_tensor_handle(value: RuntimeValue) -> Option<i64> {
@@ -4009,9 +4085,44 @@ pub extern "C" fn rt_torch_gt(_a: RuntimeValue, _b: RuntimeValue) -> RuntimeValu
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_index(tensor: RuntimeValue, indices: RuntimeValue) -> RuntimeValue {
+    // Tensor indexing: tensor[indices]
+    // indices can be a tensor of indices or a scalar index
+    let tensor_handle = match value_to_tensor_handle(tensor) {
+        Some(h) => h,
+        None => return RuntimeValue::NIL,
+    };
+
+    let tensor_val = match get_tensor(tensor_handle) {
+        Some(t) => t,
+        None => return RuntimeValue::NIL,
+    };
+
+    // If indices is a tensor handle, use index_select on dim 0
+    if let Some(indices_handle) = value_to_tensor_handle(indices) {
+        if let Some(indices_tensor) = get_tensor(indices_handle) {
+            let result = tensor_val.index_select(0, &indices_tensor);
+            let handle = store_tensor(result);
+            return RuntimeValue::from_int(handle);
+        }
+    }
+
+    // If indices is a scalar integer, use select on dim 0
+    if indices.is_int() {
+        let idx = indices.as_int();
+        let result = tensor_val.select(0, idx);
+        let handle = store_tensor(result);
+        return RuntimeValue::from_int(handle);
+    }
+
+    RuntimeValue::NIL
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_index(_tensor: RuntimeValue, _indices: RuntimeValue) -> RuntimeValue {
-    // TODO: [runtime][P3] Implement tensor indexing
     RuntimeValue::NIL
 }
 
@@ -4063,39 +4174,150 @@ pub extern "C" fn rt_torch_narrow(_tensor: RuntimeValue, _dim: i64, _start: i64,
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_stack(tensors: RuntimeValue, dim: i64) -> RuntimeValue {
+    // Stack tensors along a new dimension
+    // tensors is a handle to a tensor list (stored via store_tensor_list)
+    if !tensors.is_int() {
+        return RuntimeValue::NIL;
+    }
+
+    let list_handle = tensors.as_int();
+    let tensor_handles = match get_tensor_list(list_handle) {
+        Some(handles) => handles,
+        None => return RuntimeValue::NIL,
+    };
+
+    // Collect actual tensors from handles
+    let tensors_vec: Vec<Tensor> = tensor_handles
+        .iter()
+        .filter_map(|&h| get_tensor(h))
+        .collect();
+
+    if tensors_vec.is_empty() {
+        return RuntimeValue::NIL;
+    }
+
+    // Stack tensors
+    let result = Tensor::stack(&tensors_vec, dim);
+    let handle = store_tensor(result);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_stack(_tensors: RuntimeValue, _dim: i64) -> RuntimeValue {
-    // TODO: [runtime][P3] Implement tensor stack
     RuntimeValue::NIL
 }
 
 // Autograd Operations
 
+#[cfg(feature = "pytorch")]
 #[no_mangle]
 pub extern "C" fn rt_torch_autograd_context_new() -> RuntimeValue {
-    // TODO: [runtime][P3] Implement autograd context
+    // Create a new autograd context for storing tensors during forward pass
+    let ctx = AutogradContext::new();
+    let handle = store_autograd_ctx(ctx);
+    RuntimeValue::from_int(handle)
+}
+
+#[cfg(not(feature = "pytorch"))]
+#[no_mangle]
+pub extern "C" fn rt_torch_autograd_context_new() -> RuntimeValue {
     RuntimeValue::NIL
 }
 
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_autograd_context_save_tensor(ctx: RuntimeValue, tensor: RuntimeValue) {
+    // Save a tensor to the autograd context for use in backward pass
+    if !ctx.is_int() || !tensor.is_int() {
+        return;
+    }
+
+    let ctx_handle = ctx.as_int();
+    let tensor_handle = tensor.as_int();
+
+    get_autograd_ctx_mut(ctx_handle, |context| {
+        context.saved_tensors.push(tensor_handle);
+    });
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_autograd_context_save_tensor(_ctx: RuntimeValue, _tensor: RuntimeValue) {
-    // TODO: [runtime][P3] Implement save tensor
 }
 
+#[cfg(feature = "pytorch")]
 #[no_mangle]
-pub extern "C" fn rt_torch_autograd_context_save_value(_ctx: RuntimeValue, _value: RuntimeValue) {
-    // TODO: [runtime][P3] Implement save value
+pub extern "C" fn rt_torch_autograd_context_save_value(ctx: RuntimeValue, key: RuntimeValue, value: RuntimeValue) {
+    // Save an arbitrary value to the autograd context with a string key
+    if !ctx.is_int() {
+        return;
+    }
+
+    let ctx_handle = ctx.as_int();
+    // For simplicity, use the key's integer representation as a string key
+    let key_str = format!("{}", key.as_int());
+
+    get_autograd_ctx_mut(ctx_handle, |context| {
+        context.saved_values.insert(key_str, value);
+    });
 }
 
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_autograd_context_get_saved_tensors(_ctx: RuntimeValue) -> RuntimeValue {
-    // TODO: [runtime][P3] Implement get saved tensors
+pub extern "C" fn rt_torch_autograd_context_save_value(_ctx: RuntimeValue, _key: RuntimeValue, _value: RuntimeValue) {
+}
+
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_autograd_context_get_saved_tensors(ctx: RuntimeValue) -> RuntimeValue {
+    // Get all saved tensors from the autograd context as a tensor list handle
+    if !ctx.is_int() {
+        return RuntimeValue::NIL;
+    }
+
+    let ctx_handle = ctx.as_int();
+    if let Some(context) = get_autograd_ctx(ctx_handle) {
+        // Return a tensor list handle containing all saved tensor handles
+        let list_handle = store_tensor_list(context.saved_tensors.clone());
+        return RuntimeValue::from_int(list_handle);
+    }
+
     RuntimeValue::NIL
 }
 
+#[cfg(not(feature = "pytorch"))]
+#[no_mangle]
+pub extern "C" fn rt_torch_autograd_context_get_saved_tensors(_ctx: RuntimeValue) -> RuntimeValue {
+    RuntimeValue::NIL
+}
+
+#[cfg(feature = "pytorch")]
+#[no_mangle]
+pub extern "C" fn rt_torch_autograd_context_get_value(ctx: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
+    // Get a saved value from the autograd context by key
+    if !ctx.is_int() {
+        return RuntimeValue::NIL;
+    }
+
+    let ctx_handle = ctx.as_int();
+    let key_str = format!("{}", key.as_int());
+
+    if let Some(context) = get_autograd_ctx(ctx_handle) {
+        if let Some(&value) = context.saved_values.get(&key_str) {
+            return value;
+        }
+    }
+
+    RuntimeValue::NIL
+}
+
+#[cfg(not(feature = "pytorch"))]
 #[no_mangle]
 pub extern "C" fn rt_torch_autograd_context_get_value(_ctx: RuntimeValue, _key: RuntimeValue) -> RuntimeValue {
-    // TODO: [runtime][P3] Implement get value
     RuntimeValue::NIL
 }
 

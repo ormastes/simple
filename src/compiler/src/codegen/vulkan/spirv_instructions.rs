@@ -8,7 +8,9 @@ use crate::hir::{BinOp, TypeId};
 use crate::mir::{GpuAtomicOp, MirInst};
 use rspirv::spirv::{Decoration, StorageClass};
 
-impl super::SpirvModule {
+use super::spirv_builder::SpirvModule;
+
+impl SpirvModule {
     /// Lower a single MIR instruction to SPIR-V
     ///
     /// This is the core translation logic that maps MIR instructions to SPIR-V operations.

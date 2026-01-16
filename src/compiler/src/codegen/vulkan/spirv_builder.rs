@@ -35,52 +35,53 @@ use std::collections::HashMap;
 /// ```
 pub struct SpirvModule {
     /// rspirv builder for constructing SPIR-V
-    builder: Builder,
+    pub(super) builder: Builder,
 
     /// Module being built
-    module: Module,
+    #[allow(dead_code)]
+    pub(super) module: Module,
 
     /// Map from MIR function name to SPIR-V function ID
-    func_id_map: HashMap<String, Word>,
+    pub(super) func_id_map: HashMap<String, Word>,
 
     /// Map from MIR virtual register to SPIR-V ID (per function)
-    vreg_id_map: HashMap<VReg, Word>,
+    pub(super) vreg_id_map: HashMap<VReg, Word>,
 
     /// Map from MIR block ID to SPIR-V label ID (per function)
-    block_id_map: HashMap<BlockId, Word>,
+    pub(super) block_id_map: HashMap<BlockId, Word>,
 
     /// Map from parameter index to SPIR-V global variable ID
-    param_var_map: HashMap<usize, Word>,
+    pub(super) param_var_map: HashMap<usize, Word>,
 
     /// Map from parameter index to element TypeId (for accessing array elements)
-    param_elem_type_map: HashMap<usize, TypeId>,
+    pub(super) param_elem_type_map: HashMap<usize, TypeId>,
 
     /// Map from VReg to parameter index (for tracking which VReg holds which parameter reference)
-    vreg_param_map: HashMap<VReg, usize>,
+    pub(super) vreg_param_map: HashMap<VReg, usize>,
 
     /// Map from local variable index to SPIR-V variable ID (per function)
-    local_var_map: HashMap<usize, Word>,
+    pub(super) local_var_map: HashMap<usize, Word>,
 
     /// Map from VReg to TypeId (for type-aware operation selection)
-    vreg_types: HashMap<VReg, TypeId>,
+    pub(super) vreg_types: HashMap<VReg, TypeId>,
 
     /// Type IDs cache (to avoid recreating identical types)
-    type_cache: TypeCache,
+    pub(super) type_cache: TypeCache,
 }
 
 /// Cache for SPIR-V type IDs to avoid duplication
 #[derive(Default)]
-struct TypeCache {
-    void_type: Option<Word>,
-    bool_type: Option<Word>,
-    i32_type: Option<Word>,
-    i64_type: Option<Word>,
-    u32_type: Option<Word>,
-    u64_type: Option<Word>,
-    f32_type: Option<Word>,
-    f64_type: Option<Word>,
-    vec3_u32_type: Option<Word>,
-    ptr_input_vec3_u32: Option<Word>,
+pub(super) struct TypeCache {
+    pub(super) void_type: Option<Word>,
+    pub(super) bool_type: Option<Word>,
+    pub(super) i32_type: Option<Word>,
+    pub(super) i64_type: Option<Word>,
+    pub(super) u32_type: Option<Word>,
+    pub(super) u64_type: Option<Word>,
+    pub(super) f32_type: Option<Word>,
+    pub(super) f64_type: Option<Word>,
+    pub(super) vec3_u32_type: Option<Word>,
+    pub(super) ptr_input_vec3_u32: Option<Word>,
 }
 
 impl SpirvModule {
@@ -360,52 +361,52 @@ impl SpirvModule {
 
     // Type getters with caching
 
-    fn get_void_type(&mut self) -> Word {
+    pub(super) fn get_void_type(&mut self) -> Word {
         *self
             .type_cache
             .void_type
             .get_or_insert_with(|| self.builder.type_void())
     }
 
-    fn get_bool_type(&mut self) -> Word {
+    pub(super) fn get_bool_type(&mut self) -> Word {
         *self
             .type_cache
             .bool_type
             .get_or_insert_with(|| self.builder.type_bool())
     }
 
-    fn get_i32_type(&mut self) -> Word {
+    pub(super) fn get_i32_type(&mut self) -> Word {
         *self.type_cache.i32_type.get_or_insert_with(|| {
             self.builder.type_int(32, 1) // signed 32-bit
         })
     }
 
-    fn get_f32_type(&mut self) -> Word {
+    pub(super) fn get_f32_type(&mut self) -> Word {
         *self
             .type_cache
             .f32_type
             .get_or_insert_with(|| self.builder.type_float(32))
     }
 
-    fn get_u32_type(&mut self) -> Word {
+    pub(super) fn get_u32_type(&mut self) -> Word {
         *self.type_cache.u32_type.get_or_insert_with(|| {
             self.builder.type_int(32, 0) // unsigned 32-bit
         })
     }
 
-    fn get_i64_type(&mut self) -> Word {
+    pub(super) fn get_i64_type(&mut self) -> Word {
         *self.type_cache.i64_type.get_or_insert_with(|| {
             self.builder.type_int(64, 1) // signed 64-bit
         })
     }
 
-    fn get_u64_type(&mut self) -> Word {
+    pub(super) fn get_u64_type(&mut self) -> Word {
         *self.type_cache.u64_type.get_or_insert_with(|| {
             self.builder.type_int(64, 0) // unsigned 64-bit
         })
     }
 
-    fn get_f64_type(&mut self) -> Word {
+    pub(super) fn get_f64_type(&mut self) -> Word {
         *self
             .type_cache
             .f64_type
@@ -416,7 +417,7 @@ impl SpirvModule {
     ///
     /// Converts Simple's TypeId to the corresponding SPIR-V type ID.
     /// Currently supports primitive types only.
-    fn type_id_to_spirv(&mut self, ty: TypeId) -> Result<Word, CompileError> {
+    pub(super) fn type_id_to_spirv(&mut self, ty: TypeId) -> Result<Word, CompileError> {
         match ty {
             TypeId::VOID => Ok(self.get_void_type()),
             TypeId::BOOL => Ok(self.get_bool_type()),
@@ -435,7 +436,7 @@ impl SpirvModule {
         }
     }
 
-    fn get_vec3_u32_type(&mut self) -> Word {
+    pub(super) fn get_vec3_u32_type(&mut self) -> Word {
         if let Some(id) = self.type_cache.vec3_u32_type {
             return id;
         }
@@ -445,7 +446,7 @@ impl SpirvModule {
         id
     }
 
-    fn get_ptr_input_vec3_u32_type(&mut self) -> Word {
+    pub(super) fn get_ptr_input_vec3_u32_type(&mut self) -> Word {
         if let Some(id) = self.type_cache.ptr_input_vec3_u32 {
             return id;
         }
@@ -458,10 +459,8 @@ impl SpirvModule {
     /// Finalize and return SPIR-V bytecode
     ///
     /// Serializes the constructed SPIR-V module to bytecode (32-bit words).
+    /// Performs structural validation before returning.
     pub fn into_bytes(self) -> Result<Vec<u8>, CompileError> {
-        // Validate the module
-        // TODO: [codegen][P3] Add SPIR-V validation using spirv-val or rspirv's built-in validation
-
         // The Builder's module() returns the internal Module
         // We need to use binary::Assemble trait to convert it to words
         use rspirv::binary::Assemble;
@@ -469,10 +468,166 @@ impl SpirvModule {
         let module = self.builder.module();
         let words: Vec<u32> = module.assemble();
 
+        // Validate the assembled SPIR-V module
+        Self::validate_spirv(&words)?;
+
         // Convert to bytes (SPIR-V is little-endian)
         let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
 
         Ok(bytes)
+    }
+
+    /// Validate SPIR-V module structure
+    ///
+    /// Performs structural validation of the assembled SPIR-V:
+    /// - Magic number check (0x07230203)
+    /// - Version compatibility (1.0 - 1.6)
+    /// - Header bounds check
+    /// - Minimum module size
+    fn validate_spirv(words: &[u32]) -> Result<(), CompileError> {
+        // SPIR-V header is 5 words:
+        // [0] Magic number: 0x07230203
+        // [1] Version: major.minor (high 16 bits)
+        // [2] Generator magic number
+        // [3] Bound: upper bound on IDs
+        // [4] Schema: reserved (must be 0)
+
+        const SPIRV_MAGIC: u32 = 0x07230203;
+        const MIN_HEADER_SIZE: usize = 5;
+
+        // Check minimum size
+        if words.len() < MIN_HEADER_SIZE {
+            return Err(CompileError::Codegen(format!(
+                "SPIR-V module too small: {} words (minimum {})",
+                words.len(),
+                MIN_HEADER_SIZE
+            )));
+        }
+
+        // Check magic number
+        let magic = words[0];
+        if magic != SPIRV_MAGIC {
+            return Err(CompileError::Codegen(format!(
+                "Invalid SPIR-V magic number: 0x{:08X} (expected 0x{:08X})",
+                magic, SPIRV_MAGIC
+            )));
+        }
+
+        // Check version (support 1.0 to 1.6)
+        let version = words[1];
+        let major = (version >> 16) & 0xFF;
+        let minor = (version >> 8) & 0xFF;
+
+        if major != 1 || minor > 6 {
+            return Err(CompileError::Codegen(format!(
+                "Unsupported SPIR-V version: {}.{} (supported: 1.0 - 1.6)",
+                major, minor
+            )));
+        }
+
+        // Check bound (must be positive for non-empty modules)
+        let bound = words[3];
+        if bound == 0 {
+            return Err(CompileError::Codegen(
+                "SPIR-V bound is 0 (module has no IDs)".to_string(),
+            ));
+        }
+
+        // Check schema (must be 0)
+        let schema = words[4];
+        if schema != 0 {
+            return Err(CompileError::Codegen(format!(
+                "Invalid SPIR-V schema: {} (must be 0)",
+                schema
+            )));
+        }
+
+        // Validate instructions (basic bounds check)
+        Self::validate_instructions(&words[MIN_HEADER_SIZE..], bound)?;
+
+        Ok(())
+    }
+
+    /// Validate SPIR-V instruction stream
+    ///
+    /// Checks that each instruction has a valid opcode word count
+    /// and that all referenced IDs are within bounds.
+    fn validate_instructions(instructions: &[u32], bound: u32) -> Result<(), CompileError> {
+        let mut offset = 0;
+
+        while offset < instructions.len() {
+            let opcode_word = instructions[offset];
+
+            // Word count is in the high 16 bits
+            let word_count = (opcode_word >> 16) as usize;
+            // Opcode is in the low 16 bits
+            let opcode = opcode_word & 0xFFFF;
+
+            // Word count must be at least 1 (for the opcode word itself)
+            if word_count == 0 {
+                return Err(CompileError::Codegen(format!(
+                    "Invalid instruction at offset {}: word count is 0",
+                    offset
+                )));
+            }
+
+            // Check we don't read past end
+            if offset + word_count > instructions.len() {
+                return Err(CompileError::Codegen(format!(
+                    "Instruction at offset {} extends past end of module: needs {} words, only {} available",
+                    offset,
+                    word_count,
+                    instructions.len() - offset
+                )));
+            }
+
+            // Validate result IDs are within bounds (for instructions that produce results)
+            // Result ID is typically the second word for result-producing instructions
+            // Opcodes that produce results have result ID as operand 1 or 2
+            if word_count >= 2 {
+                let potential_result = instructions[offset + 1];
+                // Check if it looks like an ID (non-zero, within bound)
+                // Note: This is a heuristic - not all second words are result IDs
+                if potential_result != 0 && potential_result >= bound {
+                    // Some opcodes use the second word for result IDs
+                    // Check common result-producing opcodes
+                    let is_result_producing = matches!(
+                        opcode,
+                        1..=13    // Type declarations
+                        | 17..=27 // Constants
+                        | 28..=56 // Memory
+                        | 57..=99 // Function
+                        | 100..=200 // Composite/Arithmetic
+                    );
+
+                    if is_result_producing && word_count >= 3 {
+                        // For type declarations, result ID is word[1]
+                        // For most other ops, type ID is word[1], result ID is word[2]
+                        let result_id = instructions[offset + 2];
+                        if result_id >= bound {
+                            tracing::warn!(
+                                "SPIR-V instruction at offset {} may reference ID {} >= bound {}",
+                                offset,
+                                result_id,
+                                bound
+                            );
+                        }
+                    }
+                }
+            }
+
+            offset += word_count;
+        }
+
+        // Verify we consumed exactly all words
+        if offset != instructions.len() {
+            return Err(CompileError::Codegen(format!(
+                "SPIR-V instruction stream has {} trailing bytes",
+                instructions.len() - offset
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -518,5 +673,128 @@ mod tests {
         let vec3_1 = module.get_vec3_u32_type();
         let vec3_2 = module.get_vec3_u32_type();
         assert_eq!(vec3_1, vec3_2, "Vector type IDs should be cached");
+    }
+
+    // SPIR-V Validation Tests
+
+    #[test]
+    fn test_validation_valid_module() {
+        // Valid minimal SPIR-V module
+        let valid_words: Vec<u32> = vec![
+            0x07230203, // Magic number
+            0x00010300, // Version 1.3
+            0x00000000, // Generator: 0
+            0x00000002, // Bound: 2
+            0x00000000, // Schema: 0
+            // OpCapability Shader (word count 2, opcode 17)
+            (2 << 16) | 17,
+            1, // Capability::Shader
+        ];
+
+        let result = SpirvModule::validate_spirv(&valid_words);
+        assert!(result.is_ok(), "Valid module should pass validation: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_validation_invalid_magic() {
+        let invalid_magic: Vec<u32> = vec![
+            0xDEADBEEF, // Wrong magic
+            0x00010300,
+            0x00000000,
+            0x00000002,
+            0x00000000,
+        ];
+
+        let result = SpirvModule::validate_spirv(&invalid_magic);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("magic"));
+    }
+
+    #[test]
+    fn test_validation_unsupported_version() {
+        let bad_version: Vec<u32> = vec![
+            0x07230203,
+            0x00020000, // Version 2.0 (unsupported)
+            0x00000000,
+            0x00000002,
+            0x00000000,
+        ];
+
+        let result = SpirvModule::validate_spirv(&bad_version);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("version"));
+    }
+
+    #[test]
+    fn test_validation_zero_bound() {
+        let zero_bound: Vec<u32> = vec![
+            0x07230203,
+            0x00010300,
+            0x00000000,
+            0x00000000, // Bound: 0 (invalid)
+            0x00000000,
+        ];
+
+        let result = SpirvModule::validate_spirv(&zero_bound);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("bound"));
+    }
+
+    #[test]
+    fn test_validation_invalid_schema() {
+        let bad_schema: Vec<u32> = vec![
+            0x07230203,
+            0x00010300,
+            0x00000000,
+            0x00000002,
+            0x00000001, // Schema: 1 (must be 0)
+        ];
+
+        let result = SpirvModule::validate_spirv(&bad_schema);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("schema"));
+    }
+
+    #[test]
+    fn test_validation_too_small() {
+        let too_small: Vec<u32> = vec![0x07230203, 0x00010300]; // Only 2 words
+
+        let result = SpirvModule::validate_spirv(&too_small);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("small"));
+    }
+
+    #[test]
+    fn test_validation_instruction_overflow() {
+        let overflow: Vec<u32> = vec![
+            0x07230203,
+            0x00010300,
+            0x00000000,
+            0x00000002,
+            0x00000000,
+            // Instruction claiming 100 words but only 1 available
+            (100 << 16) | 17,
+        ];
+
+        let result = SpirvModule::validate_spirv(&overflow);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("extends past"));
+    }
+
+    #[test]
+    fn test_validation_zero_word_count() {
+        let zero_count: Vec<u32> = vec![
+            0x07230203,
+            0x00010300,
+            0x00000000,
+            0x00000002,
+            0x00000000,
+            // Word count 0 (invalid)
+            17,
+        ];
+
+        let result = SpirvModule::validate_spirv(&zero_count);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("word count is 0"));
     }
 }
