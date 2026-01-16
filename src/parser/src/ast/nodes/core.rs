@@ -471,6 +471,17 @@ pub enum Expr {
         fields: Vec<(String, Expr)>,
     },
     Spawn(Box<Expr>),
+    /// Go-style thread spawn: go(args) \params: body OR go |captures| \: body
+    Go {
+        /// Arguments passed to thread (for go(args) form) OR captures (for go |...| form)
+        args: Vec<Expr>,
+        /// Parameters received by thread lambda (for go(args) \params: form)
+        params: Vec<String>,
+        /// Whether this uses capture syntax |...| (true) or args (...) (false)
+        is_capture_form: bool,
+        /// Body expression to execute in thread
+        body: Box<Expr>,
+    },
     Await(Box<Expr>),
     Yield(Option<Box<Expr>>), // yield or yield value
     New {

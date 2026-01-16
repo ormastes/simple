@@ -353,6 +353,7 @@ fn test_keywords() {
     assert_eq!(tokenize("impl"), vec![TokenKind::Impl, TokenKind::Eof]);
     assert_eq!(tokenize("actor"), vec![TokenKind::Actor, TokenKind::Eof]);
     assert_eq!(tokenize("spawn"), vec![TokenKind::Spawn, TokenKind::Eof]);
+    assert_eq!(tokenize("go"), vec![TokenKind::Go, TokenKind::Eof]);
 }
 
 #[test]

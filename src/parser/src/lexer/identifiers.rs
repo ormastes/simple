@@ -118,6 +118,7 @@ impl<'a> super::Lexer<'a> {
             "false" => TokenKind::Bool(false),
             "nil" => TokenKind::Nil,
             "spawn" => TokenKind::Spawn,
+            "go" => TokenKind::Go,
             "new" => TokenKind::New,
             "self" => TokenKind::Self_,
             "super" => TokenKind::Super,

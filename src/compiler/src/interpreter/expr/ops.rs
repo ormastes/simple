@@ -323,6 +323,12 @@ pub(super) fn eval_op_expr(
                     UnaryOp::Deref => {
                         return Ok(Some(val.deref_pointer()));
                     }
+                    UnaryOp::ChannelRecv => {
+                        return Err(CompileError::Semantic(format!(
+                            "cannot apply channel receive to unit value '{}'",
+                            suffix
+                        )));
+                    }
                 }
             }
 
@@ -333,6 +339,10 @@ pub(super) fn eval_op_expr(
                 UnaryOp::Ref => Value::Borrow(BorrowValue::new(val)),
                 UnaryOp::RefMut => Value::BorrowMut(BorrowMutValue::new(val)),
                 UnaryOp::Deref => val.deref_pointer(),
+                UnaryOp::ChannelRecv => {
+                    // TODO: Implement channel receive operation
+                    return Err(CompileError::Semantic("Channel receive not yet implemented".to_string()));
+                }
             };
             Ok(Some(result))
         }

@@ -26,7 +26,7 @@ enum TokenKind:
     Plus, Minus, Star, Slash, Percent
     Eq, NotEq, Lt, Gt, LtEq, GtEq
     And, Or, Not
-    Assign, Arrow
+    Assign, Arrow, ChannelArrow
 
     # Delimiters
     LParen, RParen
@@ -71,7 +71,7 @@ impl TokenKind:
         match self:
             case Plus | Minus | Star | Slash | Percent: true
             case Eq | NotEq | Lt | Gt | LtEq | GtEq: true
-            case And | Or | Not | Assign | Arrow: true
+            case And | Or | Not | Assign | Arrow | ChannelArrow: true
             case _: false
 
     fn is_delimiter() -> bool:
@@ -229,6 +229,7 @@ static fn build_simple_grammar() -> Grammar:
             # Expressions
             "expression": expression_rule(),
             "binary_expr": binary_expr_rule(),
+            "unary_expr": unary_expr_rule(),
             "primary_expr": primary_expr_rule(),
 
             # Types
@@ -316,12 +317,12 @@ fn expression_rule() -> GrammarRule:
     return binary_expr_rule()
 
 fn binary_expr_rule() -> GrammarRule:
-    # Simplified: primary (op primary)*
+    # Simplified: unary (op unary)*
     return GrammarRule.Named("binary_expr", GrammarRule.Seq([
-        primary_expr_rule(),
+        unary_expr_rule(),
         GrammarRule.ZeroOrMore(GrammarRule.Seq(<
             GrammarRule.Field("op", binary_op_rule()),
-            primary_expr_rule()
+            unary_expr_rule()
         >))
     ]))
 
@@ -336,6 +337,23 @@ fn binary_op_rule() -> GrammarRule:
         GrammarRule.TokenRule(TokenKind.Lt),
         GrammarRule.TokenRule(TokenKind.Gt),
     >)
+
+fn unary_expr_rule() -> GrammarRule:
+    # Prefix operators: -, not, <-, etc. OR primary expression
+    return GrammarRule.Choice([
+        GrammarRule.Named("unary_expr", GrammarRule.Seq(<
+            GrammarRule.Field("op", unary_op_rule()),
+            unary_expr_rule()  # Recursive to support <-<-expr
+        >)),
+        primary_expr_rule()
+    ])
+
+fn unary_op_rule() -> GrammarRule:
+    return GrammarRule.Choice([
+        GrammarRule.TokenRule(TokenKind.Minus),
+        GrammarRule.TokenRule(TokenKind.Not),
+        GrammarRule.TokenRule(TokenKind.ChannelArrow),
+    ])
 
 fn primary_expr_rule() -> GrammarRule:
     return GrammarRule.Choice([

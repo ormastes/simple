@@ -1,0 +1,330 @@
+# Config File Loader
+# Parses Simple-syntax config files into Config objects
+#
+# Supported syntax:
+#   port = 8080                    # Numbers
+#   logging = true                 # Booleans
+#   name = "MyApp"                 # Strings
+#   mode = PRODUCTION              # Identifiers (constants)
+#   train.epochs = 100             # Dotted keys (nested)
+#   ports = [8080, 8081]           # Arrays
+
+export from_file, from_hierarchy, parse_config_file
+
+import std.fs
+import std.path
+import config.{Config, from_dict, merge}
+
+
+# ============================================================================
+# Config File Parser
+# ============================================================================
+
+fn parse_config_file(content: str) -> Result<any, str>:
+    """Parse Simple-syntax config file into dictionary.
+
+    Supported syntax:
+        key = value              # Simple assignment
+        nested.key = value       # Dotted keys create nested dicts
+
+    Value types:
+        - Numbers: 42, 3.14
+        - Booleans: true, false
+        - Strings: "hello", 'world'
+        - Identifiers: CONSTANT_NAME
+        - Arrays: [1, 2, 3]
+
+    Args:
+        content: File content as string
+
+    Returns:
+        Ok(dict) on success, Err(message) on parse error
+
+    Example:
+        val content = "port = 8080\\nlogging = true"
+        match parse_config_file(content):
+            case Ok(dict):
+                print(dict)  # {"port": 8080, "logging": true}
+            case Err(msg):
+                print("Parse error: " + msg)
+    """
+    var config = {}
+    val lines = content.split("\n")
+    var line_num = 0
+
+    for line in lines:
+        line_num = line_num + 1
+
+        # Skip empty lines and comments
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+
+        # Parse assignment: key = value
+        if !("=" in trimmed):
+            return Err("Line " + str(line_num) + ": Expected assignment (key = value)")
+
+        val parts = trimmed.split("=", limit: 2)
+        if parts.len() != 2:
+            return Err("Line " + str(line_num) + ": Invalid assignment")
+
+        val key = parts[0].trim()
+        val value_str = parts[1].trim()
+
+        if key == "":
+            return Err("Line " + str(line_num) + ": Empty key")
+
+        # Parse value
+        match parse_value(value_str):
+            case Ok(value):
+                # Handle dotted keys (nested dicts)
+                if "." in key:
+                    set_nested(config, key, value)
+                else:
+                    config.set(key, value)
+            case Err(msg):
+                return Err("Line " + str(line_num) + ": " + msg)
+
+    return Ok(config)
+
+
+fn parse_value(value_str: str) -> Result<any, str>:
+    """Parse value from string.
+
+    Supports:
+        - Integers: 42, -10
+        - Floats: 3.14, -0.5
+        - Booleans: true, false
+        - Strings: "hello", 'world'
+        - Identifiers: CONSTANT_NAME
+        - Arrays: [1, 2, 3]
+
+    Args:
+        value_str: String representation of value
+
+    Returns:
+        Ok(value) on success, Err(message) on parse error
+    """
+    val s = value_str.trim()
+
+    # Boolean
+    if s == "true":
+        return Ok(true)
+    if s == "false":
+        return Ok(false)
+
+    # String (double quotes)
+    if s.starts_with("\"") and s.ends_with("\""):
+        if s.len() < 2:
+            return Err("Invalid string")
+        return Ok(s[1:s.len()-1])
+
+    # String (single quotes)
+    if s.starts_with("'") and s.ends_with("'"):
+        if s.len() < 2:
+            return Err("Invalid string")
+        return Ok(s[1:s.len()-1])
+
+    # Array
+    if s.starts_with("[") and s.ends_with("]"):
+        return parse_array(s)
+
+    # Number (float with decimal point)
+    if "." in s:
+        match float(s):
+            case Some(f): return Ok(f)
+            case None: return Err("Invalid float: " + s)
+
+    # Number (try integer)
+    match int(s):
+        case Some(i): return Ok(i)
+        case None:
+            # Must be an identifier (constant)
+            if is_valid_identifier(s):
+                return Ok(s)  # Return as string
+            else:
+                return Err("Invalid value: " + s)
+
+
+fn parse_array(array_str: str) -> Result<any, str>:
+    """Parse array literal like [1, 2, 3]."""
+    val s = array_str.trim()
+    if !s.starts_with("[") or !s.ends_with("]"):
+        return Err("Invalid array syntax")
+
+    # Extract content between brackets
+    val content = s[1:s.len()-1].trim()
+
+    # Empty array
+    if content == "":
+        return Ok([])
+
+    # Split by comma
+    val elements = content.split(",")
+    var result = []
+
+    for elem_str in elements:
+        match parse_value(elem_str.trim()):
+            case Ok(value):
+                result.push(value)
+            case Err(msg):
+                return Err("In array: " + msg)
+
+    return Ok(result)
+
+
+fn is_valid_identifier(s: str) -> bool:
+    """Check if string is a valid identifier (CONSTANT_NAME)."""
+    if s == "":
+        return false
+
+    # First char must be letter or underscore
+    val first = s[0]
+    if !(first.is_alpha() or first == "_"):
+        return false
+
+    # Rest must be alphanumeric or underscore
+    for i in 1..s.len():
+        val ch = s[i]
+        if !(ch.is_alphanumeric() or ch == "_"):
+            return false
+
+    return true
+
+
+fn set_nested(dict: any, dotted_key: str, value: any):
+    """Set value in nested dictionary using dotted key.
+
+    Example:
+        set_nested(dict, "train.epochs", 100)
+        # dict becomes: {"train": {"epochs": 100}}
+    """
+    val parts = dotted_key.split(".")
+    var current = dict
+
+    # Navigate to parent dict
+    for i in 0..(parts.len() - 1):
+        val key = parts[i]
+        if !(key in current):
+            current.set(key, {})
+        current = current[key]
+
+    # Set final value
+    val last_key = parts[parts.len() - 1]
+    current.set(last_key, value)
+
+
+# ============================================================================
+# File Loading Functions
+# ============================================================================
+
+fn from_file(path: str) -> Result<Config, str>:
+    """Load configuration from a Simple-syntax config file.
+
+    Args:
+        path: Path to config file (.spl)
+
+    Returns:
+        Ok(Config) on success, Err(message) on error
+
+    Example:
+        match from_file("config.spl"):
+            case Ok(cfg):
+                match cfg.get("port"):
+                    case Some(p): print("Port: " + str(p))
+                    case None: pass
+            case Err(msg):
+                print("Error loading config: " + msg)
+    """
+    # Check if file exists
+    if !fs.exists(path):
+        return Err("Config file not found: " + path)
+
+    # Read file content
+    match fs.read_to_string(path):
+        case Ok(content):
+            # Parse config
+            match parse_config_file(content):
+                case Ok(dict):
+                    return Ok(from_dict(dict))
+                case Err(msg):
+                    return Err("Error parsing " + path + ": " + msg)
+        case Err(msg):
+            return Err("Error reading " + path + ": " + msg)
+
+
+fn from_hierarchy(start_path: str, filename: str = "__init__.spl") -> Result<Config, str>:
+    """Load and merge configs from directory hierarchy.
+
+    Walks up directory tree from start_path, loading config files
+    and merging them with precedence (deeper overrides higher).
+
+    Precedence (lowest to highest):
+        1. Root project config (furthest ancestor)
+        2. Parent directory configs
+        3. Current directory config (highest precedence)
+
+    Args:
+        start_path: Starting directory or file path
+        filename: Config filename to search for (default: "__init__.spl")
+
+    Returns:
+        Ok(Config) with merged configs, Err(message) on error
+
+    Example:
+        # Given hierarchy:
+        # /project/__init__.spl:        port = 8080
+        # /project/subdir/__init__.spl: port = 9000, debug = true
+        #
+        # Loading from /project/subdir:
+        match from_hierarchy("/project/subdir"):
+            case Ok(cfg):
+                cfg.get("port")   # Some(9000) - subdir overrides
+                cfg.get("debug")  # Some(true) - from subdir
+            case Err(msg):
+                print("Error: " + msg)
+    """
+    # Get absolute path
+    var current_dir = if fs.is_file(start_path):
+        path.dirname(start_path)
+    else:
+        start_path
+
+    current_dir = path.abspath(current_dir)
+
+    # Collect config files from hierarchy (root to current)
+    var config_paths = []
+    var search_dir = current_dir
+    var depth = 0
+    val max_depth = 20  # Prevent infinite loops
+
+    while depth < max_depth:
+        val config_path = path.join(search_dir, filename)
+        if fs.exists(config_path):
+            # Prepend (we want root first)
+            config_paths.insert(0, config_path)
+
+        # Move to parent
+        val parent = path.dirname(search_dir)
+        if parent == search_dir:
+            # Reached filesystem root
+            break
+        search_dir = parent
+        depth = depth + 1
+
+    # If no configs found, return empty config
+    if config_paths.is_empty():
+        return Ok(from_dict({}))
+
+    # Load and merge configs (root to current)
+    var merged = from_dict({})
+
+    for config_path in config_paths:
+        match from_file(config_path):
+            case Ok(cfg):
+                merged = merge(merged, cfg)
+            case Err(msg):
+                # Continue on error, but could also fail-fast
+                print("Warning: " + msg)
+
+    return Ok(merged)
