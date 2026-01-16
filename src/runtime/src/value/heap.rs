@@ -44,14 +44,88 @@ pub struct HeapHeader {
     pub size: u32,
 }
 
+/// GC flag bits stored in HeapHeader::gc_flags
+pub mod gc_flags {
+    /// Object has not been visited by GC (white in tri-color marking)
+    pub const WHITE: u8 = 0b00;
+    /// Object is reachable but not yet scanned (gray in tri-color marking)
+    pub const GRAY: u8 = 0b01;
+    /// Object has been scanned and is definitely reachable (black in tri-color marking)
+    pub const BLACK: u8 = 0b10;
+    /// Mask for the color bits
+    pub const COLOR_MASK: u8 = 0b11;
+    /// Object is pinned and should not be moved
+    pub const PINNED: u8 = 0b100;
+}
+
 impl HeapHeader {
     pub fn new(object_type: HeapObjectType, size: u32) -> Self {
         Self {
             object_type,
-            gc_flags: 0,
+            gc_flags: gc_flags::WHITE,
             reserved: 0,
             size,
         }
+    }
+
+    /// Get the GC color of this object
+    #[inline]
+    pub fn gc_color(&self) -> u8 {
+        self.gc_flags & gc_flags::COLOR_MASK
+    }
+
+    /// Check if this object is white (not yet visited)
+    #[inline]
+    pub fn is_white(&self) -> bool {
+        self.gc_color() == gc_flags::WHITE
+    }
+
+    /// Check if this object is gray (reachable, needs scanning)
+    #[inline]
+    pub fn is_gray(&self) -> bool {
+        self.gc_color() == gc_flags::GRAY
+    }
+
+    /// Check if this object is black (fully scanned)
+    #[inline]
+    pub fn is_black(&self) -> bool {
+        self.gc_color() == gc_flags::BLACK
+    }
+
+    /// Mark this object as gray (reachable, needs scanning)
+    #[inline]
+    pub fn mark_gray(&mut self) {
+        self.gc_flags = (self.gc_flags & !gc_flags::COLOR_MASK) | gc_flags::GRAY;
+    }
+
+    /// Mark this object as black (fully scanned)
+    #[inline]
+    pub fn mark_black(&mut self) {
+        self.gc_flags = (self.gc_flags & !gc_flags::COLOR_MASK) | gc_flags::BLACK;
+    }
+
+    /// Reset this object to white (for new GC cycle)
+    #[inline]
+    pub fn reset_color(&mut self) {
+        self.gc_flags = (self.gc_flags & !gc_flags::COLOR_MASK) | gc_flags::WHITE;
+    }
+
+    /// Check if this object is pinned
+    #[inline]
+    pub fn is_pinned(&self) -> bool {
+        (self.gc_flags & gc_flags::PINNED) != 0
+    }
+
+    /// Pin this object (prevent moving)
+    #[inline]
+    pub fn pin(&mut self) {
+        self.gc_flags |= gc_flags::PINNED;
+    }
+
+    /// Unpin this object
+    #[inline]
+    pub fn unpin(&mut self) {
+        self.gc_flags &= !gc_flags::PINNED;
     }
 }
 

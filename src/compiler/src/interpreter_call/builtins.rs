@@ -31,8 +31,17 @@ pub(super) fn eval_builtin(
 
     match name {
         "range" => {
-            let start = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            let end = eval_arg_int(args, 1, 0, env, functions, classes, enums, impl_methods)?;
+            // Handle range(n) as range(0, n) and range(start, end)
+            let (start, end) = if args.len() == 1 {
+                // Single argument: range(n) means range(0, n)
+                let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                (0, n)
+            } else {
+                // Two arguments: range(start, end)
+                let start = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                let end = eval_arg_int(args, 1, 0, env, functions, classes, enums, impl_methods)?;
+                (start, end)
+            };
             let inclusive = eval_arg(
                 args,
                 2,

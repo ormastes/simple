@@ -6,23 +6,25 @@
 // - QIDENT template variable validation
 // - Type annotation requirements
 
-use simple_compiler::error::CompileError;
-use simple_parser::Parser;
+use simple_compiler::CompilerPipeline;
 
 /// Helper to parse and check if compilation succeeds
-fn check_compiles(source: &str) -> Result<(), CompileError> {
-    let mut parser = Parser::new(source);
-    let module = parser.parse().map_err(|e| CompileError::Parse(e.to_string()))?;
-    simple_compiler::evaluate_module(&module.items).map(|_| ())
+fn check_compiles(source: &str) -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    let src_path = dir.path().join("test.spl");
+    let out_path = dir.path().join("test.smf");
+
+    std::fs::write(&src_path, source).map_err(|e| format!("Failed to write source: {}", e))?;
+
+    let mut compiler = CompilerPipeline::new().map_err(|e| format!("Failed to create compiler: {:?}", e))?;
+
+    compiler.compile(&src_path, &out_path)
 }
 
 /// Helper to parse and expect a specific error code
 fn expect_error(source: &str, expected_code: &str) -> bool {
     match check_compiles(source) {
-        Err(e) => {
-            let err_str = e.to_string();
-            err_str.contains(expected_code)
-        }
+        Err(e) => e.contains(expected_code),
         Ok(_) => false,
     }
 }
@@ -188,8 +190,6 @@ fn test_intro_type_annotation_required() {
             intro result:
                 enclosing.module.let my_var
         ):
-            const_eval:
-                pass
             emit result:
                 val my_var = 42
 
@@ -209,8 +209,6 @@ fn test_intro_with_type_annotation_success() {
             intro result:
                 enclosing.module.let my_var: i64
         ):
-            const_eval:
-                pass
             emit result:
                 val my_var = 42
 
@@ -301,8 +299,6 @@ fn test_intro_for_loop_with_const_range() {
                 for i in 0..COUNT:
                     enclosing.module.let "var_{i}": i64
         ):
-            const_eval:
-                pass
             emit result:
                 for i in 0..COUNT:
                     val "var_{i}" = i
@@ -324,8 +320,6 @@ fn test_intro_conditional_with_const_condition() {
                 else:
                     enclosing.module.let disabled_var: i64
         ):
-            const_eval:
-                pass
             emit result:
                 if FLAG:
                     val enabled_var = 1
