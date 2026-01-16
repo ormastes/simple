@@ -86,6 +86,58 @@ pub(super) fn eval_literal_expr(
             Ok(Some(Value::Str(out)))
         }
         Expr::Symbol(s) => Ok(Some(Value::Symbol(s.clone()))),
+
+        // i18n string literals
+        Expr::I18nString { name: _, default_text } => {
+            // For now, just return the default text
+            // TODO: Look up in locale registry when implemented
+            Ok(Some(Value::Str(default_text.clone())))
+        }
+
+        // i18n template strings
+        Expr::I18nTemplate {
+            name: _,
+            parts,
+            args,
+        } => {
+            // First, build the template string from parts
+            let mut template = String::new();
+            let mut placeholders = Vec::new();
+
+            for part in parts {
+                match part {
+                    FStringPart::Literal(lit) => template.push_str(lit),
+                    FStringPart::Expr(e) => {
+                        // Record the placeholder position
+                        if let Expr::Identifier(id) = e {
+                            placeholders.push(id.clone());
+                            template.push_str(&format!("{{{}}}", id));
+                        } else {
+                            // For complex expressions, evaluate inline
+                            let v = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
+                            template.push_str(&v.to_display_string());
+                        }
+                    }
+                }
+            }
+
+            // Now substitute the args
+            let mut result = template.clone();
+            for (key, value_expr) in args {
+                let value = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
+                result = result.replace(&format!("{{{}}}", key), &value.to_display_string());
+            }
+
+            Ok(Some(Value::Str(result)))
+        }
+
+        // i18n reference (named string without inline default)
+        Expr::I18nRef(name) => {
+            // TODO: Look up in locale registry
+            // For now, return the name as a placeholder
+            Ok(Some(Value::Str(format!("[i18n:{}]", name))))
+        }
+
         // Custom block expressions: m{...}, sh{...}, sql{...}, re{...}, etc.
         Expr::BlockExpr { kind, payload } => {
             // Evaluate the block using the appropriate handler

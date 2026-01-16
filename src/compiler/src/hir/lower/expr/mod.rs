@@ -28,6 +28,9 @@ impl Lowerer {
         match expr {
             Expr::Integer(_) | Expr::Float(_) | Expr::String(_) | Expr::Bool(_) | Expr::Nil => self.lower_literal(expr),
             Expr::FString(parts) => self.lower_fstring(parts),
+            Expr::I18nString { name, default_text } => self.lower_i18n_string(name, default_text),
+            Expr::I18nTemplate { name, parts, args } => self.lower_i18n_template(name, parts, args),
+            Expr::I18nRef(name) => self.lower_i18n_ref(name),
             Expr::Identifier(name) => self.lower_identifier(name, ctx),
             Expr::Binary { op, left, right } => self.lower_binary(op, left, right, ctx),
             Expr::Unary { op, operand } => self.lower_unary(op, operand, ctx),

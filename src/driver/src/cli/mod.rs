@@ -11,6 +11,7 @@ pub mod doc_gen;
 pub mod electron;
 pub mod gen_lean;
 pub mod help;
+pub mod i18n;
 pub mod init;
 pub mod llm_tools;
 pub mod migrate;

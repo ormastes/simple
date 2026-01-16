@@ -39,6 +39,37 @@ impl Lowerer {
         }
     }
 
+    /// Lower an i18n string to HIR
+    ///
+    /// Currently lowered as a plain string literal (no locale lookup at HIR level).
+    /// Locale lookup happens at runtime.
+    pub(super) fn lower_i18n_string(&self, _name: &str, default_text: &str) -> LowerResult<HirExpr> {
+        // For now, just emit the default text as a string literal
+        // TODO: Add locale lookup support in native compilation
+        Ok(HirExpr {
+            kind: HirExprKind::String(default_text.to_string()),
+            ty: TypeId::STRING,
+        })
+    }
+
+    /// Lower an i18n template to HIR
+    ///
+    /// Not yet supported in native compilation - falls back to interpreter.
+    pub(super) fn lower_i18n_template(&self, _name: &str, _parts: &[ast::FStringPart], _args: &[(String, Expr)]) -> LowerResult<HirExpr> {
+        Err(LowerError::Unsupported(
+            "i18n template strings not yet supported in native compilation".to_string(),
+        ))
+    }
+
+    /// Lower an i18n reference to HIR
+    ///
+    /// Not yet supported in native compilation - falls back to interpreter.
+    pub(super) fn lower_i18n_ref(&self, _name: &str) -> LowerResult<HirExpr> {
+        Err(LowerError::Unsupported(
+            "i18n references not yet supported in native compilation".to_string(),
+        ))
+    }
+
     /// Lower an FString (formatted string) to HIR
     ///
     /// Currently only supports FStrings without interpolation (plain literals).

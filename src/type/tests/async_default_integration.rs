@@ -43,6 +43,7 @@ fn make_function(name: &str, is_sync: bool, has_async_effect: bool, body: Vec<No
         is_abstract: false,
         is_sync,
         bounds_block: None,
+        is_me_method: false,
     }
 }
 

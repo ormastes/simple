@@ -25,6 +25,7 @@ pub mod error_explanations;
 pub mod formatter;
 pub mod hir;
 pub mod hydration_manifest;
+pub mod i18n;
 pub mod import_loader;
 pub mod incremental;
 pub mod interpreter;
@@ -84,6 +85,7 @@ pub use di::{
 };
 pub use error::{codes as error_codes, typo, CompileError, ErrorContext};
 pub use formatter::{FormatConfig, Formatter};
+pub use i18n::{ExtractionResult, I18nExtractor, I18nString, LocaleFile, LocaleGenerator};
 pub use interpreter::{
     evaluate_module, get_interpreter_args, is_debug_mode, set_debug_mode, set_interpreter_args, set_macro_trace,
 };
