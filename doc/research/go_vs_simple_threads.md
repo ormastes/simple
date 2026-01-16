@@ -598,6 +598,134 @@ val v = ch.recv()
 
 ---
 
+## Tooling Interoperability Analysis
+
+### Can `<-` Work with Tree-sitter/LSP/etc?
+
+**Short answer: Yes, with proper implementation.**
+
+### Precedent: Existing Multi-char Operators
+
+Simple already handles similar operators:
+```
+->    TokenKind::Arrow       (return type)
+<=    TokenKind::LtEq        (comparison)
+>=    TokenKind::GtEq        (comparison)
+<<    TokenKind::ShiftLeft   (bitwise)
+>>    TokenKind::ShiftRight  (bitwise)
+**    TokenKind::DoubleStar  (power)
+```
+
+Adding `<-` follows the same pattern.
+
+### Tree-sitter Compatibility
+
+| Concern | Issue | Solution |
+|---------|-------|----------|
+| Token definition | Need single `<-` token | Add to grammar: `"<-" @operator.channel` |
+| Incremental parsing | `<` then `-` typed | Tree-sitter re-lexes on edit (normal) |
+| Syntax highlighting | Must highlight as one | Add `"<-"` to operator list in highlights.scm |
+| Error recovery | Partial `<` typed | Standard error node, recovers on next char |
+
+**Tree-sitter grammar addition:**
+```javascript
+// grammar.js
+channel_arrow: $ => '<-',
+
+// In operator rules
+operators: $ => choice(
+  ...
+  $.channel_arrow,  // Must be before '<'
+  '<',
+  '-',
+  ...
+)
+```
+
+**Highlights.scm addition:**
+```scheme
+; Channel operators
+["<-"] @operator.channel
+```
+
+### LSP/IDE Compatibility
+
+| Feature | Impact | Notes |
+|---------|--------|-------|
+| Auto-complete | None | `<-` completes as operator |
+| Go-to-definition | Works | Parser sees Send/Recv nodes |
+| Hover info | Works | Can show channel type info |
+| Rename | Works | Channel variable rename |
+| Semantic tokens | Add new token type | `channel_operator` |
+
+### Potential Issues
+
+| Issue | Severity | Mitigation |
+|-------|----------|------------|
+| `a<-b` vs `a < -b` | Medium | Lexer: `<-` always wins, use space for `a < -b` |
+| Copy-paste from Go | None | Same syntax, works |
+| Regex search tools | Low | Search `<-` as literal |
+| Syntax highlighters | Low | Update grammar files |
+
+### Languages Using `<-` Successfully
+
+| Language | Use | Tooling Status |
+|----------|-----|----------------|
+| **Go** | Channel send/recv | Tree-sitter ✅, LSP ✅, all IDEs ✅ |
+| **R** | Assignment | Tree-sitter ✅, RStudio ✅ |
+| **Haskell** | Do-notation | Tree-sitter ✅, HLS ✅ |
+| **OCaml** | Reference assign | Tree-sitter ✅, Merlin ✅ |
+
+**Go's tree-sitter grammar handles `<-` perfectly** - we can copy their approach.
+
+### Implementation Checklist
+
+1. **Lexer** (Rust)
+   ```rust
+   // In lexer.rs - add before '<' case
+   '<' if self.peek() == Some('-') => {
+       self.advance(); // consume '-'
+       TokenKind::ChannelArrow
+   }
+   ```
+
+2. **Tree-sitter grammar**
+   ```javascript
+   channel_send: $ => prec.left(1, seq(
+     field('channel', $.expression),
+     '<-',
+     field('value', $.expression)
+   )),
+
+   channel_recv: $ => prec(PREC.PREFIX, seq(
+     '<-',
+     field('channel', $.expression)
+   )),
+   ```
+
+3. **Highlights.scm**
+   ```scheme
+   ["<-"] @operator.channel
+   ```
+
+4. **LSP semantic tokens**
+   ```rust
+   SemanticTokenType::OPERATOR // for <-
+   ```
+
+### Conclusion
+
+**`<-` is fully compatible with all standard tooling.** Go has proven this works. The implementation is straightforward:
+
+1. Add `<-` as single lexer token (highest priority)
+2. Update tree-sitter grammar
+3. Update syntax highlighting
+4. Parser handles prefix (recv) vs infix (send) by position
+
+**Risk level: Low** - well-established pattern across multiple languages.
+
+---
+
 ## Implementation Priority
 
 | Priority | Feature | Effort | LL(1) | Value |
@@ -640,6 +768,69 @@ latch.wait()
 val scope = CancelScope.with_timeout(5000)
 go(scope) \s: while not s.is_done(): work()
 ```
+
+---
+
+## Implementation Plan
+
+### Phase 1: Foundation (P1 - Low Effort)
+
+| Task | Files | Effort |
+|------|-------|--------|
+| Add `Sender<T>` wrapper | `std_lib/src/concurrency/channels.spl` | 1 day |
+| Add `Receiver<T>` wrapper | `std_lib/src/concurrency/channels.spl` | 1 day |
+| Add `typed_channel<T>()` | `std_lib/src/concurrency/channels.spl` | 0.5 day |
+| Document WaitGroup = Latch | `doc/guide/concurrency.md` | 0.5 day |
+| Create SSpec tests | `std_lib/test/features/` | 1 day |
+
+### Phase 2: Syntax (P2 - Medium Effort)
+
+| Task | Files | Effort |
+|------|-------|--------|
+| Add `<-` token to lexer | `src/parser/src/lexer.rs` | 0.5 day |
+| Add `ChannelArrow` TokenKind | `src/parser/src/token.rs` | 0.5 day |
+| Parse prefix `<-expr` (recv) | `src/parser/src/parser_expr.rs` | 1 day |
+| Update tree-sitter grammar | `std_lib/src/parser/treesitter/` | 0.5 day |
+| Update highlights.scm | `std_lib/src/parser/treesitter/queries/` | 0.5 day |
+
+### Phase 3: Go Keyword (P2 - Medium Effort)
+
+| Task | Files | Effort |
+|------|-------|--------|
+| Add `go` keyword to lexer | `src/parser/src/lexer.rs` | 0.5 day |
+| Parse `go(args) \params: expr` | `src/parser/src/parser_stmt.rs` | 1 day |
+| Parse `go \|captures\| \: expr` | `src/parser/src/parser_stmt.rs` | 1 day |
+| Lower to `spawn_isolated` call | `src/compiler/src/hir_lower.rs` | 1 day |
+| Add SSpec tests | `std_lib/test/features/` | 0.5 day |
+
+### Phase 4: Advanced (P2-P3)
+
+| Task | Files | Effort |
+|------|-------|--------|
+| `CancelToken` struct | `std_lib/src/concurrency/cancel.spl` | 1 day |
+| `CancelScope` struct | `std_lib/src/concurrency/cancel.spl` | 1 day |
+| `par()` iterator method | `std_lib/src/collections/list.spl` | 2 days |
+| `select` statement (P3) | Multiple parser/compiler files | 3-5 days |
+
+### Phase 5: Documentation
+
+| Task | Location |
+|------|----------|
+| Concurrency guide | `doc/guide/concurrency.md` |
+| Channel patterns | `doc/guide/channel_patterns.md` |
+| Migration guide | `doc/migration/go_style_threads.md` |
+
+---
+
+## SSpec Test Files
+
+Feature specifications to create:
+
+| File | Coverage |
+|------|----------|
+| `concurrency_spec.spl` | `go` keyword, spawn, join |
+| `channels_spec.spl` | `Sender`/`Receiver`, `<-` operator |
+| `parallel_spec.spl` | `par()`, `parallel_map`, `parallel_reduce` |
 
 ---
 

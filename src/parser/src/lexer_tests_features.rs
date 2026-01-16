@@ -18,9 +18,9 @@ fn test_use_statement_tokens() {
             TokenKind::Use,
             TokenKind::Crate,
             TokenKind::Dot,
-            TokenKind::Identifier("core".to_string()),
+            TokenKind::Identifier { name: "core".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Dot,
-            TokenKind::Identifier("Option".to_string()),
+            TokenKind::Identifier { name: "Option".to_string(), pattern: NamePattern::TypeName },
             TokenKind::Eof,
         ]
     );
@@ -33,7 +33,7 @@ fn test_mod_declaration_tokens() {
         vec![
             TokenKind::Pub,
             TokenKind::Mod,
-            TokenKind::Identifier("router".to_string()),
+            TokenKind::Identifier { name: "router".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Eof,
         ]
     );
@@ -49,25 +49,25 @@ fn test_function_definition() {
         tokens,
         vec![
             TokenKind::Fn,
-            TokenKind::Identifier("add".to_string()),
+            TokenKind::Identifier { name: "add".to_string(), pattern: NamePattern::Immutable },
             TokenKind::LParen,
-            TokenKind::Identifier("a".to_string()),
+            TokenKind::Identifier { name: "a".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Colon,
-            TokenKind::Identifier("i64".to_string()),
+            TokenKind::Identifier { name: "i64".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Comma,
-            TokenKind::Identifier("b".to_string()),
+            TokenKind::Identifier { name: "b".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Colon,
-            TokenKind::Identifier("i64".to_string()),
+            TokenKind::Identifier { name: "i64".to_string(), pattern: NamePattern::Immutable },
             TokenKind::RParen,
             TokenKind::Arrow,
-            TokenKind::Identifier("i64".to_string()),
+            TokenKind::Identifier { name: "i64".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Colon,
             TokenKind::Newline,
             TokenKind::Indent,
             TokenKind::Return,
-            TokenKind::Identifier("a".to_string()),
+            TokenKind::Identifier { name: "a".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Plus,
-            TokenKind::Identifier("b".to_string()),
+            TokenKind::Identifier { name: "b".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Dedent, // DEDENT at EOF for remaining indentation
             TokenKind::Eof,
         ]
@@ -275,7 +275,7 @@ fn test_aop_advice_statement() {
             TokenKind::On,
             TokenKind::Pointcut(" execution(* foo(..)) ".to_string()),
             TokenKind::Use,
-            TokenKind::Identifier("LogInterceptor".to_string()),
+            TokenKind::Identifier { name: "LogInterceptor".to_string(), pattern: NamePattern::TypeName },
             TokenKind::Eof
         ]
     );
@@ -290,7 +290,7 @@ fn test_di_binding_statement() {
             TokenKind::On,
             TokenKind::Pointcut(" type(UserService) ".to_string()),
             TokenKind::Arrow,
-            TokenKind::Identifier("MockUserService".to_string()),
+            TokenKind::Identifier { name: "MockUserService".to_string(), pattern: NamePattern::TypeName },
             TokenKind::Eof
         ]
     );
@@ -326,9 +326,9 @@ fn test_mock_declaration() {
         tokenize("mock MockUser implements UserTrait"),
         vec![
             TokenKind::Mock,
-            TokenKind::Identifier("MockUser".to_string()),
-            TokenKind::Identifier("implements".to_string()),
-            TokenKind::Identifier("UserTrait".to_string()),
+            TokenKind::Identifier { name: "MockUser".to_string(), pattern: NamePattern::TypeName },
+            TokenKind::Identifier { name: "implements".to_string(), pattern: NamePattern::Immutable },
+            TokenKind::Identifier { name: "UserTrait".to_string(), pattern: NamePattern::TypeName },
             TokenKind::Eof
         ]
     );

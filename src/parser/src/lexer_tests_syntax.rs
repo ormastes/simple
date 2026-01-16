@@ -85,12 +85,12 @@ fn test_complex_expression() {
     assert_eq!(
         tokenize("x * (y + z)"),
         vec![
-            TokenKind::Identifier("x".to_string()),
+            TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Star,
             TokenKind::LParen,
-            TokenKind::Identifier("y".to_string()),
+            TokenKind::Identifier { name: "y".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Plus,
-            TokenKind::Identifier("z".to_string()),
+            TokenKind::Identifier { name: "z".to_string(), pattern: NamePattern::Immutable },
             TokenKind::RParen,
             TokenKind::Eof,
         ]
@@ -102,11 +102,11 @@ fn test_function_call() {
     assert_eq!(
         tokenize("print(x, y)"),
         vec![
-            TokenKind::Identifier("print".to_string()),
+            TokenKind::Identifier { name: "print".to_string(), pattern: NamePattern::Immutable },
             TokenKind::LParen,
-            TokenKind::Identifier("x".to_string()),
+            TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Comma,
-            TokenKind::Identifier("y".to_string()),
+            TokenKind::Identifier { name: "y".to_string(), pattern: NamePattern::Immutable },
             TokenKind::RParen,
             TokenKind::Eof,
         ]
@@ -123,14 +123,14 @@ fn test_indent_dedent() {
         tokens,
         vec![
             TokenKind::If,
-            TokenKind::Identifier("x".to_string()),
+            TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Colon,
             TokenKind::Newline,
             TokenKind::Indent,
-            TokenKind::Identifier("y".to_string()),
+            TokenKind::Identifier { name: "y".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Newline,
             TokenKind::Dedent,
-            TokenKind::Identifier("z".to_string()),
+            TokenKind::Identifier { name: "z".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Eof,
         ]
     );
@@ -144,20 +144,20 @@ fn test_nested_indent() {
         tokens,
         vec![
             TokenKind::If,
-            TokenKind::Identifier("a".to_string()),
+            TokenKind::Identifier { name: "a".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Colon,
             TokenKind::Newline,
             TokenKind::Indent,
             TokenKind::If,
-            TokenKind::Identifier("b".to_string()),
+            TokenKind::Identifier { name: "b".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Colon,
             TokenKind::Newline,
             TokenKind::Indent,
-            TokenKind::Identifier("c".to_string()),
+            TokenKind::Identifier { name: "c".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Newline,
             TokenKind::Dedent,
             TokenKind::Dedent,
-            TokenKind::Identifier("d".to_string()),
+            TokenKind::Identifier { name: "d".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Eof,
         ]
     );

@@ -273,7 +273,7 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn expect_identifier(&mut self) -> Result<String, ParseError> {
         let name = match &self.current.kind {
-            TokenKind::Identifier { name: name, .. } => name.clone(),
+            TokenKind::Identifier { name, .. } => name.clone(),
             // Allow contract keywords to be used as identifiers (parameter names, variable names, etc.)
             // These are only keywords in specific contract contexts
             TokenKind::Result => "result".to_string(),
@@ -332,7 +332,7 @@ impl<'a> Parser<'a> {
     /// This allows using reserved words like 'unit', 'test', etc. in module paths.
     pub(crate) fn expect_path_segment(&mut self) -> Result<String, ParseError> {
         // First try regular identifier
-        if let TokenKind::Identifier { name: name, .. } = &self.current.kind {
+        if let TokenKind::Identifier { name, .. } = &self.current.kind {
             let name = name.clone();
             self.advance();
             return Ok(name);
@@ -394,7 +394,7 @@ impl<'a> Parser<'a> {
     /// This allows using reserved words like 'new', 'type', etc. as method names.
     pub(crate) fn expect_method_name(&mut self) -> Result<String, ParseError> {
         // First try regular identifier
-        if let TokenKind::Identifier { name: name, .. } = &self.current.kind {
+        if let TokenKind::Identifier { name, .. } = &self.current.kind {
             let name = name.clone();
             self.advance();
             return Ok(name);

@@ -5,9 +5,9 @@ fn test_line_comment() {
     assert_eq!(
         tokenize("x # comment\ny"),
         vec![
-            TokenKind::Identifier("x".to_string()),
+            TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Newline,
-            TokenKind::Identifier("y".to_string()),
+            TokenKind::Identifier { name: "y".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Eof,
         ]
     );
@@ -18,8 +18,8 @@ fn test_block_comment() {
     assert_eq!(
         tokenize("x /* comment */ y"),
         vec![
-            TokenKind::Identifier("x".to_string()),
-            TokenKind::Identifier("y".to_string()),
+            TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
+            TokenKind::Identifier { name: "y".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Eof,
         ]
     );
@@ -30,8 +30,8 @@ fn test_block_comment_multiline() {
     assert_eq!(
         tokenize("x /* multi\nline\ncomment */ y"),
         vec![
-            TokenKind::Identifier("x".to_string()),
-            TokenKind::Identifier("y".to_string()),
+            TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
+            TokenKind::Identifier { name: "y".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Eof,
         ]
     );
@@ -42,8 +42,8 @@ fn test_block_comment_nested() {
     assert_eq!(
         tokenize("x /* outer /* inner */ outer */ y"),
         vec![
-            TokenKind::Identifier("x".to_string()),
-            TokenKind::Identifier("y".to_string()),
+            TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
+            TokenKind::Identifier { name: "y".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Eof,
         ]
     );
@@ -53,7 +53,7 @@ fn test_block_comment_nested() {
 fn test_block_comment_at_line_start() {
     assert_eq!(
         tokenize("/* comment */\nx"),
-        vec![TokenKind::Identifier("x".to_string()), TokenKind::Eof,]
+        vec![TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable }, TokenKind::Eof,]
     );
 }
 
@@ -64,7 +64,7 @@ fn test_doc_block_comment() {
         vec![
             TokenKind::DocComment("This is a doc comment".to_string()),
             TokenKind::Newline,
-            TokenKind::Identifier("x".to_string()),
+            TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Eof,
         ]
     );
@@ -77,7 +77,7 @@ fn test_doc_block_comment_multiline() {
         vec![
             TokenKind::DocComment("Line 1\nLine 2".to_string()),
             TokenKind::Newline,
-            TokenKind::Identifier("x".to_string()),
+            TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Eof,
         ]
     );
@@ -90,7 +90,7 @@ fn test_doc_line_comment() {
         vec![
             TokenKind::DocComment("This is a doc comment".to_string()),
             TokenKind::Newline,
-            TokenKind::Identifier("x".to_string()),
+            TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Eof,
         ]
     );
@@ -104,7 +104,7 @@ fn test_triple_slash_doc_comment() {
         vec![
             TokenKind::DocComment("This is a doc comment".to_string()),
             TokenKind::Newline,
-            TokenKind::Identifier("x".to_string()),
+            TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Eof,
         ]
     );
@@ -134,7 +134,7 @@ fn test_triple_slash_multiline_doc_block() {
         tokens,
         vec![
             TokenKind::DocComment("Hello".to_string()),
-            TokenKind::Identifier("x".to_string()),
+            TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Eof,
         ]
     );
@@ -148,7 +148,7 @@ fn test_triple_slash_multiline_with_import() {
         vec![
             TokenKind::DocComment("Module docs".to_string()),
             TokenKind::Import,
-            TokenKind::Identifier("foo".to_string()),
+            TokenKind::Identifier { name: "foo".to_string(), pattern: NamePattern::Immutable },
             TokenKind::Eof,
         ]
     );
