@@ -308,15 +308,33 @@ fn test_symbol_literals() {
 fn test_identifiers() {
     assert_eq!(
         tokenize("foo"),
-        vec![TokenKind::Identifier("foo".to_string()), TokenKind::Eof]
+        vec![
+            TokenKind::Identifier {
+                name: "foo".to_string(),
+                pattern: NamePattern::Immutable
+            },
+            TokenKind::Eof
+        ]
     );
     assert_eq!(
         tokenize("_bar"),
-        vec![TokenKind::Identifier("_bar".to_string()), TokenKind::Eof]
+        vec![
+            TokenKind::Identifier {
+                name: "_bar".to_string(),
+                pattern: NamePattern::Private
+            },
+            TokenKind::Eof
+        ]
     );
     assert_eq!(
         tokenize("baz123"),
-        vec![TokenKind::Identifier("baz123".to_string()), TokenKind::Eof]
+        vec![
+            TokenKind::Identifier {
+                name: "baz123".to_string(),
+                pattern: NamePattern::Immutable
+            },
+            TokenKind::Eof
+        ]
     );
 }
 

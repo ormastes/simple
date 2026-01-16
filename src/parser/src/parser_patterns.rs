@@ -49,7 +49,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Pattern::Identifier(name))
             }
-            TokenKind::Identifier { name: name, .. } => {
+            TokenKind::Identifier { name, .. } => {
                 let name = name.clone();
                 self.advance();
 
