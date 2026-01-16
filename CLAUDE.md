@@ -24,7 +24,8 @@ Skills located in `.claude/skills/`.
 
 ## Key Features
 
-- **LLM-Friendly**: IR export, context packs, lint framework (70% complete)
+- **LLM-Friendly**: IR export, context packs, lint framework (75% complete)
+  - **New Lints**: `print_in_test_spec`, `todo_format`
 - **Pattern Matching Safety**: Exhaustiveness checking (5/5 complete)
 - **Scala-Style Syntax**: `val`/`var` variables, implicit `self` in methods
 - Memory model: Reference capabilities (`mut T`, `iso T`, `T`)

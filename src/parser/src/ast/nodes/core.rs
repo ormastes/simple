@@ -424,6 +424,8 @@ pub enum Expr {
         params: Vec<LambdaParam>,
         body: Box<Expr>,
         move_mode: MoveMode,
+        /// Capture all immutables (from \*: syntax)
+        capture_all: bool,
     },
     If {
         let_pattern: Option<Pattern>,
@@ -471,14 +473,17 @@ pub enum Expr {
         fields: Vec<(String, Expr)>,
     },
     Spawn(Box<Expr>),
-    /// Go-style thread spawn: go(args) \params: body OR go |captures| \: body
+    /// Go-style thread spawn:
+    /// - `go(x, y) \a, b: expr` - pass x, y as arguments to parameters a, b
+    /// - `go(x, y) \: expr` - capture x, y and use in expr
+    /// - `go(*) \: expr` or `go \: expr` - capture all immutables
     Go {
-        /// Arguments passed to thread (for go(args) form) OR captures (for go |...| form)
+        /// Arguments to pass or expressions to capture
+        /// Empty vec means capture all immutables
         args: Vec<Expr>,
-        /// Parameters received by thread lambda (for go(args) \params: form)
+        /// Parameters received by thread lambda
+        /// Empty vec means capture form (no params, just captures)
         params: Vec<String>,
-        /// Whether this uses capture syntax |...| (true) or args (...) (false)
-        is_capture_form: bool,
         /// Body expression to execute in thread
         body: Box<Expr>,
     },

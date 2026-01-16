@@ -15,11 +15,7 @@ impl CompilerPipeline {
     ///
     /// Stores diagnostics in `self.lint_diagnostics`.
     /// Returns an error if any lint is set to deny level.
-    pub(super) fn run_lint_checks(
-        &mut self,
-        items: &[Node],
-        source_file: Option<&Path>,
-    ) -> Result<(), CompileError> {
+    pub(super) fn run_lint_checks(&mut self, items: &[Node], source_file: Option<&Path>) -> Result<(), CompileError> {
         let mut checker = if let Some(ref config) = self.lint_config {
             LintChecker::with_config(config.clone())
         } else {

@@ -280,4 +280,158 @@ pub fn set_active(active: bool):
         let pretty_val: serde_json::Value = serde_json::from_str(&pretty).unwrap();
         assert_eq!(compact_val, pretty_val);
     }
+
+    #[test]
+    fn test_print_in_test_spec_lint() {
+        use std::path::PathBuf;
+
+        let code = r#"
+print("Test starting")
+val result = 42
+print("Test passed")
+"#;
+        let module = parse_code(code);
+        let mut checker = LintChecker::new()
+            .with_source_file(Some(PathBuf::from("test_spec.spl")));
+        checker.check_module(&module.items);
+
+        let diagnostics = checker.diagnostics();
+        // Should find 2 print calls
+        assert_eq!(diagnostics.len(), 2);
+        assert!(diagnostics[0].message.contains("print()"));
+        assert_eq!(diagnostics[0].lint, LintName::PrintInTestSpec);
+        assert_eq!(diagnostics[0].level, LintLevel::Warn);
+    }
+
+    #[test]
+    fn test_print_in_test_spec_not_triggered_for_regular_files() {
+        use std::path::PathBuf;
+
+        let code = r#"
+print("Regular file output")
+"#;
+        let module = parse_code(code);
+        let mut checker = LintChecker::new()
+            .with_source_file(Some(PathBuf::from("regular.spl")));
+        checker.check_module(&module.items);
+
+        let diagnostics = checker.diagnostics();
+        // Should not trigger for non-test-spec files
+        assert_eq!(diagnostics.len(), 0);
+    }
+
+    #[test]
+    fn test_todo_format_lint_valid() {
+        use std::path::PathBuf;
+        use std::fs;
+        use tempfile::NamedTempFile;
+
+        let code = r#"
+# TODO: [runtime][P1] Implement feature X
+# FIXME: [parser][P0] Fix critical bug [#123]
+fn test():
+    pass
+"#;
+        let mut temp_file = NamedTempFile::new().unwrap();
+        fs::write(&temp_file, code).unwrap();
+
+        let module = parse_code(code);
+        let mut checker = LintChecker::new()
+            .with_source_file(Some(temp_file.path().to_path_buf()));
+        checker.check_module(&module.items);
+
+        let diagnostics = checker.diagnostics();
+        // Should not warn about properly formatted TODOs
+        let todo_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::TodoFormat)
+            .collect();
+        assert_eq!(todo_warnings.len(), 0);
+    }
+
+    #[test]
+    fn test_todo_format_lint_invalid() {
+        use std::path::PathBuf;
+        use std::fs;
+        use tempfile::NamedTempFile;
+
+        let code = r#"
+# TODO: implement this feature
+# FIXME: broken code here
+fn test():
+    pass
+"#;
+        let mut temp_file = NamedTempFile::new().unwrap();
+        fs::write(&temp_file, code).unwrap();
+
+        let module = parse_code(code);
+        let mut checker = LintChecker::new()
+            .with_source_file(Some(temp_file.path().to_path_buf()));
+        checker.check_module(&module.items);
+
+        let diagnostics = checker.diagnostics();
+        // Should warn about improperly formatted TODOs
+        let todo_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::TodoFormat)
+            .collect();
+        assert_eq!(todo_warnings.len(), 2); // Both TODOs are improperly formatted
+        assert!(todo_warnings[0].message.contains("missing [area][priority]"));
+    }
+
+    #[test]
+    fn test_todo_format_lint_invalid_area() {
+        use std::path::PathBuf;
+        use std::fs;
+        use tempfile::NamedTempFile;
+
+        let code = r#"
+# TODO: [invalid_area][P1] Do something
+fn test():
+    pass
+"#;
+        let mut temp_file = NamedTempFile::new().unwrap();
+        fs::write(&temp_file, code).unwrap();
+
+        let module = parse_code(code);
+        let mut checker = LintChecker::new()
+            .with_source_file(Some(temp_file.path().to_path_buf()));
+        checker.check_module(&module.items);
+
+        let diagnostics = checker.diagnostics();
+        let todo_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::TodoFormat)
+            .collect();
+        assert_eq!(todo_warnings.len(), 1);
+        assert!(todo_warnings[0].message.contains("invalid area"));
+    }
+
+    #[test]
+    fn test_todo_format_lint_invalid_priority() {
+        use std::path::PathBuf;
+        use std::fs;
+        use tempfile::NamedTempFile;
+
+        let code = r#"
+# TODO: [runtime][P99] Do something
+fn test():
+    pass
+"#;
+        let mut temp_file = NamedTempFile::new().unwrap();
+        fs::write(&temp_file, code).unwrap();
+
+        let module = parse_code(code);
+        let mut checker = LintChecker::new()
+            .with_source_file(Some(temp_file.path().to_path_buf()));
+        checker.check_module(&module.items);
+
+        let diagnostics = checker.diagnostics();
+        let todo_warnings: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.lint == LintName::TodoFormat)
+            .collect();
+        assert_eq!(todo_warnings.len(), 1);
+        assert!(todo_warnings[0].message.contains("invalid priority"));
+    }
 }

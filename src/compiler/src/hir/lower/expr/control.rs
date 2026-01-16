@@ -145,7 +145,6 @@ impl Lowerer {
                 .map(|name| ast::LambdaParam {
                     name: name.clone(),
                     ty: None,
-                    capability: None,
                 })
                 .collect();
 
@@ -161,7 +160,7 @@ impl Lowerer {
             // This is effectively: (lambda)(args...)
             let call_hir = HirExpr {
                 kind: HirExprKind::Call {
-                    callee: Box::new(lambda_hir),
+                    func: Box::new(lambda_hir),
                     args: arg_hirs,
                 },
                 ty: TypeId::I64, // The result type of the body
