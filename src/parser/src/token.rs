@@ -164,6 +164,7 @@ pub enum TokenKind {
     True,
     False,
     Spawn,
+    Go, // go (Go-style thread spawn syntax)
     New,
     Self_,
     Super,

@@ -111,6 +111,11 @@ impl TypeChecker {
                         let _ = self.unify(&operand_ty, &Type::Int);
                         Ok(Type::Int)
                     }
+                    UnaryOp::ChannelRecv => {
+                        // Channel receive: extract value type from channel
+                        // TODO: proper channel type inference
+                        Ok(operand_ty)
+                    }
                 }
             }
             Expr::Call { callee, args } => {

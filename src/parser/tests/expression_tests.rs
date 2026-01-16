@@ -208,16 +208,18 @@ fn test_channel_receive_in_assignment() {
     // `val x = <-rx` should parse correctly
     let module = parse("val x = <-rx").unwrap();
     assert_eq!(module.items.len(), 1);
-    if let Node::Declaration(Decl::Val { name, value, .. }) = &module.items[0] {
-        assert_eq!(name, "x");
-        if let Some(Expr::Unary { op, operand }) = value {
+    if let Node::Let(stmt) = &module.items[0] {
+        if let Pattern::Identifier(name) = &stmt.pattern {
+            assert_eq!(name, "x");
+        }
+        if let Some(Expr::Unary { op, operand }) = &stmt.value {
             assert_eq!(*op, UnaryOp::ChannelRecv);
             assert_eq!(**operand, Expr::Identifier("rx".to_string()));
         } else {
             panic!("Expected Unary expression in val initializer");
         }
     } else {
-        panic!("Expected Val declaration");
+        panic!("Expected Let statement");
     }
 }
 

@@ -452,6 +452,7 @@ impl From<simple_parser::UnaryOp> for UnaryOp {
             simple_parser::UnaryOp::Ref => UnaryOp::Not, // Handled separately
             simple_parser::UnaryOp::RefMut => UnaryOp::Not, // Handled separately
             simple_parser::UnaryOp::Deref => UnaryOp::Not, // Handled separately
+            simple_parser::UnaryOp::ChannelRecv => UnaryOp::Not, // Handled separately
         }
     }
 }
