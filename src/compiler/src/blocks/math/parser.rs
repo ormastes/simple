@@ -704,4 +704,25 @@ mod tests {
             MathExpr::Abs(Box::new(MathExpr::Var("x".to_string())))
         );
     }
+
+    #[test]
+    fn test_parse_array_literal() {
+        let (expr, _) = parse_math("[1, 2, 3]").unwrap();
+        assert_eq!(
+            expr,
+            MathExpr::Array(vec![MathExpr::Int(1), MathExpr::Int(2), MathExpr::Int(3)])
+        );
+    }
+
+    #[test]
+    fn test_parse_nested_array() {
+        let (expr, _) = parse_math("[[1, 2], [3, 4]]").unwrap();
+        assert_eq!(
+            expr,
+            MathExpr::Array(vec![
+                MathExpr::Array(vec![MathExpr::Int(1), MathExpr::Int(2)]),
+                MathExpr::Array(vec![MathExpr::Int(3), MathExpr::Int(4)])
+            ])
+        );
+    }
 }
