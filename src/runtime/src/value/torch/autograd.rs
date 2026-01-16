@@ -29,9 +29,7 @@ pub extern "C" fn rt_torch_set_requires_grad(tensor_handle: u64, requires_grad: 
 
         let result = tensor.0.set_requires_grad(requires_grad != 0);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
             "rt_torch_set_requires_grad: {} requires_grad={} -> handle={}",
             tensor_handle,
@@ -59,11 +57,7 @@ pub extern "C" fn rt_torch_requires_grad(tensor_handle: u64) -> i32 {
         drop(registry);
 
         let requires_grad = tensor.0.requires_grad();
-        tracing::debug!(
-            "rt_torch_requires_grad: {} -> {}",
-            tensor_handle,
-            requires_grad
-        );
+        tracing::debug!("rt_torch_requires_grad: {} -> {}", tensor_handle, requires_grad);
         if requires_grad {
             1
         } else {
@@ -122,9 +116,7 @@ pub extern "C" fn rt_torch_grad(tensor_handle: u64) -> u64 {
         match tensor.0.grad() {
             grad => {
                 let handle = next_handle();
-                TENSOR_REGISTRY
-                    .lock()
-                    .insert(handle, Arc::new(TensorWrapper(grad)));
+                TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(grad)));
                 tracing::debug!("rt_torch_grad: {} -> handle={}", tensor_handle, handle);
                 handle
             }
@@ -150,10 +142,7 @@ pub extern "C" fn rt_torch_zero_grad(tensor_handle: u64) -> i32 {
 
         // tch-rs 0.18 doesn't expose zero_grad() for immutable tensor references
         // Gradients are zeroed implicitly when creating a new computational graph
-        tracing::debug!(
-            "rt_torch_zero_grad: {} (not implemented in tch-rs 0.18)",
-            tensor_handle
-        );
+        tracing::debug!("rt_torch_zero_grad: {} (not implemented in tch-rs 0.18)", tensor_handle);
         let _ = tensor; // Suppress unused variable warning
         TorchFfiError::Success as i32
     }
@@ -177,9 +166,7 @@ pub extern "C" fn rt_torch_detach(tensor_handle: u64) -> u64 {
 
         let result = tensor.0.detach();
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!("rt_torch_detach: {} -> handle={}", tensor_handle, handle);
         handle
     }
@@ -287,10 +274,7 @@ pub extern "C" fn rt_torch_is_grad_enabled() -> i32 {
         // tch-rs 0.18 doesn't expose is_grad_enabled() API
         // Gradients are enabled by default
         let enabled = true;
-        tracing::debug!(
-            "rt_torch_is_grad_enabled: {} (default in tch-rs 0.18)",
-            enabled
-        );
+        tracing::debug!("rt_torch_is_grad_enabled: {} (default in tch-rs 0.18)", enabled);
         if enabled {
             1
         } else {
@@ -316,14 +300,8 @@ pub extern "C" fn rt_torch_shallow_clone(tensor_handle: u64) -> u64 {
 
         let result = tensor.0.shallow_clone();
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!(
-            "rt_torch_shallow_clone: {} -> handle={}",
-            tensor_handle,
-            handle
-        );
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!("rt_torch_shallow_clone: {} -> handle={}", tensor_handle, handle);
         handle
     }
     #[cfg(not(feature = "pytorch"))]

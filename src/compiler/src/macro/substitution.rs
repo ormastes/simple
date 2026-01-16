@@ -1,13 +1,10 @@
 use simple_parser::ast::{
-    Argument, AssignmentStmt, Block, ContextStmt, Expr, FStringPart, ForStmt, IfStmt, LetStmt,
-    LoopStmt, MacroArg, MatchArm, MatchStmt, Node, RangeBound, ReturnStmt, WhileStmt, WithStmt,
+    Argument, AssignmentStmt, Block, ContextStmt, Expr, FStringPart, ForStmt, IfStmt, LetStmt, LoopStmt, MacroArg,
+    MatchArm, MatchStmt, Node, RangeBound, ReturnStmt, WhileStmt, WithStmt,
 };
 use std::collections::HashMap;
 
-pub(super) fn substitute_block_templates(
-    block: &Block,
-    const_bindings: &HashMap<String, String>,
-) -> Block {
+pub(super) fn substitute_block_templates(block: &Block, const_bindings: &HashMap<String, String>) -> Block {
     let mut statements = Vec::new();
     for stmt in &block.statements {
         // Check if this is a for-loop that can be unrolled at const-eval time
@@ -25,10 +22,7 @@ pub(super) fn substitute_block_templates(
 
 /// Try to unroll a for-loop at const-eval time if it has const bounds
 /// Returns None if the loop can't be unrolled (not a const range)
-fn try_unroll_const_for_loop(
-    node: &Node,
-    const_bindings: &HashMap<String, String>,
-) -> Option<Vec<Node>> {
+fn try_unroll_const_for_loop(node: &Node, const_bindings: &HashMap<String, String>) -> Option<Vec<Node>> {
     // Only handle Node::For
     let for_stmt = match node {
         Node::For(stmt) => stmt,
@@ -209,14 +203,12 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
             // Substitute template in function name (e.g., "get_{i}" -> "get_0")
             // Also strip quotes if the name was quoted in the source (for templated names)
             let substituted_name = substitute_template_string(&def.name, const_bindings);
-            new_def.name = if substituted_name.starts_with('"')
-                && substituted_name.ends_with('"')
-                && substituted_name.len() > 2
-            {
-                substituted_name[1..substituted_name.len() - 1].to_string()
-            } else {
-                substituted_name
-            };
+            new_def.name =
+                if substituted_name.starts_with('"') && substituted_name.ends_with('"') && substituted_name.len() > 2 {
+                    substituted_name[1..substituted_name.len() - 1].to_string()
+                } else {
+                    substituted_name
+                };
             new_def.body = substitute_block_templates(&def.body, const_bindings);
             // Also substitute in default parameter values
             new_def.params = def
@@ -240,10 +232,9 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
 fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, String>) -> Expr {
     match expr {
         Expr::String(value) => Expr::String(substitute_template_string(value, const_bindings)),
-        Expr::TypedString(value, suffix) => Expr::TypedString(
-            substitute_template_string(value, const_bindings),
-            suffix.clone(),
-        ),
+        Expr::TypedString(value, suffix) => {
+            Expr::TypedString(substitute_template_string(value, const_bindings), suffix.clone())
+        }
         Expr::FString(parts) => Expr::FString(
             parts
                 .iter()
@@ -274,11 +265,7 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
                 })
                 .collect(),
         },
-        Expr::MethodCall {
-            receiver,
-            method,
-            args,
-        } => Expr::MethodCall {
+        Expr::MethodCall { receiver, method, args } => Expr::MethodCall {
             receiver: Box::new(substitute_expr_templates(receiver, const_bindings)),
             method: method.clone(),
             args: args
@@ -403,22 +390,13 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
                 .as_ref()
                 .map(|expr| Box::new(substitute_expr_templates(expr, const_bindings))),
         },
-        Expr::Spread(expr) => {
-            Expr::Spread(Box::new(substitute_expr_templates(expr, const_bindings)))
-        }
-        Expr::DictSpread(expr) => {
-            Expr::DictSpread(Box::new(substitute_expr_templates(expr, const_bindings)))
-        }
+        Expr::Spread(expr) => Expr::Spread(Box::new(substitute_expr_templates(expr, const_bindings))),
+        Expr::DictSpread(expr) => Expr::DictSpread(Box::new(substitute_expr_templates(expr, const_bindings))),
         Expr::StructInit { name, fields } => Expr::StructInit {
             name: name.clone(),
             fields: fields
                 .iter()
-                .map(|(field, expr)| {
-                    (
-                        field.clone(),
-                        substitute_expr_templates(expr, const_bindings),
-                    )
-                })
+                .map(|(field, expr)| (field.clone(), substitute_expr_templates(expr, const_bindings)))
                 .collect(),
         },
         Expr::Spawn(expr) => Expr::Spawn(Box::new(substitute_expr_templates(expr, const_bindings))),
@@ -444,11 +422,7 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
                 .map(|expr| Box::new(substitute_expr_templates(expr, const_bindings))),
             bound: *bound,
         },
-        Expr::FunctionalUpdate {
-            target,
-            method,
-            args,
-        } => Expr::FunctionalUpdate {
+        Expr::FunctionalUpdate { target, method, args } => Expr::FunctionalUpdate {
             target: Box::new(substitute_expr_templates(target, const_bindings)),
             method: method.clone(),
             args: args
@@ -464,9 +438,7 @@ fn substitute_expr_templates(expr: &Expr, const_bindings: &HashMap<String, Strin
             args: args
                 .iter()
                 .map(|arg| match arg {
-                    MacroArg::Expr(expr) => {
-                        MacroArg::Expr(substitute_expr_templates(expr, const_bindings))
-                    }
+                    MacroArg::Expr(expr) => MacroArg::Expr(substitute_expr_templates(expr, const_bindings)),
                 })
                 .collect(),
         },

@@ -93,8 +93,9 @@ fn test_lower_binary_op() {
 #[test]
 fn test_lower_if_statement() {
     let mir = compile_to_mir(
-        "fn max(a: i64, b: i64) -> i64:\n    if a > b:\n        return a\n    else:\n        return b\n"
-    ).unwrap();
+        "fn max(a: i64, b: i64) -> i64:\n    if a > b:\n        return a\n    else:\n        return b\n",
+    )
+    .unwrap();
 
     let func = &mir.functions[0];
     // Should have multiple blocks: entry, then, else, merge
@@ -106,9 +107,9 @@ fn test_lower_if_statement() {
 
 #[test]
 fn test_lower_while_loop() {
-    let mir = compile_to_mir(
-        "fn count() -> i64:\n    let x: i64 = 0\n    while x < 10:\n        x = x + 1\n    return x\n"
-    ).unwrap();
+    let mir =
+        compile_to_mir("fn count() -> i64:\n    let x: i64 = 0\n    while x < 10:\n        x = x + 1\n    return x\n")
+            .unwrap();
 
     let func = &mir.functions[0];
     // Should have: entry, condition, body, exit blocks
@@ -127,10 +128,7 @@ fn test_lower_local_variable() {
         .instructions
         .iter()
         .any(|i| matches!(i, MirInst::LocalAddr { .. })));
-    assert!(entry
-        .instructions
-        .iter()
-        .any(|i| matches!(i, MirInst::Store { .. })));
+    assert!(entry.instructions.iter().any(|i| matches!(i, MirInst::Store { .. })));
 }
 
 #[test]
@@ -179,8 +177,7 @@ fn test_lower_function_with_postcondition() {
 #[test]
 fn test_lower_function_with_invariant() {
     // Contract syntax: contracts go INSIDE the function body (after colon)
-    let source =
-        "fn test_invariant(x: i64) -> i64:\n    invariant:\n        x >= 0\n    return x + 1\n";
+    let source = "fn test_invariant(x: i64) -> i64:\n    invariant:\n        x >= 0\n    return x + 1\n";
     let mir = compile_to_mir(source).unwrap();
 
     let func = &mir.functions[0];
@@ -237,17 +234,13 @@ fn test_contract_mode_off_no_checks() {
         .instructions
         .iter()
         .any(|i| matches!(i, MirInst::ContractCheck { .. }));
-    assert!(
-        !has_contract_check,
-        "ContractMode::Off should not emit contract checks"
-    );
+    assert!(!has_contract_check, "ContractMode::Off should not emit contract checks");
 }
 
 #[test]
 fn test_contract_mode_boundary_public_function() {
     // With ContractMode::Boundary, public functions should have contract checks
-    let source =
-        "pub fn divide(a: i64, b: i64) -> i64:\n    in:\n        b != 0\n    return a / b\n";
+    let source = "pub fn divide(a: i64, b: i64) -> i64:\n    in:\n        b != 0\n    return a / b\n";
     let mir = compile_to_mir_with_mode(source, ContractMode::Boundary).unwrap();
 
     let func = &mir.functions[0];
@@ -318,14 +311,8 @@ fn test_contract_mode_all_checks_all_functions() {
 fn test_contract_mode_from_str() {
     assert_eq!(ContractMode::from_str("off"), Some(ContractMode::Off));
     assert_eq!(ContractMode::from_str("none"), Some(ContractMode::Off));
-    assert_eq!(
-        ContractMode::from_str("boundary"),
-        Some(ContractMode::Boundary)
-    );
-    assert_eq!(
-        ContractMode::from_str("public"),
-        Some(ContractMode::Boundary)
-    );
+    assert_eq!(ContractMode::from_str("boundary"), Some(ContractMode::Boundary));
+    assert_eq!(ContractMode::from_str("public"), Some(ContractMode::Boundary));
     assert_eq!(ContractMode::from_str("all"), Some(ContractMode::All));
     assert_eq!(ContractMode::from_str("on"), Some(ContractMode::All));
     assert_eq!(ContractMode::from_str("test"), Some(ContractMode::Test));
@@ -436,10 +423,7 @@ fn test_pure_function_in_contract_allowed() {
     // Should have is_valid marked as pure
     let is_valid_func = hir_module.functions.iter().find(|f| f.name == "is_valid");
     assert!(is_valid_func.is_some(), "is_valid function should exist");
-    assert!(
-        is_valid_func.unwrap().is_pure,
-        "is_valid should be marked as pure"
-    );
+    assert!(is_valid_func.unwrap().is_pure, "is_valid should be marked as pure");
 }
 
 #[test]
@@ -490,26 +474,14 @@ fn test_snapshot_safe_primitives() {
     let registry = TypeRegistry::new();
 
     // CTR-060: Primitives should be snapshot-safe
-    assert!(
-        registry.is_snapshot_safe(TypeId::BOOL),
-        "bool should be snapshot-safe"
-    );
-    assert!(
-        registry.is_snapshot_safe(TypeId::I64),
-        "i64 should be snapshot-safe"
-    );
-    assert!(
-        registry.is_snapshot_safe(TypeId::F64),
-        "f64 should be snapshot-safe"
-    );
+    assert!(registry.is_snapshot_safe(TypeId::BOOL), "bool should be snapshot-safe");
+    assert!(registry.is_snapshot_safe(TypeId::I64), "i64 should be snapshot-safe");
+    assert!(registry.is_snapshot_safe(TypeId::F64), "f64 should be snapshot-safe");
     assert!(
         registry.is_snapshot_safe(TypeId::STRING),
         "string should be snapshot-safe"
     );
-    assert!(
-        registry.is_snapshot_safe(TypeId::NIL),
-        "nil should be snapshot-safe"
-    );
+    assert!(registry.is_snapshot_safe(TypeId::NIL), "nil should be snapshot-safe");
 }
 
 #[test]
@@ -524,10 +496,7 @@ fn test_snapshot_safe_struct() {
         "Point".to_string(),
         HirType::Struct {
             name: "Point".to_string(),
-            fields: vec![
-                ("x".to_string(), TypeId::I64),
-                ("y".to_string(), TypeId::I64),
-            ],
+            fields: vec![("x".to_string(), TypeId::I64), ("y".to_string(), TypeId::I64)],
             has_snapshot: false,
         },
     );
@@ -646,10 +615,7 @@ fn test_module_boundary_return_invariant() {
                         HirExprKind::ContractResult => {
                             // Success - local 0 was substituted with ContractResult
                         }
-                        _ => panic!(
-                            "Expected ContractResult after substitution, got {:?}",
-                            receiver.kind
-                        ),
+                        _ => panic!("Expected ContractResult after substitution, got {:?}", receiver.kind),
                     }
                 }
                 _ => panic!("Expected FieldAccess"),
@@ -799,14 +765,8 @@ fn test_subtype_result_same() {
     let module = HirModule::new();
 
     // Same types should return Same
-    assert_eq!(
-        module.check_subtype(TypeId::I64, TypeId::I64),
-        SubtypeResult::Same
-    );
-    assert_eq!(
-        module.check_subtype(TypeId::BOOL, TypeId::BOOL),
-        SubtypeResult::Same
-    );
+    assert_eq!(module.check_subtype(TypeId::I64, TypeId::I64), SubtypeResult::Same);
+    assert_eq!(module.check_subtype(TypeId::BOOL, TypeId::BOOL), SubtypeResult::Same);
 }
 
 #[test]
@@ -889,10 +849,7 @@ fn test_snapshot_annotation_on_primitive_struct() {
         "PointWithSnapshot".to_string(),
         HirType::Struct {
             name: "PointWithSnapshot".to_string(),
-            fields: vec![
-                ("x".to_string(), TypeId::I64),
-                ("y".to_string(), TypeId::I64),
-            ],
+            fields: vec![("x".to_string(), TypeId::I64), ("y".to_string(), TypeId::I64)],
             has_snapshot: true,
         },
     );

@@ -137,21 +137,11 @@ fn pattern_to_string(pattern: &Pattern) -> Option<String> {
         Pattern::Struct { name, fields } => {
             let field_strs: Vec<String> = fields
                 .iter()
-                .map(|(k, v)| {
-                    format!(
-                        "{}: {}",
-                        k,
-                        pattern_to_string(v).unwrap_or_else(|| "_".to_string())
-                    )
-                })
+                .map(|(k, v)| format!("{}: {}", k, pattern_to_string(v).unwrap_or_else(|| "_".to_string())))
                 .collect();
             Some(format!("{} {{ {} }}", name, field_strs.join(", ")))
         }
-        Pattern::Enum {
-            name,
-            variant,
-            payload,
-        } => {
+        Pattern::Enum { name, variant, payload } => {
             if let Some(payload) = payload {
                 let parts: Vec<String> = payload.iter().filter_map(pattern_to_string).collect();
                 Some(format!("{}.{}({})", name, variant, parts.join(", ")))
@@ -164,11 +154,7 @@ fn pattern_to_string(pattern: &Pattern) -> Option<String> {
             pattern_to_string(pattern).unwrap_or_else(|| "_".to_string()),
             ty
         )),
-        Pattern::Range {
-            start,
-            end,
-            inclusive,
-        } => Some(format!(
+        Pattern::Range { start, end, inclusive } => Some(format!(
             "{:?}{}  {:?}",
             start,
             if *inclusive { "..=" } else { ".." },
@@ -186,11 +172,7 @@ fn pattern_to_string(pattern: &Pattern) -> Option<String> {
 ///
 /// This checks if all variants of an enum are covered by the match arms.
 /// Returns true if exhaustive, along with a list of missing variants.
-pub fn check_enum_exhaustiveness(
-    enum_name: &str,
-    variants: &[String],
-    arms: &[MatchArm],
-) -> (bool, Vec<String>) {
+pub fn check_enum_exhaustiveness(enum_name: &str, variants: &[String], arms: &[MatchArm]) -> (bool, Vec<String>) {
     // Check if there's a wildcard pattern
     for arm in arms {
         if is_wildcard_pattern(&arm.pattern) {
@@ -209,11 +191,7 @@ pub fn check_enum_exhaustiveness(
     }
 
     // Check for missing variants
-    let missing: Vec<String> = variants
-        .iter()
-        .filter(|v| !covered.contains(*v))
-        .cloned()
-        .collect();
+    let missing: Vec<String> = variants.iter().filter(|v| !covered.contains(*v)).cloned().collect();
 
     (missing.is_empty(), missing)
 }
@@ -320,11 +298,7 @@ pub fn pattern_subsumes(general: &Pattern, specific: &Pattern) -> bool {
 
         // Tuple patterns
         (Pattern::Tuple(g_pats), Pattern::Tuple(s_pats)) => {
-            g_pats.len() == s_pats.len()
-                && g_pats
-                    .iter()
-                    .zip(s_pats.iter())
-                    .all(|(g, s)| pattern_subsumes(g, s))
+            g_pats.len() == s_pats.len() && g_pats.iter().zip(s_pats.iter()).all(|(g, s)| pattern_subsumes(g, s))
         }
 
         // Enum patterns
@@ -346,10 +320,7 @@ pub fn pattern_subsumes(general: &Pattern, specific: &Pattern) -> bool {
             match (g_payload, s_payload) {
                 (None, None) => true,
                 (Some(g), Some(s)) => {
-                    g.len() == s.len()
-                        && g.iter()
-                            .zip(s.iter())
-                            .all(|(g_p, s_p)| pattern_subsumes(g_p, s_p))
+                    g.len() == s.len() && g.iter().zip(s.iter()).all(|(g_p, s_p)| pattern_subsumes(g_p, s_p))
                 }
                 _ => false,
             }
@@ -479,10 +450,7 @@ mod tests {
 
     #[test]
     fn test_pattern_subsumes_tuple() {
-        let general = Pattern::Tuple(vec![
-            Pattern::Wildcard,
-            Pattern::Identifier("y".to_string()),
-        ]);
+        let general = Pattern::Tuple(vec![Pattern::Wildcard, Pattern::Identifier("y".to_string())]);
         let specific = Pattern::Tuple(vec![
             Pattern::Literal(Box::new(make_literal(1))),
             Pattern::Literal(Box::new(make_literal(2))),
@@ -514,11 +482,7 @@ mod tests {
 
     #[test]
     fn test_enum_exhaustiveness_complete() {
-        let variants = vec![
-            "Circle".to_string(),
-            "Rectangle".to_string(),
-            "Triangle".to_string(),
-        ];
+        let variants = vec!["Circle".to_string(), "Rectangle".to_string(), "Triangle".to_string()];
         let arms = vec![
             make_arm(Pattern::Enum {
                 name: "Shape".to_string(),
@@ -544,11 +508,7 @@ mod tests {
 
     #[test]
     fn test_enum_exhaustiveness_missing_variant() {
-        let variants = vec![
-            "Circle".to_string(),
-            "Rectangle".to_string(),
-            "Triangle".to_string(),
-        ];
+        let variants = vec!["Circle".to_string(), "Rectangle".to_string(), "Triangle".to_string()];
         let arms = vec![
             make_arm(Pattern::Enum {
                 name: "Shape".to_string(),

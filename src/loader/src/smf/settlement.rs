@@ -198,9 +198,8 @@ impl SettlementHeader {
     pub fn read_from<R: Read>(reader: &mut R) -> std::io::Result<Self> {
         let mut bytes = [0u8; Self::SIZE];
         reader.read_exact(&mut bytes)?;
-        Self::from_bytes(&bytes).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid settlement header")
-        })
+        Self::from_bytes(&bytes)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid settlement header"))
     }
 
     /// Write header to writer.

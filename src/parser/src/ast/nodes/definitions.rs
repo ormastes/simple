@@ -44,8 +44,7 @@ impl FunctionDef {
     /// Pure functions cannot perform I/O, network, filesystem, or GC operations.
     /// Pure functions can be called from contract expressions (CTR-031).
     pub fn is_pure(&self) -> bool {
-        self.effects.contains(&Effect::Pure)
-            || self.attributes.iter().any(|attr| attr.name == "pure")
+        self.effects.contains(&Effect::Pure) || self.attributes.iter().any(|attr| attr.name == "pure")
     }
 
     /// Check if this function has the @async effect.

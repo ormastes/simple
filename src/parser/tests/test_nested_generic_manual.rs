@@ -3,7 +3,7 @@ use simple_parser::ast::Type;
 
 #[test]
 fn test_parse_nested_generic_type_only() {
-    let src = "val x: Option<Guard<i32>>";  // Incomplete, just to test type parsing
+    let src = "val x: Option<Guard<i32>>"; // Incomplete, just to test type parsing
     let mut parser = Parser::new(src);
 
     // Try to manually trigger type parsing

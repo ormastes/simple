@@ -15,9 +15,7 @@ pub struct ConfigEnv {
 impl ConfigEnv {
     /// Create a new empty ConfigEnv.
     pub fn new() -> Self {
-        Self {
-            data: HashMap::new(),
-        }
+        Self { data: HashMap::new() }
     }
 
     /// Create a ConfigEnv from command-line arguments.
@@ -137,13 +135,11 @@ impl ConfigEnv {
     /// Returns false for "false", "0", "no", "off" (case-insensitive).
     /// Returns None for other values or missing keys.
     pub fn get_bool(&self, key: &str) -> Option<bool> {
-        self.data
-            .get(key)
-            .and_then(|s| match s.to_lowercase().as_str() {
-                "true" | "1" | "yes" | "on" => Some(true),
-                "false" | "0" | "no" | "off" => Some(false),
-                _ => None,
-            })
+        self.data.get(key).and_then(|s| match s.to_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Some(true),
+            "false" | "0" | "no" | "off" => Some(false),
+            _ => None,
+        })
     }
 
     /// Get a value as a boolean with a default.
@@ -365,11 +361,7 @@ mod tests {
 
     #[test]
     fn test_from_args_positional() {
-        let args = vec![
-            "input.txt".to_string(),
-            "output.txt".to_string(),
-            "--flag".to_string(),
-        ];
+        let args = vec!["input.txt".to_string(), "output.txt".to_string(), "--flag".to_string()];
         let config = ConfigEnv::from_args(&args);
 
         assert_eq!(config.get("_0"), Some("input.txt"));

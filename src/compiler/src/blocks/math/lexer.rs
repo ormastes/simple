@@ -33,13 +33,13 @@ pub enum MathToken {
     PlusMinus, // ± or +-
 
     // Comparison
-    Eq,       // =
-    Neq,      // != or ≠
-    Lt,       // <
-    Le,       // <= or ≤
-    Gt,       // >
-    Ge,       // >= or ≥
-    Approx,   // ≈
+    Eq,     // =
+    Neq,    // != or ≠
+    Lt,     // <
+    Le,     // <= or ≤
+    Gt,     // >
+    Ge,     // >= or ≥
+    Approx, // ≈
 
     // Grouping
     LParen,   // (
@@ -51,11 +51,11 @@ pub enum MathToken {
     Pipe,     // |
 
     // Punctuation
-    Comma,    // ,
-    Colon,    // :
-    Dot,      // .
-    DotDot,   // ..
-    Semi,     // ;
+    Comma,  // ,
+    Colon,  // :
+    Dot,    // .
+    DotDot, // ..
+    Semi,   // ;
 
     // Special
     Underscore, // _

@@ -69,10 +69,7 @@ impl ImportGraph {
 
         // Only add to cycle detection graph if NOT a TypeUse import
         if kind != ImportKind::TypeUse {
-            self.edges
-                .entry(from.clone())
-                .or_default()
-                .insert(to.clone());
+            self.edges.entry(from.clone()).or_default().insert(to.clone());
             self.edges.entry(to.clone()).or_default(); // Ensure target exists
         }
 

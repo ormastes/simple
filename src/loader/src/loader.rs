@@ -54,11 +54,7 @@ impl ModuleLoader {
 
     /// Load an SMF module from a memory buffer using a custom import resolver.
     #[instrument(skip(self, bytes, resolver), fields(size = bytes.len()))]
-    pub fn load_from_memory_with_resolver<F>(
-        &self,
-        bytes: &[u8],
-        resolver: F,
-    ) -> Result<LoadedModule, LoadError>
+    pub fn load_from_memory_with_resolver<F>(&self, bytes: &[u8], resolver: F) -> Result<LoadedModule, LoadError>
     where
         F: Fn(&str) -> Option<usize>,
     {
@@ -177,12 +173,8 @@ impl ModuleLoader {
                         LoadError::Io(e)
                     })?;
 
-                    let slice = unsafe {
-                        std::slice::from_raw_parts_mut(
-                            code_mem.as_mut_ptr().add(code_offset),
-                            section_size,
-                        )
-                    };
+                    let slice =
+                        unsafe { std::slice::from_raw_parts_mut(code_mem.as_mut_ptr().add(code_offset), section_size) };
                     reader.read_exact(slice).map_err(|e| {
                         error!(section_idx = idx, size = section_size, error = %e, "Failed to read code section");
                         LoadError::Io(e)
@@ -193,10 +185,7 @@ impl ModuleLoader {
                         let extra = virtual_size - section_size;
                         trace!(extra, "Zeroing code section padding");
                         let pad_slice = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                code_mem.as_mut_ptr().add(code_offset + section_size),
-                                extra,
-                            )
+                            std::slice::from_raw_parts_mut(code_mem.as_mut_ptr().add(code_offset + section_size), extra)
                         };
                         pad_slice.fill(0);
                     }
@@ -208,11 +197,10 @@ impl ModuleLoader {
                     if let Some(ref data_mem) = data_mem {
                         let section_size = section.size as usize;
                         let virtual_size = section.virtual_size as usize;
-                        let end_offset =
-                            data_offset.checked_add(virtual_size).ok_or_else(|| {
-                                error!(data_offset, virtual_size, "Data offset overflow");
-                                LoadError::InvalidFormat("Data section offset overflow".to_string())
-                            })?;
+                        let end_offset = data_offset.checked_add(virtual_size).ok_or_else(|| {
+                            error!(data_offset, virtual_size, "Data offset overflow");
+                            LoadError::InvalidFormat("Data section offset overflow".to_string())
+                        })?;
 
                         if end_offset > data_size {
                             error!(
@@ -233,10 +221,7 @@ impl ModuleLoader {
                         })?;
 
                         let slice = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                data_mem.as_mut_ptr().add(data_offset),
-                                section_size,
-                            )
+                            std::slice::from_raw_parts_mut(data_mem.as_mut_ptr().add(data_offset), section_size)
                         };
                         reader.read_exact(slice).map_err(|e| {
                             error!(section_idx = idx, size = section_size, error = %e, "Failed to read data section");
@@ -262,11 +247,10 @@ impl ModuleLoader {
                 SectionType::Bss => {
                     if let Some(ref data_mem) = data_mem {
                         let virtual_size = section.virtual_size as usize;
-                        let end_offset =
-                            data_offset.checked_add(virtual_size).ok_or_else(|| {
-                                error!(data_offset, virtual_size, "BSS offset overflow");
-                                LoadError::InvalidFormat("BSS section offset overflow".to_string())
-                            })?;
+                        let end_offset = data_offset.checked_add(virtual_size).ok_or_else(|| {
+                            error!(data_offset, virtual_size, "BSS offset overflow");
+                            LoadError::InvalidFormat("BSS section offset overflow".to_string())
+                        })?;
 
                         if end_offset > data_size {
                             error!(
@@ -283,10 +267,7 @@ impl ModuleLoader {
 
                         trace!(size = virtual_size, "Zeroing BSS section");
                         let slice = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                data_mem.as_mut_ptr().add(data_offset),
-                                virtual_size,
-                            )
+                            std::slice::from_raw_parts_mut(data_mem.as_mut_ptr().add(data_offset), virtual_size)
                         };
                         slice.fill(0);
                         data_offset = end_offset;
@@ -309,10 +290,7 @@ impl ModuleLoader {
             error!(error = %e, "Failed to read symbol table");
             e
         })?;
-        trace!(
-            symbols = symbols.symbols.len(),
-            "Symbol table read successfully"
-        );
+        trace!(symbols = symbols.symbols.len(), "Symbol table read successfully");
 
         // Read relocations
         debug!("Reading relocations");
@@ -324,17 +302,9 @@ impl ModuleLoader {
 
         // Apply relocations
         debug!(count = relocs.len(), "Applying relocations");
-        let code_slice =
-            unsafe { std::slice::from_raw_parts_mut(code_mem.as_mut_ptr(), code_size) };
+        let code_slice = unsafe { std::slice::from_raw_parts_mut(code_mem.as_mut_ptr(), code_size) };
 
-        apply_relocations(
-            code_slice,
-            &relocs,
-            &symbols,
-            code_mem.as_ptr() as usize,
-            &resolver,
-        )
-        .map_err(|e| {
+        apply_relocations(code_slice, &relocs, &symbols, code_mem.as_ptr() as usize, &resolver).map_err(|e| {
             error!(error = %e, "Failed to apply relocations");
             LoadError::RelocationFailed(e)
         })?;
@@ -351,12 +321,10 @@ impl ModuleLoader {
 
         if let Some(ref data_mem) = data_mem {
             debug!("Setting memory protection for data section (READ_WRITE)");
-            self.allocator
-                .protect(data_mem, Protection::READ_WRITE)
-                .map_err(|e| {
-                    error!(error = %e, "Failed to set data memory protection");
-                    e
-                })?;
+            self.allocator.protect(data_mem, Protection::READ_WRITE).map_err(|e| {
+                error!(error = %e, "Failed to set data memory protection");
+                e
+            })?;
         }
 
         let module_path = path.unwrap_or_else(|| PathBuf::from("<memory>"));
@@ -417,11 +385,7 @@ impl ModuleLoader {
     }
 
     #[instrument(skip(self, reader))]
-    fn read_sections<R: Read>(
-        &self,
-        reader: &mut R,
-        count: u32,
-    ) -> Result<Vec<SmfSection>, LoadError> {
+    fn read_sections<R: Read>(&self, reader: &mut R, count: u32) -> Result<Vec<SmfSection>, LoadError> {
         trace!(count, "Reading section table entries");
         let mut sections = Vec::with_capacity(count as usize);
 
@@ -479,11 +443,7 @@ impl ModuleLoader {
     }
 
     #[instrument(skip(self, reader, header))]
-    fn read_symbols<R: Read + Seek>(
-        &self,
-        reader: &mut R,
-        header: &SmfHeader,
-    ) -> Result<SymbolTable, LoadError> {
+    fn read_symbols<R: Read + Seek>(&self, reader: &mut R, header: &SmfHeader) -> Result<SymbolTable, LoadError> {
         trace!(
             offset = header.symbol_table_offset,
             count = header.symbol_count,
@@ -519,10 +479,7 @@ impl ModuleLoader {
             error!(error = %e, "Failed to read string table");
             LoadError::Io(e)
         })?;
-        trace!(
-            string_table_size = string_table.len(),
-            "String table read complete"
-        );
+        trace!(string_table_size = string_table.len(), "String table read complete");
 
         Ok(SymbolTable::new(symbols, string_table))
     }
@@ -562,8 +519,7 @@ impl ModuleLoader {
                         error!(reloc_idx = i, error = %e, "Failed to read relocation entry");
                         LoadError::Io(e)
                     })?;
-                    let reloc: SmfRelocation =
-                        unsafe { std::ptr::read(buf.as_ptr() as *const SmfRelocation) };
+                    let reloc: SmfRelocation = unsafe { std::ptr::read(buf.as_ptr() as *const SmfRelocation) };
                     trace!(
                         reloc_idx = i,
                         offset = reloc.offset,
@@ -576,10 +532,7 @@ impl ModuleLoader {
             }
         }
 
-        trace!(
-            total_relocations = relocs.len(),
-            "Finished reading relocations"
-        );
+        trace!(total_relocations = relocs.len(), "Finished reading relocations");
         Ok(relocs)
     }
 }

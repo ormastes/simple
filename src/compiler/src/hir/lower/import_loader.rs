@@ -31,11 +31,7 @@ impl Lowerer {
     ///
     /// # Returns
     /// Ok(()) if successful, Err if module can't be loaded or parsed
-    pub(super) fn load_imported_types(
-        &mut self,
-        module_path: &ModulePath,
-        target: &ImportTarget,
-    ) -> LowerResult<()> {
+    pub(super) fn load_imported_types(&mut self, module_path: &ModulePath, target: &ImportTarget) -> LowerResult<()> {
         // Only proceed if we have a module resolver
         let (resolver, current_file) = match (&self.module_resolver, &self.current_file) {
             (Some(r), Some(f)) => (r, f),
@@ -58,9 +54,8 @@ impl Lowerer {
         self.loaded_modules.insert(resolved.path.clone());
 
         // Read and parse the module file
-        let source = std::fs::read_to_string(&resolved.path).map_err(|e| {
-            LowerError::ModuleResolution(format!("Failed to read module file: {}", e))
-        })?;
+        let source = std::fs::read_to_string(&resolved.path)
+            .map_err(|e| LowerError::ModuleResolution(format!("Failed to read module file: {}", e)))?;
 
         let mut parser = simple_parser::Parser::new(&source);
         let imported_module = parser

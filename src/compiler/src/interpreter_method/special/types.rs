@@ -4,12 +4,11 @@
 
 use crate::error::CompileError;
 use crate::interpreter::interpreter_helpers::{
-    eval_option_and_then, eval_option_filter, eval_option_map, eval_option_or_else,
-    eval_result_and_then, eval_result_map, eval_result_map_err, eval_result_or_else,
+    eval_option_and_then, eval_option_filter, eval_option_map, eval_option_or_else, eval_result_and_then,
+    eval_result_map, eval_result_map_err, eval_result_or_else,
 };
 use crate::interpreter::{
-    eval_arg, evaluate_expr, exec_block_fn, Control, Enums, ImplMethods, UNIT_FAMILY_CONVERSIONS,
-    UNIT_SUFFIX_TO_FAMILY,
+    eval_arg, evaluate_expr, exec_block_fn, Control, Enums, ImplMethods, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY,
 };
 use crate::interpreter_unit::decompose_si_prefix;
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
@@ -44,13 +43,7 @@ pub fn handle_unit_methods(
         "value" => return Ok(Some((**value).clone())),
         "suffix" => return Ok(Some(Value::Str(suffix.to_string()))),
         "family" => return Ok(Some(family.clone().map_or(Value::Nil, Value::Str))),
-        "to_string" => {
-            return Ok(Some(Value::Str(format!(
-                "{}_{}",
-                value.to_display_string(),
-                suffix
-            ))))
-        }
+        "to_string" => return Ok(Some(Value::Str(format!("{}_{}", value.to_display_string(), suffix)))),
         // For dynamic to_X() conversion methods, check if method starts with "to_"
         other if other.starts_with("to_") => {
             let target_suffix = &other[3..]; // Remove "to_" prefix
@@ -58,9 +51,7 @@ pub fn handle_unit_methods(
             // Get the family name - either from the Unit value or look it up (including SI prefix check)
             let family_name = family.clone().or_else(|| {
                 // First try direct lookup
-                if let Some(f) =
-                    UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned())
-                {
+                if let Some(f) = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned()) {
                     return Some(f);
                 }
                 // Try SI prefix decomposition
@@ -229,16 +220,7 @@ pub fn handle_option_methods(
                 }
             }
             // Call the function to get default value
-            let func_arg = eval_arg(
-                args,
-                0,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let func_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             if let Value::Lambda {
                 params: _,
                 body,
@@ -345,8 +327,7 @@ pub fn handle_option_methods(
                 if let Some(inner) = payload {
                     // If inner is also an Option, return it
                     if let Value::Enum {
-                        enum_name: inner_enum,
-                        ..
+                        enum_name: inner_enum, ..
                     } = inner.as_ref()
                     {
                         if inner_enum == "Option" {
@@ -463,16 +444,7 @@ pub fn handle_result_methods(
             }
             // Call the function with error value to get default
             if let Some(err_val) = payload {
-                let func_arg = eval_arg(
-                    args,
-                    0,
-                    Value::Nil,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
+                let func_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
                 if let Value::Lambda {
                     params,
                     body,
@@ -613,8 +585,7 @@ pub fn handle_result_methods(
                 if let Some(inner) = payload {
                     // If inner is also a Result, return it
                     if let Value::Enum {
-                        enum_name: inner_enum,
-                        ..
+                        enum_name: inner_enum, ..
                     } = inner.as_ref()
                     {
                         if inner_enum == "Result" {

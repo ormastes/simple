@@ -101,11 +101,7 @@ impl ChainedProvider {
         } else {
             self.name = format!(
                 "chained[{}]",
-                self.providers
-                    .iter()
-                    .map(|p| p.name())
-                    .collect::<Vec<_>>()
-                    .join(" -> ")
+                self.providers.iter().map(|p| p.name()).collect::<Vec<_>>().join(" -> ")
             );
         }
     }

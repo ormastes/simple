@@ -77,9 +77,7 @@ pub fn analyze_divergence(kernel_source: &str) -> DivergenceAnalysis {
                 location: i + 1,
                 condition: line.to_string(),
                 probability: 0.5, // Loops are often more problematic
-                suggestion: Some(
-                    "Consider using predicated execution or restructuring the loop".to_string(),
-                ),
+                suggestion: Some("Consider using predicated execution or restructuring the loop".to_string()),
             });
         }
     }
@@ -93,8 +91,7 @@ pub fn analyze_divergence(kernel_source: &str) -> DivergenceAnalysis {
 
     // Generate recommendations
     if !branches.is_empty() {
-        recommendations
-            .push("Consider using predicated execution for simple conditionals".to_string());
+        recommendations.push("Consider using predicated execution for simple conditionals".to_string());
         recommendations.push("Restructure data to minimize thread-dependent branches".to_string());
         recommendations.push("Use warp-uniform control flow where possible".to_string());
     }
@@ -149,9 +146,7 @@ fn suggest_divergence_fix(condition: &str) -> Option<String> {
     }
 
     if condition.contains("global_id") {
-        return Some(
-            "Use predication or data restructuring to avoid thread-dependent branches".to_string(),
-        );
+        return Some("Use predication or data restructuring to avoid thread-dependent branches".to_string());
     }
 
     None
@@ -296,22 +291,16 @@ pub fn analyze_memory_access(kernel_source: &str, config: &MemoryAnalysisConfig)
     let coalescing_efficiency = if patterns.is_empty() {
         1.0
     } else {
-        patterns
-            .iter()
-            .map(|p| p.pattern_type.efficiency())
-            .sum::<f64>()
-            / patterns.len() as f64
+        patterns.iter().map(|p| p.pattern_type.efficiency()).sum::<f64>() / patterns.len() as f64
     };
 
     // Generate recommendations
     if !bank_conflicts.is_empty() {
-        recommendations
-            .push("Add padding to shared memory arrays to avoid bank conflicts".to_string());
+        recommendations.push("Add padding to shared memory arrays to avoid bank conflicts".to_string());
     }
     if coalescing_efficiency < 0.8 {
         recommendations.push("Restructure memory access to be more sequential".to_string());
-        recommendations
-            .push("Consider using shared memory for non-coalesced global access".to_string());
+        recommendations.push("Consider using shared memory for non-coalesced global access".to_string());
     }
 
     MemoryAnalysis {
@@ -355,11 +344,7 @@ fn detect_access_pattern(line: &str, location: usize) -> Option<AccessPattern> {
 }
 
 /// Detect potential bank conflicts.
-fn detect_bank_conflict(
-    line: &str,
-    location: usize,
-    config: &MemoryAnalysisConfig,
-) -> Option<BankConflict> {
+fn detect_bank_conflict(line: &str, location: usize, config: &MemoryAnalysisConfig) -> Option<BankConflict> {
     // Check for strided shared memory access
     if line.contains("[") && line.contains("*") {
         // Extract stride if possible
@@ -370,14 +355,8 @@ fn detect_bank_conflict(
                 location,
                 num_banks: config.num_banks,
                 conflict_degree: config.num_banks,
-                description: format!(
-                    "Stride {} causes {}-way bank conflict",
-                    stride, config.num_banks
-                ),
-                suggestion: format!(
-                    "Add {} bytes of padding to the array dimension",
-                    config.bank_width
-                ),
+                description: format!("Stride {} causes {}-way bank conflict", stride, config.num_banks),
+                suggestion: format!("Add {} bytes of padding to the array dimension", config.bank_width),
             });
         }
     }

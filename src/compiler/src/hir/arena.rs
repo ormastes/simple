@@ -8,8 +8,7 @@ use std::cell::RefCell;
 use typed_arena::Arena;
 
 use super::types::{
-    HirContract, HirContractClause, HirExpr, HirFunction, HirModule, HirRefinedType, HirStmt,
-    HirType, HirTypeInvariant,
+    HirContract, HirContractClause, HirExpr, HirFunction, HirModule, HirRefinedType, HirStmt, HirType, HirTypeInvariant,
 };
 
 /// Arena allocator for HIR nodes.

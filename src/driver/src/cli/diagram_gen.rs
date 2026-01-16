@@ -12,8 +12,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use simple_compiler::runtime_profile::{
-    generate_arch_from_events, generate_class_from_events, generate_sequence_from_events, CallType,
-    DiagramOptions, ProfileConfig, ProfileMode, RuntimeProfiler, SequenceEvent,
+    generate_arch_from_events, generate_class_from_events, generate_sequence_from_events, CallType, DiagramOptions,
+    ProfileConfig, ProfileMode, RuntimeProfiler, SequenceEvent,
 };
 
 /// Diagram type to generate
@@ -80,11 +80,7 @@ impl DiagramGenOptions {
     }
 
     pub fn with_all_types(mut self) -> Self {
-        self.diagram_types = vec![
-            DiagramType::Sequence,
-            DiagramType::Class,
-            DiagramType::Architecture,
-        ];
+        self.diagram_types = vec![DiagramType::Sequence, DiagramType::Class, DiagramType::Architecture];
         self
     }
 
@@ -133,10 +129,7 @@ pub struct DiagramResult {
 }
 
 /// Generate diagrams from a profiler instance
-pub fn generate_diagrams(
-    profiler: &RuntimeProfiler,
-    options: &DiagramGenOptions,
-) -> Result<DiagramResult, String> {
+pub fn generate_diagrams(profiler: &RuntimeProfiler, options: &DiagramGenOptions) -> Result<DiagramResult, String> {
     let events = profiler.get_sequence_events();
     let architectural = profiler.get_architectural_entities();
     generate_diagrams_from_events(&events, &architectural, options)
@@ -149,8 +142,7 @@ pub fn generate_diagrams_from_events(
     options: &DiagramGenOptions,
 ) -> Result<DiagramResult, String> {
     // Ensure output directory exists
-    fs::create_dir_all(&options.output_dir)
-        .map_err(|e| format!("Failed to create output directory: {}", e))?;
+    fs::create_dir_all(&options.output_dir).map_err(|e| format!("Failed to create output directory: {}", e))?;
 
     let diagram_opts = options.to_diagram_options();
     let mut result = DiagramResult {
@@ -166,31 +158,22 @@ pub fn generate_diagrams_from_events(
         match diagram_type {
             DiagramType::Sequence | DiagramType::All => {
                 let content = generate_sequence_from_events(events, &diagram_opts);
-                let path = options
-                    .output_dir
-                    .join(format!("{}_sequence.md", options.test_name));
-                fs::write(&path, &content)
-                    .map_err(|e| format!("Failed to write sequence diagram: {}", e))?;
+                let path = options.output_dir.join(format!("{}_sequence.md", options.test_name));
+                fs::write(&path, &content).map_err(|e| format!("Failed to write sequence diagram: {}", e))?;
                 result.sequence_path = Some(path);
                 result.sequence_content = Some(content);
             }
             DiagramType::Class => {
                 let content = generate_class_from_events(events, &diagram_opts);
-                let path = options
-                    .output_dir
-                    .join(format!("{}_class.md", options.test_name));
-                fs::write(&path, &content)
-                    .map_err(|e| format!("Failed to write class diagram: {}", e))?;
+                let path = options.output_dir.join(format!("{}_class.md", options.test_name));
+                fs::write(&path, &content).map_err(|e| format!("Failed to write class diagram: {}", e))?;
                 result.class_path = Some(path);
                 result.class_content = Some(content);
             }
             DiagramType::Architecture => {
                 let content = generate_arch_from_events(events, architectural, &diagram_opts);
-                let path = options
-                    .output_dir
-                    .join(format!("{}_arch.md", options.test_name));
-                fs::write(&path, &content)
-                    .map_err(|e| format!("Failed to write architecture diagram: {}", e))?;
+                let path = options.output_dir.join(format!("{}_arch.md", options.test_name));
+                fs::write(&path, &content).map_err(|e| format!("Failed to write architecture diagram: {}", e))?;
                 result.arch_path = Some(path);
                 result.arch_content = Some(content);
             }
@@ -200,21 +183,15 @@ pub fn generate_diagrams_from_events(
         if *diagram_type == DiagramType::All {
             // Class diagram
             let content = generate_class_from_events(events, &diagram_opts);
-            let path = options
-                .output_dir
-                .join(format!("{}_class.md", options.test_name));
-            fs::write(&path, &content)
-                .map_err(|e| format!("Failed to write class diagram: {}", e))?;
+            let path = options.output_dir.join(format!("{}_class.md", options.test_name));
+            fs::write(&path, &content).map_err(|e| format!("Failed to write class diagram: {}", e))?;
             result.class_path = Some(path);
             result.class_content = Some(content);
 
             // Architecture diagram
             let content = generate_arch_from_events(events, architectural, &diagram_opts);
-            let path = options
-                .output_dir
-                .join(format!("{}_arch.md", options.test_name));
-            fs::write(&path, &content)
-                .map_err(|e| format!("Failed to write architecture diagram: {}", e))?;
+            let path = options.output_dir.join(format!("{}_arch.md", options.test_name));
+            fs::write(&path, &content).map_err(|e| format!("Failed to write architecture diagram: {}", e))?;
             result.arch_path = Some(path);
             result.arch_content = Some(content);
 
@@ -238,15 +215,10 @@ pub trait MdDiagramGenerator {
     fn output_dir(&self) -> &Path;
 
     /// Generate and embed a sequence diagram
-    fn embed_sequence_diagram(
-        &mut self,
-        events: &[SequenceEvent],
-        options: &DiagramOptions,
-    ) -> String;
+    fn embed_sequence_diagram(&mut self, events: &[SequenceEvent], options: &DiagramOptions) -> String;
 
     /// Generate and embed a class diagram
-    fn embed_class_diagram(&mut self, events: &[SequenceEvent], options: &DiagramOptions)
-        -> String;
+    fn embed_class_diagram(&mut self, events: &[SequenceEvent], options: &DiagramOptions) -> String;
 
     /// Generate and embed an architecture diagram
     fn embed_arch_diagram(
@@ -286,22 +258,14 @@ impl MdDiagramGenerator for DefaultMdGenerator {
         &self.output_dir
     }
 
-    fn embed_sequence_diagram(
-        &mut self,
-        events: &[SequenceEvent],
-        options: &DiagramOptions,
-    ) -> String {
+    fn embed_sequence_diagram(&mut self, events: &[SequenceEvent], options: &DiagramOptions) -> String {
         let content = generate_sequence_from_events(events, options);
         let filename = format!("{}_sequence.md", self.name);
         self.diagrams.push((filename.clone(), content.clone()));
         content
     }
 
-    fn embed_class_diagram(
-        &mut self,
-        events: &[SequenceEvent],
-        options: &DiagramOptions,
-    ) -> String {
+    fn embed_class_diagram(&mut self, events: &[SequenceEvent], options: &DiagramOptions) -> String {
         let content = generate_class_from_events(events, options);
         let filename = format!("{}_class.md", self.name);
         self.diagrams.push((filename.clone(), content.clone()));
@@ -321,14 +285,12 @@ impl MdDiagramGenerator for DefaultMdGenerator {
     }
 
     fn write_diagrams(&self) -> Result<Vec<PathBuf>, String> {
-        fs::create_dir_all(&self.output_dir)
-            .map_err(|e| format!("Failed to create output directory: {}", e))?;
+        fs::create_dir_all(&self.output_dir).map_err(|e| format!("Failed to create output directory: {}", e))?;
 
         let mut paths = Vec::new();
         for (filename, content) in &self.diagrams {
             let path = self.output_dir.join(filename);
-            fs::write(&path, content)
-                .map_err(|e| format!("Failed to write {}: {}", filename, e))?;
+            fs::write(&path, content).map_err(|e| format!("Failed to write {}: {}", filename, e))?;
             paths.push(path);
         }
 

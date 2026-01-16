@@ -121,40 +121,18 @@ fn test_capability_env_aliasing_rules() {
 #[test]
 fn test_capability_conversion_rules() {
     // Valid conversions (downgrades)
-    assert!(CapabilityEnv::can_convert(
-        ReferenceCapability::Exclusive,
-        ReferenceCapability::Shared
-    )
-    .is_ok());
+    assert!(CapabilityEnv::can_convert(ReferenceCapability::Exclusive, ReferenceCapability::Shared).is_ok());
 
-    assert!(CapabilityEnv::can_convert(
-        ReferenceCapability::Isolated,
-        ReferenceCapability::Exclusive
-    )
-    .is_ok());
+    assert!(CapabilityEnv::can_convert(ReferenceCapability::Isolated, ReferenceCapability::Exclusive).is_ok());
 
-    assert!(
-        CapabilityEnv::can_convert(ReferenceCapability::Isolated, ReferenceCapability::Shared)
-            .is_ok()
-    );
+    assert!(CapabilityEnv::can_convert(ReferenceCapability::Isolated, ReferenceCapability::Shared).is_ok());
 
     // Invalid conversions (upcasts)
-    assert!(CapabilityEnv::can_convert(
-        ReferenceCapability::Shared,
-        ReferenceCapability::Exclusive
-    )
-    .is_err());
+    assert!(CapabilityEnv::can_convert(ReferenceCapability::Shared, ReferenceCapability::Exclusive).is_err());
 
-    assert!(
-        CapabilityEnv::can_convert(ReferenceCapability::Shared, ReferenceCapability::Isolated)
-            .is_err()
-    );
+    assert!(CapabilityEnv::can_convert(ReferenceCapability::Shared, ReferenceCapability::Isolated).is_err());
 
-    assert!(CapabilityEnv::can_convert(
-        ReferenceCapability::Exclusive,
-        ReferenceCapability::Isolated
-    )
-    .is_err());
+    assert!(CapabilityEnv::can_convert(ReferenceCapability::Exclusive, ReferenceCapability::Isolated).is_err());
 }
 
 #[test]
@@ -187,8 +165,7 @@ fn test_nested_capabilities() {
                     // Inner should also be a capability
                     match &**inner {
                         simple_parser::ast::Type::Capability {
-                            capability: inner_cap,
-                            ..
+                            capability: inner_cap, ..
                         } => {
                             assert_eq!(*inner_cap, ReferenceCapability::Exclusive);
                         }
@@ -446,10 +423,7 @@ fn process(a: mut i64, b: iso i64, c: i64) -> i64:
     let result = lower_module(&module);
 
     // Should succeed - lock_base mode allows mut and iso
-    assert!(
-        result.is_ok(),
-        "Multiple capabilities should work in lock_base mode"
-    );
+    assert!(result.is_ok(), "Multiple capabilities should work in lock_base mode");
 }
 
 #[test]
@@ -519,10 +493,7 @@ fn test_actor_mode_rejects_mut_in_params() {
 
         let result = lower_module(&module);
 
-        assert!(
-            result.is_err(),
-            "Actor mode should reject mut in any parameter"
-        );
+        assert!(result.is_err(), "Actor mode should reject mut in any parameter");
     }
 }
 
@@ -543,10 +514,7 @@ class Counter:
     let result = lower_module(&module);
 
     // Should fail - methods default to actor mode
-    assert!(
-        result.is_err(),
-        "Class methods default to actor mode and reject mut T"
-    );
+    assert!(result.is_err(), "Class methods default to actor mode and reject mut T");
 }
 
 #[test]

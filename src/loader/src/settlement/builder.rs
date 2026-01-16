@@ -10,9 +10,8 @@ use std::path::{Path, PathBuf};
 
 use crate::settlement::Settlement;
 use crate::smf::settlement::{
-    DependencyEntry, FuncTableEntry, GlobalTableEntry, ModuleTableEntry, NativeLibEntry,
-    SettlementHeader, TypeTableEntry, SSMF_FLAG_EXECUTABLE, SSMF_FLAG_HAS_NATIVE_LIBS, SSMF_MAGIC,
-    SSMF_VERSION,
+    DependencyEntry, FuncTableEntry, GlobalTableEntry, ModuleTableEntry, NativeLibEntry, SettlementHeader,
+    TypeTableEntry, SSMF_FLAG_EXECUTABLE, SSMF_FLAG_HAS_NATIVE_LIBS, SSMF_MAGIC, SSMF_VERSION,
 };
 
 /// Find the simple-stub executable.
@@ -200,11 +199,7 @@ impl SettlementBuilder {
     }
 
     /// Build a settlement to a file.
-    pub fn build_to_file<P: AsRef<Path>>(
-        &self,
-        settlement: &Settlement,
-        output_path: P,
-    ) -> Result<(), BuildError> {
+    pub fn build_to_file<P: AsRef<Path>>(&self, settlement: &Settlement, output_path: P) -> Result<(), BuildError> {
         let mut file = File::create(output_path)?;
 
         if self.options.executable {
@@ -230,11 +225,7 @@ impl SettlementBuilder {
     }
 
     /// Write a standalone executable.
-    fn write_executable<W: Write + Seek>(
-        &self,
-        settlement: &Settlement,
-        output: &mut W,
-    ) -> Result<(), BuildError> {
+    fn write_executable<W: Write + Seek>(&self, settlement: &Settlement, output: &mut W) -> Result<(), BuildError> {
         // Write executable stub first
         if let Some(stub_path) = &self.options.stub_path {
             let mut stub_file = File::open(stub_path)?;
@@ -260,11 +251,7 @@ impl SettlementBuilder {
     }
 
     /// Write the settlement data in SSMF format.
-    fn write_settlement<W: Write + Seek>(
-        &self,
-        settlement: &Settlement,
-        output: &mut W,
-    ) -> Result<(), BuildError> {
+    fn write_settlement<W: Write + Seek>(&self, settlement: &Settlement, output: &mut W) -> Result<(), BuildError> {
         // Build dependency table first (needed for module table)
         let (dep_entries, dep_offsets) = self.build_dependency_table(settlement);
 
@@ -313,8 +300,7 @@ impl SettlementBuilder {
 
         // Global table
         let global_table_offset = current_offset;
-        let global_table_size =
-            (global_entries.len() * std::mem::size_of::<GlobalTableEntry>()) as u64;
+        let global_table_size = (global_entries.len() * std::mem::size_of::<GlobalTableEntry>()) as u64;
         current_offset += global_table_size;
 
         // Type table
@@ -324,14 +310,12 @@ impl SettlementBuilder {
 
         // Module table
         let module_table_offset = current_offset;
-        let module_table_size =
-            (module_entries.len() * std::mem::size_of::<ModuleTableEntry>()) as u64;
+        let module_table_size = (module_entries.len() * std::mem::size_of::<ModuleTableEntry>()) as u64;
         current_offset += module_table_size;
 
         // Native library table
         let native_libs_offset = current_offset;
-        let native_libs_size =
-            (native_lib_entries.len() * std::mem::size_of::<NativeLibEntry>()) as u64;
+        let native_libs_size = (native_lib_entries.len() * std::mem::size_of::<NativeLibEntry>()) as u64;
         current_offset += native_libs_size;
 
         // Dependency table
@@ -496,12 +480,7 @@ impl SettlementBuilder {
     }
 
     /// Write padding bytes to align to a target offset.
-    fn write_padding<W: Write>(
-        &self,
-        output: &mut W,
-        current: u64,
-        target: u64,
-    ) -> Result<(), BuildError> {
+    fn write_padding<W: Write>(&self, output: &mut W, current: u64, target: u64) -> Result<(), BuildError> {
         if target > current {
             let padding = vec![0u8; (target - current) as usize];
             output.write_all(&padding)?;
@@ -542,8 +521,7 @@ impl SettlementBuilder {
         settlement
             .iter_modules()
             .map(|module| {
-                let (dep_start, dep_count) =
-                    dep_offsets.get(&module.name).copied().unwrap_or((0, 0));
+                let (dep_start, dep_count) = dep_offsets.get(&module.name).copied().unwrap_or((0, 0));
 
                 ModuleTableEntry {
                     name_offset: strings.offset(&module.name) as u32,
@@ -571,10 +549,7 @@ impl SettlementBuilder {
     ///
     /// Returns (dependency_entries, module_dep_offsets)
     /// where module_dep_offsets maps module_name -> (start_index, count)
-    fn build_dependency_table(
-        &self,
-        settlement: &Settlement,
-    ) -> (Vec<DependencyEntry>, HashMap<String, (u32, u32)>) {
+    fn build_dependency_table(&self, settlement: &Settlement) -> (Vec<DependencyEntry>, HashMap<String, (u32, u32)>) {
         let mut entries = Vec::new();
         let mut offsets = HashMap::new();
 
@@ -599,11 +574,7 @@ impl SettlementBuilder {
     }
 
     /// Build the native library table.
-    fn build_native_lib_table(
-        &self,
-        settlement: &Settlement,
-        strings: &StringTable,
-    ) -> Vec<NativeLibEntry> {
+    fn build_native_lib_table(&self, settlement: &Settlement, strings: &StringTable) -> Vec<NativeLibEntry> {
         settlement
             .native_libs()
             .iter()
@@ -650,10 +621,7 @@ impl SettlementBuilder {
 /// 1. Finds the stub executable
 /// 2. Creates a builder with executable options
 /// 3. Builds the executable to the output path
-pub fn create_executable<P: AsRef<Path>>(
-    settlement: &Settlement,
-    output_path: P,
-) -> Result<(), BuildError> {
+pub fn create_executable<P: AsRef<Path>>(settlement: &Settlement, output_path: P) -> Result<(), BuildError> {
     let stub_path = find_stub().ok_or(BuildError::InvalidStub)?;
     let builder = SettlementBuilder::with_options(BuildOptions::executable(stub_path));
     builder.build_to_file(settlement, output_path)

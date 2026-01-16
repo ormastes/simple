@@ -76,10 +76,7 @@ impl LineEditor {
                 let old_len = self.buffer.len();
 
                 if self.debug_mode {
-                    eprintln!(
-                        "[DEBUG] InsertChar '{}': before len={}, cap={}",
-                        c, old_len, old_cap
-                    );
+                    eprintln!("[DEBUG] InsertChar '{}': before len={}, cap={}", c, old_len, old_cap);
                 }
 
                 self.buffer.insert(self.cursor, c);
@@ -104,10 +101,7 @@ impl LineEditor {
                 let old_len = self.buffer.len();
 
                 if self.debug_mode {
-                    eprintln!(
-                        "[DEBUG] InsertIndent: before len={}, cap={}",
-                        old_len, old_cap
-                    );
+                    eprintln!("[DEBUG] InsertIndent: before len={}, cap={}", old_len, old_cap);
                 }
 
                 self.buffer.insert_str(self.cursor, "    ");
@@ -152,14 +146,10 @@ impl LineEditor {
 
                         // Check if buffer has content after cursor (not just leading spaces)
                         let has_content_after = self.cursor < self.buffer.len();
-                        let would_be_empty =
-                            !has_content_after && self.buffer.len() == spaces_to_delete;
+                        let would_be_empty = !has_content_after && self.buffer.len() == spaces_to_delete;
 
                         if self.debug_mode {
-                            eprintln!(
-                                "[DEBUG]   In leading whitespace: deleting {} spaces",
-                                spaces_to_delete
-                            );
+                            eprintln!("[DEBUG]   In leading whitespace: deleting {} spaces", spaces_to_delete);
                             eprintln!(
                                 "[DEBUG]   has_content_after={}, would_be_empty={}",
                                 has_content_after, would_be_empty
@@ -177,10 +167,7 @@ impl LineEditor {
                         };
 
                         if self.debug_mode && !would_be_empty {
-                            eprintln!(
-                                "[DEBUG]   Proceeding with {} space deletion",
-                                spaces_to_delete
-                            );
+                            eprintln!("[DEBUG]   Proceeding with {} space deletion", spaces_to_delete);
                         }
 
                         // Remove the spaces
@@ -199,8 +186,14 @@ impl LineEditor {
                         if self.debug_mode {
                             let new_cap = self.buffer.capacity();
                             let new_len = self.buffer.len();
-                            eprintln!("[DEBUG]   After deletion: cursor={}, buffer='{}', len={}, cap={}, reallocated={}",
-                                      self.cursor, self.buffer, new_len, new_cap, new_cap != old_cap);
+                            eprintln!(
+                                "[DEBUG]   After deletion: cursor={}, buffer='{}', len={}, cap={}, reallocated={}",
+                                self.cursor,
+                                self.buffer,
+                                new_len,
+                                new_cap,
+                                new_cap != old_cap
+                            );
                         }
                     } else {
                         if self.debug_mode {
@@ -219,8 +212,14 @@ impl LineEditor {
                         if self.debug_mode {
                             let new_cap = self.buffer.capacity();
                             let new_len = self.buffer.len();
-                            eprintln!("[DEBUG]   After deletion: cursor={}, buffer='{}', len={}, cap={}, reallocated={}",
-                                      self.cursor, self.buffer, new_len, new_cap, new_cap != old_cap);
+                            eprintln!(
+                                "[DEBUG]   After deletion: cursor={}, buffer='{}', len={}, cap={}, reallocated={}",
+                                self.cursor,
+                                self.buffer,
+                                new_len,
+                                new_cap,
+                                new_cap != old_cap
+                            );
                         }
                     }
                 }
@@ -320,9 +319,7 @@ impl LineEditor {
                     if line.trim().is_empty() {
                         // Empty line - complete the block and execute
                         if self.debug_mode {
-                            eprintln!(
-                                "[DEBUG] AcceptLine: Empty line in multiline - completing block"
-                            );
+                            eprintln!("[DEBUG] AcceptLine: Empty line in multiline - completing block");
                         }
                         let full_input = self.lines.join("\n");
                         self.reset();
@@ -488,11 +485,7 @@ mod tests {
 
         // Backspace should delete only 1 space (empty buffer prevention)
         editor.apply_action(EditorAction::Backspace);
-        assert_eq!(
-            editor.buffer(),
-            " ",
-            "Should leave 1 space (empty buffer prevention)"
-        );
+        assert_eq!(editor.buffer(), " ", "Should leave 1 space (empty buffer prevention)");
         assert_eq!(editor.cursor(), 1);
     }
 
@@ -587,17 +580,9 @@ mod tests {
         println!("  lines: {:?}", editor.lines());
 
         // Verify auto-indent is present
-        assert_eq!(
-            result,
-            EditorResult::Continue,
-            "Should continue in multiline mode"
-        );
+        assert_eq!(result, EditorResult::Continue, "Should continue in multiline mode");
         assert!(editor.is_multiline(), "Should be in multiline mode");
-        assert_eq!(
-            editor.buffer(),
-            "    ",
-            "Buffer should have 4 spaces for auto-indent"
-        );
+        assert_eq!(editor.buffer(), "    ", "Buffer should have 4 spaces for auto-indent");
         assert_eq!(editor.cursor(), 4, "Cursor should be at position 4");
 
         println!("\n✅ PASS: Auto-indentation is working!");
@@ -689,11 +674,7 @@ mod tests {
         println!("  buffer: '{}'", editor.buffer());
 
         // Should STAY in multiline mode because we're already in a block
-        assert_eq!(
-            result3,
-            EditorResult::Continue,
-            "Should stay in multiline mode"
-        );
+        assert_eq!(result3, EditorResult::Continue, "Should stay in multiline mode");
         assert!(editor.is_multiline(), "Should still be in multiline mode");
 
         // Line 4: Empty line - should complete the block

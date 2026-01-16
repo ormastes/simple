@@ -123,12 +123,7 @@ impl LockFile {
     pub fn dependency_graph(&self) -> HashMap<&str, Vec<&str>> {
         self.packages
             .iter()
-            .map(|p| {
-                (
-                    p.name.as_str(),
-                    p.dependencies.iter().map(|s| s.as_str()).collect(),
-                )
-            })
+            .map(|p| (p.name.as_str(), p.dependencies.iter().map(|s| s.as_str()).collect()))
             .collect()
     }
 }
@@ -139,9 +134,7 @@ impl LockedPackage {
         LockedPackage {
             name: name.to_string(),
             version: version.to_string(),
-            source: PackageSource::Path {
-                path: path.to_string(),
-            },
+            source: PackageSource::Path { path: path.to_string() },
             checksum: None,
             dependencies: Vec::new(),
         }

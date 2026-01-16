@@ -158,12 +158,7 @@ mod tests {
         let code = "1 + 1";
         let mut result = vec![0u8; 1024];
 
-        let ret = simple_repl_runner_execute(
-            code.as_ptr(),
-            code.len(),
-            result.as_mut_ptr(),
-            result.len(),
-        );
+        let ret = simple_repl_runner_execute(code.as_ptr(), code.len(), result.as_mut_ptr(), result.len());
 
         // Should succeed or fail with error message
         assert!(ret == 0 || ret == 1);

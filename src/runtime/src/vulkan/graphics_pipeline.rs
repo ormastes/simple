@@ -35,9 +35,7 @@ impl ShaderModule {
             device
                 .handle()
                 .create_shader_module(&create_info, None)
-                .map_err(|e| {
-                    VulkanError::ShaderError(format!("Failed to create shader module: {:?}", e))
-                })?
+                .map_err(|e| VulkanError::ShaderError(format!("Failed to create shader module: {:?}", e)))?
         };
 
         tracing::info!("Shader module created ({} bytes SPIR-V)", spirv.len());
@@ -54,9 +52,7 @@ impl ShaderModule {
 impl Drop for ShaderModule {
     fn drop(&mut self) {
         unsafe {
-            self.device
-                .handle()
-                .destroy_shader_module(self.module, None);
+            self.device.handle().destroy_shader_module(self.module, None);
         }
         tracing::trace!("Shader module destroyed");
     }
@@ -89,23 +85,17 @@ impl GraphicsPipeline {
         extent: vk::Extent2D,
     ) -> VulkanResult<Arc<Self>> {
         // Pipeline layout
-        let set_layouts: Vec<vk::DescriptorSetLayout> = descriptor_layouts
-            .iter()
-            .map(|layout| layout.handle())
-            .collect();
+        let set_layouts: Vec<vk::DescriptorSetLayout> =
+            descriptor_layouts.iter().map(|layout| layout.handle()).collect();
 
-        let pipeline_layout_info =
-            vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
 
         let pipeline_layout = unsafe {
             device
                 .handle()
                 .create_pipeline_layout(&pipeline_layout_info, None)
                 .map_err(|e| {
-                    VulkanError::PipelineCreationFailed(format!(
-                        "Failed to create pipeline layout: {:?}",
-                        e
-                    ))
+                    VulkanError::PipelineCreationFailed(format!("Failed to create pipeline layout: {:?}", e))
                 })?
         };
 
@@ -143,9 +133,7 @@ impl GraphicsPipeline {
             .min_depth(0.0)
             .max_depth(1.0);
 
-        let scissor = vk::Rect2D::default()
-            .offset(vk::Offset2D { x: 0, y: 0 })
-            .extent(extent);
+        let scissor = vk::Rect2D::default().offset(vk::Offset2D { x: 0, y: 0 }).extent(extent);
 
         let viewports = [viewport];
         let scissors = [scissor];
@@ -189,8 +177,7 @@ impl GraphicsPipeline {
         // Dynamic state
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
 
-        let dynamic_state_info =
-            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+        let dynamic_state_info = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
         // Create graphics pipeline
         let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
@@ -213,10 +200,7 @@ impl GraphicsPipeline {
                 .handle()
                 .create_graphics_pipelines(device.pipeline_cache(), &pipeline_infos, None)
                 .map_err(|e| {
-                    VulkanError::PipelineCreationFailed(format!(
-                        "Failed to create graphics pipeline: {:?}",
-                        e.1
-                    ))
+                    VulkanError::PipelineCreationFailed(format!("Failed to create graphics pipeline: {:?}", e.1))
                 })?
         };
 
@@ -246,9 +230,7 @@ impl Drop for GraphicsPipeline {
     fn drop(&mut self) {
         unsafe {
             self.device.handle().destroy_pipeline(self.pipeline, None);
-            self.device
-                .handle()
-                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device.handle().destroy_pipeline_layout(self.pipeline_layout, None);
         }
         tracing::info!("Graphics pipeline destroyed");
     }
@@ -310,23 +292,17 @@ mod tests {
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
             .primitive_restart_enable(false);
 
-        assert_eq!(
-            input_assembly.topology,
-            vk::PrimitiveTopology::TRIANGLE_LIST
-        );
+        assert_eq!(input_assembly.topology, vk::PrimitiveTopology::TRIANGLE_LIST);
         assert_eq!(input_assembly.primitive_restart_enable, vk::FALSE);
     }
 
     #[test]
     fn test_triangle_strip_topology() {
         // Alternative topology
-        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(vk::PrimitiveTopology::TRIANGLE_STRIP);
+        let input_assembly =
+            vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_STRIP);
 
-        assert_eq!(
-            input_assembly.topology,
-            vk::PrimitiveTopology::TRIANGLE_STRIP
-        );
+        assert_eq!(input_assembly.topology, vk::PrimitiveTopology::TRIANGLE_STRIP);
     }
 
     #[test]
@@ -382,8 +358,7 @@ mod tests {
     #[test]
     fn test_rasterization_wireframe_mode() {
         // Wireframe mode (for debugging)
-        let rasterizer =
-            vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(vk::PolygonMode::LINE);
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(vk::PolygonMode::LINE);
 
         assert_eq!(rasterizer.polygon_mode, vk::PolygonMode::LINE);
     }
@@ -406,22 +381,16 @@ mod tests {
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
         assert_eq!(multisampling.sample_shading_enable, vk::FALSE);
-        assert_eq!(
-            multisampling.rasterization_samples,
-            vk::SampleCountFlags::TYPE_1
-        );
+        assert_eq!(multisampling.rasterization_samples, vk::SampleCountFlags::TYPE_1);
     }
 
     #[test]
     fn test_msaa_4x() {
         // 4x MSAA
-        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-            .rasterization_samples(vk::SampleCountFlags::TYPE_4);
+        let multisampling =
+            vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_4);
 
-        assert_eq!(
-            multisampling.rasterization_samples,
-            vk::SampleCountFlags::TYPE_4
-        );
+        assert_eq!(multisampling.rasterization_samples, vk::SampleCountFlags::TYPE_4);
     }
 
     #[test]
@@ -439,10 +408,7 @@ mod tests {
 
         assert_eq!(blend.blend_enable, vk::TRUE);
         assert_eq!(blend.src_color_blend_factor, vk::BlendFactor::SRC_ALPHA);
-        assert_eq!(
-            blend.dst_color_blend_factor,
-            vk::BlendFactor::ONE_MINUS_SRC_ALPHA
-        );
+        assert_eq!(blend.dst_color_blend_factor, vk::BlendFactor::ONE_MINUS_SRC_ALPHA);
         assert_eq!(blend.color_blend_op, vk::BlendOp::ADD);
     }
 

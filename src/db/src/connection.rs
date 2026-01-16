@@ -66,19 +66,14 @@ impl Database {
             return Self::open_libsql_local(url);
         }
 
-        Err(DbError::InvalidUrl(format!(
-            "Unknown database URL format: {}",
-            url
-        )))
+        Err(DbError::InvalidUrl(format!("Unknown database URL format: {}", url)))
     }
 
     /// Open a local libSQL/SQLite database.
     #[cfg(feature = "libsql")]
     fn open_libsql_local(path: &str) -> DbResult<Self> {
         let conn = crate::drivers::libsql::LibsqlConnection::open_local(path)?;
-        Ok(Self {
-            inner: Box::new(conn),
-        })
+        Ok(Self { inner: Box::new(conn) })
     }
 
     #[cfg(not(feature = "libsql"))]
@@ -90,9 +85,7 @@ impl Database {
     #[cfg(feature = "libsql")]
     fn open_libsql_memory() -> DbResult<Self> {
         let conn = crate::drivers::libsql::LibsqlConnection::open_memory()?;
-        Ok(Self {
-            inner: Box::new(conn),
-        })
+        Ok(Self { inner: Box::new(conn) })
     }
 
     #[cfg(not(feature = "libsql"))]
@@ -107,9 +100,7 @@ impl Database {
         let full_url = format!("libsql://{}", url);
         let (base_url, auth_token) = parse_libsql_url(&full_url)?;
         let conn = crate::drivers::libsql::LibsqlConnection::open_remote(&base_url, &auth_token)?;
-        Ok(Self {
-            inner: Box::new(conn),
-        })
+        Ok(Self { inner: Box::new(conn) })
     }
 
     #[cfg(not(feature = "libsql"))]
@@ -121,9 +112,7 @@ impl Database {
     #[cfg(feature = "postgres")]
     fn open_postgres(url: &str) -> DbResult<Self> {
         let conn = crate::drivers::postgres::PostgresConnection::connect_sync(url)?;
-        Ok(Self {
-            inner: Box::new(conn),
-        })
+        Ok(Self { inner: Box::new(conn) })
     }
 
     #[cfg(not(feature = "postgres"))]

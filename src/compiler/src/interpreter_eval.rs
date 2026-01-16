@@ -16,20 +16,18 @@ use crate::error::CompileError;
 use crate::value::{Env, Value};
 
 use super::{
-    bind_pattern_value, check_enum_exhaustiveness, control_to_value, create_range_object,
-    dispatch_context_method, evaluate_expr, evaluate_macro_invocation,
-    evaluate_method_call_with_self_update, exec_block, exec_context, exec_for, exec_function,
-    exec_if, exec_loop, exec_match, exec_node, exec_while, exec_with, find_and_exec_method,
+    bind_pattern_value, check_enum_exhaustiveness, control_to_value, create_range_object, dispatch_context_method,
+    evaluate_expr, evaluate_macro_invocation, evaluate_method_call_with_self_update, exec_block, exec_context,
+    exec_for, exec_function, exec_if, exec_loop, exec_match, exec_node, exec_while, exec_with, find_and_exec_method,
     get_di_config, get_import_alias, get_pattern_name, get_type_name, handle_functional_update,
-    handle_method_call_with_self_update, is_unit_type, iter_to_vec, load_and_merge_module,
-    message_to_value, normalize_index, pattern_matches, register_trait_impl, slice_collection,
-    spawn_actor_with_expr, spawn_future_with_callable, spawn_future_with_callable_and_env,
-    spawn_future_with_expr, take_macro_introduced_symbols, try_method_missing, type_to_family_name,
-    validate_unit_constraints, validate_unit_type, with_effect_context, Dimension, ExternFunctions,
-    ImplMethods, Macros, TraitImplRegistry, TraitImpls, Traits, UnitArithmeticRules, UnitFamilies,
-    UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS,
-    BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES, COMPOUND_UNIT_DIMENSIONS,
-    CONST_NAMES, EXTERN_FUNCTIONS, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, SI_BASE_UNITS,
+    handle_method_call_with_self_update, is_unit_type, iter_to_vec, load_and_merge_module, message_to_value,
+    normalize_index, pattern_matches, register_trait_impl, slice_collection, spawn_actor_with_expr,
+    spawn_future_with_callable, spawn_future_with_callable_and_env, spawn_future_with_expr,
+    take_macro_introduced_symbols, try_method_missing, type_to_family_name, validate_unit_constraints,
+    validate_unit_type, with_effect_context, Dimension, ExternFunctions, ImplMethods, Macros, TraitImplRegistry,
+    TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
+    BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
+    COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, SI_BASE_UNITS,
     UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 
@@ -61,9 +59,7 @@ pub(super) fn call_value_with_args(
             }
             evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)
         }
-        Value::Function {
-            def, captured_env, ..
-        } => {
+        Value::Function { def, captured_env, .. } => {
             // Execute function with given args, using the captured environment for closure
             let mut local_env = captured_env.clone();
             for (i, param) in def.params.iter().enumerate() {
@@ -72,14 +68,7 @@ pub(super) fn call_value_with_args(
                 }
             }
             // Execute the function body
-            let result = exec_block(
-                &def.body,
-                &mut local_env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            );
+            let result = exec_block(&def.body, &mut local_env, functions, classes, enums, impl_methods);
             control_to_value(result)
         }
         _ => Err(CompileError::Semantic(format!(
@@ -93,15 +82,15 @@ pub(super) fn call_value_with_args(
 /// These are the "prelude" functions - print, math, and conversion utilities.
 pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     // I/O functions (print now adds newline by default, like Python)
-    "print",       // prints with newline (new behavior)
-    "print_raw",   // prints without newline (for old print behavior)
-    "eprint",      // stderr with newline (new behavior)
-    "eprint_raw",  // stderr without newline (for old eprint behavior)
-    "dprint",      // debug print (only outputs when --debug flag is set)
+    "print",      // prints with newline (new behavior)
+    "print_raw",  // prints without newline (for old print behavior)
+    "eprint",     // stderr with newline (new behavior)
+    "eprint_raw", // stderr without newline (for old eprint behavior)
+    "dprint",     // debug print (only outputs when --debug flag is set)
     "input",
     // Deprecated (show error messages)
-    "println",     // deprecated: use print instead
-    "eprintln",    // deprecated: use eprint instead
+    "println",  // deprecated: use print instead
+    "eprintln", // deprecated: use eprint instead
     // Math functions
     "abs",
     "min",
@@ -317,9 +306,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             Node::Impl(impl_block) => {
                 register_trait_impl(&mut trait_impl_registry, impl_block)?;
                 let type_name = get_type_name(&impl_block.target_type);
-                let methods = impl_methods
-                    .entry(type_name.clone())
-                    .or_insert_with(Vec::new);
+                let methods = impl_methods.entry(type_name.clone()).or_insert_with(Vec::new);
                 for method in &impl_block.methods {
                     methods.push(method.clone());
                 }
@@ -334,9 +321,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
 
                         for trait_method in &trait_def.methods {
                             // Only require implementation of abstract methods
-                            if trait_method.is_abstract
-                                && !impl_method_names.contains(&trait_method.name)
-                            {
+                            if trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
                                 return Err(CompileError::Semantic(format!(
                                     "type `{}` does not implement required method `{}` from trait `{}`",
                                     type_name, trait_method.name, trait_name
@@ -348,9 +333,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         let mut combined_methods = impl_block.methods.clone();
                         for trait_method in &trait_def.methods {
                             // Add default implementations that weren't overridden
-                            if !trait_method.is_abstract
-                                && !impl_method_names.contains(&trait_method.name)
-                            {
+                            if !trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
                                 combined_methods.push(trait_method.clone());
                                 // Also add to impl_methods so method dispatch can find it
                                 methods.push(trait_method.clone());
@@ -358,8 +341,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         }
 
                         // Store the trait implementation with combined methods
-                        trait_impls
-                            .insert((trait_name.clone(), type_name.clone()), combined_methods);
+                        trait_impls.insert((trait_name.clone(), type_name.clone()), combined_methods);
                     }
                     // Note: If trait not found, it might be defined in another module
                     // For now, we silently allow this for forward compatibility
@@ -446,8 +428,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     conversions.insert(variant.suffix.clone(), variant.factor);
                     // Register suffix -> family mapping in thread-local for expression evaluation
                     UNIT_SUFFIX_TO_FAMILY.with(|cell| {
-                        cell.borrow_mut()
-                            .insert(variant.suffix.clone(), uf.name.clone());
+                        cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
                     });
                 }
                 // Store the family with all conversion factors
@@ -491,16 +472,14 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Register this as a base dimension (self-referential)
                 // e.g., "length" has dimension {length: 1}
                 BASE_UNIT_DIMENSIONS.with(|cell| {
-                    cell.borrow_mut()
-                        .insert(uf.name.clone(), Dimension::base(&uf.name));
+                    cell.borrow_mut().insert(uf.name.clone(), Dimension::base(&uf.name));
                 });
                 // Register the base unit (factor = 1.0) for SI prefix support
                 // e.g., for length: "m" -> "length", so "km" can be parsed as "k" + "m"
                 for variant in &uf.variants {
                     if (variant.factor - 1.0).abs() < f64::EPSILON {
                         SI_BASE_UNITS.with(|cell| {
-                            cell.borrow_mut()
-                                .insert(variant.suffix.clone(), uf.name.clone());
+                            cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
                         });
                         break; // Only one base unit per family
                     }
@@ -542,14 +521,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             }
             Node::Let(let_stmt) => {
                 use super::Control;
-                if let Control::Return(val) = exec_node(
-                    item,
-                    &mut env,
-                    &mut functions,
-                    &mut classes,
-                    &enums,
-                    &impl_methods,
-                )? {
+                if let Control::Return(val) =
+                    exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
+                {
                     return val.as_int().map(|v| v as i32);
                 }
                 // Sync mutable module-level variables to MODULE_GLOBALS for function access
@@ -574,38 +548,21 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::Context(_)
             | Node::With(_) => {
                 use super::Control;
-                if let Control::Return(val) = exec_node(
-                    item,
-                    &mut env,
-                    &mut functions,
-                    &mut classes,
-                    &enums,
-                    &impl_methods,
-                )? {
+                if let Control::Return(val) =
+                    exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
+                {
                     return val.as_int().map(|v| v as i32);
                 }
             }
             Node::Return(ret) => {
                 if let Some(expr) = &ret.value {
-                    let val = evaluate_expr(
-                        expr,
-                        &env,
-                        &mut functions,
-                        &mut classes,
-                        &enums,
-                        &impl_methods,
-                    )?;
+                    let val = evaluate_expr(expr, &env, &mut functions, &mut classes, &enums, &impl_methods)?;
                     return val.as_int().map(|v| v as i32);
                 }
                 return Ok(0);
             }
             Node::Expression(expr) => {
-                if let Expr::FunctionalUpdate {
-                    target,
-                    method,
-                    args,
-                } = expr
-                {
+                if let Expr::FunctionalUpdate { target, method, args } = expr {
                     if let Some((name, new_value)) = handle_functional_update(
                         target,
                         method,
@@ -717,11 +674,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         // Unpack module exports into current namespace
                         // This allows direct access like: import std.spec; ExecutionMode.Variant
                         if let Value::Dict(exports) = &value {
-                            eprintln!(
-                                "DEBUG eval: Unpacking {} exports from {}",
-                                exports.len(),
-                                binding_name
-                            );
+                            eprintln!("DEBUG eval: Unpacking {} exports from {}", exports.len(), binding_name);
                             for (name, export_value) in exports {
                                 eprintln!("DEBUG eval:   - {}", name);
                                 env.insert(name.clone(), export_value.clone());
@@ -731,10 +684,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 });
                             }
                         } else {
-                            eprintln!(
-                                "DEBUG eval: Value is not a Dict, binding_name={}",
-                                binding_name
-                            );
+                            eprintln!("DEBUG eval: Value is not a Dict, binding_name={}", binding_name);
                         }
                         // Also keep the module dict under its name for qualified access
                         env.insert(binding_name.clone(), value.clone());
@@ -747,10 +697,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         // Module loading failed - log and use empty dict as fallback
                         // This allows the program to continue, with errors appearing
                         // when the module members are accessed
-                        eprintln!(
-                            "DEBUG eval: Module loading FAILED for '{}': {:?}",
-                            binding_name, e
-                        );
+                        eprintln!("DEBUG eval: Module loading FAILED for '{}': {:?}", binding_name, e);
                         tracing::debug!("Module loading failed for '{}': {:?}", binding_name, e);
                         let empty = Value::Dict(HashMap::new());
                         env.insert(binding_name.clone(), empty.clone());

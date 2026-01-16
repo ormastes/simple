@@ -13,8 +13,7 @@ use tracing::{debug, error, instrument, trace, warn};
 use crate::memory::{ExecutableMemory, MemoryAllocator, PlatformAllocator, Protection};
 use crate::settlement::{FunctionTable, GlobalTable, NativeLibManager, TableIndex};
 use crate::smf::settlement::{
-    NativeLibEntry, SettlementHeader, NATIVE_LIB_SHARED, NATIVE_LIB_SYSTEM, SSMF_FLAG_EXECUTABLE,
-    SSMF_MAGIC,
+    NativeLibEntry, SettlementHeader, NATIVE_LIB_SHARED, NATIVE_LIB_SYSTEM, SSMF_FLAG_EXECUTABLE, SSMF_MAGIC,
 };
 
 /// Errors that can occur during startup loading.
@@ -129,10 +128,7 @@ impl StartupLoader {
 
     /// Load a settlement from a file path.
     #[instrument(skip(self))]
-    pub fn load<P: AsRef<Path> + std::fmt::Debug>(
-        &self,
-        path: P,
-    ) -> Result<LoadedSettlement, StartupError> {
+    pub fn load<P: AsRef<Path> + std::fmt::Debug>(&self, path: P) -> Result<LoadedSettlement, StartupError> {
         debug!(path = ?path.as_ref(), "Loading settlement from file");
         let mut file = File::open(path.as_ref()).map_err(|e| {
             error!(path = ?path.as_ref(), error = %e, "Failed to open settlement file");
@@ -179,20 +175,15 @@ impl StartupLoader {
         const TRAILER_SIZE: u64 = 16;
 
         if file_size < TRAILER_SIZE {
-            warn!(
-                file_size,
-                trailer_size = TRAILER_SIZE,
-                "File too small for trailer"
-            );
+            warn!(file_size, trailer_size = TRAILER_SIZE, "File too small for trailer");
             return Err(StartupError::InvalidHeader);
         }
 
         // Read the trailer
-        file.seek(SeekFrom::End(-(TRAILER_SIZE as i64)))
-            .map_err(|e| {
-                error!(error = %e, "Failed to seek to trailer");
-                StartupError::IoError(e)
-            })?;
+        file.seek(SeekFrom::End(-(TRAILER_SIZE as i64))).map_err(|e| {
+            error!(error = %e, "Failed to seek to trailer");
+            StartupError::IoError(e)
+        })?;
         let mut trailer = [0u8; 16];
         file.read_exact(&mut trailer).map_err(|e| {
             error!(error = %e, "Failed to read trailer");
@@ -219,11 +210,7 @@ impl StartupLoader {
 
     /// Load a settlement from an open file at the given offset.
     #[instrument(skip(self, file))]
-    fn load_from_file(
-        &self,
-        file: &mut File,
-        offset: u64,
-    ) -> Result<LoadedSettlement, StartupError> {
+    fn load_from_file(&self, file: &mut File, offset: u64) -> Result<LoadedSettlement, StartupError> {
         debug!(offset, "Loading settlement from file");
 
         // Seek to settlement start
@@ -258,23 +245,17 @@ impl StartupLoader {
 
         // Allocate code memory
         debug!(size = header.code_size, "Allocating code memory");
-        let code_mem = self
-            .allocator
-            .allocate(header.code_size as usize, 4096)
-            .map_err(|e| {
-                error!(size = header.code_size, error = %e, "Failed to allocate code memory");
-                StartupError::MemoryAllocationFailed
-            })?;
+        let code_mem = self.allocator.allocate(header.code_size as usize, 4096).map_err(|e| {
+            error!(size = header.code_size, error = %e, "Failed to allocate code memory");
+            StartupError::MemoryAllocationFailed
+        })?;
 
         // Allocate data memory
         debug!(size = header.data_size, "Allocating data memory");
-        let data_mem = self
-            .allocator
-            .allocate(header.data_size as usize, 4096)
-            .map_err(|e| {
-                error!(size = header.data_size, error = %e, "Failed to allocate data memory");
-                StartupError::MemoryAllocationFailed
-            })?;
+        let data_mem = self.allocator.allocate(header.data_size as usize, 4096).map_err(|e| {
+            error!(size = header.data_size, error = %e, "Failed to allocate data memory");
+            StartupError::MemoryAllocationFailed
+        })?;
 
         // Read code section
         let code_offset = offset + header.code_offset;
@@ -283,9 +264,7 @@ impl StartupLoader {
             error!(offset = code_offset, error = %e, "Failed to seek to code section");
             StartupError::IoError(e)
         })?;
-        let code_slice = unsafe {
-            std::slice::from_raw_parts_mut(code_mem.as_mut_ptr(), header.code_size as usize)
-        };
+        let code_slice = unsafe { std::slice::from_raw_parts_mut(code_mem.as_mut_ptr(), header.code_size as usize) };
         file.read_exact(code_slice).map_err(|e| {
             error!(size = header.code_size, error = %e, "Failed to read code section");
             StartupError::IoError(e)
@@ -307,9 +286,7 @@ impl StartupLoader {
             error!(offset = data_offset, error = %e, "Failed to seek to data section");
             StartupError::IoError(e)
         })?;
-        let data_slice = unsafe {
-            std::slice::from_raw_parts_mut(data_mem.as_mut_ptr(), header.data_size as usize)
-        };
+        let data_slice = unsafe { std::slice::from_raw_parts_mut(data_mem.as_mut_ptr(), header.data_size as usize) };
         file.read_exact(data_slice).map_err(|e| {
             error!(size = header.data_size, error = %e, "Failed to read data section");
             StartupError::IoError(e)
@@ -317,28 +294,20 @@ impl StartupLoader {
 
         // Make data read-write
         debug!("Setting data memory protection to ReadWrite");
-        self.allocator
-            .protect(&data_mem, Protection::ReadWrite)
-            .map_err(|e| {
-                error!(error = %e, "Failed to set data memory protection");
-                StartupError::MemoryAllocationFailed
-            })?;
+        self.allocator.protect(&data_mem, Protection::ReadWrite).map_err(|e| {
+            error!(error = %e, "Failed to set data memory protection");
+            StartupError::MemoryAllocationFailed
+        })?;
 
         // Read function table with code base for address fixup
         let loaded_code_base = code_mem.as_ptr() as u64;
-        debug!(
-            code_base = format!("{:#x}", loaded_code_base),
-            "Reading function table"
-        );
+        debug!(code_base = format!("{:#x}", loaded_code_base), "Reading function table");
         let func_table = self.read_function_table(file, offset, &header, loaded_code_base)?;
         trace!(functions = func_table.len(), "Function table loaded");
 
         // Read global table with data base for address fixup
         let loaded_data_base = data_mem.as_ptr() as u64;
-        debug!(
-            data_base = format!("{:#x}", loaded_data_base),
-            "Reading global table"
-        );
+        debug!(data_base = format!("{:#x}", loaded_data_base), "Reading global table");
         let global_table = self.read_global_table(file, offset, &header, loaded_data_base)?;
         trace!(globals = global_table.len(), "Global table loaded");
 
@@ -378,8 +347,7 @@ impl StartupLoader {
         file.read_exact(&mut buf)?;
 
         // Safety: SettlementHeader is repr(C) and contains only primitive types
-        let header: SettlementHeader =
-            unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const SettlementHeader) };
+        let header: SettlementHeader = unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const SettlementHeader) };
 
         Ok(header)
     }
@@ -403,12 +371,11 @@ impl StartupLoader {
 
         file.seek(SeekFrom::Start(base_offset + header.func_table_offset))?;
 
-        let entry_count = header.func_table_size as usize
-            / std::mem::size_of::<crate::smf::settlement::FuncTableEntry>();
+        let entry_count =
+            header.func_table_size as usize / std::mem::size_of::<crate::smf::settlement::FuncTableEntry>();
 
         for _ in 0..entry_count {
-            let mut entry_buf =
-                [0u8; std::mem::size_of::<crate::smf::settlement::FuncTableEntry>()];
+            let mut entry_buf = [0u8; std::mem::size_of::<crate::smf::settlement::FuncTableEntry>()];
             file.read_exact(&mut entry_buf)?;
 
             let entry: crate::smf::settlement::FuncTableEntry =
@@ -443,12 +410,11 @@ impl StartupLoader {
 
         file.seek(SeekFrom::Start(base_offset + header.global_table_offset))?;
 
-        let entry_count = header.global_table_size as usize
-            / std::mem::size_of::<crate::smf::settlement::GlobalTableEntry>();
+        let entry_count =
+            header.global_table_size as usize / std::mem::size_of::<crate::smf::settlement::GlobalTableEntry>();
 
         for _ in 0..entry_count {
-            let mut entry_buf =
-                [0u8; std::mem::size_of::<crate::smf::settlement::GlobalTableEntry>()];
+            let mut entry_buf = [0u8; std::mem::size_of::<crate::smf::settlement::GlobalTableEntry>()];
             file.read_exact(&mut entry_buf)?;
 
             let entry: crate::smf::settlement::GlobalTableEntry =
@@ -482,8 +448,7 @@ impl StartupLoader {
             let mut entry_buf = [0u8; std::mem::size_of::<NativeLibEntry>()];
             file.read_exact(&mut entry_buf)?;
 
-            let entry: NativeLibEntry =
-                unsafe { std::ptr::read_unaligned(entry_buf.as_ptr() as *const _) };
+            let entry: NativeLibEntry = unsafe { std::ptr::read_unaligned(entry_buf.as_ptr() as *const _) };
 
             // Read library name from string table
             let name = self.read_string(

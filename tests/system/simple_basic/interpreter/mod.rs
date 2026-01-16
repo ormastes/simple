@@ -84,9 +84,7 @@ fn run_repl_script(script: &str) -> Result<(), String> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .filter(|line| {
-            !line.starts_with("Simple Language v") && !line.starts_with("Type expressions")
-        })
+        .filter(|line| !line.starts_with("Simple Language v") && !line.starts_with("Type expressions"))
         .map(str::to_string)
         .collect();
 
@@ -94,10 +92,7 @@ fn run_repl_script(script: &str) -> Result<(), String> {
         return Err(format!("unexpected stderr output:\n{stderr}"));
     }
 
-    assert_eq!(
-        expected, actual,
-        "stdout did not match for script:\n{script}"
-    );
+    assert_eq!(expected, actual, "stdout did not match for script:\n{script}");
 
     Ok(())
 }

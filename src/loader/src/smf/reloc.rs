@@ -39,19 +39,16 @@ pub fn apply_relocations(
     );
 
     for (reloc_idx, reloc) in relocs.iter().enumerate() {
-        let sym = symbols
-            .symbols
-            .get(reloc.symbol_index as usize)
-            .ok_or_else(|| {
-                let msg = format!(
-                    "Relocation {} references missing symbol index {} (max: {})",
-                    reloc_idx,
-                    reloc.symbol_index,
-                    symbols.symbols.len()
-                );
-                error!("{}", msg);
-                msg
-            })?;
+        let sym = symbols.symbols.get(reloc.symbol_index as usize).ok_or_else(|| {
+            let msg = format!(
+                "Relocation {} references missing symbol index {} (max: {})",
+                reloc_idx,
+                reloc.symbol_index,
+                symbols.symbols.len()
+            );
+            error!("{}", msg);
+            msg
+        })?;
         let sym_name = symbols.symbol_name(sym);
 
         trace!(
@@ -76,10 +73,7 @@ pub fn apply_relocations(
                     addr
                 }
                 None => {
-                    let msg = format!(
-                        "Undefined symbol: {} (required by relocation {})",
-                        sym_name, reloc_idx
-                    );
+                    let msg = format!("Undefined symbol: {} (required by relocation {})", sym_name, reloc_idx);
                     error!("{}", msg);
                     return Err(msg);
                 }
@@ -148,10 +142,7 @@ pub fn apply_relocations(
             }
 
             RelocationType::GotPcRel => {
-                warn!(
-                    reloc_idx,
-                    "GotPcRel relocation not yet implemented, skipping"
-                );
+                warn!(reloc_idx, "GotPcRel relocation not yet implemented, skipping");
             }
         }
     }

@@ -277,11 +277,7 @@ impl<'a> TraitTranslator<'a> {
         Ok(LeanClass {
             name: self.to_lean_name(&trait_def.name),
             type_param: "α".to_string(),
-            extra_params: trait_def
-                .generic_params
-                .iter()
-                .map(|p| self.to_lean_name(p))
-                .collect(),
+            extra_params: trait_def.generic_params.iter().map(|p| self.to_lean_name(p)).collect(),
             methods: methods?,
             assoc_types,
             doc: trait_def.doc_comment.as_ref().map(|d| d.content.clone()),
@@ -315,9 +311,7 @@ impl<'a> TraitTranslator<'a> {
     /// Translate an impl block to Lean instance
     pub fn translate_impl(&self, impl_block: &ImplBlock) -> Result<LeanInstance, CompileError> {
         let trait_name = impl_block.trait_name.as_ref().ok_or_else(|| {
-            CompileError::Semantic(
-                "Impl block without trait name cannot be translated to Lean instance".into(),
-            )
+            CompileError::Semantic("Impl block without trait name cannot be translated to Lean instance".into())
         })?;
 
         let for_type = self.translate_ast_type(&impl_block.target_type)?;
@@ -346,8 +340,7 @@ impl<'a> TraitTranslator<'a> {
             .iter()
             .map(|bound| {
                 let ty = self.to_lean_name(&bound.type_param);
-                let traits: Vec<String> =
-                    bound.bounds.iter().map(|b| self.to_lean_name(b)).collect();
+                let traits: Vec<String> = bound.bounds.iter().map(|b| self.to_lean_name(b)).collect();
                 format!("{} : {}", ty, traits.join(" "))
             })
             .collect();
@@ -368,9 +361,7 @@ impl<'a> TraitTranslator<'a> {
         match ty {
             AstType::Simple(name) => match name.as_str() {
                 "Int" | "i64" | "i32" | "i16" | "i8" => Ok(LeanType::Primitive("Int".to_string())),
-                "Nat" | "u64" | "u32" | "u16" | "u8" | "usize" => {
-                    Ok(LeanType::Primitive("Nat".to_string()))
-                }
+                "Nat" | "u64" | "u32" | "u16" | "u8" | "usize" => Ok(LeanType::Primitive("Nat".to_string())),
                 "Bool" | "bool" => Ok(LeanType::Primitive("Bool".to_string())),
                 "Str" | "str" | "String" => Ok(LeanType::Primitive("String".to_string())),
                 "Float" | "f64" | "f32" => Ok(LeanType::Primitive("Float".to_string())),
@@ -378,16 +369,11 @@ impl<'a> TraitTranslator<'a> {
                 _ => Ok(LeanType::Named(self.to_lean_name(name))),
             },
             AstType::Generic { name, args } => {
-                let lean_args: Result<Vec<_>, _> =
-                    args.iter().map(|a| self.translate_ast_type(a)).collect();
+                let lean_args: Result<Vec<_>, _> = args.iter().map(|a| self.translate_ast_type(a)).collect();
                 Ok(LeanType::Named(format!(
                     "{} {}",
                     self.to_lean_name(name),
-                    lean_args?
-                        .iter()
-                        .map(|t| t.to_lean())
-                        .collect::<Vec<_>>()
-                        .join(" ")
+                    lean_args?.iter().map(|t| t.to_lean()).collect::<Vec<_>>().join(" ")
                 )))
             }
             AstType::Array { element, .. } => {
@@ -399,13 +385,11 @@ impl<'a> TraitTranslator<'a> {
                 Ok(LeanType::Optional(Box::new(inner)))
             }
             AstType::Tuple(types) => {
-                let lean_types: Result<Vec<_>, _> =
-                    types.iter().map(|t| self.translate_ast_type(t)).collect();
+                let lean_types: Result<Vec<_>, _> = types.iter().map(|t| self.translate_ast_type(t)).collect();
                 Ok(LeanType::Tuple(lean_types?))
             }
             AstType::Function { params, ret } => {
-                let lean_params: Result<Vec<_>, _> =
-                    params.iter().map(|p| self.translate_ast_type(p)).collect();
+                let lean_params: Result<Vec<_>, _> = params.iter().map(|p| self.translate_ast_type(p)).collect();
                 // ret is Option<Box<Type>>
                 let lean_ret = match ret {
                     Some(r) => self.translate_ast_type(r)?,
@@ -418,10 +402,7 @@ impl<'a> TraitTranslator<'a> {
             }
             AstType::DynTrait(name) => {
                 // Dynamic trait object - existential type
-                Ok(LeanType::Named(format!(
-                    "∃ α, {} α × α",
-                    self.to_lean_name(name)
-                )))
+                Ok(LeanType::Named(format!("∃ α, {} α × α", self.to_lean_name(name))))
             }
             _ => Ok(LeanType::Primitive("Unit".to_string())),
         }
@@ -459,10 +440,7 @@ impl StaticPolyTheorems {
     /// Generate coherence theorem (no overlapping instances)
     pub fn coherence_theorem(class_name: &str, types: &[&str]) -> String {
         let mut out = String::new();
-        out.push_str(&format!(
-            "-- Coherence: {} has no overlapping instances\n",
-            class_name
-        ));
+        out.push_str(&format!("-- Coherence: {} has no overlapping instances\n", class_name));
 
         for (i, ty) in types.iter().enumerate() {
             out.push_str(&format!(

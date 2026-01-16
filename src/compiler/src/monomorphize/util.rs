@@ -19,9 +19,7 @@ use simple_parser::Span;
 pub fn type_uses_param(ty: &AstType, param: &str) -> bool {
     match ty {
         AstType::Simple(name) => name == param,
-        AstType::Generic { name, args } => {
-            name == param || args.iter().any(|a| type_uses_param(a, param))
-        }
+        AstType::Generic { name, args } => name == param || args.iter().any(|a| type_uses_param(a, param)),
         AstType::Array { element, .. } => type_uses_param(element, param),
         AstType::Tuple(elems) => elems.iter().any(|e| type_uses_param(e, param)),
         AstType::Function { params, ret } => {
@@ -35,10 +33,7 @@ pub fn type_uses_param(ty: &AstType, param: &str) -> bool {
 }
 
 /// Infer the concrete type of an expression.
-pub fn infer_concrete_type(
-    expr: &Expr,
-    type_context: &HashMap<String, ConcreteType>,
-) -> Option<ConcreteType> {
+pub fn infer_concrete_type(expr: &Expr, type_context: &HashMap<String, ConcreteType>) -> Option<ConcreteType> {
     match expr {
         Expr::Integer(_) | Expr::TypedInteger(_, _) => Some(ConcreteType::Int),
         Expr::Float(_) | Expr::TypedFloat(_, _) => Some(ConcreteType::Float),
@@ -48,10 +43,7 @@ pub fn infer_concrete_type(
         Expr::Identifier(name) => type_context.get(name).cloned(),
         Expr::Array(elems) => {
             if let Some(first) = elems.first() {
-                Some(ConcreteType::Array(Box::new(infer_concrete_type(
-                    first,
-                    type_context,
-                )?)))
+                Some(ConcreteType::Array(Box::new(infer_concrete_type(first, type_context)?)))
             } else {
                 None
             }
@@ -60,10 +52,7 @@ pub fn infer_concrete_type(
     }
 }
 
-pub fn ast_type_to_concrete(
-    ty: &AstType,
-    bindings: &HashMap<String, ConcreteType>,
-) -> ConcreteType {
+pub fn ast_type_to_concrete(ty: &AstType, bindings: &HashMap<String, ConcreteType>) -> ConcreteType {
     match ty {
         AstType::Simple(name) => {
             // Check if it's a type parameter
@@ -87,39 +76,24 @@ pub fn ast_type_to_concrete(
                 return concrete.clone();
             }
 
-            let concrete_args: Vec<ConcreteType> = args
-                .iter()
-                .map(|a| ast_type_to_concrete(a, bindings))
-                .collect();
+            let concrete_args: Vec<ConcreteType> = args.iter().map(|a| ast_type_to_concrete(a, bindings)).collect();
 
             ConcreteType::Specialized {
                 name: name.clone(),
                 args: concrete_args,
             }
         }
-        AstType::Tuple(elems) => ConcreteType::Tuple(
-            elems
-                .iter()
-                .map(|e| ast_type_to_concrete(e, bindings))
-                .collect(),
-        ),
-        AstType::Array { element, size: _ } => {
-            ConcreteType::Array(Box::new(ast_type_to_concrete(element, bindings)))
-        }
+        AstType::Tuple(elems) => ConcreteType::Tuple(elems.iter().map(|e| ast_type_to_concrete(e, bindings)).collect()),
+        AstType::Array { element, size: _ } => ConcreteType::Array(Box::new(ast_type_to_concrete(element, bindings))),
         AstType::Function { params, ret } => ConcreteType::Function {
-            params: params
-                .iter()
-                .map(|p| ast_type_to_concrete(p, bindings))
-                .collect(),
+            params: params.iter().map(|p| ast_type_to_concrete(p, bindings)).collect(),
             ret: Box::new(
                 ret.as_ref()
                     .map(|r| ast_type_to_concrete(r, bindings))
                     .unwrap_or(ConcreteType::Nil),
             ),
         },
-        AstType::Optional(inner) => {
-            ConcreteType::Optional(Box::new(ast_type_to_concrete(inner, bindings)))
-        }
+        AstType::Optional(inner) => ConcreteType::Optional(Box::new(ast_type_to_concrete(inner, bindings))),
         AstType::Pointer { kind, inner } => {
             let pk = match kind {
                 simple_parser::ast::PointerKind::Unique => PointerKind::Unique,
@@ -259,10 +233,7 @@ mod tests {
         bindings.insert("T".to_string(), ConcreteType::Int);
 
         let param_ty = AstType::Simple("T".to_string());
-        assert_eq!(
-            ast_type_to_concrete(&param_ty, &bindings),
-            ConcreteType::Int
-        );
+        assert_eq!(ast_type_to_concrete(&param_ty, &bindings), ConcreteType::Int);
 
         let generic_ty = AstType::Generic {
             name: "List".to_string(),
@@ -297,9 +268,10 @@ main = identity(42)
         assert!(has_specialized, "Should have identity$Int function");
 
         // Check that generic identity was removed
-        let has_generic = mono_module.items.iter().any(|item| {
-            matches!(item, Node::Function(f) if f.name == "identity" && !f.generic_params.is_empty())
-        });
+        let has_generic = mono_module
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(f) if f.name == "identity" && !f.generic_params.is_empty()));
         assert!(!has_generic, "Generic identity function should be removed");
 
         // Check that the call site was rewritten
@@ -311,10 +283,7 @@ main = identity(42)
             }
             false
         });
-        assert!(
-            call_rewritten,
-            "Call site should be rewritten to identity$Int"
-        );
+        assert!(call_rewritten, "Call site should be rewritten to identity$Int");
     }
 }
 
@@ -331,9 +300,7 @@ pub fn concrete_to_ast_type(concrete: &ConcreteType) -> AstType {
             element: Box::new(concrete_to_ast_type(elem)),
             size: None,
         },
-        ConcreteType::Tuple(elems) => {
-            AstType::Tuple(elems.iter().map(concrete_to_ast_type).collect())
-        }
+        ConcreteType::Tuple(elems) => AstType::Tuple(elems.iter().map(concrete_to_ast_type).collect()),
         ConcreteType::Dict { key, value } => AstType::Generic {
             name: "Dict".to_string(),
             args: vec![concrete_to_ast_type(key), concrete_to_ast_type(value)],

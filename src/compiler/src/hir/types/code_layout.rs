@@ -269,14 +269,8 @@ mod tests {
     fn test_layout_phase_from_str() {
         assert_eq!(LayoutPhase::from_str("startup"), Some(LayoutPhase::Startup));
         assert_eq!(LayoutPhase::from_str("STARTUP"), Some(LayoutPhase::Startup));
-        assert_eq!(
-            LayoutPhase::from_str("first_frame"),
-            Some(LayoutPhase::FirstFrame)
-        );
-        assert_eq!(
-            LayoutPhase::from_str("firstframe"),
-            Some(LayoutPhase::FirstFrame)
-        );
+        assert_eq!(LayoutPhase::from_str("first_frame"), Some(LayoutPhase::FirstFrame));
+        assert_eq!(LayoutPhase::from_str("firstframe"), Some(LayoutPhase::FirstFrame));
         assert_eq!(LayoutPhase::from_str("steady"), Some(LayoutPhase::Steady));
         assert_eq!(LayoutPhase::from_str("cold"), Some(LayoutPhase::Cold));
         assert_eq!(LayoutPhase::from_str("invalid"), None);
@@ -299,14 +293,8 @@ mod tests {
 
     #[test]
     fn test_layout_anchor_from_str() {
-        assert_eq!(
-            LayoutAnchor::from_str("event_loop"),
-            Some(LayoutAnchor::EventLoop)
-        );
-        assert_eq!(
-            LayoutAnchor::from_str("main_loop"),
-            Some(LayoutAnchor::EventLoop)
-        );
+        assert_eq!(LayoutAnchor::from_str("event_loop"), Some(LayoutAnchor::EventLoop));
+        assert_eq!(LayoutAnchor::from_str("main_loop"), Some(LayoutAnchor::EventLoop));
         assert_eq!(
             LayoutAnchor::from_str("custom_marker"),
             Some(LayoutAnchor::Custom("custom_marker".to_string()))

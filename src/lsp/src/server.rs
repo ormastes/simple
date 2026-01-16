@@ -154,8 +154,8 @@ impl LspServer {
         notif: &NotificationMessage,
         writer: &mut W,
     ) -> Result<(), TransportError> {
-        let params: DidOpenTextDocumentParams =
-            serde_json::from_value(notif.params.clone().unwrap_or_default()).unwrap_or_else(|_| {
+        let params: DidOpenTextDocumentParams = serde_json::from_value(notif.params.clone().unwrap_or_default())
+            .unwrap_or_else(|_| {
                 panic!("Invalid didOpen params");
             });
 
@@ -176,8 +176,8 @@ impl LspServer {
         notif: &NotificationMessage,
         writer: &mut W,
     ) -> Result<(), TransportError> {
-        let params: DidChangeTextDocumentParams =
-            serde_json::from_value(notif.params.clone().unwrap_or_default()).unwrap_or_else(|_| {
+        let params: DidChangeTextDocumentParams = serde_json::from_value(notif.params.clone().unwrap_or_default())
+            .unwrap_or_else(|_| {
                 panic!("Invalid didChange params");
             });
 
@@ -196,12 +196,7 @@ impl LspServer {
     }
 
     /// Parse document and send diagnostics
-    fn send_diagnostics<W: io::Write>(
-        &self,
-        uri: &str,
-        text: &str,
-        writer: &mut W,
-    ) -> Result<(), TransportError> {
+    fn send_diagnostics<W: io::Write>(&self, uri: &str, text: &str, writer: &mut W) -> Result<(), TransportError> {
         let mut diagnostics = Vec::new();
 
         // Parse the document
@@ -225,8 +220,7 @@ impl LspServer {
                         },
                         end: Position {
                             line: (span.line as u32).saturating_sub(1),
-                            character: (span.column as u32).saturating_sub(1)
-                                + (span.end - span.start) as u32,
+                            character: (span.column as u32).saturating_sub(1) + (span.end - span.start) as u32,
                         },
                     },
                     severity: Some(DiagnosticSeverity::Error),

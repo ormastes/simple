@@ -8,10 +8,7 @@
 //!
 //! See doc/research/aop.md for the complete specification.
 
-use crate::ast::{
-    AdviceType, AopAdvice, ArchRuleType, ArchitectureRule, DiBinding, DiScope, MockDecl,
-    PredicateExpr,
-};
+use crate::ast::{AdviceType, AopAdvice, ArchRuleType, ArchitectureRule, DiBinding, DiScope, MockDecl, PredicateExpr};
 use crate::error::ParseError;
 use crate::parser_impl::core::Parser;
 use crate::token::{Span, TokenKind};
@@ -45,11 +42,7 @@ impl<'a> Parser<'a> {
                     let type_name = name.clone();
                     self.advance();
                     AdviceType::from_str(&type_name).ok_or_else(|| {
-                        ParseError::unexpected_token(
-                            "valid advice type",
-                            type_name,
-                            self.previous.span,
-                        )
+                        ParseError::unexpected_token("valid advice type", type_name, self.previous.span)
                     })?
                 }
                 _ => AdviceType::Before, // Default
@@ -182,10 +175,7 @@ impl<'a> Parser<'a> {
         let pointcut = self.parse_pointcut()?;
 
         // Parse optional message (string literal)
-        let message = if matches!(
-            &self.current.kind,
-            TokenKind::String(_) | TokenKind::FString(_)
-        ) {
+        let message = if matches!(&self.current.kind, TokenKind::String(_) | TokenKind::FString(_)) {
             match &self.current.kind {
                 TokenKind::String(s) | TokenKind::RawString(s) => {
                     let value = s.clone();
@@ -225,11 +215,7 @@ impl<'a> Parser<'a> {
         // Expect 'implements'
         if let TokenKind::Identifier { name: s, .. } = &self.current.kind {
             if s != "implements" {
-                return Err(ParseError::unexpected_token(
-                    "implements",
-                    s.clone(),
-                    self.current.span,
-                ));
+                return Err(ParseError::unexpected_token("implements", s.clone(), self.current.span));
             }
         } else {
             return Err(ParseError::unexpected_token(
@@ -291,11 +277,7 @@ impl<'a> Parser<'a> {
         // Expect 'expect' keyword
         if let TokenKind::Identifier { name: s, .. } = &self.current.kind {
             if s != "expect" {
-                return Err(ParseError::unexpected_token(
-                    "expect",
-                    s.clone(),
-                    self.current.span,
-                ));
+                return Err(ParseError::unexpected_token("expect", s.clone(), self.current.span));
             }
         } else {
             return Err(ParseError::unexpected_token(
@@ -375,11 +357,7 @@ impl<'a> Parser<'a> {
     /// not_expr ::= '!' not_expr | primary
     /// primary ::= selector '(' args ')' | '(' expr ')'
     /// ```
-    fn parse_predicate_from_string(
-        &self,
-        content: &str,
-        span: Span,
-    ) -> Result<PredicateExpr, ParseError> {
+    fn parse_predicate_from_string(&self, content: &str, span: Span) -> Result<PredicateExpr, ParseError> {
         // LIMITATION: Simplified predicate parsing for early-stage compilation
         //
         // This creates a basic selector-only predicate. Full predicate parsing
@@ -389,11 +367,7 @@ impl<'a> Parser<'a> {
         //
         // Current behavior: Treats entire content as a selector name
         // Future: Parse full predicate grammar defined in grammar comment above
-        Ok(PredicateExpr::selector(
-            content.trim().to_string(),
-            vec![],
-            span,
-        ))
+        Ok(PredicateExpr::selector(content.trim().to_string(), vec![], span))
     }
 
     // Helper methods

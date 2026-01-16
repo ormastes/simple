@@ -59,10 +59,7 @@ fn main() {
     // PHASE 1: Early startup - parse args and start prefetching before runtime init
     let early_start = std::time::Instant::now();
     let early_config = simple_driver::parse_early_args(env::args().skip(1));
-    metrics.record(
-        simple_driver::StartupPhase::EarlyArgParse,
-        early_start.elapsed(),
-    );
+    metrics.record(simple_driver::StartupPhase::EarlyArgParse, early_start.elapsed());
 
     // Start prefetching input files in background (if enabled)
     let prefetch_start = std::time::Instant::now();
@@ -72,19 +69,13 @@ fn main() {
         None
     };
     if prefetch_handle.is_some() {
-        metrics.record(
-            simple_driver::StartupPhase::FilePrefetch,
-            prefetch_start.elapsed(),
-        );
+        metrics.record(simple_driver::StartupPhase::FilePrefetch, prefetch_start.elapsed());
     }
 
     // Pre-allocate resources based on app type
     let resource_start = std::time::Instant::now();
-    let _resources = simple_driver::PreAllocatedResources::allocate(
-        early_config.app_type,
-        &early_config.window_hints,
-    )
-    .ok();
+    let _resources =
+        simple_driver::PreAllocatedResources::allocate(early_config.app_type, &early_config.window_hints).ok();
     metrics.record(
         simple_driver::StartupPhase::ResourceAllocation,
         resource_start.elapsed(),
@@ -124,10 +115,7 @@ fn main() {
             eprintln!("warning: {}", e);
             eprintln!("Continuing without full sandboxing...");
         }
-        metrics.record(
-            simple_driver::StartupPhase::SandboxSetup,
-            sandbox_start.elapsed(),
-        );
+        metrics.record(simple_driver::StartupPhase::SandboxSetup, sandbox_start.elapsed());
     }
 
     // Filter out flags (GC and sandbox flags) and their values
@@ -584,9 +572,7 @@ fn main() {
         "add" => {
             if args.len() < 2 {
                 eprintln!("error: add requires a package name");
-                eprintln!(
-                    "Usage: simple add <pkg> [version] [--path <path>] [--git <url>] [--dev]"
-                );
+                eprintln!("Usage: simple add <pkg> [version] [--path <path>] [--git <url>] [--dev]");
                 std::process::exit(1);
             }
             let pkg_name = &args[1];
@@ -688,10 +674,7 @@ fn main() {
                             println!("{} package(s) up to date", result.up_to_date);
                         }
                         if result.skipped > 0 {
-                            println!(
-                                "{} package(s) skipped (git/registry not yet supported)",
-                                result.skipped
-                            );
+                            println!("{} package(s) skipped (git/registry not yet supported)", result.skipped);
                         }
                     }
                     std::process::exit(0);
@@ -736,10 +719,7 @@ fn main() {
                     } else {
                         for pkg in packages {
                             let status = if pkg.is_linked { "" } else { " (not linked)" };
-                            println!(
-                                "{} ({}) [{}]{}",
-                                pkg.name, pkg.version, pkg.source_type, status
-                            );
+                            println!("{} ({}) [{}]{}", pkg.name, pkg.version, pkg.source_type, status);
                         }
                     }
                     std::process::exit(0);
@@ -833,10 +813,7 @@ fn main() {
             let prefetch_wait_start = std::time::Instant::now();
             if let Some(handle) = prefetch_handle {
                 let _ = handle.wait(); // Ignore errors, prefetch is best-effort
-                metrics.record(
-                    simple_driver::StartupPhase::PrefetchWait,
-                    prefetch_wait_start.elapsed(),
-                );
+                metrics.record(simple_driver::StartupPhase::PrefetchWait, prefetch_wait_start.elapsed());
             }
 
             // Assume it's a file to run
@@ -856,10 +833,7 @@ fn main() {
                 // Record file execution phase
                 let exec_start = std::time::Instant::now();
                 let exit_code = run_file_with_args(&path, gc_log, gc_off, full_args);
-                metrics.record(
-                    simple_driver::StartupPhase::FileExecution,
-                    exec_start.elapsed(),
-                );
+                metrics.record(simple_driver::StartupPhase::FileExecution, exec_start.elapsed());
                 exit_with_metrics(exit_code, &metrics);
             } else {
                 eprintln!("error: file not found: {}", path.display());

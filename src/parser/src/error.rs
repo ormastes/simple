@@ -70,11 +70,7 @@ impl ParseError {
         }
     }
 
-    pub fn unexpected_token(
-        expected: impl Into<String>,
-        found: impl Into<String>,
-        span: Span,
-    ) -> Self {
+    pub fn unexpected_token(expected: impl Into<String>, found: impl Into<String>, span: Span) -> Self {
         Self::UnexpectedToken {
             expected: expected.into(),
             found: found.into(),
@@ -106,16 +102,17 @@ impl ParseError {
     /// Convert this error to a diagnostic with source context.
     pub fn to_diagnostic(&self) -> Diagnostic {
         match self {
-            ParseError::SyntaxError { message, line, column, span } => {
-                let mut diag = Diagnostic::error(message.clone())
-                    .with_code("E0001");
+            ParseError::SyntaxError {
+                message,
+                line,
+                column,
+                span,
+            } => {
+                let mut diag = Diagnostic::error(message.clone()).with_code("E0001");
                 if let Some(s) = span {
                     diag = diag.with_parser_label(*s, "syntax error here");
                 } else {
-                    diag = diag.with_parser_label(
-                        Span::new(0, 1, *line, *column),
-                        "syntax error here"
-                    );
+                    diag = diag.with_parser_label(Span::new(0, 1, *line, *column), "syntax error here");
                 }
                 diag
             }
@@ -125,27 +122,19 @@ impl ParseError {
                     .with_parser_label(*span, format!("expected {} here", expected))
                     .with_help(format!("try adding `{}` before this token", expected))
             }
-            ParseError::UnexpectedEof => {
-                Diagnostic::error("unexpected end of file")
-                    .with_code("E0003")
-                    .with_note("the file ended unexpectedly")
-                    .with_help("check for unclosed brackets or missing statements")
-            }
-            ParseError::InvalidInteger(s) => {
-                Diagnostic::error(format!("invalid integer literal: {}", s))
-                    .with_code("E0004")
-                    .with_help("integer literals must be valid decimal, hex (0x), octal (0o), or binary (0b) numbers")
-            }
-            ParseError::InvalidFloat(s) => {
-                Diagnostic::error(format!("invalid float literal: {}", s))
-                    .with_code("E0005")
-                    .with_help("float literals must be valid decimal numbers with optional exponent")
-            }
-            ParseError::InvalidEscape(s) => {
-                Diagnostic::error(format!("invalid escape sequence: {}", s))
-                    .with_code("E0006")
-                    .with_help("valid escape sequences are: \\n, \\r, \\t, \\\\, \\\", \\'")
-            }
+            ParseError::UnexpectedEof => Diagnostic::error("unexpected end of file")
+                .with_code("E0003")
+                .with_note("the file ended unexpectedly")
+                .with_help("check for unclosed brackets or missing statements"),
+            ParseError::InvalidInteger(s) => Diagnostic::error(format!("invalid integer literal: {}", s))
+                .with_code("E0004")
+                .with_help("integer literals must be valid decimal, hex (0x), octal (0o), or binary (0b) numbers"),
+            ParseError::InvalidFloat(s) => Diagnostic::error(format!("invalid float literal: {}", s))
+                .with_code("E0005")
+                .with_help("float literals must be valid decimal numbers with optional exponent"),
+            ParseError::InvalidEscape(s) => Diagnostic::error(format!("invalid escape sequence: {}", s))
+                .with_code("E0006")
+                .with_help("valid escape sequences are: \\n, \\r, \\t, \\\\, \\\", \\'"),
             ParseError::UnclosedString { span } => {
                 let mut diag = Diagnostic::error("unclosed string literal")
                     .with_code("E0007")
@@ -155,12 +144,10 @@ impl ParseError {
                 }
                 diag
             }
-            ParseError::InvalidIndentation { line } => {
-                Diagnostic::error("invalid indentation")
-                    .with_code("E0008")
-                    .with_parser_label(Span::new(0, 1, *line, 1), "invalid indentation here")
-                    .with_help("use consistent indentation (spaces or tabs, but not mixed)")
-            }
+            ParseError::InvalidIndentation { line } => Diagnostic::error("invalid indentation")
+                .with_code("E0008")
+                .with_parser_label(Span::new(0, 1, *line, 1), "invalid indentation here")
+                .with_help("use consistent indentation (spaces or tabs, but not mixed)"),
             ParseError::UnterminatedBlockComment { span } => {
                 let mut diag = Diagnostic::error("unterminated block comment")
                     .with_code("E0009")
@@ -175,16 +162,12 @@ impl ParseError {
                     .with_code("E0010")
                     .with_parser_label(*span, format!("expected {} here", expected))
             }
-            ParseError::InvalidPattern { span, message } => {
-                Diagnostic::error(format!("invalid pattern: {}", message))
-                    .with_code("E0011")
-                    .with_parser_label(*span, "invalid pattern here")
-            }
-            ParseError::InvalidType { span, message } => {
-                Diagnostic::error(format!("invalid type: {}", message))
-                    .with_code("E0012")
-                    .with_parser_label(*span, "invalid type here")
-            }
+            ParseError::InvalidPattern { span, message } => Diagnostic::error(format!("invalid pattern: {}", message))
+                .with_code("E0011")
+                .with_parser_label(*span, "invalid pattern here"),
+            ParseError::InvalidType { span, message } => Diagnostic::error(format!("invalid type: {}", message))
+                .with_code("E0012")
+                .with_parser_label(*span, "invalid type here"),
         }
     }
 

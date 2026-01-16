@@ -35,14 +35,7 @@
 ///   - MAP_SHARED with PROT_WRITE → PAGE_READWRITE
 ///   - Read-only → PAGE_READONLY
 #[no_mangle]
-pub extern "C" fn sys_mmap(
-    addr: i64,
-    length: u64,
-    prot: i32,
-    flags: i32,
-    fd: i32,
-    offset: u64,
-) -> i64 {
+pub extern "C" fn sys_mmap(addr: i64, length: u64, prot: i32, flags: i32, fd: i32, offset: u64) -> i64 {
     #[cfg(target_family = "unix")]
     {
         use libc::mmap;
@@ -73,9 +66,7 @@ pub extern "C" fn sys_mmap(
     {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_MAP_COPY, FILE_MAP_READ, FILE_MAP_WRITE,
-        };
+        use windows_sys::Win32::Storage::FileSystem::{FILE_MAP_COPY, FILE_MAP_READ, FILE_MAP_WRITE};
         use windows_sys::Win32::System::Memory::{
             CreateFileMappingW, MapViewOfFile, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
         };
@@ -235,9 +226,7 @@ pub extern "C" fn sys_madvise(addr: i64, length: u64, advice: i32) -> i32 {
 
     #[cfg(target_family = "windows")]
     {
-        use windows_sys::Win32::System::Memory::{
-            DiscardVirtualMemory, PrefetchVirtualMemory, WIN32_MEMORY_RANGE_ENTRY,
-        };
+        use windows_sys::Win32::System::Memory::{DiscardVirtualMemory, PrefetchVirtualMemory, WIN32_MEMORY_RANGE_ENTRY};
 
         unsafe {
             match advice {
@@ -337,8 +326,8 @@ pub extern "C" fn sys_open(path_ptr: i64, flags: i32, mode: i32) -> i32 {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::Storage::FileSystem::{
-            CreateFileA, CREATE_ALWAYS, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, OPEN_ALWAYS, OPEN_EXISTING, TRUNCATE_EXISTING,
+            CreateFileA, CREATE_ALWAYS, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            OPEN_ALWAYS, OPEN_EXISTING, TRUNCATE_EXISTING,
         };
 
         unsafe {

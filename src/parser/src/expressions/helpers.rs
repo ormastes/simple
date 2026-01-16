@@ -6,10 +6,7 @@ use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
 
 impl<'a> Parser<'a> {
-    pub(super) fn parse_remaining_lambda_params(
-        &mut self,
-        params: &mut Vec<LambdaParam>,
-    ) -> Result<(), ParseError> {
+    pub(super) fn parse_remaining_lambda_params(&mut self, params: &mut Vec<LambdaParam>) -> Result<(), ParseError> {
         while self.check(&TokenKind::Comma) {
             self.advance();
             let name = self.expect_identifier()?;
@@ -130,10 +127,7 @@ impl<'a> Parser<'a> {
 
         while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
             // Skip any stray whitespace tokens at the start of each argument
-            while self.check(&TokenKind::Newline)
-                || self.check(&TokenKind::Indent)
-                || self.check(&TokenKind::Dedent)
-            {
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
                 self.advance();
             }
             if self.check(&TokenKind::RParen) {
@@ -177,10 +171,7 @@ impl<'a> Parser<'a> {
             args.push(Argument { name, value });
 
             // Skip newlines, indent, dedent after argument (for multi-line argument lists)
-            while self.check(&TokenKind::Newline)
-                || self.check(&TokenKind::Indent)
-                || self.check(&TokenKind::Dedent)
-            {
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
                 self.advance();
             }
 
@@ -239,9 +230,7 @@ impl<'a> Parser<'a> {
 
     /// Parse comprehension clause: `for pattern in iterable [if condition]`
     /// Returns (pattern, iterable, condition)
-    pub(super) fn parse_comprehension_clause(
-        &mut self,
-    ) -> Result<(Pattern, Expr, Option<Box<Expr>>), ParseError> {
+    pub(super) fn parse_comprehension_clause(&mut self) -> Result<(Pattern, Expr, Option<Box<Expr>>), ParseError> {
         let pattern = self.parse_pattern()?;
         self.expect(&TokenKind::In)?;
         let iterable = self.parse_expression()?;
@@ -322,12 +311,7 @@ impl<'a> Parser<'a> {
 
     /// Create a slice expression with the given components
     #[allow(dead_code)]
-    fn make_slice(
-        receiver: Expr,
-        start: Option<Expr>,
-        end: Option<Expr>,
-        step: Option<Box<Expr>>,
-    ) -> Expr {
+    fn make_slice(receiver: Expr, start: Option<Expr>, end: Option<Expr>, step: Option<Box<Expr>>) -> Expr {
         Expr::Slice {
             receiver: Box::new(receiver),
             start: start.map(Box::new),

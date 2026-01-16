@@ -162,9 +162,7 @@ mod version_extended_tests {
 // AST Enums Tests (parser/ast/enums.rs)
 // ===========================================================================
 mod ast_enums_tests {
-    use simple_parser::ast::{
-        MoveMode, Mutability, RangeBound, SelfMode, StorageClass, Visibility,
-    };
+    use simple_parser::ast::{MoveMode, Mutability, RangeBound, SelfMode, StorageClass, Visibility};
 
     #[test]
     fn test_visibility_default() {
@@ -662,9 +660,7 @@ mod jj_store_extended_tests {
             error: "error 1".to_string(),
         };
         match event {
-            BuildEvent::CompilationFailed {
-                error, duration_ms, ..
-            } => {
+            BuildEvent::CompilationFailed { error, duration_ms, .. } => {
                 assert!(!error.is_empty());
                 assert_eq!(duration_ms, 50);
             }

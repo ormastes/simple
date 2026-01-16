@@ -96,10 +96,7 @@ impl BuildMode {
         match s.to_lowercase().as_str() {
             "debug" => Ok(BuildMode::Debug),
             "release" => Ok(BuildMode::Release),
-            _ => Err(format!(
-                "unknown build mode '{}', expected 'debug' or 'release'",
-                s
-            )),
+            _ => Err(format!("unknown build mode '{}', expected 'debug' or 'release'", s)),
         }
     }
 

@@ -15,11 +15,7 @@ mixin Timestamp:
         let mut parser = Parser::new(source);
 
         let result = parser.parse();
-        assert!(
-            result.is_ok(),
-            "Failed to parse simple mixin: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Failed to parse simple mixin: {:?}", result.err());
     }
 
     #[test]
@@ -34,11 +30,7 @@ mixin Auditable:
         let mut parser = Parser::new(source);
 
         let result = parser.parse();
-        assert!(
-            result.is_ok(),
-            "Failed to parse mixin with methods: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Failed to parse mixin with methods: {:?}", result.err());
     }
 
     #[test]
@@ -51,11 +43,7 @@ mixin Serializable<T>:
         let mut parser = Parser::new(source);
 
         let result = parser.parse();
-        assert!(
-            result.is_ok(),
-            "Failed to parse generic mixin: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Failed to parse generic mixin: {:?}", result.err());
     }
 
     #[test]
@@ -89,11 +77,7 @@ class User:
         let mut parser = Parser::new(source);
 
         let result = parser.parse();
-        assert!(
-            result.is_ok(),
-            "Failed to parse class with mixin: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Failed to parse class with mixin: {:?}", result.err());
     }
 
     #[test]
@@ -193,9 +177,7 @@ mod mixin_type_tests {
         };
 
         // Use instantiate method from MixinInfo
-        let instantiated = mixin
-            .instantiate(&[Type::Int])
-            .expect("Instantiation should succeed");
+        let instantiated = mixin.instantiate(&[Type::Int]).expect("Instantiation should succeed");
 
         assert_eq!(instantiated.fields[0].1, Type::Int);
     }

@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use super::types::{
-    CoverageSource, CoverageType, ExtendedCoverageSummary, ExternalLibCoverage, FileCoverage,
-    FunctionCoverage, InterfaceCoverage, NeighborCoverage, TypeCoverage, UncoveredSummary,
+    CoverageSource, CoverageType, ExtendedCoverageSummary, ExternalLibCoverage, FileCoverage, FunctionCoverage,
+    InterfaceCoverage, NeighborCoverage, TypeCoverage, UncoveredSummary,
 };
 
 /// Extended coverage report version

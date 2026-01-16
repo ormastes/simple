@@ -20,9 +20,7 @@ fn test_compilation_determinism() {
     let source = "main = 12345";
     let runner = Runner::new_no_gc();
 
-    let results: Vec<i32> = (0..5)
-        .map(|_| runner.run_source(source).expect("run ok"))
-        .collect();
+    let results: Vec<i32> = (0..5).map(|_| runner.run_source(source).expect("run ok")).collect();
 
     assert!(results.iter().all(|&r| r == 12345));
 }
@@ -63,9 +61,7 @@ fn test_in_memory_vs_file_compilation_consistency() {
 #[test]
 fn test_compile_to_memory_produces_valid_smf_extended() {
     let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
-    let smf_bytes = pipeline
-        .compile_source_to_memory("main = 55")
-        .expect("compile ok");
+    let smf_bytes = pipeline.compile_source_to_memory("main = 55").expect("compile ok");
 
     // SMF should have magic header
     assert!(smf_bytes.len() >= 4, "SMF should have header");
@@ -88,9 +84,7 @@ fn test_load_module_from_memory_buffer() {
     let smf_path = dir.path().join("buffer_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 888", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 888", &smf_path).expect("compile ok");
 
     // Read SMF into memory
     let smf_bytes = fs::read(&smf_path).expect("read ok");
@@ -110,9 +104,7 @@ fn test_load_truncated_smf() {
     let smf_path = dir.path().join("truncated.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 0", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 0", &smf_path).expect("compile ok");
 
     // Truncate the file
     let bytes = fs::read(&smf_path).expect("read ok");
@@ -130,9 +122,7 @@ fn test_module_exports_after_load() {
     let smf_path = dir.path().join("exports_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -278,9 +268,7 @@ main = 0
     let (deps, macros) = analyze_source_str(&PathBuf::from("/extended/test.spl"), content);
     assert_eq!(deps.len(), 3);
     assert!(deps.iter().any(|p| p.ends_with("helper.spl")));
-    assert!(deps
-        .iter()
-        .any(|p| p.to_string_lossy().contains("math.spl")));
+    assert!(deps.iter().any(|p| p.to_string_lossy().contains("math.spl")));
     assert!(deps.iter().any(|p| p.to_string_lossy().contains("io.spl")));
     assert!(macros.is_empty());
 }
@@ -356,14 +344,10 @@ fn test_actor_message_exchange() {
     });
 
     // Send message to actor
-    handle
-        .send(Message::Value("41".to_string()))
-        .expect("send ok");
+    handle.send(Message::Value("41".to_string())).expect("send ok");
 
     // Receive response
-    let response = handle
-        .recv_timeout(Duration::from_secs(1))
-        .expect("recv ok");
+    let response = handle.recv_timeout(Duration::from_secs(1)).expect("recv ok");
     assert_eq!(msg_value(&response), "42");
 }
 
@@ -387,20 +371,12 @@ fn test_multiple_actors_ping_pong() {
     });
 
     // Send to both
-    actor1
-        .send(Message::Value("5".to_string()))
-        .expect("send 1 ok");
-    actor2
-        .send(Message::Value("5".to_string()))
-        .expect("send 2 ok");
+    actor1.send(Message::Value("5".to_string())).expect("send 1 ok");
+    actor2.send(Message::Value("5".to_string())).expect("send 2 ok");
 
     // Receive from both
-    let r1 = actor1
-        .recv_timeout(Duration::from_secs(1))
-        .expect("recv 1 ok");
-    let r2 = actor2
-        .recv_timeout(Duration::from_secs(1))
-        .expect("recv 2 ok");
+    let r1 = actor1.recv_timeout(Duration::from_secs(1)).expect("recv 1 ok");
+    let r2 = actor2.recv_timeout(Duration::from_secs(1)).expect("recv 2 ok");
 
     assert_eq!(msg_value(&r1), "15"); // 5 + 10
     assert_eq!(msg_value(&r2), "10"); // 5 * 2
@@ -418,12 +394,8 @@ fn test_scheduled_spawner_creates_actors() {
         }
     });
 
-    handle
-        .send(Message::Value("23".to_string()))
-        .expect("send ok");
-    let response = handle
-        .recv_timeout(Duration::from_secs(1))
-        .expect("recv ok");
+    handle.send(Message::Value("23".to_string())).expect("send ok");
+    let response = handle.recv_timeout(Duration::from_secs(1)).expect("recv ok");
     assert_eq!(msg_value(&response), "123");
 }
 
@@ -439,12 +411,8 @@ fn test_thread_spawner_basic() {
         }
     });
 
-    handle
-        .send(Message::Value("7".to_string()))
-        .expect("send ok");
-    let response = handle
-        .recv_timeout(Duration::from_secs(1))
-        .expect("recv ok");
+    handle.send(Message::Value("7".to_string())).expect("send ok");
+    let response = handle.recv_timeout(Duration::from_secs(1)).expect("recv ok");
     assert_eq!(msg_value(&response), "21");
 }
 
@@ -463,9 +431,7 @@ fn test_send_to_scheduler() {
     // Use scheduler dispatch
     send_to(id, Message::Value("99".to_string())).expect("send_to ok");
 
-    let response = handle
-        .recv_timeout(Duration::from_secs(1))
-        .expect("recv ok");
+    let response = handle.recv_timeout(Duration::from_secs(1)).expect("recv ok");
     assert_eq!(msg_value(&response), "100");
 }
 

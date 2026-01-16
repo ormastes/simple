@@ -27,10 +27,7 @@ pub enum LeanExpr {
     /// Unary operation
     UnaryOp { op: String, operand: Box<LeanExpr> },
     /// Function application
-    App {
-        func: Box<LeanExpr>,
-        args: Vec<LeanExpr>,
-    },
+    App { func: Box<LeanExpr>, args: Vec<LeanExpr> },
     /// Lambda expression
     Lambda {
         params: Vec<(String, Option<LeanType>)>,
@@ -54,10 +51,7 @@ pub enum LeanExpr {
         arms: Vec<(String, Vec<String>, LeanExpr)>,
     },
     /// Field access
-    Field {
-        object: Box<LeanExpr>,
-        field: String,
-    },
+    Field { object: Box<LeanExpr>, field: String },
     /// Structure construction
     StructInit {
         type_name: String,
@@ -115,11 +109,7 @@ impl LeanExpr {
                 if args.is_empty() {
                     func.to_lean()
                 } else {
-                    let args_str = args
-                        .iter()
-                        .map(|a| a.to_lean())
-                        .collect::<Vec<_>>()
-                        .join(" ");
+                    let args_str = args.iter().map(|a| a.to_lean()).collect::<Vec<_>>().join(" ");
                     format!("({} {})", func.to_lean(), args_str)
                 }
             }
@@ -172,10 +162,7 @@ impl LeanExpr {
             LeanExpr::Field { object, field } => {
                 format!("{}.{}", object.to_lean(), field)
             }
-            LeanExpr::StructInit {
-                type_name: _,
-                fields,
-            } => {
+            LeanExpr::StructInit { type_name: _, fields } => {
                 let fields_str = fields
                     .iter()
                     .map(|(name, value)| format!("{} := {}", name, value.to_lean()))
@@ -184,19 +171,11 @@ impl LeanExpr {
                 format!("{{ {} }}", fields_str)
             }
             LeanExpr::List(elements) => {
-                let elems_str = elements
-                    .iter()
-                    .map(|e| e.to_lean())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let elems_str = elements.iter().map(|e| e.to_lean()).collect::<Vec<_>>().join(", ");
                 format!("[{}]", elems_str)
             }
             LeanExpr::Tuple(elements) => {
-                let elems_str = elements
-                    .iter()
-                    .map(|e| e.to_lean())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let elems_str = elements.iter().map(|e| e.to_lean()).collect::<Vec<_>>().join(", ");
                 format!("({})", elems_str)
             }
             LeanExpr::Do(stmts) => {
@@ -309,10 +288,7 @@ impl<'a> ExprTranslator<'a> {
                 })
             }
 
-            HirExprKind::FieldAccess {
-                receiver,
-                field_index,
-            } => {
+            HirExprKind::FieldAccess { receiver, field_index } => {
                 let lean_receiver = self.translate(receiver)?;
                 // Field access by index - we don't have field names here
                 Ok(LeanExpr::Field {
@@ -350,18 +326,15 @@ impl<'a> ExprTranslator<'a> {
             }
 
             HirExprKind::Array(elements) => {
-                let lean_elements: Result<Vec<_>, _> =
-                    elements.iter().map(|e| self.translate(e)).collect();
+                let lean_elements: Result<Vec<_>, _> = elements.iter().map(|e| self.translate(e)).collect();
                 Ok(LeanExpr::List(lean_elements?))
             }
             HirExprKind::VecLiteral(elements) => {
-                let lean_elements: Result<Vec<_>, _> =
-                    elements.iter().map(|e| self.translate(e)).collect();
+                let lean_elements: Result<Vec<_>, _> = elements.iter().map(|e| self.translate(e)).collect();
                 Ok(LeanExpr::List(lean_elements?))
             }
             HirExprKind::Tuple(elements) => {
-                let lean_elements: Result<Vec<_>, _> =
-                    elements.iter().map(|e| self.translate(e)).collect();
+                let lean_elements: Result<Vec<_>, _> = elements.iter().map(|e| self.translate(e)).collect();
                 Ok(LeanExpr::Tuple(lean_elements?))
             }
 
@@ -410,11 +383,7 @@ impl<'a> ExprTranslator<'a> {
     }
 
     /// Translate statements to a Lean expression (nested lets)
-    pub fn translate_stmts(
-        &self,
-        stmts: &[HirStmt],
-        locals: &[LocalVar],
-    ) -> Result<LeanExpr, CompileError> {
+    pub fn translate_stmts(&self, stmts: &[HirStmt], locals: &[LocalVar]) -> Result<LeanExpr, CompileError> {
         if stmts.is_empty() {
             return Ok(LeanExpr::Unit);
         }
@@ -424,9 +393,7 @@ impl<'a> ExprTranslator<'a> {
 
         for stmt in stmts.iter().rev() {
             match stmt {
-                HirStmt::Let {
-                    local_index, value, ..
-                } => {
+                HirStmt::Let { local_index, value, .. } => {
                     // Get the local name
                     let name = locals
                         .get(*local_index)

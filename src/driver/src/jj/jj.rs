@@ -16,10 +16,7 @@ impl JJConnector {
     pub fn new(repo_root: impl Into<PathBuf>) -> Self {
         let repo_root = repo_root.into();
         let state_store = StateStore::new(StateStore::default_path(&repo_root));
-        Self {
-            repo_root,
-            state_store,
-        }
+        Self { repo_root, state_store }
     }
 
     /// Initialize the connector (create state store)
@@ -84,9 +81,9 @@ impl JJConnector {
     /// Check if current commit has all tests passing
     pub fn has_all_tests_passing(&self) -> io::Result<bool> {
         let states = self.load_current_states()?;
-        Ok(states.iter().any(|s| {
-            s.compilation_success && s.tests_passed.is_some() && s.tests_failed == Some(0)
-        }))
+        Ok(states
+            .iter()
+            .any(|s| s.compilation_success && s.tests_passed.is_some() && s.tests_failed == Some(0)))
     }
 
     /// Format description from build state
@@ -99,9 +96,7 @@ impl JJConnector {
             parts.push("✗ Compilation failed".to_string());
         }
 
-        if let (Some(passed), Some(failed), Some(total)) =
-            (state.tests_passed, state.tests_failed, state.total_tests)
-        {
+        if let (Some(passed), Some(failed), Some(total)) = (state.tests_passed, state.tests_failed, state.total_tests) {
             if failed == 0 {
                 parts.push(format!("✓ All {} tests passed", total));
             } else {
@@ -134,9 +129,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let connector = JJConnector::new(temp.path());
 
-        let state = BuildState::new()
-            .mark_compilation_success()
-            .set_test_results(10, 0, 10);
+        let state = BuildState::new().mark_compilation_success().set_test_results(10, 0, 10);
 
         let desc = connector.format_description(&state);
         assert!(desc.contains("✓ Compilation succeeded"));

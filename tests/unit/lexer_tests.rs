@@ -50,18 +50,12 @@ fn test_integer_single_digit() {
 
 #[test]
 fn test_integer_multi_digit() {
-    assert_eq!(
-        tokenize("12345"),
-        vec![TokenKind::Integer(12345), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("12345"), vec![TokenKind::Integer(12345), TokenKind::Eof]);
 }
 
 #[test]
 fn test_integer_with_underscores() {
-    assert_eq!(
-        tokenize("1_000_000"),
-        vec![TokenKind::Integer(1000000), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("1_000_000"), vec![TokenKind::Integer(1000000), TokenKind::Eof]);
 }
 
 #[test]
@@ -75,96 +69,63 @@ fn test_integer_negative_parsed_as_minus() {
 
 #[test]
 fn test_hex_lowercase() {
-    assert_eq!(
-        tokenize("0xff"),
-        vec![TokenKind::Integer(255), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("0xff"), vec![TokenKind::Integer(255), TokenKind::Eof]);
 }
 
 #[test]
 fn test_hex_uppercase() {
-    assert_eq!(
-        tokenize("0XFF"),
-        vec![TokenKind::Integer(255), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("0XFF"), vec![TokenKind::Integer(255), TokenKind::Eof]);
 }
 
 #[test]
 fn test_hex_mixed_case() {
-    assert_eq!(
-        tokenize("0xAbCd"),
-        vec![TokenKind::Integer(0xABCD), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("0xAbCd"), vec![TokenKind::Integer(0xABCD), TokenKind::Eof]);
 }
 
 #[test]
 fn test_hex_with_underscores() {
-    assert_eq!(
-        tokenize("0xff_ff"),
-        vec![TokenKind::Integer(0xFFFF), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("0xff_ff"), vec![TokenKind::Integer(0xFFFF), TokenKind::Eof]);
 }
 
 // === Binary Literal Tests ===
 
 #[test]
 fn test_binary_lowercase() {
-    assert_eq!(
-        tokenize("0b1010"),
-        vec![TokenKind::Integer(10), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("0b1010"), vec![TokenKind::Integer(10), TokenKind::Eof]);
 }
 
 #[test]
 fn test_binary_uppercase() {
-    assert_eq!(
-        tokenize("0B1111"),
-        vec![TokenKind::Integer(15), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("0B1111"), vec![TokenKind::Integer(15), TokenKind::Eof]);
 }
 
 #[test]
 fn test_binary_with_underscores() {
-    assert_eq!(
-        tokenize("0b1111_0000"),
-        vec![TokenKind::Integer(0xF0), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("0b1111_0000"), vec![TokenKind::Integer(0xF0), TokenKind::Eof]);
 }
 
 // === Octal Literal Tests ===
 
 #[test]
 fn test_octal_lowercase() {
-    assert_eq!(
-        tokenize("0o77"),
-        vec![TokenKind::Integer(63), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("0o77"), vec![TokenKind::Integer(63), TokenKind::Eof]);
 }
 
 #[test]
 fn test_octal_uppercase() {
-    assert_eq!(
-        tokenize("0O77"),
-        vec![TokenKind::Integer(63), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("0O77"), vec![TokenKind::Integer(63), TokenKind::Eof]);
 }
 
 #[test]
 fn test_octal_with_underscores() {
-    assert_eq!(
-        tokenize("0o7_7_7"),
-        vec![TokenKind::Integer(511), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("0o7_7_7"), vec![TokenKind::Integer(511), TokenKind::Eof]);
 }
 
 // === Float Literal Tests ===
 
 #[test]
 fn test_float_simple() {
-    assert_eq!(
-        tokenize("3.15"),
-        vec![TokenKind::Float(3.15), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("3.15"), vec![TokenKind::Float(3.15), TokenKind::Eof]);
 }
 
 #[test]
@@ -174,52 +135,34 @@ fn test_float_leading_zero() {
 
 #[test]
 fn test_float_with_exponent_lowercase() {
-    assert_eq!(
-        tokenize("1e10"),
-        vec![TokenKind::Float(1e10), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("1e10"), vec![TokenKind::Float(1e10), TokenKind::Eof]);
 }
 
 #[test]
 fn test_float_with_exponent_uppercase() {
-    assert_eq!(
-        tokenize("1E10"),
-        vec![TokenKind::Float(1e10), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("1E10"), vec![TokenKind::Float(1e10), TokenKind::Eof]);
 }
 
 #[test]
 fn test_float_with_negative_exponent() {
-    assert_eq!(
-        tokenize("2.5E-3"),
-        vec![TokenKind::Float(2.5e-3), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("2.5E-3"), vec![TokenKind::Float(2.5e-3), TokenKind::Eof]);
 }
 
 #[test]
 fn test_float_with_positive_exponent() {
-    assert_eq!(
-        tokenize("1.5e+2"),
-        vec![TokenKind::Float(1.5e2), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("1.5e+2"), vec![TokenKind::Float(1.5e2), TokenKind::Eof]);
 }
 
 #[test]
 fn test_float_with_underscores() {
-    assert_eq!(
-        tokenize("1_000.5"),
-        vec![TokenKind::Float(1000.5), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("1_000.5"), vec![TokenKind::Float(1000.5), TokenKind::Eof]);
 }
 
 // === String Literal Tests ===
 
 #[test]
 fn test_string_empty() {
-    assert_eq!(
-        tokenize(r#""""#),
-        vec![TokenKind::FString(vec![]), TokenKind::Eof]
-    );
+    assert_eq!(tokenize(r#""""#), vec![TokenKind::FString(vec![]), TokenKind::Eof]);
 }
 
 #[test]
@@ -321,10 +264,7 @@ fn test_raw_string_simple() {
 fn test_raw_string_no_escape_processing() {
     assert_eq!(
         tokenize(r#"'hello\nworld'"#),
-        vec![
-            TokenKind::RawString("hello\\nworld".to_string()),
-            TokenKind::Eof
-        ]
+        vec![TokenKind::RawString("hello\\nworld".to_string()), TokenKind::Eof]
     );
 }
 
@@ -395,18 +335,12 @@ fn test_fstring_complex_expression() {
 
 #[test]
 fn test_bool_true() {
-    assert_eq!(
-        tokenize("true"),
-        vec![TokenKind::Bool(true), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("true"), vec![TokenKind::Bool(true), TokenKind::Eof]);
 }
 
 #[test]
 fn test_bool_false() {
-    assert_eq!(
-        tokenize("false"),
-        vec![TokenKind::Bool(false), TokenKind::Eof]
-    );
+    assert_eq!(tokenize("false"), vec![TokenKind::Bool(false), TokenKind::Eof]);
 }
 
 // === Nil Literal Test ===
@@ -472,10 +406,7 @@ fn test_identifier_with_numbers() {
 fn test_identifier_all_caps() {
     assert_eq!(
         tokenize("CONSTANT"),
-        vec![
-            TokenKind::Identifier("CONSTANT".to_string()),
-            TokenKind::Eof
-        ]
+        vec![TokenKind::Identifier("CONSTANT".to_string()), TokenKind::Eof]
     );
 }
 
@@ -533,10 +464,7 @@ fn test_keyword_break() {
 
 #[test]
 fn test_keyword_continue() {
-    assert_eq!(
-        tokenize("continue"),
-        vec![TokenKind::Continue, TokenKind::Eof]
-    );
+    assert_eq!(tokenize("continue"), vec![TokenKind::Continue, TokenKind::Eof]);
 }
 
 #[test]

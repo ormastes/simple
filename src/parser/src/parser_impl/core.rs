@@ -91,8 +91,7 @@ impl<'a> Parser<'a> {
         let next_token = Some(&parser.pending_tokens[0]);
 
         use crate::error_recovery::detect_common_mistake;
-        if let Some(mistake) = detect_common_mistake(&parser.current, &parser.previous, next_token)
-        {
+        if let Some(mistake) = detect_common_mistake(&parser.current, &parser.previous, next_token) {
             use crate::error_recovery::{CommonMistake, ErrorHint, ErrorHintLevel};
             let level = match mistake {
                 CommonMistake::PythonDef
@@ -116,9 +115,7 @@ impl<'a> Parser<'a> {
                 | CommonMistake::WrongBrackets
                 | CommonMistake::CSemicolon
                 | CommonMistake::SemicolonAfterBlock => ErrorHintLevel::Warning,
-                CommonMistake::TsLet | CommonMistake::PythonSelf | CommonMistake::RustFnMut => {
-                    ErrorHintLevel::Info
-                }
+                CommonMistake::TsLet | CommonMistake::PythonSelf | CommonMistake::RustFnMut => ErrorHintLevel::Info,
                 CommonMistake::RustLifetime
                 | CommonMistake::RustMacro
                 | CommonMistake::RustTurbofish
@@ -213,10 +210,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn debug_enter(&mut self, name: &str) {
         if self.debug_mode != DebugMode::Off {
             let indent = "  ".repeat(self.debug_depth);
-            eprintln!(
-                "[PARSER] {}> {} (token: {:?})",
-                indent, name, self.current.kind
-            );
+            eprintln!("[PARSER] {}> {} (token: {:?})", indent, name, self.current.kind);
             self.debug_depth += 1;
         }
     }
@@ -236,11 +230,7 @@ impl<'a> Parser<'a> {
     /// Check for potential infinite loop in parsing
     /// Returns an error if iteration count exceeds MAX_LOOP_ITERATIONS
     #[inline]
-    pub(crate) fn check_loop_limit(
-        &self,
-        iterations: usize,
-        context: &str,
-    ) -> Result<(), ParseError> {
+    pub(crate) fn check_loop_limit(&self, iterations: usize, context: &str) -> Result<(), ParseError> {
         if iterations >= MAX_LOOP_ITERATIONS {
             Err(ParseError::syntax_error_with_span(
                 format!(
@@ -368,9 +358,7 @@ impl<'a> Parser<'a> {
                     self.parse_interface_binding()
                 }
             }
-            TokenKind::Forbid | TokenKind::Allow => {
-                self.parse_arch_rule().map(Node::ArchitectureRule)
-            }
+            TokenKind::Forbid | TokenKind::Allow => self.parse_arch_rule().map(Node::ArchitectureRule),
             TokenKind::Mock => self.parse_mock_decl().map(Node::MockDecl),
             TokenKind::If => self.parse_if(),
             TokenKind::IfSuspend => self.parse_if_suspend(),
@@ -409,9 +397,7 @@ impl<'a> Parser<'a> {
             TokenKind::Feature => self.parse_feature(),
             TokenKind::Scenario => self.parse_scenario(),
             TokenKind::Examples => self.parse_examples(),
-            TokenKind::Given | TokenKind::When | TokenKind::Then | TokenKind::AndThen => {
-                self.parse_step_ref_as_node()
-            }
+            TokenKind::Given | TokenKind::When | TokenKind::Then | TokenKind::AndThen => self.parse_step_ref_as_node(),
             _ => self.parse_expression_or_assignment(),
         }
     }

@@ -424,12 +424,7 @@ impl<'a> Parser<'a> {
         let mut row = Vec::new();
 
         loop {
-            if self.is_at_end()
-                || matches!(
-                    self.peek_kind(),
-                    Some(TokenKind::Newline) | Some(TokenKind::Dedent)
-                )
-            {
+            if self.is_at_end() || matches!(self.peek_kind(), Some(TokenKind::Newline) | Some(TokenKind::Dedent)) {
                 break;
             }
 
@@ -728,10 +723,7 @@ mod tests {
         let src = "server:\n    host: localhost\n    port: 8080";
         let result = parse(src).unwrap();
         let server = result.get("server").unwrap();
-        assert_eq!(
-            server.get("host").and_then(|v| v.as_str()),
-            Some("localhost")
-        );
+        assert_eq!(server.get("host").and_then(|v| v.as_str()), Some("localhost"));
         assert_eq!(server.get("port").and_then(|v| v.as_i64()), Some(8080));
     }
 
@@ -764,9 +756,7 @@ mod tests {
     fn test_nested_structure() {
         let src = "database:\n    primary:\n        host: db1.example.com\n        port: 5432";
         let result = parse(src).unwrap();
-        let host = result
-            .get_path("database.primary.host")
-            .and_then(|v| v.as_str());
+        let host = result.get_path("database.primary.host").and_then(|v| v.as_str());
         assert_eq!(host, Some("db1.example.com"));
     }
 
@@ -774,10 +764,7 @@ mod tests {
     fn test_quoted_string() {
         let src = "message: \"Hello, World!\"";
         let result = parse(src).unwrap();
-        assert_eq!(
-            result.get("message").and_then(|v| v.as_str()),
-            Some("Hello, World!")
-        );
+        assert_eq!(result.get("message").and_then(|v| v.as_str()), Some("Hello, World!"));
     }
 
     #[test]

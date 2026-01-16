@@ -18,8 +18,8 @@ fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
     }
 
     // Check if deprecated syntax warnings should be suppressed
-    let allow_deprecated = std::env::var("SIMPLE_ALLOW_DEPRECATED").is_ok()
-        || std::env::var("SIMPLE_NO_DEPRECATED_WARNINGS").is_ok();
+    let allow_deprecated =
+        std::env::var("SIMPLE_ALLOW_DEPRECATED").is_ok() || std::env::var("SIMPLE_NO_DEPRECATED_WARNINGS").is_ok();
 
     // Display hints to stderr
     for hint in hints {
@@ -31,19 +31,14 @@ fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
         }
 
         let level_str = match hint.level {
-            ErrorHintLevel::Error => "\x1b[31merror\x1b[0m", // red
+            ErrorHintLevel::Error => "\x1b[31merror\x1b[0m",     // red
             ErrorHintLevel::Warning => "\x1b[33mwarning\x1b[0m", // yellow
-            ErrorHintLevel::Info => "\x1b[36minfo\x1b[0m",   // cyan
-            ErrorHintLevel::Hint => "\x1b[32mhint\x1b[0m",   // green
+            ErrorHintLevel::Info => "\x1b[36minfo\x1b[0m",       // cyan
+            ErrorHintLevel::Hint => "\x1b[32mhint\x1b[0m",       // green
         };
 
         eprintln!("{}: {}", level_str, hint.message);
-        eprintln!(
-            "  --> {}:{}:{}",
-            path.display(),
-            hint.span.line,
-            hint.span.column
-        );
+        eprintln!("  --> {}:{}:{}", path.display(), hint.span.line, hint.span.column);
 
         // Show source line with caret
         if let Some(line) = source.lines().nth(hint.span.line - 1) {
@@ -156,9 +151,7 @@ pub fn extract_startup_config(module: &Module) -> Option<StartupConfig> {
 }
 
 /// Extract startup configuration from a list of decorators.
-fn extract_startup_config_from_decorators(
-    decorators: &[simple_parser::ast::Decorator],
-) -> StartupConfig {
+fn extract_startup_config_from_decorators(decorators: &[simple_parser::ast::Decorator]) -> StartupConfig {
     let mut config = StartupConfig::default();
 
     for decorator in decorators {
@@ -325,10 +318,7 @@ pub fn check_import_compatibility(
 /// Naive resolver for `use foo` when running single-file programs from the CLI.
 ///
 /// Recursively loads sibling modules and flattens their items into the root module.
-pub fn load_module_with_imports(
-    path: &Path,
-    visited: &mut HashSet<PathBuf>,
-) -> Result<Module, CompileError> {
+pub fn load_module_with_imports(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Module, CompileError> {
     load_module_with_imports_validated(path, visited, None)
 }
 
@@ -351,35 +341,26 @@ pub fn load_module_with_imports_validated(
 
     let source = fs::read_to_string(&path).map_err(|e| CompileError::Io(format!("{e}")))?;
     let mut parser = simple_parser::Parser::new(&source);
-    let module = parser
-        .parse()
-        .map_err(|e| CompileError::Parse(format!("{e}")))?;
+    let module = parser.parse().map_err(|e| CompileError::Parse(format!("{e}")))?;
 
     // Display error hints (warnings, etc.) from parser
     display_parser_hints(&parser, &source, &path);
 
     // Extract this module's capabilities for passing to child imports
     let this_caps = extract_module_capabilities(&module);
-    let effective_caps = importing_capabilities
-        .or(this_caps.as_deref())
-        .unwrap_or(&[]);
+    let effective_caps = importing_capabilities.or(this_caps.as_deref()).unwrap_or(&[]);
 
     let mut items = Vec::new();
     for item in module.items {
         if let Node::UseStmt(use_stmt) = &item {
-            if let Some(resolved) =
-                resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new(".")))
-            {
-                let imported =
-                    load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
+            if let Some(resolved) = resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new("."))) {
+                let imported = load_module_with_imports_validated(&resolved, visited, Some(effective_caps))?;
 
                 // Validate imported functions against our capabilities
                 if !effective_caps.is_empty() {
                     let func_effects = extract_function_effects(&imported);
                     for (func_name, effects) in func_effects {
-                        if let Some(err) =
-                            check_import_compatibility(&func_name, &effects, effective_caps)
-                        {
+                        if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
                             return Err(CompileError::Semantic(err));
                         }
                     }
@@ -502,10 +483,7 @@ mod tests {
         assert_eq!(StartupAppType::from_str("cli"), Some(StartupAppType::Cli));
         assert_eq!(StartupAppType::from_str("tui"), Some(StartupAppType::Tui));
         assert_eq!(StartupAppType::from_str("gui"), Some(StartupAppType::Gui));
-        assert_eq!(
-            StartupAppType::from_str("service"),
-            Some(StartupAppType::Service)
-        );
+        assert_eq!(StartupAppType::from_str("service"), Some(StartupAppType::Service));
         assert_eq!(StartupAppType::from_str("repl"), Some(StartupAppType::Repl));
         assert_eq!(StartupAppType::from_str("GUI"), Some(StartupAppType::Gui)); // Case insensitive
         assert_eq!(StartupAppType::from_str("invalid"), None);

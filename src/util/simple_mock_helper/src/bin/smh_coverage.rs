@@ -127,15 +127,11 @@ fn cmd_scan(source: &Path, output: &Path) -> Result<()> {
 // =============================================================================
 
 /// Load coverage data and API, returning both with touched functions map
-fn load_coverage_data(
-    coverage_json: &Path,
-    source: &Path,
-) -> Result<(ScannedApi, HashMap<String, u64>)> {
+fn load_coverage_data(coverage_json: &Path, source: &Path) -> Result<(ScannedApi, HashMap<String, u64>)> {
     let cov = load_llvm_cov_export(coverage_json)
         .with_context(|| format!("Failed to load coverage JSON: {}", coverage_json.display()))?;
 
-    let api = scan_directory(source)
-        .with_context(|| format!("Failed to scan source: {}", source.display()))?;
+    let api = scan_directory(source).with_context(|| format!("Failed to scan source: {}", source.display()))?;
 
     let touched = extract_touched_functions(&cov);
 
@@ -276,11 +272,7 @@ fn cmd_func_coverage(coverage_json: &Path, source: &Path, filter: Option<&str>) 
         if *is_touched {
             total_touched += 1;
         }
-        let status = if *is_touched {
-            "✓ TOUCHED"
-        } else {
-            "✗ NOT TOUCHED"
-        };
+        let status = if *is_touched { "✓ TOUCHED" } else { "✗ NOT TOUCHED" };
         // Truncate long names
         let display_name = if func_name.len() > 58 {
             format!("{}...", &func_name[..55])
@@ -291,24 +283,14 @@ fn cmd_func_coverage(coverage_json: &Path, source: &Path, filter: Option<&str>) 
     }
 
     println!("{}", "─".repeat(72));
-    print_summary(
-        total_touched,
-        total_funcs,
-        "public functions/methods touched",
-    );
+    print_summary(total_touched, total_funcs, "public functions/methods touched");
 
     Ok(())
 }
 
 /// Legacy report mode with YAML file
-fn cmd_report(
-    coverage_json: &PathBuf,
-    public_api: &PathBuf,
-    type_filter: Option<&str>,
-) -> Result<()> {
-    use simple_mock_helper::coverage::{
-        compute_class_coverage, load_public_api_spec, print_class_coverage_table,
-    };
+fn cmd_report(coverage_json: &PathBuf, public_api: &PathBuf, type_filter: Option<&str>) -> Result<()> {
+    use simple_mock_helper::coverage::{compute_class_coverage, load_public_api_spec, print_class_coverage_table};
 
     let cov = load_llvm_cov_export(coverage_json)?;
     let api = load_public_api_spec(public_api)?;

@@ -87,8 +87,7 @@ impl ErrorRegistry {
     }
 
     fn register(&mut self, explanation: ErrorExplanation) {
-        self.explanations
-            .insert(explanation.code.clone(), explanation);
+        self.explanations.insert(explanation.code.clone(), explanation);
     }
 
     pub fn get(&self, code: &str) -> Option<&ErrorExplanation> {
@@ -145,12 +144,8 @@ impl ErrorRegistry {
                 .with_fix("Convert the value to the expected type")
                 .with_fix("Change the function signature")
                 .with_fix("Use type casting if appropriate")
-                .with_example_bad(
-                    "fn add(x: i64, y: i64) -> i64:\n    return x + y\n\nadd(\"5\", 10)  # Error!",
-                )
-                .with_example_good(
-                    "fn add(x: i64, y: i64) -> i64:\n    return x + y\n\nadd(5, 10)  # OK",
-                )
+                .with_example_bad("fn add(x: i64, y: i64) -> i64:\n    return x + y\n\nadd(\"5\", 10)  # Error!")
+                .with_example_good("fn add(x: i64, y: i64) -> i64:\n    return x + y\n\nadd(5, 10)  # OK")
                 .with_related("E1004"),
         );
 
@@ -163,9 +158,7 @@ impl ErrorRegistry {
                 .with_fix("Move break inside a loop")
                 .with_fix("Remove the break statement")
                 .with_example_bad("fn main():\n    if true:\n        break  # Error!")
-                .with_example_good(
-                    "fn main():\n    for i in 0..10:\n        if i > 5:\n            break  # OK",
-                )
+                .with_example_good("fn main():\n    for i in 0..10:\n        if i > 5:\n            break  # OK")
                 .with_related("E1102"),
         );
 

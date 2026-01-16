@@ -74,10 +74,7 @@ pub fn init() {
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
     let fmt_layer = fmt::layer().with_target(true).with_line_number(true);
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt_layer)
-        .init();
+    tracing_subscriber::registry().with(env_filter).with(fmt_layer).init();
 }
 
 /// Initialize logging with a custom filter string.
@@ -90,10 +87,7 @@ pub fn init() {
 pub fn init_with_filter(filter: &str) {
     let env_filter = EnvFilter::new(filter);
     let fmt_layer = fmt::layer().with_target(true).with_line_number(true);
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt_layer)
-        .init();
+    tracing_subscriber::registry().with(env_filter).with(fmt_layer).init();
 }
 
 /// Initialize logging with compact output (no timestamps, minimal format).
@@ -104,16 +98,9 @@ pub fn init_compact() {
         .or_else(|_| EnvFilter::try_from_env("RUST_LOG"))
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let fmt_layer = fmt::layer()
-        .with_target(true)
-        .with_level(true)
-        .without_time()
-        .compact();
+    let fmt_layer = fmt::layer().with_target(true).with_level(true).without_time().compact();
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt_layer)
-        .init();
+    tracing_subscriber::registry().with(env_filter).with(fmt_layer).init();
 }
 
 /// Initialize logging to both stdout and a file with automatic rotation.
@@ -171,10 +158,7 @@ pub fn init_dual(log_dir: Option<&std::path::Path>, filter: Option<&str>) -> std
         .with_thread_ids(true)
         .with_writer(stdout.and(file));
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt_layer)
-        .init();
+    tracing_subscriber::registry().with(env_filter).with(fmt_layer).init();
 
     Ok(())
 }
@@ -258,10 +242,7 @@ pub fn init_file(path: &std::path::Path, filter: Option<&str>) -> std::io::Resul
         .with_ansi(false)
         .with_writer(file);
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt_layer)
-        .init();
+    tracing_subscriber::registry().with(env_filter).with(fmt_layer).init();
 
     Ok(())
 }

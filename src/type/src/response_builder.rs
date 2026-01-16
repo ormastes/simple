@@ -234,25 +234,16 @@ mod tests {
 
     #[test]
     fn test_json_response() {
-        let response = Response::ok()
-            .json()
-            .body_json(r#"{"message": "success"}"#)
-            .build();
+        let response = Response::ok().json().body_json(r#"{"message": "success"}"#).build();
 
         assert_eq!(response.status, StatusCode::Ok);
-        assert_eq!(
-            response.headers.get("Content-Type").unwrap(),
-            "application/json"
-        );
+        assert_eq!(response.headers.get("Content-Type").unwrap(), "application/json");
         assert_eq!(response.body, br#"{"message": "success"}"#);
     }
 
     #[test]
     fn test_error_responses() {
-        let not_found = Response::not_found()
-            .text()
-            .body_string("Page not found")
-            .build();
+        let not_found = Response::not_found().text().body_string("Page not found").build();
 
         assert_eq!(not_found.status, StatusCode::NotFound);
         assert!(not_found.status.is_client_error());
@@ -296,22 +287,13 @@ mod tests {
     #[test]
     fn test_content_types() {
         let html = Response::ok().html().build();
-        assert_eq!(
-            html.headers.get("Content-Type").unwrap(),
-            "text/html; charset=utf-8"
-        );
+        assert_eq!(html.headers.get("Content-Type").unwrap(), "text/html; charset=utf-8");
 
         let json = Response::ok().json().build();
-        assert_eq!(
-            json.headers.get("Content-Type").unwrap(),
-            "application/json"
-        );
+        assert_eq!(json.headers.get("Content-Type").unwrap(), "application/json");
 
         let text = Response::ok().text().build();
-        assert_eq!(
-            text.headers.get("Content-Type").unwrap(),
-            "text/plain; charset=utf-8"
-        );
+        assert_eq!(text.headers.get("Content-Type").unwrap(), "text/plain; charset=utf-8");
     }
 
     #[test]
@@ -338,10 +320,7 @@ mod tests {
     fn test_cookie() {
         let response = Response::ok().cookie("session_id", "abc123").build();
 
-        assert_eq!(
-            response.headers.get("Set-Cookie").unwrap(),
-            "session_id=abc123"
-        );
+        assert_eq!(response.headers.get("Set-Cookie").unwrap(), "session_id=abc123");
     }
 
     #[test]
@@ -354,15 +333,9 @@ mod tests {
             .build();
 
         assert_eq!(response.status, StatusCode::Created);
-        assert_eq!(
-            response.headers.get("Content-Type").unwrap(),
-            "application/json"
-        );
+        assert_eq!(response.headers.get("Content-Type").unwrap(), "application/json");
         assert_eq!(response.headers.get("X-Created-By").unwrap(), "test");
-        assert_eq!(
-            response.headers.get("Access-Control-Allow-Origin").unwrap(),
-            "*"
-        );
+        assert_eq!(response.headers.get("Access-Control-Allow-Origin").unwrap(), "*");
         assert_eq!(response.body, br#"{"id": 123}"#);
     }
 }

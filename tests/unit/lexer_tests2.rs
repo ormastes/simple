@@ -127,10 +127,7 @@ fn test_keyword_extern() {
 
 #[test]
 fn test_keyword_context() {
-    assert_eq!(
-        tokenize("context"),
-        vec![TokenKind::Context, TokenKind::Eof]
-    );
+    assert_eq!(tokenize("context"), vec![TokenKind::Context, TokenKind::Eof]);
 }
 
 #[test]
@@ -437,10 +434,7 @@ fn test_comment_only_line() {
 #[test]
 fn test_comment_at_line_start() {
     let tokens = tokenize("# comment\nx");
-    assert_eq!(
-        tokens,
-        vec![TokenKind::Identifier("x".to_string()), TokenKind::Eof]
-    );
+    assert_eq!(tokens, vec![TokenKind::Identifier("x".to_string()), TokenKind::Eof]);
 }
 
 // === Line Continuation Tests ===

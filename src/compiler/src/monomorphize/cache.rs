@@ -247,12 +247,7 @@ impl MonoCache {
     }
 
     /// Cache a function with metadata.
-    pub fn put_function_with_meta(
-        &self,
-        key: SpecializationKey,
-        def: FunctionDef,
-        meta: CacheEntryMeta,
-    ) {
+    pub fn put_function_with_meta(&self, key: SpecializationKey, def: FunctionDef, meta: CacheEntryMeta) {
         self.maybe_evict();
         self.functions.insert(key, CachedFunction { def, meta });
         let mut stats = self.stats.write();
@@ -290,12 +285,7 @@ impl MonoCache {
     }
 
     /// Cache a struct with metadata.
-    pub fn put_struct_with_meta(
-        &self,
-        key: SpecializationKey,
-        def: StructDef,
-        meta: CacheEntryMeta,
-    ) {
+    pub fn put_struct_with_meta(&self, key: SpecializationKey, def: StructDef, meta: CacheEntryMeta) {
         self.maybe_evict();
         self.structs.insert(key, CachedStruct { def, meta });
         let mut stats = self.stats.write();
@@ -443,30 +433,21 @@ impl MonoCache {
     }
 
     /// Pre-warm the cache with known specializations.
-    pub fn prewarm_functions(
-        &self,
-        entries: impl IntoIterator<Item = (SpecializationKey, FunctionDef)>,
-    ) {
+    pub fn prewarm_functions(&self, entries: impl IntoIterator<Item = (SpecializationKey, FunctionDef)>) {
         for (key, def) in entries {
             self.put_function(key, def);
         }
     }
 
     /// Pre-warm the cache with struct specializations.
-    pub fn prewarm_structs(
-        &self,
-        entries: impl IntoIterator<Item = (SpecializationKey, StructDef)>,
-    ) {
+    pub fn prewarm_structs(&self, entries: impl IntoIterator<Item = (SpecializationKey, StructDef)>) {
         for (key, def) in entries {
             self.put_struct(key, def);
         }
     }
 
     /// Pre-warm the cache with class specializations.
-    pub fn prewarm_classes(
-        &self,
-        entries: impl IntoIterator<Item = (SpecializationKey, ClassDef)>,
-    ) {
+    pub fn prewarm_classes(&self, entries: impl IntoIterator<Item = (SpecializationKey, ClassDef)>) {
         for (key, def) in entries {
             self.put_class(key, def);
         }

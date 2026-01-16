@@ -4,10 +4,8 @@ use super::parse_and_lower;
 
 #[test]
 fn test_lower_struct() {
-    let module = parse_and_lower(
-        "struct Point:\n    x: f64\n    y: f64\n\nfn origin() -> i64:\n    return 0\n",
-    )
-    .unwrap();
+    let module =
+        parse_and_lower("struct Point:\n    x: f64\n    y: f64\n\nfn origin() -> i64:\n    return 0\n").unwrap();
 
     assert!(module.types.lookup("Point").is_some());
 }

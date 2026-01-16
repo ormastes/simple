@@ -20,10 +20,7 @@ impl<'a> Parser<'a> {
     fn parse_grouped_or_tuple(&mut self) -> Result<Expr, ParseError> {
         self.advance();
         // Skip whitespace tokens inside parens (for multi-line expressions)
-        while self.check(&TokenKind::Newline)
-            || self.check(&TokenKind::Indent)
-            || self.check(&TokenKind::Dedent)
-        {
+        while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
             self.advance();
         }
         // Check for lambda: (x, y) => expr
@@ -47,10 +44,7 @@ impl<'a> Parser<'a> {
         let first = self.parse_expression()?;
 
         // Skip whitespace before checking what comes next
-        while self.check(&TokenKind::Newline)
-            || self.check(&TokenKind::Indent)
-            || self.check(&TokenKind::Dedent)
-        {
+        while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
             self.advance();
         }
 
@@ -90,10 +84,7 @@ impl<'a> Parser<'a> {
     fn parse_array_literal(&mut self) -> Result<Expr, ParseError> {
         self.advance();
         // Skip whitespace tokens inside brackets (for multi-line arrays)
-        while self.check(&TokenKind::Newline)
-            || self.check(&TokenKind::Indent)
-            || self.check(&TokenKind::Dedent)
-        {
+        while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
             self.advance();
         }
         // Empty array
@@ -111,10 +102,7 @@ impl<'a> Parser<'a> {
         let first = self.parse_expression()?;
 
         // Skip whitespace after first element
-        while self.check(&TokenKind::Newline)
-            || self.check(&TokenKind::Indent)
-            || self.check(&TokenKind::Dedent)
-        {
+        while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
             self.advance();
         }
 
@@ -136,10 +124,7 @@ impl<'a> Parser<'a> {
         while self.check(&TokenKind::Comma) {
             self.advance();
             // Skip whitespace after comma
-            while self.check(&TokenKind::Newline)
-                || self.check(&TokenKind::Indent)
-                || self.check(&TokenKind::Dedent)
-            {
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
                 self.advance();
             }
             if self.check(&TokenKind::RBracket) {
@@ -153,10 +138,7 @@ impl<'a> Parser<'a> {
                 elements.push(self.parse_expression()?);
             }
             // Skip whitespace after element
-            while self.check(&TokenKind::Newline)
-                || self.check(&TokenKind::Indent)
-                || self.check(&TokenKind::Dedent)
-            {
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
                 self.advance();
             }
         }

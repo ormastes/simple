@@ -56,18 +56,10 @@ impl Weaver {
                     } => {
                         // Condition evaluation (comparison operators)
                         match op {
-                            BinOp::Eq
-                            | BinOp::NotEq
-                            | BinOp::Lt
-                            | BinOp::LtEq
-                            | BinOp::Gt
-                            | BinOp::GtEq => {
+                            BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
                                 join_points.push(JoinPoint {
                                     kind: JoinPointKind::Condition {
-                                        location: format!(
-                                            "{}:block{:?}:inst{}",
-                                            function.name, block.id, idx
-                                        ),
+                                        location: format!("{}:block{:?}:inst{}", function.name, block.id, idx),
                                     },
                                     block_id: block.id,
                                     instruction_index: idx,
@@ -82,10 +74,7 @@ impl Weaver {
                         if self.is_decision_instruction(inst) {
                             join_points.push(JoinPoint {
                                 kind: JoinPointKind::Decision {
-                                    location: format!(
-                                        "{}:block{:?}:inst{}",
-                                        function.name, block.id, idx
-                                    ),
+                                    location: format!("{}:block{:?}:inst{}", function.name, block.id, idx),
                                 },
                                 block_id: block.id,
                                 instruction_index: idx,
@@ -97,10 +86,7 @@ impl Weaver {
                         if self.is_error_instruction(inst) {
                             join_points.push(JoinPoint {
                                 kind: JoinPointKind::Error {
-                                    location: format!(
-                                        "{}:block{:?}:inst{}",
-                                        function.name, block.id, idx
-                                    ),
+                                    location: format!("{}:block{:?}:inst{}", function.name, block.id, idx),
                                     error_type: "Result".to_string(),
                                 },
                                 block_id: block.id,
@@ -120,9 +106,7 @@ impl Weaver {
     fn is_decision_instruction(&self, inst: &MirInst) -> bool {
         matches!(
             inst,
-            MirInst::PatternTest { .. }
-                | MirInst::EnumDiscriminant { .. }
-                | MirInst::TryUnwrap { .. } // Result/Option unwrapping is a decision point
+            MirInst::PatternTest { .. } | MirInst::EnumDiscriminant { .. } | MirInst::TryUnwrap { .. } // Result/Option unwrapping is a decision point
         )
     }
 
@@ -137,10 +121,7 @@ impl Weaver {
 
     /// Match advice to join points.
     /// Returns (matched advices, diagnostics).
-    pub fn match_advice(
-        &self,
-        join_point: &JoinPoint,
-    ) -> (Vec<MatchedAdvice>, Vec<WeavingDiagnostic>) {
+    pub fn match_advice(&self, join_point: &JoinPoint) -> (Vec<MatchedAdvice>, Vec<WeavingDiagnostic>) {
         if !self.config.enabled {
             return (Vec::new(), Vec::new());
         }
@@ -219,8 +200,7 @@ impl Weaver {
 
             for group in same_priority_groups {
                 if group.len() > 1 && group.iter().any(|a| a.specificity == group[0].specificity) {
-                    let advice_names: Vec<String> =
-                        group.iter().map(|a| a.advice_function.clone()).collect();
+                    let advice_names: Vec<String> = group.iter().map(|a| a.advice_function.clone()).collect();
                     diagnostics.push(
                         WeavingDiagnostic::warning(format!(
                             "Ambiguous advice ordering at priority {}: [{}]. Consider adjusting priorities.",

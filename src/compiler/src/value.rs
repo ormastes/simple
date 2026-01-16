@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use simple_common::actor::ActorHandle;
 use simple_common::manual_mem::{
-    Handle as ManualHandle, HandlePool as ManualHandlePool, ManualGc, Shared as ManualShared,
-    Unique as ManualUnique, WeakPtr as ManualWeak,
+    Handle as ManualHandle, HandlePool as ManualHandlePool, ManualGc, Shared as ManualShared, Unique as ManualUnique,
+    WeakPtr as ManualWeak,
 };
 use simple_parser::ast::{Expr, FunctionDef, Node};
 
@@ -244,10 +244,7 @@ pub enum MethodLookupResult {
 impl MethodLookupResult {
     /// Check if a method was found (either direct or via method_missing).
     pub fn is_callable(&self) -> bool {
-        matches!(
-            self,
-            MethodLookupResult::Found | MethodLookupResult::MissingHook
-        )
+        matches!(self, MethodLookupResult::Found | MethodLookupResult::MissingHook)
     }
 
     /// Check if this is the method_missing fallback.
@@ -484,10 +481,7 @@ impl SpecialEnumKind {
 
     /// Check if this is an Option variant.
     pub fn is_option(&self) -> bool {
-        matches!(
-            self,
-            SpecialEnumKind::OptionSome | SpecialEnumKind::OptionNone
-        )
+        matches!(self, SpecialEnumKind::OptionSome | SpecialEnumKind::OptionNone)
     }
 
     /// Check if this is a Result variant.
@@ -591,8 +585,8 @@ pub enum Value {
     /// Custom block value - result of evaluating m{}, sh{}, sql{}, re{}, etc.
     /// Stores the block kind and payload for block-specific processing.
     Block {
-        kind: String,    // Block kind: "m", "sh", "sql", "re", "md", "html", "graph", "img"
-        payload: String, // Raw payload content
+        kind: String,               // Block kind: "m", "sh", "sql", "re", "md", "html", "graph", "img"
+        payload: String,            // Raw payload content
         result: Option<Box<Value>>, // Parsed/evaluated result (lazily computed)
     },
     Nil,

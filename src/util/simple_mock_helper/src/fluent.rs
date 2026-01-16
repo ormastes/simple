@@ -106,8 +106,7 @@ impl MethodSetup {
 
     /// Match specific arguments
     pub fn with_args(&mut self, args: &[impl ToString]) -> &mut Self {
-        self.args
-            .extend(args.iter().map(|a| ArgMatcher::Exact(a.to_string())));
+        self.args.extend(args.iter().map(|a| ArgMatcher::Exact(a.to_string())));
         self
     }
 
@@ -131,8 +130,7 @@ impl MethodSetup {
 
     /// Set multiple return values in sequence
     pub fn returns_seq(&mut self, values: Vec<impl Into<String>>) -> &mut Self {
-        self.return_values
-            .extend(values.into_iter().map(|v| v.into()));
+        self.return_values.extend(values.into_iter().map(|v| v.into()));
         self
     }
 
@@ -603,10 +601,7 @@ mod tests {
     #[test]
     fn test_mock_setup_fluent() {
         let mut setup = MockSetup::new("UserDao");
-        setup
-            .when("findById")
-            .with_args(&[123])
-            .returns("User(id: 123)");
+        setup.when("findById").with_args(&[123]).returns("User(id: 123)");
         setup.when("save").with_any_args().returns("true");
 
         assert_eq!(setup.setups().len(), 2);
@@ -713,10 +708,7 @@ mod tests {
             .returns("Alice");
 
         assert_eq!(setup.method_chain().len(), 2);
-        assert_eq!(
-            setup.full_method_path(),
-            "getDepartment().getManager().getName"
-        );
+        assert_eq!(setup.full_method_path(), "getDepartment().getManager().getName");
 
         let display = format!("{}", setup);
         assert!(display.contains("getDepartment().getManager().getName"));

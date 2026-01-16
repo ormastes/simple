@@ -49,9 +49,7 @@ pub struct BindingExtractor {
 
 impl BindingExtractor {
     pub fn new() -> Self {
-        Self {
-            bindings: Vec::new(),
-        }
+        Self { bindings: Vec::new() }
     }
 
     /// Extract all @extern("browser", ...) bindings from a module
@@ -307,12 +305,7 @@ mod tests {
     use simple_parser::enums::*;
     use simple_parser::token::Span;
 
-    fn create_extern_function(
-        name: &str,
-        module: &str,
-        js_name: &str,
-        is_async: bool,
-    ) -> FunctionDef {
+    fn create_extern_function(name: &str, module: &str, js_name: &str, is_async: bool) -> FunctionDef {
         let span = Span::new(0, 0, 0, 0);
         FunctionDef {
             span,
@@ -334,11 +327,7 @@ mod tests {
                 span,
             },
             visibility: Visibility::Public,
-            effects: if is_async {
-                vec![Effect::Async]
-            } else {
-                vec![]
-            },
+            effects: if is_async { vec![Effect::Async] } else { vec![] },
             decorators: vec![Decorator {
                 span,
                 name: Expr::Identifier("extern".to_string()),
@@ -410,22 +399,10 @@ mod tests {
     fn test_type_conversion() {
         let generator = BindgenCodeGenerator::new(vec![]);
 
-        assert_eq!(
-            generator.type_to_js(&Type::Simple("str".to_string())),
-            "&str"
-        );
-        assert_eq!(
-            generator.type_to_js(&Type::Simple("i32".to_string())),
-            "i32"
-        );
-        assert_eq!(
-            generator.type_to_js(&Type::Simple("bool".to_string())),
-            "bool"
-        );
-        assert_eq!(
-            generator.type_to_js(&Type::Simple("Value".to_string())),
-            "JsValue"
-        );
+        assert_eq!(generator.type_to_js(&Type::Simple("str".to_string())), "&str");
+        assert_eq!(generator.type_to_js(&Type::Simple("i32".to_string())), "i32");
+        assert_eq!(generator.type_to_js(&Type::Simple("bool".to_string())), "bool");
+        assert_eq!(generator.type_to_js(&Type::Simple("Value".to_string())), "JsValue");
         assert_eq!(generator.type_to_js(&Type::Simple("()".to_string())), "()");
         assert_eq!(generator.type_to_js(&Type::Tuple(vec![])), "()");
     }

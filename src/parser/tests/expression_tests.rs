@@ -65,12 +65,7 @@ fn test_function_call() {
 #[test]
 fn test_method_call() {
     let module = parse("obj.method(x)").unwrap();
-    if let Node::Expression(Expr::MethodCall {
-        receiver,
-        method,
-        args,
-    }) = &module.items[0]
-    {
+    if let Node::Expression(Expr::MethodCall { receiver, method, args }) = &module.items[0] {
         assert_eq!(**receiver, Expr::Identifier("obj".to_string()));
         assert_eq!(method, "method");
         assert_eq!(args.len(), 1);
@@ -96,12 +91,7 @@ fn test_infix_to_keyword() {
     // `expect 5 to eq 5` should parse as `expect(5).to(eq(5))`
     let module = parse("expect 5 to eq 5").unwrap();
     assert_eq!(module.items.len(), 1);
-    if let Node::Expression(Expr::MethodCall {
-        receiver,
-        method,
-        args,
-    }) = &module.items[0]
-    {
+    if let Node::Expression(Expr::MethodCall { receiver, method, args }) = &module.items[0] {
         assert_eq!(method, "to");
         // Receiver should be expect(5)
         if let Expr::Call {
@@ -150,12 +140,7 @@ fn test_infix_to_with_include_matcher() {
     // `expect arr to include 3` should parse as `expect(arr).to(include(3))`
     let module = parse("expect arr to include 3").unwrap();
     assert_eq!(module.items.len(), 1);
-    if let Node::Expression(Expr::MethodCall {
-        receiver,
-        method,
-        args,
-    }) = &module.items[0]
-    {
+    if let Node::Expression(Expr::MethodCall { receiver, method, args }) = &module.items[0] {
         assert_eq!(method, "to");
         // Receiver: expect(arr)
         if let Expr::Call { callee, .. } = &**receiver {

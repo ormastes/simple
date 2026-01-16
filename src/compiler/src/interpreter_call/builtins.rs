@@ -3,9 +3,8 @@
 
 use crate::error::CompileError;
 use crate::interpreter::{
-    check_effect_violations, create_range_object, evaluate_expr, message_to_value,
-    spawn_actor_with_expr, spawn_future_with_callable_and_env, spawn_future_with_expr, ACTOR_INBOX,
-    ACTOR_OUTBOX, GENERATOR_YIELDS,
+    check_effect_violations, create_range_object, evaluate_expr, message_to_value, spawn_actor_with_expr,
+    spawn_future_with_callable_and_env, spawn_future_with_expr, ACTOR_INBOX, ACTOR_OUTBOX, GENERATOR_YIELDS,
 };
 use crate::value::*;
 use simple_common::actor::Message;
@@ -53,56 +52,20 @@ pub(super) fn eval_builtin(
             Ok(Some(create_range_object(start, end, bound)))
         }
         "Some" => {
-            let val = eval_arg(
-                args,
-                0,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Ok(Some(Value::some(val)))
         }
         "None" => Ok(Some(Value::none())),
         "Ok" => {
-            let val = eval_arg(
-                args,
-                0,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Ok(Some(Value::ok(val)))
         }
         "Err" => {
-            let val = eval_arg(
-                args,
-                0,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Ok(Some(Value::err(val)))
         }
         "len" => {
-            let val = eval_arg(
-                args,
-                0,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             match val {
                 Value::Array(a) => Ok(Some(Value::Int(a.len() as i64))),
                 Value::Tuple(t) => Ok(Some(Value::Int(t.len() as i64))),
@@ -112,16 +75,10 @@ pub(super) fn eval_builtin(
             }
         }
         "send" => {
-            let target = args
-                .get(0)
-                .ok_or_else(|| semantic_err!("send expects actor handle"))?;
-            let msg_arg = args
-                .get(1)
-                .ok_or_else(|| semantic_err!("send expects message"))?;
-            let target_val =
-                evaluate_expr(&target.value, env, functions, classes, enums, impl_methods)?;
-            let msg_val =
-                evaluate_expr(&msg_arg.value, env, functions, classes, enums, impl_methods)?;
+            let target = args.get(0).ok_or_else(|| semantic_err!("send expects actor handle"))?;
+            let msg_arg = args.get(1).ok_or_else(|| semantic_err!("send expects message"))?;
+            let target_val = evaluate_expr(&target.value, env, functions, classes, enums, impl_methods)?;
+            let msg_val = evaluate_expr(&msg_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Actor(handle) = target_val {
                 handle
                     .send(Message::Value(msg_val.to_display_string()))
@@ -149,8 +106,7 @@ pub(super) fn eval_builtin(
                 })?;
                 return Ok(Some(message_to_value(msg)));
             } else {
-                let handle_val =
-                    evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
+                let handle_val = evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
                 if let Value::Actor(handle) = handle_val {
                     let msg = handle
                         .recv_timeout(std::time::Duration::from_secs(5))
@@ -161,11 +117,8 @@ pub(super) fn eval_builtin(
             }
         }
         "reply" => {
-            let msg_arg = args
-                .get(0)
-                .ok_or_else(|| semantic_err!("reply expects message"))?;
-            let msg_val =
-                evaluate_expr(&msg_arg.value, env, functions, classes, enums, impl_methods)?;
+            let msg_arg = args.get(0).ok_or_else(|| semantic_err!("reply expects message"))?;
+            let msg_val = evaluate_expr(&msg_arg.value, env, functions, classes, enums, impl_methods)?;
             ACTOR_OUTBOX.with(|cell| {
                 cell.borrow()
                     .as_ref()
@@ -179,17 +132,8 @@ pub(super) fn eval_builtin(
         }
         "join" => {
             check_effect_violations("join")?;
-            let handle_arg = args
-                .get(0)
-                .ok_or_else(|| semantic_err!("join expects actor handle"))?;
-            let handle_val = evaluate_expr(
-                &handle_arg.value,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let handle_arg = args.get(0).ok_or_else(|| semantic_err!("join expects actor handle"))?;
+            let handle_val = evaluate_expr(&handle_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Actor(handle) = handle_val {
                 handle.join().map_err(|e| semantic_err!("{}", e))?;
                 return Ok(Some(Value::Int(1)));
@@ -197,9 +141,7 @@ pub(super) fn eval_builtin(
             bail_semantic!("join target must be actor");
         }
         "spawn" => {
-            let inner_expr = args
-                .get(0)
-                .ok_or_else(|| semantic_err!("spawn expects a thunk"))?;
+            let inner_expr = args.get(0).ok_or_else(|| semantic_err!("spawn expects a thunk"))?;
             Ok(Some(spawn_actor_with_expr(
                 &inner_expr.value,
                 env,
@@ -213,56 +155,26 @@ pub(super) fn eval_builtin(
             let func_arg = args
                 .get(0)
                 .ok_or_else(|| semantic_err!("spawn_isolated expects a function"))?;
-            let func_val = evaluate_expr(
-                &func_arg.value,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let func_val = evaluate_expr(&func_arg.value, env, functions, classes, enums, impl_methods)?;
             let arg_val = if args.len() > 1 {
                 evaluate_expr(&args[1].value, env, functions, classes, enums, impl_methods)?
             } else {
                 Value::Nil
             };
-            let future = spawn_future_with_callable_and_env(
-                func_val,
-                arg_val,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            );
+            let future =
+                spawn_future_with_callable_and_env(func_val, arg_val, env, functions, classes, enums, impl_methods);
             Ok(Some(Value::Future(future)))
         }
         "async" | "future" => {
             let inner_expr = args
                 .get(0)
                 .ok_or_else(|| semantic_err!("async expects an expression"))?;
-            let future = spawn_future_with_expr(
-                inner_expr.value.clone(),
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            );
+            let future = spawn_future_with_expr(inner_expr.value.clone(), env, functions, classes, enums, impl_methods);
             Ok(Some(Value::Future(future)))
         }
         "is_ready" => {
-            let future_arg = args
-                .get(0)
-                .ok_or_else(|| semantic_err!("is_ready expects a future"))?;
-            let val = evaluate_expr(
-                &future_arg.value,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let future_arg = args.get(0).ok_or_else(|| semantic_err!("is_ready expects a future"))?;
+            let val = evaluate_expr(&future_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Future(f) = val {
                 return Ok(Some(Value::Bool(f.is_ready())));
             }
@@ -290,9 +202,7 @@ pub(super) fn eval_builtin(
             match mode_arg {
                 Value::Str(s) => {
                     match s.as_str() {
-                        "threaded" => simple_runtime::configure_async_mode(
-                            simple_runtime::AsyncMode::Threaded,
-                        ),
+                        "threaded" => simple_runtime::configure_async_mode(simple_runtime::AsyncMode::Threaded),
                         "manual" | "embedded" => {
                             simple_runtime::configure_async_mode(simple_runtime::AsyncMode::Manual)
                         }
@@ -312,14 +222,7 @@ pub(super) fn eval_builtin(
             let future_arg = args
                 .get(0)
                 .ok_or_else(|| semantic_err!("poll_future expects a future"))?;
-            let val = evaluate_expr(
-                &future_arg.value,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let val = evaluate_expr(&future_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Future(f) = val {
                 return Ok(Some(Value::Bool(f.poll())));
             }
@@ -334,16 +237,7 @@ pub(super) fn eval_builtin(
             Ok(Some(Value::Int(count as i64)))
         }
         "resolved" => {
-            let value = eval_arg(
-                args,
-                0,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let value = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Ok(Some(Value::Future(FutureValue::resolved(value))))
         }
         "rejected" => {
@@ -361,36 +255,22 @@ pub(super) fn eval_builtin(
             Ok(Some(Value::Future(FutureValue::rejected(error_str))))
         }
         "generator" => {
-            let inner_expr = args
-                .get(0)
-                .ok_or_else(|| semantic_err!("generator expects a lambda"))?;
-            let val = evaluate_expr(
-                &inner_expr.value,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let inner_expr = args.get(0).ok_or_else(|| semantic_err!("generator expects a lambda"))?;
+            let val = evaluate_expr(&inner_expr.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Lambda {
-                body,
-                env: captured,
-                ..
+                body, env: captured, ..
             } = val
             {
                 GENERATOR_YIELDS.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
                 let _ = evaluate_expr(&body, &captured, functions, classes, enums, impl_methods);
-                let yields =
-                    GENERATOR_YIELDS.with(|cell| cell.borrow_mut().take().unwrap_or_default());
+                let yields = GENERATOR_YIELDS.with(|cell| cell.borrow_mut().take().unwrap_or_default());
                 let gen = GeneratorValue::new_with_values(yields);
                 return Ok(Some(Value::Generator(gen)));
             }
             bail_semantic!("generator expects a lambda");
         }
         "next" => {
-            let gen_arg = args
-                .get(0)
-                .ok_or_else(|| semantic_err!("next expects a generator"))?;
+            let gen_arg = args.get(0).ok_or_else(|| semantic_err!("next expects a generator"))?;
             let val = evaluate_expr(&gen_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Generator(gen) = val {
                 return Ok(Some(gen.next().unwrap_or(Value::Nil)));

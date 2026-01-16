@@ -79,10 +79,7 @@ mod simple_test_tests {
             location: Some("parser_spec.spl:12".to_string()),
         };
 
-        assert_eq!(
-            failure.test_name,
-            "DoctestParser > parse_docstring > parses simple"
-        );
+        assert_eq!(failure.test_name, "DoctestParser > parse_docstring > parses simple");
         assert_eq!(failure.message, "Expected: 1, Got: 0");
         assert_eq!(failure.location, Some("parser_spec.spl:12".to_string()));
     }
@@ -618,11 +615,7 @@ mod settlement_container_tests {
 
     #[test]
     fn test_settlement_error_dependency_cycle() {
-        let err = SettlementError::DependencyCycle(vec![
-            "a".to_string(),
-            "b".to_string(),
-            "a".to_string(),
-        ]);
+        let err = SettlementError::DependencyCycle(vec!["a".to_string(), "b".to_string(), "a".to_string()]);
         let msg = err.to_string();
         assert!(!msg.is_empty());
     }

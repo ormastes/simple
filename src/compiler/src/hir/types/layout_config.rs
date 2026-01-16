@@ -207,9 +207,7 @@ pub struct AnchorPatterns {
 impl AnchorPatterns {
     /// Check if a function is an event loop anchor.
     pub fn is_event_loop(&self, function_name: &str) -> bool {
-        self.event_loop
-            .iter()
-            .any(|p| pattern_matches(p, function_name))
+        self.event_loop.iter().any(|p| pattern_matches(p, function_name))
     }
 
     /// Find the anchor type for a function.
@@ -358,10 +356,7 @@ impl LayoutConfig {
     }
 
     /// Parse layout config from SDN value.
-    fn from_sdn_value(
-        root: &simple_sdn::SdnValue,
-        source_path: Option<String>,
-    ) -> Result<Self, LayoutConfigError> {
+    fn from_sdn_value(root: &simple_sdn::SdnValue, source_path: Option<String>) -> Result<Self, LayoutConfigError> {
         use simple_sdn::SdnValue;
 
         let mut config = LayoutConfig {
@@ -428,9 +423,7 @@ impl LayoutConfig {
                             _ => continue,
                         };
                         let phase = match &row[1] {
-                            SdnValue::String(s) => {
-                                LayoutPhase::from_str(s).unwrap_or(LayoutPhase::Steady)
-                            }
+                            SdnValue::String(s) => LayoutPhase::from_str(s).unwrap_or(LayoutPhase::Steady),
                             _ => continue,
                         };
                         let size = match &row[2] {
@@ -516,18 +509,12 @@ impl LayoutConfig {
         }
 
         // Merge patterns (append)
-        self.patterns
-            .startup
-            .extend(other.patterns.startup.iter().cloned());
+        self.patterns.startup.extend(other.patterns.startup.iter().cloned());
         self.patterns
             .first_frame
             .extend(other.patterns.first_frame.iter().cloned());
-        self.patterns
-            .steady
-            .extend(other.patterns.steady.iter().cloned());
-        self.patterns
-            .cold
-            .extend(other.patterns.cold.iter().cloned());
+        self.patterns.steady.extend(other.patterns.steady.iter().cloned());
+        self.patterns.cold.extend(other.patterns.cold.iter().cloned());
 
         // Merge anchor patterns
         self.anchor_patterns
@@ -561,24 +548,16 @@ impl LayoutConfig {
         // Budgets
         output.push_str("    budgets:\n");
         output.push_str(&format!("        startup: {}\n", self.budgets.startup));
-        output.push_str(&format!(
-            "        first_frame: {}\n",
-            self.budgets.first_frame
-        ));
+        output.push_str(&format!("        first_frame: {}\n", self.budgets.first_frame));
         output.push_str(&format!("        steady: {}\n", self.budgets.steady));
         output.push_str(&format!("        cold: {}\n\n", self.budgets.cold));
 
         // Patterns
-        if !self.patterns.startup.is_empty()
-            || !self.patterns.first_frame.is_empty()
-            || !self.patterns.cold.is_empty()
+        if !self.patterns.startup.is_empty() || !self.patterns.first_frame.is_empty() || !self.patterns.cold.is_empty()
         {
             output.push_str("    patterns:\n");
             if !self.patterns.startup.is_empty() {
-                output.push_str(&format!(
-                    "        startup = [{}]\n",
-                    self.patterns.startup.join(", ")
-                ));
+                output.push_str(&format!("        startup = [{}]\n", self.patterns.startup.join(", ")));
             }
             if !self.patterns.first_frame.is_empty() {
                 output.push_str(&format!(
@@ -587,10 +566,7 @@ impl LayoutConfig {
                 ));
             }
             if !self.patterns.cold.is_empty() {
-                output.push_str(&format!(
-                    "        cold = [{}]\n",
-                    self.patterns.cold.join(", ")
-                ));
+                output.push_str(&format!("        cold = [{}]\n", self.patterns.cold.join(", ")));
             }
             output.push('\n');
         }
@@ -678,10 +654,7 @@ mod tests {
         patterns.cold = vec!["help_*".to_string(), "debug_*".to_string()];
 
         assert_eq!(patterns.find_phase("init_app"), Some(LayoutPhase::Startup));
-        assert_eq!(
-            patterns.find_phase("parse_args"),
-            Some(LayoutPhase::Startup)
-        );
+        assert_eq!(patterns.find_phase("parse_args"), Some(LayoutPhase::Startup));
         assert_eq!(patterns.find_phase("help_message"), Some(LayoutPhase::Cold));
         assert_eq!(patterns.find_phase("run_loop"), None);
     }
@@ -718,12 +691,9 @@ mod tests {
         config
             .overrides
             .insert("special_func".to_string(), LayoutPhase::FirstFrame);
-        config.recorded.push(RecordedFunction::new(
-            "recorded_func",
-            LayoutPhase::Startup,
-            100,
-            5,
-        ));
+        config
+            .recorded
+            .push(RecordedFunction::new("recorded_func", LayoutPhase::Startup, 100, 5));
 
         // Override takes precedence
         assert_eq!(config.get_phase("special_func"), LayoutPhase::FirstFrame);

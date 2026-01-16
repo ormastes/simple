@@ -86,10 +86,7 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 } else {
-                    return Err(ParseError::missing_token(
-                        "| after grid cell",
-                        self.current.span,
-                    ));
+                    return Err(ParseError::missing_token("| after grid cell", self.current.span));
                 }
             }
 

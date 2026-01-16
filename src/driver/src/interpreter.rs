@@ -15,8 +15,8 @@ use simple_parser::error_recovery::ErrorHintLevel;
 use simple_parser::Parser;
 use simple_runtime::gc::GcRuntime;
 use simple_runtime::value::{
-    rt_capture_stderr_start, rt_capture_stderr_stop, rt_capture_stdout_start,
-    rt_capture_stdout_stop, rt_clear_stdin, rt_set_stdin,
+    rt_capture_stderr_start, rt_capture_stderr_stop, rt_capture_stdout_start, rt_capture_stdout_stop, rt_clear_stdin,
+    rt_set_stdin,
 };
 
 use crate::Runner;
@@ -78,9 +78,7 @@ pub struct Interpreter {
 impl Interpreter {
     /// Create a new interpreter instance
     pub fn new() -> Self {
-        Self {
-            runner: Runner::new(),
-        }
+        Self { runner: Runner::new() }
     }
 
     /// Create an interpreter that uses the no-GC allocator.
@@ -286,18 +284,13 @@ impl Interpreter {
             executable: true,
         };
 
-        let mut settlement =
-            Settlement::new(config, allocator).map_err(|e| format!("create settlement: {e}"))?;
+        let mut settlement = Settlement::new(config, allocator).map_err(|e| format!("create settlement: {e}"))?;
 
         // Add the module to the settlement
-        settlement
-            .add_module(&module)
-            .map_err(|e| format!("add module: {e}"))?;
+        settlement.add_module(&module).map_err(|e| format!("add module: {e}"))?;
 
         // Create executable
-        let exe_path = tmp
-            .path()
-            .join(if cfg!(windows) { "app.exe" } else { "app" });
+        let exe_path = tmp.path().join(if cfg!(windows) { "app.exe" } else { "app" });
 
         create_executable(&settlement, &exe_path).map_err(|e| format!("create executable: {e}"))?;
 
@@ -313,23 +306,15 @@ impl Interpreter {
         }
 
         // Run the executable
-        let output = Command::new(&exe_path)
-            .output()
-            .map_err(|e| format!("run exe: {e}"))?;
+        let output = Command::new(&exe_path).output().map_err(|e| format!("run exe: {e}"))?;
 
         // Get exit code
         let exit_code = output.status.code().unwrap_or(-1);
 
         // Check for runtime errors (look for "error:" or "panic" in stderr)
         let stderr_str = String::from_utf8_lossy(&output.stderr);
-        if exit_code == -1
-            || stderr_str.contains("Load error:")
-            || stderr_str.contains("Execution error:")
-        {
-            return Err(format!(
-                "Executable failed (exit={}): {}",
-                exit_code, stderr_str
-            ));
+        if exit_code == -1 || stderr_str.contains("Load error:") || stderr_str.contains("Execution error:") {
+            return Err(format!("Executable failed (exit={}): {}", exit_code, stderr_str));
         }
 
         Ok(exit_code)
@@ -482,10 +467,10 @@ fn display_error_hints(parser: &Parser, source: &str) {
     // Display hints to stderr
     for hint in hints {
         let level_str = match hint.level {
-            ErrorHintLevel::Error => "\x1b[31merror\x1b[0m", // red
+            ErrorHintLevel::Error => "\x1b[31merror\x1b[0m",     // red
             ErrorHintLevel::Warning => "\x1b[33mwarning\x1b[0m", // yellow
-            ErrorHintLevel::Info => "\x1b[36minfo\x1b[0m",   // cyan
-            ErrorHintLevel::Hint => "\x1b[32mhint\x1b[0m",   // green
+            ErrorHintLevel::Info => "\x1b[36minfo\x1b[0m",       // cyan
+            ErrorHintLevel::Hint => "\x1b[32mhint\x1b[0m",       // green
         };
 
         eprintln!("{}: {}", level_str, hint.message);

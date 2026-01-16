@@ -47,10 +47,7 @@ fn lean_infer_addition() {
 #[test]
 fn lean_infer_addition_type_mismatch() {
     // Bool + Nat should fail
-    let expr = LeanExpr::Add(
-        Box::new(LeanExpr::LitBool(true)),
-        Box::new(LeanExpr::LitNat(1)),
-    );
+    let expr = LeanExpr::Add(Box::new(LeanExpr::LitBool(true)), Box::new(LeanExpr::LitNat(1)));
     assert_eq!(lean_infer(&expr), None);
 }
 
@@ -167,17 +164,13 @@ fn infers_nested_if_expressions() {
 
 #[test]
 fn infers_higher_order_function() {
-    let items = parse_items(
-        "fn apply(f, x):\n    return f(x)\nfn inc(x):\n    return x + 1\nmain = apply(inc, 5)",
-    );
+    let items = parse_items("fn apply(f, x):\n    return f(x)\nfn inc(x):\n    return x + 1\nmain = apply(inc, 5)");
     check(&items).expect("type check ok");
 }
 
 #[test]
 fn infers_closure_capture() {
-    let items = parse_items(
-        "fn outer():\n    let x = 10\n    let f = \\y: x + y\n    return f(5)\nmain = outer()",
-    );
+    let items = parse_items("fn outer():\n    let x = 10\n    let f = \\y: x + y\n    return f(5)\nmain = outer()");
     check(&items).expect("type check ok");
 }
 
@@ -191,17 +184,14 @@ fn infers_mutual_recursion() {
 
 #[test]
 fn infers_complex_array_operations() {
-    let items = parse_items(
-        "let arr = [[1, 2], [3, 4], [5, 6]]\nlet first = arr[0]\nlet elem = first[1]\nmain = elem",
-    );
+    let items = parse_items("let arr = [[1, 2], [3, 4], [5, 6]]\nlet first = arr[0]\nlet elem = first[1]\nmain = elem");
     check(&items).expect("type check ok");
 }
 
 #[test]
 fn infers_mixed_collection_types() {
-    let items = parse_items(
-        "let arr = [1, 2, 3]\nlet tuple = (arr, \"test\", true)\nlet dict = {\"key\": tuple}\nmain = 0"
-    );
+    let items =
+        parse_items("let arr = [1, 2, 3]\nlet tuple = (arr, \"test\", true)\nlet dict = {\"key\": tuple}\nmain = 0");
     check(&items).expect("type check ok");
 }
 
@@ -281,8 +271,7 @@ fn catches_duplicate_field_in_struct() {
 
 #[test]
 fn catches_missing_struct_field() {
-    let items =
-        parse_items("struct Point:\n    x: i64\n    y: i64\nlet p = Point { x: 1 }\nmain = 0");
+    let items = parse_items("struct Point:\n    x: i64\n    y: i64\nlet p = Point { x: 1 }\nmain = 0");
     // Should fail - missing field y
     let _ = check(&items);
 }
@@ -369,9 +358,8 @@ fn test_occurs_check_nested() {
 
 #[test]
 fn test_numeric_operations() {
-    let items = parse_items(
-        "let a = 1\nlet b = 2\nlet c = a + b\nlet d = a * b\nlet e = a - b\nlet f = a / b\nmain = c"
-    );
+    let items =
+        parse_items("let a = 1\nlet b = 2\nlet c = a + b\nlet d = a * b\nlet e = a - b\nlet f = a / b\nmain = c");
     check(&items).expect("type check ok");
 }
 
@@ -384,7 +372,7 @@ fn test_string_operations() {
 #[test]
 fn test_boolean_operations() {
     let items = parse_items(
-        "let a = true\nlet b = false\nlet c = a and b\nlet d = a or b\nlet e = not a\nmain = if c: 1 else: 0"
+        "let a = true\nlet b = false\nlet c = a and b\nlet d = a or b\nlet e = not a\nmain = if c: 1 else: 0",
     );
     check(&items).expect("type check ok");
 }

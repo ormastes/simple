@@ -15,11 +15,7 @@ pub struct Row {
 impl Row {
     /// Create a new row with values and column names.
     pub fn new(values: Vec<SqlValue>, columns: Vec<String>) -> Self {
-        let column_map = columns
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i))
-            .collect();
+        let column_map = columns.iter().enumerate().map(|(i, name)| (name.clone(), i)).collect();
         Self { values, column_map }
     }
 
@@ -102,10 +98,7 @@ pub struct Rows {
 
 impl Rows {
     /// Create a new rows iterator.
-    pub fn new(
-        inner: Box<dyn Iterator<Item = DbResult<Row>> + Send>,
-        columns: Vec<String>,
-    ) -> Self {
+    pub fn new(inner: Box<dyn Iterator<Item = DbResult<Row>> + Send>, columns: Vec<String>) -> Self {
         Self { inner, columns }
     }
 

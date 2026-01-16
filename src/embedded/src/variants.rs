@@ -207,10 +207,7 @@ impl<const N: usize> Default for StaticBuffer<N> {
 impl<const N: usize> StaticBuffer<N> {
     /// Create a new empty static buffer.
     pub const fn new() -> Self {
-        Self {
-            data: [0; N],
-            len: 0,
-        }
+        Self { data: [0; N], len: 0 }
     }
 
     /// Get buffer capacity.
@@ -305,9 +302,7 @@ impl<T, const N: usize> StaticVec<T, N> {
     pub fn new() -> Self {
         Self {
             // Safety: MaybeUninit array doesn't require initialization
-            data: unsafe {
-                core::mem::MaybeUninit::<[core::mem::MaybeUninit<T>; N]>::uninit().assume_init()
-            },
+            data: unsafe { core::mem::MaybeUninit::<[core::mem::MaybeUninit<T>; N]>::uninit().assume_init() },
             len: 0,
         }
     }
@@ -546,9 +541,7 @@ pub struct MemoryPool<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> {
     free_mask: u64, // Bitmap of free blocks (max 64 blocks)
 }
 
-impl<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> Default
-    for MemoryPool<BLOCK_SIZE, BLOCK_COUNT>
-{
+impl<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> Default for MemoryPool<BLOCK_SIZE, BLOCK_COUNT> {
     fn default() -> Self {
         Self::new()
     }

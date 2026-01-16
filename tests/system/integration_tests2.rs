@@ -15,8 +15,8 @@ use tempfile::tempdir;
 // =============================================================================
 
 use simple_loader::smf::{
-    hash_name, Arch, Platform, SectionType, SmfHeader, SmfSection, SmfSymbol, SymbolBinding,
-    SymbolTable, SymbolType, SECTION_FLAG_EXEC, SECTION_FLAG_READ, SMF_FLAG_EXECUTABLE, SMF_MAGIC,
+    hash_name, Arch, Platform, SectionType, SmfHeader, SmfSection, SmfSymbol, SymbolBinding, SymbolTable, SymbolType,
+    SECTION_FLAG_EXEC, SECTION_FLAG_READ, SMF_FLAG_EXECUTABLE, SMF_MAGIC,
 };
 use std::io::Cursor;
 
@@ -211,9 +211,7 @@ fn test_loaded_module_entry_point_integration() {
     let smf_path = dir.path().join("entry_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -230,9 +228,7 @@ fn test_loaded_module_exports_integration() {
     let smf_path = dir.path().join("exports_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 0", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 0", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -249,9 +245,7 @@ fn test_loaded_module_source_hash_integration() {
     let smf_path = dir.path().join("hash_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 123", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 123", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -274,9 +268,7 @@ fn test_module_registry_new_load_integration() {
     let smf_path = dir.path().join("registry_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 77", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 77", &smf_path).expect("compile ok");
 
     let mut registry = ModuleRegistry::new();
     let module = registry.load(&smf_path).expect("load ok");
@@ -292,9 +284,7 @@ fn test_module_registry_unload_integration() {
     let smf_path = dir.path().join("unload_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 88", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 88", &smf_path).expect("compile ok");
 
     let mut registry = ModuleRegistry::new();
     let _module = registry.load(&smf_path).expect("load ok");
@@ -310,17 +300,13 @@ fn test_module_registry_reload_integration() {
     let smf_path = dir.path().join("reload_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 99", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 99", &smf_path).expect("compile ok");
 
     let mut registry = ModuleRegistry::new();
     let _module = registry.load(&smf_path).expect("load ok");
 
     // Modify and reload
-    runner
-        .compile_to_smf("main = 100", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 100", &smf_path).expect("compile ok");
     let result = registry.reload(&smf_path);
     // Reload may or may not be supported depending on platform
     let _ = result;
@@ -578,9 +564,7 @@ fn test_run_code_with_args_pub_func_integration() {
 // Value Types Integration Tests
 // =============================================================================
 
-use simple_compiler::{
-    ClassName, EnumTypeName, Env, Value, VariantName, BUILTIN_ARRAY, BUILTIN_RANGE,
-};
+use simple_compiler::{ClassName, EnumTypeName, Env, Value, VariantName, BUILTIN_ARRAY, BUILTIN_RANGE};
 
 /// Test ClassName newtype
 #[test]

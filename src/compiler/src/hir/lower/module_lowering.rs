@@ -203,8 +203,7 @@ impl Lowerer {
         // Fourth pass: lower import statements for dependency tracking AND load types
         for item in &ast_module.items {
             if let Node::UseStmt(use_stmt) = item {
-                let import =
-                    self.lower_import(&use_stmt.path, &use_stmt.target, use_stmt.is_type_only);
+                let import = self.lower_import(&use_stmt.path, &use_stmt.target, use_stmt.is_type_only);
                 self.module.imports.push(import);
 
                 // NEW: Load types from imported module into globals symbol table
@@ -279,15 +278,10 @@ impl Lowerer {
     }
 
     /// Flatten an ImportTarget into a list of (name, alias) pairs.
-    fn flatten_import_target(
-        &self,
-        target: &ast::ImportTarget,
-    ) -> (Vec<(String, Option<String>)>, bool) {
+    fn flatten_import_target(&self, target: &ast::ImportTarget) -> (Vec<(String, Option<String>)>, bool) {
         match target {
             ast::ImportTarget::Single(name) => (vec![(name.clone(), None)], false),
-            ast::ImportTarget::Aliased { name, alias } => {
-                (vec![(name.clone(), Some(alias.clone()))], false)
-            }
+            ast::ImportTarget::Aliased { name, alias } => (vec![(name.clone(), Some(alias.clone()))], false),
             ast::ImportTarget::Group(targets) => {
                 let mut items = Vec::new();
                 for t in targets {
@@ -325,12 +319,7 @@ impl Lowerer {
     /// - It's a method of a class/struct (owner_type is Some)
     /// - It returns an instance of the owner type
     /// - It doesn't take `self` as first parameter (static factory method)
-    fn is_constructor(
-        &self,
-        f: &ast::FunctionDef,
-        owner_type: Option<&str>,
-        return_type: TypeId,
-    ) -> bool {
+    fn is_constructor(&self, f: &ast::FunctionDef, owner_type: Option<&str>, return_type: TypeId) -> bool {
         // Must be a method of a class/struct
         let Some(type_name) = owner_type else {
             return false;
@@ -430,11 +419,7 @@ impl Lowerer {
 
     /// Lower a function, optionally injecting type invariants for methods
     /// `owner_type`: If this function is a method, the name of the owning type
-    fn lower_function(
-        &mut self,
-        f: &ast::FunctionDef,
-        owner_type: Option<&str>,
-    ) -> LowerResult<HirFunction> {
+    fn lower_function(&mut self, f: &ast::FunctionDef, owner_type: Option<&str>) -> LowerResult<HirFunction> {
         // Set current class type for Self resolution
         let previous_class_type = self.current_class_type;
         if let Some(type_name) = owner_type {
@@ -511,19 +496,17 @@ impl Lowerer {
             // Check parameter types for invariants (add as preconditions)
             for (param_idx, param) in params.iter().enumerate() {
                 if let Some(type_name) = self.module.types.get_type_name(param.ty) {
-                    if let Some(type_invariant) =
-                        self.module.type_invariants.get(type_name).cloned()
-                    {
+                    if let Some(type_invariant) = self.module.type_invariants.get(type_name).cloned() {
                         let contract = contract.get_or_insert_with(HirContract::default);
                         for clause in &type_invariant.conditions {
                             // Substitute self (local 0) with the parameter index
-                            let substituted_condition =
-                                clause.condition.substitute_local(0, param_idx);
+                            let substituted_condition = clause.condition.substitute_local(0, param_idx);
                             contract.preconditions.push(HirContractClause {
                                 condition: substituted_condition,
-                                message: clause.message.clone().or_else(|| {
-                                    Some(format!("Type invariant for parameter '{}'", param.name))
-                                }),
+                                message: clause
+                                    .message
+                                    .clone()
+                                    .or_else(|| Some(format!("Type invariant for parameter '{}'", param.name))),
                             });
                         }
                     }
@@ -610,11 +593,7 @@ impl Lowerer {
         })
     }
 
-    fn lower_contract(
-        &mut self,
-        contract: &ast::ContractBlock,
-        ctx: &mut FunctionContext,
-    ) -> LowerResult<HirContract> {
+    fn lower_contract(&mut self, contract: &ast::ContractBlock, ctx: &mut FunctionContext) -> LowerResult<HirContract> {
         let mut hir_contract = HirContract::default();
 
         // Set contract context BEFORE lowering any expressions (CTR-030-032)

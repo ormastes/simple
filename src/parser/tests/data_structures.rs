@@ -101,7 +101,9 @@ fn parse_impl_where_clause() {
 
 #[test]
 fn parse_impl_generic_params() {
-    let items = parse("impl<T> Clone for Container[T] where T: Clone:\n    fn clone(self) -> Container[T]:\n        return self");
+    let items = parse(
+        "impl<T> Clone for Container[T] where T: Clone:\n    fn clone(self) -> Container[T]:\n        return self",
+    );
     if let Node::Impl(impl_block) = &items[0] {
         assert_eq!(impl_block.generic_params, vec!["T"]);
         assert_eq!(impl_block.trait_name, Some("Clone".to_string()));
@@ -123,8 +125,7 @@ fn parse_struct_init_expression() {
 #[test]
 fn parse_struct_with_doc_comment() {
     // Double-quoted strings become FStrings, which the parser handles
-    let items =
-        parse("struct Person:\n    \"A person with a name and age.\"\n    name: str\n    age: i64");
+    let items = parse("struct Person:\n    \"A person with a name and age.\"\n    name: str\n    age: i64");
     if let Node::Struct(s) = &items[0] {
         assert_eq!(s.name, "Person");
         assert!(s.doc_comment.is_some(), "doc_comment should be present");

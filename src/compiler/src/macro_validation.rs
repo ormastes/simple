@@ -134,12 +134,10 @@ pub fn validate_intro_no_shadowing(
                 "Macro intro '{}' shadows existing {} with the same name",
                 symbol_name, namespace
             ),
-            ErrorContext::new()
-                .with_code(codes::MACRO_SHADOWING)
-                .with_help(format!(
-                    "Rename the macro-introduced symbol or the existing {}",
-                    namespace
-                )),
+            ErrorContext::new().with_code(codes::MACRO_SHADOWING).with_help(format!(
+                "Rename the macro-introduced symbol or the existing {}",
+                namespace
+            )),
         ));
     }
 
@@ -220,9 +218,7 @@ pub fn validate_intro_type_annotations(spec: &MacroIntroSpec) -> Result<(), Comp
             Ok(())
         }
         MacroIntroSpec::If {
-            then_body,
-            else_body,
-            ..
+            then_body, else_body, ..
         } => {
             // Recursively validate both branches
             for inner_spec in then_body {
@@ -253,12 +249,7 @@ pub fn validate_macro_contract(
 
             // For validation, we need to extract introduced symbol names
             // This is a simplified check - full validation happens during contract processing
-            validate_intro_spec_recursive(
-                &intro.spec,
-                const_bindings,
-                existing_symbols,
-                &mut introduced_symbols,
-            )?;
+            validate_intro_spec_recursive(&intro.spec, const_bindings, existing_symbols, &mut introduced_symbols)?;
         }
     }
 
@@ -314,35 +305,18 @@ fn validate_intro_spec_recursive(
             loop_bindings.insert(name.clone(), "loop_index".to_string());
 
             for inner_spec in body {
-                validate_intro_spec_recursive(
-                    inner_spec,
-                    &loop_bindings,
-                    existing_symbols,
-                    introduced_symbols,
-                )?;
+                validate_intro_spec_recursive(inner_spec, &loop_bindings, existing_symbols, introduced_symbols)?;
             }
             Ok(())
         }
         MacroIntroSpec::If {
-            then_body,
-            else_body,
-            ..
+            then_body, else_body, ..
         } => {
             for inner_spec in then_body {
-                validate_intro_spec_recursive(
-                    inner_spec,
-                    const_bindings,
-                    existing_symbols,
-                    introduced_symbols,
-                )?;
+                validate_intro_spec_recursive(inner_spec, const_bindings, existing_symbols, introduced_symbols)?;
             }
             for inner_spec in else_body {
-                validate_intro_spec_recursive(
-                    inner_spec,
-                    const_bindings,
-                    existing_symbols,
-                    introduced_symbols,
-                )?;
+                validate_intro_spec_recursive(inner_spec, const_bindings, existing_symbols, introduced_symbols)?;
             }
             Ok(())
         }
@@ -394,10 +368,7 @@ mod tests {
 
         let result = validate_qident_const_bindings("func_{INVALID}", &bindings);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not a const parameter"));
+        assert!(result.unwrap_err().to_string().contains("not a const parameter"));
     }
 
     #[test]

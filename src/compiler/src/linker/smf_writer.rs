@@ -6,8 +6,8 @@ use crate::mir::MirModule;
 
 // Re-export SMF types from loader (single source of truth)
 pub use simple_loader::smf::{
-    RelocationType, SectionType, SymbolBinding, SymbolType, SECTION_FLAG_EXEC, SECTION_FLAG_READ,
-    SECTION_FLAG_WRITE, SMF_FLAG_EXECUTABLE, SMF_MAGIC,
+    RelocationType, SectionType, SymbolBinding, SymbolType, SECTION_FLAG_EXEC, SECTION_FLAG_READ, SECTION_FLAG_WRITE,
+    SMF_FLAG_EXECUTABLE, SMF_MAGIC,
 };
 
 /// SMF version constants
@@ -338,9 +338,8 @@ impl SmfWriter {
         let mut writer = Self::new();
 
         // Parse object file to extract sections, symbols, and relocations
-        let parsed = ParsedObject::parse(object_code).map_err(|e| {
-            SmfWriteError::InvalidData(format!("Failed to parse object file: {}", e))
-        })?;
+        let parsed = ParsedObject::parse(object_code)
+            .map_err(|e| SmfWriteError::InvalidData(format!("Failed to parse object file: {}", e)))?;
 
         // Build mapping from MIR function names to layout info
         let mut mir_func_info: HashMap<String, _> = HashMap::new();

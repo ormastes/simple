@@ -142,11 +142,7 @@ impl HirModule {
     }
 
     /// Get method signature from a trait
-    pub fn get_trait_method(
-        &self,
-        trait_name: &str,
-        method_name: &str,
-    ) -> Option<&HirMethodSignature> {
+    pub fn get_trait_method(&self, trait_name: &str, method_name: &str) -> Option<&HirMethodSignature> {
         self.trait_infos
             .get(trait_name)
             .and_then(|info| info.get_method(method_name))

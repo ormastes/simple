@@ -37,51 +37,33 @@ impl MonomorphizationTable {
     /// Request a function specialization.
     ///
     /// Returns the mangled name for the specialization.
-    pub fn request_function(
-        &mut self,
-        name: &str,
-        type_args: Vec<ConcreteType>,
-        original: &FunctionDef,
-    ) -> String {
+    pub fn request_function(&mut self, name: &str, type_args: Vec<ConcreteType>, original: &FunctionDef) -> String {
         let key = SpecializationKey::new(name, type_args);
 
         if !self.processed.contains(&key) && !self.specialized_functions.contains_key(&key) {
-            self.pending_functions
-                .push_back((key.clone(), original.clone()));
+            self.pending_functions.push_back((key.clone(), original.clone()));
         }
 
         key.mangled_name()
     }
 
     /// Request a struct specialization.
-    pub fn request_struct(
-        &mut self,
-        name: &str,
-        type_args: Vec<ConcreteType>,
-        original: &StructDef,
-    ) -> String {
+    pub fn request_struct(&mut self, name: &str, type_args: Vec<ConcreteType>, original: &StructDef) -> String {
         let key = SpecializationKey::new(name, type_args);
 
         if !self.processed.contains(&key) && !self.specialized_structs.contains_key(&key) {
-            self.pending_structs
-                .push_back((key.clone(), original.clone()));
+            self.pending_structs.push_back((key.clone(), original.clone()));
         }
 
         key.mangled_name()
     }
 
     /// Request a class specialization.
-    pub fn request_class(
-        &mut self,
-        name: &str,
-        type_args: Vec<ConcreteType>,
-        original: &ClassDef,
-    ) -> String {
+    pub fn request_class(&mut self, name: &str, type_args: Vec<ConcreteType>, original: &ClassDef) -> String {
         let key = SpecializationKey::new(name, type_args);
 
         if !self.processed.contains(&key) && !self.specialized_classes.contains_key(&key) {
-            self.pending_classes
-                .push_back((key.clone(), original.clone()));
+            self.pending_classes.push_back((key.clone(), original.clone()));
         }
 
         key.mangled_name()
@@ -89,9 +71,7 @@ impl MonomorphizationTable {
 
     /// Check if there are pending specializations.
     pub fn has_pending(&self) -> bool {
-        !self.pending_functions.is_empty()
-            || !self.pending_structs.is_empty()
-            || !self.pending_classes.is_empty()
+        !self.pending_functions.is_empty() || !self.pending_structs.is_empty() || !self.pending_classes.is_empty()
     }
 
     /// Get the next pending function to specialize.
@@ -135,9 +115,7 @@ impl MonomorphizationTable {
     }
 
     /// Get all specialized functions.
-    pub fn specialized_functions(
-        &self,
-    ) -> impl Iterator<Item = (&SpecializationKey, &FunctionDef)> {
+    pub fn specialized_functions(&self) -> impl Iterator<Item = (&SpecializationKey, &FunctionDef)> {
         self.specialized_functions.iter()
     }
 

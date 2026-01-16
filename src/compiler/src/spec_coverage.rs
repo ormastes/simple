@@ -61,8 +61,7 @@ pub struct SpecCoverageReport {
 impl SpecCoverageReport {
     /// Load spec coverage data from YAML file
     pub fn load(path: &Path) -> Result<Self, String> {
-        let content =
-            fs::read_to_string(path).map_err(|e| format!("Failed to read spec file: {}", e))?;
+        let content = fs::read_to_string(path).map_err(|e| format!("Failed to read spec file: {}", e))?;
 
         let data: SpecCoverageFile =
             serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse YAML: {}", e))?;
@@ -78,8 +77,7 @@ impl SpecCoverageReport {
         println!(
             "Implemented: {} ({:.1}%)",
             self.data.summary.implemented,
-            (self.data.summary.implemented as f64 / self.data.summary.total_features as f64)
-                * 100.0
+            (self.data.summary.implemented as f64 / self.data.summary.total_features as f64) * 100.0
         );
         println!(
             "Partial: {} ({:.1}%)",
@@ -92,10 +90,7 @@ impl SpecCoverageReport {
             (self.data.summary.planned as f64 / self.data.summary.total_features as f64) * 100.0
         );
         println!();
-        println!(
-            "Overall Coverage: {:.1}%",
-            self.data.summary.overall_coverage
-        );
+        println!("Overall Coverage: {:.1}%", self.data.summary.overall_coverage);
     }
 
     /// Display coverage by category
@@ -159,11 +154,11 @@ impl SpecCoverageReport {
         html.push_str("    .metric .label { font-weight: bold; }\n");
         html.push_str("    .metric .value { font-size: 24px; color: #2196F3; }\n");
         html.push_str("    .progress { height: 20px; background: #e0e0e0; border-radius: 10px; margin-top: 5px; }\n");
-        html.push_str("    .progress-bar { height: 100%; background: #2196F3; border-radius: 10px; transition: width 0.3s; }\n");
-        html.push_str("    table { width: 100%; border-collapse: collapse; margin: 20px 0; }\n");
         html.push_str(
-            "    th { background: #333; color: white; padding: 12px; text-align: left; }\n",
+            "    .progress-bar { height: 100%; background: #2196F3; border-radius: 10px; transition: width 0.3s; }\n",
         );
+        html.push_str("    table { width: 100%; border-collapse: collapse; margin: 20px 0; }\n");
+        html.push_str("    th { background: #333; color: white; padding: 12px; text-align: left; }\n");
         html.push_str("    td { padding: 10px; border-bottom: 1px solid #ddd; }\n");
         html.push_str("    .implemented { background: #e8f5e9; }\n");
         html.push_str("    .partial { background: #fff3e0; }\n");
@@ -202,9 +197,7 @@ impl SpecCoverageReport {
                 category.name
             ));
             html.push_str("    <table>\n");
-            html.push_str(
-                "      <tr><th>Feature</th><th>Status</th><th>Tests</th><th>Coverage</th></tr>\n",
-            );
+            html.push_str("      <tr><th>Feature</th><th>Status</th><th>Tests</th><th>Coverage</th></tr>\n");
 
             for feature in &category.features {
                 let row_class = match feature.status {
@@ -222,10 +215,7 @@ impl SpecCoverageReport {
                 html.push_str(&format!("      <tr class=\"{}\">\n", row_class));
                 html.push_str(&format!("        <td>{}</td>\n", feature.name));
                 html.push_str(&format!("        <td>{}</td>\n", status_text));
-                html.push_str(&format!(
-                    "        <td>{} test file(s)</td>\n",
-                    feature.tests.len()
-                ));
+                html.push_str(&format!("        <td>{} test file(s)</td>\n", feature.tests.len()));
                 html.push_str(&format!("        <td>{:.1}%</td>\n", feature.coverage));
                 html.push_str("      </tr>\n");
             }
@@ -234,10 +224,7 @@ impl SpecCoverageReport {
             html.push_str("  </div>\n");
         }
 
-        html.push_str(&format!(
-            "  <p><em>Generated: {}</em></p>\n",
-            self.data.last_updated
-        ));
+        html.push_str(&format!("  <p><em>Generated: {}</em></p>\n", self.data.last_updated));
         html.push_str("</body>\n</html>");
 
         html
@@ -247,8 +234,7 @@ impl SpecCoverageReport {
 /// Find the spec coverage file in the project root
 pub fn find_spec_file() -> Result<PathBuf, String> {
     // Try specs/language.yaml in current directory and parents
-    let mut current =
-        std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+    let mut current = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
 
     loop {
         let spec_path = current.join("specs").join("language.yaml");

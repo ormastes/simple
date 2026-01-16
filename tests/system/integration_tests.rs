@@ -14,8 +14,8 @@ use tempfile::tempdir;
 // =============================================================================
 
 use simple_compiler::hir::{
-    BinOp, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, HirType, LocalVar, PointerKind,
-    Signedness, TypeId, TypeIdAllocator, TypeRegistry, UnaryOp,
+    BinOp, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, HirType, LocalVar, PointerKind, Signedness, TypeId,
+    TypeIdAllocator, TypeRegistry, UnaryOp,
 };
 use simple_parser::ast::{Mutability, Visibility};
 
@@ -79,10 +79,7 @@ fn test_type_registry_register_integration() {
     // Register named type
     let struct_type = HirType::Struct {
         name: "Point".to_string(),
-        fields: vec![
-            ("x".to_string(), TypeId::F64),
-            ("y".to_string(), TypeId::F64),
-        ],
+        fields: vec![("x".to_string(), TypeId::F64), ("y".to_string(), TypeId::F64)],
         has_snapshot: false,
     };
     let struct_id = registry.register_named("Point".to_string(), struct_type.clone());
@@ -417,9 +414,8 @@ fn test_pointer_kind_integration() {
 // =============================================================================
 
 use simple_compiler::mir::{
-    is_async, nogc, nogc_singleton, pipeline_safe, AsyncEffect, BlockBuilder, BuiltinFunc,
-    CallTarget, Effect, EffectSet, LocalKind, MirBlock, MirFunction, MirLocal, MirModule,
-    NogcInstr, Terminator,
+    is_async, nogc, nogc_singleton, pipeline_safe, AsyncEffect, BlockBuilder, BuiltinFunc, CallTarget, Effect,
+    EffectSet, LocalKind, MirBlock, MirFunction, MirLocal, MirModule, NogcInstr, Terminator,
 };
 
 /// Test LocalKind enum

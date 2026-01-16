@@ -145,9 +145,7 @@ mod compiler_async_value_tests {
 // Compiler Manual Pointer Value Types
 // ============================================================================
 mod compiler_manual_value_tests {
-    use simple_compiler::{
-        ManualHandleValue, ManualSharedValue, ManualUniqueValue, ManualWeakValue,
-    };
+    use simple_compiler::{ManualHandleValue, ManualSharedValue, ManualUniqueValue, ManualWeakValue};
 
     #[test]
     fn test_manual_handle_value_size() {
@@ -363,8 +361,7 @@ mod loader_cross_test_extended_tests {
     #[test]
     fn test_test_matrix_with_target() {
         use simple_common::{Target, TargetArch, TargetOS};
-        let matrix =
-            TestMatrix::new().with_target(Target::new(TargetArch::Riscv64, TargetOS::Linux));
+        let matrix = TestMatrix::new().with_target(Target::new(TargetArch::Riscv64, TargetOS::Linux));
         let targets = matrix.targets();
         assert!(targets.len() >= 3);
     }

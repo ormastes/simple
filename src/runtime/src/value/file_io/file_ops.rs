@@ -63,10 +63,7 @@ pub extern "C" fn native_fs_open(path: RuntimeValue, mode: i64) -> RuntimeValue 
         }
         1 => {
             // Write
-            std::fs::OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(&path_str)
+            std::fs::OpenOptions::new().write(true).truncate(true).open(&path_str)
         }
         2 => {
             // Create
@@ -74,10 +71,7 @@ pub extern "C" fn native_fs_open(path: RuntimeValue, mode: i64) -> RuntimeValue 
         }
         3 => {
             // Append
-            std::fs::OpenOptions::new()
-                .write(true)
-                .append(true)
-                .open(&path_str)
+            std::fs::OpenOptions::new().write(true).append(true).open(&path_str)
         }
         _ => return RuntimeValue::NIL,
     };

@@ -12,8 +12,8 @@ mod type_resolver;
 pub use error::{LowerError, LowerResult};
 pub use lowerer::Lowerer;
 pub use parallel::{
-    lower_modules_parallel, lower_modules_parallel_with_config, BatchLowerer, LoweringStats,
-    ParallelLowerConfig, ParallelModuleLowerer,
+    lower_modules_parallel, lower_modules_parallel_with_config, BatchLowerer, LoweringStats, ParallelLowerConfig,
+    ParallelModuleLowerer,
 };
 
 use super::types::HirModule;

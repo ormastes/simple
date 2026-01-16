@@ -172,10 +172,7 @@ impl GpuBackendManager {
             GpuBackendType::Auto => Self::auto_select(),
             _ => {
                 if !backend.is_available() {
-                    return Err(format!(
-                        "{} backend is not available on this system",
-                        backend.name()
-                    ));
+                    return Err(format!("{} backend is not available on this system", backend.name()));
                 }
                 backend
             }
@@ -204,11 +201,7 @@ impl GpuBackendManager {
         format!(
             "Current: {} | Available: {}",
             current.name(),
-            available
-                .iter()
-                .map(|b| b.name())
-                .collect::<Vec<_>>()
-                .join(", ")
+            available.iter().map(|b| b.name()).collect::<Vec<_>>().join(", ")
         )
     }
 }

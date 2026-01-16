@@ -88,11 +88,7 @@ pub fn analyze_source_str(base: &Path, content: &str) -> (Vec<PathBuf>, Vec<Stri
             }
         } else if let Some(rest) = trimmed.strip_prefix("macro ") {
             if let Some(raw) = rest.split_whitespace().next() {
-                let name = raw
-                    .split(|c| c == '(' || c == '=')
-                    .next()
-                    .unwrap_or(raw)
-                    .trim();
+                let name = raw.split(|c| c == '(' || c == '=').next().unwrap_or(raw).trim();
                 if !name.is_empty() {
                     macros.push(name.to_string());
                 }

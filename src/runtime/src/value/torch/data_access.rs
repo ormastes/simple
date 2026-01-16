@@ -18,11 +18,7 @@ use std::sync::Arc;
 /// Copy tensor data to CPU buffer
 /// Returns number of bytes copied, or 0 on failure
 #[no_mangle]
-pub extern "C" fn rt_torch_copy_data_to_cpu(
-    tensor_handle: u64,
-    buffer_ptr: *mut f32,
-    buffer_size: i64,
-) -> i64 {
+pub extern "C" fn rt_torch_copy_data_to_cpu(tensor_handle: u64, buffer_ptr: *mut f32, buffer_size: i64) -> i64 {
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
@@ -42,10 +38,7 @@ pub extern "C" fn rt_torch_copy_data_to_cpu(
         }
 
         // Convert to CPU and f32 if needed
-        let cpu_tensor = tensor
-            .0
-            .to_device(tch::Device::Cpu)
-            .to_kind(tch::Kind::Float);
+        let cpu_tensor = tensor.0.to_device(tch::Device::Cpu).to_kind(tch::Kind::Float);
 
         // Copy data to buffer
         let data: Vec<f32> = cpu_tensor.view(-1).try_into().unwrap_or_default();
@@ -110,9 +103,7 @@ pub extern "C" fn rt_torch_sum(tensor_handle: u64) -> u64 {
 
         let result = tensor.0.sum(tch::Kind::Float);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!("rt_torch_sum: {} -> handle={}", tensor_handle, handle);
         handle
     }
@@ -137,9 +128,7 @@ pub extern "C" fn rt_torch_mean(tensor_handle: u64) -> u64 {
 
         let result = tensor.0.mean(tch::Kind::Float);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!("rt_torch_mean: {} -> handle={}", tensor_handle, handle);
         handle
     }

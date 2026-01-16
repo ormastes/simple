@@ -93,11 +93,7 @@ impl<'a> Parser<'a> {
                     } else {
                         None
                     };
-                    return Ok(Pattern::Enum {
-                        name,
-                        variant,
-                        payload,
-                    });
+                    return Ok(Pattern::Enum { name, variant, payload });
                 }
 
                 // Check for unit enum variants without parentheses: None

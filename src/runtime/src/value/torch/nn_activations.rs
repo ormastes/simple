@@ -22,9 +22,7 @@ pub extern "C" fn rt_torch_relu(tensor_handle: u64) -> u64 {
 
         let result = tensor.0.relu();
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -47,9 +45,7 @@ pub extern "C" fn rt_torch_sigmoid(tensor_handle: u64) -> u64 {
 
         let result = tensor.0.sigmoid();
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -72,9 +68,7 @@ pub extern "C" fn rt_torch_tanh(tensor_handle: u64) -> u64 {
 
         let result = tensor.0.tanh();
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -101,9 +95,7 @@ pub extern "C" fn rt_torch_gelu(tensor_handle: u64) -> u64 {
 
         let result = tensor.0.gelu("none");
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!("rt_torch_gelu: {} -> handle={}", tensor_handle, handle);
         handle
     }
@@ -129,9 +121,7 @@ pub extern "C" fn rt_torch_leaky_relu(tensor_handle: u64, negative_slope: f64) -
         let scaled = &tensor.0 * negative_slope;
         let result = tensor.0.maximum(&scaled);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
             "rt_torch_leaky_relu: {} slope={} -> handle={}",
             tensor_handle,
@@ -160,9 +150,7 @@ pub extern "C" fn rt_torch_silu(tensor_handle: u64) -> u64 {
 
         let result = tensor.0.silu();
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!("rt_torch_silu: {} -> handle={}", tensor_handle, handle);
         handle
     }
@@ -187,9 +175,7 @@ pub extern "C" fn rt_torch_mish(tensor_handle: u64) -> u64 {
 
         let result = tensor.0.mish();
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!("rt_torch_mish: {} -> handle={}", tensor_handle, handle);
         handle
     }
@@ -219,15 +205,8 @@ pub extern "C" fn rt_torch_elu(tensor_handle: u64, alpha: f64) -> u64 {
         let result = tensor.0.where_self(&condition, &exp_part); // if condition: tensor else exp_part
 
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!(
-            "rt_torch_elu: {} alpha={} -> handle={}",
-            tensor_handle,
-            alpha,
-            handle
-        );
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!("rt_torch_elu: {} alpha={} -> handle={}", tensor_handle, alpha, handle);
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -261,9 +240,7 @@ pub extern "C" fn rt_torch_softplus(tensor_handle: u64, beta: f64, threshold: f6
         let result = tensor.0.where_self(&condition, &exp_part);
 
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
             "rt_torch_softplus: {} beta={} threshold={} -> handle={}",
             tensor_handle,
@@ -293,15 +270,8 @@ pub extern "C" fn rt_torch_softmax(tensor_handle: u64, dim: i64) -> u64 {
 
         let result = tensor.0.softmax(dim, tch::Kind::Float);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!(
-            "rt_torch_softmax: {} dim={} -> handle={}",
-            tensor_handle,
-            dim,
-            handle
-        );
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!("rt_torch_softmax: {} dim={} -> handle={}", tensor_handle, dim, handle);
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -324,9 +294,7 @@ pub extern "C" fn rt_torch_log_softmax(tensor_handle: u64, dim: i64) -> u64 {
 
         let result = tensor.0.log_softmax(dim, tch::Kind::Float);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
             "rt_torch_log_softmax: {} dim={} -> handle={}",
             tensor_handle,

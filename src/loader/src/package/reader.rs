@@ -42,10 +42,7 @@ impl PackageReader {
     }
 
     /// Load a package from any seekable reader.
-    pub fn load_from_reader<R: Read + Seek>(
-        &self,
-        reader: &mut R,
-    ) -> Result<LoadedPackage, PackageError> {
+    pub fn load_from_reader<R: Read + Seek>(&self, reader: &mut R) -> Result<LoadedPackage, PackageError> {
         // Read trailer from end
         let trailer = PackageTrailer::read_from(reader)?;
 
@@ -106,10 +103,7 @@ impl PackageReader {
     }
 
     /// Load only the manifest (without loading full package).
-    pub fn load_manifest<P: AsRef<Path>>(
-        &self,
-        path: P,
-    ) -> Result<Option<ManifestSection>, PackageError> {
+    pub fn load_manifest<P: AsRef<Path>>(&self, path: P) -> Result<Option<ManifestSection>, PackageError> {
         let mut file = File::open(path)?;
         let trailer = PackageTrailer::read_from(&mut file)?;
 
@@ -190,8 +184,7 @@ impl PackageReader {
             if offset + 4 > data.len() {
                 break;
             }
-            let data_len =
-                u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            let data_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
 
             if offset + data_len > data.len() {
@@ -236,11 +229,9 @@ impl PackageReader {
             if offset + 8 > data.len() {
                 break;
             }
-            let compressed_len =
-                u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            let compressed_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
-            let uncompressed_size =
-                u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+            let uncompressed_size = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
             offset += 4;
 
             // Read compressed data
@@ -251,8 +242,7 @@ impl PackageReader {
             offset += compressed_len;
 
             // Decompress
-            let decompressed =
-                self.simple_decompress(compressed_data, uncompressed_size as usize)?;
+            let decompressed = self.simple_decompress(compressed_data, uncompressed_size as usize)?;
 
             // Read checksum
             if offset + 4 > data.len() {
@@ -281,11 +271,7 @@ impl PackageReader {
     }
 
     /// Simple decompression (inverse of simple_compress).
-    fn simple_decompress(
-        &self,
-        data: &[u8],
-        expected_size: usize,
-    ) -> Result<Vec<u8>, PackageError> {
+    fn simple_decompress(&self, data: &[u8], expected_size: usize) -> Result<Vec<u8>, PackageError> {
         if data.is_empty() {
             return Ok(Vec::new());
         }
@@ -293,9 +279,7 @@ impl PackageReader {
         // Check for uncompressed marker
         if data[0] == 0xFE {
             if data.len() < 5 {
-                return Err(PackageError::CompressionError(
-                    "Invalid uncompressed data".to_string(),
-                ));
+                return Err(PackageError::CompressionError("Invalid uncompressed data".to_string()));
             }
             let size = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
             if data.len() < 5 + size {
@@ -364,10 +348,7 @@ impl Default for PackageReader {
 }
 
 /// Extract a specific resource from a package.
-pub fn extract_resource<P: AsRef<Path>>(
-    package_path: P,
-    resource_path: &str,
-) -> Result<Option<Vec<u8>>, PackageError> {
+pub fn extract_resource<P: AsRef<Path>>(package_path: P, resource_path: &str) -> Result<Option<Vec<u8>>, PackageError> {
     let reader = PackageReader::new();
     let package = reader.load(package_path)?;
 

@@ -28,8 +28,7 @@ pub fn export_ast_json<W: Write>(module: &AstModule, writer: &mut W) -> ExportRe
 pub fn export_ast(module: &AstModule, path: Option<&Path>) -> ExportResult {
     match path {
         Some(p) => {
-            let mut file =
-                File::create(p).map_err(|e| format!("Failed to create file {:?}: {}", p, e))?;
+            let mut file = File::create(p).map_err(|e| format!("Failed to create file {:?}: {}", p, e))?;
             export_ast_json(module, &mut file)
         }
         None => {
@@ -52,8 +51,7 @@ pub fn export_hir_json<W: Write>(module: &HirModule, writer: &mut W) -> ExportRe
 pub fn export_hir(module: &HirModule, path: Option<&Path>) -> ExportResult {
     match path {
         Some(p) => {
-            let mut file =
-                File::create(p).map_err(|e| format!("Failed to create file {:?}: {}", p, e))?;
+            let mut file = File::create(p).map_err(|e| format!("Failed to create file {:?}: {}", p, e))?;
             export_hir_json(module, &mut file)
         }
         None => {
@@ -76,8 +74,7 @@ pub fn export_mir_json<W: Write>(module: &MirModule, writer: &mut W) -> ExportRe
 pub fn export_mir(module: &MirModule, path: Option<&Path>) -> ExportResult {
     match path {
         Some(p) => {
-            let mut file =
-                File::create(p).map_err(|e| format!("Failed to create file {:?}: {}", p, e))?;
+            let mut file = File::create(p).map_err(|e| format!("Failed to create file {:?}: {}", p, e))?;
             export_mir_json(module, &mut file)
         }
         None => {

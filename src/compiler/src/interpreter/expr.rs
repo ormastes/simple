@@ -8,8 +8,8 @@ use crate::effects::check_effect_violations;
 use crate::value::{OptionVariant, ResultVariant, SpecialEnumType};
 
 use super::{
-    evaluate_macro_invocation, spawn_actor_with_expr, take_macro_introduced_symbols, ClassDef,
-    CompileError, Enums, Env, FunctionDef, ImplMethods, Value, GENERATOR_YIELDS,
+    evaluate_macro_invocation, spawn_actor_with_expr, take_macro_introduced_symbols, ClassDef, CompileError, Enums,
+    Env, FunctionDef, ImplMethods, Value, GENERATOR_YIELDS,
 };
 
 mod calls;
@@ -31,26 +31,19 @@ pub(crate) fn evaluate_expr(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    if let Some(value) =
-        literals::eval_literal_expr(expr, env, functions, classes, enums, impl_methods)?
-    {
+    if let Some(value) = literals::eval_literal_expr(expr, env, functions, classes, enums, impl_methods)? {
         return Ok(value);
     }
     if let Some(value) = ops::eval_op_expr(expr, env, functions, classes, enums, impl_methods)? {
         return Ok(value);
     }
-    if let Some(value) =
-        control::eval_control_expr(expr, env, functions, classes, enums, impl_methods)?
-    {
+    if let Some(value) = control::eval_control_expr(expr, env, functions, classes, enums, impl_methods)? {
         return Ok(value);
     }
-    if let Some(value) = calls::eval_call_expr(expr, env, functions, classes, enums, impl_methods)?
-    {
+    if let Some(value) = calls::eval_call_expr(expr, env, functions, classes, enums, impl_methods)? {
         return Ok(value);
     }
-    if let Some(value) =
-        collections::eval_collection_expr(expr, env, functions, classes, enums, impl_methods)?
-    {
+    if let Some(value) = collections::eval_collection_expr(expr, env, functions, classes, enums, impl_methods)? {
         return Ok(value);
     }
 
@@ -72,9 +65,7 @@ pub(crate) fn evaluate_expr(
                     handle.join().map_err(|e| CompileError::Semantic(e))?;
                     Ok(Value::Nil)
                 }
-                _ => Err(CompileError::Semantic(
-                    "await requires a Future or Actor handle".into(),
-                )),
+                _ => Err(CompileError::Semantic("await requires a Future or Actor handle".into())),
             }
         }
         Expr::Yield(maybe_val) => {
@@ -93,26 +84,13 @@ pub(crate) fn evaluate_expr(
             });
 
             if !added {
-                return Err(CompileError::Semantic(
-                    "yield called outside of generator".into(),
-                ));
+                return Err(CompileError::Semantic("yield called outside of generator".into()));
             }
 
             Ok(Value::Nil)
         }
-        Expr::MacroInvocation {
-            name,
-            args: macro_args,
-        } => {
-            let result = evaluate_macro_invocation(
-                name,
-                macro_args,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+        Expr::MacroInvocation { name, args: macro_args } => {
+            let result = evaluate_macro_invocation(name, macro_args, env, functions, classes, enums, impl_methods)?;
 
             // Register symbols introduced by macro contracts (#1303)
             if let Some(introduced) = take_macro_introduced_symbols() {
@@ -163,10 +141,7 @@ pub(crate) fn evaluate_expr(
                             // Return the Err as a TryError that should be propagated
                             Err(CompileError::TryError(val))
                         }
-                        None => Err(CompileError::Semantic(format!(
-                            "invalid Result variant: {}",
-                            variant
-                        ))),
+                        None => Err(CompileError::Semantic(format!("invalid Result variant: {}", variant))),
                     }
                 }
                 Value::Enum {
@@ -186,10 +161,7 @@ pub(crate) fn evaluate_expr(
                             // Return None as a TryError
                             Err(CompileError::TryError(val))
                         }
-                        None => Err(CompileError::Semantic(format!(
-                            "invalid Option variant: {}",
-                            variant
-                        ))),
+                        None => Err(CompileError::Semantic(format!("invalid Option variant: {}", variant))),
                     }
                 }
                 _ => Err(CompileError::Semantic(

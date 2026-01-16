@@ -60,15 +60,9 @@ impl SubtreeNode {
 #[derive(Debug, Clone)]
 pub enum SubtreeKind {
     /// HTML element
-    Element {
-        tag: String,
-        attrs: Vec<(String, String)>,
-    },
+    Element { tag: String, attrs: Vec<(String, String)> },
     /// Text content
     Text(String),
     /// Component placeholder
-    Component {
-        name: String,
-        props: Vec<(String, String)>,
-    },
+    Component { name: String, props: Vec<(String, String)> },
 }

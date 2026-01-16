@@ -27,14 +27,11 @@ mod parsing;
 // Re-export main types
 pub use core::CompilerPipeline;
 pub use execution::{
-    generate_smf_bytes, generate_smf_bytes_for_target, generate_smf_from_object,
-    generate_smf_from_object_for_target,
+    generate_smf_bytes, generate_smf_bytes_for_target, generate_smf_from_object, generate_smf_from_object_for_target,
 };
 
 // Re-export startup configuration types (#1979, #1986)
-pub use module_loader::{
-    extract_startup_config, StartupAppType, StartupConfig, StartupWindowHints,
-};
+pub use module_loader::{extract_startup_config, StartupAppType, StartupConfig, StartupWindowHints};
 
 #[cfg(test)]
 mod tests {
@@ -100,16 +97,13 @@ mod tests {
                 continue;
             }
 
-            let sh_name =
-                u32::from_le_bytes(elf_data[sh_offset..sh_offset + 4].try_into().unwrap()) as usize;
+            let sh_name = u32::from_le_bytes(elf_data[sh_offset..sh_offset + 4].try_into().unwrap()) as usize;
 
             if let Some(name) = get_section_name(shstrtab, sh_name) {
-                let sec_offset = u64::from_le_bytes(
-                    elf_data[sh_offset + 24..sh_offset + 32].try_into().unwrap(),
-                ) as usize;
-                let sec_size = u64::from_le_bytes(
-                    elf_data[sh_offset + 32..sh_offset + 40].try_into().unwrap(),
-                ) as usize;
+                let sec_offset =
+                    u64::from_le_bytes(elf_data[sh_offset + 24..sh_offset + 32].try_into().unwrap()) as usize;
+                let sec_size =
+                    u64::from_le_bytes(elf_data[sh_offset + 32..sh_offset + 40].try_into().unwrap()) as usize;
 
                 sections.push(format!(
                     "Section[{}]: '{}' offset={} size={}",
@@ -153,11 +147,7 @@ mod tests {
                 func.return_type
             );
             for block in &func.blocks {
-                eprintln!(
-                    "    Block {:?}: {} instructions",
-                    block.id,
-                    block.instructions.len()
-                );
+                eprintln!("    Block {:?}: {} instructions", block.id, block.instructions.len());
                 for inst in &block.instructions {
                     eprintln!("      {:?}", inst);
                 }
@@ -370,8 +360,7 @@ main = 0
 
     #[test]
     fn interpreter_pipeline_executes_top_level_match() {
-        let source =
-            "let x: i32 = 2\nmatch x:\n    2 =>\n        main = 20\n    _ =>\n        main = 0";
+        let source = "let x: i32 = 2\nmatch x:\n    2 =>\n        main = 20\n    _ =>\n        main = 0";
         let mut parser = simple_parser::Parser::new(source);
         let ast = parser.parse().expect("parse ok");
         let module = monomorphize_module(&ast);
@@ -480,9 +469,7 @@ main = 0
         let mut test_profile = DiProfile::default();
         // Add a test binding to simulate active test profile
         test_profile.bindings.push(DiBindingRule {
-            predicate: crate::predicate::Predicate::Selector(crate::predicate::Selector::Within(
-                "*".to_string(),
-            )),
+            predicate: crate::predicate::Predicate::Selector(crate::predicate::Selector::Within("*".to_string())),
             impl_type: "TestLogger".to_string(),
             scope: DiScope::Singleton,
             priority: 0,
@@ -521,9 +508,7 @@ main = 0
         let mut test_profile = DiProfile::default();
         // Add a test binding to simulate active test profile
         test_profile.bindings.push(DiBindingRule {
-            predicate: crate::predicate::Predicate::Selector(crate::predicate::Selector::Within(
-                "*".to_string(),
-            )),
+            predicate: crate::predicate::Predicate::Selector(crate::predicate::Selector::Within("*".to_string())),
             impl_type: "TestLogger".to_string(),
             scope: DiScope::Singleton,
             priority: 0,
@@ -608,10 +593,7 @@ main = 0
         match result {
             Err(CompileError::Semantic(msg)) => {
                 assert!(msg.contains("#1035"), "Error should reference #1035");
-                assert!(
-                    msg.contains("runtime"),
-                    "Error should mention runtime interceptors"
-                );
+                assert!(msg.contains("runtime"), "Error should mention runtime interceptors");
             }
             _ => panic!("Expected semantic error with #1035 reference"),
         }
@@ -639,10 +621,7 @@ main = 0
 
         // Should succeed when runtime AOP is disabled
         let result = pipeline.compile_source_to_memory(source);
-        assert!(
-            result.is_ok(),
-            "Release mode should allow disabled runtime AOP"
-        );
+        assert!(result.is_ok(), "Release mode should allow disabled runtime AOP");
     }
 
     #[test]
@@ -671,9 +650,6 @@ main = 0
 
         // Should succeed when test profile has no bindings
         let result = pipeline.compile_source_to_memory(source);
-        assert!(
-            result.is_ok(),
-            "Release mode should allow empty test profile"
-        );
+        assert!(result.is_ok(), "Release mode should allow empty test profile");
     }
 }

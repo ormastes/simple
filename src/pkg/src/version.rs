@@ -23,8 +23,8 @@ impl Version {
 
     /// Parse a version string
     pub fn parse(version: &str) -> PkgResult<Self> {
-        let inner = semver::Version::parse(version)
-            .map_err(|e| PkgError::VersionParse(format!("{}: {}", version, e)))?;
+        let inner =
+            semver::Version::parse(version).map_err(|e| PkgError::VersionParse(format!("{}: {}", version, e)))?;
         Ok(Version { inner })
     }
 
@@ -108,8 +108,7 @@ impl VersionReq {
         }
 
         // Try to parse as semver requirement
-        let inner = semver::VersionReq::parse(req)
-            .map_err(|e| PkgError::VersionParse(format!("{}: {}", req, e)))?;
+        let inner = semver::VersionReq::parse(req).map_err(|e| PkgError::VersionParse(format!("{}: {}", req, e)))?;
 
         Ok(VersionReq { inner })
     }

@@ -123,9 +123,7 @@ impl ProjectContext {
         let project = toml
             .get("project")
             .or_else(|| toml.get("package"))
-            .ok_or_else(|| {
-                CompileError::Semantic("manifest missing [project] or [package] section".into())
-            })?;
+            .ok_or_else(|| CompileError::Semantic("manifest missing [project] or [package] section".into()))?;
 
         // Get project name
         let name = project
@@ -135,10 +133,7 @@ impl ProjectContext {
             .to_string();
 
         // Get source root (default: "src")
-        let source_root_str = project
-            .get("root")
-            .and_then(|v| v.as_str())
-            .unwrap_or("src");
+        let source_root_str = project.get("root").and_then(|v| v.as_str()).unwrap_or("src");
         let source_root = root.join(source_root_str);
 
         // Parse features
@@ -175,14 +170,13 @@ impl ProjectContext {
             }
         }
 
-        let di_config = parse_di_config(&toml)
-            .map_err(|e| CompileError::Semantic(format!("invalid di config: {}", e)))?;
-        let aop_config = parse_aop_config(&toml)
-            .map_err(|e| CompileError::Semantic(format!("invalid aop config: {}", e)))?;
+        let di_config =
+            parse_di_config(&toml).map_err(|e| CompileError::Semantic(format!("invalid di config: {}", e)))?;
+        let aop_config =
+            parse_aop_config(&toml).map_err(|e| CompileError::Semantic(format!("invalid aop config: {}", e)))?;
 
         // Parse deterministic build configuration
-        let deterministic = if let Some(build_table) = toml.get("build").and_then(|v| v.as_table())
-        {
+        let deterministic = if let Some(build_table) = toml.get("build").and_then(|v| v.as_table()) {
             let enabled = build_table
                 .get("deterministic")
                 .and_then(|v| v.as_bool())
@@ -266,9 +260,7 @@ impl ProjectContext {
     /// Searches parent directories for simple.toml.
     /// If not found, returns single-file context.
     pub fn detect(file_path: &Path) -> Result<Self, CompileError> {
-        let file_path = file_path
-            .canonicalize()
-            .unwrap_or_else(|_| file_path.to_path_buf());
+        let file_path = file_path.canonicalize().unwrap_or_else(|_| file_path.to_path_buf());
 
         // Search upward for simple.toml
         let mut current = file_path.parent();
@@ -320,9 +312,7 @@ impl ProjectContext {
 
     /// Check if a function is an anchor point
     pub fn is_layout_anchor(&self, function_name: &str) -> Option<LayoutAnchor> {
-        self.layout_config
-            .as_ref()
-            .and_then(|c| c.is_anchor(function_name))
+        self.layout_config.as_ref().and_then(|c| c.is_anchor(function_name))
     }
 }
 
@@ -401,10 +391,7 @@ new_async = false
 
         let server_profile = ctx.get_profile("server").unwrap();
         assert_eq!(server_profile.0, vec!["async", "strong"]);
-        assert_eq!(
-            server_profile.1,
-            vec!["crate.core.base.*", "crate.net.http.*"]
-        );
+        assert_eq!(server_profile.1, vec!["crate.core.base.*", "crate.net.http.*"]);
 
         let embedded_profile = ctx.get_profile("embedded").unwrap();
         assert_eq!(embedded_profile.0, vec!["no_gc"]);
@@ -453,14 +440,8 @@ primitive_api = "deny"
 bare_bool = "allow"
 "#;
         let (_dir, ctx) = create_test_project_with_manifest(manifest);
-        assert_eq!(
-            ctx.lint_config.get_level(LintName::PrimitiveApi),
-            LintLevel::Deny
-        );
-        assert_eq!(
-            ctx.lint_config.get_level(LintName::BareBool),
-            LintLevel::Allow
-        );
+        assert_eq!(ctx.lint_config.get_level(LintName::PrimitiveApi), LintLevel::Deny);
+        assert_eq!(ctx.lint_config.get_level(LintName::BareBool), LintLevel::Allow);
     }
 
     #[test]
@@ -495,15 +476,9 @@ name = "myapp"
 primitive_api = "warn"
 "#;
         let (_dir, ctx) = create_test_project_with_manifest(manifest);
-        assert_eq!(
-            ctx.lint_config.get_level(LintName::PrimitiveApi),
-            LintLevel::Warn
-        );
+        assert_eq!(ctx.lint_config.get_level(LintName::PrimitiveApi), LintLevel::Warn);
         // bare_bool uses default (Warn)
-        assert_eq!(
-            ctx.lint_config.get_level(LintName::BareBool),
-            LintLevel::Warn
-        );
+        assert_eq!(ctx.lint_config.get_level(LintName::BareBool), LintLevel::Warn);
     }
 
     #[test]
@@ -514,10 +489,7 @@ name = "myapp"
 "#;
         let (_dir, ctx) = create_test_project_with_manifest(manifest);
         // Without [lint] section, defaults apply
-        assert_eq!(
-            ctx.lint_config.get_level(LintName::PrimitiveApi),
-            LintLevel::Warn
-        );
+        assert_eq!(ctx.lint_config.get_level(LintName::PrimitiveApi), LintLevel::Warn);
     }
 }
 
@@ -526,10 +498,6 @@ fn extract_string_array(value: &toml::Value, key: &str) -> Vec<String> {
     value
         .get(key)
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default()
 }

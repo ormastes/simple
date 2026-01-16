@@ -7,13 +7,10 @@ use super::evaluate_expr;
 use super::units::{evaluate_unit_binary_inner, evaluate_unit_unary_inner};
 use crate::error::CompileError;
 use crate::value::{
-    BorrowMutValue, BorrowValue, ManualHandleValue, ManualSharedValue, ManualUniqueValue,
-    ManualWeakValue, Value,
+    BorrowMutValue, BorrowValue, ManualHandleValue, ManualSharedValue, ManualUniqueValue, ManualWeakValue, Value,
 };
 
-use super::super::{
-    check_unit_binary_op, check_unit_unary_op, ClassDef, Enums, Env, FunctionDef, ImplMethods,
-};
+use super::super::{check_unit_binary_op, check_unit_unary_op, ClassDef, Enums, Env, FunctionDef, ImplMethods};
 
 pub(super) fn eval_op_expr(
     expr: &Expr,
@@ -88,22 +85,9 @@ pub(super) fn eval_op_expr(
                     }
                 }
                 // Mixed unit/non-unit operations: allow scaling (mul/div)
-                (
-                    Value::Unit {
-                        value,
-                        suffix,
-                        family,
-                    },
-                    other,
-                )
-                | (
-                    other,
-                    Value::Unit {
-                        value,
-                        suffix,
-                        family,
-                    },
-                ) if matches!(op, BinOp::Mul | BinOp::Div) => {
+                (Value::Unit { value, suffix, family }, other) | (other, Value::Unit { value, suffix, family })
+                    if matches!(op, BinOp::Mul | BinOp::Div) =>
+                {
                     // Scaling: unit * scalar or scalar * unit (or division)
                     let inner_result = evaluate_unit_binary_inner(value, other, *op)?;
                     return Ok(Some(Value::Unit {
@@ -136,8 +120,7 @@ pub(super) fn eval_op_expr(
 
             // Standard binary operation handling (for non-unit operations)
             // Helper to determine if we should use float arithmetic
-            let use_float =
-                matches!(&left_val, Value::Float(_)) || matches!(&right_val, Value::Float(_));
+            let use_float = matches!(&left_val, Value::Float(_)) || matches!(&right_val, Value::Float(_));
 
             let result = match op {
                 BinOp::Add => match (&left_val, &right_val) {
@@ -150,9 +133,7 @@ pub(super) fn eval_op_expr(
                         result.extend(b.iter().cloned());
                         Ok(Value::Array(result))
                     }
-                    _ if use_float => {
-                        Ok(Value::Float(left_val.as_float()? + right_val.as_float()?))
-                    }
+                    _ if use_float => Ok(Value::Float(left_val.as_float()? + right_val.as_float()?)),
                     _ => Ok(Value::Int(left_val.as_int()? + right_val.as_int()?)),
                 },
                 BinOp::Sub => {
@@ -179,9 +160,7 @@ pub(super) fn eval_op_expr(
                                 Ok(Value::Str(s.repeat(*n as usize)))
                             }
                         }
-                        _ if use_float => {
-                            Ok(Value::Float(left_val.as_float()? * right_val.as_float()?))
-                        }
+                        _ if use_float => Ok(Value::Float(left_val.as_float()? * right_val.as_float()?)),
                         _ => Ok(Value::Int(left_val.as_int()? * right_val.as_int()?)),
                     }
                 }
@@ -233,16 +212,12 @@ pub(super) fn eval_op_expr(
                 },
                 BinOp::LtEq => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a <= b)),
-                    _ if use_float => {
-                        Ok(Value::Bool(left_val.as_float()? <= right_val.as_float()?))
-                    }
+                    _ if use_float => Ok(Value::Bool(left_val.as_float()? <= right_val.as_float()?)),
                     _ => Ok(Value::Bool(left_val.as_int()? <= right_val.as_int()?)),
                 },
                 BinOp::GtEq => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a >= b)),
-                    _ if use_float => {
-                        Ok(Value::Bool(left_val.as_float()? >= right_val.as_float()?))
-                    }
+                    _ if use_float => Ok(Value::Bool(left_val.as_float()? >= right_val.as_float()?)),
                     _ => Ok(Value::Bool(left_val.as_int()? >= right_val.as_int()?)),
                 },
                 BinOp::Is => Ok(Value::Bool(left_val == right_val)),
@@ -250,9 +225,7 @@ pub(super) fn eval_op_expr(
                 BinOp::Or => Ok(Value::Bool(left_val.truthy() || right_val.truthy())),
                 BinOp::Pow => {
                     if use_float {
-                        Ok(Value::Float(
-                            left_val.as_float()?.powf(right_val.as_float()?),
-                        ))
+                        Ok(Value::Float(left_val.as_float()?.powf(right_val.as_float()?)))
                     } else {
                         let base = left_val.as_int()?;
                         let exp = right_val.as_int()?;
@@ -315,19 +288,11 @@ pub(super) fn eval_op_expr(
             let val = evaluate_expr(operand, env, functions, classes, enums, impl_methods)?;
 
             // Check for unit type safety
-            if let Value::Unit {
-                value,
-                suffix,
-                family,
-            } = &val
-            {
+            if let Value::Unit { value, suffix, family } = &val {
                 match op {
                     UnaryOp::Neg => {
                         // Check if negation is allowed for this unit family
-                        let unit_family = family
-                            .as_ref()
-                            .map(|s| s.as_str())
-                            .unwrap_or(suffix.as_str());
+                        let unit_family = family.as_ref().map(|s| s.as_str()).unwrap_or(suffix.as_str());
                         match check_unit_unary_op(unit_family, *op) {
                             Ok(_result_family) => {
                                 // Negation allowed - perform it on inner value

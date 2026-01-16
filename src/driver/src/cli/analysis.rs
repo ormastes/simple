@@ -220,9 +220,7 @@ pub fn run_info(args: &[String]) -> i32 {
                                         simple_parser::Expr::FString(parts) => {
                                             // Handle FString with single Literal part
                                             if parts.len() == 1 {
-                                                if let simple_parser::FStringPart::Literal(s) =
-                                                    &parts[0]
-                                                {
+                                                if let simple_parser::FStringPart::Literal(s) = &parts[0] {
                                                     s.clone()
                                                 } else {
                                                     format!("{:?}", parts)

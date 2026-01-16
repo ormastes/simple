@@ -149,10 +149,7 @@ impl FunctionEffectInfo {
 
     /// Get all effective effects (declared + derived).
     pub fn effective_effects(&self) -> HashSet<Effect> {
-        self.declared_effects
-            .union(&self.derived_effects)
-            .cloned()
-            .collect()
+        self.declared_effects.union(&self.derived_effects).cloned().collect()
     }
 }
 
@@ -322,12 +319,7 @@ impl EffectCache {
         if self.functions.len() >= self.config.max_function_entries {
             // Simple eviction: remove ~10% of entries
             let to_remove = self.config.max_function_entries / 10;
-            let keys: Vec<_> = self
-                .functions
-                .iter()
-                .take(to_remove)
-                .map(|e| e.key().clone())
-                .collect();
+            let keys: Vec<_> = self.functions.iter().take(to_remove).map(|e| e.key().clone()).collect();
             for key in keys {
                 self.functions.remove(&key);
             }
@@ -643,10 +635,7 @@ mod tests {
     fn test_local_effect_cache() {
         let mut cache = LocalEffectCache::new();
 
-        cache.put_function(
-            "local_func".to_string(),
-            FunctionEffectInfo::new(HashSet::new()),
-        );
+        cache.put_function("local_func".to_string(), FunctionEffectInfo::new(HashSet::new()));
         assert!(cache.get_function("local_func").is_some());
 
         cache.put_operation("local_op".to_string(), OperationEffectInfo::io());

@@ -10,9 +10,7 @@
 
 use std::collections::HashMap;
 
-use simple_parser::ast::{
-    AssignOp, Block, ClassDef, EnumDef, Expr, FunctionDef, Node, Type, UnitDef,
-};
+use simple_parser::ast::{AssignOp, Block, ClassDef, EnumDef, Expr, FunctionDef, Node, Type, UnitDef};
 use tracing::instrument;
 
 use crate::aop_config::AopConfig;
@@ -29,20 +27,18 @@ pub(crate) use crate::interpreter_unit::*;
 #[path = "interpreter_state.rs"]
 mod interpreter_state;
 pub(crate) use interpreter_state::{
-    clear_moved_vars, get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config,
-    ExecutionMode,
+    clear_moved_vars, get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config, ExecutionMode,
 };
 pub use interpreter_state::{
-    get_current_file, get_interpreter_args, init_signal_handlers, is_debug_mode, is_interrupted,
-    reset_interrupt, set_current_file, set_debug_mode, set_interpreter_args,
+    get_current_file, get_interpreter_args, init_signal_handlers, is_debug_mode, is_interrupted, reset_interrupt,
+    set_current_file, set_debug_mode, set_interpreter_args,
 };
 pub(crate) use interpreter_state::{
-    ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER, AOP_CONFIG, BASE_UNIT_DIMENSIONS,
-    COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, CURRENT_FILE,
-    DI_CONFIG, DI_SINGLETONS, EXECUTION_MODE, EXTERN_FUNCTIONS, GENERATOR_YIELDS,
-    IMMUTABLE_VARS, INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED,
-    MACRO_DEFINITION_ORDER, MODULE_GLOBALS, MOVED_VARS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC,
-    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
+    ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER, AOP_CONFIG, BASE_UNIT_DIMENSIONS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES,
+    CONTEXT_OBJECT, CONTEXT_VAR_NAME, CURRENT_FILE, DI_CONFIG, DI_SINGLETONS, EXECUTION_MODE, EXTERN_FUNCTIONS,
+    GENERATOR_YIELDS, IMMUTABLE_VARS, INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED,
+    MACRO_DEFINITION_ORDER, MODULE_GLOBALS, MOVED_VARS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
+    UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 
 /// Check if an expression is a simple identifier (for move tracking)
@@ -128,10 +124,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
     evaluate_module_with_di_and_aop(items, None, None)
 }
 
-pub fn evaluate_module_with_di(
-    items: &[Node],
-    di_config: Option<&DiConfig>,
-) -> Result<i32, CompileError> {
+pub fn evaluate_module_with_di(items: &[Node], di_config: Option<&DiConfig>) -> Result<i32, CompileError> {
     evaluate_module_with_di_and_aop(items, di_config, None)
 }
 
@@ -160,14 +153,8 @@ pub(crate) fn exec_node(
         Node::Let(let_stmt) => {
             if let Some(value_expr) = &let_stmt.value {
                 // Handle method calls on objects - need to persist mutations to self
-                let (value, update) = handle_method_call_with_self_update(
-                    value_expr,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
+                let (value, update) =
+                    handle_method_call_with_self_update(value_expr, env, functions, classes, enums, impl_methods)?;
                 if let Some((obj_name, new_self)) = update {
                     env.insert(obj_name, new_self);
                 }
@@ -195,13 +182,11 @@ pub(crate) fn exec_node(
                     match pattern {
                         simple_parser::ast::Pattern::Identifier(name) => name.clone(),
                         simple_parser::ast::Pattern::MutIdentifier(name) => name.clone(),
-                        simple_parser::ast::Pattern::Typed { pattern, .. } => {
-                            match pattern.as_ref() {
-                                simple_parser::ast::Pattern::Identifier(name) => name.clone(),
-                                simple_parser::ast::Pattern::MutIdentifier(name) => name.clone(),
-                                _ => "<pattern>".to_string(),
-                            }
-                        }
+                        simple_parser::ast::Pattern::Typed { pattern, .. } => match pattern.as_ref() {
+                            simple_parser::ast::Pattern::Identifier(name) => name.clone(),
+                            simple_parser::ast::Pattern::MutIdentifier(name) => name.clone(),
+                            _ => "<pattern>".to_string(),
+                        },
                         _ => "<pattern>".to_string(),
                     }
                 };
@@ -211,25 +196,17 @@ pub(crate) fn exec_node(
                     Some(Type::Simple(type_name)) if is_unit_type(type_name) => {
                         if let Err(e) = validate_unit_type(&value, type_name) {
                             let var_name = get_var_name(&let_stmt.pattern);
-                            return Err(CompileError::Semantic(format!(
-                                "let binding '{}': {}",
-                                var_name, e
-                            )));
+                            return Err(CompileError::Semantic(format!("let binding '{}': {}", var_name, e)));
                         }
                         value
                     }
-                    Some(Type::UnitWithRepr {
-                        name, constraints, ..
-                    }) => {
+                    Some(Type::UnitWithRepr { name, constraints, .. }) => {
                         // Validate and apply unit type constraints (range, overflow behavior)
                         match validate_unit_constraints(value, name, constraints) {
                             Ok(constrained_value) => constrained_value,
                             Err(e) => {
                                 let var_name = get_var_name(&let_stmt.pattern);
-                                return Err(CompileError::Semantic(format!(
-                                    "let binding '{}': {}",
-                                    var_name, e
-                                )));
+                                return Err(CompileError::Semantic(format!("let binding '{}': {}", var_name, e)));
                             }
                         }
                     }
@@ -251,27 +228,13 @@ pub(crate) fn exec_node(
             Ok(Control::Next)
         }
         Node::Const(const_stmt) => {
-            let value = evaluate_expr(
-                &const_stmt.value,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let value = evaluate_expr(&const_stmt.value, env, functions, classes, enums, impl_methods)?;
             env.insert(const_stmt.name.clone(), value);
             CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
             Ok(Control::Next)
         }
         Node::Static(static_stmt) => {
-            let value = evaluate_expr(
-                &static_stmt.value,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let value = evaluate_expr(&static_stmt.value, env, functions, classes, enums, impl_methods)?;
             env.insert(static_stmt.name.clone(), value);
             if !static_stmt.mutability.is_mutable() {
                 CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
@@ -285,9 +248,7 @@ pub(crate) fn exec_node(
 
                 let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(name));
                 if is_const {
-                    return Err(CompileError::Semantic(format!(
-                        "cannot assign to const '{name}'"
-                    )));
+                    return Err(CompileError::Semantic(format!("cannot assign to const '{name}'")));
                 }
 
                 // Check immutability for reassignments (not first assignment)
@@ -303,14 +264,8 @@ pub(crate) fn exec_node(
                 }
 
                 // Handle method calls on objects - need to persist mutations to self
-                let (value, update) = handle_method_call_with_self_update(
-                    &assign.value,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
+                let (value, update) =
+                    handle_method_call_with_self_update(&assign.value, env, functions, classes, enums, impl_methods)?;
                 // If the mutating method returned an updated object with the same name as target,
                 // the update already set the variable, so skip the normal assignment
                 let skip_assignment = if let Some((ref obj_name, ref new_self)) = update {
@@ -361,8 +316,7 @@ pub(crate) fn exec_node(
                 Ok(Control::Next)
             } else if let Expr::FieldAccess { receiver, field } = &assign.target {
                 // Handle field assignment: obj.field = value
-                let value =
-                    evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+                let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
                 // Get the object name (must be an identifier for now)
                 if let Expr::Identifier(obj_name) = receiver.as_ref() {
                     if let Some(obj_val) = env.get(obj_name).cloned() {
@@ -387,9 +341,7 @@ pub(crate) fn exec_node(
                             .chain(classes.keys().map(|s| s.as_str()))
                             .collect();
                         let mut msg = format!("undefined variable '{obj_name}'");
-                        if let Some(suggestion) =
-                            crate::error::typo::format_suggestion(obj_name, known_names)
-                        {
+                        if let Some(suggestion) = crate::error::typo::format_suggestion(obj_name, known_names) {
                             msg.push_str(&format!("; {}", suggestion));
                         }
                         Err(CompileError::Semantic(msg))
@@ -401,8 +353,7 @@ pub(crate) fn exec_node(
                 }
             } else if let Expr::Tuple(targets) = &assign.target {
                 // Handle tuple unpacking: (a, b) = (x, y)
-                let value =
-                    evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+                let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
                 let values: Vec<Value> = match value {
                     Value::Tuple(v) => v,
                     Value::Array(v) => v,
@@ -430,28 +381,18 @@ pub(crate) fn exec_node(
                 }
                 Ok(Control::Next)
             } else {
-                Err(CompileError::Semantic(
-                    "unsupported assignment target".into(),
-                ))
+                Err(CompileError::Semantic("unsupported assignment target".into()))
             }
         }
         Node::If(if_stmt) => exec_if(if_stmt, env, functions, classes, enums, impl_methods),
-        Node::While(while_stmt) => {
-            exec_while(while_stmt, env, functions, classes, enums, impl_methods)
-        }
+        Node::While(while_stmt) => exec_while(while_stmt, env, functions, classes, enums, impl_methods),
         Node::Loop(loop_stmt) => exec_loop(loop_stmt, env, functions, classes, enums, impl_methods),
         Node::For(for_stmt) => exec_for(for_stmt, env, functions, classes, enums, impl_methods),
         Node::Return(ret) => {
             let value = if let Some(expr) = &ret.value {
                 // Handle method calls on objects - need to persist mutations to self
-                let (val, update) = handle_method_call_with_self_update(
-                    expr,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
+                let (val, update) =
+                    handle_method_call_with_self_update(expr, env, functions, classes, enums, impl_methods)?;
                 if let Some((name, new_self)) = update {
                     env.insert(name, new_self);
                 }
@@ -463,57 +404,27 @@ pub(crate) fn exec_node(
         }
         Node::Break(b) => {
             let value = if let Some(expr) = &b.value {
-                Some(evaluate_expr(
-                    expr,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?)
+                Some(evaluate_expr(expr, env, functions, classes, enums, impl_methods)?)
             } else {
                 None
             };
             Ok(Control::Break(value))
         }
         Node::Continue(_) => Ok(Control::Continue),
-        Node::Match(match_stmt) => {
-            exec_match(match_stmt, env, functions, classes, enums, impl_methods)
-        }
-        Node::Context(ctx_stmt) => {
-            exec_context(ctx_stmt, env, functions, classes, enums, impl_methods)
-        }
+        Node::Match(match_stmt) => exec_match(match_stmt, env, functions, classes, enums, impl_methods),
+        Node::Context(ctx_stmt) => exec_context(ctx_stmt, env, functions, classes, enums, impl_methods),
         Node::With(with_stmt) => exec_with(with_stmt, env, functions, classes, enums, impl_methods),
         Node::Expression(expr) => {
-            if let Expr::FunctionalUpdate {
-                target,
-                method,
-                args,
-            } = expr
-            {
-                if let Some((name, new_value)) = handle_functional_update(
-                    target,
-                    method,
-                    args,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )? {
+            if let Expr::FunctionalUpdate { target, method, args } = expr {
+                if let Some((name, new_value)) =
+                    handle_functional_update(target, method, args, env, functions, classes, enums, impl_methods)?
+                {
                     env.insert(name, new_value);
                     return Ok(Control::Next);
                 }
             }
             // Handle method calls on objects - need to persist mutations to self
-            let (_, update) = handle_method_call_with_self_update(
-                expr,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let (_, update) = handle_method_call_with_self_update(expr, env, functions, classes, enums, impl_methods)?;
             if let Some((name, new_self)) = update {
                 env.insert(name, new_self);
             }
@@ -682,9 +593,7 @@ macro_rules! bail_semantic {
 macro_rules! bail_unknown_method {
     ($method:expr, $type_name:expr, $available:expr) => {{
         let mut msg = format!("unknown method {} on {}", $method, $type_name);
-        if let Some(suggestion) =
-            crate::error::typo::format_suggestion($method, $available.iter().copied())
-        {
+        if let Some(suggestion) = crate::error::typo::format_suggestion($method, $available.iter().copied()) {
             msg.push_str(&format!("; {}", suggestion));
         }
         return Err(semantic_err!("{}", msg));
@@ -701,9 +610,7 @@ pub(crate) use interpreter_patterns::{
 // Control flow functions (if, while, loop, for, match)
 #[path = "interpreter_control.rs"]
 mod interpreter_control;
-use interpreter_control::{
-    exec_context, exec_for, exec_if, exec_loop, exec_match, exec_while, exec_with,
-};
+use interpreter_control::{exec_context, exec_for, exec_if, exec_loop, exec_match, exec_while, exec_with};
 
 /// Helper to execute a method function with self context (for auto-forwarding properties)
 fn exec_method_function(
@@ -741,15 +648,14 @@ pub(crate) use expr::evaluate_expr;
 #[path = "interpreter_helpers/mod.rs"]
 mod interpreter_helpers;
 pub(crate) use interpreter_helpers::{
-    bind_pattern, bind_pattern_value, comprehension_iterate, control_to_value, create_range_object,
-    eval_arg, eval_arg_int, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter,
-    eval_array_find, eval_array_map, eval_array_reduce, eval_dict_filter, eval_dict_map_values,
-    eval_option_and_then, eval_option_filter, eval_option_map, eval_option_or_else,
-    eval_result_and_then, eval_result_map, eval_result_map_err, eval_result_or_else,
-    find_and_exec_method, handle_functional_update, handle_method_call_with_self_update,
+    bind_pattern, bind_pattern_value, comprehension_iterate, control_to_value, create_range_object, eval_arg,
+    eval_arg_int, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter, eval_array_find, eval_array_map,
+    eval_array_reduce, eval_dict_filter, eval_dict_map_values, eval_option_and_then, eval_option_filter,
+    eval_option_map, eval_option_or_else, eval_result_and_then, eval_result_map, eval_result_map_err,
+    eval_result_or_else, find_and_exec_method, handle_functional_update, handle_method_call_with_self_update,
     iter_to_vec, message_to_value, normalize_index, slice_collection, spawn_actor_with_expr,
-    spawn_future_with_callable, spawn_future_with_callable_and_env, spawn_future_with_expr,
-    try_method_missing, with_effect_context,
+    spawn_future_with_callable, spawn_future_with_callable_and_env, spawn_future_with_expr, try_method_missing,
+    with_effect_context,
 };
 
 // Include the rest of the interpreter functions
@@ -758,9 +664,8 @@ mod interpreter_call;
 pub(crate) use interpreter_call::IN_NEW_METHOD;
 use interpreter_call::{
     bind_args, bind_args_with_injected, evaluate_call, exec_block_value, exec_function,
-    exec_function_with_captured_env, exec_function_with_values, exec_lambda, instantiate_class,
-    BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES,
-    BDD_SHARED_EXAMPLES,
+    exec_function_with_captured_env, exec_function_with_values, exec_lambda, instantiate_class, BDD_AFTER_EACH,
+    BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
 };
 
 // Module caching and loading state
@@ -772,8 +677,7 @@ pub use module_cache::clear_module_cache;
 #[path = "interpreter_module.rs"]
 mod interpreter_module;
 use interpreter_module::{
-    evaluate_module_exports, get_import_alias, load_and_merge_module, merge_module_definitions,
-    resolve_module_path,
+    evaluate_module_exports, get_import_alias, load_and_merge_module, merge_module_definitions, resolve_module_path,
 };
 
 // Type-related utilities
@@ -791,8 +695,7 @@ use interpreter_method::{evaluate_method_call, evaluate_method_call_with_self_up
 mod macros;
 pub use macros::set_macro_trace;
 pub(crate) use macros::{
-    enter_block_scope, evaluate_macro_invocation, exit_block_scope, queue_tail_injection,
-    take_macro_introduced_symbols,
+    enter_block_scope, evaluate_macro_invocation, exit_block_scope, queue_tail_injection, take_macro_introduced_symbols,
 };
 // Native I/O helper utilities
 #[path = "interpreter_native_io.rs"]

@@ -241,11 +241,7 @@ impl StagingBuffer {
         if let Some(allocation) = &self.allocation {
             if let Some(ptr) = allocation.mapped_ptr() {
                 unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        data.as_ptr(),
-                        ptr.as_ptr() as *mut u8,
-                        data.len(),
-                    );
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr() as *mut u8, data.len());
                 }
                 Ok(())
             } else {
@@ -262,11 +258,7 @@ impl StagingBuffer {
             if let Some(ptr) = allocation.mapped_ptr() {
                 let mut data = vec![0u8; size];
                 unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        ptr.as_ptr() as *const u8,
-                        data.as_mut_ptr(),
-                        size,
-                    );
+                    std::ptr::copy_nonoverlapping(ptr.as_ptr() as *const u8, data.as_mut_ptr(), size);
                 }
                 Ok(data)
             } else {

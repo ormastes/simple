@@ -274,10 +274,7 @@ pub enum Expr {
     /// Field access `expr.field`
     FieldAccess { receiver: Box<Expr>, field: String },
     /// Index access `expr[index]`
-    IndexAccess {
-        receiver: Box<Expr>,
-        index: Box<Expr>,
-    },
+    IndexAccess { receiver: Box<Expr>, index: Box<Expr> },
     /// Method call `expr.method(args)`
     MethodCall {
         receiver: Box<Expr>,
@@ -299,10 +296,7 @@ pub enum Expr {
         else_expr: Box<Expr>,
     },
     /// Lambda/closure `fn(args): expr` or `|args| expr`
-    Lambda {
-        params: Vec<String>,
-        body: Box<Expr>,
-    },
+    Lambda { params: Vec<String>, body: Box<Expr> },
     /// Range `start..end` or `start..=end`
     Range {
         start: Option<Box<Expr>>,
@@ -384,10 +378,7 @@ pub enum Statement {
         body: Vec<Statement>,
     },
     /// While loop
-    While {
-        condition: Expr,
-        body: Vec<Statement>,
-    },
+    While { condition: Expr, body: Vec<Statement> },
     /// Return statement
     Return(Option<Expr>),
     /// Break statement
@@ -414,8 +405,5 @@ pub enum TypeExpr {
     /// Optional type `T?`
     Optional(Box<TypeExpr>),
     /// Function type `fn(T, U) -> V`
-    Function {
-        params: Vec<TypeExpr>,
-        ret: Box<TypeExpr>,
-    },
+    Function { params: Vec<TypeExpr>, ret: Box<TypeExpr> },
 }

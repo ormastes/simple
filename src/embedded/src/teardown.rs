@@ -265,13 +265,7 @@ pub fn generate_intel_hex(data: &[u8], base_addr: u32, output: &mut [u8]) -> usi
 }
 
 /// Write a single Intel HEX record.
-fn write_hex_record(
-    output: &mut [u8],
-    offset: usize,
-    rec_type: HexRecordType,
-    addr: u16,
-    data: &[u8],
-) -> usize {
+fn write_hex_record(output: &mut [u8], offset: usize, rec_type: HexRecordType, addr: u16, data: &[u8]) -> usize {
     let mut idx = offset;
 
     // Start code
@@ -341,13 +335,7 @@ pub fn generate_srec(data: &[u8], base_addr: u32, entry_point: u32, output: &mut
 }
 
 /// Write a single S-Record.
-fn write_srec_record(
-    output: &mut [u8],
-    offset: usize,
-    rec_type: u8,
-    addr: u32,
-    data: &[u8],
-) -> usize {
+fn write_srec_record(output: &mut [u8], offset: usize, rec_type: u8, addr: u32, data: &[u8]) -> usize {
     let mut idx = offset;
 
     // Start code

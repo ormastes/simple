@@ -352,11 +352,7 @@ impl<'a> Lexer<'a> {
         let end_pos = self.current_pos;
         let lexeme = self.source[start_pos..end_pos].to_string();
 
-        Token::new(
-            kind,
-            Span::new(start_pos, end_pos, start_line, start_column),
-            lexeme,
-        )
+        Token::new(kind, Span::new(start_pos, end_pos, start_line, start_column), lexeme)
     }
 
     fn advance(&mut self) -> Option<(usize, char)> {
@@ -386,17 +382,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn check_alpha(&mut self) -> bool {
-        self.peek()
-            .map(|c| c.is_alphabetic() || c == '_')
-            .unwrap_or(false)
+        self.peek().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
     }
 
-    fn match_char(
-        &mut self,
-        expected: char,
-        if_match: TokenKind,
-        otherwise: TokenKind,
-    ) -> TokenKind {
+    fn match_char(&mut self, expected: char, if_match: TokenKind, otherwise: TokenKind) -> TokenKind {
         if self.check(expected) {
             self.advance();
             if_match

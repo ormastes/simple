@@ -72,12 +72,7 @@ pub struct MemoryLayout {
 
 impl MemoryLayout {
     /// Create a simple memory layout with flash and RAM.
-    pub const fn simple(
-        flash_start: usize,
-        flash_size: usize,
-        ram_start: usize,
-        ram_size: usize,
-    ) -> Self {
+    pub const fn simple(flash_start: usize, flash_size: usize, ram_start: usize, ram_size: usize) -> Self {
         Self {
             flash: MemoryRegion::new("FLASH", flash_start, flash_size, MemoryType::Flash),
             ram: MemoryRegion::new("RAM", ram_start, ram_size, MemoryType::Ram),

@@ -250,9 +250,7 @@ impl RuntimeProfiler {
         entry.first_call_ns.store(now_ns, Ordering::Relaxed);
         entry.last_call_ns.store(now_ns, Ordering::Relaxed);
 
-        self.entries
-            .write()
-            .insert(function_name.to_string(), entry);
+        self.entries.write().insert(function_name.to_string(), entry);
     }
 
     fn record_call_internal_with_time(&self, function_name: &str, duration_ns: u64) {
@@ -261,9 +259,7 @@ impl RuntimeProfiler {
         let entries = self.entries.read();
         if let Some(entry) = entries.get(function_name) {
             entry.call_count.fetch_add(1, Ordering::Relaxed);
-            entry
-                .total_time_ns
-                .fetch_add(duration_ns, Ordering::Relaxed);
+            entry.total_time_ns.fetch_add(duration_ns, Ordering::Relaxed);
             entry.last_call_ns.store(now_ns, Ordering::Relaxed);
 
             entry
@@ -284,9 +280,7 @@ impl RuntimeProfiler {
         entry.first_call_ns.store(now_ns, Ordering::Relaxed);
         entry.last_call_ns.store(now_ns, Ordering::Relaxed);
 
-        self.entries
-            .write()
-            .insert(function_name.to_string(), entry);
+        self.entries.write().insert(function_name.to_string(), entry);
     }
 
     fn elapsed_ns(&self) -> u64 {
@@ -298,11 +292,7 @@ impl RuntimeProfiler {
 
     /// Collect runtime metrics
     pub fn collect_metrics(&self) -> RuntimeMetrics {
-        let duration = self
-            .start_time
-            .read()
-            .map(|t| t.elapsed())
-            .unwrap_or_default();
+        let duration = self.start_time.read().map(|t| t.elapsed()).unwrap_or_default();
 
         let duration_secs = duration.as_secs_f64();
         let entries = self.entries.read();
@@ -336,14 +326,8 @@ impl RuntimeProfiler {
         stats.sort_by(|a, b| b.call_count.cmp(&a.call_count));
 
         let total_calls = stats.iter().map(|s| s.call_count).sum();
-        let hot_functions = stats
-            .iter()
-            .filter(|s| s.inferred_phase == LayoutPhase::Steady)
-            .count();
-        let cold_functions = stats
-            .iter()
-            .filter(|s| s.inferred_phase == LayoutPhase::Cold)
-            .count();
+        let hot_functions = stats.iter().filter(|s| s.inferred_phase == LayoutPhase::Steady).count();
+        let cold_functions = stats.iter().filter(|s| s.inferred_phase == LayoutPhase::Cold).count();
         let startup_functions = stats
             .iter()
             .filter(|s| s.inferred_phase == LayoutPhase::Startup)
@@ -556,11 +540,7 @@ impl RuntimeProfiler {
             callee.to_string(),
             caller_class,
             callee_class.map(|s| s.to_string()),
-            if self.config.capture_args {
-                arguments
-            } else {
-                vec![]
-            },
+            if self.config.capture_args { arguments } else { vec![] },
             call_type,
             depth,
         );
@@ -625,9 +605,7 @@ impl RuntimeProfiler {
 
     /// Mark an entity as architectural (for architecture diagrams)
     pub fn mark_architectural(&self, entity: &str) {
-        self.architectural_entities
-            .write()
-            .insert(entity.to_string());
+        self.architectural_entities.write().insert(entity.to_string());
     }
 
     /// Check if an entity is marked as architectural

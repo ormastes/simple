@@ -80,11 +80,7 @@ impl Lowerer {
     ///
     /// Used in generator functions.
     /// If no value is provided, yields Nil.
-    pub(super) fn lower_yield(
-        &mut self,
-        value: Option<&Expr>,
-        ctx: &mut FunctionContext,
-    ) -> LowerResult<HirExpr> {
+    pub(super) fn lower_yield(&mut self, value: Option<&Expr>, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         let value_hir = if let Some(v) = value {
             Box::new(self.lower_expr(v, ctx)?)
         } else {

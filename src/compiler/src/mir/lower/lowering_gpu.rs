@@ -83,9 +83,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block
-                        .instructions
-                        .push(MirInst::GpuGlobalId { dest, dim: 0 });
+                    block.instructions.push(MirInst::GpuGlobalId { dest, dim: 0 });
                     dest
                 })
             }
@@ -94,9 +92,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block
-                        .instructions
-                        .push(MirInst::GpuLocalId { dest, dim: 0 });
+                    block.instructions.push(MirInst::GpuLocalId { dest, dim: 0 });
                     dest
                 })
             }
@@ -105,9 +101,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block
-                        .instructions
-                        .push(MirInst::GpuGroupId { dest, dim: 0 });
+                    block.instructions.push(MirInst::GpuGroupId { dest, dim: 0 });
                     dest
                 })
             }
@@ -123,11 +117,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecExtract {
-                        dest,
-                        vector,
-                        index,
-                    });
+                    block.instructions.push(MirInst::VecExtract { dest, vector, index });
                     dest
                 })
             }
@@ -159,11 +149,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecShuffle {
-                        dest,
-                        source,
-                        indices,
-                    });
+                    block.instructions.push(MirInst::VecShuffle { dest, source, indices });
                     dest
                 })
             }
@@ -208,11 +194,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecLoad {
-                        dest,
-                        array,
-                        offset,
-                    });
+                    block.instructions.push(MirInst::VecLoad { dest, array, offset });
                     dest
                 })
             }
@@ -223,11 +205,7 @@ impl<'a> MirLowerer<'a> {
                 let offset = self.lower_expr(&args[2])?;
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecStore {
-                        source,
-                        array,
-                        offset,
-                    });
+                    block.instructions.push(MirInst::VecStore { source, array, offset });
                     // VecStore has no return value, return a dummy vreg
                     func.new_vreg()
                 })
@@ -239,11 +217,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecGather {
-                        dest,
-                        array,
-                        indices,
-                    });
+                    block.instructions.push(MirInst::VecGather { dest, array, indices });
                     dest
                 })
             }
@@ -254,11 +228,7 @@ impl<'a> MirLowerer<'a> {
                 let indices = self.lower_expr(&args[2])?;
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecScatter {
-                        source,
-                        array,
-                        indices,
-                    });
+                    block.instructions.push(MirInst::VecScatter { source, array, indices });
                     // VecScatter has no return value, return a dummy vreg
                     func.new_vreg()
                 })
@@ -287,11 +257,9 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::NeighborLoad {
-                        dest,
-                        array,
-                        direction,
-                    });
+                    block
+                        .instructions
+                        .push(MirInst::NeighborLoad { dest, array, direction });
                     dest
                 })
             }
@@ -342,12 +310,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecClamp {
-                        dest,
-                        source,
-                        lo,
-                        hi,
-                    });
+                    block.instructions.push(MirInst::VecClamp { dest, source, lo, hi });
                     dest
                 })
             }
@@ -376,12 +339,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::GpuAtomic {
-                        dest,
-                        op,
-                        ptr,
-                        value,
-                    });
+                    block.instructions.push(MirInst::GpuAtomic { dest, op, ptr, value });
                     dest
                 })
             }
@@ -449,10 +407,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::LocalAddr {
-                        dest,
-                        local_index: idx,
-                    });
+                    block.instructions.push(MirInst::LocalAddr { dest, local_index: idx });
                     dest
                 })
             }
@@ -469,15 +424,8 @@ impl<'a> MirLowerer<'a> {
             .as_ref()
             .and_then(|path| {
                 // Convert file path like "app/domain/user.spl" to "app.domain.user"
-                if let Some(stem) = std::path::Path::new(path)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                {
-                    Some(
-                        path.trim_end_matches(".spl")
-                            .replace('/', ".")
-                            .replace('\\', "."),
-                    )
+                if let Some(stem) = std::path::Path::new(path).file_stem().and_then(|s| s.to_str()) {
+                    Some(path.trim_end_matches(".spl").replace('/', ".").replace('\\', "."))
                 } else {
                     None
                 }

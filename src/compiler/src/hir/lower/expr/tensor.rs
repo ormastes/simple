@@ -274,8 +274,7 @@ impl Lowerer {
 
         // Return clear error directing users to working alternative
         Err(LowerError::Unsupported(
-            "Sparse tensor (flat mode) not yet fully implemented. Use slice mode for now."
-                .to_string(),
+            "Sparse tensor (flat mode) not yet fully implemented. Use slice mode for now.".to_string(),
         ))
     }
 

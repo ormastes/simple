@@ -63,13 +63,7 @@ pub struct MirArenaStats {
 impl MirArenaStats {
     /// Get total number of allocations.
     pub fn total(&self) -> usize {
-        self.instructions
-            + self.blocks
-            + self.functions
-            + self.modules
-            + self.locals
-            + self.patterns
-            + self.literals
+        self.instructions + self.blocks + self.functions + self.modules + self.locals + self.patterns + self.literals
     }
 }
 

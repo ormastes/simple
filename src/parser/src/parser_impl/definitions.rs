@@ -9,10 +9,7 @@ use crate::error::ParseError;
 use super::core::Parser;
 
 impl<'a> Parser<'a> {
-    pub(super) fn parse_struct_with_doc(
-        &mut self,
-        doc_comment: Option<DocComment>,
-    ) -> Result<Node, ParseError> {
+    pub(super) fn parse_struct_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         let mut node = self.parse_struct()?;
         if let Node::Struct(ref mut s) = node {
             // Prefer leading doc comment, fall back to inline docstring from body
@@ -21,10 +18,7 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    pub(super) fn parse_class_with_doc(
-        &mut self,
-        doc_comment: Option<DocComment>,
-    ) -> Result<Node, ParseError> {
+    pub(super) fn parse_class_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         let mut node = self.parse_class()?;
         if let Node::Class(ref mut c) = node {
             // Prefer leading doc comment, fall back to inline docstring from body
@@ -33,10 +27,7 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    pub(super) fn parse_enum_with_doc(
-        &mut self,
-        doc_comment: Option<DocComment>,
-    ) -> Result<Node, ParseError> {
+    pub(super) fn parse_enum_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         let mut node = self.parse_enum()?;
         if let Node::Enum(ref mut e) = node {
             // Prefer leading doc comment, fall back to inline docstring from body
@@ -45,10 +36,7 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    pub(super) fn parse_union_with_doc(
-        &mut self,
-        doc_comment: Option<DocComment>,
-    ) -> Result<Node, ParseError> {
+    pub(super) fn parse_union_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         let mut node = self.parse_union()?;
         if let Node::Enum(ref mut e) = node {
             // Prefer leading doc comment, fall back to inline docstring from body
@@ -57,10 +45,7 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    pub(super) fn parse_trait_with_doc(
-        &mut self,
-        doc_comment: Option<DocComment>,
-    ) -> Result<Node, ParseError> {
+    pub(super) fn parse_trait_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         let mut node = self.parse_trait()?;
         if let Node::Trait(ref mut t) = node {
             t.doc_comment = doc_comment;
@@ -68,10 +53,7 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    pub(super) fn parse_mixin_with_doc(
-        &mut self,
-        doc_comment: Option<DocComment>,
-    ) -> Result<Node, ParseError> {
+    pub(super) fn parse_mixin_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         let mut node = self.parse_mixin()?;
         if let Node::Mixin(ref mut m) = node {
             m.doc_comment = doc_comment.or(m.doc_comment.take());
@@ -79,10 +61,7 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    pub(super) fn parse_mixin_with_attrs(
-        &mut self,
-        _attributes: Vec<Attribute>,
-    ) -> Result<Node, ParseError> {
+    pub(super) fn parse_mixin_with_attrs(&mut self, _attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         self.parse_mixin()
     }
 }

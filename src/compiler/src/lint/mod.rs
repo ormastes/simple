@@ -158,10 +158,7 @@ pub fn find_value() -> Option[i64]:
 
     #[test]
     fn test_lint_name_from_str() {
-        assert_eq!(
-            LintName::from_str("primitive_api"),
-            Some(LintName::PrimitiveApi)
-        );
+        assert_eq!(LintName::from_str("primitive_api"), Some(LintName::PrimitiveApi));
         assert_eq!(LintName::from_str("bare_bool"), Some(LintName::BareBool));
         assert_eq!(LintName::from_str("unknown"), None);
     }

@@ -125,9 +125,7 @@ impl GpuInitHandle {
     /// Wait for GPU initialization to complete
     pub fn wait(mut self) -> Result<GpuContext, String> {
         if let Some(thread) = self.thread.take() {
-            thread
-                .join()
-                .map_err(|_| "GPU init thread panicked".to_string())?
+            thread.join().map_err(|_| "GPU init thread panicked".to_string())?
         } else {
             Err("GPU init thread already joined".to_string())
         }

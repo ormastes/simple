@@ -124,8 +124,7 @@ impl VulkanInstance {
             let debug_utils = ash::ext::debug_utils::Instance::new(&entry, &instance);
             let messenger_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
                 .message_severity(
-                    vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                        | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
+                    vk::DebugUtilsMessageSeverityFlagsEXT::WARNING | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
                 )
                 .message_type(
                     vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
@@ -137,9 +136,7 @@ impl VulkanInstance {
             let messenger = unsafe {
                 debug_utils
                     .create_debug_utils_messenger(&messenger_info, None)
-                    .map_err(|e| {
-                        VulkanError::InitializationFailed(format!("Debug messenger: {:?}", e))
-                    })?
+                    .map_err(|e| VulkanError::InitializationFailed(format!("Debug messenger: {:?}", e)))?
             };
             (Some(debug_utils), Some(messenger))
         };
@@ -166,9 +163,9 @@ impl VulkanInstance {
     /// Enumerate physical devices
     pub fn enumerate_devices(&self) -> VulkanResult<Vec<VulkanPhysicalDevice>> {
         let devices = unsafe {
-            self.instance.enumerate_physical_devices().map_err(|e| {
-                VulkanError::InitializationFailed(format!("Enumerate devices: {:?}", e))
-            })?
+            self.instance
+                .enumerate_physical_devices()
+                .map_err(|e| VulkanError::InitializationFailed(format!("Enumerate devices: {:?}", e)))?
         };
 
         devices
@@ -266,17 +263,8 @@ impl VulkanPhysicalDevice {
     /// Get device name
     pub fn name(&self) -> String {
         let name_bytes = &self.properties.device_name;
-        let len = name_bytes
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(name_bytes.len());
-        String::from_utf8_lossy(
-            &name_bytes[..len]
-                .iter()
-                .map(|&c| c as u8)
-                .collect::<Vec<_>>(),
-        )
-        .to_string()
+        let len = name_bytes.iter().position(|&c| c == 0).unwrap_or(name_bytes.len());
+        String::from_utf8_lossy(&name_bytes[..len].iter().map(|&c| c as u8).collect::<Vec<_>>()).to_string()
     }
 
     /// Score device for compute workloads (higher is better)
@@ -353,11 +341,7 @@ impl VulkanPhysicalDevice {
 
     /// Find present queue family index (requires surface support check)
     #[cfg(feature = "vulkan")]
-    pub fn find_present_queue_family(
-        &self,
-        instance: &VulkanInstance,
-        surface: vk::SurfaceKHR,
-    ) -> Option<u32> {
+    pub fn find_present_queue_family(&self, instance: &VulkanInstance, surface: vk::SurfaceKHR) -> Option<u32> {
         let surface_loader = instance.surface_loader();
 
         self.queue_families

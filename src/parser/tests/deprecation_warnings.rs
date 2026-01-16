@@ -20,8 +20,7 @@ fn has_deprecation_warning(src: &str) -> bool {
     let hints = parse_and_get_hints(src);
     hints.iter().any(|(level, msg)| {
         matches!(level, ErrorHintLevel::Warning)
-            && (msg.contains("Deprecated syntax for generic")
-                || msg.contains("Deprecated syntax for type"))
+            && (msg.contains("Deprecated syntax for generic") || msg.contains("Deprecated syntax for type"))
     })
 }
 
@@ -32,8 +31,7 @@ fn count_deprecation_warnings(src: &str) -> usize {
         .iter()
         .filter(|(level, msg)| {
             matches!(level, ErrorHintLevel::Warning)
-                && (msg.contains("Deprecated syntax for generic")
-                    || msg.contains("Deprecated syntax for type"))
+                && (msg.contains("Deprecated syntax for generic") || msg.contains("Deprecated syntax for type"))
         })
         .count()
 }
@@ -131,20 +129,13 @@ fn test_new_type_annotation_no_warning() {
 fn test_deprecated_nested_generics() {
     let src = "val x: List[Option[String]] = []";
     let count = count_deprecation_warnings(src);
-    assert!(
-        count >= 2,
-        "Should warn about both nested [] usages (found {})",
-        count
-    );
+    assert!(count >= 2, "Should warn about both nested [] usages (found {})", count);
 }
 
 #[test]
 fn test_new_nested_generics_no_warning() {
     let src = "val x: List<Option<String>> = []";
-    assert!(
-        !has_deprecation_warning(src),
-        "Should NOT warn about nested <> syntax"
-    );
+    assert!(!has_deprecation_warning(src), "Should NOT warn about nested <> syntax");
 }
 
 // === Array Types (should NOT warn) ===
@@ -152,10 +143,7 @@ fn test_new_nested_generics_no_warning() {
 #[test]
 fn test_array_type_no_warning() {
     let src = "val arr: [i32] = [1, 2, 3]";
-    assert!(
-        !has_deprecation_warning(src),
-        "Should NOT warn about array type [i32]"
-    );
+    assert!(!has_deprecation_warning(src), "Should NOT warn about array type [i32]");
 }
 
 #[test]
@@ -172,10 +160,7 @@ fn test_fixed_array_type_no_warning() {
 #[test]
 fn test_array_literal_no_warning() {
     let src = "val arr = [1, 2, 3, 4, 5]";
-    assert!(
-        !has_deprecation_warning(src),
-        "Should NOT warn about array literal"
-    );
+    assert!(!has_deprecation_warning(src), "Should NOT warn about array literal");
 }
 
 #[test]
@@ -203,10 +188,7 @@ fn test_string_with_bracket_syntax_no_warning() {
 #[test]
 fn test_comment_with_bracket_syntax_no_warning() {
     let src = "# This is Option[T] in a comment\nval x = 42";
-    assert!(
-        !has_deprecation_warning(src),
-        "Should NOT warn about [] in comment"
-    );
+    assert!(!has_deprecation_warning(src), "Should NOT warn about [] in comment");
 }
 
 // === Multiple Warnings ===
@@ -223,11 +205,7 @@ struct Container[T]:
 val opt: Option[String] = None
 "#;
     let count = count_deprecation_warnings(src);
-    assert!(
-        count >= 5,
-        "Should have multiple warnings (found {})",
-        count
-    );
+    assert!(count >= 5, "Should have multiple warnings (found {})", count);
 }
 
 // === Class Generic Parameters ===
@@ -264,10 +242,7 @@ fn test_deprecated_enum_generic() {
 #[test]
 fn test_new_enum_generic_no_warning() {
     let src = "enum Result<T, E>:\n    Ok(T)\n    Err(E)";
-    assert!(
-        !has_deprecation_warning(src),
-        "Should NOT warn about <> syntax in enum"
-    );
+    assert!(!has_deprecation_warning(src), "Should NOT warn about <> syntax in enum");
 }
 
 // === Trait Generic Parameters ===
@@ -344,28 +319,18 @@ fn test_mixed_syntax() {
     assert!(has_deprecation_warning(src_old), "Old syntax should warn");
 
     // New syntax should not warn
-    assert!(
-        !has_deprecation_warning(src_new),
-        "New syntax should not warn"
-    );
+    assert!(!has_deprecation_warning(src_new), "New syntax should not warn");
 }
 
 #[test]
 fn test_impl_block_with_generics() {
     let src = "impl[T] Container[T]:\n    fn new(val: T) -> Container[T]:\n        pass";
     let count = count_deprecation_warnings(src);
-    assert!(
-        count >= 2,
-        "Should warn about [] in impl block (found {})",
-        count
-    );
+    assert!(count >= 2, "Should warn about [] in impl block (found {})", count);
 }
 
 #[test]
 fn test_impl_block_with_new_syntax_no_warning() {
     let src = "impl<T> Container<T>:\n    fn new(val: T) -> Container<T>:\n        pass";
-    assert!(
-        !has_deprecation_warning(src),
-        "Should NOT warn about <> in impl block"
-    );
+    assert!(!has_deprecation_warning(src), "Should NOT warn about <> in impl block");
 }

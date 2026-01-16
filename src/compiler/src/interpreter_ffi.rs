@@ -14,9 +14,7 @@ use simple_parser::token::Span;
 use simple_runtime::value::diagram_ffi;
 
 use crate::error::CompileError;
-use crate::interpreter::{
-    control_to_value, evaluate_expr, evaluate_module, exec_block, Enums, ImplMethods,
-};
+use crate::interpreter::{control_to_value, evaluate_expr, evaluate_module, exec_block, Enums, ImplMethods};
 use crate::value::{Env, Value};
 use crate::value_bridge::BridgeValue;
 
@@ -188,13 +186,7 @@ pub fn clear_interpreter_state() {
 /// This eliminates the deeply nested `.with()` calls throughout the module.
 fn with_interp_state<F, R>(f: F) -> R
 where
-    F: FnOnce(
-        &Env,
-        &mut HashMap<String, FunctionDef>,
-        &mut HashMap<String, ClassDef>,
-        &Enums,
-        &ImplMethods,
-    ) -> R,
+    F: FnOnce(&Env, &mut HashMap<String, FunctionDef>, &mut HashMap<String, ClassDef>, &Enums, &ImplMethods) -> R,
 {
     INTERP_ENV.with(|env| {
         let env = env.borrow();
@@ -269,20 +261,9 @@ pub unsafe extern "C" fn simple_interp_call(
     // Look up and call the function
     let result = with_interp_state(|env, funcs, classes, enums, impl_methods| {
         if let Some(func) = funcs.get(name).cloned() {
-            call_interpreted_function(
-                &func,
-                args.clone(),
-                env,
-                funcs,
-                classes,
-                enums,
-                impl_methods,
-            )
+            call_interpreted_function(&func, args.clone(), env, funcs, classes, enums, impl_methods)
         } else {
-            Err(CompileError::Semantic(format!(
-                "function not found: {}",
-                name
-            )))
+            Err(CompileError::Semantic(format!("function not found: {}", name)))
         }
     });
 
@@ -314,21 +295,13 @@ fn call_interpreted_function(
             local_env.insert(param.name.clone(), arg.clone());
         } else if let Some(default) = &param.default {
             // Use default value if not provided
-            let default_val =
-                evaluate_expr(default, &local_env, functions, classes, enums, impl_methods)?;
+            let default_val = evaluate_expr(default, &local_env, functions, classes, enums, impl_methods)?;
             local_env.insert(param.name.clone(), default_val);
         }
     }
 
     // Execute the function body
-    let result = exec_block(
-        &func.body,
-        &mut local_env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    );
+    let result = exec_block(&func.body, &mut local_env, functions, classes, enums, impl_methods);
     control_to_value(result)
 }
 
@@ -425,10 +398,7 @@ pub fn call_interp_function(name: &str, args: Vec<Value>) -> Result<Value, Compi
         if let Some(func) = funcs.get(name).cloned() {
             call_interpreted_function(&func, args, env, funcs, classes, enums, impl_methods)
         } else {
-            Err(CompileError::Semantic(format!(
-                "function not found: {}",
-                name
-            )))
+            Err(CompileError::Semantic(format!("function not found: {}", name)))
         }
     })
 }
@@ -525,21 +495,10 @@ unsafe extern "C" fn interp_call_handler(
     // Look up and call the function
     let result = with_interp_state(|env, funcs, classes, enums, impl_methods| {
         if let Some(func) = funcs.get(name).cloned() {
-            call_interpreted_function(
-                &func,
-                args.clone(),
-                env,
-                funcs,
-                classes,
-                enums,
-                impl_methods,
-            )
+            call_interpreted_function(&func, args.clone(), env, funcs, classes, enums, impl_methods)
         } else {
             tracing::error!("rt_interp_call: function not found: {}", name);
-            Err(CompileError::Semantic(format!(
-                "function not found: {}",
-                name
-            )))
+            Err(CompileError::Semantic(format!("function not found: {}", name)))
         }
     });
 

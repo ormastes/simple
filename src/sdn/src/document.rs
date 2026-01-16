@@ -72,9 +72,7 @@ impl SdnDocument {
 
         let parts: Vec<&str> = path.split('.').collect();
         if parts.is_empty() {
-            return Err(SdnError::PathNotFound {
-                path: path.to_string(),
-            });
+            return Err(SdnError::PathNotFound { path: path.to_string() });
         }
 
         if parts.len() == 1 {
@@ -94,9 +92,7 @@ impl SdnDocument {
             return Ok(());
         }
 
-        Err(SdnError::PathNotFound {
-            path: path.to_string(),
-        })
+        Err(SdnError::PathNotFound { path: path.to_string() })
     }
 
     /// Delete value at path.
@@ -105,9 +101,7 @@ impl SdnDocument {
 
         let parts: Vec<&str> = path.split('.').collect();
         if parts.is_empty() {
-            return Err(SdnError::PathNotFound {
-                path: path.to_string(),
-            });
+            return Err(SdnError::PathNotFound { path: path.to_string() });
         }
 
         if parts.len() == 1 {
@@ -117,9 +111,7 @@ impl SdnDocument {
                     return Ok(());
                 }
             }
-            return Err(SdnError::PathNotFound {
-                path: path.to_string(),
-            });
+            return Err(SdnError::PathNotFound { path: path.to_string() });
         }
 
         // Navigate to parent
@@ -132,9 +124,7 @@ impl SdnDocument {
             }
         }
 
-        Err(SdnError::PathNotFound {
-            path: path.to_string(),
-        })
+        Err(SdnError::PathNotFound { path: path.to_string() })
     }
 
     /// Push value to array at path.
@@ -256,11 +246,7 @@ fn is_simple_array(arr: &[SdnValue]) -> bool {
         && arr.iter().all(|v| {
             matches!(
                 v,
-                SdnValue::Null
-                    | SdnValue::Bool(_)
-                    | SdnValue::Int(_)
-                    | SdnValue::Float(_)
-                    | SdnValue::String(_)
+                SdnValue::Null | SdnValue::Bool(_) | SdnValue::Int(_) | SdnValue::Float(_) | SdnValue::String(_)
             )
         })
 }
@@ -271,11 +257,7 @@ fn is_simple_dict(dict: &IndexMap<String, SdnValue>) -> bool {
         && dict.values().all(|v| {
             matches!(
                 v,
-                SdnValue::Null
-                    | SdnValue::Bool(_)
-                    | SdnValue::Int(_)
-                    | SdnValue::Float(_)
-                    | SdnValue::String(_)
+                SdnValue::Null | SdnValue::Bool(_) | SdnValue::Int(_) | SdnValue::Float(_) | SdnValue::String(_)
             )
         })
 }
@@ -318,9 +300,7 @@ fn render_json(value: &SdnValue) -> String {
                         let pairs: Vec<String> = fields
                             .iter()
                             .zip(row.iter())
-                            .map(|(k, v)| {
-                                format!("\"{}\": {}", escape_json_string(k), render_json(v))
-                            })
+                            .map(|(k, v)| format!("\"{}\": {}", escape_json_string(k), render_json(v)))
                             .collect();
                         format!("{{{}}}", pairs.join(", "))
                     } else {
@@ -412,20 +392,11 @@ mod tests {
         // Check that top-level keys have spans
         assert!(doc.spans.contains_key("name"), "name should have a span");
         assert!(doc.spans.contains_key("age"), "age should have a span");
-        assert!(
-            doc.spans.contains_key("server"),
-            "server should have a span"
-        );
+        assert!(doc.spans.contains_key("server"), "server should have a span");
 
         // Check nested paths
-        assert!(
-            doc.spans.contains_key("server.host"),
-            "server.host should have a span"
-        );
-        assert!(
-            doc.spans.contains_key("server.port"),
-            "server.port should have a span"
-        );
+        assert!(doc.spans.contains_key("server.host"), "server.host should have a span");
+        assert!(doc.spans.contains_key("server.port"), "server.port should have a span");
 
         // Verify spans have reasonable positions
         if let Some(name_span) = doc.spans.get("name") {

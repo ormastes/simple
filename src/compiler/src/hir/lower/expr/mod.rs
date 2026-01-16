@@ -24,15 +24,9 @@ impl Lowerer {
     ///
     /// This method delegates to specialized helper methods for each expression type,
     /// keeping the dispatch logic clean and maintainable.
-    pub(in crate::hir::lower) fn lower_expr(
-        &mut self,
-        expr: &Expr,
-        ctx: &mut FunctionContext,
-    ) -> LowerResult<HirExpr> {
+    pub(in crate::hir::lower) fn lower_expr(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         match expr {
-            Expr::Integer(_) | Expr::Float(_) | Expr::String(_) | Expr::Bool(_) | Expr::Nil => {
-                self.lower_literal(expr)
-            }
+            Expr::Integer(_) | Expr::Float(_) | Expr::String(_) | Expr::Bool(_) | Expr::Nil => self.lower_literal(expr),
             Expr::FString(parts) => self.lower_fstring(parts),
             Expr::Identifier(name) => self.lower_identifier(name, ctx),
             Expr::Binary { op, left, right } => self.lower_binary(op, left, right, ctx),
@@ -54,11 +48,7 @@ impl Lowerer {
             Expr::ContractResult => self.lower_contract_result(ctx),
             Expr::ContractOld(inner) => self.lower_contract_old(inner, ctx),
             Expr::New { kind, expr } => self.lower_new(kind, expr, ctx),
-            Expr::MethodCall {
-                receiver,
-                method,
-                args,
-            } => self.lower_method_call(receiver, method, args, ctx),
+            Expr::MethodCall { receiver, method, args } => self.lower_method_call(receiver, method, args, ctx),
             Expr::StructInit { name, fields } => self.lower_struct_init(name, fields, ctx),
             // Simple Math: Grid and Tensor literals (#1920-#1929)
             Expr::GridLiteral { rows, device } => self.lower_grid_literal(rows, device, ctx),
@@ -156,9 +146,7 @@ impl Lowerer {
         // Check for SIMD vector instance methods
         let receiver_hir = self.lower_expr(receiver, ctx)?;
         if let Some(HirType::Simd { .. }) = self.module.types.get(receiver_hir.ty) {
-            if let Some(result) =
-                self.lower_simd_instance_method(&receiver_hir, method, args, ctx)?
-            {
+            if let Some(result) = self.lower_simd_instance_method(&receiver_hir, method, args, ctx)? {
                 return Ok(result);
             }
         }
@@ -171,16 +159,9 @@ impl Lowerer {
     }
 
     /// Handle this.index(), this.thread_index(), this.group_index()
-    fn lower_this_method(
-        &self,
-        method: &str,
-        args: &[ast::Argument],
-    ) -> LowerResult<Option<HirExpr>> {
+    fn lower_this_method(&self, method: &str, args: &[ast::Argument]) -> LowerResult<Option<HirExpr>> {
         if !args.is_empty() {
-            return Err(LowerError::Unsupported(format!(
-                "this.{}() takes no arguments",
-                method
-            )));
+            return Err(LowerError::Unsupported(format!("this.{}() takes no arguments", method)));
         }
 
         let intrinsic = match method {
@@ -200,11 +181,7 @@ impl Lowerer {
     }
 
     /// Handle thread_group.barrier()
-    fn lower_thread_group_method(
-        &self,
-        method: &str,
-        args: &[ast::Argument],
-    ) -> LowerResult<Option<HirExpr>> {
+    fn lower_thread_group_method(&self, method: &str, args: &[ast::Argument]) -> LowerResult<Option<HirExpr>> {
         if method != "barrier" {
             return Err(LowerError::Unsupported(format!(
                 "unknown thread_group method: {}",

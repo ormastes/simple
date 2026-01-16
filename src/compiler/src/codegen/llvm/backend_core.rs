@@ -12,9 +12,7 @@ use inkwell::context::Context;
 #[cfg(feature = "llvm")]
 use inkwell::module::Module;
 #[cfg(feature = "llvm")]
-use inkwell::targets::{
-    CodeModel, FileType, InitializationConfig, RelocMode, Target as LlvmTarget, TargetMachine,
-};
+use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target as LlvmTarget, TargetMachine};
 #[cfg(feature = "llvm")]
 use inkwell::types::BasicTypeEnum;
 #[cfg(feature = "llvm")]
@@ -114,9 +112,7 @@ impl LlvmBackend {
             let runtime_str = match self.target.wasm_runtime {
                 Some(WasmRuntime::Wasi) => "wasi",
                 Some(WasmRuntime::Emscripten) => "unknown-emscripten",
-                Some(WasmRuntime::Browser) | Some(WasmRuntime::Standalone) | None => {
-                    "unknown-unknown"
-                }
+                Some(WasmRuntime::Browser) | Some(WasmRuntime::Standalone) | None => "unknown-unknown",
             };
             return format!("{}-{}", arch_str, runtime_str);
         }
@@ -137,9 +133,7 @@ impl LlvmBackend {
         use simple_common::target::TargetArch;
         match self.target.arch {
             TargetArch::X86 | TargetArch::Arm | TargetArch::Riscv32 | TargetArch::Wasm32 => 32,
-            TargetArch::X86_64 | TargetArch::Aarch64 | TargetArch::Riscv64 | TargetArch::Wasm64 => {
-                64
-            }
+            TargetArch::X86_64 | TargetArch::Aarch64 | TargetArch::Riscv64 | TargetArch::Wasm64 => 64,
         }
     }
 
@@ -174,9 +168,7 @@ impl LlvmBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn create_module(&self, _name: &str) -> Result<(), CompileError> {
-        Err(CompileError::Semantic(
-            "LLVM feature not enabled".to_string(),
-        ))
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
 
     /// Create LLVM function signature (feature-gated)
@@ -207,11 +199,7 @@ impl LlvmBackend {
             BasicTypeEnum::IntType(t) => t.fn_type(&param_llvm, false),
             BasicTypeEnum::FloatType(t) => t.fn_type(&param_llvm, false),
             BasicTypeEnum::PointerType(t) => t.fn_type(&param_llvm, false),
-            _ => {
-                return Err(CompileError::Semantic(
-                    "Unsupported return type".to_string(),
-                ))
-            }
+            _ => return Err(CompileError::Semantic("Unsupported return type".to_string())),
         };
 
         Ok(module.add_function(name, fn_type, None))
@@ -224,9 +212,7 @@ impl LlvmBackend {
         _param_types: &[TypeId],
         _return_type: &TypeId,
     ) -> Result<(), CompileError> {
-        Err(CompileError::Semantic(
-            "LLVM feature not enabled".to_string(),
-        ))
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
 
     /// Get LLVM IR as string (feature-gated)
@@ -241,9 +227,7 @@ impl LlvmBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn get_ir(&self) -> Result<String, CompileError> {
-        Err(CompileError::Semantic(
-            "LLVM feature not enabled".to_string(),
-        ))
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
 
     /// Verify the module (feature-gated)
@@ -262,9 +246,7 @@ impl LlvmBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn verify(&self) -> Result<(), CompileError> {
-        Err(CompileError::Semantic(
-            "LLVM feature not enabled".to_string(),
-        ))
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
 
     /// Emit object code from the module (feature-gated)
@@ -283,9 +265,8 @@ impl LlvmBackend {
         let target_triple = inkwell::targets::TargetTriple::create(&triple);
 
         // Get target from triple
-        let target = LlvmTarget::from_triple(&target_triple).map_err(|e| {
-            CompileError::Semantic(format!("Failed to create target from triple: {}", e))
-        })?;
+        let target = LlvmTarget::from_triple(&target_triple)
+            .map_err(|e| CompileError::Semantic(format!("Failed to create target from triple: {}", e)))?;
 
         // Create target machine
         // For WASM targets, use static relocation mode (no PIC needed)
@@ -316,9 +297,7 @@ impl LlvmBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
-        Err(CompileError::Semantic(
-            "LLVM feature not enabled".to_string(),
-        ))
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
 }
 

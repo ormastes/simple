@@ -92,9 +92,7 @@ pub extern "C" fn rt_torch_where(cond_handle: u64, a_handle: u64, b_handle: u64)
 
         let result = cond.0.where_self(&a.0, &b.0);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
             "rt_torch_where: cond={} ? {} : {} -> handle={}",
             cond_handle,

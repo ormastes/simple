@@ -9,10 +9,7 @@ use crate::token::{Span, TokenKind};
 use super::core::Parser;
 
 impl<'a> Parser<'a> {
-    pub(super) fn parse_pub_item_with_doc(
-        &mut self,
-        doc_comment: Option<DocComment>,
-    ) -> Result<Node, ParseError> {
+    pub(super) fn parse_pub_item_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         match &self.current.kind {
             TokenKind::Fn => {
                 let mut node = self.parse_function_with_doc(doc_comment)?;
@@ -305,10 +302,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub(super) fn parse_pub_item_with_attrs(
-        &mut self,
-        attributes: Vec<Attribute>,
-    ) -> Result<Node, ParseError> {
+    pub(super) fn parse_pub_item_with_attrs(&mut self, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         match &self.current.kind {
             TokenKind::Fn => {
                 let mut node = self.parse_function_with_attrs(vec![], attributes)?;

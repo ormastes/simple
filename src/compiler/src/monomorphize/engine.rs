@@ -3,9 +3,7 @@
 use super::table::MonomorphizationTable;
 use super::types::{ConcreteType, SpecializationKey};
 use super::util::{ast_type_to_concrete, concrete_to_ast_type};
-use simple_parser::ast::{
-    Block, ClassDef, Expr, Field, FunctionDef, Module, Node, StructDef, Type as AstType,
-};
+use simple_parser::ast::{Block, ClassDef, Expr, Field, FunctionDef, Module, Node, StructDef, Type as AstType};
 use std::collections::HashMap;
 
 /// Trait for types that have fields and methods (StructDef and ClassDef)
@@ -115,11 +113,7 @@ impl<'a> Monomorphizer<'a> {
     /// Request specialization of a generic function call.
     ///
     /// Returns the mangled name of the specialized function.
-    pub fn specialize_function_call(
-        &mut self,
-        name: &str,
-        type_args: Vec<ConcreteType>,
-    ) -> Option<String> {
+    pub fn specialize_function_call(&mut self, name: &str, type_args: Vec<ConcreteType>) -> Option<String> {
         let func = self.generic_functions.get(name)?.clone();
         Some(self.table.request_function(name, type_args, &func))
     }
@@ -197,11 +191,7 @@ impl<'a> Monomorphizer<'a> {
     }
 
     /// Substitute type parameters in a block.
-    fn substitute_in_block(
-        &mut self,
-        block: &Block,
-        bindings: &HashMap<String, ConcreteType>,
-    ) -> Block {
+    fn substitute_in_block(&mut self, block: &Block, bindings: &HashMap<String, ConcreteType>) -> Block {
         Block {
             span: block.span,
             statements: self.substitute_in_nodes(&block.statements, bindings),
@@ -209,11 +199,8 @@ impl<'a> Monomorphizer<'a> {
     }
 
     /// Helper to substitute types in fields and methods
-    fn substitute_in_fields_and_methods<T>(
-        &mut self,
-        item: &mut T,
-        bindings: &HashMap<String, ConcreteType>,
-    ) where
+    fn substitute_in_fields_and_methods<T>(&mut self, item: &mut T, bindings: &HashMap<String, ConcreteType>)
+    where
         T: HasFieldsAndMethods,
     {
         // Substitute types in fields
@@ -268,11 +255,7 @@ impl<'a> Monomorphizer<'a> {
     }
 
     /// Build type bindings from generic params and concrete args.
-    fn build_bindings(
-        &self,
-        params: &[String],
-        args: &[ConcreteType],
-    ) -> HashMap<String, ConcreteType> {
+    fn build_bindings(&self, params: &[String], args: &[ConcreteType]) -> HashMap<String, ConcreteType> {
         params
             .iter()
             .zip(args.iter())
@@ -281,11 +264,7 @@ impl<'a> Monomorphizer<'a> {
     }
 
     /// Substitute type parameters in an AST type.
-    fn substitute_ast_type(
-        &mut self,
-        ty: &AstType,
-        bindings: &HashMap<String, ConcreteType>,
-    ) -> AstType {
+    fn substitute_ast_type(&mut self, ty: &AstType, bindings: &HashMap<String, ConcreteType>) -> AstType {
         match ty {
             AstType::Simple(name) => {
                 if let Some(concrete) = bindings.get(name) {
@@ -301,17 +280,12 @@ impl<'a> Monomorphizer<'a> {
                 }
 
                 // Otherwise, substitute in the arguments
-                let new_args = args
-                    .iter()
-                    .map(|a| self.substitute_ast_type(a, bindings))
-                    .collect();
+                let new_args = args.iter().map(|a| self.substitute_ast_type(a, bindings)).collect();
 
                 // Check if this is a generic type that needs specialization
                 if self.is_generic_struct(name) || self.is_generic_class(name) {
-                    let concrete_args: Vec<ConcreteType> = args
-                        .iter()
-                        .map(|a| ast_type_to_concrete(a, bindings))
-                        .collect();
+                    let concrete_args: Vec<ConcreteType> =
+                        args.iter().map(|a| ast_type_to_concrete(a, bindings)).collect();
 
                     // Request specialization
                     if self.is_generic_struct(name) {
@@ -332,45 +306,30 @@ impl<'a> Monomorphizer<'a> {
                     }
                 }
             }
-            AstType::Tuple(elems) => AstType::Tuple(
-                elems
-                    .iter()
-                    .map(|e| self.substitute_ast_type(e, bindings))
-                    .collect(),
-            ),
+            AstType::Tuple(elems) => {
+                AstType::Tuple(elems.iter().map(|e| self.substitute_ast_type(e, bindings)).collect())
+            }
             AstType::Array { element, size } => AstType::Array {
                 element: Box::new(self.substitute_ast_type(element, bindings)),
                 size: size.clone(),
             },
             AstType::Function { params, ret } => AstType::Function {
-                params: params
-                    .iter()
-                    .map(|p| self.substitute_ast_type(p, bindings))
-                    .collect(),
-                ret: ret
-                    .as_ref()
-                    .map(|r| Box::new(self.substitute_ast_type(r, bindings))),
+                params: params.iter().map(|p| self.substitute_ast_type(p, bindings)).collect(),
+                ret: ret.as_ref().map(|r| Box::new(self.substitute_ast_type(r, bindings))),
             },
             AstType::Pointer { kind, inner } => AstType::Pointer {
                 kind: *kind,
                 inner: Box::new(self.substitute_ast_type(inner, bindings)),
             },
-            AstType::Optional(inner) => {
-                AstType::Optional(Box::new(self.substitute_ast_type(inner, bindings)))
+            AstType::Optional(inner) => AstType::Optional(Box::new(self.substitute_ast_type(inner, bindings))),
+            AstType::Union(types) => {
+                AstType::Union(types.iter().map(|t| self.substitute_ast_type(t, bindings)).collect())
             }
-            AstType::Union(types) => AstType::Union(
-                types
-                    .iter()
-                    .map(|t| self.substitute_ast_type(t, bindings))
-                    .collect(),
-            ),
             AstType::Constructor { target, args } => AstType::Constructor {
                 target: Box::new(self.substitute_ast_type(target, bindings)),
-                args: args.as_ref().map(|a| {
-                    a.iter()
-                        .map(|t| self.substitute_ast_type(t, bindings))
-                        .collect()
-                }),
+                args: args
+                    .as_ref()
+                    .map(|a| a.iter().map(|t| self.substitute_ast_type(t, bindings)).collect()),
             },
             AstType::Simd { lanes, element } => AstType::Simd {
                 lanes: *lanes,
@@ -398,23 +357,12 @@ impl<'a> Monomorphizer<'a> {
     }
 
     /// Substitute type parameters in AST nodes.
-    fn substitute_in_nodes(
-        &mut self,
-        nodes: &[Node],
-        bindings: &HashMap<String, ConcreteType>,
-    ) -> Vec<Node> {
-        nodes
-            .iter()
-            .map(|n| self.substitute_in_node(n, bindings))
-            .collect()
+    fn substitute_in_nodes(&mut self, nodes: &[Node], bindings: &HashMap<String, ConcreteType>) -> Vec<Node> {
+        nodes.iter().map(|n| self.substitute_in_node(n, bindings)).collect()
     }
 
     /// Substitute type parameters in a single node.
-    fn substitute_in_node(
-        &mut self,
-        node: &Node,
-        bindings: &HashMap<String, ConcreteType>,
-    ) -> Node {
+    fn substitute_in_node(&mut self, node: &Node, bindings: &HashMap<String, ConcreteType>) -> Node {
         match node {
             Node::Let(let_stmt) => {
                 let mut new_let = let_stmt.clone();
@@ -476,11 +424,7 @@ impl<'a> Monomorphizer<'a> {
     /// This recursively traverses the expression tree and replaces type parameters
     /// with their concrete types. For calls to generic functions, it requests
     /// specialization and rewrites the call to use the mangled name.
-    fn substitute_in_expr(
-        &mut self,
-        expr: &Expr,
-        bindings: &HashMap<String, ConcreteType>,
-    ) -> Expr {
+    fn substitute_in_expr(&mut self, expr: &Expr, bindings: &HashMap<String, ConcreteType>) -> Expr {
         match expr {
             // Function calls - check for generic function calls
             Expr::Call { callee, args } => {
@@ -508,11 +452,7 @@ impl<'a> Monomorphizer<'a> {
                 operand: Box::new(self.substitute_in_expr(operand, bindings)),
             },
             // Method calls
-            Expr::MethodCall {
-                receiver,
-                method,
-                args,
-            } => Expr::MethodCall {
+            Expr::MethodCall { receiver, method, args } => Expr::MethodCall {
                 receiver: Box::new(self.substitute_in_expr(receiver, bindings)),
                 method: method.clone(),
                 args: args
@@ -534,19 +474,9 @@ impl<'a> Monomorphizer<'a> {
                 index: Box::new(self.substitute_in_expr(index, bindings)),
             },
             // Array literal
-            Expr::Array(elems) => Expr::Array(
-                elems
-                    .iter()
-                    .map(|e| self.substitute_in_expr(e, bindings))
-                    .collect(),
-            ),
+            Expr::Array(elems) => Expr::Array(elems.iter().map(|e| self.substitute_in_expr(e, bindings)).collect()),
             // Tuple literal
-            Expr::Tuple(elems) => Expr::Tuple(
-                elems
-                    .iter()
-                    .map(|e| self.substitute_in_expr(e, bindings))
-                    .collect(),
-            ),
+            Expr::Tuple(elems) => Expr::Tuple(elems.iter().map(|e| self.substitute_in_expr(e, bindings)).collect()),
             // Dict literal
             Expr::Dict(pairs) => Expr::Dict(
                 pairs
@@ -601,10 +531,7 @@ impl<'a> Monomorphizer<'a> {
                     .map(|arm| simple_parser::ast::MatchArm {
                         span: arm.span,
                         pattern: arm.pattern.clone(),
-                        guard: arm
-                            .guard
-                            .as_ref()
-                            .map(|g| self.substitute_in_expr(g, bindings)),
+                        guard: arm.guard.as_ref().map(|g| self.substitute_in_expr(g, bindings)),
                         body: self.substitute_in_block(&arm.body, bindings),
                     })
                     .collect(),

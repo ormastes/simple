@@ -42,10 +42,7 @@ fn run_expect_compile_error(src: &str, expected_error: &str) {
 fn run_expect_any_error(src: &str) {
     let runner = Runner::new_no_gc();
     let result = runner.run_source(src);
-    assert!(
-        result.is_err(),
-        "Expected an error, but execution succeeded"
-    );
+    assert!(result.is_err(), "Expected an error, but execution succeeded");
 }
 
 // =============================================================================
@@ -84,9 +81,7 @@ fn test_runner_compile_to_smf() {
     let smf_path = dir.path().join("program.smf");
 
     let runner = Runner::new();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     assert!(smf_path.exists(), "SMF file should exist");
     let smf_content = fs::read(&smf_path).expect("read ok");
@@ -110,9 +105,7 @@ fn test_runner_no_gc() {
 #[test]
 fn test_runner_complex_expression() {
     let runner = Runner::new();
-    let result = runner
-        .run_source("main = (10 + 5) * 2 - 3")
-        .expect("run ok");
+    let result = runner.run_source("main = (10 + 5) * 2 - 3").expect("run ok");
     assert_eq!(result, 27);
 }
 
@@ -123,18 +116,14 @@ fn test_runner_complex_expression() {
 #[test]
 fn test_interpreter_simple() {
     let interpreter = Interpreter::new();
-    let result = interpreter
-        .run("main = 42", RunConfig::default())
-        .expect("run ok");
+    let result = interpreter.run("main = 42", RunConfig::default()).expect("run ok");
     assert_eq!(result.exit_code, 42);
 }
 
 #[test]
 fn test_interpreter_no_gc() {
     let interpreter = Interpreter::new_no_gc();
-    let result = interpreter
-        .run("main = 99", RunConfig::default())
-        .expect("run ok");
+    let result = interpreter.run("main = 99", RunConfig::default()).expect("run ok");
     assert_eq!(result.exit_code, 99);
 }
 
@@ -193,11 +182,7 @@ fn test_parser_if_statement() {
     let source = "if true:\n    x = 1\nmain = 0";
     let mut parser = Parser::new(source);
     let result = parser.parse();
-    assert!(
-        result.is_ok(),
-        "Should parse if statement: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Should parse if statement: {:?}", result.err());
 }
 
 // =============================================================================
@@ -256,11 +241,7 @@ fn test_compiler_pipeline_arithmetic() {
 
     let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
     let result = pipeline.compile(&src, &out);
-    assert!(
-        result.is_ok(),
-        "Should compile arithmetic: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Should compile arithmetic: {:?}", result.err());
 }
 
 // =============================================================================
@@ -274,9 +255,7 @@ fn test_module_loader_load_smf() {
 
     // First compile a module
     let runner = Runner::new();
-    runner
-        .compile_to_smf("main = 123", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 123", &smf_path).expect("compile ok");
 
     // Then load it
     let loader = ModuleLoader::new();
@@ -290,9 +269,7 @@ fn test_module_loader_entry_point() {
     let smf_path = dir.path().join("entry.smf");
 
     let runner = Runner::new();
-    runner
-        .compile_to_smf("main = 456", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 456", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -418,9 +395,7 @@ fn test_actor_bidirectional_communication() {
     });
 
     // Send a message to the actor
-    handle
-        .send(Message::Value("test".to_string()))
-        .expect("send ok");
+    handle.send(Message::Value("test".to_string())).expect("send ok");
 
     // Receive the response
     let response = handle.recv().expect("recv ok");
@@ -471,10 +446,7 @@ fn test_dyn_traits_in_common() {
     fn _accepts_module<T: DynModule>(_: &T) {}
     fn _accepts_loader<T: DynLoader>(_: &T) {}
 
-    assert!(
-        true,
-        "DynModule and DynLoader traits accessible from common"
-    );
+    assert!(true, "DynModule and DynLoader traits accessible from common");
 }
 
 // =============================================================================
@@ -502,9 +474,7 @@ fn test_no_gc_mode_consistency() {
     let interpreter = Interpreter::new_no_gc();
 
     let runner_result = runner.run_source("main = 100").expect("runner ok");
-    let interpreter_result = interpreter
-        .run_simple("main = 100")
-        .expect("interpreter ok");
+    let interpreter_result = interpreter.run_simple("main = 100").expect("interpreter ok");
 
     assert_eq!(runner_result, interpreter_result.exit_code);
 }
@@ -548,11 +518,7 @@ fn test_manual_gc_multiple_allocations() {
 
     drop(ptr2);
     drop(ptr3);
-    assert_eq!(
-        gc.live(),
-        0,
-        "Should track zero allocations after all drops"
-    );
+    assert_eq!(gc.live(), 0, "Should track zero allocations after all drops");
 }
 
 /// Test Unique pointer into_inner consumes the value
@@ -685,11 +651,7 @@ fn test_config_env_from_args() {
     use simple_common::ConfigEnv;
 
     // Test --key=value format
-    let args = vec![
-        "--port=8080".to_string(),
-        "--host".to_string(),
-        "localhost".to_string(),
-    ];
+    let args = vec!["--port=8080".to_string(), "--host".to_string(), "localhost".to_string()];
 
     let config = ConfigEnv::from_args(&args);
 

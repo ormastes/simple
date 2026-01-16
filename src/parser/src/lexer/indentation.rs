@@ -36,12 +36,7 @@ impl<'a> super::Lexer<'a> {
                         // This is an attribute, not a comment
                         pending_token = Some(Token::new(
                             TokenKind::Hash,
-                            Span::new(
-                                self.current_pos - 1,
-                                self.current_pos,
-                                self.line,
-                                self.column - 1,
-                            ),
+                            Span::new(self.current_pos - 1, self.current_pos, self.line, self.column - 1),
                             "#".to_string(),
                         ));
                         break;
@@ -104,12 +99,7 @@ impl<'a> super::Lexer<'a> {
                             let cleaned = clean_doc_comment(&content);
                             return Some(Token::new(
                                 TokenKind::DocComment(cleaned),
-                                Span::new(
-                                    slash_start,
-                                    self.current_pos,
-                                    slash_start_line,
-                                    slash_start_col,
-                                ),
+                                Span::new(slash_start, self.current_pos, slash_start_line, slash_start_col),
                                 self.source[slash_start..self.current_pos].to_string(),
                             ));
                         }
@@ -155,9 +145,7 @@ impl<'a> super::Lexer<'a> {
                             // Check if this is a multi-line doc block (/// on its own line)
                             if self.peek() == Some('\n') || self.peek().is_none() {
                                 // Multi-line doc block: ///\n...\n///
-                                return Some(self.read_doc_block_triple_slash(
-                                    start_pos, start_line, start_col,
-                                ));
+                                return Some(self.read_doc_block_triple_slash(start_pos, start_line, start_col));
                             }
 
                             // Read to end of line (single-line doc comment)
@@ -168,9 +156,7 @@ impl<'a> super::Lexer<'a> {
                                 }
                                 self.advance();
                             }
-                            let content = self.source[content_start..self.current_pos]
-                                .trim()
-                                .to_string();
+                            let content = self.source[content_start..self.current_pos].trim().to_string();
                             return Some(Token::new(
                                 TokenKind::DocComment(content),
                                 Span::new(start_pos, self.current_pos, start_line, start_col),
@@ -180,12 +166,7 @@ impl<'a> super::Lexer<'a> {
                             // Double slash // - return DoubleSlash token
                             return Some(Token::new(
                                 TokenKind::DoubleSlash,
-                                Span::new(
-                                    self.current_pos - 2,
-                                    self.current_pos,
-                                    self.line,
-                                    self.column - 2,
-                                ),
+                                Span::new(self.current_pos - 2, self.current_pos, self.line, self.column - 2),
                                 "//".to_string(),
                             ));
                         }
@@ -194,24 +175,14 @@ impl<'a> super::Lexer<'a> {
                         self.advance(); // Consume '='
                         return Some(Token::new(
                             TokenKind::SlashAssign,
-                            Span::new(
-                                self.current_pos - 2,
-                                self.current_pos,
-                                self.line,
-                                self.column - 2,
-                            ),
+                            Span::new(self.current_pos - 2, self.current_pos, self.line, self.column - 2),
                             "/=".to_string(),
                         ));
                     } else {
                         // Not a block comment, it's a slash token
                         return Some(Token::new(
                             TokenKind::Slash,
-                            Span::new(
-                                self.current_pos - 1,
-                                self.current_pos,
-                                self.line,
-                                self.column - 1,
-                            ),
+                            Span::new(self.current_pos - 1, self.current_pos, self.line, self.column - 1),
                             "/".to_string(),
                         ));
                     }

@@ -55,22 +55,12 @@ extern "C" {
     fn hipMalloc(ptr: *mut HipDeviceptr, size: usize) -> HipError;
     fn hipFree(ptr: HipDeviceptr) -> HipError;
     fn hipMemcpy(dst: *mut c_void, src: *const c_void, size: usize, kind: i32) -> HipError;
-    fn hipMemcpyAsync(
-        dst: *mut c_void,
-        src: *const c_void,
-        size: usize,
-        kind: i32,
-        stream: HipStream,
-    ) -> HipError;
+    fn hipMemcpyAsync(dst: *mut c_void, src: *const c_void, size: usize, kind: i32, stream: HipStream) -> HipError;
     fn hipMemset(dst: HipDeviceptr, value: i32, size: usize) -> HipError;
     fn hipModuleLoad(module: *mut HipModule, fname: *const i8) -> HipError;
     fn hipModuleLoadData(module: *mut HipModule, image: *const c_void) -> HipError;
     fn hipModuleUnload(module: HipModule) -> HipError;
-    fn hipModuleGetFunction(
-        function: *mut HipFunction,
-        module: HipModule,
-        name: *const i8,
-    ) -> HipError;
+    fn hipModuleGetFunction(function: *mut HipFunction, module: HipModule, name: *const i8) -> HipError;
     fn hipModuleLaunchKernel(
         f: HipFunction,
         gridDimX: u32,
@@ -100,10 +90,7 @@ fn hip_check(result: HipError) -> GpuResult<()> {
     if result == HIP_SUCCESS {
         Ok(())
     } else {
-        Err(GpuError::BackendError(format!(
-            "HIP/ROCm error: {}",
-            result
-        )))
+        Err(GpuError::BackendError(format!("HIP/ROCm error: {}", result)))
     }
 }
 
@@ -145,8 +132,7 @@ impl RocmBackend {
     }
 
     fn next_handle(&self) -> u64 {
-        self.next_handle
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        self.next_handle.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Get device attribute.
@@ -179,9 +165,7 @@ impl Backend for RocmBackend {
             // Initialize HIP
             let result = hipInit(0);
             if result != HIP_SUCCESS {
-                return Err(GpuError::BackendError(
-                    "Failed to initialize HIP/ROCm".to_string(),
-                ));
+                return Err(GpuError::BackendError("Failed to initialize HIP/ROCm".to_string()));
             }
 
             // Get device count
@@ -330,27 +314,14 @@ impl Backend for RocmBackend {
         let device = index as HipDevice;
 
         Ok(DeviceCapabilities {
-            max_work_group_size_x: self
-                .get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X)?
-                as u32,
-            max_work_group_size_y: self
-                .get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y)?
-                as u32,
-            max_work_group_size_z: self
-                .get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z)?
-                as u32,
-            max_work_group_invocations: self
-                .get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)?
-                as u32,
-            max_work_groups_x: self.get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X)?
-                as u32,
-            max_work_groups_y: self.get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y)?
-                as u32,
-            max_work_groups_z: self.get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z)?
-                as u32,
-            shared_memory_size: self
-                .get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)?
-                as usize,
+            max_work_group_size_x: self.get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X)? as u32,
+            max_work_group_size_y: self.get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Y)? as u32,
+            max_work_group_size_z: self.get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_Z)? as u32,
+            max_work_group_invocations: self.get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)? as u32,
+            max_work_groups_x: self.get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X)? as u32,
+            max_work_groups_y: self.get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y)? as u32,
+            max_work_groups_z: self.get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z)? as u32,
+            shared_memory_size: self.get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)? as usize,
             supports_f64: true, // Most AMD GPUs support f64
             supports_atomics: true,
             supports_subgroups: true,
@@ -392,12 +363,7 @@ impl Backend for RocmBackend {
         };
 
         unsafe {
-            hip_check(hipMemcpy(
-                dst as *mut c_void,
-                src as *const c_void,
-                size,
-                hip_kind,
-            ))?;
+            hip_check(hipMemcpy(dst as *mut c_void, src as *const c_void, size, hip_kind))?;
         }
         Ok(())
     }
@@ -457,7 +423,8 @@ impl Backend for RocmBackend {
     fn load_kernel(&self, _source: &str, _name: &str) -> GpuResult<KernelHandle> {
         // HIP requires compiled binary (HIP-Clang output)
         Err(GpuError::BackendError(
-            "ROCm/HIP backend requires compiled binary. Use load_kernel_binary() or compile with hipcc first.".to_string(),
+            "ROCm/HIP backend requires compiled binary. Use load_kernel_binary() or compile with hipcc first."
+                .to_string(),
         ))
     }
 
@@ -466,13 +433,10 @@ impl Backend for RocmBackend {
         let mut function: HipFunction = ptr::null_mut();
 
         unsafe {
-            hip_check(hipModuleLoadData(
-                &mut module,
-                binary.as_ptr() as *const c_void,
-            ))?;
+            hip_check(hipModuleLoadData(&mut module, binary.as_ptr() as *const c_void))?;
 
-            let c_name = CString::new(name)
-                .map_err(|_| GpuError::InvalidArgument("Invalid kernel name".to_string()))?;
+            let c_name =
+                CString::new(name).map_err(|_| GpuError::InvalidArgument("Invalid kernel name".to_string()))?;
             hip_check(hipModuleGetFunction(&mut function, module, c_name.as_ptr()))?;
         }
 
@@ -527,8 +491,7 @@ impl Backend for RocmBackend {
         };
 
         unsafe {
-            let mut kernel_params: Vec<*mut c_void> =
-                args.iter().map(|&p| p as *mut c_void).collect();
+            let mut kernel_params: Vec<*mut c_void> = args.iter().map(|&p| p as *mut c_void).collect();
 
             hip_check(hipModuleLaunchKernel(
                 info,

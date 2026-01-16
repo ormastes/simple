@@ -85,10 +85,7 @@ impl RuntimeContractViolation {
             }
 
             // Initialize header
-            (*ptr).header = HeapHeader::new(
-                HeapObjectType::ContractViolation,
-                std::mem::size_of::<Self>() as u32,
-            );
+            (*ptr).header = HeapHeader::new(HeapObjectType::ContractViolation, std::mem::size_of::<Self>() as u32);
             (*ptr).kind = kind;
 
             // Copy function name
@@ -361,18 +358,9 @@ mod tests {
 
     #[test]
     fn test_violation_kind_from_i64() {
-        assert_eq!(
-            ContractViolationKind::from_i64(0),
-            Some(ContractViolationKind::Pre)
-        );
-        assert_eq!(
-            ContractViolationKind::from_i64(1),
-            Some(ContractViolationKind::Post)
-        );
-        assert_eq!(
-            ContractViolationKind::from_i64(2),
-            Some(ContractViolationKind::ErrPost)
-        );
+        assert_eq!(ContractViolationKind::from_i64(0), Some(ContractViolationKind::Pre));
+        assert_eq!(ContractViolationKind::from_i64(1), Some(ContractViolationKind::Post));
+        assert_eq!(ContractViolationKind::from_i64(2), Some(ContractViolationKind::ErrPost));
         assert_eq!(
             ContractViolationKind::from_i64(3),
             Some(ContractViolationKind::InvariantEntry)
@@ -390,23 +378,14 @@ mod tests {
         assert_eq!(ContractViolationKind::Pre.name(), "Precondition");
         assert_eq!(ContractViolationKind::Post.name(), "Postcondition");
         assert_eq!(ContractViolationKind::ErrPost.name(), "Error postcondition");
-        assert_eq!(
-            ContractViolationKind::InvariantEntry.name(),
-            "Entry invariant"
-        );
-        assert_eq!(
-            ContractViolationKind::InvariantExit.name(),
-            "Exit invariant"
-        );
+        assert_eq!(ContractViolationKind::InvariantEntry.name(), "Entry invariant");
+        assert_eq!(ContractViolationKind::InvariantExit.name(), "Exit invariant");
     }
 
     #[test]
     fn test_contract_violation_create() {
-        let ptr = RuntimeContractViolation::new(
-            ContractViolationKind::Pre,
-            "test_function",
-            Some("x must be positive"),
-        );
+        let ptr =
+            RuntimeContractViolation::new(ContractViolationKind::Pre, "test_function", Some("x must be positive"));
 
         assert!(!ptr.is_null());
 
@@ -426,8 +405,7 @@ mod tests {
 
     #[test]
     fn test_contract_violation_no_message() {
-        let ptr =
-            RuntimeContractViolation::new(ContractViolationKind::Post, "another_function", None);
+        let ptr = RuntimeContractViolation::new(ContractViolationKind::Post, "another_function", None);
 
         assert!(!ptr.is_null());
 

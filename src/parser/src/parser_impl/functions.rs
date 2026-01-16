@@ -32,10 +32,7 @@ impl<'a> Parser<'a> {
         self.parse_function_with_decorators(vec![])
     }
 
-    pub(super) fn parse_function_with_decorators(
-        &mut self,
-        decorators: Vec<Decorator>,
-    ) -> Result<Node, ParseError> {
+    pub(super) fn parse_function_with_decorators(&mut self, decorators: Vec<Decorator>) -> Result<Node, ParseError> {
         self.parse_function_with_attrs(decorators, vec![])
     }
 
@@ -89,12 +86,7 @@ impl<'a> Parser<'a> {
 
         let (body, contract, bounds_block) = if is_abstract {
             // Abstract method has no body
-            let empty_span = Span::new(
-                start_span.start,
-                start_span.end,
-                start_span.line,
-                start_span.column,
-            );
+            let empty_span = Span::new(start_span.start, start_span.end, start_span.line, start_span.column);
             (
                 Block {
                     span: empty_span,
@@ -232,10 +224,7 @@ impl<'a> Parser<'a> {
 
     // === Doc Comment Variants ===
 
-    pub(super) fn parse_function_with_doc(
-        &mut self,
-        doc_comment: Option<DocComment>,
-    ) -> Result<Node, ParseError> {
+    pub(super) fn parse_function_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         let mut node = self.parse_function()?;
         if let Node::Function(ref mut f) = node {
             f.doc_comment = doc_comment;
@@ -254,10 +243,7 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    pub(super) fn parse_sync_function_with_doc(
-        &mut self,
-        doc_comment: Option<DocComment>,
-    ) -> Result<Node, ParseError> {
+    pub(super) fn parse_sync_function_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         let mut node = self.parse_sync_function()?;
         if let Node::Function(ref mut f) = node {
             f.doc_comment = doc_comment;

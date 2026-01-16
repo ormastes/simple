@@ -9,9 +9,7 @@ use std::path::PathBuf;
 // Common Manual Memory Coverage (common/src/manual.rs - 0%)
 // =============================================================================
 
-use simple_common::manual::{
-    borrow_state_valid, gc_state_safe, BorrowState, GcState, Nat, ValidBorrowState,
-};
+use simple_common::manual::{borrow_state_valid, gc_state_safe, BorrowState, GcState, Nat, ValidBorrowState};
 
 #[test]
 fn test_nat_new() {
@@ -233,8 +231,8 @@ fn test_gc_state_collect_safe() {
 // =============================================================================
 
 use simple_compiler::effects::{
-    check_async_violation, check_effect_violations, check_pure_violation, has_side_effects,
-    is_blocking_operation, is_fs_operation, is_io_operation, is_net_operation,
+    check_async_violation, check_effect_violations, check_pure_violation, has_side_effects, is_blocking_operation,
+    is_fs_operation, is_io_operation, is_net_operation,
 };
 
 #[test]
@@ -374,9 +372,7 @@ fn test_mir_inst_copy() {
 // Doctest Coverage (driver/src/doctest.rs - 0%)
 // =============================================================================
 
-use simple_driver::doctest::{
-    is_definition_like, DoctestExample, DoctestResult, DoctestStatus, Expected,
-};
+use simple_driver::doctest::{is_definition_like, DoctestExample, DoctestResult, DoctestStatus, Expected};
 
 #[test]
 fn test_expected_output() {

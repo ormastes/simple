@@ -25,11 +25,7 @@ main = a + b
 
     let mut parser = Parser::new(source);
     let result = parser.parse();
-    assert!(
-        result.is_ok(),
-        "Should parse complex nesting: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Should parse complex nesting: {:?}", result.err());
 }
 
 /// Test parser with multiple function definitions
@@ -258,9 +254,7 @@ fn test_module_loader_caching() {
     let smf_path = dir.path().join("cache_loader_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 111", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 111", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
 
@@ -296,9 +290,7 @@ fn test_loaded_module_symbols() {
     let smf_path = dir.path().join("symbols_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 0", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 0", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -429,9 +421,7 @@ fn test_moderately_nested_parentheses() {
 #[test]
 fn test_complex_arithmetic_chain() {
     let runner = Runner::new_no_gc();
-    let result = runner
-        .run_source("main = 1 + 2 * 3 - 4 / 2 + 5 * 6")
-        .expect("run ok");
+    let result = runner.run_source("main = 1 + 2 * 3 - 4 / 2 + 5 * 6").expect("run ok");
     // 1 + 6 - 2 + 30 = 35
     assert_eq!(result, 35);
 }
@@ -617,9 +607,7 @@ fn test_file_deleted_after_compile() {
     let smf_path = dir.path().join("deleted.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 100", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 100", &smf_path).expect("compile ok");
 
     // Load the module first
     let loader = ModuleLoader::new();
@@ -657,10 +645,7 @@ fn test_compile_to_readonly_dir() {
     perms.set_mode(0o755);
     fs::set_permissions(&readonly_dir, perms).expect("chmod ok");
 
-    assert!(
-        result.is_err(),
-        "Should fail to write to read-only directory"
-    );
+    assert!(result.is_err(), "Should fail to write to read-only directory");
 }
 
 // =============================================================================

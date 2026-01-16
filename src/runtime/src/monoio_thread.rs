@@ -196,25 +196,11 @@ pub enum IoRequest {
 /// Responses sent from runtime thread back to FFI
 #[derive(Debug, Clone)]
 pub enum IoResponse {
-    Success {
-        id: i64,
-    },
-    Error {
-        code: i64,
-        message: String,
-    },
-    Data {
-        bytes: Vec<u8>,
-        len: usize,
-    },
-    DataFrom {
-        bytes: Vec<u8>,
-        len: usize,
-        addr: String,
-    },
-    Address {
-        addr: String,
-    },
+    Success { id: i64 },
+    Error { code: i64, message: String },
+    Data { bytes: Vec<u8>, len: usize },
+    DataFrom { bytes: Vec<u8>, len: usize, addr: String },
+    Address { addr: String },
 }
 
 type ResponseSender = std::sync::mpsc::Sender<IoResponse>;
@@ -383,10 +369,7 @@ impl RuntimeThread {
             } => {
                 Self::handle_tcp_write(stream_id, data, response_tx, registry).await;
             }
-            IoRequest::TcpClose {
-                stream_id,
-                response_tx,
-            } => {
+            IoRequest::TcpClose { stream_id, response_tx } => {
                 Self::handle_tcp_close(stream_id, response_tx, registry);
             }
             IoRequest::UdpBind { addr, response_tx } => {
@@ -407,10 +390,7 @@ impl RuntimeThread {
             } => {
                 Self::handle_udp_recv_from(socket_id, max_len, response_tx, registry).await;
             }
-            IoRequest::UdpClose {
-                socket_id,
-                response_tx,
-            } => {
+            IoRequest::UdpClose { socket_id, response_tx } => {
                 Self::handle_udp_close(socket_id, response_tx, registry);
             }
             IoRequest::TcpSetNodelay {
@@ -440,16 +420,10 @@ impl RuntimeThread {
             } => {
                 Self::handle_tcp_listener_close(listener_id, response_tx, registry);
             }
-            IoRequest::TcpGetLocalAddr {
-                stream_id,
-                response_tx,
-            } => {
+            IoRequest::TcpGetLocalAddr { stream_id, response_tx } => {
                 Self::handle_tcp_get_local_addr(stream_id, response_tx, registry);
             }
-            IoRequest::TcpGetPeerAddr {
-                stream_id,
-                response_tx,
-            } => {
+            IoRequest::TcpGetPeerAddr { stream_id, response_tx } => {
                 Self::handle_tcp_get_peer_addr(stream_id, response_tx, registry);
             }
             IoRequest::UdpSetBroadcast {
@@ -472,13 +446,7 @@ impl RuntimeThread {
                 interface_addr,
                 response_tx,
             } => {
-                Self::handle_udp_join_multicast(
-                    socket_id,
-                    multicast_addr,
-                    interface_addr,
-                    response_tx,
-                    registry,
-                );
+                Self::handle_udp_join_multicast(socket_id, multicast_addr, interface_addr, response_tx, registry);
             }
             IoRequest::UdpLeaveMulticast {
                 socket_id,
@@ -486,18 +454,9 @@ impl RuntimeThread {
                 interface_addr,
                 response_tx,
             } => {
-                Self::handle_udp_leave_multicast(
-                    socket_id,
-                    multicast_addr,
-                    interface_addr,
-                    response_tx,
-                    registry,
-                );
+                Self::handle_udp_leave_multicast(socket_id, multicast_addr, interface_addr, response_tx, registry);
             }
-            IoRequest::UdpGetLocalAddr {
-                socket_id,
-                response_tx,
-            } => {
+            IoRequest::UdpGetLocalAddr { socket_id, response_tx } => {
                 Self::handle_udp_get_local_addr(socket_id, response_tx, registry);
             }
             IoRequest::Shutdown => {
@@ -507,11 +466,7 @@ impl RuntimeThread {
     }
 
     // TCP Handlers
-    async fn handle_tcp_listen(
-        addr: String,
-        response_tx: ResponseSender,
-        registry: &mut StreamRegistry,
-    ) {
+    async fn handle_tcp_listen(addr: String, response_tx: ResponseSender, registry: &mut StreamRegistry) {
         let socket_addr = parse_addr!(addr, response_tx);
 
         match TcpListener::bind(socket_addr) {
@@ -523,11 +478,7 @@ impl RuntimeThread {
         }
     }
 
-    async fn handle_tcp_accept(
-        listener_id: i64,
-        response_tx: ResponseSender,
-        registry: &mut StreamRegistry,
-    ) {
+    async fn handle_tcp_accept(listener_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
         let listener = get_tcp_listener!(registry, listener_id, response_tx);
 
         match listener.accept().await {
@@ -539,11 +490,7 @@ impl RuntimeThread {
         }
     }
 
-    async fn handle_tcp_connect(
-        addr: String,
-        response_tx: ResponseSender,
-        registry: &mut StreamRegistry,
-    ) {
+    async fn handle_tcp_connect(addr: String, response_tx: ResponseSender, registry: &mut StreamRegistry) {
         let socket_addr = parse_addr!(addr, response_tx);
 
         match TcpStream::connect(socket_addr).await {
@@ -596,20 +543,13 @@ impl RuntimeThread {
 
         match result {
             Ok(n) => {
-                let _ = response_tx.send(IoResponse::Data {
-                    bytes: vec![],
-                    len: n,
-                });
+                let _ = response_tx.send(IoResponse::Data { bytes: vec![], len: n });
             }
             Err(e) => send_error!(response_tx, -5, format!("Write failed: {}", e)),
         }
     }
 
-    fn handle_tcp_close(
-        stream_id: i64,
-        response_tx: ResponseSender,
-        registry: &mut StreamRegistry,
-    ) {
+    fn handle_tcp_close(stream_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
         if registry.remove_tcp_stream(stream_id) {
             send_success!(response_tx, 0);
         } else {
@@ -618,11 +558,7 @@ impl RuntimeThread {
     }
 
     // UDP Handlers
-    async fn handle_udp_bind(
-        addr: String,
-        response_tx: ResponseSender,
-        registry: &mut StreamRegistry,
-    ) {
+    async fn handle_udp_bind(addr: String, response_tx: ResponseSender, registry: &mut StreamRegistry) {
         let socket_addr = parse_addr!(addr, response_tx);
 
         match UdpSocket::bind(socket_addr) {
@@ -648,10 +584,7 @@ impl RuntimeThread {
 
         match result {
             Ok(n) => {
-                let _ = response_tx.send(IoResponse::Data {
-                    bytes: vec![],
-                    len: n,
-                });
+                let _ = response_tx.send(IoResponse::Data { bytes: vec![], len: n });
             }
             Err(e) => send_error!(response_tx, -5, format!("Send failed: {}", e)),
         }
@@ -680,11 +613,7 @@ impl RuntimeThread {
         }
     }
 
-    fn handle_udp_close(
-        socket_id: i64,
-        response_tx: ResponseSender,
-        registry: &mut StreamRegistry,
-    ) {
+    fn handle_udp_close(socket_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
         if registry.remove_udp_socket(socket_id) {
             send_success!(response_tx, 0);
         } else {
@@ -722,12 +651,7 @@ impl RuntimeThread {
         send_success!(response_tx, 0);
     }
 
-    async fn handle_tcp_shutdown(
-        stream_id: i64,
-        how: i64,
-        response_tx: ResponseSender,
-        registry: &mut StreamRegistry,
-    ) {
+    async fn handle_tcp_shutdown(stream_id: i64, how: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
         let stream = get_tcp_stream!(registry, stream_id, response_tx);
 
         // Note: monoio's shutdown() doesn't take a mode parameter
@@ -738,11 +662,7 @@ impl RuntimeThread {
         }
     }
 
-    fn handle_tcp_listener_close(
-        listener_id: i64,
-        response_tx: ResponseSender,
-        registry: &mut StreamRegistry,
-    ) {
+    fn handle_tcp_listener_close(listener_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
         if registry.remove_tcp_listener(listener_id) {
             send_success!(response_tx, 0);
         } else {
@@ -750,35 +670,23 @@ impl RuntimeThread {
         }
     }
 
-    fn handle_tcp_get_local_addr(
-        stream_id: i64,
-        response_tx: ResponseSender,
-        registry: &mut StreamRegistry,
-    ) {
+    fn handle_tcp_get_local_addr(stream_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
         let stream = get_tcp_stream!(registry, stream_id, response_tx);
 
         match stream.local_addr() {
             Ok(addr) => {
-                let _ = response_tx.send(IoResponse::Address {
-                    addr: addr.to_string(),
-                });
+                let _ = response_tx.send(IoResponse::Address { addr: addr.to_string() });
             }
             Err(e) => send_error!(response_tx, -2, format!("local_addr failed: {}", e)),
         }
     }
 
-    fn handle_tcp_get_peer_addr(
-        stream_id: i64,
-        response_tx: ResponseSender,
-        registry: &mut StreamRegistry,
-    ) {
+    fn handle_tcp_get_peer_addr(stream_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
         let stream = get_tcp_stream!(registry, stream_id, response_tx);
 
         match stream.peer_addr() {
             Ok(addr) => {
-                let _ = response_tx.send(IoResponse::Address {
-                    addr: addr.to_string(),
-                });
+                let _ = response_tx.send(IoResponse::Address { addr: addr.to_string() });
             }
             Err(e) => send_error!(response_tx, -2, format!("peer_addr failed: {}", e)),
         }
@@ -852,18 +760,12 @@ impl RuntimeThread {
         send_success!(response_tx, 0);
     }
 
-    fn handle_udp_get_local_addr(
-        socket_id: i64,
-        response_tx: ResponseSender,
-        registry: &mut StreamRegistry,
-    ) {
+    fn handle_udp_get_local_addr(socket_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
         let socket = get_udp_socket!(registry, socket_id, response_tx);
 
         match socket.local_addr() {
             Ok(addr) => {
-                let _ = response_tx.send(IoResponse::Address {
-                    addr: addr.to_string(),
-                });
+                let _ = response_tx.send(IoResponse::Address { addr: addr.to_string() });
             }
             Err(e) => send_error!(response_tx, -2, format!("local_addr failed: {}", e)),
         }
@@ -881,57 +783,38 @@ impl RuntimeThread {
                 response_tx,
             },
             IoRequest::TcpConnect { addr, .. } => IoRequest::TcpConnect { addr, response_tx },
-            IoRequest::TcpRead {
-                stream_id, max_len, ..
-            } => IoRequest::TcpRead {
+            IoRequest::TcpRead { stream_id, max_len, .. } => IoRequest::TcpRead {
                 stream_id,
                 max_len,
                 response_tx,
             },
-            IoRequest::TcpWrite {
-                stream_id, data, ..
-            } => IoRequest::TcpWrite {
+            IoRequest::TcpWrite { stream_id, data, .. } => IoRequest::TcpWrite {
                 stream_id,
                 data,
                 response_tx,
             },
-            IoRequest::TcpClose { stream_id, .. } => IoRequest::TcpClose {
-                stream_id,
-                response_tx,
-            },
+            IoRequest::TcpClose { stream_id, .. } => IoRequest::TcpClose { stream_id, response_tx },
             IoRequest::UdpBind { addr, .. } => IoRequest::UdpBind { addr, response_tx },
             IoRequest::UdpSendTo {
-                socket_id,
-                data,
-                addr,
-                ..
+                socket_id, data, addr, ..
             } => IoRequest::UdpSendTo {
                 socket_id,
                 data,
                 addr,
                 response_tx,
             },
-            IoRequest::UdpRecvFrom {
-                socket_id, max_len, ..
-            } => IoRequest::UdpRecvFrom {
+            IoRequest::UdpRecvFrom { socket_id, max_len, .. } => IoRequest::UdpRecvFrom {
                 socket_id,
                 max_len,
                 response_tx,
             },
-            IoRequest::UdpClose { socket_id, .. } => IoRequest::UdpClose {
-                socket_id,
-                response_tx,
-            },
-            IoRequest::TcpSetNodelay {
-                stream_id, nodelay, ..
-            } => IoRequest::TcpSetNodelay {
+            IoRequest::UdpClose { socket_id, .. } => IoRequest::UdpClose { socket_id, response_tx },
+            IoRequest::TcpSetNodelay { stream_id, nodelay, .. } => IoRequest::TcpSetNodelay {
                 stream_id,
                 nodelay,
                 response_tx,
             },
-            IoRequest::TcpSetKeepalive {
-                stream_id, secs, ..
-            } => IoRequest::TcpSetKeepalive {
+            IoRequest::TcpSetKeepalive { stream_id, secs, .. } => IoRequest::TcpSetKeepalive {
                 stream_id,
                 secs,
                 response_tx,
@@ -945,18 +828,10 @@ impl RuntimeThread {
                 listener_id,
                 response_tx,
             },
-            IoRequest::TcpGetLocalAddr { stream_id, .. } => IoRequest::TcpGetLocalAddr {
-                stream_id,
-                response_tx,
-            },
-            IoRequest::TcpGetPeerAddr { stream_id, .. } => IoRequest::TcpGetPeerAddr {
-                stream_id,
-                response_tx,
-            },
+            IoRequest::TcpGetLocalAddr { stream_id, .. } => IoRequest::TcpGetLocalAddr { stream_id, response_tx },
+            IoRequest::TcpGetPeerAddr { stream_id, .. } => IoRequest::TcpGetPeerAddr { stream_id, response_tx },
             IoRequest::UdpSetBroadcast {
-                socket_id,
-                broadcast,
-                ..
+                socket_id, broadcast, ..
             } => IoRequest::UdpSetBroadcast {
                 socket_id,
                 broadcast,
@@ -989,10 +864,7 @@ impl RuntimeThread {
                 interface_addr,
                 response_tx,
             },
-            IoRequest::UdpGetLocalAddr { socket_id, .. } => IoRequest::UdpGetLocalAddr {
-                socket_id,
-                response_tx,
-            },
+            IoRequest::UdpGetLocalAddr { socket_id, .. } => IoRequest::UdpGetLocalAddr { socket_id, response_tx },
             IoRequest::Shutdown => IoRequest::Shutdown,
         };
 

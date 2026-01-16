@@ -68,26 +68,25 @@ pub mod startup;
 pub use loader::{LoadError, ModuleLoader};
 pub use module::LoadedModule;
 pub use package::{
-    extract_resource, list_resources, LoadedPackage, ManifestSection, PackageError, PackageOptions,
-    PackageReader, PackageTrailer, PackageWriter, ResourceEntry, SPK_MAGIC, SPK_VERSION,
+    extract_resource, list_resources, LoadedPackage, ManifestSection, PackageError, PackageOptions, PackageReader,
+    PackageTrailer, PackageWriter, ResourceEntry, SPK_MAGIC, SPK_VERSION,
 };
 pub use registry::ModuleRegistry;
 pub use settlement::{
-    create_executable, find_stub, BuildError, BuildOptions, ExportedSymbol, FunctionTable,
-    GlobalTable, ImportedSymbol, LinkResult, ModuleHandle, NativeHandle, NativeLibManager,
-    NativeLibSpec, Settlement, SettlementBuilder, SettlementConfig, SettlementError,
-    SettlementLinker, SettlementModule, SlotAllocator, SlotRange, TableIndex, TypeTable,
+    create_executable, find_stub, BuildError, BuildOptions, ExportedSymbol, FunctionTable, GlobalTable, ImportedSymbol,
+    LinkResult, ModuleHandle, NativeHandle, NativeLibManager, NativeLibSpec, Settlement, SettlementBuilder,
+    SettlementConfig, SettlementError, SettlementLinker, SettlementModule, SlotAllocator, SlotRange, TableIndex,
+    TypeTable,
 };
 pub use simple_common::{DynLoader, DynModule};
 pub use startup::{settlement_main, LoadedSettlement, StartupError, StartupLoader};
 
 // Multi-architecture support
 pub use arch_validate::{
-    is_compatible, is_native, native_target, supported_compile_targets, supported_execute_targets,
-    ArchValidator, ValidationError, ValidationResult, ValidationWarning,
+    is_compatible, is_native, native_target, supported_compile_targets, supported_execute_targets, ArchValidator,
+    ValidationError, ValidationResult, ValidationWarning,
 };
 pub use cross_test::{CiConfig, CrossTestResults, TargetFixture, TestMatrix, TestOutcome};
 pub use native_cross::{
-    build_for_targets, CrossCompileError, NativeLibBuilder, NativeLibConfig, Toolchain,
-    ToolchainRegistry,
+    build_for_targets, CrossCompileError, NativeLibBuilder, NativeLibConfig, Toolchain, ToolchainRegistry,
 };

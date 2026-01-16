@@ -32,16 +32,15 @@ macro_rules! check_interrupt {
 }
 use crate::value::{Env, Value, ATTR_STRONG, BUILTIN_ARRAY, BUILTIN_RANGE};
 use simple_parser::ast::{
-    ClassDef, ContextStmt, Expr, ForStmt, FunctionDef, IfStmt, LoopStmt, MatchStmt, WhileStmt,
-    WithStmt,
+    ClassDef, ContextStmt, Expr, ForStmt, FunctionDef, IfStmt, LoopStmt, MatchStmt, WhileStmt, WithStmt,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 // Import parent interpreter types and functions
 use super::{
-    evaluate_expr, exec_block, exec_block_fn, Control, Enums, ImplMethods, BDD_CONTEXT_DEFS,
-    BDD_INDENT, BDD_LAZY_VALUES, CONTEXT_OBJECT, CONTEXT_VAR_NAME,
+    evaluate_expr, exec_block, exec_block_fn, Control, Enums, ImplMethods, BDD_CONTEXT_DEFS, BDD_INDENT,
+    BDD_LAZY_VALUES, CONTEXT_OBJECT, CONTEXT_VAR_NAME,
 };
 
 // Import helpers for pattern binding
@@ -74,28 +73,14 @@ pub(super) fn exec_if(
 ) -> Result<Control, CompileError> {
     // Handle if-let: if let PATTERN = EXPR:
     if let Some(pattern) = &if_stmt.let_pattern {
-        let value = evaluate_expr(
-            &if_stmt.condition,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?;
+        let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
         let mut bindings = HashMap::new();
         if pattern_matches(pattern, &value, &mut bindings, enums)? {
             // Pattern matched - add bindings and execute then block
             for (name, val) in bindings {
                 env.insert(name, val);
             }
-            return exec_block(
-                &if_stmt.then_block,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            );
+            return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
         } else if let Some(block) = &if_stmt.else_block {
             // Pattern didn't match - execute else block
             return exec_block(block, env, functions, classes, enums, impl_methods);
@@ -104,24 +89,8 @@ pub(super) fn exec_if(
     }
 
     // Normal if condition
-    if evaluate_expr(
-        &if_stmt.condition,
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )?
-    .truthy()
-    {
-        return exec_block(
-            &if_stmt.then_block,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        );
+    if evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?.truthy() {
+        return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
     }
     for (cond, block) in &if_stmt.elif_branches {
         if evaluate_expr(cond, env, functions, classes, enums, impl_methods)?.truthy() {
@@ -146,14 +115,7 @@ pub(super) fn exec_while(
     if let Some(pattern) = &while_stmt.let_pattern {
         loop {
             check_interrupt!();
-            let value = evaluate_expr(
-                &while_stmt.condition,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
             let mut bindings = HashMap::new();
             if !pattern_matches(pattern, &value, &mut bindings, enums)? {
                 break;
@@ -162,14 +124,7 @@ pub(super) fn exec_while(
             for (name, val) in bindings {
                 env.insert(name, val);
             }
-            let ctrl = exec_block(
-                &while_stmt.body,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods)?;
             if matches!(ctrl, Control::Continue) {
                 continue;
             }
@@ -183,26 +138,10 @@ pub(super) fn exec_while(
     // Normal while loop
     loop {
         check_interrupt!();
-        if !evaluate_expr(
-            &while_stmt.condition,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?
-        .truthy()
-        {
+        if !evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?.truthy() {
             break;
         }
-        let ctrl = exec_block(
-            &while_stmt.body,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?;
+        let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods)?;
         if matches!(ctrl, Control::Continue) {
             continue;
         }
@@ -223,14 +162,7 @@ pub(super) fn exec_loop(
 ) -> Result<Control, CompileError> {
     loop {
         check_interrupt!();
-        let ctrl = exec_block(
-            &loop_stmt.body,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?;
+        let ctrl = exec_block(&loop_stmt.body, env, functions, classes, enums, impl_methods)?;
         if matches!(ctrl, Control::Continue) {
             continue;
         }
@@ -251,14 +183,7 @@ pub(super) fn exec_context(
     // BDD_INDENT, BDD_LAZY_VALUES, BDD_CONTEXT_DEFS are defined in interpreter_call.rs
     // which is also include!d into interpreter.rs, so they're in scope directly
 
-    let context_obj = evaluate_expr(
-        &ctx_stmt.context,
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )?;
+    let context_obj = evaluate_expr(&ctx_stmt.context, env, functions, classes, enums, impl_methods)?;
 
     // Check if this is a BDD-style context (string or symbol description)
     match &context_obj {
@@ -272,9 +197,7 @@ pub(super) fn exec_context(
 
             // Check if this is a symbol referencing a context_def
             let ctx_def_blocks = if matches!(context_obj, Value::Symbol(_)) {
-                BDD_CONTEXT_DEFS.with(|cell: &RefCell<HashMap<String, Vec<Value>>>| {
-                    cell.borrow().get(name).cloned()
-                })
+                BDD_CONTEXT_DEFS.with(|cell: &RefCell<HashMap<String, Vec<Value>>>| cell.borrow().get(name).cloned())
             } else {
                 None
             };
@@ -300,9 +223,7 @@ pub(super) fn exec_context(
             let result = exec_block(&ctx_stmt.body, env, functions, classes, enums, impl_methods);
 
             // Clear lazy values after context exits
-            BDD_LAZY_VALUES.with(|cell: &RefCell<HashMap<String, (Value, Option<Value>)>>| {
-                cell.borrow_mut().clear()
-            });
+            BDD_LAZY_VALUES.with(|cell: &RefCell<HashMap<String, (Value, Option<Value>)>>| cell.borrow_mut().clear());
 
             // Restore indent
             BDD_INDENT.with(|cell: &RefCell<usize>| *cell.borrow_mut() -= 1);
@@ -352,14 +273,7 @@ pub(super) fn exec_with(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
-    let resource = evaluate_expr(
-        &with_stmt.resource,
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )?;
+    let resource = evaluate_expr(&with_stmt.resource, env, functions, classes, enums, impl_methods)?;
 
     // Call __enter__ if it exists
     let enter_result = call_method_if_exists(
@@ -379,26 +293,10 @@ pub(super) fn exec_with(
     }
 
     // Execute the body
-    let result = exec_block(
-        &with_stmt.body,
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    );
+    let result = exec_block(&with_stmt.body, env, functions, classes, enums, impl_methods);
 
     // Always call __exit__ (even if body failed)
-    let _ = call_method_if_exists(
-        &resource,
-        "__exit__",
-        &[],
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    );
+    let _ = call_method_if_exists(&resource, "__exit__", &[], env, functions, classes, enums, impl_methods);
 
     // Remove the binding if it was created
     if let Some(name) = &with_stmt.name {
@@ -424,14 +322,7 @@ fn exec_method_body(
     for (k, v) in fields {
         local_env.insert(k.clone(), v.clone());
     }
-    let result = exec_block(
-        &method.body,
-        &mut local_env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )?;
+    let result = exec_block(&method.body, &mut local_env, functions, classes, enums, impl_methods)?;
     Ok(if let Control::Return(val) = result {
         val
     } else {
@@ -453,12 +344,7 @@ fn call_method_if_exists(
     if let Value::Object { class, fields } = receiver {
         // Check if the class has the method
         if let Some(class_def) = classes.get(class).cloned() {
-            if let Some(method) = class_def
-                .methods
-                .iter()
-                .find(|m| m.name == method_name)
-                .cloned()
-            {
+            if let Some(method) = class_def.methods.iter().find(|m| m.name == method_name).cloned() {
                 return Ok(Some(exec_method_body(
                     &method,
                     receiver,
@@ -498,14 +384,7 @@ pub(super) fn exec_for(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
-    let iterable = evaluate_expr(
-        &for_stmt.iterable,
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )?;
+    let iterable = evaluate_expr(&for_stmt.iterable, env, functions, classes, enums, impl_methods)?;
 
     // Use iter_to_vec to handle all iterable types uniformly
     let items = iter_to_vec(&iterable)?;
@@ -546,22 +425,12 @@ pub(super) fn exec_match(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
-    let subject = evaluate_expr(
-        &match_stmt.subject,
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )?;
+    let subject = evaluate_expr(&match_stmt.subject, env, functions, classes, enums, impl_methods)?;
 
     // Check for strong enum - disallow wildcard/catch-all patterns
     if let Value::Enum { enum_name, .. } = &subject {
         if let Some(enum_def) = enums.get(enum_name) {
-            let is_strong = enum_def
-                .attributes
-                .iter()
-                .any(|attr| attr.name == ATTR_STRONG);
+            let is_strong = enum_def.attributes.iter().any(|attr| attr.name == ATTR_STRONG);
             if is_strong {
                 for arm in &match_stmt.arms {
                     if is_catch_all_pattern(&arm.pattern) {
@@ -583,9 +452,7 @@ pub(super) fn exec_match(
                 for (name, value) in &bindings {
                     guard_env.insert(name.clone(), value.clone());
                 }
-                if !evaluate_expr(guard, &guard_env, functions, classes, enums, impl_methods)?
-                    .truthy()
-                {
+                if !evaluate_expr(guard, &guard_env, functions, classes, enums, impl_methods)?.truthy() {
                     continue;
                 }
             }
@@ -595,8 +462,7 @@ pub(super) fn exec_match(
             }
 
             // Use exec_block_fn to capture implicit return value from match arms
-            let (flow, last_val) =
-                exec_block_fn(&arm.body, env, functions, classes, enums, impl_methods)?;
+            let (flow, last_val) = exec_block_fn(&arm.body, env, functions, classes, enums, impl_methods)?;
             match flow {
                 Control::Return(_) | Control::Break(_) | Control::Continue => return Ok(flow),
                 Control::Next => {

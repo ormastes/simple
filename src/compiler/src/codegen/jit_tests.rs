@@ -53,9 +53,9 @@ fn test_jit_negate() {
 
 #[test]
 fn test_jit_conditional() {
-    let jit = jit_compile(
-        "fn max(a: i64, b: i64) -> i64:\n    if a > b:\n        return a\n    else:\n        return b\n"
-    ).unwrap();
+    let jit =
+        jit_compile("fn max(a: i64, b: i64) -> i64:\n    if a > b:\n        return a\n    else:\n        return b\n")
+            .unwrap();
 
     let result1 = unsafe { jit.call_i64_i64_i64("max", 42, 10).unwrap() };
     assert_eq!(result1, 42);

@@ -37,12 +37,7 @@ impl Framebuffer {
             device
                 .handle()
                 .create_framebuffer(&create_info, None)
-                .map_err(|e| {
-                    VulkanError::PipelineCreationFailed(format!(
-                        "Failed to create framebuffer: {:?}",
-                        e
-                    ))
-                })?
+                .map_err(|e| VulkanError::PipelineCreationFailed(format!("Failed to create framebuffer: {:?}", e)))?
         };
 
         Ok(Arc::new(Self {
@@ -64,15 +59,7 @@ impl Framebuffer {
 
         image_views
             .iter()
-            .map(|&view| {
-                Self::new(
-                    device.clone(),
-                    render_pass,
-                    view,
-                    extent.width,
-                    extent.height,
-                )
-            })
+            .map(|&view| Self::new(device.clone(), render_pass, view, extent.width, extent.height))
             .collect()
     }
 
@@ -95,9 +82,7 @@ impl Framebuffer {
 impl Drop for Framebuffer {
     fn drop(&mut self) {
         unsafe {
-            self.device
-                .handle()
-                .destroy_framebuffer(self.framebuffer, None);
+            self.device.handle().destroy_framebuffer(self.framebuffer, None);
         }
         tracing::trace!("Framebuffer destroyed");
     }

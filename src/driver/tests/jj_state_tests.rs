@@ -81,11 +81,7 @@ fn snapshot_build_creates_commit() {
     };
 
     let result = manager.snapshot_build_success(&metadata);
-    assert!(
-        result.is_ok(),
-        "Snapshot should succeed: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Snapshot should succeed: {:?}", result.err());
 
     // Verify commit was created (check parent since we created a new working copy)
     assert_jj_commit_contains(&repo_path, "Build Success");
@@ -116,11 +112,7 @@ fn snapshot_test_creates_commit() {
     };
 
     let result = manager.snapshot_test_success(&metadata);
-    assert!(
-        result.is_ok(),
-        "Snapshot should succeed: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Snapshot should succeed: {:?}", result.err());
 
     // Verify commit was created (check parent since we created a new working copy)
     assert_jj_commit_contains(&repo_path, "Tests Passed");
@@ -224,10 +216,7 @@ fn snapshot_includes_artifacts() {
     let metadata = BuildMetadata {
         timestamp: Utc::now(),
         duration_ms: 1000,
-        artifacts: vec![
-            PathBuf::from("artifact1.smf"),
-            PathBuf::from("artifact2.so"),
-        ],
+        artifacts: vec![PathBuf::from("artifact1.smf"), PathBuf::from("artifact2.so")],
         target: "test".to_string(),
         mode: BuildMode::Debug,
     };
@@ -383,10 +372,7 @@ fn snapshot_preserves_git_state() {
         .unwrap();
 
     let log = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        log.contains("Initial commit"),
-        "Git commit should be preserved"
-    );
+    assert!(log.contains("Initial commit"), "Git commit should be preserved");
 }
 
 #[test]

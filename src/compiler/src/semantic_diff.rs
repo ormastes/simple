@@ -292,20 +292,13 @@ impl SemanticDiffer {
 
     fn diff_nodes(&self, name: &str, old: &Node, new: &Node) -> Vec<SemanticChange> {
         match (old, new) {
-            (Node::Function(old_f), Node::Function(new_f)) => {
-                self.diff_functions(name, old_f, new_f)
-            }
+            (Node::Function(old_f), Node::Function(new_f)) => self.diff_functions(name, old_f, new_f),
             (Node::Class(old_c), Node::Class(new_c)) => self.diff_classes(name, old_c, new_c),
             _ => vec![],
         }
     }
 
-    fn diff_functions(
-        &self,
-        name: &str,
-        old: &FunctionDef,
-        new: &FunctionDef,
-    ) -> Vec<SemanticChange> {
+    fn diff_functions(&self, name: &str, old: &FunctionDef, new: &FunctionDef) -> Vec<SemanticChange> {
         let mut changes = Vec::new();
 
         // Check visibility change
@@ -373,10 +366,7 @@ impl SemanticDiffer {
                     changes.push(SemanticChange {
                         kind: ChangeKind::ParameterTypeChanged,
                         symbol: format!("{}[param:{}]", name, i),
-                        description: format!(
-                            "Function '{}' parameter '{}' type changed",
-                            name, old_p.name
-                        ),
+                        description: format!("Function '{}' parameter '{}' type changed", name, old_p.name),
                         old_value: old_p.ty.as_ref().map(|t| self.format_type(t)),
                         new_value: new_p.ty.as_ref().map(|t| self.format_type(t)),
                         impact: if old.visibility.is_public() {
@@ -454,10 +444,7 @@ impl SemanticDiffer {
                     changes.push(SemanticChange {
                         kind: ChangeKind::FieldTypeChanged,
                         symbol: format!("{}.{}", name, field_name),
-                        description: format!(
-                            "Class '{}' field '{}' type changed",
-                            name, field_name
-                        ),
+                        description: format!("Class '{}' field '{}' type changed", name, field_name),
                         old_value: Some(self.format_type(&old_field.ty)),
                         new_value: Some(self.format_type(&new_field.ty)),
                         impact: if old.visibility.is_public() {
@@ -547,21 +534,14 @@ impl SemanticDiffer {
                 format!(
                     "{}<{}>",
                     name,
-                    args.iter()
-                        .map(|t| self.format_type(t))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    args.iter().map(|t| self.format_type(t)).collect::<Vec<_>>().join(", ")
                 )
             }
             Type::Array { element, .. } => format!("[{}]", self.format_type(element)),
             Type::Optional(inner) => format!("{}?", self.format_type(inner)),
             Type::Tuple(types) => format!(
                 "({})",
-                types
-                    .iter()
-                    .map(|t| self.format_type(t))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                types.iter().map(|t| self.format_type(t)).collect::<Vec<_>>().join(", ")
             ),
             _ => format!("{:?}", ty),
         }
@@ -606,9 +586,9 @@ impl SemanticDiffer {
             | ChangeKind::FieldTypeChanged
             | ChangeKind::MethodAdded
             | ChangeKind::MethodRemoved => summary.classes_modified += 1,
-            ChangeKind::ReturnTypeChanged
-            | ChangeKind::ParameterTypeChanged
-            | ChangeKind::FieldTypeChanged => summary.type_changes += 1,
+            ChangeKind::ReturnTypeChanged | ChangeKind::ParameterTypeChanged | ChangeKind::FieldTypeChanged => {
+                summary.type_changes += 1
+            }
             ChangeKind::ControlFlowChanged => summary.control_flow_changes += 1,
             _ => {}
         }
@@ -619,10 +599,7 @@ impl SemanticDiffer {
         let mut output = String::new();
 
         output.push_str(&format!("Semantic Diff: {}\n", diff.module_path));
-        output.push_str(&format!(
-            "Total changes: {}\n\n",
-            diff.summary.total_changes
-        ));
+        output.push_str(&format!("Total changes: {}\n\n", diff.summary.total_changes));
 
         if diff.changes.is_empty() {
             output.push_str("No semantic changes detected.\n");
@@ -652,40 +629,22 @@ impl SemanticDiffer {
         // Summary
         output.push_str("Summary:\n");
         if diff.summary.functions_added > 0 {
-            output.push_str(&format!(
-                "  Functions added: {}\n",
-                diff.summary.functions_added
-            ));
+            output.push_str(&format!("  Functions added: {}\n", diff.summary.functions_added));
         }
         if diff.summary.functions_removed > 0 {
-            output.push_str(&format!(
-                "  Functions removed: {}\n",
-                diff.summary.functions_removed
-            ));
+            output.push_str(&format!("  Functions removed: {}\n", diff.summary.functions_removed));
         }
         if diff.summary.functions_modified > 0 {
-            output.push_str(&format!(
-                "  Functions modified: {}\n",
-                diff.summary.functions_modified
-            ));
+            output.push_str(&format!("  Functions modified: {}\n", diff.summary.functions_modified));
         }
         if diff.summary.classes_added > 0 {
-            output.push_str(&format!(
-                "  Classes added: {}\n",
-                diff.summary.classes_added
-            ));
+            output.push_str(&format!("  Classes added: {}\n", diff.summary.classes_added));
         }
         if diff.summary.classes_removed > 0 {
-            output.push_str(&format!(
-                "  Classes removed: {}\n",
-                diff.summary.classes_removed
-            ));
+            output.push_str(&format!("  Classes removed: {}\n", diff.summary.classes_removed));
         }
         if diff.summary.classes_modified > 0 {
-            output.push_str(&format!(
-                "  Classes modified: {}\n",
-                diff.summary.classes_modified
-            ));
+            output.push_str(&format!("  Classes modified: {}\n", diff.summary.classes_modified));
         }
 
         output
@@ -767,11 +726,7 @@ mod tests {
     #[test]
     fn test_return_type_changed() {
         let old = make_module(vec![make_function("foo", 0, None)]);
-        let new = make_module(vec![make_function(
-            "foo",
-            0,
-            Some(Type::Simple("bool".to_string())),
-        )]);
+        let new = make_module(vec![make_function("foo", 0, Some(Type::Simple("bool".to_string())))]);
 
         let differ = SemanticDiffer::new("test.spl");
         let diff = differ.diff_modules(&old, &new);

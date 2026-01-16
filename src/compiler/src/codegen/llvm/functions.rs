@@ -22,8 +22,7 @@ mod objects;
 
 /// Type alias for vreg map
 #[cfg(feature = "llvm")]
-type VRegMap =
-    std::collections::HashMap<crate::mir::VReg, inkwell::values::BasicValueEnum<'static>>;
+type VRegMap = std::collections::HashMap<crate::mir::VReg, inkwell::values::BasicValueEnum<'static>>;
 
 /// Fallback VRegMap when LLVM is not enabled
 #[cfg(not(feature = "llvm"))]
@@ -76,9 +75,7 @@ impl LlvmBackend {
         // Create basic blocks for each MIR block
         let mut llvm_blocks = HashMap::new();
         for block in &func.blocks {
-            let bb = self
-                .context
-                .append_basic_block(function, &format!("bb{}", block.id.0));
+            let bb = self.context.append_basic_block(function, &format!("bb{}", block.id.0));
             llvm_blocks.insert(block.id, bb);
         }
 
@@ -87,8 +84,7 @@ impl LlvmBackend {
 
         // Allocate stack space for parameters and locals at the entry block
         // Parameters and locals share a combined index space: params at 0..param_count, locals at param_count..
-        let mut local_allocas: HashMap<usize, inkwell::values::PointerValue<'static>> =
-            HashMap::new();
+        let mut local_allocas: HashMap<usize, inkwell::values::PointerValue<'static>> = HashMap::new();
         if !func.blocks.is_empty() {
             let entry_bb = llvm_blocks[&func.blocks[0].id];
             builder.position_at_end(entry_bb);
@@ -96,9 +92,9 @@ impl LlvmBackend {
             // Create allocas for parameters (index 0..param_count)
             for (i, param) in func.params.iter().enumerate() {
                 let param_ty = self.llvm_type(&param.ty)?;
-                let alloca = builder.build_alloca(param_ty, &param.name).map_err(|e| {
-                    CompileError::Semantic(format!("Failed to build param alloca: {}", e))
-                })?;
+                let alloca = builder
+                    .build_alloca(param_ty, &param.name)
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build param alloca: {}", e)))?;
                 local_allocas.insert(i, alloca);
             }
 
@@ -106,9 +102,9 @@ impl LlvmBackend {
             let param_count = func.params.len();
             for (i, local) in func.locals.iter().enumerate() {
                 let local_ty = self.llvm_type(&local.ty)?;
-                let alloca = builder.build_alloca(local_ty, &local.name).map_err(|e| {
-                    CompileError::Semantic(format!("Failed to build local alloca: {}", e))
-                })?;
+                let alloca = builder
+                    .build_alloca(local_ty, &local.name)
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build local alloca: {}", e)))?;
                 local_allocas.insert(param_count + i, alloca);
             }
 
@@ -116,9 +112,9 @@ impl LlvmBackend {
             for (i, _param) in func.params.iter().enumerate() {
                 if let Some(llvm_param) = function.get_nth_param(i as u32) {
                     if let Some(&alloca) = local_allocas.get(&i) {
-                        builder.build_store(alloca, llvm_param).map_err(|e| {
-                            CompileError::Semantic(format!("Failed to store param: {}", e))
-                        })?;
+                        builder
+                            .build_store(alloca, llvm_param)
+                            .map_err(|e| CompileError::Semantic(format!("Failed to store param: {}", e)))?;
                     }
                 }
             }
@@ -190,12 +186,7 @@ impl LlvmBackend {
                     vreg_map.insert(*dest, *val);
                 }
             }
-            MirInst::BinOp {
-                dest,
-                op,
-                left,
-                right,
-            } => {
+            MirInst::BinOp { dest, op, left, right } => {
                 let left_val = self.get_vreg(left, vreg_map)?;
                 let right_val = self.get_vreg(right, vreg_map)?;
                 let result = self.compile_binop(*op, left_val, right_val, builder)?;
@@ -228,9 +219,9 @@ impl LlvmBackend {
                 self.compile_gc_alloc(*dest, ty, vreg_map, builder)?;
             }
             MirInst::LocalAddr { dest, local_index } => {
-                let alloca = local_allocas.get(local_index).ok_or_else(|| {
-                    CompileError::Semantic(format!("Unknown local index: {}", local_index))
-                })?;
+                let alloca = local_allocas
+                    .get(local_index)
+                    .ok_or_else(|| CompileError::Semantic(format!("Unknown local index: {}", local_index)))?;
                 vreg_map.insert(*dest, (*alloca).into());
             }
 
@@ -265,16 +256,7 @@ impl LlvmBackend {
                 end,
                 step,
             } => {
-                self.compile_slice_op(
-                    *dest,
-                    *collection,
-                    *start,
-                    *end,
-                    *step,
-                    vreg_map,
-                    builder,
-                    module,
-                )?;
+                self.compile_slice_op(*dest, *collection, *start, *end, *step, vreg_map, builder, module)?;
             }
 
             // Calls
@@ -289,21 +271,9 @@ impl LlvmBackend {
                 args,
                 ..
             } => {
-                self.compile_indirect_call(
-                    *dest,
-                    *callee,
-                    param_types,
-                    return_type,
-                    args,
-                    vreg_map,
-                    builder,
-                )?;
+                self.compile_indirect_call(*dest, *callee, param_types, return_type, args, vreg_map, builder)?;
             }
-            MirInst::InterpCall {
-                dest,
-                func_name,
-                args,
-            } => {
+            MirInst::InterpCall { dest, func_name, args } => {
                 self.compile_interp_call(*dest, func_name, args, vreg_map, builder, module)?;
             }
             MirInst::InterpEval { dest, expr_index } => {
@@ -335,14 +305,7 @@ impl LlvmBackend {
                 byte_offset,
                 field_type,
             } => {
-                self.compile_field_get(
-                    *dest,
-                    *object,
-                    *byte_offset,
-                    field_type,
-                    vreg_map,
-                    builder,
-                )?;
+                self.compile_field_get(*dest, *object, *byte_offset, field_type, vreg_map, builder)?;
             }
             MirInst::FieldSet {
                 object,
@@ -350,14 +313,7 @@ impl LlvmBackend {
                 field_type,
                 value,
             } => {
-                self.compile_field_set(
-                    *object,
-                    *byte_offset,
-                    field_type,
-                    *value,
-                    vreg_map,
-                    builder,
-                )?;
+                self.compile_field_set(*object, *byte_offset, field_type, *value, vreg_map, builder)?;
             }
             MirInst::ClosureCreate {
                 dest,
@@ -411,12 +367,7 @@ impl LlvmBackend {
             MirInst::GpuMemFence { scope } => {
                 self.compile_gpu_mem_fence(*scope, builder, module)?;
             }
-            MirInst::GpuAtomic {
-                dest,
-                op,
-                ptr,
-                value,
-            } => {
+            MirInst::GpuAtomic { dest, op, ptr, value } => {
                 let ptr_val = self.get_vreg(ptr, vreg_map)?;
                 let value_val = self.get_vreg(value, vreg_map)?;
                 let result = self.compile_gpu_atomic(*op, ptr_val, value_val, builder, module)?;
@@ -431,13 +382,7 @@ impl LlvmBackend {
                 let ptr_val = self.get_vreg(ptr, vreg_map)?;
                 let expected_val = self.get_vreg(expected, vreg_map)?;
                 let desired_val = self.get_vreg(desired, vreg_map)?;
-                let result = self.compile_gpu_atomic_cmpxchg(
-                    ptr_val,
-                    expected_val,
-                    desired_val,
-                    builder,
-                    module,
-                )?;
+                let result = self.compile_gpu_atomic_cmpxchg(ptr_val, expected_val, desired_val, builder, module)?;
                 vreg_map.insert(*dest, result);
             }
             MirInst::GpuSharedAlloc { dest, size, .. } => {
@@ -477,8 +422,6 @@ impl LlvmBackend {
 #[cfg(not(feature = "llvm"))]
 impl LlvmBackend {
     pub fn compile_function(&self, _func: &MirFunction) -> Result<(), CompileError> {
-        Err(CompileError::Semantic(
-            "LLVM feature not enabled".to_string(),
-        ))
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
 }

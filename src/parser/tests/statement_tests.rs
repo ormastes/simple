@@ -215,10 +215,7 @@ fn test_normal_mode_allows_nested_no_paren() {
     // Note: they may not parse as intended, but they don't error
     let result = parse("func1 func2 arg");
     // Normal mode should not error (though parsing may be ambiguous)
-    assert!(
-        result.is_ok(),
-        "Normal mode should allow nested no-paren syntax"
-    );
+    assert!(result.is_ok(), "Normal mode should allow nested no-paren syntax");
 }
 
 // === GPU/Shared Memory Tests ===

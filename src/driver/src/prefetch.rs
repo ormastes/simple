@@ -35,9 +35,9 @@ impl PrefetchHandle {
         #[cfg(windows)]
         {
             if let Some(handle) = self.thread_handle {
-                handle.join().map_err(|_| {
-                    io::Error::new(io::ErrorKind::Other, "prefetch thread panicked")
-                })?;
+                handle
+                    .join()
+                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "prefetch thread panicked"))?;
             }
         }
 
@@ -73,8 +73,7 @@ fn prefetch_files_unix<P: AsRef<Path>>(files: &[P]) -> io::Result<PrefetchHandle
     use std::os::unix::process::CommandExt;
 
     // Convert paths to owned for transfer to child
-    let file_paths: Vec<std::path::PathBuf> =
-        files.iter().map(|p| p.as_ref().to_path_buf()).collect();
+    let file_paths: Vec<std::path::PathBuf> = files.iter().map(|p| p.as_ref().to_path_buf()).collect();
 
     unsafe {
         match libc::fork() {
@@ -150,14 +149,7 @@ fn prefetch_file_mmap<P: AsRef<Path>>(path: P) -> io::Result<()> {
 
     unsafe {
         // Memory-map the file
-        let addr = libc::mmap(
-            ptr::null_mut(),
-            file_size,
-            libc::PROT_READ,
-            libc::MAP_PRIVATE,
-            fd,
-            0,
-        );
+        let addr = libc::mmap(ptr::null_mut(), file_size, libc::PROT_READ, libc::MAP_PRIVATE, fd, 0);
 
         if addr == libc::MAP_FAILED {
             return Err(io::Error::last_os_error());
@@ -198,8 +190,7 @@ fn prefetch_files_windows<P: AsRef<Path>>(files: &[P]) -> io::Result<PrefetchHan
     use winapi::um::memoryapi::PrefetchVirtualMemory;
     use winapi::um::winnt::{HANDLE, WIN32_MEMORY_RANGE_ENTRY};
 
-    let file_paths: Vec<std::path::PathBuf> =
-        files.iter().map(|p| p.as_ref().to_path_buf()).collect();
+    let file_paths: Vec<std::path::PathBuf> = files.iter().map(|p| p.as_ref().to_path_buf()).collect();
 
     let thread = std::thread::spawn(move || {
         for path in &file_paths {
@@ -218,9 +209,7 @@ fn prefetch_file_windows<P: AsRef<Path>>(path: P) -> io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use winapi::shared::minwindef::FALSE;
     use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
-    use winapi::um::memoryapi::{
-        CreateFileMappingW, MapViewOfFile, PrefetchVirtualMemory, UnmapViewOfFile,
-    };
+    use winapi::um::memoryapi::{CreateFileMappingW, MapViewOfFile, PrefetchVirtualMemory, UnmapViewOfFile};
     use winapi::um::winnt::{FILE_MAP_READ, HANDLE, PAGE_READONLY, WIN32_MEMORY_RANGE_ENTRY};
 
     let file = OpenOptions::new().read(true).open(path.as_ref())?;
@@ -235,14 +224,7 @@ fn prefetch_file_windows<P: AsRef<Path>>(path: P) -> io::Result<()> {
         let file_handle = file.as_raw_handle() as HANDLE;
 
         // Create file mapping
-        let mapping = CreateFileMappingW(
-            file_handle,
-            std::ptr::null_mut(),
-            PAGE_READONLY,
-            0,
-            0,
-            std::ptr::null(),
-        );
+        let mapping = CreateFileMappingW(file_handle, std::ptr::null_mut(), PAGE_READONLY, 0, 0, std::ptr::null());
 
         if mapping.is_null() || mapping == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
@@ -263,12 +245,7 @@ fn prefetch_file_windows<P: AsRef<Path>>(path: P) -> io::Result<()> {
         };
 
         let process_handle = winapi::um::processthreadsapi::GetCurrentProcess();
-        let result = PrefetchVirtualMemory(
-            process_handle,
-            1,
-            &mut range as *mut WIN32_MEMORY_RANGE_ENTRY,
-            0,
-        );
+        let result = PrefetchVirtualMemory(process_handle, 1, &mut range as *mut WIN32_MEMORY_RANGE_ENTRY, 0);
 
         // Clean up
         UnmapViewOfFile(view);
@@ -319,9 +296,7 @@ mod tests {
         let mut files = Vec::new();
         for i in 0..3 {
             let mut temp_file = NamedTempFile::new().unwrap();
-            temp_file
-                .write_all(format!("File {}", i).as_bytes())
-                .unwrap();
+            temp_file.write_all(format!("File {}", i).as_bytes()).unwrap();
             temp_file.flush().unwrap();
             files.push(temp_file);
         }

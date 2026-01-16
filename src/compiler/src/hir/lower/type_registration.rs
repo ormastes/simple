@@ -27,20 +27,14 @@ impl Lowerer {
         let mut fields: Vec<_> = c
             .fields
             .iter()
-            .map(|f| {
-                (
-                    f.name.clone(),
-                    self.resolve_type(&f.ty).unwrap_or(TypeId::VOID),
-                )
-            })
+            .map(|f| (f.name.clone(), self.resolve_type(&f.ty).unwrap_or(TypeId::VOID)))
             .collect();
 
         // Apply mixins: add mixin fields to the class
         for mixin_ref in &c.mixins {
             if let Some(mixin_type_id) = self.module.types.lookup(&mixin_ref.name) {
                 if let Some(HirType::Mixin {
-                    fields: mixin_fields,
-                    ..
+                    fields: mixin_fields, ..
                 }) = self.module.types.get(mixin_type_id)
                 {
                     // Add mixin fields to class fields
@@ -94,9 +88,7 @@ impl Lowerer {
 
         // Register combined invariant if non-empty
         if !hir_invariant.conditions.is_empty() {
-            self.module
-                .type_invariants
-                .insert(c.name.clone(), hir_invariant);
+            self.module.type_invariants.insert(c.name.clone(), hir_invariant);
         }
 
         Ok(type_id)
@@ -130,9 +122,7 @@ impl Lowerer {
                 });
             }
 
-            self.module
-                .type_invariants
-                .insert(s.name.clone(), hir_invariant);
+            self.module.type_invariants.insert(s.name.clone(), hir_invariant);
         }
 
         Ok(type_id)
@@ -170,11 +160,7 @@ impl Lowerer {
         let trait_bounds = m.required_traits.clone();
 
         // Extract required method names
-        let required_methods: Vec<String> = m
-            .required_methods
-            .iter()
-            .map(|rm| rm.name.clone())
-            .collect();
+        let required_methods: Vec<String> = m.required_methods.iter().map(|rm| rm.name.clone()).collect();
 
         let hir_type = HirType::Mixin {
             name: m.name.clone(),
@@ -203,11 +189,7 @@ impl Lowerer {
             // Lower the predicate with a synthetic 'self' binding
             let mut ctx = FunctionContext::new(base_type);
             // Add 'self' as a local variable for the predicate
-            ctx.add_local(
-                "self".to_string(),
-                base_type,
-                simple_parser::Mutability::Immutable,
-            );
+            ctx.add_local("self".to_string(), base_type, simple_parser::Mutability::Immutable);
 
             let predicate = self.lower_expr(where_clause, &mut ctx)?;
 
@@ -217,9 +199,7 @@ impl Lowerer {
                 predicate,
             };
 
-            self.module
-                .refined_types
-                .insert(ta.name.clone(), refined_type);
+            self.module.refined_types.insert(ta.name.clone(), refined_type);
         }
 
         // Register the type alias name to map to the base type

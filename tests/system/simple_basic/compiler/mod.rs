@@ -23,10 +23,7 @@ fn samples_dir() -> PathBuf {
 /// Compile a sample file and check that compilation succeeds (or fails gracefully for unimplemented features)
 fn compile_sample(sample_path: &Path) -> Result<(), String> {
     let dir = tempdir().map_err(|e| e.to_string())?;
-    let smf_path = dir
-        .path()
-        .join(sample_path.file_stem().unwrap())
-        .with_extension("smf");
+    let smf_path = dir.path().join(sample_path.file_stem().unwrap()).with_extension("smf");
 
     let bin = simple_bin();
 
@@ -107,10 +104,7 @@ main = a + b
         );
     }
 
-    let run = Command::new(&bin)
-        .arg(&smf_path)
-        .output()
-        .expect("run compiled smf");
+    let run = Command::new(&bin).arg(&smf_path).output().expect("run compiled smf");
 
     let stdout = String::from_utf8_lossy(&run.stdout);
     if !stdout.trim().is_empty() {

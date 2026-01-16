@@ -132,10 +132,7 @@ pub fn compile_gpu_num_groups<M: Module>(
 }
 
 /// Compile GpuBarrier instruction
-pub fn compile_gpu_barrier<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-) -> InstrResult<()> {
+pub fn compile_gpu_barrier<M: Module>(ctx: &mut InstrContext<'_, M>, builder: &mut FunctionBuilder) -> InstrResult<()> {
     let func_id = ctx
         .runtime_funcs
         .get("rt_gpu_barrier")

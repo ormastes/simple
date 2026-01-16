@@ -21,10 +21,7 @@ impl DirectoryManifest {
     pub fn to_tracker_visibility_manifest(&self) -> TrackerDirManifest {
         let mut manifest = TrackerDirManifest::new(&self.name);
         for child in &self.child_modules {
-            manifest.add_child(TrackerModDecl::new(
-                &child.name,
-                child.visibility == Visibility::Public,
-            ));
+            manifest.add_child(TrackerModDecl::new(&child.name, child.visibility == Visibility::Public));
         }
         // Add exports from export use statements
         for export in &self.exports {
@@ -190,9 +187,8 @@ impl ModuleResolver {
             return Ok(DirectoryManifest::default());
         }
 
-        let source = std::fs::read_to_string(&init_path).map_err(|e| {
-            CompileError::Semantic(format!("failed to read {:?}: {}", init_path, e))
-        })?;
+        let source = std::fs::read_to_string(&init_path)
+            .map_err(|e| CompileError::Semantic(format!("failed to read {:?}: {}", init_path, e)))?;
 
         let manifest = self.parse_manifest(&source, dir_path)?;
         self.manifests.insert(init_path, manifest.clone());
@@ -235,25 +231,17 @@ impl ModuleResolver {
     }
 
     /// Parse a directory manifest from source
-    pub(super) fn parse_manifest(
-        &self,
-        source: &str,
-        dir_path: &Path,
-    ) -> ResolveResult<DirectoryManifest> {
+    pub(super) fn parse_manifest(&self, source: &str, dir_path: &Path) -> ResolveResult<DirectoryManifest> {
         let mut parser = Parser::new(source);
-        let module = parser.parse().map_err(|e| {
-            CompileError::Semantic(format!("failed to parse __init__.spl: {:?}", e))
-        })?;
+        let module = parser
+            .parse()
+            .map_err(|e| CompileError::Semantic(format!("failed to parse __init__.spl: {:?}", e)))?;
 
         self.extract_manifest(&module, dir_path)
     }
 
     /// Extract manifest information from parsed AST
-    pub(super) fn extract_manifest(
-        &self,
-        module: &Module,
-        dir_path: &Path,
-    ) -> ResolveResult<DirectoryManifest> {
+    pub(super) fn extract_manifest(&self, module: &Module, dir_path: &Path) -> ResolveResult<DirectoryManifest> {
         let dir_name = dir_path
             .file_name()
             .and_then(|s| s.to_str())

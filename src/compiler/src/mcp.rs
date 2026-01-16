@@ -127,12 +127,7 @@ impl McpGenerator {
     }
 
     /// Generate MCP output with specific expansion
-    pub fn generate_with_expansion(
-        &self,
-        nodes: &[Node],
-        selector: &str,
-        what: ExpandWhat,
-    ) -> McpOutput {
+    pub fn generate_with_expansion(&self, nodes: &[Node], selector: &str, what: ExpandWhat) -> McpOutput {
         let mut lines = Vec::new();
 
         for node in nodes {
@@ -153,11 +148,7 @@ impl McpGenerator {
                 mode: "mcp".to_string(),
                 line_numbers: None,
                 show_coverage: if self.show_coverage { Some(true) } else { None },
-                show_block_guides: if self.show_block_guides {
-                    Some(true)
-                } else {
-                    None
-                },
+                show_block_guides: if self.show_block_guides { Some(true) } else { None },
             })
         }
     }
@@ -181,13 +172,7 @@ impl McpGenerator {
         }
     }
 
-    fn process_node_with_expansion(
-        &self,
-        node: &Node,
-        lines: &mut Vec<String>,
-        selector: &str,
-        what: ExpandWhat,
-    ) {
+    fn process_node_with_expansion(&self, node: &Node, lines: &mut Vec<String>, selector: &str, what: ExpandWhat) {
         match node {
             Node::Function(func) => {
                 if self.should_show(&func.visibility) {
@@ -231,11 +216,7 @@ impl McpGenerator {
             McpMode::Expanded => "F▼",
         };
 
-        let vis = if func.visibility.is_public() {
-            "pub "
-        } else {
-            ""
-        };
+        let vis = if func.visibility.is_public() { "pub " } else { "" };
         let name = &func.name;
 
         match mode {
@@ -252,10 +233,7 @@ impl McpGenerator {
                     .map(|t| format!(" -> {}", self.format_type(t)))
                     .unwrap_or_default();
 
-                lines.push(format!(
-                    "{}  {}fn {}({}){} {{",
-                    mark, vis, name, params, ret
-                ));
+                lines.push(format!("{}  {}fn {}({}){} {{", mark, vis, name, params, ret));
                 lines.push("    # Implementation".to_string());
                 lines.push("    …".to_string());
                 lines.push("}".to_string());
@@ -273,11 +251,7 @@ impl McpGenerator {
             McpMode::Expanded => "C▼",
         };
 
-        let vis = if class.visibility.is_public() {
-            "pub "
-        } else {
-            ""
-        };
+        let vis = if class.visibility.is_public() { "pub " } else { "" };
         let name = &class.name;
 
         match mode {
@@ -381,10 +355,7 @@ impl McpGenerator {
                     format!(
                         "{}<{}>",
                         name,
-                        args.iter()
-                            .map(|t| self.format_type(t))
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        args.iter().map(|t| self.format_type(t)).collect::<Vec<_>>().join(", ")
                     )
                 }
             }
@@ -400,11 +371,7 @@ impl McpGenerator {
             Type::Tuple(types) => {
                 format!(
                     "({})",
-                    types
-                        .iter()
-                        .map(|t| self.format_type(t))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    types.iter().map(|t| self.format_type(t)).collect::<Vec<_>>().join(", ")
                 )
             }
             _ => "…".to_string(),
@@ -431,15 +398,8 @@ impl McpTools {
     }
 
     /// Expand a specific symbol
-    pub fn expand_at(
-        &self,
-        nodes: &[Node],
-        selector: &str,
-        what: ExpandWhat,
-    ) -> Result<String, serde_json::Error> {
-        let output = self
-            .generator
-            .generate_with_expansion(nodes, selector, what);
+    pub fn expand_at(&self, nodes: &[Node], selector: &str, what: ExpandWhat) -> Result<String, serde_json::Error> {
+        let output = self.generator.generate_with_expansion(nodes, selector, what);
         serde_json::to_string_pretty(&output)
     }
 

@@ -62,26 +62,15 @@ fn contains_suspension_node(node: &Node) -> bool {
         Node::If(if_stmt) => {
             contains_suspension_expr(&if_stmt.condition)
                 || contains_suspension(&if_stmt.then_block)
-                || if_stmt
-                    .else_block
-                    .as_ref()
-                    .map_or(false, |b| contains_suspension(b))
+                || if_stmt.else_block.as_ref().map_or(false, |b| contains_suspension(b))
         }
-        Node::While(stmt) => {
-            contains_suspension_expr(&stmt.condition) || contains_suspension(&stmt.body)
-        }
+        Node::While(stmt) => contains_suspension_expr(&stmt.condition) || contains_suspension(&stmt.body),
         Node::For(stmt) => contains_suspension(&stmt.body),
         Node::Match(match_stmt) => {
             contains_suspension_expr(&match_stmt.subject)
-                || match_stmt
-                    .arms
-                    .iter()
-                    .any(|arm| contains_suspension(&arm.body))
+                || match_stmt.arms.iter().any(|arm| contains_suspension(&arm.body))
         }
-        Node::Return(stmt) => stmt
-            .value
-            .as_ref()
-            .map_or(false, |v| contains_suspension_expr(v)),
+        Node::Return(stmt) => stmt.value.as_ref().map_or(false, |v| contains_suspension_expr(v)),
         _ => false,
     }
 }
@@ -93,18 +82,13 @@ fn contains_suspension_expr(expr: &Expr) -> bool {
         Expr::Await(_) => true,
 
         // Recursively check subexpressions
-        Expr::Binary { left, right, .. } => {
-            contains_suspension_expr(left) || contains_suspension_expr(right)
-        }
+        Expr::Binary { left, right, .. } => contains_suspension_expr(left) || contains_suspension_expr(right),
         Expr::Unary { operand, .. } => contains_suspension_expr(operand),
         Expr::Call { args, .. } => args.iter().any(|arg| contains_suspension_expr(&arg.value)),
         Expr::MethodCall { receiver, args, .. } => {
-            contains_suspension_expr(receiver)
-                || args.iter().any(|arg| contains_suspension_expr(&arg.value))
+            contains_suspension_expr(receiver) || args.iter().any(|arg| contains_suspension_expr(&arg.value))
         }
-        Expr::Index { receiver, index } => {
-            contains_suspension_expr(receiver) || contains_suspension_expr(index)
-        }
+        Expr::Index { receiver, index } => contains_suspension_expr(receiver) || contains_suspension_expr(index),
         Expr::Lambda { body, .. } => contains_suspension_expr(body),
 
         // Literals and simple expressions don't suspend
@@ -165,21 +149,13 @@ fn calls_async_function_node(node: &Node, env: &EffectEnv) -> bool {
                     .as_ref()
                     .map_or(false, |b| calls_async_function(b, env))
         }
-        Node::While(stmt) => {
-            calls_async_function_expr(&stmt.condition, env) || calls_async_function(&stmt.body, env)
-        }
+        Node::While(stmt) => calls_async_function_expr(&stmt.condition, env) || calls_async_function(&stmt.body, env),
         Node::For(stmt) => calls_async_function(&stmt.body, env),
         Node::Match(match_stmt) => {
             calls_async_function_expr(&match_stmt.subject, env)
-                || match_stmt
-                    .arms
-                    .iter()
-                    .any(|arm| calls_async_function(&arm.body, env))
+                || match_stmt.arms.iter().any(|arm| calls_async_function(&arm.body, env))
         }
-        Node::Return(stmt) => stmt
-            .value
-            .as_ref()
-            .map_or(false, |v| calls_async_function_expr(v, env)),
+        Node::Return(stmt) => stmt.value.as_ref().map_or(false, |v| calls_async_function_expr(v, env)),
         _ => false,
     }
 }
@@ -195,14 +171,11 @@ fn calls_async_function_expr(expr: &Expr, env: &EffectEnv) -> bool {
                 }
             }
             // Check arguments
-            args.iter()
-                .any(|arg| calls_async_function_expr(&arg.value, env))
+            args.iter().any(|arg| calls_async_function_expr(&arg.value, env))
         }
         Expr::MethodCall { receiver, args, .. } => {
             calls_async_function_expr(receiver, env)
-                || args
-                    .iter()
-                    .any(|arg| calls_async_function_expr(&arg.value, env))
+                || args.iter().any(|arg| calls_async_function_expr(&arg.value, env))
         }
         Expr::Binary { left, right, .. } => {
             calls_async_function_expr(left, env) || calls_async_function_expr(right, env)
@@ -288,10 +261,7 @@ pub fn needs_promise_wrapping(func: &FunctionDef, env: &EffectEnv) -> bool {
 
 /// Get the return type transformation status for a function
 /// Returns None for sync functions, Some(return_type) for async functions
-pub fn get_promise_wrapped_type<'a>(
-    func: &'a FunctionDef,
-    env: &EffectEnv,
-) -> Option<&'a simple_parser::ast::Type> {
+pub fn get_promise_wrapped_type<'a>(func: &'a FunctionDef, env: &EffectEnv) -> Option<&'a simple_parser::ast::Type> {
     if needs_promise_wrapping(func, env) {
         func.return_type.as_ref()
     } else {
@@ -555,10 +525,7 @@ mod tests {
 
         let env = HashMap::new();
         assert!(needs_promise_wrapping(&async_func, &env));
-        assert_eq!(
-            get_return_wrap_mode(&async_func, &env),
-            ReturnWrapMode::Resolved
-        );
+        assert_eq!(get_return_wrap_mode(&async_func, &env), ReturnWrapMode::Resolved);
     }
 
     // Phase 6: Await inference tests

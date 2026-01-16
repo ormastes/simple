@@ -1,8 +1,8 @@
 //! Tests for generator functionality
 
 use super::{
-    rt_generator_get_ctx, rt_generator_get_state, rt_generator_load_slot, rt_generator_mark_done,
-    rt_generator_new, rt_generator_next, rt_generator_set_state, rt_generator_store_slot,
+    rt_generator_get_ctx, rt_generator_get_state, rt_generator_load_slot, rt_generator_mark_done, rt_generator_new,
+    rt_generator_next, rt_generator_set_state, rt_generator_store_slot,
 };
 use crate::value::RuntimeValue;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -43,8 +43,8 @@ extern "C" fn simple_yielder(gen: RuntimeValue) -> RuntimeValue {
 // Test helper: Generator that uses slot storage
 extern "C" fn slot_based_generator(gen: RuntimeValue) -> RuntimeValue {
     use super::{
-        rt_generator_get_state, rt_generator_load_slot, rt_generator_mark_done,
-        rt_generator_set_state, rt_generator_store_slot,
+        rt_generator_get_state, rt_generator_load_slot, rt_generator_mark_done, rt_generator_set_state,
+        rt_generator_store_slot,
     };
 
     let state = rt_generator_get_state(gen);
@@ -73,10 +73,7 @@ extern "C" fn slot_based_generator(gen: RuntimeValue) -> RuntimeValue {
 
 // Test helper: Generator that uses context
 extern "C" fn context_based_generator(gen: RuntimeValue) -> RuntimeValue {
-    use super::{
-        rt_generator_get_ctx, rt_generator_get_state, rt_generator_mark_done,
-        rt_generator_set_state,
-    };
+    use super::{rt_generator_get_ctx, rt_generator_get_state, rt_generator_mark_done, rt_generator_set_state};
 
     let state = rt_generator_get_state(gen);
     let ctx = rt_generator_get_ctx(gen);

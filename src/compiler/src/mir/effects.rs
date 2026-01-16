@@ -69,10 +69,7 @@ pub fn append_safe(a: Vec<AsyncEffect>, b: Vec<AsyncEffect>) -> Vec<AsyncEffect>
     debug_assert!(pipeline_safe(&b), "Precondition: b must be pipeline safe");
     let mut result = a;
     result.extend(b);
-    debug_assert!(
-        pipeline_safe(&result),
-        "Postcondition: result must be pipeline safe"
-    );
+    debug_assert!(pipeline_safe(&result), "Postcondition: result must be pipeline safe");
     result
 }
 
@@ -419,11 +416,9 @@ impl BuiltinFunc {
     /// Get the effect category of this builtin
     pub fn effect(&self) -> Effect {
         match self {
-            BuiltinFunc::Await
-            | BuiltinFunc::Wait
-            | BuiltinFunc::Join
-            | BuiltinFunc::Recv
-            | BuiltinFunc::Sleep => Effect::Wait,
+            BuiltinFunc::Await | BuiltinFunc::Wait | BuiltinFunc::Join | BuiltinFunc::Recv | BuiltinFunc::Sleep => {
+                Effect::Wait
+            }
 
             BuiltinFunc::GcAlloc | BuiltinFunc::GcNew | BuiltinFunc::Box => Effect::GcAlloc,
 
@@ -447,9 +442,7 @@ impl BuiltinFunc {
             | BuiltinFunc::ListDir
             | BuiltinFunc::CreateDir => Effect::Fs,
 
-            BuiltinFunc::UnsafePtr | BuiltinFunc::UnsafeDeref | BuiltinFunc::UnsafeCast => {
-                Effect::Unsafe
-            }
+            BuiltinFunc::UnsafePtr | BuiltinFunc::UnsafeDeref | BuiltinFunc::UnsafeCast => Effect::Unsafe,
         }
     }
 
@@ -621,16 +614,13 @@ impl CallTarget {
             // GC allocating functions
             "gc_alloc" | "gc_new" | "box" => CallTarget::GcAllocating(name.to_string()),
             // I/O functions
-            "print" | "println" | "read" | "write" | "send" | "spawn" => {
-                CallTarget::Io(name.to_string())
-            }
+            "print" | "println" | "read" | "write" | "send" | "spawn" => CallTarget::Io(name.to_string()),
             // Network functions
-            "http_get" | "http_post" | "tcp_connect" | "tcp_listen" | "udp_bind" => {
-                CallTarget::Net(name.to_string())
-            }
+            "http_get" | "http_post" | "tcp_connect" | "tcp_listen" | "udp_bind" => CallTarget::Net(name.to_string()),
             // Filesystem functions
-            "read_file" | "write_file" | "open_file" | "delete_file" | "list_dir"
-            | "create_dir" => CallTarget::Fs(name.to_string()),
+            "read_file" | "write_file" | "open_file" | "delete_file" | "list_dir" | "create_dir" => {
+                CallTarget::Fs(name.to_string())
+            }
             // Unsafe functions
             "unsafe_ptr" | "unsafe_deref" | "unsafe_cast" => CallTarget::Unsafe(name.to_string()),
             // Pure functions (default)

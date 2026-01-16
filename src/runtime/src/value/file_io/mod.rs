@@ -18,29 +18,23 @@ pub mod syscalls;
 pub mod zerocopy;
 
 // Re-export fadvise functions
-pub use fadvise::{
-    native_fadvise_dontneed, native_fadvise_random, native_fadvise_sequential,
-    native_fadvise_willneed,
-};
+pub use fadvise::{native_fadvise_dontneed, native_fadvise_random, native_fadvise_sequential, native_fadvise_willneed};
 
 // Re-export mmap functions
-pub use mmap::{
-    native_mmap_create, native_mmap_create_shared, native_mmap_read, native_mmap_unmap,
-};
+pub use mmap::{native_mmap_create, native_mmap_create_shared, native_mmap_read, native_mmap_unmap};
 
 // Re-export zero-copy functions
 pub use zerocopy::{native_copy_file_range, native_sendfile};
 
 // Re-export file operations
 pub use file_ops::{
-    native_file_close, native_file_flush, native_file_read, native_file_seek, native_file_sync,
-    native_file_write, native_fs_open,
+    native_file_close, native_file_flush, native_file_read, native_file_seek, native_file_sync, native_file_write,
+    native_fs_open,
 };
 
 // Re-export process management functions
 pub use process::{
-    native_path_resolve, native_process_is_alive, native_process_kill, native_process_wait,
-    native_spawn_worker,
+    native_path_resolve, native_process_is_alive, native_process_kill, native_process_wait, native_spawn_worker,
 };
 
 // Re-export async file functions
@@ -50,9 +44,7 @@ pub use async_file::{
 };
 
 // Re-export low-level syscall wrappers
-pub use syscalls::{
-    sys_close, sys_file_exists, sys_file_size, sys_madvise, sys_mmap, sys_munmap, sys_open,
-};
+pub use syscalls::{sys_close, sys_file_exists, sys_file_size, sys_madvise, sys_mmap, sys_munmap, sys_open};
 
 /// Memory-mapped region handle
 ///

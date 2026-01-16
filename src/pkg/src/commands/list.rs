@@ -28,8 +28,7 @@ pub fn list_dependencies(dir: &Path) -> PkgResult<Vec<InstalledPackage>> {
 
     let linker = Linker::new(dir);
     let linked = linker.list().unwrap_or_default();
-    let linked_names: std::collections::HashSet<_> =
-        linked.iter().map(|p| p.name.as_str()).collect();
+    let linked_names: std::collections::HashSet<_> = linked.iter().map(|p| p.name.as_str()).collect();
 
     let packages: Vec<_> = lock
         .packages
@@ -87,14 +86,7 @@ pub fn dependency_tree(dir: &Path) -> PkgResult<TreeNode> {
     let children: Vec<TreeNode> = manifest
         .dependencies
         .keys()
-        .map(|name| {
-            build_subtree(
-                name,
-                &version_map,
-                &dep_graph,
-                &mut std::collections::HashSet::new(),
-            )
-        })
+        .map(|name| build_subtree(name, &version_map, &dep_graph, &mut std::collections::HashSet::new()))
         .collect();
 
     Ok(TreeNode {
@@ -157,10 +149,7 @@ pub fn format_tree(node: &TreeNode, prefix: &str, is_last: bool) -> String {
         "├── "
     };
 
-    output.push_str(&format!(
-        "{}{}{} ({})\n",
-        prefix, connector, node.name, node.version
-    ));
+    output.push_str(&format!("{}{}{} ({})\n", prefix, connector, node.name, node.version));
 
     let child_prefix = if prefix.is_empty() {
         String::new()

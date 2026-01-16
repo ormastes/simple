@@ -423,8 +423,7 @@ impl Insert {
         I: IntoIterator,
         I::Item: Into<SqlValue>,
     {
-        self.values
-            .push(values.into_iter().map(|v| v.into()).collect());
+        self.values.push(values.into_iter().map(|v| v.into()).collect());
         self
     }
 
@@ -718,10 +717,7 @@ mod tests {
             .set("updated_at", "2024-01-01")
             .where_eq("id", 1);
         let (sql, params) = update.build();
-        assert_eq!(
-            sql,
-            "UPDATE users SET name = ?, updated_at = ? WHERE id = ?"
-        );
+        assert_eq!(sql, "UPDATE users SET name = ?, updated_at = ? WHERE id = ?");
         assert_eq!(params.len(), 3);
     }
 

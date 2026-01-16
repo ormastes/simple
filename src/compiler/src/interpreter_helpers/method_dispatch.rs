@@ -5,10 +5,7 @@ use crate::value::{Env, OptionVariant, ResultVariant, Value, METHOD_MISSING};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
 
-use super::super::{
-    evaluate_expr, evaluate_method_call_with_self_update, exec_function, Control, Enums,
-    ImplMethods,
-};
+use super::super::{evaluate_expr, evaluate_method_call_with_self_update, exec_function, Control, Enums, ImplMethods};
 use crate::interpreter::interpreter_call::exec_function_with_values_and_self;
 
 pub(crate) fn call_method_on_value(
@@ -30,11 +27,7 @@ pub(crate) fn call_method_on_value(
             "len" | "length" => return Ok(Value::Int(s.chars().count() as i64)),
             "is_empty" => return Ok(Value::Bool(s.is_empty())),
             "to_string" => return Ok(Value::Str(s.clone())),
-            "chars" => {
-                return Ok(Value::Array(
-                    s.chars().map(|c| Value::Str(c.to_string())).collect(),
-                ))
-            }
+            "chars" => return Ok(Value::Array(s.chars().map(|c| Value::Str(c.to_string())).collect())),
             "trim" | "strip" => return Ok(Value::Str(s.trim().to_string())),
             "to_upper" | "upper" | "uppercase" => return Ok(Value::Str(s.to_uppercase())),
             "to_lower" | "lower" | "lowercase" => return Ok(Value::Str(s.to_lowercase())),
@@ -116,16 +109,10 @@ pub(crate) fn call_method_on_value(
             "len" | "length" => return Ok(Value::Int(arr.len() as i64)),
             "is_empty" => return Ok(Value::Bool(arr.is_empty())),
             "first" => {
-                return Ok(arr
-                    .first()
-                    .map(|v| Value::some(v.clone()))
-                    .unwrap_or_else(Value::none));
+                return Ok(arr.first().map(|v| Value::some(v.clone())).unwrap_or_else(Value::none));
             }
             "last" => {
-                return Ok(arr
-                    .last()
-                    .map(|v| Value::some(v.clone()))
-                    .unwrap_or_else(Value::none));
+                return Ok(arr.last().map(|v| Value::some(v.clone())).unwrap_or_else(Value::none));
             }
             _ => {}
         },

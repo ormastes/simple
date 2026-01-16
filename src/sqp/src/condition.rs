@@ -37,11 +37,7 @@ pub enum Op {
 #[derive(Debug, Clone)]
 pub enum Condition {
     /// Simple comparison (column op value)
-    Compare {
-        column: String,
-        op: Op,
-        value: SqlValue,
-    },
+    Compare { column: String, op: Op, value: SqlValue },
     /// IN or NOT IN with multiple values
     InList {
         column: String,
@@ -181,11 +177,7 @@ impl Condition {
     }
 
     /// Create a BETWEEN condition.
-    pub fn between(
-        column: impl Into<String>,
-        low: impl Into<SqlValue>,
-        high: impl Into<SqlValue>,
-    ) -> Self {
+    pub fn between(column: impl Into<String>, low: impl Into<SqlValue>, high: impl Into<SqlValue>) -> Self {
         Condition::Between {
             column: column.into(),
             low: low.into(),
@@ -265,12 +257,7 @@ impl Condition {
                     _ => unreachable!(),
                 };
                 params.push(value.clone());
-                format!(
-                    "{} {} {}",
-                    column,
-                    op_str,
-                    dialect.placeholder(offset + params.len())
-                )
+                format!("{} {} {}", column, op_str, dialect.placeholder(offset + params.len()))
             }
             Condition::InList {
                 column,
@@ -427,10 +414,7 @@ mod tests {
 
     #[test]
     fn test_or_condition() {
-        let cond = Condition::or([
-            Condition::eq("role", "admin"),
-            Condition::eq("role", "superuser"),
-        ]);
+        let cond = Condition::or([Condition::eq("role", "admin"), Condition::eq("role", "superuser")]);
         let (sql, params) = cond.build(Dialect::Sqlite);
         assert_eq!(sql, "(role = ? OR role = ?)");
         assert_eq!(params.len(), 2);

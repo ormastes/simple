@@ -47,10 +47,7 @@ mod tests {
         assert_eq!(registry.get(TypeId::VOID), Some(&HirType::Void));
         assert_eq!(registry.get(TypeId::BOOL), Some(&HirType::Bool));
         assert_eq!(registry.get(TypeId::I64), Some(&HirType::signed_int(64)));
-        assert_eq!(
-            registry.get(TypeId::F64),
-            Some(&HirType::Float { bits: 64 })
-        );
+        assert_eq!(registry.get(TypeId::F64), Some(&HirType::Float { bits: 64 }));
         assert_eq!(registry.get(TypeId::STRING), Some(&HirType::String));
     }
 
@@ -95,10 +92,7 @@ mod tests {
 
         let struct_type = HirType::Struct {
             name: "Point".to_string(),
-            fields: vec![
-                ("x".to_string(), TypeId::F64),
-                ("y".to_string(), TypeId::F64),
-            ],
+            fields: vec![("x".to_string(), TypeId::F64), ("y".to_string(), TypeId::F64)],
             has_snapshot: false,
         };
 

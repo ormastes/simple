@@ -218,8 +218,7 @@ pub struct MirLowerer<'a> {
     /// Contract checking mode
     pub(super) contract_mode: ContractMode,
     /// Reference to refined types for emitting refinement checks (CTR-020)
-    pub(super) refined_types:
-        Option<&'a std::collections::HashMap<String, crate::hir::HirRefinedType>>,
+    pub(super) refined_types: Option<&'a std::collections::HashMap<String, crate::hir::HirRefinedType>>,
     /// Reference to type registry for looking up unit type constraints
     pub(super) type_registry: Option<&'a crate::hir::TypeRegistry>,
     /// Reference to trait infos for vtable slot resolution (static polymorphism)
@@ -354,9 +353,7 @@ impl<'a> MirLowerer<'a> {
             ContractMode::Off => false,
             ContractMode::Boundary => {
                 // Only emit for public functions
-                self.try_contract_ctx()
-                    .map(|ctx| ctx.is_public)
-                    .unwrap_or(false)
+                self.try_contract_ctx().map(|ctx| ctx.is_public).unwrap_or(false)
             }
             ContractMode::All | ContractMode::Test => true,
         }
@@ -368,12 +365,7 @@ impl<'a> MirLowerer<'a> {
     }
 
     /// Transition from Idle to Lowering - explicit state transition
-    pub(super) fn begin_function(
-        &mut self,
-        func: MirFunction,
-        func_name: &str,
-        is_public: bool,
-    ) -> MirLowerResult<()> {
+    pub(super) fn begin_function(&mut self, func: MirFunction, func_name: &str, is_public: bool) -> MirLowerResult<()> {
         match &self.state {
             LowererState::Idle => {
                 self.state = LowererState::Lowering {
@@ -431,15 +423,10 @@ impl<'a> MirLowerer<'a> {
     }
 
     /// Get mutable access to current function (requires Lowering state)
-    pub(super) fn with_func<T>(
-        &mut self,
-        f: impl FnOnce(&mut MirFunction, BlockId) -> T,
-    ) -> MirLowerResult<T> {
+    pub(super) fn with_func<T>(&mut self, f: impl FnOnce(&mut MirFunction, BlockId) -> T) -> MirLowerResult<T> {
         match &mut self.state {
             LowererState::Lowering {
-                func,
-                current_block,
-                ..
+                func, current_block, ..
             } => Ok(f(func, *current_block)),
             LowererState::Idle => Err(MirLowerError::InvalidState {
                 expected: "Lowering".to_string(),
@@ -501,11 +488,8 @@ impl<'a> MirLowerer<'a> {
             if has_any_injectable {
                 // If function-level @inject, all params without explicit @inject are injectable
                 // If no function-level @inject, only params with @inject are injectable
-                let param_info: Vec<(TypeId, bool)> = func
-                    .params
-                    .iter()
-                    .map(|p| (p.ty, func.inject || p.inject))
-                    .collect();
+                let param_info: Vec<(TypeId, bool)> =
+                    func.params.iter().map(|p| (p.ty, func.inject || p.inject)).collect();
                 self.inject_functions.insert(func.name.clone(), param_info);
             }
         }

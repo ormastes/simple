@@ -64,11 +64,7 @@ pub struct DiResolveError {
 }
 
 /// Helper to create a match context for DI binding selection.
-pub fn create_di_match_context<'a>(
-    type_name: &'a str,
-    module_path: &'a str,
-    attrs: &'a [String],
-) -> MatchContext<'a> {
+pub fn create_di_match_context<'a>(type_name: &'a str, module_path: &'a str, attrs: &'a [String]) -> MatchContext<'a> {
     MatchContext::new()
         .with_type_name(type_name)
         .with_module_path(module_path)
@@ -129,30 +125,20 @@ pub fn parse_di_config(toml: &toml::Value) -> Result<Option<DiConfig>, String> {
                 None => Vec::new(),
                 Some(value) => value
                     .as_array()
-                    .ok_or_else(|| {
-                        format!("di.profiles.{}.bindings must be an array", profile_name)
-                    })?
+                    .ok_or_else(|| format!("di.profiles.{}.bindings must be an array", profile_name))?
                     .clone(),
             };
 
             for (idx, binding_val) in bindings.iter().enumerate() {
-                let binding = binding_val.as_table().ok_or_else(|| {
-                    format!(
-                        "di.profiles.{}.bindings[{}] must be a table",
-                        profile_name, idx
-                    )
-                })?;
+                let binding = binding_val
+                    .as_table()
+                    .ok_or_else(|| format!("di.profiles.{}.bindings[{}] must be a table", profile_name, idx))?;
 
                 let predicate_raw = binding
                     .get("on")
                     .or_else(|| binding.get("predicate"))
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        format!(
-                            "di.profiles.{}.bindings[{}] missing 'on' predicate",
-                            profile_name, idx
-                        )
-                    })?;
+                    .ok_or_else(|| format!("di.profiles.{}.bindings[{}] missing 'on' predicate", profile_name, idx))?;
                 let predicate = predicate_parser::parse_predicate(predicate_raw)?;
                 // Validate that the predicate is legal for DI context
                 predicate
@@ -163,12 +149,7 @@ pub fn parse_di_config(toml: &toml::Value) -> Result<Option<DiConfig>, String> {
                     .get("impl")
                     .or_else(|| binding.get("impl_type"))
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        format!(
-                            "di.profiles.{}.bindings[{}] missing 'impl' type",
-                            profile_name, idx
-                        )
-                    })?
+                    .ok_or_else(|| format!("di.profiles.{}.bindings[{}] missing 'impl' type", profile_name, idx))?
                     .to_string();
 
                 let scope = binding
@@ -178,10 +159,7 @@ pub fn parse_di_config(toml: &toml::Value) -> Result<Option<DiConfig>, String> {
                     .transpose()?
                     .unwrap_or(DiScope::Transient);
 
-                let priority = binding
-                    .get("priority")
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(0);
+                let priority = binding.get("priority").and_then(|v| v.as_integer()).unwrap_or(0);
 
                 profile.bindings.push(DiBindingRule {
                     predicate,
@@ -409,9 +387,7 @@ bindings = [
         let config = parse_di_config(&toml).unwrap().unwrap();
         let container = DiContainer::new(config, "test".to_string());
 
-        let result = container
-            .resolve_type("UserRepository", "app.domain", &[])
-            .unwrap();
+        let result = container.resolve_type("UserRepository", "app.domain", &[]).unwrap();
 
         assert!(result.is_some());
         let (impl_type, scope) = result.unwrap();
@@ -434,9 +410,7 @@ bindings = []
         let config = parse_di_config(&toml).unwrap().unwrap();
         let container = DiContainer::new(config, "test".to_string());
 
-        let result = container
-            .resolve_type("UserRepository", "app.domain", &[])
-            .unwrap();
+        let result = container.resolve_type("UserRepository", "app.domain", &[]).unwrap();
 
         assert!(result.is_none());
     }
@@ -487,14 +461,8 @@ bindings = []
     fn dependency_graph_implementations() {
         let mut graph = DependencyGraph::default();
 
-        graph.add_implementation(
-            "UserRepository".to_string(),
-            "SqlUserRepository".to_string(),
-        );
-        graph.add_implementation(
-            "UserRepository".to_string(),
-            "MockUserRepository".to_string(),
-        );
+        graph.add_implementation("UserRepository".to_string(), "SqlUserRepository".to_string());
+        graph.add_implementation("UserRepository".to_string(), "MockUserRepository".to_string());
 
         let impls = graph.get_implementations("UserRepository").unwrap();
         assert_eq!(impls.len(), 2);

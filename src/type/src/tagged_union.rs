@@ -103,10 +103,7 @@ impl UnionVariant {
 
     /// Get field type by name
     pub fn get_field_type(&self, name: &str) -> Option<&crate::Type> {
-        self.fields
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, ty)| ty)
+        self.fields.iter().find(|(n, _)| n == name).map(|(_, ty)| ty)
     }
 }
 

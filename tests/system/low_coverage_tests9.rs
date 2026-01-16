@@ -166,20 +166,15 @@ mod compilability_tests {
     #[test]
     fn test_compilability_status_merge_compilable_with_requires() {
         let mut status = CompilabilityStatus::Compilable;
-        status.merge(CompilabilityStatus::RequiresInterpreter(vec![
-            FallbackReason::Closure,
-        ]));
+        status.merge(CompilabilityStatus::RequiresInterpreter(vec![FallbackReason::Closure]));
         assert!(!status.is_compilable());
         assert_eq!(status.reasons().len(), 1);
     }
 
     #[test]
     fn test_compilability_status_merge_requires_with_requires() {
-        let mut status =
-            CompilabilityStatus::RequiresInterpreter(vec![FallbackReason::PatternMatch]);
-        status.merge(CompilabilityStatus::RequiresInterpreter(vec![
-            FallbackReason::Closure,
-        ]));
+        let mut status = CompilabilityStatus::RequiresInterpreter(vec![FallbackReason::PatternMatch]);
+        status.merge(CompilabilityStatus::RequiresInterpreter(vec![FallbackReason::Closure]));
         assert!(!status.is_compilable());
         assert_eq!(status.reasons().len(), 2);
     }
@@ -548,8 +543,8 @@ mod monomorphize_types_tests {
 // ===========================================================================
 mod hir_types_tests {
     use simple_compiler::hir::{
-        FieldLayout, HirOverflowBehavior, HirType, HirUnitConstraints, PointerKind, Signedness,
-        StructLayout, TypeId, TypeRegistry,
+        FieldLayout, HirOverflowBehavior, HirType, HirUnitConstraints, PointerKind, Signedness, StructLayout, TypeId,
+        TypeRegistry,
     };
 
     #[test]
@@ -778,10 +773,7 @@ mod hir_types_tests {
     fn test_hir_type_struct() {
         let ty = HirType::Struct {
             name: "Point".to_string(),
-            fields: vec![
-                ("x".to_string(), TypeId::I32),
-                ("y".to_string(), TypeId::I32),
-            ],
+            fields: vec![("x".to_string(), TypeId::I32), ("y".to_string(), TypeId::I32)],
             has_snapshot: false,
         };
         match ty {

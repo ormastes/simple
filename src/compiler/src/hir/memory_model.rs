@@ -50,15 +50,9 @@ impl OperationId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryOperation {
     /// Read from a memory location
-    Read {
-        location: LocationId,
-        thread: ThreadId,
-    },
+    Read { location: LocationId, thread: ThreadId },
     /// Write to a memory location
-    Write {
-        location: LocationId,
-        thread: ThreadId,
-    },
+    Write { location: LocationId, thread: ThreadId },
     /// Atomic read-modify-write operation
     AtomicRMW {
         location: LocationId,
@@ -74,15 +68,9 @@ pub enum MemoryOperation {
     /// Thread/actor join
     ThreadJoin { parent: ThreadId, child: ThreadId },
     /// Channel send
-    ChannelSend {
-        channel: ChannelId,
-        thread: ThreadId,
-    },
+    ChannelSend { channel: ChannelId, thread: ThreadId },
     /// Channel receive
-    ChannelReceive {
-        channel: ChannelId,
-        thread: ThreadId,
-    },
+    ChannelReceive { channel: ChannelId, thread: ThreadId },
 }
 
 /// Memory ordering for atomic operations
@@ -197,19 +185,14 @@ impl HappensBeforeGraph {
 
         // Update program order for the thread (AFTER establishing edges)
         let thread = self.get_thread_id(&op);
-        self.program_order
-            .entry(thread)
-            .or_insert_with(Vec::new)
-            .push(op_id);
+        self.program_order.entry(thread).or_insert_with(Vec::new).push(op_id);
 
         // Update synchronization tracking
         match &op {
             MemoryOperation::LockRelease { lock, .. } => {
                 self.lock_releases.insert(*lock, op_id);
             }
-            MemoryOperation::AtomicRMW {
-                location, ordering, ..
-            } => {
+            MemoryOperation::AtomicRMW { location, ordering, .. } => {
                 self.atomic_stores
                     .entry(*location)
                     .or_insert_with(Vec::new)
@@ -222,10 +205,7 @@ impl HappensBeforeGraph {
                 self.thread_joins.insert(*child, op_id);
             }
             MemoryOperation::ChannelSend { channel, .. } => {
-                self.channel_sends
-                    .entry(*channel)
-                    .or_insert_with(Vec::new)
-                    .push(op_id);
+                self.channel_sends.entry(*channel).or_insert_with(Vec::new).push(op_id);
             }
             MemoryOperation::ChannelReceive { channel, .. } => {
                 self.channel_receives
@@ -292,9 +272,7 @@ impl HappensBeforeGraph {
                         for &(store_id, store_ordering) in stores {
                             if matches!(
                                 store_ordering,
-                                MemoryOrdering::Release
-                                    | MemoryOrdering::AcqRel
-                                    | MemoryOrdering::SeqCst
+                                MemoryOrdering::Release | MemoryOrdering::AcqRel | MemoryOrdering::SeqCst
                             ) {
                                 edges_to_add.push(store_id);
                             }
@@ -363,18 +341,12 @@ impl HappensBeforeGraph {
 
     /// Get the previous operation in a thread's program order
     fn get_previous_operation(&self, thread: ThreadId) -> Option<OperationId> {
-        self.program_order
-            .get(&thread)
-            .and_then(|ops| ops.last())
-            .copied()
+        self.program_order.get(&thread).and_then(|ops| ops.last()).copied()
     }
 
     /// Add a happens-before edge
     fn add_edge(&mut self, from: OperationId, to: OperationId) {
-        self.edges
-            .entry(from)
-            .or_insert_with(HashSet::new)
-            .insert(to);
+        self.edges.entry(from).or_insert_with(HashSet::new).insert(to);
     }
 
     /// Check if operation `from` happens-before operation `to`
@@ -421,12 +393,8 @@ impl HappensBeforeGraph {
         let mut location_ops: HashMap<LocationId, Vec<OperationId>> = HashMap::new();
         for (&op_id, op) in &self.operations {
             match op {
-                MemoryOperation::Read { location, .. }
-                | MemoryOperation::Write { location, .. } => {
-                    location_ops
-                        .entry(*location)
-                        .or_insert_with(Vec::new)
-                        .push(op_id);
+                MemoryOperation::Read { location, .. } | MemoryOperation::Write { location, .. } => {
+                    location_ops.entry(*location).or_insert_with(Vec::new).push(op_id);
                 }
                 _ => {}
             }
@@ -439,9 +407,7 @@ impl HappensBeforeGraph {
                     let op1_id = ops[i];
                     let op2_id = ops[j];
 
-                    if let (Some(op1), Some(op2)) =
-                        (self.operations.get(&op1_id), self.operations.get(&op2_id))
-                    {
+                    if let (Some(op1), Some(op2)) = (self.operations.get(&op1_id), self.operations.get(&op2_id)) {
                         // Check if at least one is a write
                         let has_write = matches!(op1, MemoryOperation::Write { .. })
                             || matches!(op2, MemoryOperation::Write { .. });
@@ -491,15 +457,9 @@ mod tests {
         let thread = ThreadId::new(1);
         let loc = LocationId::new(1);
 
-        let write = graph.add_operation(MemoryOperation::Write {
-            location: loc,
-            thread,
-        });
+        let write = graph.add_operation(MemoryOperation::Write { location: loc, thread });
 
-        let read = graph.add_operation(MemoryOperation::Read {
-            location: loc,
-            thread,
-        });
+        let read = graph.add_operation(MemoryOperation::Read { location: loc, thread });
 
         // Write happens-before read in same thread (program order)
         assert!(graph.happens_before(write, read));
@@ -513,15 +473,9 @@ mod tests {
         let thread1 = ThreadId::new(1);
         let thread2 = ThreadId::new(2);
 
-        let release = graph.add_operation(MemoryOperation::LockRelease {
-            lock,
-            thread: thread1,
-        });
+        let release = graph.add_operation(MemoryOperation::LockRelease { lock, thread: thread1 });
 
-        let acquire = graph.add_operation(MemoryOperation::LockAcquire {
-            lock,
-            thread: thread2,
-        });
+        let acquire = graph.add_operation(MemoryOperation::LockAcquire { lock, thread: thread2 });
 
         // Release happens-before acquire
         assert!(graph.happens_before(release, acquire));
@@ -607,16 +561,10 @@ mod tests {
             thread: thread1,
         });
 
-        let release = graph.add_operation(MemoryOperation::LockRelease {
-            lock,
-            thread: thread1,
-        });
+        let release = graph.add_operation(MemoryOperation::LockRelease { lock, thread: thread1 });
 
         // Thread 2: lock then write
-        let acquire = graph.add_operation(MemoryOperation::LockAcquire {
-            lock,
-            thread: thread2,
-        });
+        let acquire = graph.add_operation(MemoryOperation::LockAcquire { lock, thread: thread2 });
 
         let write2 = graph.add_operation(MemoryOperation::Write {
             location: loc,
@@ -634,20 +582,11 @@ mod tests {
         let thread = ThreadId::new(1);
         let loc = LocationId::new(1);
 
-        let op1 = graph.add_operation(MemoryOperation::Write {
-            location: loc,
-            thread,
-        });
+        let op1 = graph.add_operation(MemoryOperation::Write { location: loc, thread });
 
-        let op2 = graph.add_operation(MemoryOperation::Read {
-            location: loc,
-            thread,
-        });
+        let op2 = graph.add_operation(MemoryOperation::Read { location: loc, thread });
 
-        let op3 = graph.add_operation(MemoryOperation::Write {
-            location: loc,
-            thread,
-        });
+        let op3 = graph.add_operation(MemoryOperation::Write { location: loc, thread });
 
         // Transitivity: op1 → op2 → op3, so op1 → op3
         assert!(graph.happens_before(op1, op3));

@@ -1,9 +1,6 @@
 //! Tests for async/future functionality
 
-use super::{
-    rt_future_all, rt_future_await, rt_future_is_ready, rt_future_new, rt_future_race,
-    rt_future_resolve,
-};
+use super::{rt_future_all, rt_future_await, rt_future_is_ready, rt_future_new, rt_future_race, rt_future_resolve};
 use crate::executor::{configure_async_mode, AsyncMode};
 use crate::value::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, RuntimeValue};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -36,10 +33,7 @@ fn test_future_new_and_await_simple() {
     configure_async_mode(AsyncMode::Threaded);
 
     // Create a future with lazy execution
-    let future = rt_future_new(
-        return_value as *const () as u64,
-        RuntimeValue::from_int(123),
-    );
+    let future = rt_future_new(return_value as *const () as u64, RuntimeValue::from_int(123));
 
     // Counter should be 0 (lazy execution)
     assert!(future.is_heap());
@@ -92,10 +86,7 @@ fn test_future_await_double_await() {
 fn test_future_is_ready() {
     configure_async_mode(AsyncMode::Threaded);
 
-    let future = rt_future_new(
-        return_value as *const () as u64,
-        RuntimeValue::from_int(100),
-    );
+    let future = rt_future_new(return_value as *const () as u64, RuntimeValue::from_int(100));
 
     // Not ready initially (lazy execution)
     assert_eq!(rt_future_is_ready(future), 0);

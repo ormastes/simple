@@ -119,10 +119,7 @@ impl SymbolTable {
         let mut hash_table = HashMap::new();
 
         for (i, sym) in symbols.iter().enumerate() {
-            hash_table
-                .entry(sym.name_hash)
-                .or_insert_with(Vec::new)
-                .push(i);
+            hash_table.entry(sym.name_hash).or_insert_with(Vec::new).push(i);
         }
 
         trace!(unique_hashes = hash_table.len(), "Symbol hash table built");
@@ -204,9 +201,7 @@ impl SymbolTable {
 
     /// Get all exported symbols
     pub fn exports(&self) -> impl Iterator<Item = &SmfSymbol> {
-        self.symbols
-            .iter()
-            .filter(|s| s.binding == SymbolBinding::Global)
+        self.symbols.iter().filter(|s| s.binding == SymbolBinding::Global)
     }
 }
 

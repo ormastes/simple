@@ -40,8 +40,7 @@ unsafe impl Sync for MmapRegion {}
 ///
 /// # Thread Safety
 /// Protected by a Mutex for safe concurrent access from multiple threads.
-pub(super) static MMAP_REGISTRY: std::sync::OnceLock<Mutex<Vec<MmapRegion>>> =
-    std::sync::OnceLock::new();
+pub(super) static MMAP_REGISTRY: std::sync::OnceLock<Mutex<Vec<MmapRegion>>> = std::sync::OnceLock::new();
 
 /// Initialize the MMAP_REGISTRY
 #[inline]

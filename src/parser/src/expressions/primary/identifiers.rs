@@ -72,9 +72,7 @@ impl<'a> Parser<'a> {
             Ok(Expr::Path(segments))
         // Check for struct initialization: Name { field: value, ... }
         // Convention: struct names start with uppercase
-        } else if self.check(&TokenKind::LBrace)
-            && name.chars().next().map_or(false, |c| c.is_uppercase())
-        {
+        } else if self.check(&TokenKind::LBrace) && name.chars().next().map_or(false, |c| c.is_uppercase()) {
             self.advance(); // consume '{'
                             // Skip newlines after opening brace
             while self.check(&TokenKind::Newline) {
@@ -137,10 +135,7 @@ impl<'a> Parser<'a> {
             self.advance(); // consume '['
 
             // Skip whitespace
-            while self.check(&TokenKind::Newline)
-                || self.check(&TokenKind::Indent)
-                || self.check(&TokenKind::Dedent)
-            {
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
                 self.advance();
             }
 

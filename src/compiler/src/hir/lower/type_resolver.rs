@@ -88,9 +88,7 @@ impl Lowerer {
                 for t in types {
                     variant_ids.push(self.resolve_type(t)?);
                 }
-                Ok(self.module.types.register(HirType::Union {
-                    variants: variant_ids,
-                }))
+                Ok(self.module.types.register(HirType::Union { variants: variant_ids }))
             }
             Type::UnitWithRepr {
                 name,
@@ -171,10 +169,7 @@ impl Lowerer {
                     }
                 } else {
                     // Cannot get inner type, error
-                    Err(LowerError::UnknownType(format!(
-                        "capability inner type {:?}",
-                        inner
-                    )))
+                    Err(LowerError::UnknownType(format!("capability inner type {:?}", inner)))
                 }
             }
             _ => Err(LowerError::Unsupported(format!("{:?}", ty))),
@@ -195,18 +190,11 @@ impl Lowerer {
                 _ => Err(LowerError::CannotInferDerefType(format!("{:?}", hir_ty))),
             }
         } else {
-            Err(LowerError::CannotInferDerefType(format!(
-                "TypeId({:?})",
-                ptr_ty
-            )))
+            Err(LowerError::CannotInferDerefType(format!("TypeId({:?})", ptr_ty)))
         }
     }
 
-    pub(super) fn get_field_info(
-        &self,
-        struct_ty: TypeId,
-        field: &str,
-    ) -> LowerResult<(usize, TypeId)> {
+    pub(super) fn get_field_info(&self, struct_ty: TypeId, field: &str) -> LowerResult<(usize, TypeId)> {
         if let Some(hir_ty) = self.module.types.get(struct_ty) {
             match hir_ty {
                 HirType::Struct { name, fields, .. } => {
@@ -247,10 +235,7 @@ impl Lowerer {
                 _ => Err(LowerError::CannotInferIndexType(format!("{:?}", hir_ty))),
             }
         } else {
-            Err(LowerError::CannotInferIndexType(format!(
-                "TypeId({:?})",
-                arr_ty
-            )))
+            Err(LowerError::CannotInferIndexType(format!("TypeId({:?})", arr_ty)))
         }
     }
 }

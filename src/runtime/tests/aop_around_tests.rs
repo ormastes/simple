@@ -13,37 +13,21 @@ extern "C" fn target_sum(argc: u64, argv: *const RuntimeValue) -> RuntimeValue {
     RuntimeValue::from_int(sum)
 }
 
-extern "C" fn advice_add_one(
-    ctx: *mut ProceedContext,
-    _argc: u64,
-    _argv: *const RuntimeValue,
-) -> RuntimeValue {
+extern "C" fn advice_add_one(ctx: *mut ProceedContext, _argc: u64, _argv: *const RuntimeValue) -> RuntimeValue {
     let result = unsafe { rt_aop_proceed(ctx) };
     RuntimeValue::from_int(result.as_int() + 1)
 }
 
-extern "C" fn advice_mul_two(
-    ctx: *mut ProceedContext,
-    _argc: u64,
-    _argv: *const RuntimeValue,
-) -> RuntimeValue {
+extern "C" fn advice_mul_two(ctx: *mut ProceedContext, _argc: u64, _argv: *const RuntimeValue) -> RuntimeValue {
     let result = unsafe { rt_aop_proceed(ctx) };
     RuntimeValue::from_int(result.as_int() * 2)
 }
 
-extern "C" fn advice_no_proceed(
-    _ctx: *mut ProceedContext,
-    _argc: u64,
-    _argv: *const RuntimeValue,
-) -> RuntimeValue {
+extern "C" fn advice_no_proceed(_ctx: *mut ProceedContext, _argc: u64, _argv: *const RuntimeValue) -> RuntimeValue {
     RuntimeValue::from_int(0)
 }
 
-extern "C" fn advice_double_proceed(
-    ctx: *mut ProceedContext,
-    _argc: u64,
-    _argv: *const RuntimeValue,
-) -> RuntimeValue {
+extern "C" fn advice_double_proceed(ctx: *mut ProceedContext, _argc: u64, _argv: *const RuntimeValue) -> RuntimeValue {
     let _ = unsafe { rt_aop_proceed(ctx) };
     let _ = unsafe { rt_aop_proceed(ctx) };
     RuntimeValue::from_int(0)

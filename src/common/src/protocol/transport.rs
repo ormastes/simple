@@ -25,9 +25,7 @@ pub enum TransportError {
 }
 
 /// Read a message from stdin
-pub fn read_message<R: BufRead, M: for<'de> Deserialize<'de>>(
-    reader: &mut R,
-) -> Result<M, TransportError> {
+pub fn read_message<R: BufRead, M: for<'de> Deserialize<'de>>(reader: &mut R) -> Result<M, TransportError> {
     // Read headers
     let mut content_length: Option<usize> = None;
 
@@ -41,15 +39,16 @@ pub fn read_message<R: BufRead, M: for<'de> Deserialize<'de>>(
         }
 
         if let Some(value) = header.strip_prefix("Content-Length: ") {
-            content_length = Some(value.parse().map_err(|_| {
-                TransportError::InvalidFormat("Invalid Content-Length".to_string())
-            })?);
+            content_length = Some(
+                value
+                    .parse()
+                    .map_err(|_| TransportError::InvalidFormat("Invalid Content-Length".to_string()))?,
+            );
         }
     }
 
-    let content_length = content_length.ok_or_else(|| {
-        TransportError::InvalidFormat("Missing Content-Length header".to_string())
-    })?;
+    let content_length =
+        content_length.ok_or_else(|| TransportError::InvalidFormat("Missing Content-Length header".to_string()))?;
 
     // Read content
     let mut content = vec![0u8; content_length];
@@ -61,10 +60,7 @@ pub fn read_message<R: BufRead, M: for<'de> Deserialize<'de>>(
 }
 
 /// Write a message to stdout
-pub fn write_message<W: Write, M: Serialize>(
-    writer: &mut W,
-    message: &M,
-) -> Result<(), TransportError> {
+pub fn write_message<W: Write, M: Serialize>(writer: &mut W, message: &M) -> Result<(), TransportError> {
     let content = serde_json::to_string(message)?;
     let content_bytes = content.as_bytes();
 

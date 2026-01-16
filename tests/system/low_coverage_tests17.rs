@@ -227,9 +227,7 @@ mod compiler_error_tests {
 // Compiler Monomorphize Types Extended
 // ============================================================================
 mod compiler_mono_extended_tests {
-    use simple_compiler::monomorphize::{
-        ConcreteType, MonomorphizationTable, SpecializationKey, TypeBindings,
-    };
+    use simple_compiler::monomorphize::{ConcreteType, MonomorphizationTable, SpecializationKey, TypeBindings};
 
     #[test]
     fn test_concrete_type_int() {
@@ -439,9 +437,8 @@ mod loader_module_extended_tests {
 // ============================================================================
 mod parser_ast_size_tests {
     use simple_parser::{
-        ActorDef, Argument, Attribute, ClassDef, Decorator, EnumDef, EnumVariant, Expr, Field,
-        ForStmt, FunctionDef, IfStmt, ImplBlock, LetStmt, MatchStmt, Pattern, StructDef, TraitDef,
-        WhileStmt,
+        ActorDef, Argument, Attribute, ClassDef, Decorator, EnumDef, EnumVariant, Expr, Field, ForStmt, FunctionDef,
+        IfStmt, ImplBlock, LetStmt, MatchStmt, Pattern, StructDef, TraitDef, WhileStmt,
     };
 
     #[test]

@@ -166,22 +166,12 @@ unsafe fn extract_string_array(array_val: RuntimeValue) -> Vec<String> {
 }
 
 /// Filter files by glob patterns
-fn filter_by_glob_patterns(
-    files: &[String],
-    include_patterns: &[String],
-    exclude_patterns: &[String],
-) -> Vec<String> {
+fn filter_by_glob_patterns(files: &[String], include_patterns: &[String], exclude_patterns: &[String]) -> Vec<String> {
     // Compile include patterns
-    let include_compiled: Vec<Pattern> = include_patterns
-        .iter()
-        .filter_map(|p| Pattern::new(p).ok())
-        .collect();
+    let include_compiled: Vec<Pattern> = include_patterns.iter().filter_map(|p| Pattern::new(p).ok()).collect();
 
     // Compile exclude patterns
-    let exclude_compiled: Vec<Pattern> = exclude_patterns
-        .iter()
-        .filter_map(|p| Pattern::new(p).ok())
-        .collect();
+    let exclude_compiled: Vec<Pattern> = exclude_patterns.iter().filter_map(|p| Pattern::new(p).ok()).collect();
 
     files
         .iter()
@@ -239,10 +229,7 @@ fn walk_dir_recursive(dir: &str) -> Result<Vec<String>, std::io::Error> {
 
 /// Check if file path ends with given extension
 #[no_mangle]
-pub extern "C" fn doctest_path_has_extension(
-    path_val: RuntimeValue,
-    ext_val: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn doctest_path_has_extension(path_val: RuntimeValue, ext_val: RuntimeValue) -> RuntimeValue {
     unsafe {
         let Some(path) = runtime_value_to_string(path_val) else {
             return RuntimeValue::from_bool(false);
@@ -259,10 +246,7 @@ pub extern "C" fn doctest_path_has_extension(
 
 /// Check if path contains substring (for exclude pattern matching)
 #[no_mangle]
-pub extern "C" fn doctest_path_contains(
-    path_val: RuntimeValue,
-    pattern_val: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn doctest_path_contains(path_val: RuntimeValue, pattern_val: RuntimeValue) -> RuntimeValue {
     unsafe {
         let Some(path) = runtime_value_to_string(path_val) else {
             return RuntimeValue::from_bool(false);

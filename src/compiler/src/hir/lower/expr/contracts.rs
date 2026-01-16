@@ -26,11 +26,7 @@ impl Lowerer {
     ///
     /// Used in postconditions to capture the value of an expression at function entry.
     /// The expression's type must be snapshot-safe (i.e., can be safely captured).
-    pub(super) fn lower_contract_old(
-        &mut self,
-        inner: &Expr,
-        ctx: &mut FunctionContext,
-    ) -> LowerResult<HirExpr> {
+    pub(super) fn lower_contract_old(&mut self, inner: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         let inner_hir = Box::new(self.lower_expr(inner, ctx)?);
         let ty = inner_hir.ty;
 

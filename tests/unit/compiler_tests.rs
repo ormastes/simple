@@ -20,11 +20,7 @@ fn test_compile_simple_expression() {
 
     let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
     let result = pipeline.compile(&src, &out);
-    assert!(
-        result.is_ok(),
-        "Should compile simple expression: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Should compile simple expression: {:?}", result.err());
 }
 
 #[test]
@@ -54,9 +50,5 @@ fn test_compile_main_binding() {
 
     let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
     let result = pipeline.compile(&src, &out);
-    assert!(
-        result.is_ok(),
-        "Should compile main binding: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Should compile main binding: {:?}", result.err());
 }

@@ -25,15 +25,13 @@ pub mod visibility;
 // Re-export main types
 pub use graph::{CyclicDependencyError, ImportEdge, ImportGraph};
 pub use macro_import::{
-    auto_imported_macros, explicit_import, glob_import, is_auto_imported, AutoImport, MacroExports,
-    SymKind,
+    auto_imported_macros, explicit_import, glob_import, is_auto_imported, AutoImport, MacroExports, SymKind,
 };
 pub use resolution::{
-    resolve, to_dir_path, to_file_path, well_formed, FileKind, FileSystem, ModPath,
-    ResolutionResult, Segment,
+    resolve, to_dir_path, to_file_path, well_formed, FileKind, FileSystem, ModPath, ResolutionResult, Segment,
 };
 pub use symbol::{SymbolEntry, SymbolKind, SymbolTable};
 pub use visibility::{
-    ancestor_visibility, effective_visibility, visibility_meet, DirManifest, EffectiveVisibility,
-    ModDecl, ModuleContents, Symbol, SymbolId, Visibility,
+    ancestor_visibility, effective_visibility, visibility_meet, DirManifest, EffectiveVisibility, ModDecl,
+    ModuleContents, Symbol, SymbolId, Visibility,
 };

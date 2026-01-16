@@ -35,14 +35,10 @@ pub use emitter::{LeanEmitter, LeanModule};
 pub use expressions::{ExprTranslator, LeanDoStmt, LeanExpr, LeanLit};
 pub use functions::{FunctionTranslator, LeanFunction};
 pub use runner::{LeanCheckResult, LeanRunner, VerificationSummary};
-pub use traits::{
-    LeanBinding, LeanClass, LeanInstance, LeanMethodSig, StaticPolyTheorems, TraitTranslator,
-};
+pub use traits::{LeanBinding, LeanClass, LeanInstance, LeanMethodSig, StaticPolyTheorems, TraitTranslator};
 pub use types::{LeanType, TypeTranslator};
 pub use verification_checker::{check_module, VerificationChecker};
-pub use verification_diagnostics::{
-    VerificationDiagnostic, VerificationDiagnostics, VerificationErrorCode,
-};
+pub use verification_diagnostics::{VerificationDiagnostic, VerificationDiagnostics, VerificationErrorCode};
 
 use crate::hir::{HirFunction, HirModule};
 use crate::CompileError;
@@ -121,11 +117,7 @@ impl LeanCodegen {
     }
 
     /// Generate Lean code for a single verified function
-    pub fn generate_function(
-        &self,
-        func: &HirFunction,
-        module: &HirModule,
-    ) -> Result<String, CompileError> {
+    pub fn generate_function(&self, func: &HirFunction, module: &HirModule) -> Result<String, CompileError> {
         if !func.verification_mode.is_verified() {
             return Err(CompileError::Semantic(format!(
                 "Function '{}' is not marked @verify",
@@ -144,11 +136,7 @@ impl LeanCodegen {
     }
 
     /// Generate Lean type class from a Simple trait definition
-    pub fn generate_trait(
-        &self,
-        trait_def: &TraitDef,
-        module: &HirModule,
-    ) -> Result<String, CompileError> {
+    pub fn generate_trait(&self, trait_def: &TraitDef, module: &HirModule) -> Result<String, CompileError> {
         let mut emitter = LeanEmitter::new();
         let type_translator = TypeTranslator::new(&module.types);
         let trait_translator = TraitTranslator::new(&type_translator);
@@ -160,11 +148,7 @@ impl LeanCodegen {
     }
 
     /// Generate Lean instance from a Simple impl block
-    pub fn generate_impl(
-        &self,
-        impl_block: &ImplBlock,
-        module: &HirModule,
-    ) -> Result<String, CompileError> {
+    pub fn generate_impl(&self, impl_block: &ImplBlock, module: &HirModule) -> Result<String, CompileError> {
         let mut emitter = LeanEmitter::new();
         let type_translator = TypeTranslator::new(&module.types);
         let trait_translator = TraitTranslator::new(&type_translator);
@@ -176,11 +160,7 @@ impl LeanCodegen {
     }
 
     /// Generate Lean binding for static dispatch
-    pub fn generate_binding(
-        &self,
-        interface_name: &str,
-        impl_type: LeanType,
-    ) -> Result<String, CompileError> {
+    pub fn generate_binding(&self, interface_name: &str, impl_type: LeanType) -> Result<String, CompileError> {
         let mut emitter = LeanEmitter::new();
 
         let binding = LeanBinding {
@@ -293,8 +273,7 @@ impl LeanCodegen {
                     .collect();
 
                 if !impl_types.is_empty() {
-                    let coherence =
-                        StaticPolyTheorems::coherence_theorem(&trait_def.name, &impl_types);
+                    let coherence = StaticPolyTheorems::coherence_theorem(&trait_def.name, &impl_types);
                     emitter.emit_raw(&coherence);
                 }
             }

@@ -7,9 +7,7 @@
 //! - ModuleResolver: Main resolver struct
 
 use simple_dependency_tracker::{graph::ImportGraph, symbol::ProjectSymbols};
-use simple_parser::ast::{
-    Attribute, AutoImportStmt, Capability, CommonUseStmt, ExportUseStmt, Visibility,
-};
+use simple_parser::ast::{Attribute, AutoImportStmt, Capability, CommonUseStmt, ExportUseStmt, Visibility};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -88,11 +86,7 @@ impl ModuleResolver {
     pub fn new(project_root: PathBuf, source_root: PathBuf) -> Self {
         // Auto-detect stdlib location
         let stdlib_root = project_root.join("simple/std_lib/src");
-        let stdlib_root = if stdlib_root.exists() {
-            Some(stdlib_root)
-        } else {
-            None
-        };
+        let stdlib_root = if stdlib_root.exists() { Some(stdlib_root) } else { None };
 
         Self {
             project_root,
@@ -108,10 +102,7 @@ impl ModuleResolver {
 
     /// Create a resolver for single-file mode (no project)
     pub fn single_file(file_path: &std::path::Path) -> Self {
-        let parent = file_path
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .to_path_buf();
+        let parent = file_path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
 
         // Try to detect stdlib even in single-file mode
         let stdlib_root = parent.join("simple/std_lib/src");

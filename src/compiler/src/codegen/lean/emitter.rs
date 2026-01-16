@@ -77,8 +77,7 @@ impl LeanEmitter {
         self.output.push_str("import Mathlib.Data.Nat.Basic\n");
         self.output.push_str("\n");
 
-        self.output
-            .push_str(&format!("namespace {}\n\n", module_name));
+        self.output.push_str(&format!("namespace {}\n\n", module_name));
     }
 
     /// Emit a type definition

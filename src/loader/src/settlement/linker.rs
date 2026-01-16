@@ -172,11 +172,7 @@ impl SettlementLinker {
     /// Link a module against existing exports.
     ///
     /// Returns the dependencies and resolved import addresses.
-    pub fn link_module(
-        &mut self,
-        module: &LoadedModule,
-        handle: ModuleHandle,
-    ) -> Result<LinkResult, SettlementError> {
+    pub fn link_module(&mut self, module: &LoadedModule, handle: ModuleHandle) -> Result<LinkResult, SettlementError> {
         let imports = self.extract_imports(module);
         let mut resolved_imports = HashMap::new();
         let mut dependencies = Vec::new();
@@ -300,12 +296,7 @@ impl SettlementLinker {
         }
     }
 
-    fn dfs_cycle(
-        &self,
-        current: ModuleHandle,
-        visited: &mut Vec<ModuleHandle>,
-        path: &mut Vec<ModuleHandle>,
-    ) -> bool {
+    fn dfs_cycle(&self, current: ModuleHandle, visited: &mut Vec<ModuleHandle>, path: &mut Vec<ModuleHandle>) -> bool {
         if path.contains(&current) {
             path.push(current);
             return true;

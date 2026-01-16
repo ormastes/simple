@@ -9,17 +9,10 @@ use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::collections::HashMap;
 
-pub fn handle_future_methods(
-    future: &crate::value::FutureValue,
-    method: &str,
-) -> Result<Option<Value>, CompileError> {
+pub fn handle_future_methods(future: &crate::value::FutureValue, method: &str) -> Result<Option<Value>, CompileError> {
     match method {
         "join" | "await" | "get" => {
-            return Ok(Some(
-                future
-                    .await_result()
-                    .map_err(|e| CompileError::Semantic(e))?,
-            ));
+            return Ok(Some(future.await_result().map_err(|e| CompileError::Semantic(e))?));
         }
         "is_ready" => {
             return Ok(Some(Value::Bool(future.is_ready())));
@@ -42,16 +35,7 @@ pub fn handle_channel_methods(
 ) -> Result<Option<Value>, CompileError> {
     match method {
         "send" => {
-            let val = eval_arg(
-                args,
-                0,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             channel.send(val).map_err(|e| CompileError::Semantic(e))?;
             return Ok(Some(Value::Nil));
         }
@@ -92,34 +76,9 @@ pub fn handle_threadpool_methods(
     match method {
         "submit" => {
             // pool.submit(func, arg) - submit a task to the pool
-            let func_val = eval_arg(
-                args,
-                0,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
-            let arg_val = eval_arg(
-                args,
-                1,
-                Value::Nil,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
-            let future = spawn_future_with_callable(
-                func_val,
-                arg_val,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            );
+            let func_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let arg_val = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let future = spawn_future_with_callable(func_val, arg_val, functions, classes, enums, impl_methods);
             return Ok(Some(Value::Future(future)));
         }
         _ => {}

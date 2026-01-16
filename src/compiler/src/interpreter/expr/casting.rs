@@ -66,10 +66,7 @@ fn cast_to_i8(val: Value) -> Result<Value, CompileError> {
         Value::Int(i) => Ok(Value::Int(i as i8 as i64)),
         Value::Float(f) => Ok(Value::Int(f as i8 as i64)),
         Value::Bool(b) => Ok(Value::Int(if b { 1 } else { 0 })),
-        _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to i8",
-            val.type_name()
-        ))),
+        _ => Err(CompileError::Semantic(format!("cannot cast {} to i8", val.type_name()))),
     }
 }
 
@@ -114,10 +111,7 @@ fn cast_to_u8(val: Value) -> Result<Value, CompileError> {
         Value::Int(i) => Ok(Value::Int(i as u8 as i64)),
         Value::Float(f) => Ok(Value::Int(f as u8 as i64)),
         Value::Bool(b) => Ok(Value::Int(if b { 1 } else { 0 })),
-        _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to u8",
-            val.type_name()
-        ))),
+        _ => Err(CompileError::Semantic(format!("cannot cast {} to u8", val.type_name()))),
     }
 }
 

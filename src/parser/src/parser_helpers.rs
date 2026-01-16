@@ -21,8 +21,7 @@ impl<'a> Parser<'a> {
         };
 
         if !skip_check {
-            if let Some(mistake) = detect_common_mistake(&self.current, &self.previous, next_token)
-            {
+            if let Some(mistake) = detect_common_mistake(&self.current, &self.previous, next_token) {
                 // Determine error hint level based on mistake type
                 use crate::error_recovery::CommonMistake;
                 let level = match mistake {
@@ -52,9 +51,7 @@ impl<'a> Parser<'a> {
                     | CommonMistake::SemicolonAfterBlock => ErrorHintLevel::Warning,
 
                     // Info for style preferences
-                    CommonMistake::TsLet | CommonMistake::PythonSelf | CommonMistake::RustFnMut => {
-                        ErrorHintLevel::Info
-                    }
+                    CommonMistake::TsLet | CommonMistake::PythonSelf | CommonMistake::RustFnMut => ErrorHintLevel::Info,
 
                     // Hints for advanced features
                     CommonMistake::RustLifetime
@@ -364,10 +361,10 @@ impl<'a> Parser<'a> {
             TokenKind::Return => "return",
             TokenKind::True => "true",
             TokenKind::False => "false",
-            TokenKind::Crate => "crate", // Allow "crate" keyword in paths
-            TokenKind::Result => "result", // Allow "result" keyword in paths
-            TokenKind::To => "to",       // Allow "to" in paths (e.g., to_sdn)
-            TokenKind::NotTo => "not_to", // Allow "not_to" in paths
+            TokenKind::Crate => "crate",     // Allow "crate" keyword in paths
+            TokenKind::Result => "result",   // Allow "result" keyword in paths
+            TokenKind::To => "to",           // Allow "to" in paths (e.g., to_sdn)
+            TokenKind::NotTo => "not_to",    // Allow "not_to" in paths
             TokenKind::Context => "context", // Allow "context" in paths
             TokenKind::Feature => "feature", // Allow BDD keywords in paths
             TokenKind::Scenario => "scenario",
@@ -546,12 +543,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Evaluate a binary operation on const values
-    fn eval_const_binary_op(
-        &self,
-        left: &ConstValue,
-        op: &BinOp,
-        right: &ConstValue,
-    ) -> Option<ConstValue> {
+    fn eval_const_binary_op(&self, left: &ConstValue, op: &BinOp, right: &ConstValue) -> Option<ConstValue> {
         match (left, right) {
             (ConstValue::Int(l), ConstValue::Int(r)) => match op {
                 BinOp::Add => Some(ConstValue::Int(l + r)),
@@ -610,10 +602,7 @@ impl<'a> Parser<'a> {
                 message: "Deprecated syntax for generic parameters".to_string(),
                 span: bracket_span,
                 suggestion: Some("Use angle brackets <...> instead of [...]".to_string()),
-                help: Some(
-                    "Run `simple migrate --fix-generics` to automatically update your code"
-                        .to_string(),
-                ),
+                help: Some("Run `simple migrate --fix-generics` to automatically update your code".to_string()),
             };
             self.error_hints.push(warning);
 
@@ -725,11 +714,7 @@ impl<'a> Parser<'a> {
                     None
                 };
 
-                params.push(GenericParam::Type {
-                    name,
-                    bounds,
-                    default,
-                });
+                params.push(GenericParam::Type { name, bounds, default });
             }
 
             // Check for end of generic parameters or comma before next parameter

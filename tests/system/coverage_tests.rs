@@ -113,9 +113,7 @@ fn test_actor_inbox_sender() {
 
     // Get the inbox sender and use it directly
     let sender = handle.inbox_sender();
-    sender
-        .send(Message::Value("via_sender".to_string()))
-        .unwrap();
+    sender.send(Message::Value("via_sender".to_string())).unwrap();
 
     let response = handle.recv().unwrap();
     match response {
@@ -181,9 +179,7 @@ fn test_thread_spawner_default() {
 #[test]
 fn test_interpreter_run_with_stdin() {
     let interpreter = Interpreter::new_no_gc();
-    let result = interpreter
-        .run_with_stdin("main = 42", "test input")
-        .unwrap();
+    let result = interpreter.run_with_stdin("main = 42", "test input").unwrap();
     assert_eq!(result.exit_code, 42);
 }
 
@@ -346,19 +342,13 @@ fn test_module_loader_with_resolver() {
     let smf_path = dir.path().join("resolver_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 55", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 55", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
 
     // Load with a custom resolver
     let result = loader.load_with_resolver(&smf_path, |_symbol| None);
-    assert!(
-        result.is_ok(),
-        "Should load with resolver: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Should load with resolver: {:?}", result.err());
 }
 
 /// Test loading and executing entry point
@@ -368,9 +358,7 @@ fn test_module_execute_entry_point() {
     let smf_path = dir.path().join("execute_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -464,9 +452,7 @@ fn test_module_registry_new_and_load() {
 
     // Compile a module first
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     // Create registry and load
     let registry = ModuleRegistry::new();
@@ -483,9 +469,7 @@ fn test_module_registry_caching() {
     let smf_path = dir.path().join("cache_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 100", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 100", &smf_path).expect("compile ok");
 
     let registry = ModuleRegistry::new();
 
@@ -511,9 +495,7 @@ fn test_module_registry_unload() {
     let smf_path = dir.path().join("unload_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 50", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 50", &smf_path).expect("compile ok");
 
     let registry = ModuleRegistry::new();
     let _ = registry.load(&smf_path).expect("load ok");
@@ -536,24 +518,17 @@ fn test_module_registry_reload() {
     let smf_path = dir.path().join("reload_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 1", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 1", &smf_path).expect("compile ok");
 
     let registry = ModuleRegistry::new();
     let module1 = registry.load(&smf_path).expect("first load");
 
     // Recompile with different value
-    runner
-        .compile_to_smf("main = 2", &smf_path)
-        .expect("recompile ok");
+    runner.compile_to_smf("main = 2", &smf_path).expect("recompile ok");
 
     // Reload
     let module2 = registry.reload(&smf_path).expect("reload ok");
 
     // Should be different Arc (reloaded)
-    assert!(
-        !std::sync::Arc::ptr_eq(&module1, &module2),
-        "Should return new module"
-    );
+    assert!(!std::sync::Arc::ptr_eq(&module1, &module2), "Should return new module");
 }

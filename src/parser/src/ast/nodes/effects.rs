@@ -135,10 +135,10 @@ impl Capability {
             Effect::Net => Some(Capability::Net),
             Effect::Fs => Some(Capability::Fs),
             Effect::Unsafe => Some(Capability::Unsafe),
-            Effect::Async => None,  // Async is execution model, not capability
-            Effect::Verify => None, // Verify is verification mode marker
+            Effect::Async => None,   // Async is execution model, not capability
+            Effect::Verify => None,  // Verify is verification mode marker
             Effect::Trusted => None, // Trusted is verification boundary marker
-            Effect::Ghost => None,  // Ghost is verification-only marker
+            Effect::Ghost => None,   // Ghost is verification-only marker
         }
     }
 }

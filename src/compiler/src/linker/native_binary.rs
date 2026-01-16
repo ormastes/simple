@@ -337,8 +337,8 @@ impl NativeBinaryBuilder {
     /// Build the native binary.
     pub fn build(self) -> LinkerResult<NativeBinaryResult> {
         // Create temporary directory for intermediate files
-        let temp_dir = tempfile::tempdir()
-            .map_err(|e| LinkerError::LinkFailed(format!("failed to create temp dir: {}", e)))?;
+        let temp_dir =
+            tempfile::tempdir().map_err(|e| LinkerError::LinkFailed(format!("failed to create temp dir: {}", e)))?;
 
         // Write object file
         let obj_path = temp_dir.path().join("main.o");
@@ -437,9 +437,7 @@ impl NativeBinaryBuilder {
         match builder.link() {
             Ok(()) => Ok(NativeBinaryResult {
                 output: self.options.output.clone(),
-                size: std::fs::metadata(&self.options.output)
-                    .map(|m| m.len())
-                    .unwrap_or(0),
+                size: std::fs::metadata(&self.options.output).map(|m| m.len()).unwrap_or(0),
             }),
             Err(LinkerError::LinkerFailed {
                 exit_code,
@@ -586,9 +584,8 @@ impl NativeBinaryBuilder {
 
         // Write ordering file
         let ordering_path = temp_dir.join("symbol_order.txt");
-        let mut file = std::fs::File::create(&ordering_path).map_err(|e| {
-            LinkerError::LinkFailed(format!("failed to create ordering file: {}", e))
-        })?;
+        let mut file = std::fs::File::create(&ordering_path)
+            .map_err(|e| LinkerError::LinkFailed(format!("failed to create ordering file: {}", e)))?;
 
         for symbol in symbols {
             writeln!(file, "{}", symbol)
@@ -630,12 +627,12 @@ pub fn compile_to_native_binary(
         .map_err(|e| LinkerError::LinkFailed(format!("parse error: {}", e)))?;
 
     // Lower to HIR
-    let hir_module = hir::lower(&ast_module)
-        .map_err(|e| LinkerError::LinkFailed(format!("HIR lowering error: {}", e)))?;
+    let hir_module =
+        hir::lower(&ast_module).map_err(|e| LinkerError::LinkFailed(format!("HIR lowering error: {}", e)))?;
 
     // Lower to MIR
-    let mir_module = mir::lower_to_mir(&hir_module)
-        .map_err(|e| LinkerError::LinkFailed(format!("MIR lowering error: {}", e)))?;
+    let mir_module =
+        mir::lower_to_mir(&hir_module).map_err(|e| LinkerError::LinkFailed(format!("MIR lowering error: {}", e)))?;
 
     // Generate object code
     let codegen = Codegen::for_target(options.target.clone())
@@ -687,9 +684,7 @@ mod tests {
 
     #[test]
     fn test_builder_creation() {
-        let builder = NativeBinaryBuilder::new(vec![1, 2, 3, 4])
-            .output("test")
-            .strip(true);
+        let builder = NativeBinaryBuilder::new(vec![1, 2, 3, 4]).output("test").strip(true);
 
         assert_eq!(builder.options.output, PathBuf::from("test"));
         assert!(builder.options.strip);

@@ -18,8 +18,7 @@ mod tests;
 
 // Re-export the main types and functions
 pub use lowering_core::{
-    ContractContext, ContractMode, LoopContext, LowererState, MirLowerError, MirLowerResult,
-    MirLowerer,
+    ContractContext, ContractMode, LoopContext, LowererState, MirLowerError, MirLowerResult, MirLowerer,
 };
 
 // Re-export public API functions
@@ -36,10 +35,7 @@ pub fn lower_to_mir(hir: &HirModule) -> MirLowerResult<MirModule> {
 }
 
 /// Lower HIR to MIR with a specific contract mode.
-pub fn lower_to_mir_with_mode(
-    hir: &HirModule,
-    contract_mode: ContractMode,
-) -> MirLowerResult<MirModule> {
+pub fn lower_to_mir_with_mode(hir: &HirModule, contract_mode: ContractMode) -> MirLowerResult<MirModule> {
     MirLowerer::with_contract_mode(contract_mode)
         .with_refined_types(&hir.refined_types)
         .with_type_registry(&hir.types)

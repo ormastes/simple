@@ -20,9 +20,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block
-                        .instructions
-                        .push(MirInst::ConstInt { dest, value: n });
+                    block.instructions.push(MirInst::ConstInt { dest, value: n });
                     dest
                 })
             }
@@ -32,9 +30,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block
-                        .instructions
-                        .push(MirInst::ConstFloat { dest, value: f });
+                    block.instructions.push(MirInst::ConstFloat { dest, value: f });
                     dest
                 })
             }
@@ -44,9 +40,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block
-                        .instructions
-                        .push(MirInst::ConstBool { dest, value: b });
+                    block.instructions.push(MirInst::ConstBool { dest, value: b });
                     dest
                 })
             }
@@ -56,9 +50,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block
-                        .instructions
-                        .push(MirInst::ConstString { dest, value: s });
+                    block.instructions.push(MirInst::ConstString { dest, value: s });
                     dest
                 })
             }
@@ -130,8 +122,7 @@ impl<'a> MirLowerer<'a> {
                         let mut final_args = Vec::new();
                         let mut provided_idx = 0;
 
-                        for (param_idx, (param_ty, is_injectable)) in param_info.iter().enumerate()
-                        {
+                        for (param_idx, (param_ty, is_injectable)) in param_info.iter().enumerate() {
                             if *is_injectable {
                                 // This parameter should be DI-injected
                                 if self.di_config.is_none() {
@@ -186,8 +177,7 @@ impl<'a> MirLowerer<'a> {
                 // For now, create a simple closure with captures
                 // Each capture is 8 bytes (pointer-sized)
                 let closure_size = 8 + (captures.len() as u32 * 8);
-                let capture_offsets: Vec<u32> =
-                    (0..captures.len()).map(|i| 8 + (i as u32 * 8)).collect();
+                let capture_offsets: Vec<u32> = (0..captures.len()).map(|i| 8 + (i as u32 * 8)).collect();
                 let capture_types: Vec<TypeId> = captures.iter().map(|_| TypeId::I64).collect();
 
                 // Load captured variables
@@ -250,9 +240,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block
-                        .instructions
-                        .push(MirInst::GeneratorCreate { dest, body_block });
+                    block.instructions.push(MirInst::GeneratorCreate { dest, body_block });
                     dest
                 })
             }
@@ -267,9 +255,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block
-                        .instructions
-                        .push(MirInst::FutureCreate { dest, body_block });
+                    block.instructions.push(MirInst::FutureCreate { dest, body_block });
                     dest
                 })
             }
@@ -298,9 +284,7 @@ impl<'a> MirLowerer<'a> {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block
-                        .instructions
-                        .push(MirInst::ActorSpawn { dest, body_block });
+                    block.instructions.push(MirInst::ActorSpawn { dest, body_block });
                     dest
                 })
             }
@@ -312,10 +296,7 @@ impl<'a> MirLowerer<'a> {
                     return self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::ActorJoin {
-                            dest,
-                            actor: actor_reg,
-                        });
+                        block.instructions.push(MirInst::ActorJoin { dest, actor: actor_reg });
                         dest
                     });
                 }
@@ -326,13 +307,9 @@ impl<'a> MirLowerer<'a> {
                     return self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::ActorReply {
-                            message: message_reg,
-                        });
+                        block.instructions.push(MirInst::ActorReply { message: message_reg });
                         // Reply returns nil (represented as 0)
-                        block
-                            .instructions
-                            .push(MirInst::ConstInt { dest, value: 0 });
+                        block.instructions.push(MirInst::ConstInt { dest, value: 0 });
                         dest
                     });
                 }
@@ -368,9 +345,7 @@ impl<'a> MirLowerer<'a> {
                     self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
-                        block
-                            .instructions
-                            .push(MirInst::ConstInt { dest, value: 0 });
+                        block.instructions.push(MirInst::ConstInt { dest, value: 0 });
                         dest
                     })
                 }
@@ -451,9 +426,7 @@ impl<'a> MirLowerer<'a> {
                 })
             }
 
-            HirExprKind::GpuIntrinsic { intrinsic, args } => {
-                self.lower_gpu_intrinsic(*intrinsic, args)
-            }
+            HirExprKind::GpuIntrinsic { intrinsic, args } => self.lower_gpu_intrinsic(*intrinsic, args),
 
             HirExprKind::NeighborAccess { array, direction } => {
                 let array_reg = self.lower_expr(array)?;
@@ -525,32 +498,29 @@ impl<'a> MirLowerer<'a> {
                 }
 
                 // Get struct type information from type registry
-                let (field_types, field_offsets, struct_size) =
-                    if let Some(registry) = self.type_registry {
-                        if let Some(HirType::Struct {
-                            fields: struct_fields,
-                            ..
-                        }) = registry.get(*ty)
-                        {
-                            let field_types: Vec<TypeId> =
-                                struct_fields.iter().map(|(_, ty)| *ty).collect();
-                            // For now, use simple sequential layout (simplified, may not match actual layout)
-                            let mut offsets = Vec::new();
-                            let mut offset = 0u32;
-                            for (_, field_ty) in struct_fields {
-                                offsets.push(offset);
-                                // Assume 8-byte fields for simplicity (pointer-sized)
-                                offset += 8;
-                            }
-                            (field_types, offsets, offset)
-                        } else {
-                            // Fallback: use empty struct
-                            (Vec::new(), Vec::new(), 0u32)
+                let (field_types, field_offsets, struct_size) = if let Some(registry) = self.type_registry {
+                    if let Some(HirType::Struct {
+                        fields: struct_fields, ..
+                    }) = registry.get(*ty)
+                    {
+                        let field_types: Vec<TypeId> = struct_fields.iter().map(|(_, ty)| *ty).collect();
+                        // For now, use simple sequential layout (simplified, may not match actual layout)
+                        let mut offsets = Vec::new();
+                        let mut offset = 0u32;
+                        for (_, field_ty) in struct_fields {
+                            offsets.push(offset);
+                            // Assume 8-byte fields for simplicity (pointer-sized)
+                            offset += 8;
                         }
+                        (field_types, offsets, offset)
                     } else {
-                        // No type registry, use empty struct
+                        // Fallback: use empty struct
                         (Vec::new(), Vec::new(), 0u32)
-                    };
+                    }
+                } else {
+                    // No type registry, use empty struct
+                    (Vec::new(), Vec::new(), 0u32)
+                };
 
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();

@@ -74,11 +74,7 @@ pub extern "C" fn rt_actor_spawn(body_func: u64, ctx: RuntimeValue) -> RuntimeVa
     } else {
         Some(unsafe { std::mem::transmute::<usize, extern "C" fn(*const u8)>(body_func as usize) })
     };
-    let ctx_ptr: usize = if ctx.is_heap() {
-        ctx.as_heap_ptr() as usize
-    } else {
-        0
-    };
+    let ctx_ptr: usize = if ctx.is_heap() { ctx.as_heap_ptr() as usize } else { 0 };
     let handle = spawn_actor(move |inbox, outbox| {
         let inbox = Arc::new(Mutex::new(inbox));
         CURRENT_ACTOR_INBOX.with(|cell| *cell.borrow_mut() = Some(inbox.clone()));

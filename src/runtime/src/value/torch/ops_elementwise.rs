@@ -169,9 +169,7 @@ pub extern "C" fn rt_torch_clamp(tensor_handle: u64, min: f64, max: f64) -> u64 
 
         let result = tensor.0.clamp(min, max);
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!(
             "rt_torch_clamp: {} clamp({}, {}) -> handle={}",
             tensor_handle,

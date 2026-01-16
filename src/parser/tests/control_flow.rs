@@ -103,10 +103,7 @@ fn parse_for_suspend_loop() {
 fn parse_suspend_assignment() {
     let items = parse("x ~= async_function()");
     if let Node::Assignment(assign) = &items[0] {
-        assert!(matches!(
-            assign.op,
-            simple_parser::ast::AssignOp::SuspendAssign
-        ));
+        assert!(matches!(assign.op, simple_parser::ast::AssignOp::SuspendAssign));
     } else {
         panic!("Expected Assignment node");
     }

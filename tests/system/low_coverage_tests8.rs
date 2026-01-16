@@ -145,9 +145,7 @@ mod coverage_collector_tests {
         cov.record_line(Path::new("test.spl"), 1);
         let result = cov.validate_minimum_coverage(1, 5);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("Insufficient function coverage"));
+        assert!(result.unwrap_err().contains("Insufficient function coverage"));
     }
 
     #[test]
@@ -279,9 +277,7 @@ mod package_reader_tests {
 
     #[test]
     fn test_package_trailer_flags() {
-        use simple_loader::package::{
-            PackageTrailer, SPK_FLAG_HAS_MANIFEST, SPK_FLAG_HAS_RESOURCES,
-        };
+        use simple_loader::package::{PackageTrailer, SPK_FLAG_HAS_MANIFEST, SPK_FLAG_HAS_RESOURCES};
 
         let mut trailer = PackageTrailer::new();
 
@@ -952,10 +948,7 @@ mod lean_type_tests {
 
     #[test]
     fn test_lean_expr_add_type_error() {
-        let expr = LeanExpr::Add(
-            Box::new(LeanExpr::LitNat(1)),
-            Box::new(LeanExpr::LitBool(true)),
-        );
+        let expr = LeanExpr::Add(Box::new(LeanExpr::LitNat(1)), Box::new(LeanExpr::LitBool(true)));
         let ty = lean_infer(&expr);
         assert_eq!(ty, None);
     }
@@ -1017,10 +1010,7 @@ mod lean_type_tests {
     fn test_lean_expr_lam() {
         let expr = LeanExpr::Lam(Box::new(LeanExpr::LitBool(true)));
         let ty = lean_infer(&expr);
-        assert_eq!(
-            ty,
-            Some(LeanTy::Arrow(Box::new(LeanTy::Nat), Box::new(LeanTy::Bool)))
-        );
+        assert_eq!(ty, Some(LeanTy::Arrow(Box::new(LeanTy::Nat), Box::new(LeanTy::Bool))));
     }
 
     #[test]

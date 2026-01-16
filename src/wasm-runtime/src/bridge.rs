@@ -77,9 +77,7 @@ pub fn from_wasm_value(value: WasmValue) -> WasmResult<RuntimeValue> {
 
         WasmValue::F64(v) => Ok(RuntimeValue::from_float(v)),
 
-        WasmValue::V128(_) => Err(WasmError::ConversionError(
-            "v128 values not supported".to_string(),
-        )),
+        WasmValue::V128(_) => Err(WasmError::ConversionError("v128 values not supported".to_string())),
 
         WasmValue::FuncRef(_) => Err(WasmError::ConversionError(
             "Function references not supported".to_string(),
@@ -126,10 +124,7 @@ pub fn to_i32(value: RuntimeValue) -> WasmResult<i32> {
             if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
                 Ok(i as i32)
             } else {
-                Err(WasmError::ConversionError(format!(
-                    "Integer {} out of i32 range",
-                    i
-                )))
+                Err(WasmError::ConversionError(format!("Integer {} out of i32 range", i)))
             }
         }
         tags::TAG_SPECIAL => {
@@ -141,10 +136,7 @@ pub fn to_i32(value: RuntimeValue) -> WasmResult<i32> {
                 _ => Ok(payload as i32),
             }
         }
-        _ => Err(WasmError::ConversionError(format!(
-            "Cannot convert {:?} to i32",
-            value
-        ))),
+        _ => Err(WasmError::ConversionError(format!("Cannot convert {:?} to i32", value))),
     }
 }
 
@@ -165,10 +157,7 @@ pub fn to_i64(value: RuntimeValue) -> WasmResult<i64> {
             }
         }
         tags::TAG_HEAP => Ok(value.as_heap_ptr() as i64),
-        _ => Err(WasmError::ConversionError(format!(
-            "Cannot convert {:?} to i64",
-            value
-        ))),
+        _ => Err(WasmError::ConversionError(format!("Cannot convert {:?} to i64", value))),
     }
 }
 
@@ -180,10 +169,7 @@ pub fn to_f64(value: RuntimeValue) -> WasmResult<f64> {
     match value.tag() {
         tags::TAG_FLOAT => Ok(value.as_float()),
         tags::TAG_INT => Ok(value.as_int() as f64),
-        _ => Err(WasmError::ConversionError(format!(
-            "Cannot convert {:?} to f64",
-            value
-        ))),
+        _ => Err(WasmError::ConversionError(format!("Cannot convert {:?} to f64", value))),
     }
 }
 

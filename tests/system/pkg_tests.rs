@@ -370,12 +370,7 @@ fn test_pkg_locked_package_from_path() {
 
 #[test]
 fn test_pkg_locked_package_from_git() {
-    let pkg = LockedPackage::from_git(
-        "mylib",
-        "1.0.0",
-        "https://github.com/user/repo",
-        Some("abc123"),
-    );
+    let pkg = LockedPackage::from_git("mylib", "1.0.0", "https://github.com/user/repo", Some("abc123"));
     assert_eq!(pkg.name, "mylib");
     assert_eq!(pkg.version, "1.0.0");
     assert!(pkg.is_git());

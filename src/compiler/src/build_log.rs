@@ -175,10 +175,7 @@ impl BuildLogger {
             start_timestamp: Utc::now(),
             compiler_version,
             command,
-            environment: BuildEnvironment {
-                working_dir,
-                env_vars,
-            },
+            environment: BuildEnvironment { working_dir, env_vars },
             inputs: BuildInputs {
                 source_files: Vec::new(),
                 dependencies: HashMap::new(),
@@ -284,16 +281,14 @@ impl BuildLogger {
 impl BuildLog {
     /// Load a build log from a JSON file.
     pub fn load(path: &Path) -> Result<Self, String> {
-        let content =
-            fs::read_to_string(path).map_err(|e| format!("Failed to read log file: {}", e))?;
+        let content = fs::read_to_string(path).map_err(|e| format!("Failed to read log file: {}", e))?;
 
         serde_json::from_str(&content).map_err(|e| format!("Failed to parse log file: {}", e))
     }
 
     /// Save the build log to a JSON file.
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("Failed to serialize log: {}", e))?;
+        let json = serde_json::to_string_pretty(self).map_err(|e| format!("Failed to serialize log: {}", e))?;
 
         fs::write(path, json).map_err(|e| format!("Failed to write log file: {}", e))
     }
@@ -404,10 +399,7 @@ mod tests {
     fn test_add_dependency() {
         let mut logger = BuildLogger::new("0.1.0".to_string(), "simple compile".to_string());
         logger.add_dependency("http".to_string(), "1.0.0".to_string());
-        assert_eq!(
-            logger.inputs.dependencies.get("http"),
-            Some(&"1.0.0".to_string())
-        );
+        assert_eq!(logger.inputs.dependencies.get("http"), Some(&"1.0.0".to_string()));
     }
 
     #[test]
@@ -455,8 +447,7 @@ mod tests {
 
     #[test]
     fn test_finalize() {
-        let mut logger =
-            BuildLogger::new("0.1.0".to_string(), "simple compile test.spl".to_string());
+        let mut logger = BuildLogger::new("0.1.0".to_string(), "simple compile test.spl".to_string());
         logger.add_source_file("test.spl");
         logger.start_phase("parse");
         logger.end_phase_success();

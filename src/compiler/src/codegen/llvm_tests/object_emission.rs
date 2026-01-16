@@ -16,9 +16,7 @@ fn test_object_emission_x86_64() {
     backend.create_module("obj_test").unwrap();
 
     // Create a simple function
-    backend
-        .compile_simple_function("main", &[], &T::I32, 0)
-        .unwrap();
+    backend.compile_simple_function("main", &[], &T::I32, 0).unwrap();
 
     // Emit object code
     let mir_module = MirModule::default();
@@ -45,13 +43,7 @@ fn test_object_emission_i686() {
 
     // Create function with binary operation
     backend
-        .compile_binop_function(
-            "add",
-            &T::I32,
-            &T::I32,
-            &T::I32,
-            crate::codegen::llvm::BinOp::Add,
-        )
+        .compile_binop_function("add", &T::I32, &T::I32, &T::I32, crate::codegen::llvm::BinOp::Add)
         .unwrap();
 
     // Emit object code
@@ -108,9 +100,7 @@ fn test_object_emission_riscv32() {
     backend.create_module("rv32_obj").unwrap();
 
     // Create function
-    backend
-        .compile_simple_function("test", &[], &T::I32, 42)
-        .unwrap();
+    backend.compile_simple_function("test", &[], &T::I32, 42).unwrap();
 
     // Emit object code
     let mir_module = MirModule::default();
@@ -133,9 +123,7 @@ fn test_object_is_relocatable() {
     let backend = LlvmBackend::new(target).unwrap();
 
     backend.create_module("reloc_test").unwrap();
-    backend
-        .compile_simple_function("func", &[], &T::I32, 123)
-        .unwrap();
+    backend.compile_simple_function("func", &[], &T::I32, 123).unwrap();
 
     let mir_module = MirModule::default();
     let object_code = backend.emit_object(&mir_module).unwrap();

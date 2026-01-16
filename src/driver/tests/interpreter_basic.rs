@@ -111,9 +111,7 @@ fn interpreter_with_config() {
 #[test]
 fn interpreter_run_with_stdin() {
     let interpreter = Interpreter::new();
-    let result = interpreter
-        .run_with_stdin("main = 50", "test input")
-        .unwrap();
+    let result = interpreter.run_with_stdin("main = 50", "test input").unwrap();
     assert_eq!(result.exit_code, 50);
 }
 

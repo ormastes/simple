@@ -58,11 +58,7 @@ enum Status:
 "#;
 
     let result = try_parse(code);
-    assert!(
-        result.is_ok(),
-        "Should parse simple enum: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Should parse simple enum: {:?}", result.err());
 }
 
 /// Test: Methods inside enum blocks
@@ -83,11 +79,7 @@ enum Status:
 "#;
 
     let result = try_parse(code);
-    assert!(
-        result.is_ok(),
-        "Should parse enum with methods: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "Should parse enum with methods: {:?}", result.err());
 }
 
 /// Test: Union types in class fields

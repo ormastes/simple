@@ -184,9 +184,7 @@ pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
         let ptr_a = a.as_heap_ptr();
         let ptr_b = b.as_heap_ptr();
         unsafe {
-            if (*ptr_a).object_type == HeapObjectType::String
-                && (*ptr_b).object_type == HeapObjectType::String
-            {
+            if (*ptr_a).object_type == HeapObjectType::String && (*ptr_b).object_type == HeapObjectType::String {
                 let str_a = ptr_a as *const RuntimeString;
                 let str_b = ptr_b as *const RuntimeString;
                 if (*str_a).len != (*str_b).len {
@@ -216,12 +214,8 @@ pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// Type for rt_interp_call handler function
-pub type InterpCallFn = unsafe extern "C" fn(
-    name_ptr: *const u8,
-    name_len: u64,
-    argc: u64,
-    argv: *const RuntimeValue,
-) -> RuntimeValue;
+pub type InterpCallFn =
+    unsafe extern "C" fn(name_ptr: *const u8, name_len: u64, argc: u64, argv: *const RuntimeValue) -> RuntimeValue;
 
 /// Type for rt_interp_eval handler function
 pub type InterpEvalFn = extern "C" fn(expr_index: i64) -> RuntimeValue;
@@ -243,13 +237,11 @@ extern "C" fn default_interp_eval(_expr_index: i64) -> RuntimeValue {
 
 /// Global function pointer for rt_interp_call.
 /// Set by compiler crate via `set_interp_call_handler`.
-static INTERP_CALL_HANDLER: AtomicPtr<()> =
-    AtomicPtr::new(default_interp_call as *const () as *mut ());
+static INTERP_CALL_HANDLER: AtomicPtr<()> = AtomicPtr::new(default_interp_call as *const () as *mut ());
 
 /// Global function pointer for rt_interp_eval.
 /// Set by compiler crate via `set_interp_eval_handler`.
-static INTERP_EVAL_HANDLER: AtomicPtr<()> =
-    AtomicPtr::new(default_interp_eval as *const () as *mut ());
+static INTERP_EVAL_HANDLER: AtomicPtr<()> = AtomicPtr::new(default_interp_eval as *const () as *mut ());
 
 /// Set the interpreter call handler. Called by compiler crate during initialization.
 ///
@@ -402,8 +394,7 @@ pub unsafe extern "C" fn simple_contract_check(
     }
 
     // Contract violated - create violation object and panic
-    let violation_kind =
-        ContractViolationKind::from_i64(kind).unwrap_or(ContractViolationKind::Pre);
+    let violation_kind = ContractViolationKind::from_i64(kind).unwrap_or(ContractViolationKind::Pre);
 
     let func_name = if func_name_ptr.is_null() || func_name_len <= 0 {
         "<unknown>"
@@ -457,8 +448,7 @@ pub unsafe extern "C" fn simple_contract_check_msg(
     }
 
     // Contract violated - create violation object and panic
-    let violation_kind =
-        ContractViolationKind::from_i64(kind).unwrap_or(ContractViolationKind::Pre);
+    let violation_kind = ContractViolationKind::from_i64(kind).unwrap_or(ContractViolationKind::Pre);
 
     let func_name = if func_name_ptr.is_null() || func_name_len <= 0 {
         "<unknown>"
@@ -1172,12 +1162,7 @@ pub unsafe extern "C" fn rt_file_write_text(
 
 /// Copy file from src to dest
 #[no_mangle]
-pub unsafe extern "C" fn rt_file_copy(
-    src_ptr: *const u8,
-    src_len: u64,
-    dest_ptr: *const u8,
-    dest_len: u64,
-) -> bool {
+pub unsafe extern "C" fn rt_file_copy(src_ptr: *const u8, src_len: u64, dest_ptr: *const u8, dest_len: u64) -> bool {
     if src_ptr.is_null() || dest_ptr.is_null() {
         return false;
     }
@@ -1199,11 +1184,7 @@ pub unsafe extern "C" fn rt_file_copy(
 
 /// Create directory (with optional recursive creation)
 #[no_mangle]
-pub unsafe extern "C" fn rt_dir_create(
-    path_ptr: *const u8,
-    path_len: u64,
-    recursive: bool,
-) -> bool {
+pub unsafe extern "C" fn rt_dir_create(path_ptr: *const u8, path_len: u64, recursive: bool) -> bool {
     if path_ptr.is_null() {
         return false;
     }
@@ -1271,11 +1252,7 @@ pub unsafe extern "C" fn rt_file_remove(path_ptr: *const u8, path_len: u64) -> b
 
 /// Remove a directory
 #[no_mangle]
-pub unsafe extern "C" fn rt_dir_remove(
-    path_ptr: *const u8,
-    path_len: u64,
-    recursive: bool,
-) -> bool {
+pub unsafe extern "C" fn rt_dir_remove(path_ptr: *const u8, path_len: u64, recursive: bool) -> bool {
     if path_ptr.is_null() {
         return false;
     }
@@ -1295,12 +1272,7 @@ pub unsafe extern "C" fn rt_dir_remove(
 
 /// Rename/move a file or directory
 #[no_mangle]
-pub unsafe extern "C" fn rt_file_rename(
-    from_ptr: *const u8,
-    from_len: u64,
-    to_ptr: *const u8,
-    to_len: u64,
-) -> bool {
+pub unsafe extern "C" fn rt_file_rename(from_ptr: *const u8, from_len: u64, to_ptr: *const u8, to_len: u64) -> bool {
     if from_ptr.is_null() || to_ptr.is_null() {
         return false;
     }
@@ -1348,12 +1320,7 @@ pub unsafe extern "C" fn rt_env_get(name_ptr: *const u8, name_len: u64) -> Runti
 
 /// Set environment variable
 #[no_mangle]
-pub unsafe extern "C" fn rt_env_set(
-    name_ptr: *const u8,
-    name_len: u64,
-    value_ptr: *const u8,
-    value_len: u64,
-) -> bool {
+pub unsafe extern "C" fn rt_env_set(name_ptr: *const u8, name_len: u64, value_ptr: *const u8, value_len: u64) -> bool {
     if name_ptr.is_null() || value_ptr.is_null() {
         return false;
     }
@@ -1406,20 +1373,16 @@ pub unsafe extern "C" fn rt_base64_decode(input_ptr: *const u8, input_len: u64) 
 
     // Simple base64 decoding implementation
     const DECODE_TABLE: [u8; 128] = [
-        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-        255, 255, 255, 255, 255, 255, 255, 62, 255, 255, 255, 63, 52, 53, 54, 55, 56, 57, 58, 59,
-        60, 61, 255, 255, 255, 0, 255, 255, 255, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
-        15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 255, 255, 255, 255, 255, 255, 26, 27, 28, 29,
-        30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
-        255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 62,
+        255, 255, 255, 63, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 255, 255, 255, 0, 255, 255, 255, 0, 1, 2, 3, 4, 5,
+        6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 255, 255, 255, 255, 255, 255, 26,
+        27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 255, 255,
+        255, 255, 255,
     ];
 
     let mut result = Vec::new();
-    let input_chars: Vec<u8> = input_str
-        .bytes()
-        .filter(|&b| !b.is_ascii_whitespace())
-        .collect();
+    let input_chars: Vec<u8> = input_str.bytes().filter(|&b| !b.is_ascii_whitespace()).collect();
 
     let mut i = 0;
     while i < input_chars.len() {
@@ -1475,8 +1438,7 @@ pub unsafe extern "C" fn rt_base64_encode(input_ptr: *const u8, input_len: u64) 
 
     let input_bytes = std::slice::from_raw_parts(input_ptr, input_len as usize);
 
-    const ENCODE_TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ENCODE_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let mut result = Vec::new();
     let mut i = 0;
@@ -1852,27 +1814,13 @@ pub extern "C" fn rt_file_close(fd: i32) {
 /// Memory map a file
 /// Returns null pointer on error
 #[no_mangle]
-pub extern "C" fn rt_file_mmap(
-    _addr: *mut u8,
-    length: u64,
-    prot: i32,
-    flags: i32,
-    fd: i32,
-    offset: u64,
-) -> *mut u8 {
+pub extern "C" fn rt_file_mmap(_addr: *mut u8, length: u64, prot: i32, flags: i32, fd: i32, offset: u64) -> *mut u8 {
     #[cfg(unix)]
     {
         use libc::mmap;
 
         unsafe {
-            let addr = mmap(
-                std::ptr::null_mut(),
-                length as usize,
-                prot,
-                flags,
-                fd,
-                offset as i64,
-            );
+            let addr = mmap(std::ptr::null_mut(), length as usize, prot, flags, fd, offset as i64);
 
             if addr == libc::MAP_FAILED {
                 std::ptr::null_mut()
@@ -1954,11 +1902,7 @@ pub extern "C" fn native_msync(addr: *mut u8, length: u64, flags: i32) -> i32 {
 /// Execute a command and capture output
 /// Returns tuple (stdout: String, stderr: String, exit_code: Int)
 #[no_mangle]
-pub unsafe extern "C" fn rt_process_run(
-    cmd_ptr: *const u8,
-    cmd_len: u64,
-    args: RuntimeValue,
-) -> RuntimeValue {
+pub unsafe extern "C" fn rt_process_run(cmd_ptr: *const u8, cmd_len: u64, args: RuntimeValue) -> RuntimeValue {
     use std::process::Command;
 
     // Helper to extract string from RuntimeValue
@@ -2045,11 +1989,7 @@ pub unsafe extern "C" fn rt_process_run(
 /// Spawn a process without waiting
 /// Returns process ID or -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_process_spawn(
-    cmd_ptr: *const u8,
-    cmd_len: u64,
-    args: RuntimeValue,
-) -> i64 {
+pub unsafe extern "C" fn rt_process_spawn(cmd_ptr: *const u8, cmd_len: u64, args: RuntimeValue) -> i64 {
     use std::process::Command;
 
     // Helper to extract string from RuntimeValue
@@ -2103,11 +2043,7 @@ pub unsafe extern "C" fn rt_process_spawn(
 /// Execute a command and return just the exit code
 /// Returns exit code or -1 on error
 #[no_mangle]
-pub unsafe extern "C" fn rt_process_execute(
-    cmd_ptr: *const u8,
-    cmd_len: u64,
-    args: RuntimeValue,
-) -> i32 {
+pub unsafe extern "C" fn rt_process_execute(cmd_ptr: *const u8, cmd_len: u64, args: RuntimeValue) -> i32 {
     use std::process::Command;
 
     // Helper to extract string from RuntimeValue
@@ -3335,11 +3271,7 @@ pub extern "C" fn rt_spin_loop_hint() {
 /// Wait on condvar with timeout (milliseconds)
 /// Returns 1 if notified, 0 if timeout
 #[no_mangle]
-pub extern "C" fn rt_condvar_wait_timeout(
-    condvar_handle: i64,
-    _mutex_handle: i64,
-    timeout_ms: u64,
-) -> i64 {
+pub extern "C" fn rt_condvar_wait_timeout(condvar_handle: i64, _mutex_handle: i64, timeout_ms: u64) -> i64 {
     // Simplified implementation - real version needs proper mutex integration
     if CONDVAR_MAP.lock().unwrap().get(&condvar_handle).is_some() {
         // In a real implementation, we'd wait with timeout on the condvar
@@ -3627,13 +3559,7 @@ pub extern "C" fn rt_thread_local_get(handle: i64) -> RuntimeValue {
         return RuntimeValue::NIL;
     }
 
-    THREAD_LOCAL_STORAGE.with(|storage| {
-        storage
-            .borrow()
-            .get(&handle)
-            .copied()
-            .unwrap_or(RuntimeValue::NIL)
-    })
+    THREAD_LOCAL_STORAGE.with(|storage| storage.borrow().get(&handle).copied().unwrap_or(RuntimeValue::NIL))
 }
 
 /// Set value in thread-local storage
@@ -4115,12 +4041,7 @@ pub extern "C" fn rt_torch_select(_tensor: RuntimeValue, _dim: i64, _index: i64)
 
 #[cfg(feature = "pytorch")]
 #[no_mangle]
-pub extern "C" fn rt_torch_narrow(
-    tensor: RuntimeValue,
-    dim: i64,
-    start: i64,
-    length: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_narrow(tensor: RuntimeValue, dim: i64, start: i64, length: i64) -> RuntimeValue {
     let tensor_handle = match value_to_tensor_handle(tensor) {
         Some(h) => h,
         None => return RuntimeValue::NIL,
@@ -4138,12 +4059,7 @@ pub extern "C" fn rt_torch_narrow(
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_narrow(
-    _tensor: RuntimeValue,
-    _dim: i64,
-    _start: i64,
-    _length: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_narrow(_tensor: RuntimeValue, _dim: i64, _start: i64, _length: i64) -> RuntimeValue {
     RuntimeValue::NIL
 }
 
@@ -4178,19 +4094,13 @@ pub extern "C" fn rt_torch_autograd_context_get_saved_tensors(_ctx: RuntimeValue
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_autograd_context_get_value(
-    _ctx: RuntimeValue,
-    _key: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_autograd_context_get_value(_ctx: RuntimeValue, _key: RuntimeValue) -> RuntimeValue {
     // TODO: Implement get value
     RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_autograd_function_apply(
-    _func: RuntimeValue,
-    _inputs: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_autograd_function_apply(_func: RuntimeValue, _inputs: RuntimeValue) -> RuntimeValue {
     // TODO: Implement autograd function apply
     RuntimeValue::NIL
 }
@@ -4224,8 +4134,7 @@ pub extern "C" fn rt_torch_bce_loss(pred: RuntimeValue, target: RuntimeValue) ->
         None => return RuntimeValue::NIL,
     };
 
-    let result =
-        pred_tensor.binary_cross_entropy::<tch::Tensor>(&target_tensor, None, tch::Reduction::Mean);
+    let result = pred_tensor.binary_cross_entropy::<tch::Tensor>(&target_tensor, None, tch::Reduction::Mean);
     let handle = store_tensor(result);
     RuntimeValue::from_int(handle)
 }
@@ -4238,10 +4147,7 @@ pub extern "C" fn rt_torch_bce_loss(_pred: RuntimeValue, _target: RuntimeValue) 
 
 #[cfg(feature = "pytorch")]
 #[no_mangle]
-pub extern "C" fn rt_torch_cross_entropy_loss(
-    pred: RuntimeValue,
-    target: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_cross_entropy_loss(pred: RuntimeValue, target: RuntimeValue) -> RuntimeValue {
     let pred_handle = match value_to_tensor_handle(pred) {
         Some(h) => h,
         None => return RuntimeValue::NIL,
@@ -4260,43 +4166,27 @@ pub extern "C" fn rt_torch_cross_entropy_loss(
         None => return RuntimeValue::NIL,
     };
 
-    let result = pred_tensor.cross_entropy_loss::<tch::Tensor>(
-        &target_tensor,
-        None,
-        tch::Reduction::Mean,
-        -100,
-        0.0,
-    );
+    let result = pred_tensor.cross_entropy_loss::<tch::Tensor>(&target_tensor, None, tch::Reduction::Mean, -100, 0.0);
     let handle = store_tensor(result);
     RuntimeValue::from_int(handle)
 }
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_cross_entropy_loss(
-    _pred: RuntimeValue,
-    _target: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_cross_entropy_loss(_pred: RuntimeValue, _target: RuntimeValue) -> RuntimeValue {
     RuntimeValue::NIL
 }
 
 // Neural Network Layers
 
 #[no_mangle]
-pub extern "C" fn rt_torch_conv3d_new(
-    _in_channels: i64,
-    _out_channels: i64,
-    _kernel_size: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_conv3d_new(_in_channels: i64, _out_channels: i64, _kernel_size: i64) -> RuntimeValue {
     // TODO: Implement Conv3d layer
     RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_conv3d_forward(
-    _layer: RuntimeValue,
-    _input: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_conv3d_forward(_layer: RuntimeValue, _input: RuntimeValue) -> RuntimeValue {
     // TODO: Implement Conv3d forward
     RuntimeValue::NIL
 }
@@ -4318,10 +4208,7 @@ pub extern "C" fn rt_torch_rnn_forward(
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_multihead_attention_new(
-    _embed_dim: i64,
-    _num_heads: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_multihead_attention_new(_embed_dim: i64, _num_heads: i64) -> RuntimeValue {
     // TODO: Implement MultiheadAttention layer
     RuntimeValue::NIL
 }
@@ -4344,28 +4231,19 @@ pub extern "C" fn rt_torch_positional_encoding_new(_d_model: i64, _max_len: i64)
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_transformer_encoder_layer_new(
-    _d_model: i64,
-    _nhead: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_transformer_encoder_layer_new(_d_model: i64, _nhead: i64) -> RuntimeValue {
     // TODO: Implement TransformerEncoderLayer
     RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_transformer_encoder_layer_forward(
-    _layer: RuntimeValue,
-    _src: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_transformer_encoder_layer_forward(_layer: RuntimeValue, _src: RuntimeValue) -> RuntimeValue {
     // TODO: Implement TransformerEncoderLayer forward
     RuntimeValue::NIL
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_transformer_decoder_layer_new(
-    _d_model: i64,
-    _nhead: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_transformer_decoder_layer_new(_d_model: i64, _nhead: i64) -> RuntimeValue {
     // TODO: Implement TransformerDecoderLayer
     RuntimeValue::NIL
 }
@@ -4397,10 +4275,7 @@ pub extern "C" fn rt_torch_jit_script(_module: RuntimeValue) -> RuntimeValue {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_jit_trace(
-    _func: RuntimeValue,
-    _example_inputs: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_jit_trace(_func: RuntimeValue, _example_inputs: RuntimeValue) -> RuntimeValue {
     // TODO: Implement JIT tracing
     RuntimeValue::NIL
 }
@@ -4417,10 +4292,7 @@ pub extern "C" fn rt_torch_jit_save(_module: RuntimeValue, _path_ptr: *const u8,
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_jit_forward(
-    _module: RuntimeValue,
-    _inputs: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_jit_forward(_module: RuntimeValue, _inputs: RuntimeValue) -> RuntimeValue {
     // TODO: Implement JIT forward pass
     RuntimeValue::NIL
 }
@@ -4497,11 +4369,7 @@ pub extern "C" fn rt_torch_mnist_download(_path_ptr: *const u8, _path_len: u64) 
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_mnist_load(
-    _path_ptr: *const u8,
-    _path_len: u64,
-    _train: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_mnist_load(_path_ptr: *const u8, _path_len: u64, _train: i64) -> RuntimeValue {
     // TODO: Implement MNIST dataset loading
     RuntimeValue::NIL
 }
@@ -4513,11 +4381,7 @@ pub extern "C" fn rt_torch_cifar10_download(_path_ptr: *const u8, _path_len: u64
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_cifar10_load(
-    _path_ptr: *const u8,
-    _path_len: u64,
-    _train: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_cifar10_load(_path_ptr: *const u8, _path_len: u64, _train: i64) -> RuntimeValue {
     // TODO: Implement CIFAR10 dataset loading
     RuntimeValue::NIL
 }
@@ -4540,10 +4404,7 @@ pub extern "C" fn rt_torch_dist_is_available() -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_torch_dist_init_process_group(
-    _backend_ptr: *const u8,
-    _backend_len: u64,
-) -> i64 {
+pub extern "C" fn rt_torch_dist_init_process_group(_backend_ptr: *const u8, _backend_len: u64) -> i64 {
     // TODO: Implement distributed process group initialization
     0
 }

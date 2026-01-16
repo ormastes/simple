@@ -132,10 +132,7 @@ impl ParallelCodegen {
         }
 
         Ok(CompiledModule {
-            name: mir_module
-                .name
-                .clone()
-                .unwrap_or_else(|| "unnamed".to_string()),
+            name: mir_module.name.clone().unwrap_or_else(|| "unnamed".to_string()),
             object_code,
             function_count,
         })
@@ -159,18 +156,12 @@ impl ParallelCodegen {
     }
 
     /// Compile modules sequentially.
-    fn compile_modules_sequential(
-        &self,
-        modules: &[MirModule],
-    ) -> Vec<BackendResult<CompiledModule>> {
+    fn compile_modules_sequential(&self, modules: &[MirModule]) -> Vec<BackendResult<CompiledModule>> {
         modules.iter().map(|m| self.compile_module(m)).collect()
     }
 
     /// Compile modules in parallel.
-    fn compile_modules_parallel(
-        &self,
-        modules: &[MirModule],
-    ) -> Vec<BackendResult<CompiledModule>> {
+    fn compile_modules_parallel(&self, modules: &[MirModule]) -> Vec<BackendResult<CompiledModule>> {
         modules.par_iter().map(|m| self.compile_module(m)).collect()
     }
 }
@@ -332,9 +323,7 @@ mod tests {
 
     #[test]
     fn test_parallel_codegen_config() {
-        let config = ParallelCodegenConfig::new()
-            .with_threshold(10)
-            .with_threads(4);
+        let config = ParallelCodegenConfig::new().with_threshold(10).with_threads(4);
 
         assert_eq!(config.parallel_threshold, 10);
         assert_eq!(config.num_threads, Some(4));

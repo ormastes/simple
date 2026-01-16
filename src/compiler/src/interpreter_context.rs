@@ -84,10 +84,6 @@ fn value_to_expr(val: &Value) -> Result<Expr, CompileError> {
             let exprs: Result<Vec<_>, _> = items.iter().map(value_to_expr).collect();
             Expr::Tuple(exprs?)
         }
-        _ => {
-            return Err(CompileError::Semantic(
-                "cannot convert value to expression".into(),
-            ))
-        }
+        _ => return Err(CompileError::Semantic("cannot convert value to expression".into())),
     })
 }

@@ -19,14 +19,14 @@ mod llvm_tests;
 
 pub use backend_trait::{BackendKind, NativeBackend};
 pub use buffer_pool::{
-    acquire_thread_buffer, clear_thread_buffer_pool, init_thread_buffer_pool,
-    init_thread_buffer_pool_with_config, release_thread_buffer, thread_buffer_pool_stats,
-    BufferPool, BufferPoolConfig, BufferPoolStats, LocalBufferPool, PooledBuffer,
+    acquire_thread_buffer, clear_thread_buffer_pool, init_thread_buffer_pool, init_thread_buffer_pool_with_config,
+    release_thread_buffer, thread_buffer_pool_stats, BufferPool, BufferPoolConfig, BufferPoolStats, LocalBufferPool,
+    PooledBuffer,
 };
 pub use common_backend::{BackendError, BackendResult, BackendSettings, CodegenBackend};
 pub use cranelift::*;
 pub use jit::*;
 pub use parallel::{
-    compile_modules_parallel, compile_modules_parallel_with_config, BatchCodegen, CodegenStats,
-    CompiledModule, CompiledModuleCache, ParallelCodegen, ParallelCodegenConfig,
+    compile_modules_parallel, compile_modules_parallel_with_config, BatchCodegen, CodegenStats, CompiledModule,
+    CompiledModuleCache, ParallelCodegen, ParallelCodegenConfig,
 };

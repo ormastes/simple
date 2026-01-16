@@ -10,9 +10,7 @@ use tempfile::tempdir;
 // SmfWriter Coverage (compiler/src/linker/smf_writer.rs - 0%)
 // =============================================================================
 
-use simple_compiler::linker::{
-    DataSectionKind, SmfRelocation, SmfSymbol as WriterSmfSymbol, SmfWriter,
-};
+use simple_compiler::linker::{DataSectionKind, SmfRelocation, SmfSymbol as WriterSmfSymbol, SmfWriter};
 use simple_loader::smf::{RelocationType, SectionType, SymbolBinding, SymbolType, SMF_MAGIC};
 
 #[test]
@@ -145,14 +143,8 @@ fn test_data_section_kind_is_readonly() {
 
 #[test]
 fn test_data_section_kind_to_section_type() {
-    assert_eq!(
-        DataSectionKind::Mutable.to_section_type(),
-        SectionType::Data
-    );
-    assert_eq!(
-        DataSectionKind::ReadOnly.to_section_type(),
-        SectionType::RoData
-    );
+    assert_eq!(DataSectionKind::Mutable.to_section_type(), SectionType::Data);
+    assert_eq!(DataSectionKind::ReadOnly.to_section_type(), SectionType::RoData);
 }
 
 #[test]
@@ -298,9 +290,7 @@ fn test_hash_name() {
 // =============================================================================
 
 use simple_common::target::{TargetArch, TargetOS};
-use simple_loader::smf::{
-    SmfHeader, SMF_FLAG_DEBUG_INFO, SMF_FLAG_EXECUTABLE, SMF_FLAG_RELOADABLE,
-};
+use simple_loader::smf::{SmfHeader, SMF_FLAG_DEBUG_INFO, SMF_FLAG_EXECUTABLE, SMF_FLAG_RELOADABLE};
 
 #[test]
 fn test_smf_header_new_for_target() {

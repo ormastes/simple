@@ -28,21 +28,15 @@ pub(super) fn compile_binop<M: Module>(
         BinOp::BitXor => builder.ins().bxor(lhs, rhs),
         BinOp::ShiftLeft => builder.ins().ishl(lhs, rhs),
         BinOp::ShiftRight => builder.ins().sshr(lhs, rhs),
-        BinOp::Lt => builder.ins().icmp(
-            cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
-            lhs,
-            rhs,
-        ),
-        BinOp::Gt => builder.ins().icmp(
-            cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
-            lhs,
-            rhs,
-        ),
-        BinOp::LtEq => builder.ins().icmp(
-            cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
-            lhs,
-            rhs,
-        ),
+        BinOp::Lt => builder
+            .ins()
+            .icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThan, lhs, rhs),
+        BinOp::Gt => builder
+            .ins()
+            .icmp(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan, lhs, rhs),
+        BinOp::LtEq => builder
+            .ins()
+            .icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, lhs, rhs),
         BinOp::GtEq => builder.ins().icmp(
             cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual,
             lhs,
@@ -51,11 +45,9 @@ pub(super) fn compile_binop<M: Module>(
         BinOp::Eq => builder
             .ins()
             .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs, rhs),
-        BinOp::NotEq => {
-            builder
-                .ins()
-                .icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, rhs)
-        }
+        BinOp::NotEq => builder
+            .ins()
+            .icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, rhs),
         BinOp::Is => builder
             .ins()
             .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs, rhs),
@@ -66,25 +58,21 @@ pub(super) fn compile_binop<M: Module>(
             builder.inst_results(call)[0]
         }
         BinOp::And => {
-            let lhs_bool =
-                builder
-                    .ins()
-                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, 0);
-            let rhs_bool =
-                builder
-                    .ins()
-                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, rhs, 0);
+            let lhs_bool = builder
+                .ins()
+                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, 0);
+            let rhs_bool = builder
+                .ins()
+                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, rhs, 0);
             builder.ins().band(lhs_bool, rhs_bool)
         }
         BinOp::Or => {
-            let lhs_bool =
-                builder
-                    .ins()
-                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, 0);
-            let rhs_bool =
-                builder
-                    .ins()
-                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, rhs, 0);
+            let lhs_bool = builder
+                .ins()
+                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, 0);
+            let rhs_bool = builder
+                .ins()
+                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, rhs, 0);
             builder.ins().bor(lhs_bool, rhs_bool)
         }
         BinOp::Pow => {
@@ -108,9 +96,7 @@ pub(super) fn compile_binop<M: Module>(
                 exp_param,
                 zero,
             );
-            builder
-                .ins()
-                .brif(cond, loop_body, &[], loop_exit, &[result_param]);
+            builder.ins().brif(cond, loop_body, &[], loop_exit, &[result_param]);
 
             builder.switch_to_block(loop_body);
             let new_result = builder.ins().imul(result_param, lhs);
@@ -123,10 +109,7 @@ pub(super) fn compile_binop<M: Module>(
         BinOp::FloorDiv => builder.ins().sdiv(lhs, rhs),
         BinOp::MatMul => {
             // Simple Math #1930-#1939: Matrix multiplication requires PyTorch runtime
-            return Err(
-                "Matrix multiplication (@) requires PyTorch runtime, use interpreter mode"
-                    .to_string(),
-            );
+            return Err("Matrix multiplication (@) requires PyTorch runtime, use interpreter mode".to_string());
         }
     };
     Ok(val)
@@ -215,9 +198,7 @@ pub(super) fn compile_builtin_io_call<M: Module>(
                     .define_data(newline_data_id, &newline_desc)
                     .map_err(|e| e.to_string())?;
 
-                let newline_gv = ctx
-                    .module
-                    .declare_data_in_func(newline_data_id, builder.func);
+                let newline_gv = ctx.module.declare_data_in_func(newline_data_id, builder.func);
                 let newline_ptr = builder.ins().global_value(types::I64, newline_gv);
                 let newline_len = builder.ins().iconst(types::I64, 1);
 
@@ -228,9 +209,7 @@ pub(super) fn compile_builtin_io_call<M: Module>(
                 };
                 let print_str_id = ctx.runtime_funcs[base_str_fn];
                 let print_str_ref = ctx.module.declare_func_in_func(print_str_id, builder.func);
-                builder
-                    .ins()
-                    .call(print_str_ref, &[newline_ptr, newline_len]);
+                builder.ins().call(print_str_ref, &[newline_ptr, newline_len]);
             }
 
             // Return nil (0) for void functions
@@ -266,12 +245,8 @@ pub(super) fn compile_interp_call<M: Module>(
     let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
 
     let interp_call_id = ctx.runtime_funcs["rt_interp_call"];
-    let interp_call_ref = ctx
-        .module
-        .declare_func_in_func(interp_call_id, builder.func);
-    let call = builder
-        .ins()
-        .call(interp_call_ref, &[name_ptr, name_len, args_array]);
+    let interp_call_ref = ctx.module.declare_func_in_func(interp_call_id, builder.func);
+    let call = builder.ins().call(interp_call_ref, &[name_ptr, name_len, args_array]);
     let result = builder.inst_results(call)[0];
 
     if let Some(d) = dest {

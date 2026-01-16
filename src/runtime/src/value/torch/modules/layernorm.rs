@@ -29,9 +29,7 @@ pub unsafe extern "C" fn rt_torch_layernorm_new(
             return 0;
         }
 
-        let normalized_shape =
-            std::slice::from_raw_parts(normalized_shape_ptr, normalized_shape_len as usize)
-                .to_vec();
+        let normalized_shape = std::slice::from_raw_parts(normalized_shape_ptr, normalized_shape_len as usize).to_vec();
 
         // Create weight and bias parameters if elementwise_affine is true
         // Weight and bias should have the same shape as normalized_shape
@@ -63,9 +61,7 @@ pub unsafe extern "C" fn rt_torch_layernorm_new(
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY
-            .lock()
-            .insert(handle, std::sync::Arc::new(module));
+        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(module));
 
         tracing::debug!(
             "rt_torch_layernorm_new: handle={} shape_len={} eps={} affine={}",
@@ -78,12 +74,7 @@ pub unsafe extern "C" fn rt_torch_layernorm_new(
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        let _ = (
-            normalized_shape_ptr,
-            normalized_shape_len,
-            eps,
-            elementwise_affine,
-        );
+        let _ = (normalized_shape_ptr, normalized_shape_len, eps, elementwise_affine);
         0
     }
 }

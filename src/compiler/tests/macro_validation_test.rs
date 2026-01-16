@@ -12,9 +12,7 @@ use simple_parser::Parser;
 /// Helper to parse and check if compilation succeeds
 fn check_compiles(source: &str) -> Result<(), CompileError> {
     let mut parser = Parser::new(source);
-    let module = parser
-        .parse()
-        .map_err(|e| CompileError::Parse(e.to_string()))?;
+    let module = parser.parse().map_err(|e| CompileError::Parse(e.to_string()))?;
     simple_compiler::evaluate_module(&module.items).map(|_| ())
 }
 

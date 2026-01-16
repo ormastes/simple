@@ -473,17 +473,8 @@ mod tests {
         stats.record_stage(PipelineStage::Parse);
         stats.record_stage(PipelineStage::HirLower);
 
-        assert_eq!(
-            *stats.modules_per_stage.get(&PipelineStage::Parse).unwrap(),
-            2
-        );
-        assert_eq!(
-            *stats
-                .modules_per_stage
-                .get(&PipelineStage::HirLower)
-                .unwrap(),
-            1
-        );
+        assert_eq!(*stats.modules_per_stage.get(&PipelineStage::Parse).unwrap(), 2);
+        assert_eq!(*stats.modules_per_stage.get(&PipelineStage::HirLower).unwrap(), 1);
     }
 
     #[test]

@@ -55,10 +55,7 @@ on pc{ execution(* target_func(..)) } use advice_func after_success priority 20
     let hir_module = hir::lower(&ast).expect("Failed to lower to HIR");
 
     // Verify we have AOP advices in HIR
-    assert!(
-        !hir_module.aop_advices.is_empty(),
-        "Should have AOP advices"
-    );
+    assert!(!hir_module.aop_advices.is_empty(), "Should have AOP advices");
 
     // Create weaving config from HIR
     let weaving_config = weaving::WeavingConfig::from_hir_advices(&hir_module.aop_advices);
@@ -80,10 +77,7 @@ on pc{ execution(* target_func(..)) } use advice_func after_success priority 20
     let result = weaver.weave_function(&mut test_func);
 
     // Verify weaving occurred
-    assert!(
-        result.join_points_woven > 0,
-        "Should have woven join points"
-    );
+    assert!(result.join_points_woven > 0, "Should have woven join points");
     assert!(result.advices_inserted > 0, "Should have inserted advices");
 
     // Verify diagnostics were collected
@@ -94,16 +88,10 @@ on pc{ execution(* target_func(..)) } use advice_func after_success priority 20
         .diagnostics
         .iter()
         .any(|d| matches!(d.level, weaving::DiagnosticLevel::Info));
-    assert!(
-        has_info,
-        "Should have informational diagnostic about weaving"
-    );
+    assert!(has_info, "Should have informational diagnostic about weaving");
 
     // Verify no errors occurred
-    assert!(
-        !result.has_errors(),
-        "Should not have errors for valid weaving"
-    );
+    assert!(!result.has_errors(), "Should not have errors for valid weaving");
 }
 
 #[test]
@@ -122,10 +110,7 @@ fn simple_func():
     let hir_module = hir::lower(&ast).expect("Failed to lower to HIR");
 
     // Verify no AOP advices
-    assert!(
-        hir_module.aop_advices.is_empty(),
-        "Should have no AOP advices"
-    );
+    assert!(hir_module.aop_advices.is_empty(), "Should have no AOP advices");
 
     // Lower to MIR
     let mir_module = mir::lower_to_mir(&hir_module).expect("Failed to lower to MIR");
@@ -140,14 +125,8 @@ fn simple_func():
     let result = weaver.weave_function(&mut test_func);
 
     // Verify zero overhead - no weaving occurred
-    assert_eq!(
-        result.join_points_woven, 0,
-        "Should not weave when disabled"
-    );
-    assert_eq!(
-        result.advices_inserted, 0,
-        "Should not insert advices when disabled"
-    );
+    assert_eq!(result.join_points_woven, 0, "Should not weave when disabled");
+    assert_eq!(result.advices_inserted, 0, "Should not insert advices when disabled");
     assert_eq!(
         result.diagnostics.len(),
         0,

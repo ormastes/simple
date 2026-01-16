@@ -124,9 +124,7 @@ impl MockRegistry {
         let mut matched = Vec::new();
 
         for rule in &self.config.rules {
-            if rule.predicate.validate(PredicateContext::Mock).is_ok()
-                && rule.predicate.matches(&ctx)
-            {
+            if rule.predicate.validate(PredicateContext::Mock).is_ok() && rule.predicate.matches(&ctx) {
                 matched.push((rule.priority, rule));
             }
         }
@@ -191,18 +189,12 @@ impl MockRegistry {
 
     /// Get invocation count for a function
     pub fn invocation_count(&self, function_name: &str) -> usize {
-        self.invocations
-            .get(function_name)
-            .map(|v| v.len())
-            .unwrap_or(0)
+        self.invocations.get(function_name).map(|v| v.len()).unwrap_or(0)
     }
 
     /// Get all invocations for a function
     pub fn get_invocations(&self, function_name: &str) -> &[MockInvocation] {
-        self.invocations
-            .get(function_name)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.invocations.get(function_name).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Reset all invocation records
@@ -237,9 +229,7 @@ mod tests {
 
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("can only be used in test profile"));
+        assert!(result.unwrap_err().contains("can only be used in test profile"));
     }
 
     #[test]

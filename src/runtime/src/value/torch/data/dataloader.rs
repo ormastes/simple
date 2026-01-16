@@ -49,12 +49,7 @@ pub struct DataLoaderState {
 /// shuffle: 1 to shuffle, 0 for sequential
 /// drop_last: 1 to drop incomplete last batch, 0 to keep it
 #[no_mangle]
-pub extern "C" fn rt_torch_dataloader_new(
-    dataset_handle: u64,
-    batch_size: i64,
-    shuffle: i32,
-    drop_last: i32,
-) -> u64 {
+pub extern "C" fn rt_torch_dataloader_new(dataset_handle: u64, batch_size: i64, shuffle: i32, drop_last: i32) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         if batch_size <= 0 {
@@ -87,9 +82,7 @@ pub extern "C" fn rt_torch_dataloader_new(
         };
 
         let handle = next_dataloader_handle();
-        DATALOADER_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(Mutex::new(state)));
+        DATALOADER_REGISTRY.lock().insert(handle, Arc::new(Mutex::new(state)));
 
         tracing::debug!(
             "rt_torch_dataloader_new: dataset={} batch_size={} shuffle={} -> loader={}",
@@ -128,10 +121,7 @@ pub extern "C" fn rt_torch_dataloader_next(dataloader_handle: u64) -> u64 {
         }
 
         // Determine batch end
-        let batch_end = std::cmp::min(
-            state.current_index + state.batch_size,
-            state.num_samples as usize,
-        );
+        let batch_end = std::cmp::min(state.current_index + state.batch_size, state.num_samples as usize);
 
         // Check if we should drop last incomplete batch
         if state.drop_last && (batch_end - state.current_index) < state.batch_size {
@@ -161,8 +151,7 @@ pub extern "C" fn rt_torch_dataloader_next(dataloader_handle: u64) -> u64 {
                 drop(tensor_registry);
 
                 // Gather batch samples using index_select
-                let batch_indices_tensor =
-                    Tensor::from_slice(batch_indices).to_kind(tch::Kind::Int64);
+                let batch_indices_tensor = Tensor::from_slice(batch_indices).to_kind(tch::Kind::Int64);
 
                 let batch_features = feat_tensor.0.index_select(0, &batch_indices_tensor);
                 let batch_labels = label_tensor.0.index_select(0, &batch_indices_tensor);
@@ -238,10 +227,7 @@ pub extern "C" fn rt_torch_dataloader_free(dataloader_handle: u64) -> i32 {
     {
         let mut loader_registry = DATALOADER_REGISTRY.lock();
         if loader_registry.remove(&dataloader_handle).is_some() {
-            tracing::debug!(
-                "rt_torch_dataloader_free: freed loader={}",
-                dataloader_handle
-            );
+            tracing::debug!("rt_torch_dataloader_free: freed loader={}", dataloader_handle);
             TorchFfiError::Success as i32
         } else {
             TorchFfiError::InvalidHandle as i32

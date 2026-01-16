@@ -112,8 +112,7 @@ fn cmd_from_json(args: &[String]) -> Result<(), String> {
 
     // Simple JSON parsing (basic implementation)
     let value = parse_json(&content)?;
-    let doc = SdnDocument::parse(&format_as_sdn(&value))
-        .map_err(|e| format!("Conversion error: {}", e))?;
+    let doc = SdnDocument::parse(&format_as_sdn(&value)).map_err(|e| format!("Conversion error: {}", e))?;
 
     println!("{}", doc.to_sdn());
     Ok(())
@@ -145,11 +144,9 @@ fn cmd_set(args: &[String]) -> Result<(), String> {
     let mut doc = SdnDocument::from_file(file_path).map_err(|e| format!("Parse error: {}", e))?;
 
     let value = parse_value_string(&args[2])?;
-    doc.set(&args[1], value)
-        .map_err(|e| format!("Set error: {}", e))?;
+    doc.set(&args[1], value).map_err(|e| format!("Set error: {}", e))?;
 
-    doc.write_file(file_path)
-        .map_err(|e| format!("Write error: {}", e))?;
+    doc.write_file(file_path).map_err(|e| format!("Write error: {}", e))?;
 
     println!("Updated: {} = {}", args[1], args[2]);
     Ok(())
@@ -163,8 +160,7 @@ fn cmd_fmt(args: &[String]) -> Result<(), String> {
     let file_path = Path::new(&args[0]);
     let doc = SdnDocument::from_file(file_path).map_err(|e| format!("Parse error: {}", e))?;
 
-    doc.write_file(file_path)
-        .map_err(|e| format!("Write error: {}", e))?;
+    doc.write_file(file_path).map_err(|e| format!("Write error: {}", e))?;
 
     println!("Formatted: {}", args[0]);
     Ok(())
@@ -392,10 +388,7 @@ fn split_json_object(s: &str) -> Result<Vec<(String, String)>, String> {
                 in_key = false;
             }
             ',' if depth == 0 => {
-                pairs.push((
-                    current_key.trim().to_string(),
-                    current_value.trim().to_string(),
-                ));
+                pairs.push((current_key.trim().to_string(), current_value.trim().to_string()));
                 current_key = String::new();
                 current_value = String::new();
                 in_key = true;
@@ -410,10 +403,7 @@ fn split_json_object(s: &str) -> Result<Vec<(String, String)>, String> {
         }
     }
     if !current_key.trim().is_empty() {
-        pairs.push((
-            current_key.trim().to_string(),
-            current_value.trim().to_string(),
-        ));
+        pairs.push((current_key.trim().to_string(), current_value.trim().to_string()));
     }
     Ok(pairs)
 }

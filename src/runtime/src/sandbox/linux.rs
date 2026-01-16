@@ -39,10 +39,7 @@ pub fn apply_sandbox(config: &SandboxConfig) -> SandboxResult<()> {
 }
 
 /// Apply network isolation using Linux network namespaces.
-fn apply_network_isolation(
-    mode: &NetworkMode,
-    config: &super::NetworkIsolation,
-) -> SandboxResult<()> {
+fn apply_network_isolation(mode: &NetworkMode, config: &super::NetworkIsolation) -> SandboxResult<()> {
     match mode {
         NetworkMode::Full => {
             // No restrictions
@@ -54,27 +51,19 @@ fn apply_network_isolation(
             tracing::debug!("Network: Blocking all access");
             if let Err(e) = create_empty_network_namespace() {
                 tracing::warn!("Failed to create network namespace: {}", e);
-                tracing::info!(
-                    "Network isolation requires CAP_SYS_ADMIN or unprivileged user namespaces"
-                );
+                tracing::info!("Network isolation requires CAP_SYS_ADMIN or unprivileged user namespaces");
             }
             Ok(())
         }
         NetworkMode::AllowList => {
-            tracing::debug!(
-                "Network: Allowlist mode with {} domains",
-                config.allowed_domains.len()
-            );
+            tracing::debug!("Network: Allowlist mode with {} domains", config.allowed_domains.len());
             // Domain filtering would be implemented using iptables/nftables or eBPF
             // For now, we log a warning
             tracing::warn!("Domain allowlist filtering not yet implemented");
             Ok(())
         }
         NetworkMode::BlockList => {
-            tracing::debug!(
-                "Network: Blocklist mode with {} domains",
-                config.blocked_domains.len()
-            );
+            tracing::debug!("Network: Blocklist mode with {} domains", config.blocked_domains.len());
             // Domain filtering would be implemented using iptables/nftables or eBPF
             tracing::warn!("Domain blocklist filtering not yet implemented");
             Ok(())
@@ -122,9 +111,8 @@ fn apply_filesystem_isolation(
 fn create_empty_network_namespace() -> SandboxResult<()> {
     use nix::sched::{unshare, CloneFlags};
 
-    unshare(CloneFlags::CLONE_NEWNET).map_err(|e| {
-        SandboxError::NetworkIsolation(format!("Failed to create network namespace: {}", e))
-    })?;
+    unshare(CloneFlags::CLONE_NEWNET)
+        .map_err(|e| SandboxError::NetworkIsolation(format!("Failed to create network namespace: {}", e)))?;
 
     tracing::debug!("Created isolated network namespace");
     Ok(())

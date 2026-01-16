@@ -75,11 +75,7 @@ fn next_scheduler_handle() -> u64 {
 /// Create StepLR scheduler
 /// Decays the learning rate by gamma every step_size epochs
 #[no_mangle]
-pub extern "C" fn rt_torch_scheduler_step_new(
-    optimizer_handle: u64,
-    step_size: usize,
-    gamma: f64,
-) -> u64 {
+pub extern "C" fn rt_torch_scheduler_step_new(optimizer_handle: u64, step_size: usize, gamma: f64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         if step_size == 0 {
@@ -101,9 +97,7 @@ pub extern "C" fn rt_torch_scheduler_step_new(
         };
 
         let handle = next_scheduler_handle();
-        SCHEDULER_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(Mutex::new(state)));
+        SCHEDULER_REGISTRY.lock().insert(handle, Arc::new(Mutex::new(state)));
 
         tracing::debug!(
             "rt_torch_scheduler_step_new: handle={} optimizer={} step_size={} gamma={}",
@@ -140,9 +134,7 @@ pub extern "C" fn rt_torch_scheduler_exponential_new(optimizer_handle: u64, gamm
         };
 
         let handle = next_scheduler_handle();
-        SCHEDULER_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(Mutex::new(state)));
+        SCHEDULER_REGISTRY.lock().insert(handle, Arc::new(Mutex::new(state)));
 
         tracing::debug!(
             "rt_torch_scheduler_exponential_new: handle={} optimizer={} gamma={}",
@@ -162,11 +154,7 @@ pub extern "C" fn rt_torch_scheduler_exponential_new(optimizer_handle: u64, gamm
 /// Create CosineAnnealingLR scheduler
 /// Anneals the learning rate using a cosine schedule
 #[no_mangle]
-pub extern "C" fn rt_torch_scheduler_cosine_new(
-    optimizer_handle: u64,
-    t_max: usize,
-    eta_min: f64,
-) -> u64 {
+pub extern "C" fn rt_torch_scheduler_cosine_new(optimizer_handle: u64, t_max: usize, eta_min: f64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         if t_max == 0 {
@@ -189,9 +177,7 @@ pub extern "C" fn rt_torch_scheduler_cosine_new(
         };
 
         let handle = next_scheduler_handle();
-        SCHEDULER_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(Mutex::new(state)));
+        SCHEDULER_REGISTRY.lock().insert(handle, Arc::new(Mutex::new(state)));
 
         tracing::debug!(
             "rt_torch_scheduler_cosine_new: handle={} optimizer={} t_max={} eta_min={}",
@@ -227,11 +213,7 @@ pub extern "C" fn rt_torch_scheduler_plateau_new(
         }
         drop(opt_registry);
 
-        let best = if mode == 0 {
-            f64::INFINITY
-        } else {
-            f64::NEG_INFINITY
-        };
+        let best = if mode == 0 { f64::INFINITY } else { f64::NEG_INFINITY };
 
         let state = SchedulerState::ReduceLROnPlateau {
             optimizer: optimizer_handle,
@@ -247,9 +229,7 @@ pub extern "C" fn rt_torch_scheduler_plateau_new(
         };
 
         let handle = next_scheduler_handle();
-        SCHEDULER_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(Mutex::new(state)));
+        SCHEDULER_REGISTRY.lock().insert(handle, Arc::new(Mutex::new(state)));
 
         tracing::debug!(
             "rt_torch_scheduler_plateau_new: handle={} optimizer={} mode={} factor={} patience={}",
@@ -455,10 +435,7 @@ pub extern "C" fn rt_torch_scheduler_free(scheduler_handle: u64) -> i32 {
     {
         let mut sched_registry = SCHEDULER_REGISTRY.lock();
         if sched_registry.remove(&scheduler_handle).is_some() {
-            tracing::debug!(
-                "rt_torch_scheduler_free: freed scheduler={}",
-                scheduler_handle
-            );
+            tracing::debug!("rt_torch_scheduler_free: freed scheduler={}", scheduler_handle);
             TorchFfiError::Success as i32
         } else {
             TorchFfiError::InvalidHandle as i32

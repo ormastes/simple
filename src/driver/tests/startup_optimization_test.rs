@@ -9,9 +9,8 @@
 //! - Phase 3: GPU initialization (#1987-#1991)
 
 use simple_driver::{
-    display_loading_indicator, parse_early_args, prefetch_file, prefetch_files, start_gpu_init,
-    AppType, EarlyConfig, GpuInitPhase, GpuInitState, PreAllocatedResources, StartupEvent,
-    StartupProgress, WindowConfig, WindowHints,
+    display_loading_indicator, parse_early_args, prefetch_file, prefetch_files, start_gpu_init, AppType, EarlyConfig,
+    GpuInitPhase, GpuInitState, PreAllocatedResources, StartupEvent, StartupProgress, WindowConfig, WindowHints,
 };
 use std::fs::File;
 use std::io::Write;

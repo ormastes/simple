@@ -148,10 +148,7 @@ impl ConcurrentMap {
 
     /// Get all key-value pairs in the map.
     pub fn entries(&self) -> Vec<(RuntimeValue, RuntimeValue)> {
-        self.inner
-            .iter()
-            .map(|entry| (entry.key().0, *entry.value()))
-            .collect()
+        self.inner.iter().map(|entry| (entry.key().0, *entry.value())).collect()
     }
 }
 
@@ -225,10 +222,7 @@ pub unsafe extern "C" fn simple_concurrent_map_insert(
 ///
 /// Returns the value, or RuntimeValue::NIL if not found
 #[no_mangle]
-pub unsafe extern "C" fn simple_concurrent_map_get(
-    map: *mut ConcurrentMap,
-    key: RuntimeValue,
-) -> RuntimeValue {
+pub unsafe extern "C" fn simple_concurrent_map_get(map: *mut ConcurrentMap, key: RuntimeValue) -> RuntimeValue {
     if let Some(m) = map.as_ref() {
         m.get(key).unwrap_or(RuntimeValue::NIL)
     } else {
@@ -240,10 +234,7 @@ pub unsafe extern "C" fn simple_concurrent_map_get(
 ///
 /// Returns the value, or RuntimeValue::NIL if not found
 #[no_mangle]
-pub unsafe extern "C" fn simple_concurrent_map_remove(
-    map: *mut ConcurrentMap,
-    key: RuntimeValue,
-) -> RuntimeValue {
+pub unsafe extern "C" fn simple_concurrent_map_remove(map: *mut ConcurrentMap, key: RuntimeValue) -> RuntimeValue {
     if let Some(m) = map.as_ref() {
         m.remove(key).unwrap_or(RuntimeValue::NIL)
     } else {
@@ -253,10 +244,7 @@ pub unsafe extern "C" fn simple_concurrent_map_remove(
 
 /// Check if map contains a key
 #[no_mangle]
-pub unsafe extern "C" fn simple_concurrent_map_contains_key(
-    map: *mut ConcurrentMap,
-    key: RuntimeValue,
-) -> bool {
+pub unsafe extern "C" fn simple_concurrent_map_contains_key(map: *mut ConcurrentMap, key: RuntimeValue) -> bool {
     if let Some(m) = map.as_ref() {
         m.contains_key(key)
     } else {

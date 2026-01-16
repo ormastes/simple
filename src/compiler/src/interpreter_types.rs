@@ -32,10 +32,7 @@ pub(super) fn register_trait_impl(
     registry: &mut HashMap<String, TraitImplRegistry>,
     impl_block: &ImplBlock,
 ) -> Result<(), CompileError> {
-    let is_default = impl_block
-        .attributes
-        .iter()
-        .any(|attr| attr.name == "default");
+    let is_default = impl_block.attributes.iter().any(|attr| attr.name == "default");
 
     let Some(trait_name) = &impl_block.trait_name else {
         if is_default {

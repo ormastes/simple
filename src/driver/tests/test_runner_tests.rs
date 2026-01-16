@@ -400,10 +400,7 @@ mod test_runner {
         output.push_str(&format!("  \"success\": {},\n", result.success()));
         output.push_str(&format!("  \"total_passed\": {},\n", result.total_passed));
         output.push_str(&format!("  \"total_failed\": {},\n", result.total_failed));
-        output.push_str(&format!(
-            "  \"total_duration_ms\": {},\n",
-            result.total_duration_ms
-        ));
+        output.push_str(&format!("  \"total_duration_ms\": {},\n", result.total_duration_ms));
         output.push_str("  \"files\": [\n");
 
         for (i, file) in result.files.iter().enumerate() {
@@ -462,10 +459,7 @@ mod test_runner {
                 "✓"
             };
 
-            output.push_str(&format!(
-                "  {} {} ({}ms)\n",
-                status, file_name, file.duration_ms
-            ));
+            output.push_str(&format!("  {} {} ({}ms)\n", status, file_name, file.duration_ms));
 
             if let Some(ref err) = file.error {
                 for line in err.lines().take(3) {

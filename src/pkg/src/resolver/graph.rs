@@ -158,11 +158,7 @@ impl DependencyGraph {
             let dep_count = self
                 .edges
                 .get(name.as_str())
-                .map(|deps| {
-                    deps.iter()
-                        .filter(|d| self.packages.contains_key(d.as_str()))
-                        .count()
-                })
+                .map(|deps| deps.iter().filter(|d| self.packages.contains_key(d.as_str())).count())
                 .unwrap_or(0);
             remaining_deps.insert(name.as_str(), dep_count);
         }
@@ -202,10 +198,7 @@ impl DependencyGraph {
         }
 
         // Map back to packages
-        Ok(result
-            .into_iter()
-            .filter_map(|name| self.packages.get(name))
-            .collect())
+        Ok(result.into_iter().filter_map(|name| self.packages.get(name)).collect())
     }
 
     /// Detect if there's a cycle in the dependency graph
@@ -221,9 +214,7 @@ impl DependencyGraph {
 
         for name in self.packages.keys() {
             if !visited.contains(name.as_str()) {
-                if let Some(cycle) =
-                    self.find_cycle_dfs(name, &mut visited, &mut rec_stack, &mut path)
-                {
+                if let Some(cycle) = self.find_cycle_dfs(name, &mut visited, &mut rec_stack, &mut path) {
                     return Some(cycle);
                 }
             }
@@ -279,12 +270,7 @@ impl DependencyGraph {
         None
     }
 
-    fn reconstruct_path(
-        &self,
-        prev: &HashMap<&str, &str>,
-        start: &str,
-        target: &str,
-    ) -> Vec<String> {
+    fn reconstruct_path(&self, prev: &HashMap<&str, &str>, start: &str, target: &str) -> Vec<String> {
         let mut path = Vec::new();
         let mut current = target;
         path.push(current.to_string());

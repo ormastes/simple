@@ -44,10 +44,7 @@ fn test_cli_help() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Either help should be in stdout or we got some output
-            assert!(
-                !stdout.is_empty() || !stderr.is_empty(),
-                "Should produce some output"
-            );
+            assert!(!stdout.is_empty() || !stderr.is_empty(), "Should produce some output");
         }
         Err(_) => {
             println!("Skipping CLI test - cargo run not available");

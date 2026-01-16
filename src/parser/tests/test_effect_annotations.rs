@@ -21,11 +21,7 @@ fn parse_and_get_function(source: &str) -> simple_parser::ast::FunctionDef {
 }
 
 /// Test single effect annotation
-fn test_single_effect(
-    source: &str,
-    effect: Effect,
-    checker: fn(&simple_parser::ast::FunctionDef) -> bool,
-) {
+fn test_single_effect(source: &str, effect: Effect, checker: fn(&simple_parser::ast::FunctionDef) -> bool) {
     let func = parse_and_get_function(source);
     assert_eq!(func.effects.len(), 1);
     assert!(func.effects.contains(&effect));

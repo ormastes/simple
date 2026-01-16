@@ -34,24 +34,14 @@ use std::os::unix::io::RawFd;
 /// - Efficient for large file transfers (network sockets, etc)
 /// - Avoids kernel buffer copies
 #[no_mangle]
-pub extern "C" fn native_sendfile(
-    out_fd: i64,
-    in_fd: i64,
-    offset: u64,
-    count: u64,
-) -> RuntimeValue {
+pub extern "C" fn native_sendfile(out_fd: i64, in_fd: i64, offset: u64, count: u64) -> RuntimeValue {
     #[cfg(target_os = "linux")]
     {
         use libc::sendfile;
 
         unsafe {
             let mut off = offset as i64;
-            let result = sendfile(
-                out_fd as RawFd,
-                in_fd as RawFd,
-                &mut off as *mut i64,
-                count as usize,
-            );
+            let result = sendfile(out_fd as RawFd, in_fd as RawFd, &mut off as *mut i64, count as usize);
 
             if result < 0 {
                 return RuntimeValue::NIL;

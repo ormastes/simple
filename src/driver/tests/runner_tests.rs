@@ -15,8 +15,8 @@ use tempfile::TempDir;
 // Import shared test helpers
 mod test_helpers;
 use test_helpers::{
-    run_expect, run_expect_compile_error, run_expect_compile_error_at, run_expect_error,
-    run_expect_interp, run_expect_parity, run_expect_runtime_error,
+    run_expect, run_expect_compile_error, run_expect_compile_error_at, run_expect_error, run_expect_interp,
+    run_expect_parity, run_expect_runtime_error,
 };
 
 #[test]
@@ -406,9 +406,8 @@ main = res
 #[test]
 fn runner_cli_case_match_rejects_spec_syntax() {
     let mut cmd = Command::cargo_bin("simple").expect("binary exists");
-    cmd.arg("-c").arg(
-        "let x: i32 = 2\nmatch x:\n    case 2:\n        main = 20\n    case _:\n        main = 0",
-    );
+    cmd.arg("-c")
+        .arg("let x: i32 = 2\nmatch x:\n    case 2:\n        main = 20\n    case _:\n        main = 0");
     cmd.assert().code(20).stdout(contains("20"));
 }
 
@@ -441,9 +440,8 @@ fn runner_cli_match_arrow_file_rejects_basic_syntax() {
 #[test]
 fn runner_cli_case_guard_rejects_spec_syntax() {
     let mut cmd = Command::cargo_bin("simple").expect("binary exists");
-    cmd.arg("-c").arg(
-        "let x: i32 = 3\nmatch x:\n    case n if n > 0:\n        main = 1\n    case _:\n        main = 0",
-    );
+    cmd.arg("-c")
+        .arg("let x: i32 = 3\nmatch x:\n    case n if n > 0:\n        main = 1\n    case _:\n        main = 0");
     cmd.assert().code(1).stdout(contains("1"));
 }
 

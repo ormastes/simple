@@ -101,17 +101,14 @@ pub struct PooledConnection {
 impl PooledConnection {
     /// Get the underlying database connection.
     pub fn connection(&self) -> &Database {
-        self.conn
-            .as_ref()
-            .expect("Connection already returned to pool")
+        self.conn.as_ref().expect("Connection already returned to pool")
     }
 }
 
 impl Drop for PooledConnection {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
-            self.pool
-                .return_connection(conn, self.created_at, self.last_used);
+            self.pool.return_connection(conn, self.created_at, self.last_used);
         }
     }
 }
@@ -238,8 +235,7 @@ impl Pool {
             }
 
             // No idle connection, try to create a new one
-            let total =
-                self.inner.in_use.load(Ordering::Relaxed) + self.inner.idle.lock().len() as u64;
+            let total = self.inner.in_use.load(Ordering::Relaxed) + self.inner.idle.lock().len() as u64;
 
             if total < self.inner.config.max_connections as u64 {
                 match Database::open(&self.inner.url) {
@@ -293,9 +289,7 @@ impl Pool {
         let mut idle = self.inner.idle.lock();
         let count = idle.len();
         idle.clear();
-        self.inner
-            .total_closed
-            .fetch_add(count as u64, Ordering::Relaxed);
+        self.inner.total_closed.fetch_add(count as u64, Ordering::Relaxed);
         self.inner.available.notify_all();
         Ok(())
     }

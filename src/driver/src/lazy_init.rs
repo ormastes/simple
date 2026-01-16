@@ -106,9 +106,7 @@ pub struct LazyStatic<T> {
 impl<T> LazyStatic<T> {
     /// Create a new lazy static value
     pub const fn new() -> Self {
-        Self {
-            cell: OnceLock::new(),
-        }
+        Self { cell: OnceLock::new() }
     }
 
     /// Get the value, initializing it if necessary

@@ -135,13 +135,10 @@ pub fn compile_function_body<M: Module>(
         let state_val = builder.inst_results(call)[0];
 
         let mut dispatch_blocks = Vec::new();
-        if let Some(entry_target) = func
-            .block(func.entry_block)
-            .and_then(|b| match b.terminator {
-                Terminator::Jump(t) => Some(t),
-                _ => None,
-            })
-        {
+        if let Some(entry_target) = func.block(func.entry_block).and_then(|b| match b.terminator {
+            Terminator::Jump(t) => Some(t),
+            _ => None,
+        }) {
             let target_block = *blocks.get(&entry_target).unwrap();
             let mut targets = Vec::new();
             targets.push(target_block);
@@ -200,13 +197,10 @@ pub fn compile_function_body<M: Module>(
                 let state_val = builder.inst_results(call)[0];
 
                 let mut dispatch_blocks = Vec::new();
-                if let Some(entry_target) =
-                    func.block(func.entry_block)
-                        .and_then(|b| match b.terminator {
-                            Terminator::Jump(t) => Some(t),
-                            _ => None,
-                        })
-                {
+                if let Some(entry_target) = func.block(func.entry_block).and_then(|b| match b.terminator {
+                    Terminator::Jump(t) => Some(t),
+                    _ => None,
+                }) {
                     let target_block = *blocks.get(&entry_target).unwrap();
                     let mut targets = Vec::new();
                     targets.push(target_block); // State 0: initial entry
@@ -395,9 +389,7 @@ pub fn compile_function_body<M: Module>(
                 } else if func.return_type == TypeId::VOID {
                     builder.ins().return_(&[]);
                 } else {
-                    builder
-                        .ins()
-                        .trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
+                    builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
                 }
             }
 
@@ -418,9 +410,7 @@ pub fn compile_function_body<M: Module>(
             }
 
             Terminator::Unreachable => {
-                builder
-                    .ins()
-                    .trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
+                builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
             }
         }
     }

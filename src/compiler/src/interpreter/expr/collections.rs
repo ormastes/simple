@@ -7,8 +7,8 @@ use crate::error::CompileError;
 use crate::value::Value;
 
 use super::super::{
-    comprehension_iterate, create_range_object, normalize_index, slice_collection, ClassDef, Enums,
-    Env, FunctionDef, ImplMethods,
+    comprehension_iterate, create_range_object, normalize_index, slice_collection, ClassDef, Enums, Env, FunctionDef,
+    ImplMethods,
 };
 
 pub(super) fn eval_collection_expr(
@@ -64,10 +64,7 @@ pub(super) fn eval_collection_expr(
                     )))
                 }
             } else {
-                Err(CompileError::Semantic(format!(
-                    "unsupported path: {:?}",
-                    segments
-                )))
+                Err(CompileError::Semantic(format!("unsupported path: {:?}", segments)))
             };
             Ok(Some(result?))
         }
@@ -76,16 +73,13 @@ pub(super) fn eval_collection_expr(
             for (k, v) in entries {
                 // Handle dict spread: **expr
                 if let Expr::DictSpread(inner) = k {
-                    let spread_val =
-                        evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
+                    let spread_val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
                     if let Value::Dict(spread_map) = spread_val {
                         for (sk, sv) in spread_map {
                             map.insert(sk, sv);
                         }
                     } else {
-                        return Err(CompileError::Semantic(
-                            "dict spread requires dict value".into(),
-                        ));
+                        return Err(CompileError::Semantic("dict spread requires dict value".into()));
                     }
                 } else {
                     let key_val = evaluate_expr(k, env, functions, classes, enums, impl_methods)?;
@@ -123,26 +117,14 @@ pub(super) fn eval_collection_expr(
             for item in items {
                 // Handle spread operator: *expr
                 if let Expr::Spread(inner) = item {
-                    let spread_val =
-                        evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
+                    let spread_val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
                     match spread_val {
                         Value::Array(spread_arr) => arr.extend(spread_arr),
                         Value::Tuple(tup) => arr.extend(tup),
-                        _ => {
-                            return Err(CompileError::Semantic(
-                                "spread operator requires array or tuple".into(),
-                            ))
-                        }
+                        _ => return Err(CompileError::Semantic("spread operator requires array or tuple".into())),
                     }
                 } else {
-                    arr.push(evaluate_expr(
-                        item,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )?);
+                    arr.push(evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
                 }
             }
             Ok(Some(Value::Array(arr)))
@@ -150,40 +132,23 @@ pub(super) fn eval_collection_expr(
         Expr::Tuple(items) => {
             let mut tup = Vec::new();
             for item in items {
-                tup.push(evaluate_expr(
-                    item,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?);
+                tup.push(evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
             }
             Ok(Some(Value::Tuple(tup)))
         }
         Expr::Index { receiver, index } => {
-            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
-                .deref_pointer();
+            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
             let idx_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
 
             // Check if idx_val is a range object for slicing
             if let Value::Object { class, fields } = &idx_val {
                 if class == crate::value::BUILTIN_RANGE {
                     // Extract range bounds
-                    let start = fields
-                        .get("start")
-                        .and_then(|v| v.as_int().ok())
-                        .unwrap_or(0);
+                    let start = fields.get("start").and_then(|v| v.as_int().ok()).unwrap_or(0);
                     let end = fields.get("end").and_then(|v| v.as_int().ok());
                     let inclusive = fields
                         .get("inclusive")
-                        .and_then(|v| {
-                            if let Value::Bool(b) = v {
-                                Some(*b)
-                            } else {
-                                None
-                            }
-                        })
+                        .and_then(|v| if let Value::Bool(b) = v { Some(*b) } else { None })
                         .unwrap_or(false);
 
                     return Ok(Some(match recv_val {
@@ -251,9 +216,9 @@ pub(super) fn eval_collection_expr(
                     } else {
                         raw_idx as usize
                     };
-                    arr.get(idx).cloned().ok_or_else(|| {
-                        CompileError::Semantic(format!("array index out of bounds: {raw_idx}"))
-                    })
+                    arr.get(idx)
+                        .cloned()
+                        .ok_or_else(|| CompileError::Semantic(format!("array index out of bounds: {raw_idx}")))
                 }
                 Value::Tuple(tup) => {
                     let raw_idx = idx_val.as_int()?;
@@ -264,9 +229,9 @@ pub(super) fn eval_collection_expr(
                     } else {
                         raw_idx as usize
                     };
-                    tup.get(idx).cloned().ok_or_else(|| {
-                        CompileError::Semantic(format!("tuple index out of bounds: {raw_idx}"))
-                    })
+                    tup.get(idx)
+                        .cloned()
+                        .ok_or_else(|| CompileError::Semantic(format!("tuple index out of bounds: {raw_idx}")))
                 }
                 Value::Dict(map) => {
                     let key = idx_val.to_key_string();
@@ -286,9 +251,7 @@ pub(super) fn eval_collection_expr(
                     s.chars()
                         .nth(idx)
                         .map(|c| Value::Str(c.to_string()))
-                        .ok_or_else(|| {
-                            CompileError::Semantic(format!("string index out of bounds: {raw_idx}"))
-                        })
+                        .ok_or_else(|| CompileError::Semantic(format!("string index out of bounds: {raw_idx}")))
                 }
                 Value::Object { fields, .. } => {
                     let key = idx_val.to_key_string();
@@ -297,22 +260,18 @@ pub(super) fn eval_collection_expr(
                         .cloned()
                         .ok_or_else(|| CompileError::Semantic(format!("key not found: {key}")))
                 }
-                _ => Err(CompileError::Semantic(
-                    "index access on non-indexable type".into(),
-                )),
+                _ => Err(CompileError::Semantic("index access on non-indexable type".into())),
             };
             Ok(Some(result?))
         }
         Expr::TupleIndex { receiver, index } => {
-            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
-                .deref_pointer();
+            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
             let result = match recv_val {
-                Value::Tuple(tup) => tup.get(*index).cloned().ok_or_else(|| {
-                    CompileError::Semantic(format!("tuple index out of bounds: {index}"))
-                }),
-                _ => Err(CompileError::Semantic(
-                    "tuple index access on non-tuple type".into(),
-                )),
+                Value::Tuple(tup) => tup
+                    .get(*index)
+                    .cloned()
+                    .ok_or_else(|| CompileError::Semantic(format!("tuple index out of bounds: {index}"))),
+                _ => Err(CompileError::Semantic("tuple index access on non-tuple type".into())),
             };
             Ok(Some(result?))
         }
@@ -336,14 +295,7 @@ pub(super) fn eval_collection_expr(
 
             let mut result = Vec::new();
             for mut inner_env in envs {
-                let val = evaluate_expr(
-                    expr,
-                    &mut inner_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
+                let val = evaluate_expr(expr, &mut inner_env, functions, classes, enums, impl_methods)?;
                 result.push(val);
             }
             Ok(Some(Value::Array(result)))
@@ -369,16 +321,8 @@ pub(super) fn eval_collection_expr(
 
             let mut result = HashMap::new();
             for mut inner_env in envs {
-                let k =
-                    evaluate_expr(key, &mut inner_env, functions, classes, enums, impl_methods)?;
-                let v = evaluate_expr(
-                    value,
-                    &mut inner_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
+                let k = evaluate_expr(key, &mut inner_env, functions, classes, enums, impl_methods)?;
+                let v = evaluate_expr(value, &mut inner_env, functions, classes, enums, impl_methods)?;
                 result.insert(k.to_key_string(), v);
             }
             Ok(Some(Value::Dict(result)))
@@ -389,8 +333,7 @@ pub(super) fn eval_collection_expr(
             end,
             step,
         } => {
-            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
-                .deref_pointer();
+            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
             let len = match &recv_val {
                 Value::Array(arr) => arr.len() as i64,
                 Value::Str(s) => s.len() as i64,
@@ -424,17 +367,13 @@ pub(super) fn eval_collection_expr(
             }
 
             let result = match recv_val {
-                Value::Array(arr) => Ok(Value::Array(slice_collection(
-                    &arr, start_idx, end_idx, step_val,
-                ))),
+                Value::Array(arr) => Ok(Value::Array(slice_collection(&arr, start_idx, end_idx, step_val))),
                 Value::Str(s) => {
                     let chars: Vec<char> = s.chars().collect();
                     let sliced = slice_collection(&chars, start_idx, end_idx, step_val);
                     Ok(Value::Str(sliced.into_iter().collect()))
                 }
-                Value::Tuple(tup) => Ok(Value::Tuple(slice_collection(
-                    &tup, start_idx, end_idx, step_val,
-                ))),
+                Value::Tuple(tup) => Ok(Value::Tuple(slice_collection(&tup, start_idx, end_idx, step_val))),
                 _ => Err(CompileError::Semantic("slice on non-sliceable type".into())),
             };
             Ok(Some(result?))

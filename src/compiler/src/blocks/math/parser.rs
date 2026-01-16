@@ -186,11 +186,7 @@ impl MathParser {
     fn is_implicit_mul(&self, left: &MathExpr) -> bool {
         matches!(
             left,
-            MathExpr::Int(_)
-                | MathExpr::Float(_)
-                | MathExpr::Var(_)
-                | MathExpr::Group(_)
-                | MathExpr::Subscript(_, _)
+            MathExpr::Int(_) | MathExpr::Float(_) | MathExpr::Var(_) | MathExpr::Group(_) | MathExpr::Subscript(_, _)
         )
     }
 
@@ -243,9 +239,8 @@ impl MathParser {
                         // Single token subscript
                         self.parse_primary()?
                     };
-                    self.warnings.push(
-                        "subscript syntax `x_i` is deprecated, use `x[i]` instead".to_string(),
-                    );
+                    self.warnings
+                        .push("subscript syntax `x_i` is deprecated, use `x[i]` instead".to_string());
                     expr = MathExpr::Subscript(Box::new(expr), Box::new(index));
                 }
                 _ => break,
@@ -353,11 +348,7 @@ impl MathParser {
                 self.advance();
                 v
             }
-            _ => {
-                return Err(CompileError::Semantic(
-                    "expected variable name in binder".to_string(),
-                ))
-            }
+            _ => return Err(CompileError::Semantic("expected variable name in binder".to_string())),
         };
 
         // Optional type annotation (ignored for now)
@@ -472,11 +463,7 @@ impl MathParser {
                     self.advance();
                     v
                 }
-                _ => {
-                    return Err(CompileError::Semantic(
-                        "expected variable in binder".to_string(),
-                    ))
-                }
+                _ => return Err(CompileError::Semantic("expected variable in binder".to_string())),
             };
             self.expect(MathToken::Eq)?;
             let start = self.parse_expression()?;
@@ -489,11 +476,7 @@ impl MathParser {
                     self.advance();
                     v
                 }
-                _ => {
-                    return Err(CompileError::Semantic(
-                        "expected variable in binder".to_string(),
-                    ))
-                }
+                _ => return Err(CompileError::Semantic("expected variable in binder".to_string())),
             };
             self.expect(MathToken::Eq)?;
             let start = self.parse_primary()?;
@@ -641,10 +624,7 @@ mod tests {
     #[test]
     fn test_parse_function() {
         let (expr, _) = parse_math("sqrt(16)").unwrap();
-        assert_eq!(
-            expr,
-            MathExpr::App("sqrt".to_string(), vec![MathExpr::Int(16)])
-        );
+        assert_eq!(expr, MathExpr::App("sqrt".to_string(), vec![MathExpr::Int(16)]));
     }
 
     #[test]
@@ -699,10 +679,7 @@ mod tests {
     #[test]
     fn test_parse_absolute() {
         let (expr, _) = parse_math("|x|").unwrap();
-        assert_eq!(
-            expr,
-            MathExpr::Abs(Box::new(MathExpr::Var("x".to_string())))
-        );
+        assert_eq!(expr, MathExpr::Abs(Box::new(MathExpr::Var("x".to_string()))));
     }
 
     #[test]

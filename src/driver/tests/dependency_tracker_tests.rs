@@ -28,14 +28,14 @@
 use simple_dependency_tracker::{
     graph::ImportGraph,
     macro_import::{
-        auto_imported_macros, explicit_import, glob_import, is_auto_imported, AutoImport,
-        MacroDirManifest, MacroExports, MacroSymbol, SymKind,
+        auto_imported_macros, explicit_import, glob_import, is_auto_imported, AutoImport, MacroDirManifest,
+        MacroExports, MacroSymbol, SymKind,
     },
     resolution::{resolve, well_formed, FileKind, FileSystem, ModPath, ResolutionResult},
     symbol::{ProjectSymbols, SymbolEntry, SymbolKind, SymbolTable},
     visibility::{
-        ancestor_visibility, effective_visibility, visibility_meet, DirManifest, ModDecl,
-        ModuleContents, Symbol, SymbolId, Visibility,
+        ancestor_visibility, effective_visibility, visibility_meet, DirManifest, ModDecl, ModuleContents, Symbol,
+        SymbolId, Visibility,
     },
 };
 use std::fs;

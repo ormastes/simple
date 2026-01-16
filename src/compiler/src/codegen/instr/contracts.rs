@@ -52,9 +52,7 @@ pub(super) fn compile_contract_check<M: Module>(
         let continue_block = builder.create_block();
 
         // Branch based on condition
-        builder
-            .ins()
-            .brif(cond, continue_block, &[], trap_block, &[]);
+        builder.ins().brif(cond, continue_block, &[], trap_block, &[]);
 
         // Trap block - triggers a panic
         builder.switch_to_block(trap_block);

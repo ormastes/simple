@@ -14,10 +14,7 @@ impl<'a> super::SuiParser<'a> {
             SuiTokenKind::Text(text) => {
                 let span = self.peek().span;
                 self.advance();
-                Ok(Some(TemplateNode::Text(TextNode {
-                    span,
-                    content: text,
-                })))
+                Ok(Some(TemplateNode::Text(TextNode { span, content: text })))
             }
             SuiTokenKind::OutputOpen => Ok(Some(self.parse_output(false)?)),
             SuiTokenKind::RawOutputOpen => Ok(Some(self.parse_output(true)?)),

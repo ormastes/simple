@@ -13,10 +13,7 @@ use super::{next_module_handle, ModuleState, MODULE_REGISTRY};
 use super::{next_handle, TensorWrapper, TENSOR_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-use super::{
-    rt_torch_free, rt_torch_kaiming_uniform_, rt_torch_randn, rt_torch_set_requires_grad,
-    rt_torch_zeros,
-};
+use super::{rt_torch_free, rt_torch_kaiming_uniform_, rt_torch_randn, rt_torch_set_requires_grad, rt_torch_zeros};
 
 #[cfg(feature = "pytorch")]
 use tch::Kind as TchKind;
@@ -71,9 +68,7 @@ pub extern "C" fn rt_torch_conv2d_new(
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY
-            .lock()
-            .insert(handle, std::sync::Arc::new(state));
+        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(state));
 
         tracing::debug!(
             "rt_torch_conv2d_new: handle={} in_ch={} out_ch={} kernel={} stride={} padding={}",
@@ -156,12 +151,7 @@ pub extern "C" fn rt_torch_conv2d_forward(module_handle: u64, input_handle: u64)
 
 /// Max pooling 2D
 #[no_mangle]
-pub extern "C" fn rt_torch_max_pool2d(
-    input_handle: u64,
-    kernel_size: i64,
-    stride: i64,
-    padding: i64,
-) -> u64 {
+pub extern "C" fn rt_torch_max_pool2d(input_handle: u64, kernel_size: i64, stride: i64, padding: i64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let tensor_registry = TENSOR_REGISTRY.lock();
@@ -202,12 +192,7 @@ pub extern "C" fn rt_torch_max_pool2d(
 
 /// Average pooling 2D
 #[no_mangle]
-pub extern "C" fn rt_torch_avg_pool2d(
-    input_handle: u64,
-    kernel_size: i64,
-    stride: i64,
-    padding: i64,
-) -> u64 {
+pub extern "C" fn rt_torch_avg_pool2d(input_handle: u64, kernel_size: i64, stride: i64, padding: i64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let tensor_registry = TENSOR_REGISTRY.lock();
@@ -271,11 +256,7 @@ pub extern "C" fn rt_torch_global_avg_pool2d(input_handle: u64) -> u64 {
             .lock()
             .insert(handle, std::sync::Arc::new(TensorWrapper(result)));
 
-        tracing::debug!(
-            "rt_torch_global_avg_pool2d: input={} -> {}",
-            input_handle,
-            handle
-        );
+        tracing::debug!("rt_torch_global_avg_pool2d: input={} -> {}", input_handle, handle);
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -307,11 +288,7 @@ pub extern "C" fn rt_torch_global_max_pool2d(input_handle: u64) -> u64 {
             .lock()
             .insert(handle, std::sync::Arc::new(TensorWrapper(result)));
 
-        tracing::debug!(
-            "rt_torch_global_max_pool2d: input={} -> {}",
-            input_handle,
-            handle
-        );
+        tracing::debug!("rt_torch_global_max_pool2d: input={} -> {}", input_handle, handle);
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -324,11 +301,7 @@ pub extern "C" fn rt_torch_global_max_pool2d(input_handle: u64) -> u64 {
 /// Adaptive Average Pooling 2D - pools to target output size
 /// Input: [N, C, H, W] -> Output: [N, C, output_h, output_w]
 #[no_mangle]
-pub extern "C" fn rt_torch_adaptive_avg_pool2d(
-    input_handle: u64,
-    output_h: i64,
-    output_w: i64,
-) -> u64 {
+pub extern "C" fn rt_torch_adaptive_avg_pool2d(input_handle: u64, output_h: i64, output_w: i64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
@@ -368,11 +341,7 @@ pub extern "C" fn rt_torch_adaptive_avg_pool2d(
 /// Adaptive Max Pooling 2D - pools to target output size
 /// Input: [N, C, H, W] -> Output: [N, C, output_h, output_w]
 #[no_mangle]
-pub extern "C" fn rt_torch_adaptive_max_pool2d(
-    input_handle: u64,
-    output_h: i64,
-    output_w: i64,
-) -> u64 {
+pub extern "C" fn rt_torch_adaptive_max_pool2d(input_handle: u64, output_h: i64, output_w: i64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();

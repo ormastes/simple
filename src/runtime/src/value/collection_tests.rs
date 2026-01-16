@@ -21,9 +21,7 @@ use super::{
     rt_tuple_set,
 };
 // Dict functions are in a sibling module, import via crate path
-use crate::value::{
-    rt_dict_clear, rt_dict_get, rt_dict_len, rt_dict_new, rt_dict_set, RuntimeValue,
-};
+use crate::value::{rt_dict_clear, rt_dict_get, rt_dict_len, rt_dict_new, rt_dict_set, RuntimeValue};
 
 // ============================================================================
 // Array Tests

@@ -223,10 +223,7 @@ impl Diagnostic {
             "{}{}{}{}: {}{}",
             severity_color,
             self.severity.name(),
-            self.code
-                .as_ref()
-                .map(|c| format!("[{}]", c))
-                .unwrap_or_default(),
+            self.code.as_ref().map(|c| format!("[{}]", c)).unwrap_or_default(),
             reset,
             bold,
             self.message
@@ -302,21 +299,13 @@ impl Diagnostic {
 
         // Notes
         for note in &self.notes {
-            let note_color = if use_color {
-                Severity::Note.color()
-            } else {
-                ""
-            };
+            let note_color = if use_color { Severity::Note.color() } else { "" };
             output.push_str(&format!("  {}= note:{} {}\n", note_color, reset, note));
         }
 
         // Help
         for help in &self.help {
-            let help_color = if use_color {
-                Severity::Help.color()
-            } else {
-                ""
-            };
+            let help_color = if use_color { Severity::Help.color() } else { "" };
             output.push_str(&format!("  {}= help:{} {}\n", help_color, reset, help));
         }
 
@@ -420,18 +409,12 @@ impl Diagnostics {
 
     /// Get the number of errors.
     pub fn error_count(&self) -> usize {
-        self.items
-            .iter()
-            .filter(|d| d.severity == Severity::Error)
-            .count()
+        self.items.iter().filter(|d| d.severity == Severity::Error).count()
     }
 
     /// Get the number of warnings.
     pub fn warning_count(&self) -> usize {
-        self.items
-            .iter()
-            .filter(|d| d.severity == Severity::Warning)
-            .count()
+        self.items.iter().filter(|d| d.severity == Severity::Warning).count()
     }
 
     /// Format all diagnostics.
@@ -496,11 +479,7 @@ impl Diagnostics {
 
         for diag in &self.items {
             // Get the source for this diagnostic's file
-            let source = diag
-                .file
-                .as_ref()
-                .and_then(|f| sources.get(f))
-                .unwrap_or("");
+            let source = diag.file.as_ref().and_then(|f| sources.get(f)).unwrap_or("");
 
             output.push_str(&diag.format(source, use_color));
             output.push('\n');
@@ -515,8 +494,7 @@ impl Diagnostics {
     /// Returns a map from file path to diagnostics for that file.
     /// Diagnostics without a file are grouped under an empty string key.
     pub fn by_file(&self) -> std::collections::HashMap<String, Vec<&Diagnostic>> {
-        let mut grouped: std::collections::HashMap<String, Vec<&Diagnostic>> =
-            std::collections::HashMap::new();
+        let mut grouped: std::collections::HashMap<String, Vec<&Diagnostic>> = std::collections::HashMap::new();
 
         for diag in &self.items {
             let file = diag.file.as_deref().unwrap_or("").to_string();
@@ -528,10 +506,7 @@ impl Diagnostics {
 
     /// Get diagnostics for a specific file.
     pub fn for_file(&self, path: &str) -> Vec<&Diagnostic> {
-        self.items
-            .iter()
-            .filter(|d| d.file.as_deref() == Some(path))
-            .collect()
+        self.items.iter().filter(|d| d.file.as_deref() == Some(path)).collect()
     }
 
     /// Iterate over diagnostics.

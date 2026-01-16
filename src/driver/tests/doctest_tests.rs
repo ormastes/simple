@@ -1,6 +1,6 @@
 use simple_driver::doctest::{
-    discover_md_doctests, parse_doctest_text, parse_markdown_doctests, parse_readme_config,
-    parse_spl_doctests, run_examples, DoctestStatus, Expected,
+    discover_md_doctests, parse_doctest_text, parse_markdown_doctests, parse_readme_config, parse_spl_doctests,
+    run_examples, DoctestStatus, Expected,
 };
 use std::path::Path;
 
@@ -157,12 +157,7 @@ fn second():
     // First docstring has 2 examples (>>> x = 10, >>> x)
     // Second docstring has 1 example (>>> 2 * 3)
     // Total: 3 examples
-    assert_eq!(
-        examples.len(),
-        3,
-        "Expected 3 examples but got {}",
-        examples.len()
-    );
+    assert_eq!(examples.len(), 3, "Expected 3 examples but got {}", examples.len());
 
     let results = run_examples(&examples);
     assert!(matches!(results[0].status, DoctestStatus::Passed));
@@ -271,12 +266,7 @@ fn doctest_discovers_md_doctests_from_fixtures() {
     let examples = discover_md_doctests(fixtures_path).expect("Should discover md doctests");
 
     // Should find 5 examples: 2 from README.md, 1 from api/README.md, 2 from usage.md
-    assert_eq!(
-        examples.len(),
-        5,
-        "Expected 5 doctests but found {}",
-        examples.len()
-    );
+    assert_eq!(examples.len(), 5, "Expected 5 doctests but found {}", examples.len());
 }
 
 #[test]

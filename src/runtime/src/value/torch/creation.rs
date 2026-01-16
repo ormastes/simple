@@ -122,9 +122,7 @@ pub extern "C" fn rt_torch_zeros(shape_ptr: *const i64, ndim: i32, dtype: i32, d
 
         // Register and return handle
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(tensor)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
 
         tracing::debug!(
             "rt_torch_zeros: created handle={}, shape={:?}, dtype={}, device={}",
@@ -162,9 +160,7 @@ pub extern "C" fn rt_torch_ones(shape_ptr: *const i64, ndim: i32, dtype: i32, de
 
         let tensor = Tensor::ones(shape, (kind, dev));
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(tensor)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
 
         handle
     }
@@ -194,9 +190,7 @@ pub extern "C" fn rt_torch_randn(shape_ptr: *const i64, ndim: i32, dtype: i32, d
 
         let tensor = Tensor::randn(shape, (kind, dev));
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(tensor)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
 
         handle
     }
@@ -225,9 +219,7 @@ pub extern "C" fn rt_torch_arange(start: i64, end: i64, step: i64, dtype: i32, d
 
         let tensor = Tensor::arange_start_step(start, end, step, (kind, dev));
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(tensor)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
 
         handle
     }
@@ -278,8 +270,7 @@ pub extern "C" fn rt_torch_tensor(
         }
 
         // Read shape
-        let shape: Vec<i64> =
-            unsafe { std::slice::from_raw_parts(shape_ptr, shape_len as usize) }.to_vec();
+        let shape: Vec<i64> = unsafe { std::slice::from_raw_parts(shape_ptr, shape_len as usize) }.to_vec();
 
         // Verify shape matches data length
         let expected_len: i64 = shape.iter().product();
@@ -319,9 +310,7 @@ pub extern "C" fn rt_torch_tensor(
 
         // Register and return handle
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(tensor)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(tensor)));
         tracing::debug!(
             "rt_torch_tensor: created tensor with shape {:?}, dtype={}, device={}, handle={}",
             shape,
@@ -333,14 +322,7 @@ pub extern "C" fn rt_torch_tensor(
     }
     #[cfg(not(feature = "pytorch"))]
     {
-        let _ = (
-            data_ptr,
-            data_len,
-            shape_ptr,
-            shape_len,
-            dtype_code,
-            device_code,
-        );
+        let _ = (data_ptr, data_len, shape_ptr, shape_len, dtype_code, device_code);
         0
     }
 }
@@ -361,9 +343,7 @@ pub extern "C" fn rt_torch_clone(tensor_handle: u64) -> u64 {
         drop(registry);
 
         let handle = next_handle();
-        TENSOR_REGISTRY
-            .lock()
-            .insert(handle, Arc::new(TensorWrapper(cloned)));
+        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(cloned)));
 
         handle
     }

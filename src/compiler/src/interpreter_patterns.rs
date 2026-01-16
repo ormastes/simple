@@ -294,11 +294,7 @@ pub(crate) fn pattern_matches(
             }
         }
 
-        Pattern::Range {
-            start,
-            end,
-            inclusive,
-        } => {
+        Pattern::Range { start, end, inclusive } => {
             // Range patterns only work with integers
             let Value::Int(val) = value else {
                 return Ok(false);
@@ -391,10 +387,7 @@ pub(crate) fn check_enum_exhaustiveness(
     }
 
     // Find missing variants
-    let missing: Vec<String> = all_variants
-        .into_iter()
-        .filter(|v| !covered.contains(v))
-        .collect();
+    let missing: Vec<String> = all_variants.into_iter().filter(|v| !covered.contains(v)).collect();
 
     if missing.is_empty() {
         None

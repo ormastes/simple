@@ -12,19 +12,13 @@
 use simple_parser::ast::{AssignOp, Block, Expr, FunctionDef, Node};
 use simple_parser::Span;
 use simple_type::effects::{
-    build_effect_env, get_return_wrap_mode, infer_function_effect, needs_await,
-    needs_promise_wrapping, statement_needs_await, validate_suspension_context, AwaitMode, Effect,
-    ReturnWrapMode,
+    build_effect_env, get_return_wrap_mode, infer_function_effect, needs_await, needs_promise_wrapping,
+    statement_needs_await, validate_suspension_context, AwaitMode, Effect, ReturnWrapMode,
 };
 use std::collections::HashMap;
 
 /// Helper to create a minimal function definition
-fn make_function(
-    name: &str,
-    is_sync: bool,
-    has_async_effect: bool,
-    body: Vec<Node>,
-) -> FunctionDef {
+fn make_function(name: &str, is_sync: bool, has_async_effect: bool, body: Vec<Node>) -> FunctionDef {
     FunctionDef {
         span: Span::new(0, 0, 0, 0),
         name: name.to_string(),
@@ -143,10 +137,7 @@ fn test_phase_5_promise_wrapping() {
 
     // Async function needs Promise wrapping
     assert!(needs_promise_wrapping(&async_func, &env));
-    assert_eq!(
-        get_return_wrap_mode(&async_func, &env),
-        ReturnWrapMode::Resolved
-    );
+    assert_eq!(get_return_wrap_mode(&async_func, &env), ReturnWrapMode::Resolved);
 
     // Sync function doesn't need Promise wrapping
     assert!(!needs_promise_wrapping(&sync_func, &env));

@@ -32,16 +32,11 @@ impl LlvmBackend {
             .build_pointer_cast(alloc, i8_ptr_type, "struct_ptr")
             .map_err(|e| CompileError::Semantic(format!("Failed to cast struct ptr: {}", e)))?;
 
-        for ((offset, field_type), value) in field_offsets
-            .iter()
-            .zip(field_types.iter())
-            .zip(field_values.iter())
-        {
+        for ((offset, field_type), value) in field_offsets.iter().zip(field_types.iter()).zip(field_values.iter()) {
             let field_val = self.get_vreg(value, vreg_map)?;
             let offset_val = self.context.i32_type().const_int(*offset as u64, false);
-            let field_ptr =
-                unsafe { builder.build_gep(i8_type, struct_ptr, &[offset_val], "field_ptr") }
-                    .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
+            let field_ptr = unsafe { builder.build_gep(i8_type, struct_ptr, &[offset_val], "field_ptr") }
+                .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
             let llvm_field_ty = self.llvm_type(field_type)?;
             let typed_ptr = builder
                 .build_pointer_cast(
@@ -78,9 +73,8 @@ impl LlvmBackend {
                 .build_pointer_cast(ptr, i8_ptr_type, "struct_ptr")
                 .map_err(|e| CompileError::Semantic(format!("Failed to cast struct ptr: {}", e)))?;
             let offset_val = self.context.i32_type().const_int(byte_offset as u64, false);
-            let field_ptr =
-                unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr") }
-                    .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
+            let field_ptr = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr") }
+                .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
             let llvm_field_ty = self.llvm_type(field_type)?;
             let typed_ptr = builder
                 .build_pointer_cast(
@@ -122,9 +116,8 @@ impl LlvmBackend {
                 .build_pointer_cast(ptr, i8_ptr_type, "struct_ptr")
                 .map_err(|e| CompileError::Semantic(format!("Failed to cast struct ptr: {}", e)))?;
             let offset_val = self.context.i32_type().const_int(byte_offset as u64, false);
-            let field_ptr =
-                unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr") }
-                    .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
+            let field_ptr = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr") }
+                .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
             let llvm_field_ty = self.llvm_type(field_type)?;
             let typed_ptr = builder
                 .build_pointer_cast(
@@ -185,16 +178,11 @@ impl LlvmBackend {
             .build_store(fn_slot, func_ptr_cast)
             .map_err(|e| CompileError::Semantic(format!("Failed to build store: {}", e)))?;
 
-        for ((offset, field_type), value) in capture_offsets
-            .iter()
-            .zip(capture_types.iter())
-            .zip(captures.iter())
-        {
+        for ((offset, field_type), value) in capture_offsets.iter().zip(capture_types.iter()).zip(captures.iter()) {
             let capture_val = self.get_vreg(value, vreg_map)?;
             let offset_val = self.context.i32_type().const_int(*offset as u64, false);
-            let field_ptr =
-                unsafe { builder.build_gep(i8_type, closure_ptr, &[offset_val], "cap_ptr") }
-                    .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
+            let field_ptr = unsafe { builder.build_gep(i8_type, closure_ptr, &[offset_val], "cap_ptr") }
+                .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
             let llvm_field_ty = self.llvm_type(field_type)?;
             let typed_ptr = builder
                 .build_pointer_cast(

@@ -112,8 +112,7 @@ impl PackageTrailer {
         let trailer_bytes = &bytes[start..];
 
         // Safety: PackageTrailer is repr(C) with only primitive types
-        let trailer =
-            unsafe { std::ptr::read_unaligned(trailer_bytes.as_ptr() as *const PackageTrailer) };
+        let trailer = unsafe { std::ptr::read_unaligned(trailer_bytes.as_ptr() as *const PackageTrailer) };
 
         if trailer.is_valid() {
             Some(trailer)
@@ -130,9 +129,8 @@ impl PackageTrailer {
         let mut bytes = [0u8; Self::SIZE];
         reader.read_exact(&mut bytes)?;
 
-        Self::from_bytes(&bytes).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid package trailer")
-        })
+        Self::from_bytes(&bytes)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid package trailer"))
     }
 
     /// Write trailer to bytes.
@@ -201,8 +199,7 @@ impl ManifestSection {
             return None;
         }
 
-        let manifest_toml =
-            String::from_utf8(bytes[offset..offset + manifest_len].to_vec()).ok()?;
+        let manifest_toml = String::from_utf8(bytes[offset..offset + manifest_len].to_vec()).ok()?;
         offset += manifest_len;
 
         // Read lock

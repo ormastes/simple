@@ -95,9 +95,7 @@ impl HirRefinedType {
             // For predicates like `self > 0` with integer constants
             (HirExprKind::Binary { op, left, right }, HirExprKind::Integer(val)) => {
                 // Check if predicate is in form: self <op> <const>
-                if let (HirExprKind::Local(0), HirExprKind::Integer(bound)) =
-                    (&left.kind, &right.kind)
-                {
+                if let (HirExprKind::Local(0), HirExprKind::Integer(bound)) = (&left.kind, &right.kind) {
                     match op {
                         BinOp::Gt => return Some(*val > *bound),
                         BinOp::GtEq => return Some(*val >= *bound),
@@ -109,9 +107,7 @@ impl HirRefinedType {
                     }
                 }
                 // Check reversed: <const> <op> self
-                if let (HirExprKind::Integer(bound), HirExprKind::Local(0)) =
-                    (&left.kind, &right.kind)
-                {
+                if let (HirExprKind::Integer(bound), HirExprKind::Local(0)) = (&left.kind, &right.kind) {
                     match op {
                         BinOp::Gt => return Some(*bound > *val),
                         BinOp::GtEq => return Some(*bound >= *val),

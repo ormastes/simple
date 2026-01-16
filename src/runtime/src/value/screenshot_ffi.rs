@@ -152,10 +152,7 @@ pub extern "C" fn rt_screenshot_get_output_dir() -> *mut c_char {
 /// # Safety
 /// `test_file` and `test_name` must be valid C strings
 #[no_mangle]
-pub unsafe extern "C" fn rt_screenshot_set_context(
-    test_file: *const c_char,
-    test_name: *const c_char,
-) {
+pub unsafe extern "C" fn rt_screenshot_set_context(test_file: *const c_char, test_name: *const c_char) {
     let mut ctx = get_test_context().write();
 
     if !test_file.is_null() {
@@ -316,12 +313,7 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-fn generate_screenshot_path(
-    test_file: &str,
-    test_name: &str,
-    capture_type: CaptureType,
-    output_dir: &str,
-) -> String {
+fn generate_screenshot_path(test_file: &str, test_name: &str, capture_type: CaptureType, output_dir: &str) -> String {
     // Clean up test file path
     let relative = test_file
         .replace("simple/std_lib/test/", "")

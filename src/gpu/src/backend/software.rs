@@ -112,13 +112,7 @@ impl Backend for SoftwareBackend {
     }
 
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    fn memcpy(
-        &self,
-        dst: *mut u8,
-        src: *const u8,
-        size: usize,
-        _kind: MemcpyKind,
-    ) -> GpuResult<()> {
+    fn memcpy(&self, dst: *mut u8, src: *const u8, size: usize, _kind: MemcpyKind) -> GpuResult<()> {
         // In software backend, all memory is host memory
         unsafe {
             std::ptr::copy_nonoverlapping(src, dst, size);
@@ -159,10 +153,7 @@ impl Backend for SoftwareBackend {
     fn load_kernel_binary(&self, _binary: &[u8], name: &str) -> GpuResult<KernelHandle> {
         // Software backend doesn't execute binaries - just store the name
         let handle = next_handle();
-        self.kernels
-            .lock()
-            .unwrap()
-            .insert(handle, name.to_string());
+        self.kernels.lock().unwrap().insert(handle, name.to_string());
         Ok(handle)
     }
 

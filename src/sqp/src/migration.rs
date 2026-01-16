@@ -27,11 +27,7 @@ pub enum Operation {
     /// Drop a column from a table.
     DropColumn { table: String, column: String },
     /// Rename a column.
-    RenameColumn {
-        table: String,
-        from: String,
-        to: String,
-    },
+    RenameColumn { table: String, from: String, to: String },
     /// Change column type.
     ChangeColumn {
         table: String,
@@ -131,15 +127,9 @@ impl Operation {
                     new_type.to_sqlite()
                 };
                 if dialect == "postgres" {
-                    let mut sql = format!(
-                        "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
-                        table, column, type_str
-                    );
+                    let mut sql = format!("ALTER TABLE {} ALTER COLUMN {} TYPE {}", table, column, type_str);
                     if !nullable {
-                        sql.push_str(&format!(
-                            "; ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
-                            table, column
-                        ));
+                        sql.push_str(&format!("; ALTER TABLE {} ALTER COLUMN {} SET NOT NULL", table, column));
                     }
                     sql
                 } else {
@@ -194,10 +184,7 @@ impl Operation {
                     format!("ALTER TABLE {} DROP CONSTRAINT {}", table, name)
                 } else {
                     // SQLite doesn't support dropping foreign keys
-                    format!(
-                        "-- SQLite: Cannot drop foreign key {}; requires table rebuild",
-                        name
-                    )
+                    format!("-- SQLite: Cannot drop foreign key {}; requires table rebuild", name)
                 }
             }
             Operation::RawSql(sql) => sql.clone(),
@@ -297,11 +284,7 @@ impl Migration {
 
     /// Generate down SQL.
     pub fn down_sql(&self, dialect: &str) -> Vec<String> {
-        self.down
-            .iter()
-            .rev()
-            .map(|op| op.to_sql(dialect))
-            .collect()
+        self.down.iter().rev().map(|op| op.to_sql(dialect)).collect()
     }
 }
 
@@ -358,10 +341,7 @@ impl Migrator {
 
     /// Get applied migrations.
     pub fn applied(&self) -> Vec<&Migration> {
-        self.applied
-            .iter()
-            .filter_map(|v| self.migrations.get(v))
-            .collect()
+        self.applied.iter().filter_map(|v| self.migrations.get(v)).collect()
     }
 
     /// Get migration status.
@@ -428,9 +408,7 @@ mod tests {
         let op = Operation::CreateTable {
             name: "users".to_string(),
             columns: vec![
-                Column::new("id", ColumnType::Integer)
-                    .primary_key()
-                    .auto_increment(),
+                Column::new("id", ColumnType::Integer).primary_key().auto_increment(),
                 Column::new("name", ColumnType::Text).not_null(),
             ],
         };
@@ -446,9 +424,7 @@ mod tests {
         let migration = Migration::new("001_create_users").create_table(
             "users",
             vec![
-                Column::new("id", ColumnType::Integer)
-                    .primary_key()
-                    .auto_increment(),
+                Column::new("id", ColumnType::Integer).primary_key().auto_increment(),
                 Column::new("name", ColumnType::Text).not_null(),
             ],
         );
@@ -468,8 +444,8 @@ mod tests {
 
     #[test]
     fn test_add_column_migration() {
-        let migration = Migration::new("002_add_email")
-            .add_column("users", Column::new("email", ColumnType::Text).not_null());
+        let migration =
+            Migration::new("002_add_email").add_column("users", Column::new("email", ColumnType::Text).not_null());
 
         let up_sql = migration.up_sql("sqlite");
         assert!(up_sql[0].contains("ADD COLUMN email"));

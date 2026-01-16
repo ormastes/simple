@@ -58,16 +58,7 @@ pub(crate) fn eval_arg_usize(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<usize, CompileError> {
-    Ok(eval_arg_int(
-        args,
-        idx,
-        default as i64,
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )? as usize)
+    Ok(eval_arg_int(args, idx, default as i64, env, functions, classes, enums, impl_methods)? as usize)
 }
 
 /// Apply a lambda to each item in an array, returning Vec of results.

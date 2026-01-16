@@ -74,11 +74,7 @@ impl BindingSpecializer {
             return module.clone();
         }
 
-        let new_items: Vec<Node> = module
-            .items
-            .iter()
-            .map(|node| self.specialize_node(node))
-            .collect();
+        let new_items: Vec<Node> = module.items.iter().map(|node| self.specialize_node(node)).collect();
 
         Module {
             name: module.name.clone(),
@@ -132,20 +128,12 @@ impl BindingSpecializer {
             }
             Node::Class(c) => {
                 let mut new_class = c.clone();
-                new_class.methods = c
-                    .methods
-                    .iter()
-                    .map(|m| self.specialize_function(m))
-                    .collect();
+                new_class.methods = c.methods.iter().map(|m| self.specialize_function(m)).collect();
                 Node::Class(new_class)
             }
             Node::Impl(impl_block) => {
                 let mut new_impl = impl_block.clone();
-                new_impl.methods = impl_block
-                    .methods
-                    .iter()
-                    .map(|m| self.specialize_function(m))
-                    .collect();
+                new_impl.methods = impl_block.methods.iter().map(|m| self.specialize_function(m)).collect();
                 Node::Impl(new_impl)
             }
             // Pass through other nodes unchanged
@@ -160,11 +148,7 @@ impl BindingSpecializer {
     }
 
     fn specialize_block(&self, block: &Block) -> Block {
-        let new_stmts: Vec<Node> = block
-            .statements
-            .iter()
-            .map(|stmt| self.specialize_node(stmt))
-            .collect();
+        let new_stmts: Vec<Node> = block.statements.iter().map(|stmt| self.specialize_node(stmt)).collect();
         Block {
             span: block.span,
             statements: new_stmts,
@@ -174,11 +158,7 @@ impl BindingSpecializer {
     fn specialize_expr(&self, expr: &Expr) -> Expr {
         match expr {
             // Method calls are the primary target for specialization
-            Expr::MethodCall {
-                receiver,
-                method,
-                args,
-            } => {
+            Expr::MethodCall { receiver, method, args } => {
                 let new_receiver = Box::new(self.specialize_expr(receiver));
                 let new_args: Vec<_> = args
                     .iter()
@@ -237,9 +217,7 @@ impl BindingSpecializer {
                 let_pattern: let_pattern.clone(),
                 condition: Box::new(self.specialize_expr(condition)),
                 then_branch: Box::new(self.specialize_expr(then_branch)),
-                else_branch: else_branch
-                    .as_ref()
-                    .map(|e| Box::new(self.specialize_expr(e))),
+                else_branch: else_branch.as_ref().map(|e| Box::new(self.specialize_expr(e))),
             },
 
             Expr::Lambda { params, body, .. } => {
@@ -250,13 +228,9 @@ impl BindingSpecializer {
                 new_lambda
             }
 
-            Expr::Array(elements) => {
-                Expr::Array(elements.iter().map(|e| self.specialize_expr(e)).collect())
-            }
+            Expr::Array(elements) => Expr::Array(elements.iter().map(|e| self.specialize_expr(e)).collect()),
 
-            Expr::Tuple(elements) => {
-                Expr::Tuple(elements.iter().map(|e| self.specialize_expr(e)).collect())
-            }
+            Expr::Tuple(elements) => Expr::Tuple(elements.iter().map(|e| self.specialize_expr(e)).collect()),
 
             Expr::Index { receiver, index } => Expr::Index {
                 receiver: Box::new(self.specialize_expr(receiver)),

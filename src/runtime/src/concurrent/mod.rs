@@ -56,14 +56,11 @@ pub use queue::ConcurrentQueue;
 pub use stack::ConcurrentStack;
 
 // Re-export FFI functions from submodules
-pub use gc_barrier::{
-    simple_gc_barrier_end_collection, simple_gc_barrier_epoch, simple_gc_barrier_start_collection,
-};
+pub use gc_barrier::{simple_gc_barrier_end_collection, simple_gc_barrier_epoch, simple_gc_barrier_start_collection};
 pub use map::{
     simple_concurrent_map_clear, simple_concurrent_map_contains_key, simple_concurrent_map_free,
-    simple_concurrent_map_get, simple_concurrent_map_insert, simple_concurrent_map_is_empty,
-    simple_concurrent_map_len, simple_concurrent_map_new, simple_concurrent_map_remove,
-    simple_concurrent_map_with_capacity,
+    simple_concurrent_map_get, simple_concurrent_map_insert, simple_concurrent_map_is_empty, simple_concurrent_map_len,
+    simple_concurrent_map_new, simple_concurrent_map_remove, simple_concurrent_map_with_capacity,
 };
 pub use queue::{
     simple_concurrent_queue_free, simple_concurrent_queue_is_empty, simple_concurrent_queue_len,

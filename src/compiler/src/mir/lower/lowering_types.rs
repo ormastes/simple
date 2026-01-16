@@ -43,10 +43,7 @@ impl<'a> MirLowerer<'a> {
         // Look up type info from registry
         if let Some(registry) = self.type_registry {
             if let Some(hir_type) = registry.get(ty) {
-                if let HirType::UnitType {
-                    name, constraints, ..
-                } = hir_type
-                {
+                if let HirType::UnitType { name, constraints, .. } = hir_type {
                     // Only emit check if there's a range constraint
                     if let Some((min, max)) = constraints.range {
                         let overflow: UnitOverflowBehavior = constraints.overflow.into();

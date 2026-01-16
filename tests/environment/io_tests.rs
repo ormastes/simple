@@ -40,8 +40,5 @@ fn main() -> int = 42
     fs::write(&source, content).expect("write ok");
 
     let read_content = fs::read_to_string(&source).expect("read ok");
-    assert!(
-        read_content.contains("fn main()"),
-        "Should contain function"
-    );
+    assert!(read_content.contains("fn main()"), "Should contain function");
 }

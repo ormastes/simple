@@ -194,18 +194,12 @@ fn test_module_loader_load_from_memory() {
     let smf_path = dir.path().join("memory_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     let bytes = fs::read(&smf_path).expect("read ok");
     let loader = ModuleLoader::new();
     let module = loader.load_from_memory(&bytes);
-    assert!(
-        module.is_ok(),
-        "Should load from memory: {:?}",
-        module.err()
-    );
+    assert!(module.is_ok(), "Should load from memory: {:?}", module.err());
 }
 
 /// Test ModuleLoader::load_with_resolver
@@ -219,17 +213,11 @@ fn test_module_loader_load_with_resolver() {
     let smf_path = dir.path().join("resolver_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 99", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 99", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load_with_resolver(&smf_path, |_name| None);
-    assert!(
-        module.is_ok(),
-        "Should load with resolver: {:?}",
-        module.err()
-    );
+    assert!(module.is_ok(), "Should load with resolver: {:?}", module.err());
 }
 
 // =============================================================================

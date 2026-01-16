@@ -13,8 +13,7 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, error, instrument, trace, warn};
 
 use simple_parser::ast::{
-    ClassDef, EnumDef, ExportUseStmt, Expr, FunctionDef, ImportTarget, MacroDef, Node, Pattern,
-    UseStmt,
+    ClassDef, EnumDef, ExportUseStmt, Expr, FunctionDef, ImportTarget, MacroDef, Node, Pattern, UseStmt,
 };
 
 use crate::error::CompileError;
@@ -22,9 +21,8 @@ use crate::value::{Env, Value};
 
 // Import module cache utilities
 use super::module_cache::{
-    cache_module_exports, decrement_load_depth, filter_functions_from_value,
-    get_cached_module_exports, increment_load_depth, is_module_loading, mark_module_loading,
-    unmark_module_loading, MAX_MODULE_DEPTH,
+    cache_module_exports, decrement_load_depth, filter_functions_from_value, get_cached_module_exports,
+    increment_load_depth, is_module_loading, mark_module_loading, unmark_module_loading, MAX_MODULE_DEPTH,
 };
 
 type Enums = HashMap<String, EnumDef>;
@@ -57,11 +55,7 @@ pub(super) fn load_and_merge_module(
     let depth = increment_load_depth();
     if depth > MAX_MODULE_DEPTH {
         decrement_load_depth();
-        error!(
-            depth,
-            max = MAX_MODULE_DEPTH,
-            "Module import depth exceeded"
-        );
+        error!(depth, max = MAX_MODULE_DEPTH, "Module import depth exceeded");
         return Err(CompileError::Runtime(format!(
             "Maximum module import depth ({}) exceeded. Possible circular import or very deep module hierarchy.",
             MAX_MODULE_DEPTH
@@ -140,9 +134,7 @@ pub(super) fn load_and_merge_module(
     };
 
     // Try to resolve the module path
-    let base_dir = current_file
-        .and_then(|p| p.parent())
-        .unwrap_or(Path::new("."));
+    let base_dir = current_file.and_then(|p| p.parent()).unwrap_or(Path::new("."));
 
     let module_path = match resolve_module_path(&parts, base_dir) {
         Ok(p) => p,
@@ -164,10 +156,7 @@ pub(super) fn load_and_merge_module(
                     return Ok(value.clone());
                 }
             }
-            return Err(CompileError::Runtime(format!(
-                "Module does not export '{}'",
-                item_name
-            )));
+            return Err(CompileError::Runtime(format!("Module does not export '{}'", item_name)));
         }
         return Ok(cached_exports);
     }
@@ -193,10 +182,7 @@ pub(super) fn load_and_merge_module(
         Err(e) => {
             unmark_module_loading(&module_path);
             decrement_load_depth();
-            return Err(CompileError::Io(format!(
-                "Cannot read module {:?}: {}",
-                module_path, e
-            )));
+            return Err(CompileError::Io(format!("Cannot read module {:?}: {}", module_path, e)));
         }
     };
 
@@ -218,8 +204,7 @@ pub(super) fn load_and_merge_module(
     // Evaluate the module to get its environment (including imports)
     debug!(path = ?module_path, "Evaluating module exports");
     let (module_env, module_exports) =
-        match evaluate_module_exports(&module.items, Some(&module_path), functions, classes, enums)
-        {
+        match evaluate_module_exports(&module.items, Some(&module_path), functions, classes, enums) {
             Ok(result) => result,
             Err(e) => {
                 unmark_module_loading(&module_path);
@@ -242,9 +227,7 @@ pub(super) fn load_and_merge_module(
     let mut exports: HashMap<String, Value> = HashMap::new();
     for (name, value) in module_exports {
         match value {
-            Value::Function {
-                name: fn_name, def, ..
-            } => {
+            Value::Function { name: fn_name, def, .. } => {
                 // Re-create function with filtered env (excludes function values to avoid cycles)
                 exports.insert(
                     name,
@@ -468,10 +451,7 @@ pub(super) fn evaluate_module_exports(
             }
             Node::Macro(m) => {
                 // Register macro in exports with special prefix
-                exports.insert(
-                    format!("macro:{}", m.name),
-                    Value::Str(format!("macro:{}", m.name)),
-                );
+                exports.insert(format!("macro:{}", m.name), Value::Str(format!("macro:{}", m.name)));
                 // Also register in the thread-local USER_MACROS
                 super::USER_MACROS.with(|cell| cell.borrow_mut().insert(m.name.clone(), m.clone()));
             }
@@ -508,22 +488,12 @@ pub(super) fn evaluate_module_exports(
                         .unwrap_or_else(|| "module".to_string()),
                 };
 
-                match load_and_merge_module(
-                    use_stmt,
-                    module_path,
-                    global_functions,
-                    global_classes,
-                    global_enums,
-                ) {
+                match load_and_merge_module(use_stmt, module_path, global_functions, global_classes, global_enums) {
                     Ok(value) => {
                         // Unpack module exports into current namespace
                         // This allows direct access like: import std.spec; ExecutionMode.Variant
                         if let Value::Dict(exports) = &value {
-                            eprintln!(
-                                "DEBUG: Unpacking {} exports from {}",
-                                exports.len(),
-                                binding_name
-                            );
+                            eprintln!("DEBUG: Unpacking {} exports from {}", exports.len(), binding_name);
                             for (name, export_value) in exports {
                                 eprintln!("DEBUG:   - {}", name);
                                 env.insert(name.clone(), export_value.clone());
@@ -593,13 +563,9 @@ pub(super) fn evaluate_module_exports(
                 } else {
                     // Re-export: export X, Y from module
                     // Load the source module and add specified items to our exports
-                    if let Ok(source_exports) = load_export_source(
-                        export_stmt,
-                        module_path,
-                        global_functions,
-                        global_classes,
-                        global_enums,
-                    ) {
+                    if let Ok(source_exports) =
+                        load_export_source(export_stmt, module_path, global_functions, global_classes, global_enums)
+                    {
                         match &export_stmt.target {
                             ImportTarget::Single(name) => {
                                 if let Some(value) = source_exports.get(name) {
@@ -650,10 +616,7 @@ pub(super) fn evaluate_module_exports(
 
     // First pass: Add all module functions to env with empty captured_env
     // This allows functions to reference each other
-    trace!(
-        functions = local_functions.len(),
-        "First pass: adding functions to env"
-    );
+    trace!(functions = local_functions.len(), "First pass: adding functions to env");
     for (name, f) in &local_functions {
         env.insert(
             name.clone(),
@@ -715,10 +678,7 @@ pub(super) fn evaluate_module_exports(
             }
         }
     }
-    trace!(
-        total_exports = exports.len(),
-        "Finished processing bare exports"
-    );
+    trace!(total_exports = exports.len(), "Finished processing bare exports");
 
     Ok((env, exports))
 }
@@ -760,10 +720,7 @@ fn load_export_source(
 }
 
 /// Resolve module path from segments
-pub(super) fn resolve_module_path(
-    parts: &[String],
-    base_dir: &Path,
-) -> Result<PathBuf, CompileError> {
+pub(super) fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf, CompileError> {
     // Try resolving from base directory first (sibling files)
     let mut resolved = base_dir.to_path_buf();
     for part in parts {

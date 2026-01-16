@@ -201,11 +201,9 @@ impl CompileOptions {
     /// Get the number of threads to use for parallel compilation.
     /// Returns the configured number or all available cores.
     pub fn thread_count(&self) -> usize {
-        self.parallel_threads.map(|n| n.get()).unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-        })
+        self.parallel_threads
+            .map(|n| n.get())
+            .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1))
     }
 
     /// Parse compile options from CLI arguments.
@@ -478,10 +476,7 @@ mod tests {
         let args = vec!["--build-timestamp=2025-01-15T10:00:00Z".to_string()];
         let opts = CompileOptions::from_args(&args);
         assert!(opts.deterministic);
-        assert_eq!(
-            opts.build_timestamp,
-            Some("2025-01-15T10:00:00Z".to_string())
-        );
+        assert_eq!(opts.build_timestamp, Some("2025-01-15T10:00:00Z".to_string()));
     }
 
     #[test]
@@ -494,10 +489,7 @@ mod tests {
     fn test_with_build_timestamp() {
         let opts = CompileOptions::new().with_build_timestamp("2025-01-15T10:00:00Z".to_string());
         assert!(opts.deterministic);
-        assert_eq!(
-            opts.build_timestamp,
-            Some("2025-01-15T10:00:00Z".to_string())
-        );
+        assert_eq!(opts.build_timestamp, Some("2025-01-15T10:00:00Z".to_string()));
     }
 
     #[test]

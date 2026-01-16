@@ -191,9 +191,7 @@ fn test_module_loader_load() {
     let smf_path = dir.path().join("load_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path);
@@ -208,12 +206,8 @@ fn test_module_loader_multiple_loads() {
     let smf_path2 = dir.path().join("multi_load_2.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 42", &smf_path1)
-        .expect("compile ok");
-    runner
-        .compile_to_smf("main = 99", &smf_path2)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path1).expect("compile ok");
+    runner.compile_to_smf("main = 99", &smf_path2).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module1 = loader.load(&smf_path1).expect("load 1 ok");
@@ -237,9 +231,7 @@ fn test_loaded_module_entry_point() {
     let smf_path = dir.path().join("entry_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     let loader = ModuleLoader::new();
     let module = loader.load(&smf_path).expect("load ok");
@@ -261,9 +253,7 @@ fn test_module_registry_resolve_symbol() {
     let smf_path = dir.path().join("registry_symbol_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 99", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 99", &smf_path).expect("compile ok");
 
     let registry = ModuleRegistry::new();
     let _module = registry.load(&smf_path).expect("load ok");
@@ -287,18 +277,12 @@ fn test_smf_header_read() {
     let smf_path = dir.path().join("header_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     let bytes = fs::read(&smf_path).expect("read ok");
     let mut cursor = Cursor::new(bytes);
     let header = SmfHeader::read(&mut cursor);
-    assert!(
-        header.is_ok(),
-        "header read should succeed: {:?}",
-        header.err()
-    );
+    assert!(header.is_ok(), "header read should succeed: {:?}", header.err());
 }
 
 /// Test SmfHeader::is_executable()
@@ -311,9 +295,7 @@ fn test_smf_header_is_executable() {
     let smf_path = dir.path().join("exec_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     let bytes = fs::read(&smf_path).expect("read ok");
     let mut cursor = Cursor::new(bytes);
@@ -334,9 +316,7 @@ fn test_smf_header_is_reloadable() {
     let smf_path = dir.path().join("reload_header_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     let bytes = fs::read(&smf_path).expect("read ok");
     let mut cursor = Cursor::new(bytes);
@@ -356,9 +336,7 @@ fn test_smf_header_has_debug_info() {
     let smf_path = dir.path().join("debug_test.smf");
 
     let runner = Runner::new_no_gc();
-    runner
-        .compile_to_smf("main = 42", &smf_path)
-        .expect("compile ok");
+    runner.compile_to_smf("main = 42", &smf_path).expect("compile ok");
 
     let bytes = fs::read(&smf_path).expect("read ok");
     let mut cursor = Cursor::new(bytes);
@@ -405,11 +383,7 @@ fn test_runner_run_file() {
 
     let runner = Runner::new_no_gc();
     let result = runner.run_file(&src_path);
-    assert!(
-        result.is_ok(),
-        "run_file should succeed: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "run_file should succeed: {:?}", result.err());
     assert_eq!(result.unwrap(), 77);
 }
 
@@ -747,11 +721,7 @@ fn test_lowerer_lower_module() {
 
     let lowerer = Lowerer::new();
     let result = lowerer.lower_module(&ast);
-    assert!(
-        result.is_ok(),
-        "lower_module should succeed: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "lower_module should succeed: {:?}", result.err());
 }
 
 // =============================================================================
@@ -764,10 +734,6 @@ fn test_run_code_function() {
     use simple_driver::run_code;
 
     let result = run_code("main = 42", &[], "");
-    assert!(
-        result.is_ok(),
-        "run_code should succeed: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "run_code should succeed: {:?}", result.err());
     assert_eq!(result.unwrap().exit_code, 42);
 }

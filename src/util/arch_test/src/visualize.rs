@@ -86,10 +86,7 @@ fn find_layer<'a>(module: &str, layers: &'a HashMap<String, Layer>) -> Option<&'
 }
 
 /// Build layer-level dependency graph
-fn build_layer_graph(
-    layers: &HashMap<String, Layer>,
-    module_tree: &ModuleTree,
-) -> HashMap<String, HashSet<String>> {
+fn build_layer_graph(layers: &HashMap<String, Layer>, module_tree: &ModuleTree) -> HashMap<String, HashSet<String>> {
     let mut layer_deps: HashMap<String, HashSet<String>> = HashMap::new();
 
     // Initialize all layers
@@ -117,11 +114,7 @@ fn build_layer_graph(
 }
 
 /// Generate DOT format output
-fn generate_dot(
-    layers: &HashMap<String, Layer>,
-    module_tree: &ModuleTree,
-    options: &VisualizeOptions,
-) -> String {
+fn generate_dot(layers: &HashMap<String, Layer>, module_tree: &ModuleTree, options: &VisualizeOptions) -> String {
     let mut output = String::new();
     output.push_str("digraph architecture {\n");
     output.push_str("    rankdir=TB;\n");
@@ -168,9 +161,7 @@ fn generate_dot(
         let layer_deps = build_layer_graph(layers, module_tree);
 
         // Layer colors
-        let colors = [
-            "#a6cee3", "#b2df8a", "#fb9a99", "#fdbf6f", "#cab2d6", "#ffff99",
-        ];
+        let colors = ["#a6cee3", "#b2df8a", "#fb9a99", "#fdbf6f", "#cab2d6", "#ffff99"];
 
         // Add layer nodes
         for (i, layer_name) in layers.keys().enumerate() {
@@ -196,11 +187,7 @@ fn generate_dot(
 }
 
 /// Generate Mermaid diagram format
-fn generate_mermaid(
-    layers: &HashMap<String, Layer>,
-    module_tree: &ModuleTree,
-    _options: &VisualizeOptions,
-) -> String {
+fn generate_mermaid(layers: &HashMap<String, Layer>, module_tree: &ModuleTree, _options: &VisualizeOptions) -> String {
     let mut output = String::new();
     output.push_str("graph TD\n");
 
@@ -224,11 +211,7 @@ fn generate_mermaid(
 }
 
 /// Generate plain text format
-fn generate_text(
-    layers: &HashMap<String, Layer>,
-    module_tree: &ModuleTree,
-    _options: &VisualizeOptions,
-) -> String {
+fn generate_text(layers: &HashMap<String, Layer>, module_tree: &ModuleTree, _options: &VisualizeOptions) -> String {
     let mut output = String::new();
     output.push_str("Layer Dependencies:\n");
     output.push_str("==================\n\n");
@@ -266,18 +249,12 @@ mod tests {
 
     fn create_test_layers() -> HashMap<String, Layer> {
         let mut layers = HashMap::new();
-        layers.insert(
-            "ui".to_string(),
-            Layer::new("ui", vec!["src/ui/**".to_string()]),
-        );
+        layers.insert("ui".to_string(), Layer::new("ui", vec!["src/ui/**".to_string()]));
         layers.insert(
             "service".to_string(),
             Layer::new("service", vec!["src/service/**".to_string()]),
         );
-        layers.insert(
-            "data".to_string(),
-            Layer::new("data", vec!["src/data/**".to_string()]),
-        );
+        layers.insert("data".to_string(), Layer::new("data", vec!["src/data/**".to_string()]));
         layers
     }
 

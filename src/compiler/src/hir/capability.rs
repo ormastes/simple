@@ -19,9 +19,7 @@ pub struct CapabilityEnv {
 impl CapabilityEnv {
     /// Create a new empty capability environment
     pub fn new() -> Self {
-        Self {
-            active: HashMap::new(),
-        }
+        Self { active: HashMap::new() }
     }
 
     /// Check if a capability can be acquired without aliasing violations
@@ -53,10 +51,7 @@ impl CapabilityEnv {
     }
 
     /// Check if a capability conversion is valid
-    pub fn can_convert(
-        from: ReferenceCapability,
-        to: ReferenceCapability,
-    ) -> Result<(), CapabilityError> {
+    pub fn can_convert(from: ReferenceCapability, to: ReferenceCapability) -> Result<(), CapabilityError> {
         match (from, to) {
             // Identity conversions are always valid
             (a, b) if a == b => Ok(()),
@@ -92,11 +87,9 @@ impl CapabilityEnv {
         context: &str,
     ) -> Result<(), CapabilityError> {
         match cap {
-            ReferenceCapability::Exclusive if !mode.allows_mut() => {
-                Err(CapabilityError::MutInActorMode {
-                    function: context.to_string(),
-                })
-            }
+            ReferenceCapability::Exclusive if !mode.allows_mut() => Err(CapabilityError::MutInActorMode {
+                function: context.to_string(),
+            }),
             _ => Ok(()),
         }
     }
@@ -138,7 +131,10 @@ impl std::fmt::Display for CapabilityError {
                     "Aliasing violation: reference {} already has {:?} capability, cannot acquire {:?}",
                     id, existing, requested
                 )?;
-                writeln!(f, "\nHint: Exclusive and isolated capabilities cannot coexist with any other reference.")?;
+                writeln!(
+                    f,
+                    "\nHint: Exclusive and isolated capabilities cannot coexist with any other reference."
+                )?;
                 write!(f, "      Only shared (T) references can be aliased.")
             }
             CapabilityError::InvalidConversion { from, to } => {
@@ -147,29 +143,22 @@ impl std::fmt::Display for CapabilityError {
                     "Invalid capability conversion: cannot convert {:?} to {:?}",
                     from, to
                 )?;
-                writeln!(
-                    f,
-                    "\nHint: Capabilities can only be downgraded, not upgraded:"
-                )?;
+                writeln!(f, "\nHint: Capabilities can only be downgraded, not upgraded:")?;
                 writeln!(f, "      ✓ iso T → mut T  (consume to mutable)")?;
                 writeln!(f, "      ✓ iso T → T      (consume to shared)")?;
                 writeln!(f, "      ✓ mut T → T      (downgrade to shared)")?;
                 write!(f, "      ✗ T → mut T      (cannot upgrade)")
             }
             CapabilityError::MutInActorMode { function } => {
+                writeln!(f, "Cannot use 'mut T' in actor mode (function: {})", function)?;
                 writeln!(
                     f,
-                    "Cannot use 'mut T' in actor mode (function: {})",
-                    function
+                    "\nActor mode enforces message-passing concurrency with no shared mutable state."
                 )?;
-                writeln!(f, "\nActor mode enforces message-passing concurrency with no shared mutable state.")?;
                 writeln!(f, "\nTo fix this, choose one of:")?;
                 writeln!(f, "  1. Use iso T for transferable unique references:")?;
                 writeln!(f, "     fn {}(x: iso Data) -> ...", function)?;
-                writeln!(
-                    f,
-                    "\n  2. Switch to lock_base mode for shared mutable state:"
-                )?;
+                writeln!(f, "\n  2. Switch to lock_base mode for shared mutable state:")?;
                 write!(
                     f,
                     "     #[concurrency_mode(lock_base)]\n     fn {}(x: mut Data) -> ...",
@@ -226,49 +215,25 @@ mod tests {
     #[test]
     fn test_valid_conversions() {
         // mut T → T (downgrade)
-        assert!(CapabilityEnv::can_convert(
-            ReferenceCapability::Exclusive,
-            ReferenceCapability::Shared
-        )
-        .is_ok());
+        assert!(CapabilityEnv::can_convert(ReferenceCapability::Exclusive, ReferenceCapability::Shared).is_ok());
 
         // iso T → mut T (consume)
-        assert!(CapabilityEnv::can_convert(
-            ReferenceCapability::Isolated,
-            ReferenceCapability::Exclusive
-        )
-        .is_ok());
+        assert!(CapabilityEnv::can_convert(ReferenceCapability::Isolated, ReferenceCapability::Exclusive).is_ok());
 
         // iso T → T (consume)
-        assert!(CapabilityEnv::can_convert(
-            ReferenceCapability::Isolated,
-            ReferenceCapability::Shared
-        )
-        .is_ok());
+        assert!(CapabilityEnv::can_convert(ReferenceCapability::Isolated, ReferenceCapability::Shared).is_ok());
     }
 
     #[test]
     fn test_invalid_conversions() {
         // T → mut T (upcast, invalid)
-        assert!(CapabilityEnv::can_convert(
-            ReferenceCapability::Shared,
-            ReferenceCapability::Exclusive
-        )
-        .is_err());
+        assert!(CapabilityEnv::can_convert(ReferenceCapability::Shared, ReferenceCapability::Exclusive).is_err());
 
         // T → iso T (upcast, invalid)
-        assert!(CapabilityEnv::can_convert(
-            ReferenceCapability::Shared,
-            ReferenceCapability::Isolated
-        )
-        .is_err());
+        assert!(CapabilityEnv::can_convert(ReferenceCapability::Shared, ReferenceCapability::Isolated).is_err());
 
         // mut T → iso T (upcast, invalid)
-        assert!(CapabilityEnv::can_convert(
-            ReferenceCapability::Exclusive,
-            ReferenceCapability::Isolated
-        )
-        .is_err());
+        assert!(CapabilityEnv::can_convert(ReferenceCapability::Exclusive, ReferenceCapability::Isolated).is_err());
     }
 
     #[test]
@@ -370,18 +335,12 @@ mod tests {
 
     #[test]
     fn test_mode_from_attr() {
-        assert_eq!(
-            ConcurrencyMode::from_attr_arg("actor"),
-            Some(ConcurrencyMode::Actor)
-        );
+        assert_eq!(ConcurrencyMode::from_attr_arg("actor"), Some(ConcurrencyMode::Actor));
         assert_eq!(
             ConcurrencyMode::from_attr_arg("lock_base"),
             Some(ConcurrencyMode::LockBase)
         );
-        assert_eq!(
-            ConcurrencyMode::from_attr_arg("unsafe"),
-            Some(ConcurrencyMode::Unsafe)
-        );
+        assert_eq!(ConcurrencyMode::from_attr_arg("unsafe"), Some(ConcurrencyMode::Unsafe));
         assert_eq!(ConcurrencyMode::from_attr_arg("invalid"), None);
     }
 }

@@ -21,13 +21,10 @@ impl ComputePipeline {
     pub fn new(device: Arc<VulkanDevice>, spirv_code: &[u8]) -> VulkanResult<Self> {
         // Validate SPIR-V magic number
         if spirv_code.len() < 4 {
-            return Err(VulkanError::SpirvCompilationFailed(
-                "Code too short".to_string(),
-            ));
+            return Err(VulkanError::SpirvCompilationFailed("Code too short".to_string()));
         }
 
-        let magic =
-            u32::from_le_bytes([spirv_code[0], spirv_code[1], spirv_code[2], spirv_code[3]]);
+        let magic = u32::from_le_bytes([spirv_code[0], spirv_code[1], spirv_code[2], spirv_code[3]]);
         if magic != 0x07230203 {
             return Err(VulkanError::SpirvCompilationFailed(format!(
                 "Invalid SPIR-V magic number: 0x{:08x}",
@@ -52,17 +49,13 @@ impl ComputePipeline {
         };
 
         // Use spirv_reflect to extract descriptor set layout information
-        let reflection_module =
-            spirv_reflect::ShaderModule::load_u8_data(spirv_code).map_err(|e| {
-                VulkanError::SpirvCompilationFailed(format!("Reflection failed: {:?}", e))
-            })?;
+        let reflection_module = spirv_reflect::ShaderModule::load_u8_data(spirv_code)
+            .map_err(|e| VulkanError::SpirvCompilationFailed(format!("Reflection failed: {:?}", e)))?;
 
         // Get descriptor bindings
         let descriptor_sets = reflection_module
             .enumerate_descriptor_sets(None)
-            .map_err(|e| {
-                VulkanError::SpirvCompilationFailed(format!("Enumerate descriptors: {:?}", e))
-            })?;
+            .map_err(|e| VulkanError::SpirvCompilationFailed(format!("Enumerate descriptors: {:?}", e)))?;
 
         // Create descriptor set layout from reflection data
         let mut bindings = Vec::new();
@@ -79,30 +72,24 @@ impl ComputePipeline {
             }
         }
 
-        let descriptor_layout_info =
-            vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        let descriptor_layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
 
         let descriptor_set_layout = unsafe {
             device
                 .handle()
                 .create_descriptor_set_layout(&descriptor_layout_info, None)
-                .map_err(|e| {
-                    VulkanError::PipelineCreationFailed(format!("Descriptor layout: {:?}", e))
-                })?
+                .map_err(|e| VulkanError::PipelineCreationFailed(format!("Descriptor layout: {:?}", e)))?
         };
 
         // Create pipeline layout
         let set_layouts = [descriptor_set_layout];
-        let pipeline_layout_info =
-            vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
 
         let pipeline_layout = unsafe {
             device
                 .handle()
                 .create_pipeline_layout(&pipeline_layout_info, None)
-                .map_err(|e| {
-                    VulkanError::PipelineCreationFailed(format!("Pipeline layout: {:?}", e))
-                })?
+                .map_err(|e| VulkanError::PipelineCreationFailed(format!("Pipeline layout: {:?}", e)))?
         };
 
         // Create compute pipeline
@@ -139,9 +126,7 @@ impl ComputePipeline {
             device
                 .handle()
                 .create_descriptor_pool(&pool_info, None)
-                .map_err(|e| {
-                    VulkanError::PipelineCreationFailed(format!("Descriptor pool: {:?}", e))
-                })?
+                .map_err(|e| VulkanError::PipelineCreationFailed(format!("Descriptor pool: {:?}", e)))?
         };
 
         tracing::info!("Compute pipeline created with {} bindings", bindings.len());
@@ -157,12 +142,7 @@ impl ComputePipeline {
     }
 
     /// Execute the kernel with given buffers
-    pub fn execute(
-        &self,
-        buffers: &[&VulkanBuffer],
-        global_size: [u32; 3],
-        local_size: [u32; 3],
-    ) -> VulkanResult<()> {
+    pub fn execute(&self, buffers: &[&VulkanBuffer], global_size: [u32; 3], local_size: [u32; 3]) -> VulkanResult<()> {
         // Allocate descriptor set
         let set_layouts = [self.descriptor_set_layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
@@ -173,9 +153,7 @@ impl ComputePipeline {
             self.device
                 .handle()
                 .allocate_descriptor_sets(&alloc_info)
-                .map_err(|e| {
-                    VulkanError::ExecutionFailed(format!("Allocate descriptors: {:?}", e))
-                })?
+                .map_err(|e| VulkanError::ExecutionFailed(format!("Allocate descriptors: {:?}", e)))?
         };
 
         let descriptor_set = descriptor_sets[0];
@@ -205,11 +183,9 @@ impl ComputePipeline {
 
         unsafe {
             // Bind pipeline
-            self.device.handle().cmd_bind_pipeline(
-                cmd,
-                vk::PipelineBindPoint::COMPUTE,
-                self.pipeline,
-            );
+            self.device
+                .handle()
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, self.pipeline);
 
             // Bind descriptor sets
             self.device.handle().cmd_bind_descriptor_sets(
@@ -258,19 +234,13 @@ impl ComputePipeline {
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
         unsafe {
-            self.device
-                .handle()
-                .destroy_descriptor_pool(self.descriptor_pool, None);
+            self.device.handle().destroy_descriptor_pool(self.descriptor_pool, None);
             self.device.handle().destroy_pipeline(self.pipeline, None);
-            self.device
-                .handle()
-                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device.handle().destroy_pipeline_layout(self.pipeline_layout, None);
             self.device
                 .handle()
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-            self.device
-                .handle()
-                .destroy_shader_module(self.shader_module, None);
+            self.device.handle().destroy_shader_module(self.shader_module, None);
         }
         tracing::debug!("Compute pipeline destroyed");
     }

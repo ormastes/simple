@@ -272,10 +272,7 @@ fn split_type_method(name: &str) -> Option<(&str, &str)> {
 ///
 /// `type_filter` is an optional substring filter on type_name.
 pub fn print_class_coverage_table(results: &[ClassCoverage], type_filter: Option<&str>) {
-    println!(
-        "{:<50} {:>9} {:>9} {:>9}",
-        "Type", "Covered", "Total", "Percent"
-    );
+    println!("{:<50} {:>9} {:>9} {:>9}", "Type", "Covered", "Total", "Percent");
 
     let mut total_methods = 0usize;
     let mut total_covered = 0usize;
@@ -387,10 +384,7 @@ mod tests {
 
     #[test]
     fn test_split_type_method_deep_nesting() {
-        assert_eq!(
-            split_type_method("a::b::c::d::method"),
-            Some(("a::b::c::d", "method"))
-        );
+        assert_eq!(split_type_method("a::b::c::d::method"), Some(("a::b::c::d", "method")));
     }
 
     #[test]
@@ -464,10 +458,7 @@ types:
         assert_eq!(spec.types.len(), 2);
         assert!(spec.types.contains_key("MyNamespace::Foo"));
         assert!(spec.types.contains_key("Bar"));
-        assert_eq!(
-            spec.types["MyNamespace::Foo"].methods,
-            vec!["do_stuff", "reset"]
-        );
+        assert_eq!(spec.types["MyNamespace::Foo"].methods, vec!["do_stuff", "reset"]);
         assert_eq!(spec.types["Bar"].methods, vec!["run", "stop"]);
     }
 
@@ -486,7 +477,7 @@ types:
                 {"name": "MyType::method2", "count": 0},
                 {"name": "OtherType::run", "count": 10}
             ]}]}"#,
-            "types:\n  MyType:\n    methods: [method1, method2, method3]\n  OtherType:\n    methods: [run, stop]"
+            "types:\n  MyType:\n    methods: [method1, method2, method3]\n  OtherType:\n    methods: [run, stop]",
         );
         assert_eq!(results.len(), 2);
 
@@ -534,10 +525,7 @@ types:
 
     #[test]
     fn test_coverage_summary() {
-        let results = vec![
-            make_class_coverage("A", 2, 4),
-            make_class_coverage("B", 3, 6),
-        ];
+        let results = vec![make_class_coverage("A", 2, 4), make_class_coverage("B", 3, 6)];
 
         let summary = CoverageSummary::from_results(&results);
         assert_eq!(summary.total_types, 2);

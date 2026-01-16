@@ -5,9 +5,7 @@
 // Driver JJ State Types
 // ============================================================================
 mod driver_jj_state_tests {
-    use simple_driver::jj_state::{
-        BuildMetadata, BuildMode, JjStateManager, TestLevel, TestMetadata,
-    };
+    use simple_driver::jj_state::{BuildMetadata, BuildMode, JjStateManager, TestLevel, TestMetadata};
 
     #[test]
     fn test_build_mode_size() {
@@ -66,9 +64,7 @@ mod driver_simple_test_types {
 // Dependency Tracker Graph Types
 // ============================================================================
 mod dep_tracker_graph_tests {
-    use simple_dependency_tracker::graph::{
-        CyclicDependencyError, ImportEdge, ImportGraph, ImportKind,
-    };
+    use simple_dependency_tracker::graph::{CyclicDependencyError, ImportEdge, ImportGraph, ImportKind};
 
     #[test]
     fn test_import_edge_size() {
@@ -95,9 +91,7 @@ mod dep_tracker_graph_tests {
 // Dependency Tracker Macro Import Types
 // ============================================================================
 mod dep_tracker_macro_import_tests {
-    use simple_dependency_tracker::macro_import::{
-        AutoImport, MacroDirManifest, MacroExports, MacroSymbol, SymKind,
-    };
+    use simple_dependency_tracker::macro_import::{AutoImport, MacroDirManifest, MacroExports, MacroSymbol, SymKind};
 
     #[test]
     fn test_auto_import_size() {
@@ -129,9 +123,7 @@ mod dep_tracker_macro_import_tests {
 // Dependency Tracker Resolution Types
 // ============================================================================
 mod dep_tracker_resolution_tests {
-    use simple_dependency_tracker::resolution::{
-        FileKind, FileSystem, ModPath, ResolutionResult, Segment,
-    };
+    use simple_dependency_tracker::resolution::{FileKind, FileSystem, ModPath, ResolutionResult, Segment};
 
     #[test]
     fn test_file_kind_size() {
@@ -300,9 +292,7 @@ mod common_runtime_symbols_tests {
 // Common Target Types
 // ============================================================================
 mod common_target_tests {
-    use simple_common::target::{
-        PointerSize, Target, TargetArch, TargetConfig, TargetOS, TargetParseError,
-    };
+    use simple_common::target::{PointerSize, Target, TargetArch, TargetConfig, TargetOS, TargetParseError};
 
     #[test]
     fn test_pointer_size_size() {

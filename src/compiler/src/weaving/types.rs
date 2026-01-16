@@ -32,19 +32,13 @@ impl AdviceForm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JoinPointKind {
     /// Function execution
-    Execution {
-        function_name: String,
-        signature: String,
-    },
+    Execution { function_name: String, signature: String },
     /// Decision point (if/match condition)
     Decision { location: String },
     /// Condition evaluation
     Condition { location: String },
     /// Error handling point (Result::Err, TryUnwrap)
-    Error {
-        location: String,
-        error_type: String,
-    },
+    Error { location: String, error_type: String },
 }
 
 /// A detected join point in the MIR.

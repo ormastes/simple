@@ -64,10 +64,7 @@ fn print_summary_json(result: &TestRunResult) {
     for (i, file) in result.files.iter().enumerate() {
         let comma = if i < result.files.len() - 1 { "," } else { "" };
         let error_str = match &file.error {
-            Some(e) => format!(
-                "\"{}\"",
-                e.as_str().replace('\"', "\\\"").replace('\n', "\\n")
-            ),
+            Some(e) => format!("\"{}\"", e.as_str().replace('\"', "\\\"").replace('\n', "\\n")),
             None => "null".to_string(),
         };
         println!("    {{");
@@ -221,10 +218,7 @@ fn generate_sspec_documentation(
 }
 
 /// Generate HTML documentation file
-fn generate_html_doc(
-    docs_dir: &Path,
-    result: &TestRunResult,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn generate_html_doc(docs_dir: &Path, result: &TestRunResult) -> Result<(), Box<dyn std::error::Error>> {
     use std::fs::File;
     use std::io::Write;
 
@@ -342,10 +336,7 @@ fn generate_html_doc(
 }
 
 /// Generate Markdown documentation file
-fn generate_markdown_doc(
-    docs_dir: &Path,
-    result: &TestRunResult,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn generate_markdown_doc(docs_dir: &Path, result: &TestRunResult) -> Result<(), Box<dyn std::error::Error>> {
     use std::fs::File;
     use std::io::Write;
 
@@ -379,10 +370,7 @@ fn generate_markdown_doc(
         };
         let file_name = parts.last().unwrap_or(&"");
 
-        md.push_str(&format!(
-            "{} **{}** ({}ms)\n",
-            icon, file_name, file.duration_ms
-        ));
+        md.push_str(&format!("{} **{}** ({}ms)\n", icon, file_name, file.duration_ms));
 
         if let Some(ref err) = file.error {
             md.push_str(&format!("\n```\nError: {}\n```\n", err));

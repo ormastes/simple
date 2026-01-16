@@ -80,12 +80,8 @@ impl TargetArch {
     /// Get the pointer size for this architecture.
     pub const fn pointer_size(&self) -> PointerSize {
         match self {
-            TargetArch::X86_64 | TargetArch::Aarch64 | TargetArch::Riscv64 | TargetArch::Wasm64 => {
-                PointerSize::Bits64
-            }
-            TargetArch::X86 | TargetArch::Arm | TargetArch::Riscv32 | TargetArch::Wasm32 => {
-                PointerSize::Bits32
-            }
+            TargetArch::X86_64 | TargetArch::Aarch64 | TargetArch::Riscv64 | TargetArch::Wasm64 => PointerSize::Bits64,
+            TargetArch::X86 | TargetArch::Arm | TargetArch::Riscv32 | TargetArch::Wasm32 => PointerSize::Bits32,
         }
     }
 
@@ -455,12 +451,12 @@ impl Target {
                 "wasi" => WasmRuntime::Wasi,
                 "unknown" => {
                     // Check third part for "emscripten"
-                    parts.get(2).map_or(WasmRuntime::Standalone, |p| {
-                        match p.to_lowercase().as_str() {
+                    parts
+                        .get(2)
+                        .map_or(WasmRuntime::Standalone, |p| match p.to_lowercase().as_str() {
                             "emscripten" => WasmRuntime::Emscripten,
                             _ => WasmRuntime::Standalone,
-                        }
-                    })
+                        })
                 }
                 _ => WasmRuntime::Standalone,
             })
@@ -480,11 +476,7 @@ impl Target {
             })
             .unwrap_or(TargetOS::host());
 
-        Ok(Self {
-            arch,
-            os,
-            wasm_runtime,
-        })
+        Ok(Self { arch, os, wasm_runtime })
     }
 
     /// Get the triple string for Cranelift.
@@ -528,21 +520,12 @@ mod tests {
     fn test_parse_arch() {
         assert_eq!("x86_64".parse::<TargetArch>().unwrap(), TargetArch::X86_64);
         assert_eq!("amd64".parse::<TargetArch>().unwrap(), TargetArch::X86_64);
-        assert_eq!(
-            "aarch64".parse::<TargetArch>().unwrap(),
-            TargetArch::Aarch64
-        );
+        assert_eq!("aarch64".parse::<TargetArch>().unwrap(), TargetArch::Aarch64);
         assert_eq!("arm64".parse::<TargetArch>().unwrap(), TargetArch::Aarch64);
         assert_eq!("i686".parse::<TargetArch>().unwrap(), TargetArch::X86);
         assert_eq!("armv7".parse::<TargetArch>().unwrap(), TargetArch::Arm);
-        assert_eq!(
-            "riscv64".parse::<TargetArch>().unwrap(),
-            TargetArch::Riscv64
-        );
-        assert_eq!(
-            "riscv32".parse::<TargetArch>().unwrap(),
-            TargetArch::Riscv32
-        );
+        assert_eq!("riscv64".parse::<TargetArch>().unwrap(), TargetArch::Riscv64);
+        assert_eq!("riscv32".parse::<TargetArch>().unwrap(), TargetArch::Riscv32);
     }
 
     #[test]

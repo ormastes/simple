@@ -20,14 +20,7 @@ impl WindowsAllocator {
 
 impl MemoryAllocator for WindowsAllocator {
     fn allocate(&self, size: usize, _alignment: usize) -> std::io::Result<ExecutableMemory> {
-        let ptr = unsafe {
-            VirtualAlloc(
-                std::ptr::null_mut(),
-                size,
-                MEM_COMMIT | MEM_RESERVE,
-                PAGE_READWRITE,
-            )
-        };
+        let ptr = unsafe { VirtualAlloc(std::ptr::null_mut(), size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) };
 
         if ptr.is_null() {
             return Err(std::io::Error::last_os_error());

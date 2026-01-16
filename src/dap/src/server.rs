@@ -145,9 +145,7 @@ impl DapServer {
     fn handle_initialize(&mut self, req: &RequestMessage) -> ResponseMessage {
         // Parse arguments
         if let Some(args) = &req.arguments {
-            if let Ok(init_args) =
-                serde_json::from_value::<InitializeRequestArguments>(args.clone())
-            {
+            if let Ok(init_args) = serde_json::from_value::<InitializeRequestArguments>(args.clone()) {
                 self.lines_start_at1 = init_args.lines_start_at1.unwrap_or(true);
             }
         }
@@ -170,8 +168,7 @@ impl DapServer {
     fn handle_launch(&mut self, req: &RequestMessage) -> ResponseMessage {
         // Parse launch arguments
         if let Some(args) = &req.arguments {
-            if let Ok(launch_args) = serde_json::from_value::<LaunchRequestArguments>(args.clone())
-            {
+            if let Ok(launch_args) = serde_json::from_value::<LaunchRequestArguments>(args.clone()) {
                 self.program = Some(launch_args.program.clone());
 
                 // Set initial state

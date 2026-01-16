@@ -25,10 +25,7 @@ impl MacroHygieneContext {
     }
 
     fn resolve(&self, name: &str) -> Option<String> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).cloned())
+        self.scopes.iter().rev().find_map(|scope| scope.get(name).cloned())
     }
 
     fn bind(&mut self, name: &str, reuse_if_bound: bool) -> String {
@@ -48,11 +45,7 @@ impl MacroHygieneContext {
     }
 }
 
-pub(super) fn apply_macro_hygiene_block(
-    block: &Block,
-    ctx: &mut MacroHygieneContext,
-    push_scope: bool,
-) -> Block {
+pub(super) fn apply_macro_hygiene_block(block: &Block, ctx: &mut MacroHygieneContext, push_scope: bool) -> Block {
     if push_scope {
         ctx.push_scope();
     }
@@ -72,10 +65,7 @@ pub(super) fn apply_macro_hygiene_block(
 pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContext) -> Node {
     match node {
         Node::Let(let_stmt) => {
-            let value = let_stmt
-                .value
-                .as_ref()
-                .map(|expr| apply_macro_hygiene_expr(expr, ctx));
+            let value = let_stmt.value.as_ref().map(|expr| apply_macro_hygiene_expr(expr, ctx));
             let pattern = apply_macro_hygiene_pattern(&let_stmt.pattern, ctx, false);
             Node::Let(LetStmt {
                 span: let_stmt.span,
@@ -107,10 +97,7 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
         }),
         Node::Return(ret) => Node::Return(ReturnStmt {
             span: ret.span,
-            value: ret
-                .value
-                .as_ref()
-                .map(|expr| apply_macro_hygiene_expr(expr, ctx)),
+            value: ret.value.as_ref().map(|expr| apply_macro_hygiene_expr(expr, ctx)),
         }),
         Node::If(stmt) => {
             if let Some(let_pattern) = &stmt.let_pattern {
@@ -175,10 +162,7 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
                 .map(|arm| {
                     ctx.push_scope();
                     let pattern = apply_macro_hygiene_pattern(&arm.pattern, ctx, true);
-                    let guard = arm
-                        .guard
-                        .as_ref()
-                        .map(|expr| apply_macro_hygiene_expr(expr, ctx));
+                    let guard = arm.guard.as_ref().map(|expr| apply_macro_hygiene_expr(expr, ctx));
                     let body = apply_macro_hygiene_block(&arm.body, ctx, false);
                     ctx.pop_scope();
                     MatchArm {
@@ -261,10 +245,7 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
             ctx.push_scope();
             let mut params = Vec::with_capacity(def.params.len());
             for param in &def.params {
-                let default = param
-                    .default
-                    .as_ref()
-                    .map(|expr| apply_macro_hygiene_expr(expr, ctx));
+                let default = param.default.as_ref().map(|expr| apply_macro_hygiene_expr(expr, ctx));
                 let new_name = ctx.bind(&param.name, false);
                 let mut new_param = param.clone();
                 new_param.name = new_name;
@@ -283,18 +264,13 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
 
 pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContext) -> Expr {
     match expr {
-        Expr::Identifier(name) => ctx
-            .resolve(name)
-            .map(Expr::Identifier)
-            .unwrap_or_else(|| expr.clone()),
+        Expr::Identifier(name) => ctx.resolve(name).map(Expr::Identifier).unwrap_or_else(|| expr.clone()),
         Expr::FString(parts) => Expr::FString(
             parts
                 .iter()
                 .map(|part| match part {
                     FStringPart::Literal(text) => FStringPart::Literal(text.clone()),
-                    FStringPart::Expr(expr) => {
-                        FStringPart::Expr(apply_macro_hygiene_expr(expr, ctx))
-                    }
+                    FStringPart::Expr(expr) => FStringPart::Expr(apply_macro_hygiene_expr(expr, ctx)),
                 })
                 .collect(),
         ),
@@ -317,11 +293,7 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
                 })
                 .collect(),
         },
-        Expr::MethodCall {
-            receiver,
-            method,
-            args,
-        } => Expr::MethodCall {
+        Expr::MethodCall { receiver, method, args } => Expr::MethodCall {
             receiver: Box::new(apply_macro_hygiene_expr(receiver, ctx)),
             method: method.clone(),
             args: args
@@ -385,10 +357,7 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
                 .map(|arm| {
                     ctx.push_scope();
                     let pattern = apply_macro_hygiene_pattern(&arm.pattern, ctx, true);
-                    let guard = arm
-                        .guard
-                        .as_ref()
-                        .map(|expr| apply_macro_hygiene_expr(expr, ctx));
+                    let guard = arm.guard.as_ref().map(|expr| apply_macro_hygiene_expr(expr, ctx));
                     let body = apply_macro_hygiene_block(&arm.body, ctx, false);
                     ctx.pop_scope();
                     MatchArm {
@@ -400,33 +369,15 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
                 })
                 .collect(),
         },
-        Expr::Tuple(items) => Expr::Tuple(
-            items
-                .iter()
-                .map(|item| apply_macro_hygiene_expr(item, ctx))
-                .collect(),
-        ),
-        Expr::Array(items) => Expr::Array(
-            items
-                .iter()
-                .map(|item| apply_macro_hygiene_expr(item, ctx))
-                .collect(),
-        ),
-        Expr::VecLiteral(items) => Expr::VecLiteral(
-            items
-                .iter()
-                .map(|item| apply_macro_hygiene_expr(item, ctx))
-                .collect(),
-        ),
+        Expr::Tuple(items) => Expr::Tuple(items.iter().map(|item| apply_macro_hygiene_expr(item, ctx)).collect()),
+        Expr::Array(items) => Expr::Array(items.iter().map(|item| apply_macro_hygiene_expr(item, ctx)).collect()),
+        Expr::VecLiteral(items) => {
+            Expr::VecLiteral(items.iter().map(|item| apply_macro_hygiene_expr(item, ctx)).collect())
+        }
         Expr::Dict(entries) => Expr::Dict(
             entries
                 .iter()
-                .map(|(k, v)| {
-                    (
-                        apply_macro_hygiene_expr(k, ctx),
-                        apply_macro_hygiene_expr(v, ctx),
-                    )
-                })
+                .map(|(k, v)| (apply_macro_hygiene_expr(k, ctx), apply_macro_hygiene_expr(v, ctx)))
                 .collect(),
         ),
         Expr::ListComprehension {
@@ -481,15 +432,9 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
             step,
         } => Expr::Slice {
             receiver: Box::new(apply_macro_hygiene_expr(receiver, ctx)),
-            start: start
-                .as_ref()
-                .map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
-            end: end
-                .as_ref()
-                .map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
-            step: step
-                .as_ref()
-                .map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
+            start: start.as_ref().map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
+            end: end.as_ref().map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
+            step: step.as_ref().map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
         },
         Expr::Spread(expr) => Expr::Spread(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::DictSpread(expr) => Expr::DictSpread(Box::new(apply_macro_hygiene_expr(expr, ctx))),
@@ -502,10 +447,7 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
         },
         Expr::Spawn(expr) => Expr::Spawn(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::Await(expr) => Expr::Await(Box::new(apply_macro_hygiene_expr(expr, ctx))),
-        Expr::Yield(expr) => Expr::Yield(
-            expr.as_ref()
-                .map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
-        ),
+        Expr::Yield(expr) => Expr::Yield(expr.as_ref().map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx)))),
         Expr::New { kind, expr } => Expr::New {
             kind: *kind,
             expr: Box::new(apply_macro_hygiene_expr(expr, ctx)),
@@ -515,19 +457,11 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
             target_type: target_type.clone(),
         },
         Expr::Range { start, end, bound } => Expr::Range {
-            start: start
-                .as_ref()
-                .map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
-            end: end
-                .as_ref()
-                .map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
+            start: start.as_ref().map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
+            end: end.as_ref().map(|expr| Box::new(apply_macro_hygiene_expr(expr, ctx))),
             bound: *bound,
         },
-        Expr::FunctionalUpdate {
-            target,
-            method,
-            args,
-        } => Expr::FunctionalUpdate {
+        Expr::FunctionalUpdate { target, method, args } => Expr::FunctionalUpdate {
             target: Box::new(apply_macro_hygiene_expr(target, ctx)),
             method: method.clone(),
             args: args
@@ -587,19 +521,10 @@ pub(super) fn apply_macro_hygiene_pattern(
             name: name.clone(),
             fields: fields
                 .iter()
-                .map(|(field, pat)| {
-                    (
-                        field.clone(),
-                        apply_macro_hygiene_pattern(pat, ctx, reuse_if_bound),
-                    )
-                })
+                .map(|(field, pat)| (field.clone(), apply_macro_hygiene_pattern(pat, ctx, reuse_if_bound)))
                 .collect(),
         },
-        Pattern::Enum {
-            name,
-            variant,
-            payload,
-        } => Pattern::Enum {
+        Pattern::Enum { name, variant, payload } => Pattern::Enum {
             name: name.clone(),
             variant: variant.clone(),
             payload: payload.as_ref().map(|payload| {
@@ -619,11 +544,7 @@ pub(super) fn apply_macro_hygiene_pattern(
             pattern: Box::new(apply_macro_hygiene_pattern(pattern, ctx, reuse_if_bound)),
             ty: ty.clone(),
         },
-        Pattern::Range {
-            start,
-            end,
-            inclusive,
-        } => Pattern::Range {
+        Pattern::Range { start, end, inclusive } => Pattern::Range {
             start: Box::new(apply_macro_hygiene_expr(start, ctx)),
             end: Box::new(apply_macro_hygiene_expr(end, ctx)),
             inclusive: *inclusive,

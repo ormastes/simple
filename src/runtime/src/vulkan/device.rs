@@ -54,9 +54,7 @@ impl VulkanDevice {
         let compute_family = physical_device
             .find_compute_queue_family()
             .ok_or(VulkanError::NoComputeQueue)?;
-        let transfer_family = physical_device
-            .find_transfer_queue_family()
-            .unwrap_or(compute_family);
+        let transfer_family = physical_device.find_transfer_queue_family().unwrap_or(compute_family);
 
         // Graphics queue support (optional - may not be needed for compute-only devices)
         #[cfg(feature = "vulkan")]
@@ -133,12 +131,10 @@ impl VulkanDevice {
         let transfer_queue = unsafe { device.get_device_queue(transfer_family, 0) };
 
         #[cfg(feature = "vulkan")]
-        let graphics_queue =
-            graphics_family.map(|family| unsafe { device.get_device_queue(family, 0) });
+        let graphics_queue = graphics_family.map(|family| unsafe { device.get_device_queue(family, 0) });
 
         #[cfg(feature = "vulkan")]
-        let present_queue =
-            present_family.map(|family| unsafe { device.get_device_queue(family, 0) });
+        let present_queue = present_family.map(|family| unsafe { device.get_device_queue(family, 0) });
 
         // Create allocator
         let allocator = Allocator::new(&AllocatorCreateDesc {
@@ -156,9 +152,7 @@ impl VulkanDevice {
         let pipeline_cache = unsafe {
             device
                 .create_pipeline_cache(&cache_info, None)
-                .map_err(|e| {
-                    VulkanError::DeviceCreationFailed(format!("Pipeline cache: {:?}", e))
-                })?
+                .map_err(|e| VulkanError::DeviceCreationFailed(format!("Pipeline cache: {:?}", e)))?
         };
 
         // Create command pools
@@ -189,9 +183,7 @@ impl VulkanDevice {
             let pool = unsafe {
                 device
                     .create_command_pool(&graphics_pool_info, None)
-                    .map_err(|e| {
-                        VulkanError::DeviceCreationFailed(format!("Graphics pool: {:?}", e))
-                    })?
+                    .map_err(|e| VulkanError::DeviceCreationFailed(format!("Graphics pool: {:?}", e)))?
             };
             Some(pool)
         } else {
@@ -200,10 +192,7 @@ impl VulkanDevice {
 
         // Create swapchain loader
         #[cfg(feature = "vulkan")]
-        let swapchain_loader = Some(ash::khr::swapchain::Device::new(
-            instance.instance(),
-            &device,
-        ));
+        let swapchain_loader = Some(ash::khr::swapchain::Device::new(instance.instance(), &device));
 
         tracing::info!("Vulkan device created successfully");
 
@@ -342,8 +331,7 @@ impl VulkanDevice {
                 .map_err(|e| VulkanError::CommandBufferError(format!("Allocate: {:?}", e)))?[0]
         };
 
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
         unsafe {
             self.device
@@ -401,8 +389,7 @@ impl VulkanDevice {
                 .map_err(|e| VulkanError::CommandBufferError(format!("Allocate: {:?}", e)))?[0]
         };
 
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let begin_info = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
         unsafe {
             self.device
@@ -451,12 +438,9 @@ impl Drop for VulkanDevice {
         unsafe {
             let _ = self.device.device_wait_idle();
 
-            self.device
-                .destroy_command_pool(*self.transfer_pool.lock(), None);
-            self.device
-                .destroy_command_pool(*self.compute_pool.lock(), None);
-            self.device
-                .destroy_pipeline_cache(self.pipeline_cache, None);
+            self.device.destroy_command_pool(*self.transfer_pool.lock(), None);
+            self.device.destroy_command_pool(*self.compute_pool.lock(), None);
+            self.device.destroy_pipeline_cache(self.pipeline_cache, None);
 
             // Allocator drop happens automatically
 

@@ -91,113 +91,60 @@ pub(super) fn compile_builtin_method<M: Module>(
             let result_i8 = call_runtime_2(ctx, builder, "rt_array_push", receiver_val, wrapped);
             Some(builder.ins().uextend(types::I64, result_i8))
         }
-        ("Array", "len") | ("array", "len") => {
-            Some(call_len_method(ctx, builder, "rt_array_len", receiver_val))
-        }
+        ("Array", "len") | ("array", "len") => Some(call_len_method(ctx, builder, "rt_array_len", receiver_val)),
         ("Array", "get") | ("array", "get") => {
             let idx_val = ctx.vreg_values[&args[0]];
             let wrapped_idx = wrap_value(ctx, builder, idx_val);
-            Some(call_runtime_2(
-                ctx,
-                builder,
-                "rt_index_get",
-                receiver_val,
-                wrapped_idx,
-            ))
+            Some(call_runtime_2(ctx, builder, "rt_index_get", receiver_val, wrapped_idx))
         }
         ("Array", "set") | ("array", "set") => {
             let idx_val = ctx.vreg_values[&args[0]];
             let arg_val = ctx.vreg_values[&args[1]];
             let wrapped_idx = wrap_value(ctx, builder, idx_val);
             let wrapped_val = wrap_value(ctx, builder, arg_val);
-            let result_i8 = call_runtime_3(
-                ctx,
-                builder,
-                "rt_index_set",
-                receiver_val,
-                wrapped_idx,
-                wrapped_val,
-            );
+            let result_i8 = call_runtime_3(ctx, builder, "rt_index_set", receiver_val, wrapped_idx, wrapped_val);
             Some(builder.ins().uextend(types::I64, result_i8))
         }
-        ("Array", "pop") | ("array", "pop") => {
-            Some(call_runtime_1(ctx, builder, "rt_array_pop", receiver_val))
-        }
+        ("Array", "pop") | ("array", "pop") => Some(call_runtime_1(ctx, builder, "rt_array_pop", receiver_val)),
         ("Array", "clear") | ("array", "clear") => {
             let result_i8 = call_runtime_1(ctx, builder, "rt_array_clear", receiver_val);
             Some(builder.ins().uextend(types::I64, result_i8))
         }
-        ("String", "len") | ("string", "len") => {
-            Some(call_len_method(ctx, builder, "rt_string_len", receiver_val))
-        }
+        ("String", "len") | ("string", "len") => Some(call_len_method(ctx, builder, "rt_string_len", receiver_val)),
         ("String", "concat") | ("string", "concat") => {
             let arg_val = ctx.vreg_values[&args[0]];
-            Some(call_runtime_2(
-                ctx,
-                builder,
-                "rt_string_concat",
-                receiver_val,
-                arg_val,
-            ))
+            Some(call_runtime_2(ctx, builder, "rt_string_concat", receiver_val, arg_val))
         }
         ("Dict", "get") | ("dict", "get") => {
             let key_val = ctx.vreg_values[&args[0]];
             let wrapped_key = wrap_value(ctx, builder, key_val);
-            Some(call_runtime_2(
-                ctx,
-                builder,
-                "rt_index_get",
-                receiver_val,
-                wrapped_key,
-            ))
+            Some(call_runtime_2(ctx, builder, "rt_index_get", receiver_val, wrapped_key))
         }
         ("Dict", "set") | ("dict", "set") => {
             let key_val = ctx.vreg_values[&args[0]];
             let val_val = ctx.vreg_values[&args[1]];
             let wrapped_key = wrap_value(ctx, builder, key_val);
             let wrapped_val = wrap_value(ctx, builder, val_val);
-            let result_i8 = call_runtime_3(
-                ctx,
-                builder,
-                "rt_dict_set",
-                receiver_val,
-                wrapped_key,
-                wrapped_val,
-            );
+            let result_i8 = call_runtime_3(ctx, builder, "rt_dict_set", receiver_val, wrapped_key, wrapped_val);
             Some(builder.ins().uextend(types::I64, result_i8))
         }
-        ("Dict", "len") | ("dict", "len") => {
-            Some(call_len_method(ctx, builder, "rt_dict_len", receiver_val))
-        }
+        ("Dict", "len") | ("dict", "len") => Some(call_len_method(ctx, builder, "rt_dict_len", receiver_val)),
         ("Dict", "clear") | ("dict", "clear") => {
             let result_i8 = call_runtime_1(ctx, builder, "rt_dict_clear", receiver_val);
             Some(builder.ins().uextend(types::I64, result_i8))
         }
-        ("Dict", "keys") | ("dict", "keys") => {
-            Some(call_runtime_1(ctx, builder, "rt_dict_keys", receiver_val))
-        }
-        ("Dict", "values") | ("dict", "values") => {
-            Some(call_runtime_1(ctx, builder, "rt_dict_values", receiver_val))
-        }
+        ("Dict", "keys") | ("dict", "keys") => Some(call_runtime_1(ctx, builder, "rt_dict_keys", receiver_val)),
+        ("Dict", "values") | ("dict", "values") => Some(call_runtime_1(ctx, builder, "rt_dict_values", receiver_val)),
         ("Tuple", "get") | ("tuple", "get") => {
             let idx_val = ctx.vreg_values[&args[0]];
-            Some(call_runtime_2(
-                ctx,
-                builder,
-                "rt_tuple_get",
-                receiver_val,
-                idx_val,
-            ))
+            Some(call_runtime_2(ctx, builder, "rt_tuple_get", receiver_val, idx_val))
         }
-        ("Tuple", "len") | ("tuple", "len") => {
-            Some(call_len_method(ctx, builder, "rt_tuple_len", receiver_val))
-        }
+        ("Tuple", "len") | ("tuple", "len") => Some(call_len_method(ctx, builder, "rt_tuple_len", receiver_val)),
         ("Tuple", "set") | ("tuple", "set") => {
             let idx_val = ctx.vreg_values[&args[0]];
             let arg_val = ctx.vreg_values[&args[1]];
             let wrapped = wrap_value(ctx, builder, arg_val);
-            let result_i8 =
-                call_runtime_3(ctx, builder, "rt_tuple_set", receiver_val, idx_val, wrapped);
+            let result_i8 = call_runtime_3(ctx, builder, "rt_tuple_set", receiver_val, idx_val, wrapped);
             Some(builder.ins().uextend(types::I64, result_i8))
         }
         ("Array", "contains")
@@ -224,9 +171,7 @@ pub(super) fn compile_builtin_method<M: Module>(
             } else {
                 builder.ins().iconst(types::I64, 1)
             };
-            let call = builder
-                .ins()
-                .call(slice_ref, &[receiver_val, start, end, step]);
+            let call = builder.ins().call(slice_ref, &[receiver_val, start, end, step]);
             Some(builder.inst_results(call)[0])
         }
         _ => {
@@ -257,9 +202,7 @@ pub(super) fn compile_builtin_method<M: Module>(
                 .define_data(method_data_id, &method_data_desc)
                 .map_err(|e| e.to_string())?;
 
-            let method_global = ctx
-                .module
-                .declare_data_in_func(method_data_id, builder.func);
+            let method_global = ctx.module.declare_data_in_func(method_data_id, builder.func);
             let method_ptr = builder.ins().global_value(types::I64, method_global);
             let method_len = builder.ins().iconst(types::I64, method_bytes.len() as i64);
 

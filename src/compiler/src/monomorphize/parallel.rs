@@ -95,9 +95,7 @@ impl ParallelMonoTable {
 
     /// Check if there are pending items.
     pub fn has_pending(&self) -> bool {
-        !self.pending_functions.is_empty()
-            || !self.pending_structs.is_empty()
-            || !self.pending_classes.is_empty()
+        !self.pending_functions.is_empty() || !self.pending_structs.is_empty() || !self.pending_classes.is_empty()
     }
 
     /// Take all pending functions.

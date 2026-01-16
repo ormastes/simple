@@ -136,11 +136,7 @@ mod tests {
     }
 
     fn make_test_function(name: &str, instructions: Vec<MirInst>) -> MirFunction {
-        let mut func = MirFunction::new(
-            name.to_string(),
-            TypeId::I64,
-            simple_parser::Visibility::Private,
-        );
+        let mut func = MirFunction::new(name.to_string(), TypeId::I64, simple_parser::Visibility::Private);
 
         // Use the entry block (BlockId(0)) that was created by MirFunction::new
         let entry_block = func.entry_block;
@@ -157,10 +153,7 @@ mod tests {
     fn test_transform_replaces_non_compilable_calls() {
         let mut func = make_test_function(
             "test",
-            vec![
-                make_call(0, "compilable_fn"),
-                make_call(1, "non_compilable_fn"),
-            ],
+            vec![make_call(0, "compilable_fn"), make_call(1, "non_compilable_fn")],
         );
 
         let mut non_compilable = HashSet::new();

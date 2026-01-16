@@ -54,11 +54,7 @@ impl Lowerer {
     /// Swizzle mappings:
     /// - Position: x=0, y=1, z=2, w=3
     /// - Color: r=0, g=1, b=2, a=3
-    pub(in crate::hir::lower) fn parse_swizzle_pattern(
-        &self,
-        pattern: &str,
-        max_lanes: u32,
-    ) -> Option<Vec<u32>> {
+    pub(in crate::hir::lower) fn parse_swizzle_pattern(&self, pattern: &str, max_lanes: u32) -> Option<Vec<u32>> {
         // Swizzle must be 1-4 characters
         if pattern.is_empty() || pattern.len() > 4 {
             return None;

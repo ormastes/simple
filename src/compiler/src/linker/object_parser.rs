@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use super::smf_writer::{
-    DataSectionKind, RelocationType, SectionType, SmfRelocation, SmfSection, SmfSymbol,
-    SymbolBinding, SymbolType, SECTION_FLAG_EXEC, SECTION_FLAG_READ, SECTION_FLAG_WRITE,
+    DataSectionKind, RelocationType, SectionType, SmfRelocation, SmfSection, SmfSymbol, SymbolBinding, SymbolType,
+    SECTION_FLAG_EXEC, SECTION_FLAG_READ, SECTION_FLAG_WRITE,
 };
 
 #[derive(Error, Debug)]
@@ -66,21 +66,13 @@ impl ParsedObject {
             let section_data = section.data().unwrap_or(&[]).to_vec();
 
             let (section_type, flags, data_kind) = match section.kind() {
-                SectionKind::Text => (
-                    SectionType::Code,
-                    SECTION_FLAG_READ | SECTION_FLAG_EXEC,
-                    None,
-                ),
+                SectionKind::Text => (SectionType::Code, SECTION_FLAG_READ | SECTION_FLAG_EXEC, None),
                 SectionKind::Data => (
                     SectionType::Data,
                     SECTION_FLAG_READ | SECTION_FLAG_WRITE,
                     Some(DataSectionKind::Mutable),
                 ),
-                SectionKind::ReadOnlyData => (
-                    SectionType::RoData,
-                    SECTION_FLAG_READ,
-                    Some(DataSectionKind::ReadOnly),
-                ),
+                SectionKind::ReadOnlyData => (SectionType::RoData, SECTION_FLAG_READ, Some(DataSectionKind::ReadOnly)),
                 SectionKind::UninitializedData => {
                     // BSS - skip for now
                     continue;
@@ -131,11 +123,7 @@ impl ParsedObject {
                 // Find SMF section index from object section index
                 let obj_section = obj_file.section_by_index(section_idx)?;
                 let section_name = obj_section.name().unwrap_or("");
-                parsed
-                    .section_name_to_index
-                    .get(section_name)
-                    .copied()
-                    .unwrap_or(0) as u16
+                parsed.section_name_to_index.get(section_name).copied().unwrap_or(0) as u16
             } else {
                 0 // Undefined symbol
             };
@@ -172,11 +160,7 @@ impl ParsedObject {
                         // Find symbol in our parsed symbols
                         let obj_symbol = obj_file.symbol_by_index(sym_idx)?;
                         let sym_name = obj_symbol.name().unwrap_or("");
-                        parsed
-                            .symbol_name_to_index
-                            .get(sym_name)
-                            .copied()
-                            .unwrap_or(0) as u32
+                        parsed.symbol_name_to_index.get(sym_name).copied().unwrap_or(0) as u32
                     }
                     _ => continue, // Skip non-symbol relocations
                 };
@@ -257,13 +241,7 @@ mod tests {
         use object::RelocationEncoding::Generic;
         use object::RelocationKind::*;
 
-        assert_eq!(
-            map_relocation_type(Absolute, Generic).unwrap(),
-            RelocationType::Abs64
-        );
-        assert_eq!(
-            map_relocation_type(Relative, Generic).unwrap(),
-            RelocationType::Pc32
-        );
+        assert_eq!(map_relocation_type(Absolute, Generic).unwrap(), RelocationType::Abs64);
+        assert_eq!(map_relocation_type(Relative, Generic).unwrap(), RelocationType::Pc32);
     }
 }

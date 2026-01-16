@@ -345,10 +345,7 @@ impl PackageWriter {
                 while i < data.len() && literal_count < 254 {
                     // Check if next position starts a good run
                     let mut next_run = 1;
-                    while i + next_run < data.len()
-                        && data[i + next_run] == data[i]
-                        && next_run < 255
-                    {
+                    while i + next_run < data.len() && data[i + next_run] == data[i] && next_run < 255 {
                         next_run += 1;
                     }
 

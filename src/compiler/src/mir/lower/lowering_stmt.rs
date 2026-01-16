@@ -9,11 +9,7 @@ use crate::mir::blocks::Terminator;
 use crate::mir::instructions::MirInst;
 
 impl<'a> MirLowerer<'a> {
-    pub(super) fn lower_stmt(
-        &mut self,
-        stmt: &HirStmt,
-        contract: Option<&HirContract>,
-    ) -> MirLowerResult<()> {
+    pub(super) fn lower_stmt(&mut self, stmt: &HirStmt, contract: Option<&HirContract>) -> MirLowerResult<()> {
         match stmt {
             HirStmt::Let {
                 local_index,

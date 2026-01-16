@@ -138,11 +138,7 @@ impl LeanRunner {
     }
 
     /// Run Lean on generated content
-    pub fn check_content(
-        &self,
-        name: &str,
-        content: &str,
-    ) -> Result<LeanCheckResult, CompileError> {
+    pub fn check_content(&self, name: &str, content: &str) -> Result<LeanCheckResult, CompileError> {
         let file_path = self
             .write_lean_file(name, content)
             .map_err(|e| CompileError::Semantic(format!("Failed to write Lean file: {}", e)))?;
@@ -186,10 +182,7 @@ impl LeanRunner {
 
     /// Check multiple files
     pub fn check_files(&self, files: &[PathBuf]) -> Vec<LeanCheckResult> {
-        files
-            .iter()
-            .filter_map(|f| self.check_file(f).ok())
-            .collect()
+        files.iter().filter_map(|f| self.check_file(f).ok()).collect()
     }
 
     /// Get the output directory

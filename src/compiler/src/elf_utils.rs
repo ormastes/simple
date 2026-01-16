@@ -86,18 +86,14 @@ pub(crate) fn extract_elf_text_section(elf_data: &[u8]) -> Option<Vec<u8>> {
             continue;
         }
 
-        let sh_name =
-            u32::from_le_bytes(elf_data[sh_offset..sh_offset + 4].try_into().ok()?) as usize;
+        let sh_name = u32::from_le_bytes(elf_data[sh_offset..sh_offset + 4].try_into().ok()?) as usize;
         let sh_type = u32::from_le_bytes(elf_data[sh_offset + 4..sh_offset + 8].try_into().ok()?);
         let sh_link = u32::from_le_bytes(elf_data[sh_offset + 40..sh_offset + 44].try_into().ok()?);
 
         // Get section name from string table
         if let Some(name) = get_section_name(shstrtab, sh_name) {
-            let offset =
-                u64::from_le_bytes(elf_data[sh_offset + 24..sh_offset + 32].try_into().ok()?)
-                    as usize;
-            let size = u64::from_le_bytes(elf_data[sh_offset + 32..sh_offset + 40].try_into().ok()?)
-                as usize;
+            let offset = u64::from_le_bytes(elf_data[sh_offset + 24..sh_offset + 32].try_into().ok()?) as usize;
+            let size = u64::from_le_bytes(elf_data[sh_offset + 32..sh_offset + 40].try_into().ok()?) as usize;
 
             match name {
                 ".text" => text_section = Some((offset, size)),
@@ -132,11 +128,7 @@ pub(crate) fn extract_elf_text_section(elf_data: &[u8]) -> Option<Vec<u8>> {
             // Get strtab from symtab's link field
             let link_sh_offset = e_shoff + symtab_link * e_shentsize;
             if link_sh_offset + e_shentsize <= elf_data.len() {
-                u64::from_le_bytes(
-                    elf_data[link_sh_offset + 24..link_sh_offset + 32]
-                        .try_into()
-                        .ok()?,
-                ) as usize
+                u64::from_le_bytes(elf_data[link_sh_offset + 24..link_sh_offset + 32].try_into().ok()?) as usize
             } else {
                 return Some(code);
             }
@@ -185,18 +177,9 @@ fn apply_elf_relocations(
             continue;
         }
 
-        let r_offset =
-            u64::from_le_bytes(elf_data[rela_entry..rela_entry + 8].try_into().unwrap()) as usize;
-        let r_info = u64::from_le_bytes(
-            elf_data[rela_entry + 8..rela_entry + 16]
-                .try_into()
-                .unwrap(),
-        );
-        let r_addend = i64::from_le_bytes(
-            elf_data[rela_entry + 16..rela_entry + 24]
-                .try_into()
-                .unwrap(),
-        );
+        let r_offset = u64::from_le_bytes(elf_data[rela_entry..rela_entry + 8].try_into().unwrap()) as usize;
+        let r_info = u64::from_le_bytes(elf_data[rela_entry + 8..rela_entry + 16].try_into().unwrap());
+        let r_addend = i64::from_le_bytes(elf_data[rela_entry + 16..rela_entry + 24].try_into().unwrap());
 
         let r_type = (r_info & 0xffffffff) as u32;
         let r_sym = (r_info >> 32) as usize;
@@ -212,8 +195,7 @@ fn apply_elf_relocations(
             continue;
         }
 
-        let st_name =
-            u32::from_le_bytes(elf_data[sym_entry..sym_entry + 4].try_into().unwrap()) as usize;
+        let st_name = u32::from_le_bytes(elf_data[sym_entry..sym_entry + 4].try_into().unwrap()) as usize;
 
         // Get symbol name from string table
         let sym_name = get_elf_string(elf_data, strtab_off, st_name);

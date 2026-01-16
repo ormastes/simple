@@ -46,21 +46,11 @@ fn expr_to_source_string(expr: &Expr) -> String {
             format!("{}{}", op_str, expr_to_source_string(operand))
         }
         Expr::Call { callee, args } => {
-            let args_str: Vec<String> = args
-                .iter()
-                .map(|a| expr_to_source_string(&a.value))
-                .collect();
+            let args_str: Vec<String> = args.iter().map(|a| expr_to_source_string(&a.value)).collect();
             format!("{}({})", expr_to_source_string(callee), args_str.join(", "))
         }
-        Expr::MethodCall {
-            receiver,
-            method,
-            args,
-        } => {
-            let args_str: Vec<String> = args
-                .iter()
-                .map(|a| expr_to_source_string(&a.value))
-                .collect();
+        Expr::MethodCall { receiver, method, args } => {
+            let args_str: Vec<String> = args.iter().map(|a| expr_to_source_string(&a.value)).collect();
             format!(
                 "{}.{}({})",
                 expr_to_source_string(receiver),
@@ -72,11 +62,7 @@ fn expr_to_source_string(expr: &Expr) -> String {
             format!("{}.{}", expr_to_source_string(receiver), field)
         }
         Expr::Index { receiver, index } => {
-            format!(
-                "{}[{}]",
-                expr_to_source_string(receiver),
-                expr_to_source_string(index)
-            )
+            format!("{}[{}]", expr_to_source_string(receiver), expr_to_source_string(index))
         }
         Expr::Array(items) => {
             let items_str: Vec<String> = items.iter().map(|i| expr_to_source_string(i)).collect();
@@ -91,9 +77,7 @@ fn expr_to_source_string(expr: &Expr) -> String {
             format!("fn({}) -> ...", params_str.join(", "))
         }
         Expr::If {
-            condition,
-            else_branch,
-            ..
+            condition, else_branch, ..
         } => {
             let else_str = else_branch
                 .as_ref()
@@ -138,14 +122,7 @@ pub(crate) fn evaluate_macro_invocation(
             let mut items = Vec::new();
             for arg in macro_args {
                 let MacroArg::Expr(e) = arg;
-                items.push(evaluate_expr(
-                    e,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?);
+                items.push(evaluate_expr(e, env, functions, classes, enums, impl_methods)?);
             }
             Ok(Value::Array(items))
         }
@@ -160,8 +137,7 @@ pub(crate) fn evaluate_macro_invocation(
         }
         "assert_eq" => {
             if macro_args.len() >= 2 {
-                let (MacroArg::Expr(left), MacroArg::Expr(right)) =
-                    (&macro_args[0], &macro_args[1]);
+                let (MacroArg::Expr(left), MacroArg::Expr(right)) = (&macro_args[0], &macro_args[1]);
                 let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
                 let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
                 if left_val != right_val {
@@ -176,12 +152,9 @@ pub(crate) fn evaluate_macro_invocation(
         "assert_unit" => {
             // assert_unit!(value, "unit_type") - validate value is of expected unit type
             if macro_args.len() >= 2 {
-                let (MacroArg::Expr(value_expr), MacroArg::Expr(type_expr)) =
-                    (&macro_args[0], &macro_args[1]);
-                let value =
-                    evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
-                let type_val =
-                    evaluate_expr(type_expr, env, functions, classes, enums, impl_methods)?;
+                let (MacroArg::Expr(value_expr), MacroArg::Expr(type_expr)) = (&macro_args[0], &macro_args[1]);
+                let value = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
+                let type_val = evaluate_expr(type_expr, env, functions, classes, enums, impl_methods)?;
 
                 // Extract type name from string or symbol
                 let type_name = match &type_val {
@@ -204,10 +177,7 @@ pub(crate) fn evaluate_macro_invocation(
 
                 // Validate the value against the unit type
                 if let Err(e) = crate::interpreter::validate_unit_type(&value, &type_name) {
-                    return Err(CompileError::Semantic(format!(
-                        "unit assertion failed: {}",
-                        e
-                    )));
+                    return Err(CompileError::Semantic(format!("unit assertion failed: {}", e)));
                 }
             } else {
                 return Err(CompileError::Semantic(
@@ -258,8 +228,7 @@ pub(crate) fn evaluate_macro_invocation(
             }
         }
         _ => {
-            let macro_def =
-                crate::interpreter::USER_MACROS.with(|cell| cell.borrow().get(name).cloned());
+            let macro_def = crate::interpreter::USER_MACROS.with(|cell| cell.borrow().get(name).cloned());
             if let Some(m) = macro_def {
                 expand_user_macro(&m, macro_args, env, functions, classes, enums, impl_methods)
             } else {

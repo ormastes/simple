@@ -139,10 +139,7 @@ impl JjStateManager {
     }
 
     /// Snapshot a successful build
-    pub fn snapshot_build_success(
-        &self,
-        metadata: &BuildMetadata,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn snapshot_build_success(&self, metadata: &BuildMetadata) -> Result<(), Box<dyn std::error::Error>> {
         if !self.enabled {
             // Gracefully do nothing if JJ is not enabled
             return Ok(());
@@ -155,10 +152,7 @@ impl JjStateManager {
     }
 
     /// Snapshot a successful test run
-    pub fn snapshot_test_success(
-        &self,
-        metadata: &TestMetadata,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn snapshot_test_success(&self, metadata: &TestMetadata) -> Result<(), Box<dyn std::error::Error>> {
         if !self.enabled {
             // Gracefully do nothing if JJ is not enabled
             return Ok(());

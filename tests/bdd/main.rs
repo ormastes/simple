@@ -31,16 +31,8 @@ pub struct MixinWorld {
 // ============================================================================
 
 #[given(regex = r#"^a file "([^"]+)" with content:$"#)]
-async fn given_file_with_content(
-    world: &mut MixinWorld,
-    filename: String,
-    step: &cucumber::gherkin::Step,
-) {
-    let content = step
-        .docstring
-        .as_ref()
-        .expect("No docstring provided")
-        .to_string();
+async fn given_file_with_content(world: &mut MixinWorld, filename: String, step: &cucumber::gherkin::Step) {
+    let content = step.docstring.as_ref().expect("No docstring provided").to_string();
 
     world.source_code = content.clone();
 
@@ -53,11 +45,7 @@ async fn given_file_with_content(
 
 #[given("a sspec source with id annotations:")]
 async fn given_sspec_source_with_ids(world: &mut MixinWorld, step: &cucumber::gherkin::Step) {
-    let content = step
-        .docstring
-        .as_ref()
-        .expect("No docstring provided")
-        .to_string();
+    let content = step.docstring.as_ref().expect("No docstring provided").to_string();
     world.source_code = content;
 }
 
@@ -73,8 +61,7 @@ async fn given_feature_db_with_categories(world: &mut MixinWorld, step: &cucumbe
     let headers = &table.rows[0];
     for row in table.rows.iter().skip(1) {
         let id = table_cell(headers, row, "id").unwrap_or_else(|| "0".to_string());
-        let category =
-            table_cell(headers, row, "category").unwrap_or_else(|| "Uncategorized".to_string());
+        let category = table_cell(headers, row, "category").unwrap_or_else(|| "Uncategorized".to_string());
         let name = table_cell(headers, row, "name").unwrap_or_else(|| "Feature".to_string());
         let record = FeatureRecord {
             id: id.clone(),
@@ -93,8 +80,7 @@ async fn given_feature_db_with_categories(world: &mut MixinWorld, step: &cucumbe
     let tmp_dir = std::env::temp_dir().join("simple_feature_db_docs");
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).expect("Failed to create tmp dir");
-    simple_driver::feature_db::generate_feature_docs(&db, &tmp_dir)
-        .expect("Failed to generate feature docs");
+    simple_driver::feature_db::generate_feature_docs(&db, &tmp_dir).expect("Failed to generate feature docs");
 
     let feature_md = tmp_dir.join("feature.md");
     let feature_index = std::fs::read_to_string(&feature_md).unwrap_or_default();
@@ -156,10 +142,7 @@ async fn when_compile_with_inference(world: &mut MixinWorld) {
 
 #[then("parsing should succeed")]
 async fn then_parsing_succeeds(world: &mut MixinWorld) {
-    let result = world
-        .parse_result
-        .as_ref()
-        .expect("No parse result available");
+    let result = world.parse_result.as_ref().expect("No parse result available");
 
     assert!(result.is_ok(), "Parsing failed: {:?}", result);
 }
@@ -183,15 +166,8 @@ async fn then_feature_md_links_to_category(world: &mut MixinWorld, category: Str
 }
 
 #[then(regex = r#"^category doc "([^"]+)" should list subcategory "([^"]+)"$"#)]
-async fn then_category_doc_lists_subcategory(
-    world: &mut MixinWorld,
-    category: String,
-    sub: String,
-) {
-    let dir = world
-        .feature_docs_dir
-        .as_ref()
-        .expect("No feature docs dir");
+async fn then_category_doc_lists_subcategory(world: &mut MixinWorld, category: String, sub: String) {
+    let dir = world.feature_docs_dir.as_ref().expect("No feature docs dir");
     let path = dir.join(simple_driver::feature_db::category_link(&category));
     let content = std::fs::read_to_string(&path).unwrap_or_default();
     let sub_link = simple_driver::feature_db::category_link(&sub);
@@ -210,33 +186,21 @@ fn table_cell(headers: &[String], row: &[String], name: &str) -> Option<String> 
 
 #[then("compilation should succeed")]
 async fn then_compilation_succeeds(world: &mut MixinWorld) {
-    let result = world
-        .parse_result
-        .as_ref()
-        .expect("No parse result available");
+    let result = world.parse_result.as_ref().expect("No parse result available");
 
     assert!(result.is_ok(), "Compilation failed: {:?}", result);
 }
 
 #[then("compilation should fail")]
 async fn then_compilation_fails(world: &mut MixinWorld) {
-    let result = world
-        .parse_result
-        .as_ref()
-        .expect("No parse result available");
+    let result = world.parse_result.as_ref().expect("No parse result available");
 
-    assert!(
-        result.is_err(),
-        "Expected compilation to fail but it succeeded"
-    );
+    assert!(result.is_err(), "Expected compilation to fail but it succeeded");
 }
 
 #[then(regex = r#"^the AST should contain a mixin declaration "([^"]+)"$"#)]
 async fn then_ast_contains_mixin(world: &mut MixinWorld, name: String) {
-    let result = world
-        .parse_result
-        .as_ref()
-        .expect("No parse result available");
+    let result = world.parse_result.as_ref().expect("No parse result available");
 
     let module = result.as_ref().expect("Parse result is error");
 
@@ -365,12 +329,7 @@ async fn then_method_has_parameters(world: &mut MixinWorld, method_name: String,
 
 #[then(regex = r#"^the error should mention "([^"]+)"$"#)]
 async fn then_error_mentions(world: &mut MixinWorld, message: String) {
-    let result = world
-        .parse_result
-        .as_ref()
-        .expect("No result available")
-        .as_ref()
-        .err();
+    let result = world.parse_result.as_ref().expect("No result available").as_ref().err();
 
     let error = result.expect("Expected error but got success");
     assert!(
@@ -382,12 +341,7 @@ async fn then_error_mentions(world: &mut MixinWorld, message: String) {
 }
 
 #[then(regex = r#"^class "([^"]+)" should have field "([^"]+)" of type "([^"]+)"$"#)]
-async fn then_class_has_field(
-    world: &mut MixinWorld,
-    class_name: String,
-    field_name: String,
-    type_name: String,
-) {
+async fn then_class_has_field(world: &mut MixinWorld, class_name: String, field_name: String, type_name: String) {
     let result = world.parse_result.as_ref().expect("No parse result");
     let module = result.as_ref().expect("Parse failed");
 
@@ -411,10 +365,7 @@ async fn then_class_has_field(
         .fields
         .iter()
         .find(|f| f.name == field_name)
-        .expect(&format!(
-            "Field '{}' not found in class '{}'",
-            field_name, class_name
-        ));
+        .expect(&format!("Field '{}' not found in class '{}'", field_name, class_name));
 
     let field_type_str = format!("{:?}", field.ty);
     assert!(
@@ -484,16 +435,9 @@ async fn then_class_has_field_from_mixin(
         .expect(&format!("Class '{}' not found", class_name));
 
     // Check that class has the mixin in its uses clause
-    let uses_mixin = class
-        .mixins
-        .iter()
-        .any(|m| format!("{:?}", m).contains(&mixin_name));
+    let uses_mixin = class.mixins.iter().any(|m| format!("{:?}", m).contains(&mixin_name));
 
-    assert!(
-        uses_mixin,
-        "Class '{}' does not use mixin '{}'",
-        class_name, mixin_name
-    );
+    assert!(uses_mixin, "Class '{}' does not use mixin '{}'", class_name, mixin_name);
 
     println!(
         "✓ Class '{}' uses mixin '{}' (field '{}' expansion verified at HIR level)",
@@ -502,11 +446,7 @@ async fn then_class_has_field_from_mixin(
 }
 
 #[then(regex = r#"^class "([^"]+)" should have field "([^"]+)"$"#)]
-async fn then_class_has_field_simple(
-    world: &mut MixinWorld,
-    class_name: String,
-    field_name: String,
-) {
+async fn then_class_has_field_simple(world: &mut MixinWorld, class_name: String, field_name: String) {
     let result = world.parse_result.as_ref().expect("No parse result");
     let module = result.as_ref().expect("Parse failed");
 
@@ -527,11 +467,7 @@ async fn then_class_has_field_simple(
         .expect(&format!("Class '{}' not found", class_name));
 
     let has_field = class.fields.iter().any(|f| f.name == field_name);
-    assert!(
-        has_field,
-        "Class '{}' does not have field '{}'",
-        class_name, field_name
-    );
+    assert!(has_field, "Class '{}' does not have field '{}'", class_name, field_name);
 }
 
 #[then(regex = r#"^the mixin should have type parameter "([^"]+)"$"#)]
@@ -552,11 +488,7 @@ async fn then_mixin_has_type_param(world: &mut MixinWorld, param_name: String) {
         .expect("No mixin found");
 
     let has_param = mixin.generic_params.iter().any(|p| p == &param_name);
-    assert!(
-        has_param,
-        "Mixin does not have type parameter '{}'",
-        param_name
-    );
+    assert!(has_param, "Mixin does not have type parameter '{}'", param_name);
 }
 
 #[then(regex = r#"^the mixin should have type parameters "([^"]+)" and "([^"]+)"$"#)]
@@ -579,16 +511,8 @@ async fn then_mixin_has_two_type_params(world: &mut MixinWorld, param1: String, 
     let has_param1 = mixin.generic_params.iter().any(|p| p == &param1);
     let has_param2 = mixin.generic_params.iter().any(|p| p == &param2);
 
-    assert!(
-        has_param1,
-        "Mixin does not have type parameter '{}'",
-        param1
-    );
-    assert!(
-        has_param2,
-        "Mixin does not have type parameter '{}'",
-        param2
-    );
+    assert!(has_param1, "Mixin does not have type parameter '{}'", param1);
+    assert!(has_param2, "Mixin does not have type parameter '{}'", param2);
 }
 
 #[then(regex = r#"^method "([^"]+)" should return type "([^"]+)"$"#)]
@@ -601,12 +525,8 @@ async fn then_method_returns_type(world: &mut MixinWorld, method_name: String, t
         .items
         .iter()
         .find_map(|item| match item {
-            simple_parser::ast::Node::Mixin(m) => {
-                m.methods.iter().find(|me| me.name == method_name)
-            }
-            simple_parser::ast::Node::Class(c) => {
-                c.methods.iter().find(|me| me.name == method_name)
-            }
+            simple_parser::ast::Node::Mixin(m) => m.methods.iter().find(|me| me.name == method_name),
+            simple_parser::ast::Node::Class(c) => c.methods.iter().find(|me| me.name == method_name),
             _ => None,
         })
         .expect(&format!("Method '{}' not found", method_name));
@@ -626,11 +546,7 @@ async fn then_method_returns_type(world: &mut MixinWorld, method_name: String, t
 }
 
 #[then(regex = r#"^method "([^"]+)" should take parameter of type "([^"]+)"$"#)]
-async fn then_method_takes_param_type(
-    world: &mut MixinWorld,
-    method_name: String,
-    type_name: String,
-) {
+async fn then_method_takes_param_type(world: &mut MixinWorld, method_name: String, type_name: String) {
     let result = world.parse_result.as_ref().expect("No parse result");
     let module = result.as_ref().expect("Parse failed");
 
@@ -639,12 +555,8 @@ async fn then_method_takes_param_type(
         .items
         .iter()
         .find_map(|item| match item {
-            simple_parser::ast::Node::Mixin(m) => {
-                m.methods.iter().find(|me| me.name == method_name)
-            }
-            simple_parser::ast::Node::Class(c) => {
-                c.methods.iter().find(|me| me.name == method_name)
-            }
+            simple_parser::ast::Node::Mixin(m) => m.methods.iter().find(|me| me.name == method_name),
+            simple_parser::ast::Node::Class(c) => c.methods.iter().find(|me| me.name == method_name),
             _ => None,
         })
         .expect(&format!("Method '{}' not found", method_name));
@@ -662,11 +574,7 @@ async fn then_method_takes_param_type(
 }
 
 #[then(regex = r#"^type parameter "([^"]+)" should have trait bound "([^"]+)"$"#)]
-async fn then_type_param_has_trait_bound(
-    world: &mut MixinWorld,
-    param: String,
-    trait_name: String,
-) {
+async fn then_type_param_has_trait_bound(world: &mut MixinWorld, param: String, trait_name: String) {
     let result = world.parse_result.as_ref().expect("No parse result");
     let module = result.as_ref().expect("Parse failed");
 
@@ -703,11 +611,7 @@ async fn then_mixin_type_inferred(_world: &mut MixinWorld, param: String, inferr
 }
 
 #[then(regex = r#"^field "([^"]+)" should have inferred type "([^"]+)"$"#)]
-async fn then_field_has_inferred_type(
-    _world: &mut MixinWorld,
-    field_name: String,
-    type_name: String,
-) {
+async fn then_field_has_inferred_type(_world: &mut MixinWorld, field_name: String, type_name: String) {
     // Note: Type inference verification requires full type checking pass
     println!(
         "⚠ Type inference check: field '{}' -> '{}' (requires type checker)",
@@ -764,11 +668,7 @@ async fn then_mixin_has_required_method(world: &mut MixinWorld, method_name: Str
         .expect("No mixin found");
 
     let has_required = mixin.required_methods.iter().any(|m| m.name == method_name);
-    assert!(
-        has_required,
-        "Mixin does not have required method '{}'",
-        method_name
-    );
+    assert!(has_required, "Mixin does not have required method '{}'", method_name);
 }
 
 // ============================================================================

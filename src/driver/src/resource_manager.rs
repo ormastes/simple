@@ -89,12 +89,7 @@ impl PreAllocatedResources {
         let (tui, gui, service, repl) = match app_type {
             AppType::Cli => (None, None, None, None),
             AppType::Tui => (Some(TuiResources::allocate()?), None, None, None),
-            AppType::Gui => (
-                None,
-                Some(GuiResources::allocate(window_hints)?),
-                None,
-                None,
-            ),
+            AppType::Gui => (None, Some(GuiResources::allocate(window_hints)?), None, None),
             AppType::Service => (None, None, Some(ServiceResources::allocate()?), None),
             AppType::Repl => (None, None, None, Some(ReplResources::allocate()?)),
         };
@@ -165,10 +160,7 @@ impl TuiResources {
 
         #[cfg(not(feature = "tui"))]
         {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "TUI feature not enabled",
-            ))
+            Err(io::Error::new(io::ErrorKind::Unsupported, "TUI feature not enabled"))
         }
     }
 
@@ -219,9 +211,7 @@ impl GuiResources {
 
     /// Check if GUI resources are ready
     pub fn is_ready(&self) -> bool {
-        self.gpu_init_handle
-            .as_ref()
-            .map_or(false, |h| h.is_ready())
+        self.gpu_init_handle.as_ref().map_or(false, |h| h.is_ready())
     }
 
     /// Check if window is created (may not have GPU context yet)
@@ -244,9 +234,7 @@ impl GuiResources {
 
     /// Get current GPU initialization progress (0-100)
     pub fn gpu_progress(&self) -> u8 {
-        self.gpu_init_handle
-            .as_ref()
-            .map_or(100, |h| h.state().progress())
+        self.gpu_init_handle.as_ref().map_or(100, |h| h.state().progress())
     }
 }
 

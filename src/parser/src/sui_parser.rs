@@ -97,10 +97,7 @@ pub struct SuiParser {
 impl SuiParser {
     /// Create a new .sui parser
     pub fn new(source: String) -> Self {
-        Self {
-            source,
-            position: 0,
-        }
+        Self { source, position: 0 }
     }
 
     /// Parse a .sui file
@@ -306,11 +303,7 @@ impl SuiParser {
     }
 
     /// Helper: extract content until pattern from iterator
-    fn extract_until_in_iter(
-        &self,
-        chars: &mut std::iter::Peekable<std::str::Chars>,
-        pattern: &str,
-    ) -> String {
+    fn extract_until_in_iter(&self, chars: &mut std::iter::Peekable<std::str::Chars>, pattern: &str) -> String {
         let mut result = String::new();
         let pattern_chars: Vec<char> = pattern.chars().collect();
         let mut match_pos = 0;
@@ -435,10 +428,7 @@ impl SuiParser {
     }
 
     fn peek_ahead(&self, char_offset: usize) -> char {
-        self.source[self.position..]
-            .chars()
-            .nth(char_offset)
-            .unwrap_or('\0')
+        self.source[self.position..].chars().nth(char_offset).unwrap_or('\0')
     }
 
     fn extract_code_until_block(&mut self) -> Result<String, ParseError> {
@@ -532,9 +522,7 @@ fn on_click():
         let result = parser.parse().unwrap();
 
         assert_eq!(result.template_blocks.len(), 1);
-        assert!(result.template_blocks[0]
-            .variables
-            .contains(&"user".to_string()));
+        assert!(result.template_blocks[0].variables.contains(&"user".to_string()));
     }
 
     #[test]

@@ -57,10 +57,8 @@ impl<'a> Analyzer<'a> {
     pub fn new(root: &'a Path, layers: &'a HashMap<String, Layer>) -> Self {
         // Pattern to match Simple language use statements
         // Matches: use module.path, use module.path.*, use crate.module
-        let use_pattern = Regex::new(
-            r"(?m)^\s*use\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)(?:\.\*)?",
-        )
-        .expect("Invalid regex pattern");
+        let use_pattern = Regex::new(r"(?m)^\s*use\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)(?:\.\*)?")
+            .expect("Invalid regex pattern");
 
         Self {
             root,
@@ -87,12 +85,7 @@ impl<'a> Analyzer<'a> {
         Ok(tree)
     }
 
-    fn scan_directory(
-        &self,
-        dir: &Path,
-        tree: &mut ModuleTree,
-        patterns: &[glob::Pattern],
-    ) -> Result<(), ArchError> {
+    fn scan_directory(&self, dir: &Path, tree: &mut ModuleTree, patterns: &[glob::Pattern]) -> Result<(), ArchError> {
         if !dir.exists() {
             return Ok(());
         }
@@ -112,21 +105,11 @@ impl<'a> Analyzer<'a> {
         Ok(())
     }
 
-    fn analyze_file(
-        &self,
-        path: &Path,
-        tree: &mut ModuleTree,
-        patterns: &[glob::Pattern],
-    ) -> Result<(), ArchError> {
+    fn analyze_file(&self, path: &Path, tree: &mut ModuleTree, patterns: &[glob::Pattern]) -> Result<(), ArchError> {
         // Convert path to module name
-        let relative = path
-            .strip_prefix(self.root)
-            .unwrap_or(path)
-            .with_extension("");
+        let relative = path.strip_prefix(self.root).unwrap_or(path).with_extension("");
 
-        let module_name = relative
-            .to_string_lossy()
-            .replace(std::path::MAIN_SEPARATOR, "/");
+        let module_name = relative.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
 
         // Check if this file is in any layer
         let in_layer = patterns.iter().any(|p| p.matches(&module_name));
@@ -170,11 +153,7 @@ mod tests {
         )
         .unwrap();
 
-        fs::write(
-            dir.path().join("src/services/user_service.spl"),
-            "fn get_user(): ...",
-        )
-        .unwrap();
+        fs::write(dir.path().join("src/services/user_service.spl"), "fn get_user(): ...").unwrap();
 
         dir
     }
@@ -195,10 +174,7 @@ mod tests {
         let dir = create_test_project();
 
         let mut layers = HashMap::new();
-        layers.insert(
-            "ui".to_string(),
-            Layer::new("ui", vec!["src/ui/**".to_string()]),
-        );
+        layers.insert("ui".to_string(), Layer::new("ui", vec!["src/ui/**".to_string()]));
         layers.insert(
             "services".to_string(),
             Layer::new("services", vec!["src/services/**".to_string()]),
@@ -215,10 +191,8 @@ mod tests {
 
     #[test]
     fn test_use_pattern_extraction() {
-        let use_pattern = Regex::new(
-            r"(?m)^\s*use\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)(?:\.\*)?",
-        )
-        .unwrap();
+        let use_pattern =
+            Regex::new(r"(?m)^\s*use\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)(?:\.\*)?").unwrap();
 
         let content = r#"
 use crate.core.option

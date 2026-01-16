@@ -165,10 +165,7 @@ fn migrate_generics(path: &Path, dry_run: bool) -> i32 {
     if dry_run {
         println!("DRY RUN complete!");
         println!("  Would modify: {}", modified_count);
-        println!(
-            "  Unchanged: {}",
-            files.len() - modified_count - error_count
-        );
+        println!("  Unchanged: {}", files.len() - modified_count - error_count);
         println!("  Errors: {}", error_count);
         if modified_count > 0 {
             println!();
@@ -177,10 +174,7 @@ fn migrate_generics(path: &Path, dry_run: bool) -> i32 {
     } else {
         println!("Migration complete!");
         println!("  Modified: {}", modified_count);
-        println!(
-            "  Unchanged: {}",
-            files.len() - modified_count - error_count
-        );
+        println!("  Unchanged: {}", files.len() - modified_count - error_count);
         println!("  Errors: {}", error_count);
     }
 
@@ -403,8 +397,7 @@ fn is_array_type_syntax(content: &str) -> bool {
 
     // Check if it's a primitive type followed by ]
     let primitives = [
-        "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "f32", "f64", "bool",
-        "char",
+        "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "f32", "f64", "bool", "char",
     ];
 
     for prim in &primitives {
@@ -607,10 +600,7 @@ fn migrate_print_syntax(path: &Path, dry_run: bool) -> i32 {
     if dry_run {
         println!("DRY RUN complete!");
         println!("  Would modify: {}", modified_count);
-        println!(
-            "  Unchanged: {}",
-            files.len() - modified_count - error_count
-        );
+        println!("  Unchanged: {}", files.len() - modified_count - error_count);
         println!("  Errors: {}", error_count);
         if modified_count > 0 {
             println!();
@@ -619,10 +609,7 @@ fn migrate_print_syntax(path: &Path, dry_run: bool) -> i32 {
     } else {
         println!("Migration complete!");
         println!("  Modified: {}", modified_count);
-        println!(
-            "  Unchanged: {}",
-            files.len() - modified_count - error_count
-        );
+        println!("  Unchanged: {}", files.len() - modified_count - error_count);
         println!("  Errors: {}", error_count);
     }
 
@@ -793,9 +780,15 @@ fn migrate_sspec_docstrings(path: &Path, dry_run: bool) -> i32 {
     }
 
     if dry_run {
-        println!("DRY RUN: Previewing SSpec docstring migration for {} file(s)...", files.len());
+        println!(
+            "DRY RUN: Previewing SSpec docstring migration for {} file(s)...",
+            files.len()
+        );
     } else {
-        println!("Migrating {} SSpec test file(s) to intensive docstring format...", files.len());
+        println!(
+            "Migrating {} SSpec test file(s) to intensive docstring format...",
+            files.len()
+        );
     }
 
     let mut modified_count = 0;

@@ -54,9 +54,7 @@ impl Terminator {
             Terminator::Return(_) => vec![],
             Terminator::Jump(target) => vec![*target],
             Terminator::Branch {
-                then_block,
-                else_block,
-                ..
+                then_block, else_block, ..
             } => vec![*then_block, *else_block],
             Terminator::Unreachable => vec![],
         }
@@ -79,10 +77,7 @@ impl Terminator {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockBuildState {
     /// Block is open, accepting instructions
-    Open {
-        id: BlockId,
-        instructions: Vec<MirInst>,
-    },
+    Open { id: BlockId, instructions: Vec<MirInst> },
     /// Block has been sealed with a terminator
     Sealed {
         id: BlockId,

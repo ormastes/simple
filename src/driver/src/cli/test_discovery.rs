@@ -31,9 +31,7 @@ pub fn discover_tests(dir: &Path, level: TestLevel) -> Vec<PathBuf> {
                 // Filter by test level based on directory name
                 let should_include = match level {
                     TestLevel::All => true,
-                    TestLevel::Unit => {
-                        dir_name == "unit" || !["integration", "system"].contains(&dir_name)
-                    }
+                    TestLevel::Unit => dir_name == "unit" || !["integration", "system"].contains(&dir_name),
                     TestLevel::Integration => dir_name == "integration",
                     TestLevel::System => dir_name == "system",
                 };
@@ -54,8 +52,7 @@ pub fn discover_tests(dir: &Path, level: TestLevel) -> Vec<PathBuf> {
 /// Check if a file is a test file
 pub fn is_test_file(path: &Path) -> bool {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        let is_simple_ext =
-            name.ends_with(".spl") || name.ends_with(".simple") || name.ends_with(".sscript");
+        let is_simple_ext = name.ends_with(".spl") || name.ends_with(".simple") || name.ends_with(".sscript");
         let is_test = name.contains("_spec.") || name.contains("_test.");
         is_simple_ext && is_test
     } else {
@@ -131,10 +128,7 @@ fn extract_tags_from_content(content: &str) -> Vec<String> {
         // Match @tag name (in comments like # @tag slow)
         if let Some(idx) = trimmed.find("@tag ") {
             let after = &trimmed[idx + 5..];
-            let tag: String = after
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
+            let tag: String = after.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
             if !tag.is_empty() {
                 tags.push(tag.to_lowercase());
             }

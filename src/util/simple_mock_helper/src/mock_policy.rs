@@ -38,13 +38,7 @@ static ALLOWED_PATTERNS: OnceLock<RwLock<Vec<&'static str>>> = OnceLock::new();
 pub const DEFAULT_HAL_PATTERNS: &[&str] = &["*::hal::*", "*::sub_hal::*"];
 
 /// Default patterns for environment tests: HAL, external libs, and other dependencies.
-pub const DEFAULT_ENV_PATTERNS: &[&str] = &[
-    "*::hal::*",
-    "*::sub_hal::*",
-    "*::external::*",
-    "*::lib::*",
-    "*::io::*",
-];
+pub const DEFAULT_ENV_PATTERNS: &[&str] = &["*::hal::*", "*::sub_hal::*", "*::external::*", "*::lib::*", "*::io::*"];
 
 /// Enable mocks, restricting usage to modules whose `module_path!()`
 /// matches at least one of `patterns`.
@@ -88,15 +82,10 @@ pub fn check_mock_use_from(source_path: &str) {
             panic!("Mock used while mocks are disabled (system test policy)");
         }
         MockCheckResult::NotInitialized => {
-            panic!(
-                "Mock policy not initialized. Call init_mocks_for_only*() once per test binary."
-            );
+            panic!("Mock policy not initialized. Call init_mocks_for_only*() once per test binary.");
         }
         MockCheckResult::NotAllowed { source_path } => {
-            panic!(
-                "Mock from `{}` not allowed by current mock policy",
-                source_path
-            );
+            panic!("Mock from `{}` not allowed by current mock policy", source_path);
         }
     }
 }
@@ -233,27 +222,15 @@ mod tests {
 
     #[test]
     fn test_pattern_matches_nested_hal() {
-        assert!(pattern_matches(
-            "my_app::drivers::hal::gpio::pin",
-            "*::hal::*"
-        ));
-        assert!(pattern_matches(
-            "root::sub_hal::i2c::device",
-            "*::sub_hal::*"
-        ));
+        assert!(pattern_matches("my_app::drivers::hal::gpio::pin", "*::hal::*"));
+        assert!(pattern_matches("root::sub_hal::i2c::device", "*::sub_hal::*"));
     }
 
     #[test]
     fn test_mock_check_result_variants() {
         assert_eq!(MockCheckResult::Allowed, MockCheckResult::Allowed);
-        assert_eq!(
-            MockCheckResult::MocksDisabled,
-            MockCheckResult::MocksDisabled
-        );
-        assert_eq!(
-            MockCheckResult::NotInitialized,
-            MockCheckResult::NotInitialized
-        );
+        assert_eq!(MockCheckResult::MocksDisabled, MockCheckResult::MocksDisabled);
+        assert_eq!(MockCheckResult::NotInitialized, MockCheckResult::NotInitialized);
         assert_eq!(
             MockCheckResult::NotAllowed {
                 source_path: "test".to_string()
@@ -287,10 +264,7 @@ mod tests {
         assert!(pattern_matches("my_crate::hal::gpio", "*::hal::*"));
         assert!(pattern_matches("my_crate::sub_hal::spi", "*::sub_hal::*"));
         // External lib patterns
-        assert!(pattern_matches(
-            "my_crate::external::http",
-            "*::external::*"
-        ));
+        assert!(pattern_matches("my_crate::external::http", "*::external::*"));
         // Lib patterns
         assert!(pattern_matches("my_crate::lib::utils", "*::lib::*"));
         // IO patterns
@@ -311,9 +285,6 @@ mod tests {
         reset_policy_for_tests();
         init_mocks_for_system();
         assert!(is_policy_initialized());
-        assert_eq!(
-            try_check_mock_use_from("any::path"),
-            MockCheckResult::MocksDisabled
-        );
+        assert_eq!(try_check_mock_use_from("any::path"), MockCheckResult::MocksDisabled);
     }
 }
