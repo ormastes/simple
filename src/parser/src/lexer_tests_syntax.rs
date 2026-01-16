@@ -35,6 +35,60 @@ fn test_assignment_operators() {
 fn test_arrow_operators() {
     assert_eq!(tokenize("->"), vec![TokenKind::Arrow, TokenKind::Eof]);
     assert_eq!(tokenize("=>"), vec![TokenKind::FatArrow, TokenKind::Eof]);
+    assert_eq!(
+        tokenize("<-"),
+        vec![TokenKind::ChannelArrow, TokenKind::Eof]
+    );
+}
+
+#[test]
+fn test_channel_arrow_disambiguation() {
+    // <- is channel arrow (single token)
+    assert_eq!(
+        tokenize("<-"),
+        vec![TokenKind::ChannelArrow, TokenKind::Eof]
+    );
+
+    // < - with space is two tokens
+    assert_eq!(
+        tokenize("< -"),
+        vec![TokenKind::Lt, TokenKind::Minus, TokenKind::Eof]
+    );
+
+    // a<-b is tokenized as a, <-, b (channel send pattern)
+    assert_eq!(
+        tokenize("a<-b"),
+        vec![
+            TokenKind::Identifier {
+                name: "a".to_string(),
+                pattern: NamePattern::Immutable
+            },
+            TokenKind::ChannelArrow,
+            TokenKind::Identifier {
+                name: "b".to_string(),
+                pattern: NamePattern::Immutable
+            },
+            TokenKind::Eof
+        ]
+    );
+
+    // a < -b is three tokens (comparison with negative)
+    assert_eq!(
+        tokenize("a < -b"),
+        vec![
+            TokenKind::Identifier {
+                name: "a".to_string(),
+                pattern: NamePattern::Immutable
+            },
+            TokenKind::Lt,
+            TokenKind::Minus,
+            TokenKind::Identifier {
+                name: "b".to_string(),
+                pattern: NamePattern::Immutable
+            },
+            TokenKind::Eof
+        ]
+    );
 }
 
 #[test]

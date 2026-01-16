@@ -258,7 +258,7 @@ mod lexer_tests {
     fn test_lexer_tokenize_identifier() {
         let mut lexer = Lexer::new("foo");
         let tokens = lexer.tokenize();
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Identifier(_))));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Identifier { .. })));
     }
 
     #[test]
@@ -338,10 +338,10 @@ mod lexer_tests {
         // Comments are skipped, so only x, =, 1, newline, y, =, 2, eof
         assert!(tokens
             .iter()
-            .any(|t| matches!(t.kind, TokenKind::Identifier(ref s) if s == "x")));
+            .any(|t| matches!(t.kind, TokenKind::Identifier { ref name, .. } if name == "x")));
         assert!(tokens
             .iter()
-            .any(|t| matches!(t.kind, TokenKind::Identifier(ref s) if s == "y")));
+            .any(|t| matches!(t.kind, TokenKind::Identifier { ref name, .. } if name == "y")));
     }
 
     #[test]
@@ -407,9 +407,9 @@ mod lexer_tests {
         let t1 = lexer.next_token();
         let t2 = lexer.next_token();
         let t3 = lexer.next_token();
-        assert!(matches!(t1.kind, TokenKind::Identifier(_)));
-        assert!(matches!(t2.kind, TokenKind::Identifier(_)));
-        assert!(matches!(t3.kind, TokenKind::Identifier(_)));
+        assert!(matches!(t1.kind, TokenKind::Identifier { .. }));
+        assert!(matches!(t2.kind, TokenKind::Identifier { .. }));
+        assert!(matches!(t3.kind, TokenKind::Identifier { .. }));
     }
 
     #[test]

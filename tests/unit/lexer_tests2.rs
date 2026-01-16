@@ -3,7 +3,7 @@
 
 use simple_parser::lexer::Lexer;
 
-use simple_parser::token::{FStringToken, Span, Token, TokenKind};
+use simple_parser::token::{FStringToken, NamePattern, Span, Token, TokenKind};
 
 fn tokenize(source: &str) -> Vec<TokenKind> {
     let mut lexer = Lexer::new(source);
@@ -422,7 +422,7 @@ fn test_line_comment() {
     let tokens = tokenize("x # this is a comment\ny");
     assert!(!tokens
         .iter()
-        .any(|t| matches!(t, TokenKind::Identifier(s) if s.contains("comment"))));
+        .any(|t| matches!(t, TokenKind::Identifier { name, .. } if name.contains("comment"))));
 }
 
 #[test]
@@ -434,7 +434,16 @@ fn test_comment_only_line() {
 #[test]
 fn test_comment_at_line_start() {
     let tokens = tokenize("# comment\nx");
-    assert_eq!(tokens, vec![TokenKind::Identifier("x".to_string()), TokenKind::Eof]);
+    assert_eq!(
+        tokens,
+        vec![
+            TokenKind::Identifier {
+                name: "x".to_string(),
+                pattern: NamePattern::Immutable
+            },
+            TokenKind::Eof
+        ]
+    );
 }
 
 // === Line Continuation Tests ===
@@ -445,8 +454,14 @@ fn test_line_continuation() {
     assert_eq!(
         tokens,
         vec![
-            TokenKind::Identifier("x".to_string()),
-            TokenKind::Identifier("y".to_string()),
+            TokenKind::Identifier {
+                name: "x".to_string(),
+                pattern: NamePattern::Immutable
+            },
+            TokenKind::Identifier {
+                name: "y".to_string(),
+                pattern: NamePattern::Immutable
+            },
             TokenKind::Eof,
         ]
     );
@@ -514,11 +529,20 @@ fn test_expression_function_call() {
     assert_eq!(
         tokens,
         vec![
-            TokenKind::Identifier("foo".to_string()),
+            TokenKind::Identifier {
+                name: "foo".to_string(),
+                pattern: NamePattern::Immutable
+            },
             TokenKind::LParen,
-            TokenKind::Identifier("x".to_string()),
+            TokenKind::Identifier {
+                name: "x".to_string(),
+                pattern: NamePattern::Immutable
+            },
             TokenKind::Comma,
-            TokenKind::Identifier("y".to_string()),
+            TokenKind::Identifier {
+                name: "y".to_string(),
+                pattern: NamePattern::Immutable
+            },
             TokenKind::RParen,
             TokenKind::Eof,
         ]
@@ -531,11 +555,20 @@ fn test_expression_method_chain() {
     assert_eq!(
         tokens,
         vec![
-            TokenKind::Identifier("a".to_string()),
+            TokenKind::Identifier {
+                name: "a".to_string(),
+                pattern: NamePattern::Immutable
+            },
             TokenKind::Dot,
-            TokenKind::Identifier("b".to_string()),
+            TokenKind::Identifier {
+                name: "b".to_string(),
+                pattern: NamePattern::Immutable
+            },
             TokenKind::Dot,
-            TokenKind::Identifier("c".to_string()),
+            TokenKind::Identifier {
+                name: "c".to_string(),
+                pattern: NamePattern::Immutable
+            },
             TokenKind::LParen,
             TokenKind::RParen,
             TokenKind::Eof,
@@ -549,7 +582,10 @@ fn test_expression_array_indexing() {
     assert_eq!(
         tokens,
         vec![
-            TokenKind::Identifier("arr".to_string()),
+            TokenKind::Identifier {
+                name: "arr".to_string(),
+                pattern: NamePattern::Immutable
+            },
             TokenKind::LBracket,
             TokenKind::Integer(0),
             TokenKind::RBracket,
@@ -565,7 +601,13 @@ fn test_function_def_tokens() {
     let source = "fn add(a: i64, b: i64) -> i64:\n    return a + b";
     let tokens = tokenize(source);
     assert_eq!(tokens[0], TokenKind::Fn);
-    assert_eq!(tokens[1], TokenKind::Identifier("add".to_string()));
+    assert_eq!(
+        tokens[1],
+        TokenKind::Identifier {
+            name: "add".to_string(),
+            pattern: NamePattern::Immutable
+        }
+    );
     assert_eq!(tokens[2], TokenKind::LParen);
 }
 

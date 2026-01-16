@@ -5,7 +5,7 @@ mod indentation;
 mod numbers;
 mod strings;
 
-pub use crate::token::NumericSuffix;
+pub use crate::token::{NamePattern, NumericSuffix};
 use crate::token::{Span, Token, TokenKind};
 
 pub struct Lexer<'a> {
@@ -280,7 +280,10 @@ impl<'a> Lexer<'a> {
                 }
             }
             '<' => {
-                if self.check('=') {
+                if self.check('-') {
+                    self.advance();
+                    TokenKind::ChannelArrow
+                } else if self.check('=') {
                     self.advance();
                     TokenKind::LtEq
                 } else if self.check('<') {

@@ -3,7 +3,7 @@
 
 use simple_parser::lexer::Lexer;
 
-use simple_parser::token::{FStringToken, Span, Token, TokenKind};
+use simple_parser::token::{FStringToken, NamePattern, Span, Token, TokenKind};
 
 fn tokenize(source: &str) -> Vec<TokenKind> {
     let mut lexer = Lexer::new(source);
