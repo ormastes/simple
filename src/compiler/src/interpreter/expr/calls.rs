@@ -12,7 +12,7 @@ use super::super::{
 
 pub(super) fn eval_call_expr(
     expr: &Expr,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,

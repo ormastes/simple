@@ -13,7 +13,7 @@ use super::super::{ClassDef, Enums, Env, FunctionDef, ImplMethods, MODULE_GLOBAL
 
 pub(super) fn eval_literal_expr(
     expr: &Expr,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
