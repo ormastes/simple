@@ -58,6 +58,9 @@ pub struct SpirvModule {
     /// Map from VReg to parameter index (for tracking which VReg holds which parameter reference)
     vreg_param_map: HashMap<VReg, usize>,
 
+    /// Map from local variable index to SPIR-V variable ID (per function)
+    local_var_map: HashMap<usize, Word>,
+
     /// Map from VReg to TypeId (for type-aware operation selection)
     vreg_types: HashMap<VReg, TypeId>,
 
@@ -111,6 +114,7 @@ impl SpirvModule {
             param_var_map: HashMap::new(),
             param_elem_type_map: HashMap::new(),
             vreg_param_map: HashMap::new(),
+            local_var_map: HashMap::new(),
             vreg_types: HashMap::new(),
             type_cache: TypeCache::default(),
         })
@@ -229,12 +233,30 @@ impl SpirvModule {
         self.vreg_id_map.clear();
         self.block_id_map.clear();
         self.vreg_types.clear();
+        self.local_var_map.clear();
 
         // Pre-allocate labels for all blocks
         for (i, _) in func.blocks.iter().enumerate() {
             let block_id = BlockId(i.try_into().unwrap());
             let label = self.builder.id();
             self.block_id_map.insert(block_id, label);
+        }
+
+        // Allocate local variables as OpVariable in Function storage class
+        // Local indices start after parameters
+        let param_count = func.params.len();
+        for (local_idx, local) in func.locals.iter().enumerate() {
+            // Skip ghost variables (verification only)
+            if local.is_ghost {
+                continue;
+            }
+
+            let local_index = param_count + local_idx;
+            let spirv_type = self.type_id_to_spirv(local.ty)?;
+            let ptr_type = self.builder.type_pointer(None, StorageClass::Function, spirv_type);
+            let var_id = self.builder.variable(ptr_type, None, StorageClass::Function, None);
+
+            self.local_var_map.insert(local_index, var_id);
         }
 
         // Compile all blocks

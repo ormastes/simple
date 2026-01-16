@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use simple_driver::{Interpreter, RunConfig, RunningType};
+use crate::{Interpreter, RunConfig, RunningType};
 
 /// Options for gen-lean commands
 pub struct GenLeanOptions {

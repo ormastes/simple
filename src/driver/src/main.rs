@@ -8,8 +8,6 @@
 //!   simple compile src.spl [-o out.smf]  - Compile to SMF
 //!   simple watch file.spl  - Watch and auto-recompile
 
-mod cli;
-
 use std::env;
 use std::path::PathBuf;
 
@@ -28,23 +26,23 @@ use simple_driver::CompileOptions;
 use simple_log;
 use simple_pkg::commands::{add, cache_cmd, init, install, list, update};
 
-use cli::analysis::{run_info, run_query};
-use cli::audit::{run_replay, run_spec_coverage};
-use cli::basic::{create_runner, run_code, run_file, run_file_with_args, watch_file};
-use cli::code_quality::{run_fmt, run_lint};
-use cli::compile::{compile_file, list_linkers, list_targets};
-use cli::diagram_gen::{parse_diagram_args, print_diagram_help};
-use cli::doc_gen::{run_feature_gen, run_spec_gen, run_task_gen};
-use cli::gen_lean::run_gen_lean;
-use cli::help::{print_help, print_version, version};
-use cli::llm_tools::{run_context, run_diff, run_mcp};
-use cli::migrate::run_migrate;
-use cli::repl::run_repl;
-use cli::sandbox::{apply_sandbox, parse_sandbox_config};
-use cli::test_runner;
+use simple_driver::cli::analysis::{run_info, run_query};
+use simple_driver::cli::audit::{run_replay, run_spec_coverage};
+use simple_driver::cli::basic::{create_runner, run_code, run_file, run_file_with_args, watch_file};
+use simple_driver::cli::code_quality::{run_fmt, run_lint};
+use simple_driver::cli::compile::{compile_file, list_linkers, list_targets};
+use simple_driver::cli::diagram_gen::{parse_diagram_args, print_diagram_help};
+use simple_driver::cli::doc_gen::{run_feature_gen, run_spec_gen, run_task_gen};
+use simple_driver::cli::gen_lean::run_gen_lean;
+use simple_driver::cli::help::{print_help, print_version, version};
+use simple_driver::cli::llm_tools::{run_context, run_diff, run_mcp};
+use simple_driver::cli::migrate::run_migrate;
+use simple_driver::cli::repl::run_repl;
+use simple_driver::cli::sandbox::{apply_sandbox, parse_sandbox_config};
+use simple_driver::cli::test_runner;
 #[cfg(feature = "tui")]
-use cli::tui::run_tui_repl;
-use cli::web::{web_build, web_features, web_init, web_serve, WebBuildOptions, WebServeOptions};
+use simple_driver::cli::tui::run_tui_repl;
+use simple_driver::cli::web::{web_build, web_features, web_init, web_serve, WebBuildOptions, WebServeOptions};
 
 fn main() {
     // Check for --startup-metrics flag early (#1997)
@@ -82,7 +80,7 @@ fn main() {
     );
 
     // PHASE 2: Normal initialization (happens in parallel with prefetching)
-    cli::init::init_runtime(&mut metrics);
+    simple_driver::cli::init::init_runtime(&mut metrics);
 
     // Reconstruct args from early config for compatibility with existing code
     let args: Vec<String> = early_config
@@ -284,7 +282,7 @@ fn main() {
 
             if native {
                 // Compile to standalone native binary
-                std::process::exit(cli::compile::compile_file_native(
+                std::process::exit(simple_driver::cli::compile::compile_file_native(
                     &source,
                     output,
                     target,

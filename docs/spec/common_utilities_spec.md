@@ -1,0 +1,729 @@
+# Common Utilities
+
+*Source: `simple/std_lib/test/features/infrastructure/common_utilities_spec.spl`*
+
+---
+
+# Common Utilities
+
+**Feature ID:** #103
+**Category:** Infrastructure - Core Utilities
+**Difficulty:** 3/5
+**Status:** Complete
+
+## Overview
+
+The Common Utilities module provides foundational infrastructure used across all
+compiler crates. This includes memory management interfaces, efficient file I/O,
+configuration management, module caching, and runtime symbol resolution.
+
+Key components:
+- **File Reader:** Memory-mapped I/O for large files with automatic strategy selection
+- **ConfigEnv:** Unified configuration from environment variables and command-line args
+- **Module Cache:** Generic module caching with load/unload/reload capabilities
+- **ManualGc:** Manual memory management for controlled allocation patterns
+- **Runtime Symbols:** ABI versioning and symbol provider interface
+- **Actor System:** Basic concurrency primitives for message passing
+
+## Key Features
+
+- **Memory-Mapped File I/O:** 15% faster file reading for large source files
+- **Automatic Strategy Selection:** Switches between mmap and regular I/O based on file size
+- **Unified Configuration:** Single interface for env vars, CLI args, and key-value pairs
+- **Thread-Safe Module Cache:** Concurrent access with RwLock protection
+- **ABI Versioning:** Runtime symbol compatibility checking
+- **Manual Memory Management:** Unique/Shared handles with custom drop logic
+
+## Syntax
+
+**File Reading:**
+```simple
+# Automatic strategy (mmap for files > 32KB)
+val content = FileReader.read_to_string("large_file.spl")
+
+# Force memory-mapped reading
+val content = FileReader.read_to_string_mmap("file.spl")
+
+# Force regular reading
+val content = FileReader.read_to_string_regular("file.spl")
+```
+
+**Configuration:**
+```simple
+# From environment variables
+val config = ConfigEnv.from_env()
+val debug = config.get_bool("DEBUG")
+
+# From command-line arguments
+val args = ["--port=8080", "--verbose", "input.spl"]
+val config = ConfigEnv.from_args(args)
+val port = config.get_i64("port")      # 8080
+val verbose = config.get_bool("verbose")  # true
+val input = config.get("_0")           # "input.spl"
+```
+
+**Module Cache:**
+```simple
+val cache = ModuleCache.new()
+
+# Cache a loaded module
+cache.insert("path/to/module.so", module)
+
+# Retrieve cached module
+match cache.get("path/to/module.so"):
+    Some(module) => use_module(module)
+    None => load_and_cache()
+
+# Remove from cache
+cache.remove("path/to/module.so")
+```
+
+## Implementation
+
+**Primary Files:**
+- `src/common/src/file_reader.rs` - Memory-mapped file I/O
+- `src/common/src/config_env.rs` - Configuration management
+- `src/common/src/lib.rs` - Module cache and common interfaces
+- `src/common/src/manual_mem.rs` - Manual memory management
+- `src/common/src/runtime_symbols.rs` - ABI versioning and symbol provider
+- `src/common/src/actor.rs` - Basic actor primitives
+
+**Testing:**
+- `src/common/tests/file_reader_tests.rs` - File I/O tests
+- `src/common/tests/config_env_tests.rs` - Configuration tests
+- `src/common/tests/module_cache_tests.rs` - Cache tests
+
+**Dependencies:**
+- `memmap2` crate for memory-mapped I/O
+- Standard library for file operations
+
+**Required By:**
+- Feature #2: Parser (file reading)
+- Feature #106: Driver (configuration)
+- Feature #105: Native Loader (module cache)
+- All compiler crates (common utilities)
+
+## File Reader System
+
+### Memory-Mapped I/O
+
+Memory-mapped I/O provides efficient file reading for large files by mapping file
+contents directly into virtual memory:
+
+**Performance Benefits:**
+- Reduced system calls (single mmap vs multiple read calls)
+- Zero-copy access to file contents
+- OS-level page caching
+- Lazy loading of file contents
+
+**Threshold-Based Strategy:**
+```
+File Size < 32KB:  Use regular I/O (lower overhead)
+File Size >= 32KB: Use mmap (better performance)
+```
+
+**Example:**
+```rust
+// Small file (1KB) - uses regular I/O
+FileReader.read_to_string("small.spl")
+
+// Large file (100KB) - uses mmap
+FileReader.read_to_string("large.spl")
+```
+
+### Reading Strategies
+
+**Auto Strategy (Default):**
+Automatically selects best strategy based on file size:
+```simple
+val content = FileReader.read_to_string("file.spl")
+# Automatically chooses mmap or regular based on size
+```
+
+**Explicit Mmap:**
+Force memory-mapped reading:
+```simple
+val content = FileReader.read_to_string_mmap("file.spl")
+# Always uses mmap, even for small files
+```
+
+**Explicit Regular:**
+Force regular file reading:
+```simple
+val content = FileReader.read_to_string_regular("file.spl")
+# Always uses read(), even for large files
+```
+
+### Mapped File Handle
+
+For advanced use cases, get direct access to mapped memory:
+```simple
+val mapped = FileReader.map_file("data.bin")
+val bytes = mapped.as_bytes()  # Zero-copy byte access
+```
+
+## Configuration Management
+
+### Unified Configuration Interface
+
+ConfigEnv provides a single interface for accessing configuration from multiple sources:
+
+**Environment Variables:**
+```simple
+# Set: export DEBUG=true
+val config = ConfigEnv.from_env()
+val debug = config.get_bool("DEBUG")  # true
+```
+
+**Command-Line Arguments:**
+```simple
+# Args: --port=8080 --verbose input.spl
+val config = ConfigEnv.from_args(args)
+val port = config.get_i64("port")      # 8080
+val verbose = config.get_bool("verbose")  # true
+val input = config.get("_0")           # "input.spl" (positional)
+```
+
+**Manual Configuration:**
+```simple
+val config = ConfigEnv.new()
+config.set("host", "localhost")
+config.set("port", "3000")
+```
+
+### Argument Formats
+
+ConfigEnv supports multiple command-line argument formats:
+
+**Long Format with Equals:**
+```
+--key=value    → config.get("key") == "value"
+--port=8080    → config.get_i64("port") == 8080
+```
+
+**Long Format with Space:**
+```
+--key value    → config.get("key") == "value"
+--debug true   → config.get_bool("debug") == true
+```
+
+**Short Format:**
+```
+-p 8080        → config.get_i64("p") == 8080
+-v             → config.get_bool("v") == true
+```
+
+**Boolean Flags:**
+```
+--verbose      → config.get_bool("verbose") == true
+--no-color     → config.get("no-color") == "true"
+```
+
+**Positional Arguments:**
+```
+file1.spl file2.spl   → config.get("_0") == "file1.spl"
+                          config.get("_1") == "file2.spl"
+```
+
+## Module Cache System
+
+### Generic Module Caching
+
+ModuleCache provides thread-safe caching for any module type:
+
+**Type Parameters:**
+- `M`: Module type to cache
+- `E`: Error type for load operations
+
+**Operations:**
+```simple
+# Create cache
+val cache = ModuleCache.new()
+
+# Insert module
+cache.insert(path, module)
+
+# Retrieve module
+val maybe_module = cache.get(path)
+
+# Remove module
+val removed = cache.remove(path)
+
+# List all cached modules
+val all_modules = cache.modules()
+```
+
+### Thread Safety
+
+ModuleCache uses RwLock for concurrent access:
+- **Multiple readers:** Concurrent gets allowed
+- **Single writer:** Exclusive access for insert/remove
+- **No deadlocks:** RwLock prevents lock ordering issues
+
+**Example:**
+```rust
+// Thread 1: Read
+val module1 = cache.get("/foo/bar.so")  // Concurrent read
+
+// Thread 2: Read
+val module2 = cache.get("/baz/qux.so")  // Concurrent read
+
+// Thread 3: Write
+cache.insert("/new/module.so", module)  // Exclusive write
+```
+
+### Path Canonicalization
+
+All paths are canonicalized before caching to handle:
+- Relative paths (`../../file.so`)
+- Symlinks (`/usr/local/lib` → `/opt/libs`)
+- Different path separators (Windows vs Unix)
+
+**Example:**
+```simple
+# All these refer to the same file:
+cache.get("./module.so")
+cache.get("module.so")
+cache.get("/absolute/path/module.so")
+```
+
+## Manual Memory Management
+
+### Handle Types
+
+ManualGc provides controlled memory management:
+
+**Unique<T>:**
+Exclusive ownership, not cloneable:
+```simple
+val unique = Unique.new(value)  # Single owner
+# Cannot clone, must move
+```
+
+**Shared<T>:**
+Reference-counted shared ownership:
+```simple
+val shared = Shared.new(value)  # Multiple owners
+val clone = shared.clone()      # Increment ref count
+```
+
+**WeakPtr<T>:**
+Non-owning weak reference:
+```simple
+val weak = Weak.from(shared)    # Weak reference
+val maybe = weak.upgrade()      # Try to get Shared<T>
+```
+
+## Runtime Symbol System
+
+### ABI Versioning
+
+Runtime symbols include ABI version checking:
+
+**Version Format:**
+```rust
+struct AbiVersion {
+    major: u16,  # Incompatible changes
+    minor: u16,  # Compatible additions
+    patch: u16,  # Bug fixes
+}
+```
+
+**Compatibility Rules:**
+- Major version must match exactly
+- Minor version: older compatible with newer
+- Patch version: any compatible
+
+**Example:**
+```simple
+val provider = RuntimeSymbolProvider.new()
+provider.check_abi_version(1, 2, 0)  # Check compatibility
+```
+
+### Symbol Provider Interface
+
+Provides runtime functions to loaded modules:
+
+**Common Symbols:**
+- Memory allocation (`malloc`, `free`)
+- GC operations (`gc_alloc`, `gc_collect`)
+- I/O functions (`print`, `read_file`)
+- Math functions (`sqrt`, `sin`, `cos`)
+
+**Custom Symbols:**
+```simple
+val provider = RuntimeSymbolProvider.new()
+provider.register("custom_fn", custom_fn_ptr)
+val maybe_fn = provider.lookup("custom_fn")
+```
+
+## Performance Characteristics
+
+| Operation | Complexity | Notes |
+|-----------|------------|-------|
+| File read (regular) | O(n) | n = file size |
+| File read (mmap) | O(1) + page faults | Lazy loading |
+| Config get | O(1) | HashMap lookup |
+| Module cache get | O(1) + lock | RwLock read lock |
+| Module cache insert | O(1) + lock | RwLock write lock |
+| Path canonicalization | O(n) | n = path length |
+
+**Memory Usage:**
+- Mmap: Maps file into virtual memory (lazy)
+- Regular read: Allocates full file buffer (eager)
+- Module cache: One Arc<M> per cached module
+
+## Related Features
+
+- Feature #105: Native Loader (uses module cache)
+- Feature #106: Driver (uses file reader and config)
+- Feature #2: Parser (uses file reader)
+- Feature #7: GC (runtime symbol provider)
+
+## Language Design Notes
+
+**Memory-Mapped I/O Threshold:**
+32KB threshold balances overhead vs performance:
+- Smaller threshold: More mmap overhead for small files
+- Larger threshold: Miss performance gains for medium files
+- Current value: Empirically optimized for source files
+
+**Unified Configuration:**
+Single ConfigEnv interface simplifies configuration management compared to
+separate env::var(), arg parsing, and config file loading.
+
+**Generic Module Cache:**
+Type parameters allow reuse across different module systems:
+- Native modules (`.so`/`.dll`)
+- Bytecode modules (`.smf`)
+- Source modules (`.spl`)
+- Plugin modules (dynamic)
+
+## Memory-Mapped File Reading
+
+    FileReader provides efficient file I/O using memory-mapped reading for
+    large files and regular I/O for small files.
+
+    **Threshold:** 32KB (files >= 32KB use mmap)
+
+    **Performance:** 15% faster for large source files
+
+    **Implementation:** See `file_reader.rs::FileReader`
+
+**Given** a small file (< 32KB)
+        **When** reading with auto strategy
+        **Then** uses regular file I/O
+
+        **Rationale:**
+        For small files, mmap syscall overhead exceeds the benefit.
+        Regular read() is faster for files under 32KB.
+
+        **Example:**
+        ```simple
+        # Small config file (1KB)
+        val content = FileReader.read_to_string("config.json")
+        # Uses: std::fs::read_to_string()
+        ```
+
+        **Verification:** File reading works correctly
+
+**Given** a large file (>= 32KB)
+        **When** reading with auto strategy
+        **Then** uses memory-mapped I/O
+
+        **Benefits:**
+        - Reduced system calls
+        - Zero-copy access
+        - OS page caching
+        - Lazy loading
+
+        **Example:**
+        ```simple
+        # Large source file (100KB)
+        val content = FileReader.read_to_string("large_module.spl")
+        # Uses: memmap2::Mmap
+        ```
+
+        **Performance:**
+        ~15% faster than regular I/O for files > 100KB
+
+        **Verification:** Large file reading works
+
+**Given** specific performance requirements
+        **When** selecting explicit strategy
+        **Then** respects strategy choice
+
+        **Strategies:**
+        - `Auto`: Choose based on file size (default)
+        - `Mmap`: Always use memory-mapped I/O
+        - `Regular`: Always use regular I/O
+
+        **Examples:**
+        ```simple
+        # Always use mmap (even for small files)
+        val content = FileReader.read_with_strategy("file.spl", Strategy.Mmap)
+
+        # Always use regular I/O (even for large files)
+        val content = FileReader.read_with_strategy("file.spl", Strategy.Regular)
+
+        # Automatic selection (recommended)
+        val content = FileReader.read_with_strategy("file.spl", Strategy.Auto)
+        ```
+
+        **Use Cases:**
+        - Mmap: Known large files, repeated access
+        - Regular: Streaming, temporary files
+        - Auto: General-purpose (recommended)
+
+        **Verification:** Strategy selection works
+
+## Unified Configuration Interface
+
+    ConfigEnv provides unified access to configuration from environment variables,
+    command-line arguments, and manual key-value pairs.
+
+    **Sources:**
+    - Environment variables
+    - CLI arguments
+    - Direct key-value sets
+
+    **Implementation:** See `config_env.rs::ConfigEnv`
+
+**Given** environment variables set
+        **When** creating ConfigEnv from environment
+        **Then** reads values from env
+
+        **Example:**
+        ```simple
+        # Shell: export DEBUG=true
+        # Shell: export PORT=8080
+
+        val config = ConfigEnv.from_env()
+        val debug = config.get_bool("DEBUG")    # true
+        val port = config.get_i64("PORT")       # 8080
+        ```
+
+        **Type Conversion:**
+        - `get()`: Returns string
+        - `get_i64()`: Parses as integer
+        - `get_f64()`: Parses as float
+        - `get_bool()`: Parses as boolean ("true"/"false")
+
+        **Verification:** Environment variable reading works
+
+**Given** command-line arguments
+        **When** creating ConfigEnv from args
+        **Then** extracts key-value pairs
+
+        **Argument Formats:**
+        ```simple
+        --key=value         # Long format with equals
+        --key value         # Long format with space
+        -k value            # Short format
+        --flag              # Boolean flag (true)
+        positional.spl      # Positional arg (stored as _0, _1, etc.)
+        ```
+
+        **Example:**
+        ```simple
+        val args = ["--port=8080", "--verbose", "input.spl"]
+        val config = ConfigEnv.from_args(args)
+
+        val port = config.get_i64("port")         # 8080
+        val verbose = config.get_bool("verbose")  # true
+        val input = config.get("_0")              # "input.spl"
+        ```
+
+        **Verification:** Argument parsing works correctly
+
+**Given** programmatic configuration needs
+        **When** setting values manually
+        **Then** stores key-value pairs
+
+        **Example:**
+        ```simple
+        val config = ConfigEnv.new()
+        config.set("host", "localhost")
+        config.set("port", "3000")
+        config.set("debug", "false")
+
+        val host = config.get("host")          # "localhost"
+        val port = config.get_i64("port")      # 3000
+        val debug = config.get_bool("debug")   # false
+        ```
+
+        **Override Pattern:**
+        ```simple
+        # Start with environment
+        val config = ConfigEnv.from_env()
+
+        # Override with command-line args
+        config.merge(ConfigEnv.from_args(args))
+
+        # Override with manual settings
+        config.set("debug", "true")
+        ```
+
+        **Verification:** Manual configuration works
+
+## Generic Module Cache
+
+    ModuleCache provides thread-safe caching for loaded modules with support
+    for insertion, retrieval, and removal.
+
+    **Thread Safety:** Uses RwLock for concurrent access
+
+    **Path Handling:** Canonicalizes all paths
+
+    **Implementation:** See `lib.rs::ModuleCache`
+
+**Given** loaded modules
+        **When** inserting into cache
+        **Then** stores for later retrieval
+
+        **Example:**
+        ```simple
+        val cache = ModuleCache.new()
+
+        # Load and cache module
+        val module = load_module("path/to/module.so")
+        cache.insert("path/to/module.so", module)
+
+        # Later: retrieve from cache (no reload)
+        val cached = cache.get("path/to/module.so")
+        ```
+
+        **Benefits:**
+        - Avoid redundant loading
+        - Share modules across components
+        - Centralized module management
+
+        **Verification:** Module caching works
+
+**Given** request for uncached module
+        **When** getting from cache
+        **Then** returns None
+
+        **Example:**
+        ```simple
+        val cache = ModuleCache.new()
+
+        match cache.get("not_loaded.so"):
+            Some(module) => use_module(module)
+            None => {
+                val module = load_module("not_loaded.so")
+                cache.insert("not_loaded.so", module)
+                use_module(module)
+            }
+        ```
+
+        **Pattern:** Load-on-miss with caching
+
+        **Verification:** Cache miss handling works
+
+**Given** cached modules
+        **When** removing from cache
+        **Then** evicts module
+
+        **Example:**
+        ```simple
+        val cache = ModuleCache.new()
+        cache.insert("module.so", module)
+
+        # Later: unload and remove
+        val removed = cache.remove("module.so")  # true
+
+        # Module no longer cached
+        val gone = cache.get("module.so")  # None
+        ```
+
+        **Use Cases:**
+        - Hot reloading (remove, reload, re-insert)
+        - Memory management (evict unused modules)
+        - Testing (reset between tests)
+
+        **Verification:** Module removal works
+
+**Given** different path representations
+        **When** accessing cache
+        **Then** treats as same module
+
+        **Path Normalization:**
+        ```simple
+        val cache = ModuleCache.new()
+        cache.insert("./module.so", module)
+
+        # All these refer to same cached module:
+        cache.get("./module.so")         # Direct match
+        cache.get("module.so")           # Relative normalized
+        cache.get("/abs/path/module.so") # Absolute path
+        ```
+
+        **Handles:**
+        - Relative paths (`../foo/bar.so`)
+        - Symlinks (`/usr/local` → `/opt`)
+        - Path separators (Windows `\` vs Unix `/`)
+
+        **Verification:** Path canonicalization works
+
+## Runtime Symbol Provider
+
+    RuntimeSymbolProvider manages ABI versioning and symbol resolution for
+    dynamically loaded modules.
+
+    **ABI Versioning:** Major.Minor.Patch compatibility
+
+    **Symbol Lookup:** Function pointer resolution by name
+
+    **Implementation:** See `runtime_symbols.rs::RuntimeSymbolProvider`
+
+**Given** module with ABI version
+        **When** checking compatibility
+        **Then** validates version constraints
+
+        **Compatibility Rules:**
+        - Major version must match exactly
+        - Minor version: older <= newer (additions OK)
+        - Patch version: any compatible
+
+        **Examples:**
+        ```simple
+        # Compatible
+        Runtime: 1.2.3, Module: 1.2.0 ✓
+        Runtime: 1.3.0, Module: 1.2.5 ✓
+
+        # Incompatible
+        Runtime: 1.2.0, Module: 2.0.0 ✗ (major mismatch)
+        Runtime: 1.3.0, Module: 1.4.0 ✗ (minor too new)
+        ```
+
+        **Error Handling:**
+        ```simple
+        match provider.check_abi_version(module_version):
+            Ok(_) => load_module()
+            Err(IncompatibleAbi) => report_error()
+        ```
+
+        **Verification:** ABI version checking works
+
+**Given** symbol name
+        **When** looking up in provider
+        **Then** returns function pointer
+
+        **Common Symbols:**
+        ```simple
+        provider.lookup("malloc")      # Memory allocation
+        provider.lookup("gc_alloc")    # GC allocation
+        provider.lookup("print")       # I/O functions
+        provider.lookup("sqrt")        # Math functions
+        ```
+
+        **Custom Registration:**
+        ```simple
+        val provider = RuntimeSymbolProvider.new()
+        provider.register("custom_fn", fn_ptr)
+
+        val maybe_fn = provider.lookup("custom_fn")
+        ```
+
+        **Verification:** Symbol lookup works

@@ -15,8 +15,8 @@ use crossterm::{
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{self, Clear, ClearType},
 };
-use simple_driver::doctest::{append_to_prelude, build_source, is_definition_like};
-use simple_driver::runner::Runner;
+use crate::doctest::{append_to_prelude, build_source, is_definition_like};
+use crate::runner::Runner;
 use std::io::{self, Write};
 
 /// Run the TUI-based REPL

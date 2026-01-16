@@ -1,0 +1,652 @@
+# Dependency Tracker & Module Resolution
+
+*Source: `simple/std_lib/test/features/infrastructure/dependency_tracker_spec.spl`*
+
+---
+
+# Dependency Tracker & Module Resolution
+
+**Feature ID:** #104
+**Category:** Infrastructure - Module System
+**Difficulty:** 4/5
+**Status:** Complete
+
+## Overview
+
+The Dependency Tracker implements formally verified module resolution, visibility control,
+and macro auto-import semantics. Unlike other compiler components, this system has been
+entirely verified in Lean 4 with proofs of correctness properties. This SSpec serves as
+executable validation that the Rust implementation matches the Lean specification.
+
+Key verified components:
+- **Module Resolution:** Translates dot-path imports to filesystem paths unambiguously
+- **Visibility Rules:** Enforces public/private access control with ancestor visibility
+- **Macro Auto-Import:** Implements glob import semantics with auto-import lists
+- **Cyclic Detection:** Prevents circular module dependencies
+
+## Key Features
+
+- **Lean 4 Verification:** 17 formally proven theorems about module system properties
+- **Unambiguous Resolution:** Well-formed filesystems never produce ambiguous paths
+- **Visibility Intersection:** Effective visibility = item visibility ∩ ancestor visibility
+- **Auto-Import Control:** Glob imports only include explicitly listed macros
+- **Cyclic Prevention:** Detects and rejects circular dependencies
+
+## Syntax
+
+**Module Imports:**
+```simple
+# Absolute import (starts with 'crate')
+import crate.sys.http
+
+# Resolves to:
+#   crate/sys/http.spl  OR
+#   crate/sys/http/__init__.spl
+
+# Relative import (from current module)
+import .utils      # Same directory
+import ..config    # Parent directory
+```
+
+**Visibility Declarations:**
+```simple
+# Public visibility
+pub fn public_function():
+    pass
+
+# Private visibility (default)
+fn private_function():
+    pass
+
+# Module visibility in __init__.spl
+pub mod utils      # Public submodule
+mod internal       # Private submodule
+```
+
+**Macro Auto-Import:**
+```simple
+# In __init__.spl
+auto import derive, test, benchmark
+
+# Glob import includes only listed macros
+from crate.macros import *  # Gets: derive, test, benchmark only
+```
+
+## Lean 4 Formal Verification
+
+The dependency tracker is formally verified in Lean 4 across three proof modules:
+
+### Module Resolution (`verification/module_resolution/`)
+
+**Theorem 1: wellformed_not_ambiguous**
+```lean
+theorem wellformed_not_ambiguous (fs : FileSystem) (p : ModPath) :
+  wellFormed fs → ∀ file dir, resolve fs p ≠ Ambiguous file dir
+```
+**Property:** In well-formed filesystems (no module exists as both file and directory),
+resolution never returns ambiguous results.
+
+**Theorem 2: unique_path_form**
+```lean
+theorem unique_path_form (fs : FileSystem) (p : ModPath) (k : FileKind) (path : String) :
+  resolve fs p = Unique k path →
+    path = toFilePath p ∨ path = toDirPath p
+```
+**Property:** Unique resolution always returns one of the two canonical path forms.
+
+**Theorem 3: unique_implies_exists**
+```lean
+theorem unique_implies_exists (fs : FileSystem) (p : ModPath) (k : FileKind) (path : String) :
+  resolve fs p = Unique k path → path ∈ fs.files
+```
+**Property:** Unique resolution implies the resolved file exists in the filesystem.
+
+**Theorem 4: notfound_means_neither**
+```lean
+theorem notfound_means_neither (fs : FileSystem) (p : ModPath) :
+  resolve fs p = NotFound →
+    toFilePath p ∉ fs.files ∧ toDirPath p ∉ fs.files
+```
+**Property:** Not found means neither file form exists.
+
+### Visibility & Export (`verification/visibility_export/`)
+
+**Theorem 5: private_stays_private**
+```lean
+theorem private_stays_private (item_vis : Visibility) (anc_vis : Visibility) :
+  item_vis = priv → effectiveVisibility item_vis anc_vis = priv
+```
+**Property:** Private items remain private regardless of ancestor visibility.
+
+**Theorem 6: private_module_restricts**
+```lean
+theorem private_module_restricts (item_vis : Visibility) (anc_vis : Visibility) :
+  anc_vis = priv → effectiveVisibility item_vis anc_vis = priv
+```
+**Property:** Items in private modules cannot be public.
+
+**Theorem 7: must_be_exported**
+```lean
+theorem must_be_exported (dir : DirManifest) (sym : SymbolId) :
+  externally_visible dir sym → sym ∈ dir.exports
+```
+**Property:** Externally visible symbols must be explicitly exported.
+
+**Theorem 8-10: meet_comm, meet_assoc, any_private_means_private**
+Visibility meet operation is commutative, associative, and private-dominant.
+
+### Macro Auto-Import (`verification/macro_auto_import/`)
+
+**Theorem 11: glob_includes_auto_imports**
+```lean
+theorem glob_includes_auto_imports (exports : MacroExports) (auto : AutoImport) :
+  ∀ m ∈ auto.macros, isAutoImported exports auto m = true →
+    m ∈ globImport exports auto
+```
+**Property:** Glob imports include all auto-imported macros.
+
+**Theorem 12-17:** Additional properties about macro import semantics, filtering,
+and auto-import list behavior.
+
+## Implementation
+
+**Primary Files:**
+- `src/dependency_tracker/src/resolution.rs` - Module path resolution
+- `src/dependency_tracker/src/visibility.rs` - Visibility and export control
+- `src/dependency_tracker/src/macro_import.rs` - Macro auto-import semantics
+- `src/dependency_tracker/src/graph.rs` - Dependency graph and cycle detection
+
+**Testing:**
+- **This SSpec file is the ONLY executable test** for dependency_tracker
+- Translates Lean theorems into executable Simple code
+- Validates Rust implementation matches Lean model
+
+**Verification:**
+- `verification/module_resolution/` - 4 Lean theorems
+- `verification/visibility_export/` - 7 Lean theorems
+- `verification/macro_auto_import/` - 6 Lean theorems
+
+**Dependencies:**
+- Feature #2: Parser (imports syntax)
+- Feature #106: Driver (module loading)
+
+**Required By:**
+- Feature #106: Driver (uses module resolution)
+- All compiler phases (module imports)
+
+## Module Resolution Algorithm
+
+### Dot-Path to File-Path Translation
+
+**Input:** Module path like `crate.sys.http`
+
+**Resolution Steps:**
+```
+1. Parse dot-path into segments: ["crate", "sys", "http"]
+2. Remove leading "crate" prefix: ["sys", "http"]
+3. Convert to file path: "sys/http"
+4. Try both forms:
+   a. File form: "sys/http.spl"
+   b. Directory form: "sys/http/__init__.spl"
+5. Return result:
+   - Unique: Exactly one form exists
+   - Ambiguous: Both forms exist (error in well-formed FS)
+   - NotFound: Neither form exists
+```
+
+**Path Forms:**
+```
+crate.foo       → foo.spl OR foo/__init__.spl
+crate.foo.bar   → foo/bar.spl OR foo/bar/__init__.spl
+crate.a.b.c     → a/b/c.spl OR a/b/c/__init__.spl
+```
+
+### Well-Formed Filesystem
+
+A filesystem is well-formed if no module exists in both forms:
+
+**Valid:**
+```
+foo.spl         # Module as file
+bar/__init__.spl  # Module as directory
+```
+
+**Invalid (Ambiguous):**
+```
+baz.spl           # Module as file
+baz/__init__.spl  # AND as directory (ambiguous!)
+```
+
+**Theorem:** In well-formed filesystems, resolution is never ambiguous.
+
+## Visibility System
+
+### Effective Visibility Formula
+
+**Formula:**
+```
+effective_visibility(item, ancestors) = item_visibility ∩ ancestor_visibility
+```
+
+**Rules:**
+- `Public ∩ Public = Public`
+- `Public ∩ Private = Private`
+- `Private ∩ Public = Private`
+- `Private ∩ Private = Private`
+
+**Property:** Private dominates (meet operation)
+
+### Ancestor Visibility Chain
+
+Visibility propagates through module hierarchy:
+
+**Example:**
+```
+crate/           # Public (always)
+  sys/           # Private (declared as 'mod sys')
+    http/        # Public (declared as 'pub mod http')
+      Client     # Public (declared as 'pub struct Client')
+```
+
+**Effective Visibility:**
+```
+Client visibility = Public ∩ (Public ∩ Private ∩ Public)
+                  = Public ∩ Private
+                  = Private
+```
+
+**Result:** Client is not externally accessible (private module in chain).
+
+### Export Lists
+
+Only explicitly exported symbols are externally visible:
+
+**In crate/sys/__init__.spl:**
+```simple
+pub mod http          # http module is public
+export use http.Client  # Client is exported
+
+# http.Server is NOT exported, even if public in http.spl
+```
+
+**External View:**
+```simple
+from crate.sys import Client  # OK (exported)
+from crate.sys import Server  # Error (not exported)
+```
+
+## Macro Auto-Import
+
+### Auto-Import Lists
+
+Directories specify which macros are auto-imported:
+
+**In crate/macros/__init__.spl:**
+```simple
+auto import derive, test, benchmark
+
+# Other macros: async, inline, deprecated
+```
+
+### Glob Import Semantics
+
+**Glob import includes only auto-imported macros:**
+```simple
+from crate.macros import *
+
+# Imports: derive, test, benchmark
+# Does NOT import: async, inline, deprecated
+```
+
+**Explicit import works for all macros:**
+```simple
+from crate.macros import async  # OK (explicit)
+```
+
+**Property:** Glob imports are controlled, preventing namespace pollution.
+
+## Test Coverage
+
+This specification validates:
+1. **Module Resolution:** Path translation, uniqueness, existence
+2. **Visibility Intersection:** Effective visibility computation
+3. **Export Requirements:** Externally visible symbols must be exported
+4. **Macro Auto-Import:** Glob import filtering
+5. **Lean Verification Alignment:** Rust matches Lean model
+
+## Performance Characteristics
+
+| Operation | Complexity | Notes |
+|-----------|------------|-------|
+| Path resolution | O(n) | n = path segments |
+| Visibility check | O(d) | d = directory depth |
+| Export lookup | O(1) | Hash set lookup |
+| Cycle detection | O(V + E) | V = modules, E = imports |
+
+## Related Features
+
+- Feature #2: Parser (import statements)
+- Feature #106: Driver (module loading)
+- Feature #28: Module System (uses resolution)
+
+## Language Design Notes
+
+**Explicit Exports:**
+Simple requires explicit export lists to prevent accidental API exposure:
+```simple
+# In __init__.spl
+export use foo, bar  # Only foo and bar are public
+```
+
+This contrasts with languages that auto-export all public items.
+
+**Auto-Import Control:**
+Macro auto-import lists prevent namespace pollution from glob imports:
+```simple
+auto import derive  # Only 'derive' imported with '*'
+```
+
+**Verification-First Design:**
+The dependency tracker was designed in Lean first, then implemented in Rust.
+This ensures correctness by construction.
+
+## Module Path Resolution
+
+    Translates dot-path module imports to filesystem paths with well-defined
+    resolution rules verified in Lean 4.
+
+    **Lean Verification:** `verification/module_resolution/`
+
+    **Implementation:** See `resolution.rs::resolve()`
+
+**Given** module path `crate.foo`
+        **When** filesystem has `foo.spl`
+        **Then** resolves to file form
+
+        **Lean Theorem:** `unique_path_form`
+        Unique resolution returns one of: file form OR directory form
+
+        **Example:**
+        ```
+        Filesystem: foo.spl
+        Import: crate.foo
+        Resolves: foo.spl (file form)
+        ```
+
+        **Verification:** File resolution works correctly
+
+**Given** module path `crate.bar`
+        **When** filesystem has `bar/__init__.spl`
+        **Then** resolves to directory form
+
+        **Lean Theorem:** `unique_path_form`
+        Unique resolution returns canonical path form
+
+        **Example:**
+        ```
+        Filesystem: bar/__init__.spl
+        Import: crate.bar
+        Resolves: bar/__init__.spl (directory form)
+        ```
+
+        **Verification:** Directory resolution works correctly
+
+**Given** module path `crate.a.b.c`
+        **When** resolving to filesystem
+        **Then** translates to nested path structure
+
+        **Translation:**
+        ```
+        crate.a.b.c → a/b/c.spl OR a/b/c/__init__.spl
+        ```
+
+        **Example:**
+        ```
+        Filesystem: a/b/c.spl
+        Import: crate.a.b.c
+        Resolves: a/b/c.spl
+        ```
+
+        **Verification:** Nested path translation works
+
+**Given** well-formed filesystem
+        **When** resolving any module path
+        **Then** never returns ambiguous result
+
+        **Lean Theorem:** `wellformed_not_ambiguous`
+        ```lean
+        theorem wellformed_not_ambiguous (fs : FileSystem) (p : ModPath) :
+          wellFormed fs → ∀ file dir, resolve fs p ≠ Ambiguous file dir
+        ```
+
+        **Property:** If filesystem is well-formed (no module exists as both
+        file and directory), resolution is always unique or not found.
+
+        **Well-Formed:**
+        ```
+        foo.spl          # OK (file only)
+        bar/__init__.spl # OK (directory only)
+        ```
+
+        **Not Well-Formed:**
+        ```
+        baz.spl          # Ambiguous!
+        baz/__init__.spl # Same module, both forms
+        ```
+
+        **Verification:** Ambiguity is prevented in well-formed FS
+
+**Given** module path for non-existent module
+        **When** resolving
+        **Then** returns NotFound
+
+        **Lean Theorem:** `notfound_means_neither`
+        ```lean
+        theorem notfound_means_neither (fs : FileSystem) (p : ModPath) :
+          resolve fs p = NotFound →
+            toFilePath p ∉ fs.files ∧ toDirPath p ∉ fs.files
+        ```
+
+        **Property:** NotFound means neither file form nor directory form exists.
+
+        **Example:**
+        ```
+        Filesystem: (empty)
+        Import: crate.missing
+        Result: NotFound
+        ```
+
+        **Verification:** Not found detection works
+
+## Visibility System
+
+    Implements visibility intersection semantics where effective visibility is
+    the meet (intersection) of item visibility and ancestor visibility.
+
+    **Lean Verification:** `verification/visibility_export/`
+
+    **Implementation:** See `visibility.rs::effective_visibility()`
+
+**Given** item visibility and ancestor visibility
+        **When** computing effective visibility
+        **Then** returns intersection (meet)
+
+        **Meet Operation:**
+        ```
+        Public ∩ Public = Public
+        Public ∩ Private = Private
+        Private ∩ Public = Private
+        Private ∩ Private = Private
+        ```
+
+        **Lean Theorem:** `meet_comm`, `meet_assoc`
+        Meet is commutative and associative
+
+        **Example:**
+        ```
+        Item: Public
+        Ancestor: Private
+        Effective: Private (intersection)
+        ```
+
+        **Verification:** Visibility intersection works
+
+**Given** private item
+        **When** computing effective visibility
+        **Then** remains private regardless of ancestors
+
+        **Lean Theorem:** `private_stays_private`
+        ```lean
+        theorem private_stays_private (item_vis : Visibility) (anc_vis : Visibility) :
+          item_vis = priv → effectiveVisibility item_vis anc_vis = priv
+        ```
+
+        **Property:** Private items cannot be made public by public ancestors.
+
+        **Example:**
+        ```
+        Item: Private
+        Ancestors: All Public
+        Result: Private (item visibility dominates)
+        ```
+
+        **Verification:** Private dominance works
+
+**Given** item in private module
+        **When** computing effective visibility
+        **Then** item becomes private
+
+        **Lean Theorem:** `private_module_restricts`
+        ```lean
+        theorem private_module_restricts (item_vis : Visibility) (anc_vis : Visibility) :
+          anc_vis = priv → effectiveVisibility item_vis anc_vis = priv
+        ```
+
+        **Property:** Items in private modules cannot be public.
+
+        **Example:**
+        ```
+        Module: Private
+        Item: Public
+        Result: Private (module visibility restricts)
+        ```
+
+        **Verification:** Module restriction works
+
+**Given** symbol to be externally visible
+        **When** checking export requirements
+        **Then** symbol must be in export list
+
+        **Lean Theorem:** `must_be_exported`
+        ```lean
+        theorem must_be_exported (dir : DirManifest) (sym : SymbolId) :
+          externally_visible dir sym → sym ∈ dir.exports
+        ```
+
+        **Property:** Externally visible symbols must be explicitly exported.
+
+        **Example:**
+        ```simple
+        # In __init__.spl
+        pub mod http
+        export use http.Client  # Explicit export
+
+        # Client is externally visible
+        # Server is NOT (even if public in http.spl)
+        ```
+
+        **Verification:** Export requirement works
+
+## Macro Auto-Import
+
+    Implements controlled glob imports where only explicitly listed macros
+    are included with `import *` syntax.
+
+    **Lean Verification:** `verification/macro_auto_import/`
+
+    **Implementation:** See `macro_import.rs::glob_import()`
+
+**Given** auto-import list in module
+        **When** using glob import syntax
+        **Then** only auto-imported macros are included
+
+        **Lean Theorem:** `glob_includes_auto_imports`
+        All auto-imported macros are included in glob imports
+
+        **Example:**
+        ```simple
+        # In macros/__init__.spl
+        auto import derive, test
+
+        # In user code
+        from crate.macros import *
+        # Gets: derive, test
+        # Does NOT get: async, inline, deprecated
+        ```
+
+        **Rationale:** Prevents namespace pollution from glob imports
+
+        **Verification:** Auto-import filtering works
+
+**Given** macro not in auto-import list
+        **When** using explicit import
+        **Then** import succeeds
+
+        **Example:**
+        ```simple
+        # auto import derive, test
+
+        # Explicit imports work for any macro
+        from crate.macros import async   # OK
+        from crate.macros import inline  # OK
+        ```
+
+        **Property:** Auto-import list only affects glob imports, not explicit.
+
+        **Verification:** Explicit imports work for all macros
+
+## Cyclic Dependency Detection
+
+    Detects circular import dependencies to prevent infinite compilation loops.
+
+    **Implementation:** See `graph.rs::ImportGraph`
+
+**Given** module A imports B, B imports A
+        **When** building dependency graph
+        **Then** reports cyclic dependency
+
+        **Example:**
+        ```
+        A.spl: import B
+        B.spl: import A
+        Cycle: A → B → A
+        ```
+
+        **Error:**
+        ```
+        error: cyclic dependency detected
+          A → B → A
+        ```
+
+        **Verification:** Simple cycle detection works
+
+**Given** complex import chain with cycle
+        **When** building dependency graph
+        **Then** identifies all modules in cycle
+
+        **Example:**
+        ```
+        A.spl: import B
+        B.spl: import C
+        C.spl: import D
+        D.spl: import B
+        Cycle: B → C → D → B
+        ```
+
+        **Error:**
+        ```
+        error: cyclic dependency detected
+          B → C → D → B
+        ```
+
+        **Verification:** Multi-module cycle detection works

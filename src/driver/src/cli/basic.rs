@@ -1,7 +1,7 @@
 //! Basic CLI operations: running files, code, and watching for changes.
 
-use simple_driver::runner::Runner;
-use simple_driver::watcher::watch;
+use crate::runner::Runner;
+use crate::watcher::watch;
 use std::path::PathBuf;
 
 /// Create a runner with appropriate GC configuration

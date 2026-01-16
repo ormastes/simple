@@ -1,86 +1,20 @@
 # Test Specification Index
 
-*Generated: 2026-01-16 04:08:50*
+*Generated: 2026-01-16 06:44:49*
 
-## Features
+## Quick Stats
 
-- [buffer_pool_spec](buffer_pool_spec.md)
-- [Cranelift JIT Compilation Backend](cranelift_spec.md)
-- [generator_codegen_spec](generator_codegen_spec.md)
-- [llvm_backend_spec](llvm_backend_spec.md)
-- [native_binary_spec](native_binary_spec.md)
-- [actors_spec](actors_spec.md)
-- [Async/Await (Asynchronous Programming)](async_await_spec.md)
-- [Async-by-Default Functions](async_default_spec.md)
-- [effect_inference_spec](effect_inference_spec.md)
-- [futures_spec](futures_spec.md)
-- [generators_spec](generators_spec.md)
-- [promise_type_spec](promise_type_spec.md)
-- [suspension_operator_spec](suspension_operator_spec.md)
-- [Conditionals (If/Elif/Else)](conditionals_spec.md)
-- [Enumerate Shorthand Syntax](enumerate_shorthand_spec.md)
-- [Error Handling (Result Type)](error_handling_spec.md)
-- [Loops (For and While)](loops_spec.md)
-- [Pattern Matching (Match Expressions)](match_spec.md)
-- [With Statement (Context Managers)](with_statement_spec.md)
-- [Arrays (Dynamic Lists)](arrays_spec.md)
-- [List and Dict Comprehensions](comprehensions_spec.md)
-- [Dictionary (Hash Map) Type](dicts_spec.md)
-- [ranges_spec](ranges_spec.md)
-- [Sets (Unique Collections)](sets_spec.md)
-- [String Type (text)](strings_spec.md)
-- [Tensor Dimension Inference](tensor_dimensions_spec.md)
-- [Tuple Type](tuples_spec.md)
-- [ast_spec](ast_spec.md)
-- [gc_spec](gc_spec.md)
-- [hir_spec](hir_spec.md)
-- [lexer_spec](lexer_spec.md)
-- [mir_spec](mir_spec.md)
-- [package_manager_spec](package_manager_spec.md)
-- [Parser (Syntax Analysis)](parser_spec.md)
-- [runtime_value_spec](runtime_value_spec.md)
-- [smf_spec](smf_spec.md)
-- [Type-safe Channels](channels_spec.md)
-- [Classes (Object-Oriented Programming)](classes_spec.md)
-- [Lambda Functions and Closures](closures_spec.md)
-- [Isolated Threads and Go-style Concurrency](concurrency_spec.md)
-- [Functions (Named, Lambda, Higher-Order)](functions_spec.md)
-- [Module Import System](imports_spec.md)
-- [Lambda Expressions](lambda_spec.md)
-- [macros_spec](macros_spec.md)
-- [Methods (Instance and Static)](methods_spec.md)
-- [Naming Convention Mutability](naming_convention_mutability_spec.md)
-- [static_polymorphism_spec](static_polymorphism_spec.md)
-- [Struct Types (Classes)](structs_spec.md)
-- [traits_spec](traits_spec.md)
-- [Variable Declarations](variables_spec.md)
-- [Hierarchical Configuration System](config_system_spec.md)
-- [experiment_tracking_spec](experiment_tracking_spec.md)
-- [torch_caching_spec](torch_caching_spec.md)
-- [Event-Driven Training Engine](training_engine_spec.md)
-- [each_method_spec](each_method_spec.md)
-- [empty_predicate_spec](empty_predicate_spec.md)
-- [File I/O (File System Operations)](file_io_spec.md)
-- [integer_iteration_spec](integer_iteration_spec.md)
-- [json_spec](json_spec.md)
-- [number_trait_spec](number_trait_spec.md)
-- [sorting_algorithms_spec](sorting_algorithms_spec.md)
-- [string_methods_spec](string_methods_spec.md)
-- [symbol_table_spec](symbol_table_spec.md)
-- [try_operator_spec](try_operator_spec.md)
-- [Brevity Syntax Features](brevity_syntax_spec.md)
-- [Custom Blocks Feature Specification](custom_blocks_spec.md)
-- [After Each Hooks (Test Cleanup)](after_each_spec.md)
-- [Before Each Hooks (Test Setup)](before_each_spec.md)
-- [context_blocks_spec](context_blocks_spec.md)
-- [describe_blocks_spec](describe_blocks_spec.md)
-- [doctest_spec](doctest_spec.md)
-- [expect_matchers_spec](expect_matchers_spec.md)
-- [it_examples_spec](it_examples_spec.md)
-- [Primitive Types (Basic Types)](basic_types_spec.md)
-- [borrowing_spec](borrowing_spec.md)
-- [Algebraic Data Types (Enums)](enums_spec.md)
-- [generics_spec](generics_spec.md)
-- [memory_types_spec](memory_types_spec.md)
-- [Operators (Arithmetic, Comparison, Logical)](operators_spec.md)
-- [Option and Result Types](option_result_spec.md)
+- **Total Features:** 1
+- **Complete Documentation:** 1 (100%)
+- **Stubs Remaining:** 0
+- **Total Lines:** 100
+- **Warnings:** 1
+
+---
+
+## Infrastructure - Developer Tools (1 features)
+
+| Feature | Status | Difficulty | Coverage | Details |
+|---------|--------|------------|----------|----------|
+| [CLI Tools & Utilities](cli_tools_spec.md) | ⚠️ Partial | 2/5 | 60% | 100 lines |
+
