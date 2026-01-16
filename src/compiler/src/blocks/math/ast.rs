@@ -13,6 +13,8 @@ pub enum MathExpr {
     Int(i64),
     /// Float literal: 3.14
     Float(f64),
+    /// Array literal for tensor creation: [1, 2, 3] or [[1, 2], [3, 4]]
+    Array(Vec<MathExpr>),
 
     // === Identifiers ===
     /// Variable or constant: x, pi, alpha
@@ -140,7 +142,20 @@ pub fn is_builtin_function(name: &str) -> bool {
         // Binders (parsed specially but also callable)
         "sum" | "Σ" |
         "prod" | "Π" |
-        "int" | "∫"
+        "int" | "∫" |
+        // Tensor creation (torch-compatible)
+        "tensor" | "zeros" | "ones" | "full" | "eye" |
+        "arange" | "linspace" | "rand" | "randn" |
+        // Tensor operations
+        "matmul" | "dot" | "transpose" | "T" |
+        "reshape" | "flatten" | "squeeze" | "unsqueeze" |
+        "shape" | "ndim" | "numel" | "item" |
+        // Tensor reductions
+        "mean" | "var" | "std" | "argmin" | "argmax" |
+        // Tensor element-wise (also work on scalars)
+        "relu" | "sigmoid" | "softmax" |
+        // Tensor utilities
+        "cat" | "stack" | "split" | "chunk"
     )
 }
 
