@@ -10,7 +10,7 @@ use super::super::{exec_node, pattern_matches, ClassDef, Control, Enums, Env, Fu
 
 pub(super) fn eval_control_expr(
     expr: &Expr,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,

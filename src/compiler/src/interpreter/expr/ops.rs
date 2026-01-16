@@ -14,7 +14,7 @@ use super::super::{check_unit_binary_op, check_unit_unary_op, ClassDef, Enums, E
 
 pub(super) fn eval_op_expr(
     expr: &Expr,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,

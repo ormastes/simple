@@ -25,7 +25,7 @@ mod units;
 #[instrument(skip(env, functions, classes, enums, impl_methods))]
 pub(crate) fn evaluate_expr(
     expr: &Expr,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -104,18 +104,28 @@ pub(crate) fn evaluate_expr(
                     classes.insert(class_name, class_def);
                 }
 
+                // Register introduced types (stored as Nil for now)
+                for (name, _ty) in introduced.introduced_types {
+                    env.insert(name, Value::Nil);
+                }
+
+                // Register introduced variables
+                for (name, _ty, _is_const) in introduced.introduced_vars {
+                    // Initialize with Nil placeholder
+                    // The macro's emit block should assign the actual value
+                    env.insert(name, Value::Nil);
+                }
+
                 // TODO: [compiler][P3] Execute inject code
                 // NOTE: Inject code requires mutable environment access and block-level modification
                 // Currently inject code is extracted and stored in contract result, but not executed
                 // Full implementation requires:
-                // 1. Mutable env access (currently expressions have &Env, not &mut Env)
+                // 1. Mutable env access (now available with &mut Env)
                 // 2. Block-level handling for head/tail/here injection points
                 // 3. Statement-level macro invocation handling (not just expressions)
                 //
                 // For now, inject contract items are parsed, validated, and extracted,
                 // but the code is not yet spliced into the callsite.
-
-                // TODO: [compiler][P1] Register types, variables when those contract types are implemented
             }
 
             Ok(result)

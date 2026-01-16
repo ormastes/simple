@@ -26,7 +26,10 @@ fn watcher_rebuilds_on_change() {
     thread::sleep(Duration::from_millis(200));
 
     // Validate that the .smf file exists (indicating watcher compiled)
-    let smf_path = PathBuf::from(&src_path).with_extension("smf");
+    // SMF files are now stored in .simple/build/ directory
+    let build_dir = src_path.parent().unwrap().join(".simple").join("build");
+    let file_stem = src_path.file_stem().unwrap();
+    let smf_path = build_dir.join(file_stem).with_extension("smf");
     assert!(smf_path.exists());
 
     // End watcher thread
