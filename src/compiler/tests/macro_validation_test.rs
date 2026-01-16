@@ -181,38 +181,38 @@ fn test_qident_template_without_const_param() {
 }
 
 #[test]
-#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_type_annotation_required() {
     let source = r#"
         # intro let without type annotation - should fail
-        macro init_var():
-            contract:
-                intro: let my_var
+        macro init_var() -> (
+            intro result:
+                enclosing.module.let my_var
+        ):
             const_eval:
                 pass
             emit result:
-                let my_var = 42
+                val my_var = 42
 
         init_var!()
         main = 0
     "#;
 
     // Should fail with E1405 (MACRO_MISSING_TYPE_ANNOTATION)
-    // Note: This would be caught by the parser, so we expect a parse error
+    // The parser requires type annotation for 'let' in intro
     assert!(check_compiles(source).is_err());
 }
 
 #[test]
-#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_with_type_annotation_success() {
     let source = r#"
-        macro init_var():
-            contract:
-                intro: let my_var: int
+        macro init_var() -> (
+            intro result:
+                enclosing.module.let my_var: i64
+        ):
             const_eval:
                 pass
             emit result:
-                let my_var = 42
+                val my_var = 42
 
         init_var!()
         main = 0
@@ -294,18 +294,18 @@ fn test_intro_duplicate_symbols_within_macro() {
 }
 
 #[test]
-#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_for_loop_with_const_range() {
     let source = r#"
-        macro generate_vars(const COUNT):
-            contract:
-                intro for i in 0..COUNT:
-                    let var_{i}: int
+        macro generate_vars(COUNT: i64 const) -> (
+            intro result:
+                for i in 0..COUNT:
+                    enclosing.module.let "var_{i}": i64
+        ):
             const_eval:
                 pass
             emit result:
                 for i in 0..COUNT:
-                    let var_{i} = i
+                    val "var_{i}" = i
 
         generate_vars!(3)
         main = 0
@@ -315,22 +315,22 @@ fn test_intro_for_loop_with_const_range() {
 }
 
 #[test]
-#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_conditional_with_const_condition() {
     let source = r#"
-        macro conditional_intro(const FLAG):
-            contract:
-                intro if FLAG:
-                    let enabled_var: int
+        macro conditional_intro(FLAG: bool const) -> (
+            intro result:
+                if FLAG:
+                    enclosing.module.let enabled_var: i64
                 else:
-                    let disabled_var: int
+                    enclosing.module.let disabled_var: i64
+        ):
             const_eval:
                 pass
             emit result:
                 if FLAG:
-                    let enabled_var = 1
+                    val enabled_var = 1
                 else:
-                    let disabled_var = 0
+                    val disabled_var = 0
 
         conditional_intro!(true)
         main = 0

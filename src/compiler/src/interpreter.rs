@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use simple_parser::ast::{AssignOp, Block, ClassDef, EnumDef, Expr, FunctionDef, Node, Type, UnitDef};
+use simple_parser::ast::{AssignOp, BinOp, Block, ClassDef, EnumDef, Expr, FunctionDef, Node, Type, UnitDef};
 use tracing::instrument;
 
 use crate::aop_config::AopConfig;
@@ -382,6 +382,77 @@ pub(crate) fn exec_node(
                 Ok(Control::Next)
             } else {
                 Err(CompileError::Semantic("unsupported assignment target".into()))
+            }
+        }
+        // Handle augmented assignments (+=, -=, *=, /=)
+        Node::Assignment(assign) => {
+            // Get the binary operation corresponding to the augmented assign op
+            let bin_op = match assign.op {
+                AssignOp::AddAssign => BinOp::Add,
+                AssignOp::SubAssign => BinOp::Sub,
+                AssignOp::MulAssign => BinOp::Mul,
+                AssignOp::DivAssign => BinOp::Div,
+                AssignOp::SuspendAssign | AssignOp::Assign => {
+                    return Err(CompileError::Semantic(
+                        "unsupported augmented assignment operator".into(),
+                    ))
+                }
+            };
+
+            // Handle identifier targets: x += 1
+            if let Expr::Identifier(name) = &assign.target {
+                let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(name));
+                if is_const {
+                    return Err(CompileError::Semantic(format!(
+                        "cannot assign to const '{name}'"
+                    )));
+                }
+
+                // Create a binary expression: target_expr op value_expr
+                let binary_expr = Expr::Binary {
+                    op: bin_op,
+                    left: Box::new(assign.target.clone()),
+                    right: Box::new(assign.value.clone()),
+                };
+                let new_value = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
+                env.insert(name.clone(), new_value);
+                Ok(Control::Next)
+            }
+            // Handle field access targets: obj.field += 1
+            else if let Expr::FieldAccess { receiver, field } = &assign.target {
+                if let Expr::Identifier(obj_name) = receiver.as_ref() {
+                    if let Some(obj_val) = env.get(obj_name).cloned() {
+                        match obj_val {
+                            Value::Object { class, mut fields } => {
+                                // Create a binary expression: target_expr op value_expr
+                                let binary_expr = Expr::Binary {
+                                    op: bin_op,
+                                    left: Box::new(assign.target.clone()),
+                                    right: Box::new(assign.value.clone()),
+                                };
+                                let new_value = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
+                                fields.insert(field.clone(), new_value);
+                                env.insert(obj_name.clone(), Value::Object { class, fields });
+                                Ok(Control::Next)
+                            }
+                            _ => Err(CompileError::Semantic(
+                                "cannot use augmented assignment on non-object value".into(),
+                            )),
+                        }
+                    } else {
+                        Err(CompileError::Semantic(format!(
+                            "undefined variable '{obj_name}'"
+                        )))
+                    }
+                } else {
+                    Err(CompileError::Semantic(
+                        "augmented field assignment requires identifier as object".into(),
+                    ))
+                }
+            } else {
+                Err(CompileError::Semantic(
+                    "unsupported augmented assignment target".into(),
+                ))
             }
         }
         Node::If(if_stmt) => exec_if(if_stmt, env, functions, classes, enums, impl_methods),
