@@ -315,9 +315,25 @@ fn eval_const_condition(
     const_bindings: &HashMap<String, String>,
     env: &mut Env,
 ) -> Result<bool, CompileError> {
-    // For now, support simple boolean literals and comparisons
+    // Support boolean literals, identifiers (const params), and comparisons
     match expr {
         Expr::Bool(b) => Ok(*b),
+        Expr::Identifier(name) => {
+            // Check const bindings for boolean parameter
+            if let Some(value_str) = const_bindings.get(name) {
+                value_str.parse::<bool>().map_err(|_| {
+                    CompileError::Semantic(format!(
+                        "Const binding '{}' is not a boolean: {}",
+                        name, value_str
+                    ))
+                })
+            } else {
+                Err(CompileError::Semantic(format!(
+                    "Unknown const parameter '{}' in condition",
+                    name
+                )))
+            }
+        }
         Expr::Binary { op, left, right } => {
             // Support basic comparisons
             use simple_parser::ast::BinOp;

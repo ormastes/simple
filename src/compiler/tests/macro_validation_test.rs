@@ -299,7 +299,6 @@ main = 0
 }
 
 #[test]
-#[ignore = "Complex expressions not yet supported in macro if conditions (macro registry limitation)"]
 fn test_intro_conditional_with_const_condition() {
     let source = r#"macro conditional_intro(FLAG: bool const) -> (
     intro result:
