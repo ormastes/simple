@@ -391,11 +391,12 @@ impl<'a> Parser<'a> {
                 }
                 invariant = self.parse_invariant_block()?;
             } else if self.check(&TokenKind::Fn)
+                || self.check(&TokenKind::Me)  // Mutable method keyword
                 || self.check(&TokenKind::Async)
                 || self.check(&TokenKind::At)
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
-                || (self.check(&TokenKind::Pub) && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async)))
+                || (self.check(&TokenKind::Pub) && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async) || self.peek_is(&TokenKind::Me)))
             {
                 // Method (optionally async/decorated/attributed/pub/static).
                 let start_span = self.current.span;

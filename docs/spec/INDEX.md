@@ -1,20 +1,19 @@
 # Test Specification Index
 
-*Generated: 2026-01-16 06:44:49*
+*Generated: 2026-01-16 08:55:07*
 
 ## Quick Stats
 
 - **Total Features:** 1
 - **Complete Documentation:** 1 (100%)
 - **Stubs Remaining:** 0
-- **Total Lines:** 100
-- **Warnings:** 1
+- **Total Lines:** 144
 
 ---
 
-## Infrastructure - Developer Tools (1 features)
+## Language (1 features)
 
 | Feature | Status | Difficulty | Coverage | Details |
 |---------|--------|------------|----------|----------|
-| [CLI Tools & Utilities](cli_tools_spec.md) | ⚠️ Partial | 2/5 | 60% | 100 lines |
+| [Type Inference Specification](type_inference_spec.md) | ⚠️ Partial | 4/5 | 60% | 144 lines |
 
