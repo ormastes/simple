@@ -1,25 +1,591 @@
-# file_io_spec
+# File I/O (File System Operations)
 
-*Source: `./vulkan-backend/simple/std_lib/test/system/sdn/file_io_spec.spl`*
+*Source: `simple/std_lib/test/features/stdlib/file_io_spec.spl`*
 
 ---
 
-let path = create_test_file(content)
+# File I/O (File System Operations)
 
-            match SdnDocument.from_file(path):
-                case Ok(doc):
-                    expect doc.get("server.host").flatmap(|v| v.as_str()) == Some("localhost")
-                    expect doc.get("server.port").flatmap(|v| v.as_i64()) == Some(8080)
-                    expect doc.get("server.config.debug").flatmap(|v| v.as_bool()) == Some(True)
-                    expect doc.get("server.config.workers").flatmap(|v| v.as_i64()) == Some(4)
-                case Err(e):
-                    fail("Failed to load file: ${e}")
+**Feature ID:** #201
+**Category:** Stdlib
+**Difficulty:** 3/5 (Intermediate)
+**Status:** Complete
 
-            cleanup_file(path)
+## Overview
 
-        it "loads arrays and dicts from file":
-            let content = """
-items = [1, 2, 3, 4, 5]
-config = {x: 10, y: 20, z: 30}
-nested:
-    data = [a, b, c]
+File I/O in Simple provides comprehensive file system operations through native FFI functions that wrap
+Rust's `std::fs` module. The API supports reading and writing string content, checking file existence,
+and memory-mapped file access for large files.
+
+**Key Features:**
+- **String I/O:** Read and write text files with `read_string` and `write_string`
+- **File existence:** Check if files exist with `exists`
+- **Native performance:** FFI to Rust `std::fs` for OS-level file operations
+- **Result-based errors:** Type-safe error handling (planned)
+- **Memory mapping:** Efficient large file access with mmap (planned)
+
+**Use Cases:**
+- Configuration file reading
+- Log file writing
+- Data persistence
+- File-based caching
+- Build systems and tooling
+
+## Syntax
+
+### Read File
+
+```simple
+# Declare extern function
+extern fn native_fs_read_string(path: str) -> str
+
+# Read entire file as string
+val content = native_fs_read_string("/etc/config.txt")
+print(content)
+```
+
+### Write File
+
+```simple
+# Declare extern function
+extern fn native_fs_write_string(path: str, content: str) -> i32
+
+# Write string to file (creates or overwrites)
+val bytes_written = native_fs_write_string("/tmp/output.txt", "Hello, World!")
+print("Wrote {bytes_written} bytes")
+```
+
+### Check Existence
+
+```simple
+# Declare extern function
+extern fn native_fs_exists(path: str) -> bool
+
+# Check if file exists
+if native_fs_exists("/etc/passwd"):
+    print("File exists")
+else:
+    print("File not found")
+```
+
+## Runtime Representation
+
+**Native Functions:**
+FFI declarations map to Rust implementations:
+
+```rust
+// Rust implementation
+pub fn native_fs_read_string(path: String) -> Result<String, IOError> {
+    std::fs::read_to_string(path)
+}
+
+pub fn native_fs_write_string(path: String, content: String) -> Result<usize, IOError> {
+    std::fs::write(path, content)?;
+    Ok(content.len())
+}
+
+pub fn native_fs_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+```
+
+**Memory:**
+- File content loaded into heap-allocated String
+- Large files may cause memory pressure (use mmap for large files)
+
+**Error Handling:**
+- Currently returns None/empty on error
+- Planned: Return Result<T, IOError> for proper error handling
+
+## Comparison with Other Languages
+
+| Feature | Simple | Python | Node.js | Rust | Go |
+|---------|--------|--------|---------|------|-------|
+| Read file | `native_fs_read_string()` | `open().read()` | `fs.readFileSync()` | `std::fs::read_to_string()` | `os.ReadFile()` |
+| Write file | `native_fs_write_string()` | `open().write()` | `fs.writeFileSync()` | `std::fs::write()` | `os.WriteFile()` |
+| Exists | `native_fs_exists()` | `os.path.exists()` | `fs.existsSync()` | `Path::exists()` | `os.Stat()` |
+| Error handling | None/empty | Exceptions | Exceptions | `Result<T, E>` | `(T, error)` |
+| Async | ❌ Planned | ✅ `aio` | ✅ `fs.promises` | ✅ `tokio::fs` | ✅ goroutines |
+
+## Common Patterns
+
+### Config File Loading
+
+```simple
+fn load_config(path: str) -> Config:
+    if not native_fs_exists(path):
+        return Config.default()
+
+    val content = native_fs_read_string(path)
+    return Config.parse(content)
+```
+
+### Log File Writing
+
+```simple
+fn append_log(message: str):
+    val timestamp = Time.now().format()
+    val entry = "[{timestamp}] {message}\\n"
+
+    # Read existing content
+    val existing = if native_fs_exists("/var/log/app.log"):
+        native_fs_read_string("/var/log/app.log")
+    else:
+        ""
+
+    # Append and write back
+    native_fs_write_string("/var/log/app.log", existing + entry)
+```
+
+### Data Persistence
+
+```simple
+fn save_state(state: AppState):
+    val json = JSON.stringify(state)
+    native_fs_write_string("/tmp/app_state.json", json)
+
+fn load_state() -> Option<AppState>:
+    if not native_fs_exists("/tmp/app_state.json"):
+        return None
+
+    val json = native_fs_read_string("/tmp/app_state.json")
+    return Some(JSON.parse(json))
+```
+
+### Atomic Write (Safe Overwrite)
+
+```simple
+fn atomic_write(path: str, content: str):
+    val temp_path = "{path}.tmp"
+
+    # Write to temp file
+    native_fs_write_string(temp_path, content)
+
+    # Move to final location (atomic on POSIX)
+    native_fs_rename(temp_path, path)
+```
+
+## Built-in Functions
+
+### Reading
+- `native_fs_read_string(path: str) -> str` - Read entire file as UTF-8 string
+- Planned: `native_fs_read_bytes(path: str) -> [byte]` - Read binary data
+- Planned: `native_fs_read_lines(path: str) -> [str]` - Read line by line
+
+### Writing
+- `native_fs_write_string(path: str, content: str) -> i32` - Write string to file
+- Planned: `native_fs_write_bytes(path: str, data: [byte]) -> i32` - Write binary
+- Planned: `native_fs_append(path: str, content: str) -> i32` - Append to file
+
+### Metadata
+- `native_fs_exists(path: str) -> bool` - Check if file/directory exists
+- Planned: `native_fs_size(path: str) -> i64` - Get file size
+- Planned: `native_fs_modified(path: str) -> Time` - Last modified time
+- Planned: `native_fs_is_file(path: str) -> bool` - Check if path is file
+- Planned: `native_fs_is_dir(path: str) -> bool` - Check if path is directory
+
+### Directory Operations (Planned)
+- `native_fs_list_dir(path: str) -> [str]` - List directory contents
+- `native_fs_create_dir(path: str) -> Result<void, IOError>` - Create directory
+- `native_fs_remove_dir(path: str) -> Result<void, IOError>` - Remove directory
+
+## Implementation Files
+
+**Rust FFI:** `src/runtime/src/value/file_io/file_ops.rs` - Native file operations
+**Memory Mapping:** `src/runtime/src/value/file_io/mmap.rs` - Large file support
+**Simple Wrapper:** `simple/std_lib/src/host/sync_nogc_mut/io/fs/ops.spl` - High-level API
+**Tests:** `src/driver/tests/interpreter_io_tests.rs` - File I/O tests
+
+## Related Features
+
+- **Async I/O (#TBD):** Non-blocking file operations
+- **Path Manipulation (#TBD):** Join, basename, dirname utilities
+- **Error Handling (#35):** Result types for proper error handling
+- **JSON (#TBD):** Parse/stringify for config files
+
+## Performance Characteristics
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| read_string | O(n) | n = file size, reads entire file |
+| write_string | O(n) | n = content size, writes entire file |
+| exists | O(1) | Stat syscall, very fast |
+
+**Memory:** File content loaded into memory - O(file size)
+
+**Optimization:** Use memory-mapped files for large files (> 1MB)
+
+## Limitations and Future Work
+
+**Current Limitations:**
+- No async file I/O (blocking operations only)
+- No streaming (entire file loaded into memory)
+- No directory operations (mkdir, rmdir, list)
+- Limited error reporting (no Result types yet)
+- No file permissions/ownership control
+- No symbolic link handling
+
+**Planned Features:**
+- `Result<T, IOError>` return types for proper error handling
+- Async file operations: `async fn read_file_async(path)`
+- Streaming readers/writers for large files
+- Directory operations (mkdir, rmdir, readdir)
+- File metadata access (size, modified time, permissions)
+- Path utilities (join, basename, dirname, extension)
+- File watching for change notifications
+- Memory-mapped file API for large file access
+
+## Best Practices
+
+**Do:**
+- Check file existence before reading
+- Handle errors gracefully (check for None/empty)
+- Use absolute paths when possible
+- Close file handles (auto in Simple)
+- Use atomic writes for critical data
+
+**Don't:**
+- Read extremely large files into memory (use mmap)
+- Ignore write failures
+- Hardcode file paths (use configuration)
+- Write to arbitrary user-provided paths (validate first)
+- Assume file encoding (always UTF-8 in Simple)
+
+## Error Handling
+
+**Current Approach:**
+Functions return None or empty string on error:
+    ```simple
+val content = native_fs_read_string("/nonexistent.txt")
+if content == "":
+    print("Read failed")
+```
+
+**Planned Approach (Result types):**
+```simple
+match native_fs_read_string("/config.txt"):
+    Ok(content) =>
+        process(content)
+    Err(e) =>
+        print("Error: {e}")
+        # Handle: file not found, permission denied, etc.
+```
+
+## Security Considerations
+
+**Path Traversal:**
+Validate user-provided paths to prevent directory traversal attacks:
+    ```simple
+fn safe_read(user_path: str) -> str:
+    # Ensure path doesn't contain ../ or /..
+    if user_path.contains(".."):
+        panic("Invalid path: directory traversal not allowed")
+
+    val safe_path = "/app/data/" + user_path
+    return native_fs_read_string(safe_path)
+```
+
+**Permissions:**
+Simple's file operations respect OS-level permissions. Write operations fail if:
+    - File not writable
+- Directory not writable
+- Disk full
+
+## Writing Files
+
+    File writing operations create new files or overwrite existing files with string content.
+    The `native_fs_write_string` function writes UTF-8 text to the specified path.
+
+    **Function:** `native_fs_write_string(path, content) -> bytes_written`
+
+    **Behavior:** Creates file if not exists, overwrites if exists
+
+    **Implementation:** `src/runtime/src/value/file_io/file_ops.rs:native_fs_write_string()`
+
+**Given** a file path and string content
+        **When** calling native_fs_write_string
+        **Then** the content is written to the file
+
+        **Code Example:**
+        ```simple
+        val path = "/tmp/test.txt"
+        val content = "Hello from Simple!"
+        val bytes = native_fs_write_string(path, content)
+        assert bytes > 0  # Returns number of bytes written
+        ```
+
+        **Runtime Behavior:**
+        - Opens file for writing (creates if not exists)
+        - Writes UTF-8 encoded string
+        - Returns byte count written
+        - Closes file automatically
+
+        **Use Case:** Save configuration, write logs, export data
+
+**Given** a path to a non-existent file
+            **When** calling native_fs_write_string
+            **Then** a new file is created with the content
+
+            **Code Example:**
+            ```simple
+            val new_path = "/tmp/new_file.txt"
+            val result = native_fs_write_string(new_path, "new content")
+            assert native_fs_exists(new_path) == true
+            ```
+
+            **Runtime Behavior:**
+            - Checks if file exists
+            - Creates new file if not exists
+            - Sets file permissions (0644 on Unix)
+            - Writes content
+
+            **Pattern:** Initialize files on first run
+
+**Given** a path to an existing file
+            **When** calling native_fs_write_string with new content
+            **Then** the existing file is completely replaced
+
+            **Code Example:**
+            ```simple
+            native_fs_write_string("/tmp/file.txt", "original")
+            native_fs_write_string("/tmp/file.txt", "new")
+            val content = native_fs_read_string("/tmp/file.txt")
+            assert content == "new"  # Original content gone
+            ```
+
+            **Runtime Behavior:**
+            - Truncates existing file to 0 bytes
+            - Writes new content
+            - Original content lost
+
+            **Warning:** No backup created - overwrite is destructive
+            **Best Practice:** Use atomic writes for critical data
+
+## Reading Files
+
+    File reading operations load entire file contents into memory as a UTF-8 string.
+    The `native_fs_read_string` function reads text files.
+
+    **Function:** `native_fs_read_string(path) -> content`
+
+    **Behavior:** Reads entire file, returns empty on error
+
+    **Implementation:** `src/runtime/src/value/file_io/file_ops.rs:native_fs_read_string()`
+
+**Given** a file with text content
+        **When** calling native_fs_read_string
+        **Then** the file content is returned as a string
+
+        **Code Example:**
+        ```simple
+        native_fs_write_string("/tmp/data.txt", "test data")
+        val content = native_fs_read_string("/tmp/data.txt")
+        assert content == "test data"
+        ```
+
+        **Runtime Behavior:**
+        - Opens file for reading
+        - Reads all bytes into memory
+        - Decodes as UTF-8 string
+        - Closes file automatically
+
+        **Memory:** Entire file loaded - O(file size)
+        **Limitation:** Not suitable for very large files (use mmap instead)
+
+**Given** content written to a file
+            **When** reading the file back
+            **Then** the original content is retrieved (roundtrip verification)
+
+            **Code Example:**
+            ```simple
+            val original = "Test content with unicode: 你好"
+            native_fs_write_string("/tmp/test.txt", original)
+            val read_back = native_fs_read_string("/tmp/test.txt")
+            assert read_back == original  # Perfect roundtrip
+            ```
+
+            **Runtime Behavior:**
+            - Write encodes UTF-8
+            - Read decodes UTF-8
+            - Byte-for-byte preservation
+
+            **Use Case:** Data persistence, configuration storage
+            **Pattern:** Write-read-verify workflow for critical data
+
+## Checking File Existence
+
+    File existence checks determine whether a file or directory exists at the specified path.
+    The `native_fs_exists` function provides fast existence testing.
+
+    **Function:** `native_fs_exists(path) -> bool`
+
+    **Performance:** O(1) - fast stat syscall
+
+    **Implementation:** `src/runtime/src/value/file_io/file_ops.rs:native_fs_exists()`
+
+**Given** a path to an existing file
+        **When** calling native_fs_exists
+        **Then** returns true
+
+        **Code Example:**
+        ```simple
+        native_fs_write_string("/tmp/exists_test.txt", "content")
+        val exists = native_fs_exists("/tmp/exists_test.txt")
+        assert exists == true
+        ```
+
+        **Runtime Behavior:**
+        - Stat syscall to check file metadata
+        - Returns true if file or directory exists
+        - Returns true for symlinks (checks target)
+
+        **Use Case:** Check before read to avoid errors
+        **Pattern:**
+        ```simple
+        if native_fs_exists(path):
+            val content = native_fs_read_string(path)
+        else:
+            print("File not found")
+        ```
+
+**Given** a path to a non-existent file
+            **When** calling native_fs_exists
+            **Then** returns false
+
+            **Code Example:**
+            ```simple
+            val exists = native_fs_exists("/nonexistent/file.txt")
+            assert exists == false
+            ```
+
+            **Runtime Behavior:**
+            - Stat syscall fails
+            - Returns false
+
+            **Use Case:** Conditional file creation
+            **Pattern:**
+            ```simple
+            if not native_fs_exists(config_path):
+                create_default_config(config_path)
+            ```
+
+## Integrated File Workflows
+
+    Real-world usage combines reading, writing, and existence checking into complete workflows
+    for configuration management, data persistence, and logging.
+
+    **Pattern:** write → verify → read → process
+
+    **Best Practice:** Always check existence before read, verify write success
+
+**Given** a complete file I/O workflow
+        **When** writing, checking existence, and reading back
+        **Then** all operations succeed and content is preserved
+
+        **Code Example:**
+        ```simple
+        # 1. Write
+        val path = "/tmp/workflow.txt"
+        val content = "workflow test"
+        native_fs_write_string(path, content)
+
+        # 2. Verify existence
+        assert native_fs_exists(path) == true
+
+        # 3. Read back
+        val read = native_fs_read_string(path)
+        assert read == content
+
+        # Complete workflow verified!
+        ```
+
+        **Runtime Behavior:**
+        - Write creates file with content
+        - Exists confirms file created
+        - Read retrieves exact content
+
+        **Use Case:** Configuration save/load, data export/import
+        **Pattern:** Standard persistence workflow
+
+**Given** a file path containing spaces
+            **When** performing file operations
+            **Then** operations succeed (path correctly handled)
+
+            **Code Example:**
+            ```simple
+            val path = "/tmp/my file with spaces.txt"
+            native_fs_write_string(path, "content")
+            assert native_fs_exists(path) == true
+            ```
+
+            **Runtime Behavior:**
+            - Path passed as-is to OS
+            - OS handles space encoding
+            - No special escaping needed
+
+            **Cross-Platform:** Works on Unix, Windows, macOS
+            **Best Practice:** Avoid spaces in paths when possible
+
+## Error Handling in File I/O
+
+    File operations can fail for various reasons: file not found, permission denied, disk full.
+    Simple's current approach returns None/empty on error; planned Result types will provide
+    detailed error information.
+
+    **Current:** Silent failure (None/empty)
+
+    **Planned:** Result<T, IOError> for explicit error handling
+
+    **Implementation:** Error checking in FFI boundary
+
+**Given** a read operation on a non-existent file
+        **When** calling native_fs_read_string
+        **Then** returns empty string without crashing
+
+        **Code Example:**
+        ```simple
+        val content = native_fs_read_string("/nonexistent/file.txt")
+        # Current: content is empty string
+        # Planned: Result::Err("File not found")
+        ```
+
+        **Runtime Behavior:**
+        - File open fails
+        - Error caught in Rust FFI
+        - Returns empty string (current) or Err (planned)
+        - No panic/crash
+
+        **Best Practice:** Always check result before use
+        ```simple
+        val content = native_fs_read_string(path)
+        if content != "":
+            process(content)
+        else:
+            print("Read failed")
+        ```
+
+**Given** a write operation without sufficient permissions
+            **When** calling native_fs_write_string
+            **Then** operation fails gracefully without crashing
+
+            **Code Example:**
+            ```simple
+            # Try writing to protected location
+            val result = native_fs_write_string("/root/test.txt", "data")
+            # Current: result is None/0
+            # Planned: Result::Err("Permission denied")
+            ```
+
+            **Runtime Behavior:**
+            - File open fails (permission denied)
+            - Error caught in Rust FFI
+            - Returns None/0 (current) or Err (planned)
+            - No panic
+
+            **Common Errors:**
+            - Permission denied (EACCES)
+            - File not found (ENOENT)
+            - Disk full (ENOSPC)
+            - Too many open files (EMFILE)
+
+            **Future:** Result types will provide error codes and messages

@@ -1,6 +1,572 @@
-# async_await_spec
+# Async/Await (Asynchronous Programming)
 
-*Source: `./simple/std_lib/test/features/concurrency/async_await_spec.spl`*
+*Source: `simple/std_lib/test/features/concurrency/async_await_spec.spl`*
 
 ---
 
+# Async/Await (Asynchronous Programming)
+
+**Feature ID:** #41
+**Category:** Concurrency
+**Difficulty:** 4/5 (Advanced)
+**Status:** Complete
+
+## Overview
+
+Async/await in Simple enables non-blocking asynchronous programming for concurrent operations. Following
+patterns from JavaScript, Python, and Rust, Simple provides `async fn` declarations for asynchronous
+functions, `future()` for deferred computation, and `await` for suspending execution until a value is ready.
+
+**Key Features:**
+- **Async functions:** `async fn` declares non-blocking functions
+- **Futures:** Deferred computations resolved with `await`
+- **Effect system:** Compile-time checking prevents blocking operations in async code
+- **Auto-await:** Async functions auto-await when called at top level
+- **Composability:** Async functions can call other async functions
+
+**Use Cases:**
+- Network I/O (HTTP requests, database queries)
+- File operations (non-blocking reads/writes)
+- Concurrent task execution
+- Event-driven programming
+
+## Syntax
+
+### Async Function Declaration
+
+```simple
+async fn fetch_user(id: i32) -> User:
+    val response = await http.get("/users/{id}")
+    val data = await response.json()
+    return User.parse(data)
+```
+
+**Grammar:**
+```
+async_fn = 'async' 'fn' IDENT '(' params ')' (':' type)? ':' block
+```
+
+### Future Creation and Await
+
+```simple
+# Create future from immediate value
+val f = future(42)
+
+# Create future from computation
+val f2 = future(expensive_calculation())
+
+# Await future (suspends until ready)
+val value = await f   # value = 42
+```
+
+**Grammar:**
+```
+future_expr = 'future' '(' expression ')'
+await_expr = 'await' expression
+```
+
+### Async Calling Async
+
+```simple
+async fn double(x: i32) -> i32:
+    return x * 2
+
+async fn quadruple(x: i32) -> i32:
+    val doubled = await double(x)
+    return await double(doubled)
+
+# Top-level call auto-awaits
+val result = quadruple(5)  # result = 20
+```
+
+## Runtime Representation
+
+**Future Type:**
+```rust
+pub enum RuntimeValue {
+    Future {
+        state: FutureState,
+        value: Option<Box<RuntimeValue>>,
+        executor: Option<Box<dyn FnOnce() -> RuntimeValue>>,
+    },
+    // ... other variants
+}
+
+pub enum FutureState {
+    Pending,    # Not yet resolved
+    Ready,      # Value available
+    Running,    # Currently executing
+}
+```
+
+**Async Function:**
+```rust
+pub struct AsyncFunction {
+    params: Vec<Param>,
+    body: Block,
+    effect: EffectType,  # Must be Async
+}
+```
+
+**Execution Model:**
+1. Async function called → returns Future immediately
+2. Future scheduled for execution
+3. `await` suspends current context, yields control
+4. Future resolves → execution resumes
+5. Value extracted from Future
+
+**Memory:** Futures heap-allocated, cleaned up when resolved and dropped.
+
+## Comparison with Other Languages
+
+| Feature | Simple | JavaScript | Python | Rust | Go | Scala |
+|---------|--------|------------|--------|------|----|----|
+| Async syntax | `async fn` | `async function` | `async def` | `async fn` | `go func` | `Future[T]` |
+| Await syntax | `await expr` | `await expr` | `await expr` | `.await` | `<-chan` | `Await.result` |
+| Futures | `future()` | `Promise` | `asyncio.Future` | `Future<T>` | `chan T` | `Future[T]` |
+| Effect checking | ✅ Compile-time | ❌ No | ❌ No | ✅ Compile-time | ❌ No | ⚠️ Limited |
+| Auto-await | ✅ Top-level | ❌ Manual | ⚠️ REPL only | ❌ Manual | N/A | ❌ Manual |
+| Runtime | Single-threaded | Event loop | Event loop | Multi-threaded | Multi-threaded | JVM threads |
+
+## Common Patterns
+
+### HTTP Request
+
+```simple
+async fn fetch_json(url: text) -> Result<Json, text>:
+    val response = await http.get(url)
+    if response.status != 200:
+        return Err("Request failed")
+    return Ok(await response.json())
+```
+
+### Database Query
+
+```simple
+async fn find_user(email: text) -> Option<User>:
+    val result = await db.query("SELECT * FROM users WHERE email = ?", [email])
+    if result.rows.len() == 0:
+        return None
+    return Some(User.from_row(result.rows[0]))
+```
+
+### Parallel Execution
+
+```simple
+async fn fetch_all_data() -> DataSet:
+    val f1 = future(fetch_users())
+    val f2 = future(fetch_posts())
+    val f3 = future(fetch_comments())
+
+    val users = await f1
+    val posts = await f2
+    val comments = await f3
+
+    return DataSet { users, posts, comments }
+```
+
+### Error Handling
+
+```simple
+async fn safe_fetch(url: text) -> Result<Data, text>:
+    match await http.get(url):
+        Ok(response) =>
+            match await response.parse():
+                Ok(data) => Ok(data)
+                Err(e) => Err("Parse error: {e}")
+        Err(e) => Err("Network error: {e}")
+```
+
+## Effect System
+
+**Async Safety:**
+Simple's effect system prevents blocking operations inside async functions at compile time.
+
+**Prohibited in async fn:**
+```simple
+async fn bad_async():
+    print("Hello")  # ERROR: print is blocking effect
+    val f = future(42)
+    await f  # ERROR: await not allowed in async fn body
+```
+
+**Effect Types:**
+```simple
+Pure      # No side effects
+IO        # Blocking I/O (print, file operations)
+Async     # Asynchronous operations
+```
+
+**Effect Checking:**
+- `async fn` has Async effect
+- Cannot call IO effects from Async context
+- Cannot use `await` inside `async fn` body (use in caller)
+- Enforced at compile time
+
+**Rationale:** Prevents accidental blocking in async code, ensuring true non-blocking execution.
+
+## Implementation Files
+
+**Compiler:** `src/compiler/src/effects.rs` - Effect checking, async function analysis
+**Runtime:** `src/runtime/src/value/async_gen.rs` - Future implementation, async executor
+**Tests:** `src/driver/tests/interpreter_async_tests.rs` - Async tests
+**Runner:** `src/driver/tests/runner_async_tests.rs` - Async execution tests
+
+## Related Features
+
+- **Futures (#43):** Promise type for deferred values
+- **Effects (#TBD):** Effect system for side-effect tracking
+- **Generators (#TBD):** Lazy value generation
+- **Actors (#TBD):** Message-passing concurrency
+
+## Performance Characteristics
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| Async fn call | O(1) | Creates Future immediately |
+| future() | O(1) | Wraps value in Future |
+| await | O(n) | n = computation time |
+| Future resolution | O(1) | Extract value from Future |
+
+**Memory:** Futures heap-allocated (~32 bytes + payload)
+
+## Limitations and Future Work
+
+**Current Limitations:**
+- Single-threaded execution (no parallel futures)
+- No async I/O runtime (simulated only)
+- No select/race for multiple futures
+- No async iterators or streams
+- No cancellation tokens
+
+**Planned Features:**
+- Multi-threaded async runtime with work-stealing
+- `async for` for async iteration
+- `select!` macro for racing futures
+- Timeouts: `await_timeout(future, duration)`
+- Cancellation: `future.cancel()`
+- Async channels for communication
+
+## Best Practices
+
+**Do:**
+- Use async fn for I/O-bound operations
+- Create futures for parallel tasks, await all
+- Handle errors with Result in async functions
+- Keep async functions small and focused
+- Use effect system to ensure async safety
+
+**Don't:**
+- Use blocking operations in async fn (effect checker prevents this)
+- Await inside async fn body (await in caller instead)
+- Nest deeply (prefer flat async chains)
+- Ignore errors (always handle Result from async operations)
+
+## Auto-Await Behavior
+
+**Top-Level Auto-Await:**
+Async functions called at the top level (not inside another async fn) auto-await:
+
+```simple
+async fn compute():
+    return 42
+
+# Top-level: auto-awaits
+val result = compute()  # result = 42 (not Future)
+
+# Inside another async fn: manual await required
+async fn caller():
+    val fut = compute()  # Returns Future
+    val value = await fut  # value = 42
+```
+
+**Rationale:** Ergonomic top-level usage while preserving control in async contexts.
+
+## Async Function Declarations
+
+    Async functions are declared using the `async fn` keyword. They represent non-blocking operations
+    that return a Future when called. Async functions can call other async functions.
+
+    **Syntax:** `async fn name(params): body`
+
+    **Effect:** Async (cannot use blocking I/O)
+
+    **Implementation:** `src/compiler/src/effects.rs:check_async_fn()`
+
+**Given** an async function declaration
+        **When** defining the function with async fn keyword
+        **Then** the function is registered as asynchronous
+
+        **Code Example:**
+        ```simple
+        async fn compute(x):
+            return x * 2
+
+        val result = compute(21)  # Auto-awaits at top level
+        assert result == 42
+        ```
+
+        **Runtime Behavior:**
+        - Function marked with Async effect
+        - Calling returns Future (or auto-awaits at top level)
+        - Body executes when Future is awaited
+
+        **Effect Check:** Compiler ensures no blocking operations in body
+
+**Given** an async function with multiple parameters
+            **When** calling the function with arguments
+            **Then** all parameters are bound and computation proceeds
+
+            **Code Example:**
+            ```simple
+            async fn add_async(a, b):
+                return a + b
+
+            val sum = add_async(15, 27)
+            assert sum == 42
+            ```
+
+            **Runtime Behavior:**
+            - Multiple parameters bound as usual
+            - Return value wrapped in Future
+            - Auto-awaited at top level
+
+            **Pattern:** Standard parameter passing works in async functions
+
+## Async Function Composition
+
+        Async functions can call other async functions, enabling composition of asynchronous
+        operations. Calls between async functions create Future chains.
+
+        **Pattern:** Async → Async = Future chaining
+
+        **Execution:** Futures resolved in order of awaits
+
+**Given** two async functions where one calls the other
+            **When** the outer async function calls the inner one
+            **Then** the functions execute in sequence (auto-await at top level)
+
+            **Code Example:**
+            ```simple
+            async fn double_async(x):
+                return x * 2
+
+            async fn quadruple(x):
+                return double_async(double_async(x))
+
+            val result = quadruple(10)  # 10 → 20 → 40
+            assert result == 40
+            ```
+
+            **Runtime Behavior:**
+            - quadruple(10) called at top level → auto-awaits
+            - First double_async(10) returns Future
+            - Result (20) used for second double_async(20)
+            - Final result 40 returned
+
+            **Pattern:** Async composition - building complex async operations from simple ones
+
+## Futures and Deferred Computation
+
+    Futures represent values that will be available in the future. They allow starting computations
+    without immediately blocking for results, enabling concurrent execution.
+
+    **Creation:** `future(expr)` wraps expression in Future
+
+    **Resolution:** `await future` suspends until value ready
+
+    **Implementation:** `src/runtime/src/value/async_gen.rs:Future`
+
+## Creating Futures
+
+        Futures can be created from immediate values or from computations. Once created, they can
+        be passed around and awaited multiple times.
+
+        **Syntax:** `future(expression)`
+
+        **Behavior:** Expression evaluated lazily or immediately depending on implementation
+
+**Given** a future created from an immediate value
+            **When** awaiting the future
+            **Then** the value is extracted
+
+            **Code Example:**
+            ```simple
+            val f = future(42)
+            val value = await f
+            assert value == 42
+            ```
+
+            **Runtime Behavior:**
+            - future(42) creates Future wrapping 42
+            - await f suspends current context
+            - Future immediately ready (value already computed)
+            - 42 extracted and returned
+
+            **Use Case:** Uniform interface for sync and async values
+
+**Given** a future created from a function call
+                **When** awaiting the future
+                **Then** the computation executes and result is returned
+
+                **Code Example:**
+                ```simple
+                fn slow_compute():
+                    return 10 + 20 + 30
+
+                val f2 = future(slow_compute())
+                val result = await f2
+                assert result == 60
+                ```
+
+                **Runtime Behavior:**
+                - future(slow_compute()) creates Future
+                - slow_compute() may execute immediately or lazily
+                - await f2 suspends until computation complete
+                - Result 60 extracted
+
+                **Pattern:** Defer expensive computation until needed
+
+## Concurrent Futures
+
+        Multiple futures can be created and awaited independently, enabling concurrent execution
+        of multiple operations.
+
+        **Pattern:** Create all futures first, then await all
+
+        **Benefit:** Operations can run concurrently while awaiting
+
+**Given** multiple futures created from values
+            **When** awaiting each future
+            **Then** all values are extracted successfully
+
+            **Code Example:**
+            ```simple
+            val f1 = future(10)
+            val f2 = future(20)
+            val f3 = future(30)
+            val r1 = await f1
+            val r2 = await f2
+            val r3 = await f3
+            assert r1 + r2 + r3 == 60
+            ```
+
+            **Runtime Behavior:**
+            - Three futures created concurrently
+            - Each await suspends until that Future ready
+            - All values extracted and summed
+
+            **Pattern:** Parallel data fetching
+            ```simple
+            val users_fut = future(fetch_users())
+            val posts_fut = future(fetch_posts())
+            val users = await users_fut
+            val posts = await posts_fut
+            ```
+
+## Await Operator
+
+        The `await` operator suspends execution until a Future is ready, then extracts and returns
+        the wrapped value.
+
+        **Syntax:** `await <future_expression>`
+
+        **Effect:** Suspends current execution context
+
+        **Return:** Unwrapped value from Future
+
+**Given** a future containing a value
+            **When** using await on the future
+            **Then** execution suspends until ready, then value is returned
+
+            **Code Example:**
+            ```simple
+            val x = future(42)
+            val v = await x
+            assert v == 42
+            ```
+
+            **Runtime Behavior:**
+            - future(42) creates Future<i32>
+            - await x checks Future state
+            - If ready: immediately extract value
+            - If pending: suspend until ready
+            - Return unwrapped value (42)
+
+            **Semantics:** await is a suspension point - control may yield
+
+**Given** a future created from a function call
+            **When** awaiting the future
+            **Then** the function executes and result is awaited
+
+            **Code Example:**
+            ```simple
+            fn add_slow(a, b):
+                return a + b
+
+            val f4 = future(add_slow(15, 27))
+            val sum = await f4
+            assert sum == 42
+            ```
+
+            **Runtime Behavior:**
+            - add_slow(15, 27) may execute immediately or lazily
+            - Result wrapped in Future
+            - await f4 suspends until computation complete
+            - Result 42 extracted and returned
+
+            **Pattern:** Wrap any computation in Future for async control flow
+
+## Awaiting Async Functions
+
+    Async functions return Futures when called. At the top level (not inside another async fn),
+    async function calls auto-await for convenience. Inside async contexts, manual await is required.
+
+    **Top-Level:** Auto-await (ergonomic)
+
+    **Inside async fn:** Manual await required (control)
+
+    **Implementation:** Auto-await in top-level interpreter loop
+
+## Auto-Await at Top Level
+
+        When async functions are called at the top level (outside any async context), they
+        automatically await, returning the resolved value directly.
+
+        **Behavior:** Transparent async - looks like sync call
+
+        **Rationale:** Ergonomic REPL and script usage
+
+**Given** an async function returning a value
+            **When** calling the function at top level
+            **Then** the function auto-awaits and returns the value directly
+
+            **Code Example:**
+            ```simple
+            async fn fetch():
+                return 42
+
+            # Auto-awaits at top level
+            val value = fetch()
+            assert value == 42  # Not a Future, the actual value
+            ```
+
+            **Runtime Behavior:**
+            - fetch() called at top level
+            - Returns Future<i32>
+            - Interpreter detects top-level async call
+            - Automatically awaits Future
+            - Returns unwrapped value 42
+
+            **Comparison:**
+            ```simple
+            # Top-level (auto-await)
+            val x = async_fn()  # x = resolved value
+
+            # Inside async fn (manual await)
+            async fn caller():
+                val fut = async_fn()  # fut = Future
+                val x = await fut     # x = resolved value
+            ```
+
+            **Pattern:** Simplifies REPL usage and simple scripts

@@ -41,19 +41,19 @@ main = x
     let exit = runner.run_source(src).expect("run ok");
     assert_eq!(exit, 20, "let mut variables can be reassigned");
 
-    // Bare assignment creates mutable variable (Python-like)
+    // var keyword creates mutable variable
     let src = r#"
-y = 10
+var y = 10
 y = 30
 main = y
 "#;
     let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 30, "bare assignment creates mutable variable");
+    assert_eq!(exit, 30, "var variables can be reassigned");
 
-    // Variables in loop (no mut needed)
+    // Variables in loop with var
     let src = r#"
-sum = 0
-i = 0
+var sum = 0
+var i = 0
 while i < 5:
     sum = sum + i
     i = i + 1

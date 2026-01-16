@@ -1,0 +1,252 @@
+# Event-Driven Training Engine
+
+*Source: `simple/std_lib/test/features/ml/training_engine_spec.spl`*
+
+---
+
+# Event-Driven Training Engine
+
+**Feature ID:** TBD (planned feature)
+**Category:** ML Infrastructure
+**Difficulty:** 4/5
+**Status:** Planned (Not Yet Implemented)
+
+## Overview
+
+Simple's Training Engine provides a flexible, event-driven framework for orchestrating
+machine learning training loops. Inspired by PyTorch Ignite, the engine abstracts away
+boilerplate training code while providing powerful hooks for metrics, checkpointing, early
+stopping, and custom callbacks.
+
+## Key Features
+
+**Engine Core:**
+- Execute user-defined process_function per batch
+- Track training state (epoch, iteration, metrics, outputs)
+- Support both finite (max_epochs) and infinite training loops
+
+**Event System:**
+- Built-in lifecycle events (STARTED, EPOCH_COMPLETED, ITERATION_COMPLETED, etc.)
+- Attach multiple handlers to events with guaranteed execution order
+- Periodic events (every=100) and one-time events (once=1000)
+- Custom user-defined events for domain-specific logic
+
+**Metrics:**
+- Automatic metric computation during training/evaluation
+- Built-in classification metrics (Accuracy, Precision, Recall, F1Score)
+- Built-in regression metrics (MSE, MAE, R2Score)
+- Custom metrics via Metric base class (reset/update/compute pattern)
+
+**Handlers:**
+- Checkpoint: Save model/optimizer state with N-best retention
+- EarlyStopping: Stop training when validation metric plateaus
+- LRScheduler: Integrate with learning rate schedules
+- Timer: Track training time and throughput
+- ProgressBar: Visual feedback with metrics display
+
+**Engine Composition:**
+- Multiple engines (trainer, evaluator, tester) in single workflow
+- Engine-in-handler pattern: Run evaluator after each training epoch
+- State sharing between composed engines
+
+## Test Coverage
+
+This specification covers:
+    - Engine core functionality (3 tests)
+- Event system (5 tests)
+- Metrics (4 tests)
+- Handlers (5 tests)
+- Engine composition (2 tests)
+
+Total: 19 tests across 5 describe blocks
+
+Note: All tests are currently marked TODO as this is a planned feature.
+
+## Engine Core Functionality
+
+    The Engine class is the heart of the training system. It executes a user-defined
+    process_function for each batch in the dataset, manages training state, and fires
+    events at key lifecycle points.
+
+    Core Responsibilities:
+        1. Batch Processing: Call process_function(engine, batch) for each batch
+    2. State Management: Track epoch, iteration, output, metrics
+    3. Event Firing: Trigger events at appropriate points (EPOCH_STARTED, etc.)
+    4. Loop Control: Support max_epochs and early termination
+
+**Given** an Engine with a process function and a data loader with 5 batches
+        **When** running the engine for 1 epoch
+        **Then** the process function is called exactly 5 times (once per batch)
+
+        Implementation: src/ml/engine/engine.spl:Engine.run()
+
+**Given** an Engine running for 3 epochs with 10 batches per epoch
+        **When** checking state during execution
+        **Then** state correctly tracks epoch (1-indexed), iteration (cumulative), and output
+
+        Implementation: src/ml/engine/state.spl:State
+
+**Given** an Engine and a data loader
+        **When** calling engine.run(data, max_epochs=10)
+        **Then** the engine runs for exactly 10 epochs and stops
+
+## Event System
+
+    The event system is the core abstraction that makes the Training Engine flexible and
+    composable. Instead of hardcoding when to checkpoint, log, or validate, you attach
+    handlers (functions) to events (lifecycle points in training).
+
+    Built-in Events:
+        - Events.STARTED - Before first epoch
+    - Events.EPOCH_STARTED - At start of each epoch
+    - Events.ITERATION_STARTED - Before processing each batch
+    - Events.ITERATION_COMPLETED - After processing each batch
+    - Events.EPOCH_COMPLETED - At end of each epoch
+    - Events.COMPLETED - After all epochs
+    - Events.EXCEPTION_RAISED - When error occurs
+
+**Given** an Engine with handlers attached to all built-in events
+        **When** running for 2 epochs with 3 batches each
+        **Then** events fire in correct order: STARTED, EPOCH_STARTED, ITERATION_STARTED,
+              ITERATION_COMPLETED, EPOCH_COMPLETED, COMPLETED
+
+        Implementation: src/ml/engine/engine.spl:_fire_event()
+
+**Given** multiple handlers attached to the same event in order: H1, H2, H3
+        **When** the event fires
+        **Then** handlers execute in registration order: H1 → H2 → H3
+
+**Given** a handler attached to Events.ITERATION_COMPLETED(every=100)
+        **When** running for 500 iterations
+        **Then** handler executes at iterations: 100, 200, 300, 400, 500
+
+**Given** a handler attached to Events.ITERATION_COMPLETED(once=1000)
+        **When** running for 2000 iterations
+        **Then** handler executes only once at iteration 1000
+
+**Given** a custom event defined and fired from within process_function
+        **When** the custom event is fired
+        **Then** attached handlers execute
+
+## Metrics
+
+    The metric system automatically computes and tracks training/evaluation metrics
+    without cluttering your training loop. Metrics follow a reset/update/compute pattern.
+
+    Built-in Metrics:
+
+    Classification:
+        - Accuracy() - Correct predictions / total predictions
+    - Precision(average='macro') - Precision score
+    - Recall(average='macro') - Recall score
+    - F1Score(average='macro') - F1 score
+
+    Regression:
+        - MSE() - Mean squared error
+    - MAE() - Mean absolute error
+    - R2Score() - R² coefficient of determination
+    - RMSE() - Root mean squared error
+
+**Given** an Engine with Accuracy and Loss metrics attached
+        **When** running training for 1 epoch
+        **Then** metrics are automatically computed and available in engine.state.metrics
+
+        Implementation: src/ml/engine/engine.spl:_update_metrics()
+
+**Given** classification data with predictions and targets
+        **When** attaching Accuracy, Precision, Recall, F1Score metrics
+        **Then** all metrics compute correctly
+
+        Implementation: src/ml/metrics/classification.spl
+
+**Given** regression data with predictions and targets
+        **When** attaching MSE, MAE, R2Score metrics
+        **Then** all metrics compute correctly
+
+        Implementation: src/ml/metrics/regression.spl
+
+**Given** a custom metric class inheriting from Metric base class
+        **When** implementing reset/update/compute methods
+        **Then** the custom metric works with the Engine like built-in metrics
+
+        Metric Base Class: src/ml/metrics/metric.spl
+
+## Handlers
+
+    Handlers are reusable components that encapsulate common training infrastructure:
+        checkpointing, early stopping, learning rate scheduling, logging, progress bars, etc.
+
+    Handler Categories:
+
+    1. Model Persistence:
+        - Checkpoint - Save model/optimizer state with N-best retention
+    - ModelCheckpoint - Save only when metric improves
+
+    2. Training Control:
+        - EarlyStopping - Stop when validation metric plateaus
+    - TerminateOnNaN - Stop if loss becomes NaN
+
+    3. Learning Rate:
+        - LRScheduler - Integrate with LR schedulers (StepLR, CosineAnnealingLR, etc.)
+    - ReduceLROnPlateau - Reduce LR when metric plateaus
+
+    4. Monitoring:
+        - Timer - Track training time and throughput
+    - ProgressBar - Visual progress with metrics
+    - TensorBoard - Log metrics to TensorBoard
+    - WandB - Integration with Weights & Biases
+
+**Given** a Checkpoint handler with N-best retention
+        **When** training completes multiple epochs
+        **Then** only the N best checkpoints are retained based on score function
+
+        Implementation: src/ml/handlers/checkpoint.spl
+
+**Given** an EarlyStopping handler with patience=10
+        **When** validation metric doesn't improve for 10 epochs
+        **Then** training stops early
+
+        Implementation: src/ml/handlers/early_stopping.spl
+
+**Given** an LRScheduler handler wrapping a learning rate scheduler
+        **When** the trigger event fires
+        **Then** scheduler.step() is called automatically
+
+        Implementation: src/ml/handlers/lr_scheduler.spl
+
+**Given** a Timer handler attached to the engine
+        **When** training completes
+        **Then** total time, average epoch time, and throughput are tracked
+
+        Implementation: src/ml/handlers/timer.spl
+
+**Given** a ProgressBar handler attached to trainer
+        **When** training executes
+        **Then** a visual progress bar displays with metrics
+
+        Implementation: src/ml/handlers/progress_bar.spl
+
+## Engine Composition
+
+    Engine composition allows multiple engines (trainer, evaluator, tester) to work
+    together in a single workflow. The most common pattern is running an evaluator after
+    each training epoch.
+
+    Benefits:
+        - Separate training and validation logic
+    - Reuse evaluator for test set
+    - Different metrics for train vs validation
+    - Cleaner code organization
+
+**Given** a trainer Engine and an evaluator Engine
+        **When** both run on their respective datasets
+        **Then** each maintains independent state
+
+        Implementation: Each Engine instance has its own State object.
+
+**Given** a trainer Engine and an evaluator Engine
+        **When** attaching a handler to trainer that runs evaluator
+        **Then** evaluator runs after each training epoch automatically
+
+        Implementation Note:
+            The handler pattern is preferred over nested engine.run() calls for clarity.

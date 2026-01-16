@@ -1,6 +1,6 @@
 # traits_spec
 
-*Source: `./vulkan-backend/simple/test/system/features/traits/traits_spec.spl`*
+*Source: `simple/std_lib/test/features/language/traits_spec.spl`*
 
 ---
 

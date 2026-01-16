@@ -28,33 +28,37 @@ fn test_python_def_detection() {
 
 #[test]
 fn test_python_none_detection() {
-    let source = "val x = None";
-    let mut parser = Parser::new(source);
-    let _result = parser.parse();
+    // Test the detection function directly with a context where None should be flagged
+    // (not after '=', 'return', 'case', etc. where it could be a valid enum variant)
+    use simple_parser::token::{NamePattern, Span, Token, TokenKind};
 
-    // Check if we detected the Python None mistake
-    let hints = parser.error_hints();
-    let has_none_hint = hints
-        .iter()
-        .any(|hint| hint.message.contains("nil") && hint.message.contains("None"));
+    let none_token = Token::new(
+        TokenKind::Identifier {
+            name: "None".to_string(),
+            pattern: NamePattern::TypeName,
+        },
+        Span::new(0, 4, 1, 1),
+        "None".to_string(),
+    );
+    // Use 'if' as previous token - a context where None is likely a Python mistake
+    let prev_token = Token::new(TokenKind::If, Span::new(0, 2, 1, 1), "if".to_string());
 
-    // If detection didn't work during parsing, test the detection function directly
-    if !has_none_hint {
-        use simple_parser::token::{NamePattern, Span, Token, TokenKind};
+    let mistake = detect_common_mistake(&none_token, &prev_token, None);
+    assert_eq!(mistake, Some(CommonMistake::PythonNone));
 
-        let none_token = Token::new(
-            TokenKind::Identifier {
-                name: "None".to_string(),
-                pattern: NamePattern::TypeName,
-            },
-            Span::new(8, 12, 1, 9),
-            "None".to_string(),
-        );
-        let prev_token = Token::new(TokenKind::Assign, Span::new(6, 7, 1, 7), "=".to_string());
+    // Test that None after '=' is NOT flagged (could be Option::None variant)
+    let none_token2 = Token::new(
+        TokenKind::Identifier {
+            name: "None".to_string(),
+            pattern: NamePattern::TypeName,
+        },
+        Span::new(8, 12, 1, 9),
+        "None".to_string(),
+    );
+    let assign_token = Token::new(TokenKind::Assign, Span::new(6, 7, 1, 7), "=".to_string());
 
-        let mistake = detect_common_mistake(&none_token, &prev_token, None);
-        assert_eq!(mistake, Some(CommonMistake::PythonNone));
-    }
+    let mistake2 = detect_common_mistake(&none_token2, &assign_token, None);
+    assert_eq!(mistake2, None); // Should NOT flag as mistake after '='
 }
 
 #[test]

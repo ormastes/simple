@@ -1,6 +1,6 @@
 # borrowing_spec
 
-*Source: `./vulkan-backend/simple/test/system/features/borrowing/borrowing_spec.spl`*
+*Source: `simple/std_lib/test/features/types/borrowing_spec.spl`*
 
 ---
 

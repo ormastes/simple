@@ -1,6 +1,625 @@
-# enums_spec
+# Algebraic Data Types (Enums)
 
-*Source: `./vulkan-backend/simple/test/system/features/enums/enums_spec.spl`*
+*Source: `simple/std_lib/test/features/types/enums_spec.spl`*
 
 ---
 
+# Algebraic Data Types (Enums)
+
+**Feature ID:** #16
+**Category:** Type System
+**Difficulty:** 3/5
+**Status:** Complete
+
+## Overview
+
+Enums in Simple are algebraic data types (ADTs) that allow defining types with multiple
+named variants. They provide type-safe representation of values that can be one of
+several alternatives, similar to Rust enums, Scala case classes, or Haskell data types.
+
+## Enum Variants
+
+Simple supports two kinds of enum variants:
+
+1. **Simple Variants:** Named alternatives without associated data
+   ```simple
+   enum Color:
+       Red
+       Green
+       Blue
+   ```
+
+2. **Data-Carrying Variants:** Variants that hold values
+   ```simple
+   enum Option<T>:
+       Some(T)
+       None
+   ```
+
+## Key Features
+
+- **Type Safety:** Compile-time guarantee that only valid variants can be created
+- **Pattern Matching:** Exhaustive matching ensures all cases are handled
+- **Namespace Scoping:** Variants accessed via `::` syntax (e.g., `Color::Red`)
+- **Value Association:** Variants can carry arbitrary data
+- **Generic Support:** Enums can be parameterized with type variables
+- **Collections:** Enums work seamlessly with arrays, lists, and other containers
+
+## Syntax
+
+**Declaration:**
+```simple
+enum EnumName:
+    Variant1
+    Variant2(Type)
+    Variant3(Type1, Type2)
+```
+
+**Construction:**
+```simple
+val simple_variant = EnumName::Variant1
+val data_variant = EnumName::Variant2(value)
+```
+
+**Pattern Matching:**
+```simple
+match value:
+    EnumName::Variant1 => ...
+    EnumName::Variant2(x) => ...
+```
+
+## Test Coverage
+
+This specification validates:
+    1. **Simple Enums:** Creating and comparing variants without data
+2. **Data-Carrying Enums:** Variants that hold values
+3. **Collections:** Using enums in arrays and other data structures
+4. **Function Integration:** Enums as parameters and return types
+
+## Implementation
+
+**Primary Files:**
+- `src/parser/src/statements/mod.rs` - Enum declaration parsing
+- `src/runtime/src/value/objects.rs` - Enum runtime representation
+- `src/compiler/src/interpreter.rs` - Enum construction and matching
+
+**Testing:**
+- `src/driver/tests/interpreter_oop_tests.rs` - Rust integration tests
+
+**Dependencies:**
+- Feature #1: Lexer (tokenizes enum keyword)
+- Feature #2: Parser (parses enum declarations)
+- Feature #10: Pattern Matching (match expressions)
+
+**Required By:**
+- Feature #17: Option<T> type (std library enum)
+- Feature #90: Result<T, E> type (std library enum)
+
+## Runtime Representation
+
+Enums are represented as tagged unions:
+    ```
+EnumValue {
+    type_id: EnumTypeId,
+    variant_index: u32,
+    data: Option<Vec<RuntimeValue>>
+}
+```
+
+- **type_id:** Identifies which enum type this is
+- **variant_index:** Which variant (0-indexed)
+- **data:** None for simple variants, Some(values) for data variants
+
+## Comparison with Other Languages
+
+| Feature | Simple | Rust | Haskell |
+|---------|--------|------|---------|
+| Simple variants | ✅ | ✅ | ✅ |
+| Data variants | ✅ | ✅ | ✅ |
+| Generic enums | ✅ | ✅ | ✅ |
+| Pattern matching | ✅ | ✅ | ✅ |
+| Exhaustiveness | ✅ | ✅ | ✅ |
+
+## Common Patterns
+
+**Option Type (null safety):**
+```simple
+enum Option<T>:
+    Some(T)
+    None
+
+fn safe_divide(a: i64, b: i64) -> Option<i64>:
+    if b == 0:
+        return Option::None
+    return Option::Some(a / b)
+```
+
+**Result Type (error handling):**
+```simple
+enum Result<T, E>:
+    Ok(T)
+    Err(E)
+
+fn parse_int(s: text) -> Result<i64, text>:
+    # ...parsing logic...
+```
+
+**State Machines:**
+```simple
+enum ConnectionState:
+    Disconnected
+    Connecting
+    Connected
+    Error(text)
+```
+
+## Related Features
+
+- Feature #10: Pattern Matching (destructuring enums)
+- Feature #17: Option<T> (standard library enum)
+- Feature #90: Result<T, E> (error handling enum)
+- Feature #95: Generics (parameterized enums)
+
+**Migration Notes:**
+- Automated migration: N/A (already in SSpec format)
+- Manual assertion conversion: ~14 minutes (7 assertions × 2 min)
+- Docstring enhancement: ~28 minutes
+- Total: ~42 minutes
+
+## Simple Enum Variants
+
+    Simple enums define a closed set of named alternatives without associated data.
+    They're analogous to C-style enums or Java enumerations, but with stronger type
+    safety and namespace scoping.
+
+    **Declaration:**
+    ```simple
+    enum Color:
+        Red
+        Green
+        Blue
+    ```
+
+    **Key Properties:**
+    - Each variant is a distinct value of the enum type
+    - Variants are accessed via qualified names (`Color::Red`)
+    - Comparison operations work correctly (== and !=)
+    - No implicit conversion to/from integers (unlike C enums)
+
+    **Use Cases:**
+    - Representing a fixed set of choices (days of week, card suits)
+    - State machines with discrete states
+    - Configuration options
+    - Error codes
+
+    **Implementation:** Internally represented as tagged values with variant index.
+
+**Given** an enum declaration with simple variants
+        **When** constructing a variant using qualified syntax
+        **Then** creates a valid enum value of that type
+
+        **Syntax:**
+        ```simple
+        enum Color:
+            Red
+            Green
+            Blue
+
+        val c = Color::Red
+        ```
+
+        **Namespacing:**
+        - Variants are NOT global (can't use just `Red`)
+        - Must use qualified name: `Color::Red`
+        - Prevents naming conflicts between different enums
+
+        **Type Safety:**
+        - `Color::Red` has type `Color`
+        - Cannot assign `Color::Red` to variable expecting different enum
+        - Compiler enforces type correctness at construction
+
+        **Runtime Representation:**
+        ```
+        EnumValue {
+            type_id: Color,
+            variant_index: 0,  // Red = 0, Green = 1, Blue = 2
+            data: None
+        }
+        ```
+
+        **Verification:** Confirms variant construction succeeds
+
+        **Implementation:** See parser/statements/mod.rs::parse_enum()
+
+**Given** multiple enum variant instances
+        **When** comparing with == and != operators
+        **Then** equality works correctly (same variants equal, different not equal)
+
+        **Test Case:**
+        ```simple
+        val c1 = Color::Blue
+        val c2 = Color::Blue
+        val c3 = Color::Red
+
+        c1 == c2  // true (same variant)
+        c1 != c3  // true (different variants)
+        ```
+
+        **Equality Semantics:**
+        - Compares variant index (not memory address)
+        - Structural equality, not referential
+        - Works for enums with and without data
+
+        **Comparison Algorithm:**
+        ```
+        enum1 == enum2 ⟺
+            enum1.type_id == enum2.type_id &&
+            enum1.variant_index == enum2.variant_index &&
+            enum1.data == enum2.data  // recursive equality
+        ```
+
+        **Type Safety:**
+        - Cannot compare enums of different types at compile time
+        - `Color::Red == MyOption::None` is a type error
+
+        **Performance:** O(1) for simple variants, O(n) for data variants
+        where n is size of contained data
+
+        **Verification:**
+        - c1 == c2 must be true (both Blue)
+        - c1 != c3 must be true (Blue vs Red)
+
+        **Implementation:** See runtime/value/objects.rs::enum_equality()
+
+        **Related:** Feature #90 (Pattern Matching with equality guards)
+
+## Data-Carrying Enum Variants
+
+    Enum variants can hold associated data, making them true algebraic data types.
+    This enables powerful patterns like Option<T> and Result<T, E> for safe error
+    handling without exceptions or null pointers.
+
+    **Declaration:**
+    ```simple
+    enum MyOption:
+        Some(i64)
+        None
+    ```
+
+    **Construction:**
+    ```simple
+    val opt1 = MyOption::Some(42)  // variant with data
+    val opt2 = MyOption::None      // variant without data
+    ```
+
+    **Mixed Variants:**
+    An enum can have both simple variants (like `None`) and data-carrying variants
+    (like `Some(T)`) in the same definition.
+
+    **Data Access:**
+    Data is accessed via pattern matching:
+        ```simple
+    match opt:
+        MyOption::Some(value) => print("Got: {value}")
+        MyOption::None => print("Nothing")
+    ```
+
+    **Use Cases:**
+    - Optional values (replacing null)
+    - Error handling (Result<T, E>)
+    - Recursive data structures (e.g., linked lists)
+    - State with context (Connecting(host, port))
+
+    **Generic Variants:**
+    ```simple
+    enum Option<T>:
+        Some(T)
+        None
+    ```
+    This allows `Option<i64>`, `Option<text>`, etc.
+
+**Given** an enum with data-carrying variant
+        **When** constructing with value syntax
+        **Then** creates variant containing the provided value
+
+        **Syntax:**
+        ```simple
+        enum MyOption:
+            Some(i64)
+            None
+
+        val opt = MyOption::Some(42)
+        ```
+
+        **Construction Process:**
+        1. Parser recognizes `MyOption::Some(42)` as enum construction
+        2. Type checker verifies `42` is compatible with `i64`
+        3. Runtime creates EnumValue with variant_index=0, data=[42]
+
+        **Runtime Representation:**
+        ```
+        EnumValue {
+            type_id: MyOption,
+            variant_index: 0,  // Some
+            data: Some([RuntimeValue::Int(42)])
+        }
+        ```
+
+        **Type Inference:**
+        - `MyOption::Some(42)` has type `MyOption`
+        - The `42` has type `i64` (matches variant signature)
+
+        **Multiple Values:**
+        Variants can hold multiple values:
+            ```simple
+        enum Point:
+            TwoD(f64, f64)
+            ThreeD(f64, f64, f64)
+
+        val p = Point::TwoD(3.14, 2.71)
+        ```
+
+        **Verification:** Confirms construction of data variant succeeds
+
+        **Implementation:** See interpreter.rs::construct_enum_variant()
+
+        **Pattern Matching Access:**
+        ```simple
+        match opt:
+            MyOption::Some(x) => print(x)  // x binds to 42
+            MyOption::None => pass
+        ```
+
+**Given** an enum with both data and simple variants
+        **When** constructing the simple variant
+        **Then** creates variant without associated data
+
+        **Syntax:**
+        ```simple
+        val none_opt = MyOption::None
+        ```
+
+        **Runtime Representation:**
+        ```
+        EnumValue {
+            type_id: MyOption,
+            variant_index: 1,  // None
+            data: None  // No associated data
+        }
+        ```
+
+        **Mixed Enum Pattern:**
+        This demonstrates that a single enum can have:
+            - Data variants: `Some(i64)`
+            - Simple variants: `None`
+
+        This is the foundation of Option<T> in the standard library:
+        ```simple
+        enum Option<T>:
+            Some(T)  // data variant
+            None     // simple variant
+        ```
+
+        **Null Safety:**
+        By using `Option<T>` instead of nullable references, Simple enforces
+        explicit handling of absent values:
+            ```simple
+        fn get_user(id: i64) -> Option<User>:
+            # Must return Some(user) or None explicitly
+
+        match get_user(123):
+            Option::Some(user) => print(user.name)
+            Option::None => print("User not found")
+        ```
+
+        **Verification:** Confirms construction of None variant succeeds
+
+        **Implementation:** Simple variants have `data: None` in runtime repr
+
+        **Comparison:**
+        - `MyOption::None == MyOption::None` → true
+        - `MyOption::None != MyOption::Some(42)` → true
+
+        **Related:** Feature #17 (Option<T> type), Feature #90 (Result<T, E>)
+
+## Enums in Data Structures
+
+    Enums are first-class values in Simple and work seamlessly with all collection
+    types: arrays, lists, sets, maps, etc. This enables powerful compositional patterns.
+
+    **Array of Enums:**
+    ```simple
+    val colors = [Color::Red, Color::Green, Color::Blue]
+    ```
+
+    **List of Options:**
+    ```simple
+    val results: List<Option<i64>> = [
+        Option::Some(1),
+        Option::None,
+        Option::Some(3)
+    ]
+    ```
+
+    **Enum as Map Key:**
+    ```simple
+    val rgb_values = {
+        Color::Red: (255, 0, 0),
+        Color::Green: (0, 255, 0),
+        Color::Blue: (0, 0, 255)
+    }
+    ```
+
+    **Filtering and Transformation:**
+    ```simple
+    val some_values = results
+        .filter(|opt| match opt:
+            Option::Some(_) => true
+            Option::None => false)
+        .map(|opt| match opt:
+            Option::Some(x) => x
+            Option::None => 0)
+    ```
+
+    **Use Cases:**
+    - State machine transitions (array of states)
+    - Error accumulation (List<Result<T, E>>)
+    - Configuration options
+    - Game entities with different types
+
+**Given** an array literal with enum variants
+        **When** creating the array
+        **Then** stores all variants correctly and supports standard operations
+
+        **Example:**
+        ```simple
+        val colors = [Color::Red, Color::Green, Color::Blue]
+        ```
+
+        **Array Type:**
+        - Type: `[Color]` (array of Color)
+        - All elements must be same enum type
+        - Can mix different variants of same enum
+
+        **Array Operations:**
+        ```simple
+        colors.len()      // 3
+        colors[0]         // Color::Red
+        colors.contains(Color::Red)  // true
+        ```
+
+        **Iteration:**
+        ```simple
+        for color in colors:
+            match color:
+                Color::Red => print("R")
+                Color::Green => print("G")
+                Color::Blue => print("B")
+        ```
+
+        **Memory Layout:**
+        Arrays of enums are stored contiguously with each element having
+        the same size (size of largest variant + discriminant).
+
+        **Verification:** Confirms array stores 3 enum values
+
+        **Performance:**
+        - Access: O(1)
+        - Length: O(1)
+        - Iteration: O(n)
+
+        **Implementation:** See runtime/value/objects.rs::array_operations()
+
+        **Related:** Feature #12 (Arrays), Feature #13 (Lists)
+
+**Given** a function accepting enum parameter
+        **When** calling with enum variant
+        **Then** function receives and processes the variant correctly
+
+        **Function Definition:**
+        ```simple
+        fn is_red(color):
+            return color == Color::Red
+        ```
+
+        **Calling:**
+        ```simple
+        is_red(Color::Red)   // true
+        is_red(Color::Blue)  // false
+        ```
+
+        **Type Safety:**
+        - Function expects `Color` type
+        - Passing `MyOption::Some(42)` would be type error
+        - Compile-time enforcement
+
+        **Pattern Matching in Functions:**
+        More powerful version:
+            ```simple
+        fn color_name(color: Color) -> text:
+            match color:
+                Color::Red => "red"
+                Color::Green => "green"
+                Color::Blue => "blue"
+        ```
+
+        **Exhaustiveness:**
+        Compiler ensures all variants are handled:
+            ```simple
+        fn process(color: Color):
+            match color:
+                Color::Red => ...
+                Color::Green => ...
+                // ERROR: missing Color::Blue
+        ```
+
+        **Verification:** Confirms enum can be passed as parameter
+
+        **Performance:** Passing enums by value copies the discriminant and data
+        (typically 16-24 bytes for simple enums)
+
+        **Implementation:** See interpreter.rs::call_function()
+
+        **Related:** Feature #14 (Functions), Feature #10 (Pattern Matching)
+
+**Given** a function returning enum type
+        **When** calling the function
+        **Then** returns correct variant based on logic
+
+        **Function Example:**
+        ```simple
+        fn get_color(n):
+            if n == 0:
+                return Color::Red
+            elif n == 1:
+                return Color::Green
+            else:
+                return Color::Blue
+        ```
+
+        **Calling:**
+        ```simple
+        val col = get_color(1)  // Color::Green
+        ```
+
+        **Return Type Inference:**
+        - Compiler infers return type is `Color`
+        - All return paths must return same enum type
+        - Mixing `Color` and `MyOption` returns is type error
+
+        **Common Pattern - Option Return:**
+        ```simple
+        fn find_user(id: i64) -> Option<User>:
+            # Search logic...
+            if found:
+                return Option::Some(user)
+            return Option::None
+        ```
+
+        **Error Handling Pattern - Result Return:**
+        ```simple
+        fn divide(a: i64, b: i64) -> Result<i64, text>:
+            if b == 0:
+                return Result::Err("Division by zero")
+            return Result::Ok(a / b)
+        ```
+
+        **Verification:**
+        - get_color(1) must equal Color::Green
+        - Tests conditional enum return logic
+
+        **Performance:** Returning enums copies the value (discriminant + data)
+
+        **Implementation:** See interpreter.rs::return_value()
+
+        **Best Practice:**
+        Use `Option<T>` for fallible operations instead of sentinel values:
+            ```simple
+        // GOOD
+        fn parse(s: text) -> Option<i64>
+
+        // BAD
+        fn parse(s: text) -> i64  // returns -1 on error?
+        ```
+
+        **Related:** Feature #17 (Option<T>), Feature #90 (Result<T, E>)

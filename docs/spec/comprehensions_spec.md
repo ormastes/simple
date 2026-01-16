@@ -1,0 +1,264 @@
+# List and Dict Comprehensions
+
+*Source: `simple/std_lib/test/features/data_structures/comprehensions_spec.spl`*
+
+---
+
+# List and Dict Comprehensions
+
+**Feature ID:** #52
+**Category:** Data Structures
+**Difficulty:** 2/5 (Beginner-Intermediate)
+**Status:** Complete
+
+## Overview
+
+Comprehensions provide a concise, declarative syntax for creating new collections by transforming
+and filtering elements from existing iterables. Simple supports both list comprehensions and
+dictionary comprehensions, following Python's syntax.
+
+**Design Philosophy:**
+Comprehensions reduce boilerplate code by combining iteration, transformation, and filtering
+into a single expression. They are more readable than equivalent loop-based code for simple
+transformations.
+
+## Syntax
+
+### List Comprehension
+
+```simple
+[expression for pattern in iterable]
+[expression for pattern in iterable if condition]
+```
+
+**Grammar:**
+```
+list_comp = '[' expression 'for' pattern 'in' expression ('if' expression)? ']'
+```
+
+### Dict Comprehension
+
+```simple
+{key_expr: value_expr for pattern in iterable}
+{key_expr: value_expr for pattern in iterable if condition}
+```
+
+**Grammar:**
+```
+dict_comp = '{' expression ':' expression 'for' pattern 'in' expression ('if' expression)? '}'
+```
+
+## Runtime Representation
+
+**Execution Flow (List Comprehension):**
+1. Evaluate iterable expression once
+2. For each element in iterable:
+   - Bind element to pattern
+   - If condition exists, evaluate it
+   - If condition true (or no condition), evaluate expression
+   - Append result to output list
+3. Return new list
+
+**Execution Flow (Dict Comprehension):**
+Similar to list, but evaluates key and value expressions for each element.
+
+## Comparison with Other Languages
+
+| Feature | Simple | Python | JavaScript | Rust | Haskell |
+|---------|--------|--------|------------|------|---------|
+| List comprehension | ✅ `[x for x in items]` | ✅ `[x for x in items]` | ❌ Use `.map()` | ❌ Use `.iter()` | ✅ `[x | x <- items]` |
+| With filter | ✅ `if cond` | ✅ `if cond` | ❌ Use `.filter()` | ❌ Use `.filter()` | ✅ Guards |
+| Dict comprehension | ✅ `{k: v for ...}` | ✅ `{k: v for ...}` | ❌ Use `Object.fromEntries()` | ❌ Use `.collect()` | ✅ Maps |
+| Tuple destructuring | ✅ Yes | ✅ Yes | N/A | N/A | ✅ Yes |
+| Nested comprehension | ✅ Yes | ✅ Yes | N/A | N/A | ✅ Yes |
+
+## Common Patterns
+
+### Simple Transformation
+
+```simple
+val numbers = [1, 2, 3, 4, 5]
+val squares = [x * x for x in numbers]  # [1, 4, 9, 16, 25]
+```
+
+### Filtering Elements
+
+```simple
+val numbers = [1, 2, 3, 4, 5, 6, 7, 8]
+val evens = [x for x in numbers if x % 2 == 0]  # [2, 4, 6, 8]
+```
+
+### Transform and Filter
+
+```simple
+# Get squares of even numbers
+val even_squares = [x * x for x in numbers if x % 2 == 0]  # [4, 16, 36, 64]
+```
+
+### Tuple Destructuring
+
+```simple
+val pairs = [(1, 2), (3, 4), (5, 6)]
+val sums = [a + b for (a, b) in pairs]  # [3, 7, 11]
+```
+
+### String Processing
+
+```simple
+val words = ["hello", "world", "simple"]
+val upper = [word.to_upper() for word in words]
+```
+
+### Dict from List
+
+```simple
+val items = ["a", "b", "c"]
+val indexed = {item: i for (i, item) in items.enumerate()}  # {"a": 0, "b": 1, "c": 2}
+```
+
+### Inverting a Dict
+
+```simple
+val original = {"a": 1, "b": 2, "c": 3}
+val inverted = {v: k for (k, v) in original.items()}  # {1: "a", 2: "b", 3: "c"}
+```
+
+## Implementation Files
+
+**Parser:** `src/parser/src/expressions/primary/collections.rs:121-131` - Comprehension parsing
+**AST:** `src/parser/src/ast/nodes/core.rs:440-453` - ListComprehension, DictComprehension
+**Helpers:** `src/parser/src/expressions/helpers.rs:242-255` - parse_comprehension_clause()
+**Interpreter:** `src/compiler/src/interpreter/expr/collections.rs` - comprehension_iterate()
+**Tests:** `src/driver/tests/interpreter_collections.rs:330-370`
+
+## Related Features
+
+- **Arrays (#20):** Base collection type for comprehensions
+- **Dicts (#21):** Dictionary type for dict comprehensions
+- **Loops (#13):** For-in loops use similar iteration semantics
+- **Pattern Matching (#35):** Patterns used for destructuring
+- **Closures (#32):** Alternative via map/filter with lambdas
+
+## Limitations and Future Work
+
+**Current Limitations:**
+- No nested comprehensions with multiple `for` clauses
+- No async comprehensions
+- No set comprehensions (no Set type yet)
+
+**Planned Features:**
+- Multiple iterables: `[x + y for x in xs for y in ys]`
+- Generator expressions: `(x for x in items)` for lazy evaluation
+- Set comprehensions: `{x for x in items}`
+- Async comprehensions: `[await f(x) for x in items]`
+
+## List Comprehensions - Declarative Collection Transformation
+
+    List comprehensions provide a concise syntax for creating new lists by transforming
+    elements from an existing iterable. They combine iteration, transformation, and
+    optional filtering into a single readable expression.
+
+    **Key Properties:**
+    - Returns a new list (original unchanged)
+    - Expression evaluated for each element
+    - Optional `if` clause for filtering
+    - Supports pattern destructuring
+
+    **Grammar:**
+    ```
+    list_comp = '[' expression 'for' pattern 'in' expression ('if' expression)? ']'
+    ```
+
+    **Implementation:** `src/compiler/src/interpreter/expr/collections.rs`
+
+**Given** a list of integers
+        **When** applying a transformation expression
+        **Then** returns a new list with transformed elements
+
+        The most basic comprehension applies an expression to each element,
+        creating a new list with the results.
+
+**Given** a list of integers
+        **When** using an if clause to filter
+        **Then** only elements matching the condition are included
+
+        The optional `if` clause filters elements before transformation,
+        only including those where the condition is true.
+
+**Given** a list of integers
+        **When** using both transformation and filter
+        **Then** filters first, then transforms
+
+        Combining transformation with filtering allows powerful one-liner
+        data processing pipelines.
+
+**Given** a list of tuples
+        **When** using tuple pattern in for clause
+        **Then** elements are destructured for use in expression
+
+        Tuple destructuring allows working with structured data naturally.
+
+**Given** a string iterable
+        **When** iterating over characters
+        **Then** each character is available in the expression
+
+        Strings are iterable, so comprehensions work with them directly.
+
+**Given** an empty list
+        **When** using in a comprehension
+        **Then** returns an empty list
+
+        Comprehensions gracefully handle empty input.
+
+## Dict Comprehensions - Key-Value Pair Generation
+
+    Dict comprehensions create dictionaries by generating key-value pairs from
+    an iterable. They follow the same pattern as list comprehensions but produce
+    a dictionary instead of a list.
+
+    **Key Properties:**
+    - Returns a new dict
+    - Both key and value expressions evaluated per element
+    - Optional filtering with `if` clause
+    - Supports pattern destructuring
+
+    **Grammar:**
+    ```
+    dict_comp = '{' key_expr ':' value_expr 'for' pattern 'in' expression ('if' expression)? '}'
+    ```
+
+**Given** a list of values
+        **When** using dict comprehension
+        **Then** creates dict with computed keys and values
+
+        Dict comprehensions generate key-value pairs from each element.
+
+**Given** a list with an if condition
+        **When** using dict comprehension with filter
+        **Then** only matching elements create entries
+
+        Filtering works the same as in list comprehensions.
+
+**Given** a list of tuples
+        **When** destructuring in dict comprehension
+        **Then** can use both elements for key and value
+
+        Tuple destructuring is useful for transforming data structures.
+
+## Comprehensions vs map/filter
+
+    Simple supports both comprehension syntax and functional methods like
+    `.mapped()` and `.filtered()`. Both achieve similar results with different
+    syntax.
+
+**Given** a transformation task
+        **When** using either comprehension or .mapped()
+        **Then** both produce the same result
+
+        Choose based on readability for your use case.
+
+**Given** a filter-then-transform task
+        **When** using comprehension vs chained methods
+        **Then** comprehension is often more concise
+
+        Comprehensions excel when combining filter and transform.
