@@ -1,81 +1,169 @@
-# Type Inference & Unification
-
-*Source: `simple/std_lib/test/features/infrastructure/type_inference_spec.spl`*
+*Source: `simple/test/system/features/type_inference/type_inference_spec.spl`*
+*Last Updated: 2026-01-16*
 
 ---
 
-# Type Inference & Unification
+# Type Inference Specification
 
-**Feature ID:** #100
-**Category:** Infrastructure - Type System
-**Difficulty:** 5/5
-**Status:** Complete
+**Feature IDs:** #200-215
+**Category:** Language
+**Difficulty:** 4/5
+**Status:** Implemented
 
 ## Overview
 
-The Type Inference system implements Hindley-Milner type inference with Lean 4 verification,
-providing automatic type deduction for expressions without requiring type annotations.
+Type inference automatically deduces types for variables, function parameters,
+and return values without explicit type annotations. Simple uses a Hindley-Milner
+style type inference system with unification and occurs-check.
 
-## Key Features
+## Syntax
 
-- **Literal Type Inference:** Automatic inference of integer, float, string, boolean types
-- **Generic Instantiation:** Type parameter resolution from usage context
-- **Unification Algorithm:** Robinson's algorithm with occurs-check
-- **Lean Verification:** Formal proofs of determinism and soundness
-- **Pattern Matching:** Exhaustiveness checking with type refinement
+```simple
+# Inferred from literal
+val x = 42           # x: Int
 
-## Implementation
+# Inferred from usage
+val arr = [1, 2, 3]  # arr: [Int]
 
-**Primary Files:**
-- `src/type/src/lib.rs` - Type system entry point, Lean model bridge
-- `src/type/src/checker_infer.rs` - Hindley-Milner inference algorithm
-- `src/type/src/checker_unify.rs` - Robinson unification
+# Inferred from return
+fn double(x):        # x: Int -> Int (inferred from usage)
+    x * 2
+```
 
-**Verification:**
-- `verification/type_inference_compile/` - Lean 4 formal proofs
+## Key Concepts
 
-**Dependencies:**
-- Feature #2: Parser
-- Feature #3: AST
+| Concept | Description |
+|---------|-------------|
+| Unification | Combines type constraints to find most general type |
+| Type Variable | Placeholder type that gets resolved during inference |
+| Occurs Check | Prevents infinite recursive types like `T = Array<T>` |
+| Let-Polymorphism | Variables can have different types in different contexts |
 
-**Required By:**
-- Feature #4: HIR
-- Feature #101: Effect System
+## Behavior
 
-**Given** integer literal
-        **When** type inference runs
-        **Then** infers i64
+- **Literals** infer primitive types (Int, Float, Bool, String, Nil)
+- **Operations** propagate type constraints (e.g., `+` requires numbers)
+- **Collections** infer element types from contents
+- **Functions** infer parameter/return types from body and call sites
+- **Generics** instantiate type parameters at call sites
+- **Traits** resolve method types from trait definitions
 
-        **Verification:** Integer inference works
+## Related Specifications
 
-**Given** float literal
-        **When** type inference runs
-        **Then** infers f64
+- [Functions](../functions/functions_spec.md) - Function type signatures
+- [Generics](../generics/generics_spec.md) - Generic type parameters
+- [Traits](../traits/traits_spec.md) - Trait method resolution
 
-        **Verification:** Float inference works
+## Implementation Notes
 
-**Given** string literal
-        **When** type inference runs
-        **Then** infers string
+The type checker (`simple-type` crate) implements:
+- Robinson's unification algorithm
+- Fresh type variable generation
+- Substitution-based type resolution
+- Formal verification via Lean4 integration
 
-        **Verification:** String inference works
+Performance: Type inference is O(n) for most expressions, with unification
+being nearly constant-time in practice.
 
-**Given** generic function usage
-        **When** type inference runs
-        **Then** instantiates type parameters
+## Examples
 
-        **Verification:** Generic instantiation works
+```simple
+# Basic inference
+val x = 10           # Int
+val y = 3.14         # Float
+val name = "Alice"   # String
+val flag = true      # Bool
 
-**Given** compatible type expressions
-        **When** unification runs
-        **Then** finds consistent substitution
+# Function inference
+fn add(a, b):
+    a + b            # Inferred: fn(Int, Int) -> Int
 
-        **Verification:** Unification works
+# Generic inference
+val numbers = [1, 2, 3]        # [Int]
+val strings = ["a", "b", "c"]  # [String]
+```
 
-**Given** expression
-        **When** inference runs multiple times
-        **Then** always produces same type
+## Literal Type Inference
 
-        **Lean Theorem:** infer_deterministic
+    The type checker infers types from literal values.
+    Variables can be used without type annotations.
 
-        **Verification:** Determinism holds
+### Scenario: Integer Literal Inference
+
+        Integer literals are inferred as Int type.
+        Operations like arithmetic confirm correct inference.
+
+### Scenario: Float Literal Inference
+
+        Float literals are inferred as Float type.
+
+### Scenario: String Literal Inference
+
+        String literals are inferred as String type.
+
+### Scenario: Boolean Literal Inference
+
+        Boolean literals are inferred as Bool type.
+
+## Operator Type Inference
+
+    Operators constrain operand types through unification.
+    Type inference ensures operands have compatible types.
+
+### Scenario: Arithmetic Type Inference
+
+        Arithmetic operators work with inferred numeric types.
+
+### Scenario: Comparison Type Inference
+
+        Comparison operators return Bool with inferred operands.
+
+### Scenario: Logical Operator Inference
+
+        Logical operators work with inferred Bool types.
+
+## Collection Type Inference
+
+    Collections infer element types from their contents.
+
+### Scenario: Array Element Type Inference
+
+        Arrays infer element type from contents.
+        All elements must have compatible types.
+
+## Control Flow Type Inference
+
+    Control flow expressions must have unified branch types.
+
+### Scenario: If Expression Type Unification
+
+        Both branches must have compatible inferred types.
+
+## Function Type Inference
+
+    Functions infer parameter and return types from usage.
+
+### Scenario: Function Type Inference from Body
+
+        Parameter types inferred from how they're used.
+        Return type inferred from return expression.
+
+### Scenario: Multiple Parameter Inference
+
+        Each parameter type inferred independently.
+
+## Variable Type Consistency
+
+    Once a variable's type is inferred, it remains consistent.
+
+### Scenario: Let Binding Type Persistence
+
+        Variables maintain their inferred type.
+
+## Complex Expression Type Inference
+
+    Type constraints propagate through nested expressions.
+
+### Scenario: Nested Expression Inference
+
+        Types inferred through multiple levels of nesting.
