@@ -35,14 +35,14 @@ fn apply_lambda_to_value(
     if let Value::Lambda {
         params,
         body,
-        env: captured,
+        env: mut captured,
     } = lambda_arg
     {
         let mut local_env = captured.clone();
         if let Some(param) = params.first() {
             local_env.insert(param.clone(), val.clone());
         }
-        evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)
+        evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)
     } else {
         Ok(Value::Nil)
     }
@@ -55,7 +55,7 @@ fn handle_option_operation<F, W>(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -91,7 +91,7 @@ fn handle_result_map_operation<WOk, WErr>(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -123,7 +123,7 @@ pub(crate) fn eval_option_map(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -148,7 +148,7 @@ pub(crate) fn eval_option_and_then(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -173,7 +173,7 @@ pub(crate) fn eval_option_or_else(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -192,7 +192,7 @@ pub(crate) fn eval_option_or_else(
     if let Value::Lambda {
         params: _,
         body,
-        env: captured,
+        env: mut captured,
     } = func_arg
     {
         return evaluate_expr(&body, &mut captured, functions, classes, enums, impl_methods);
@@ -205,7 +205,7 @@ pub(crate) fn eval_option_filter(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -217,14 +217,14 @@ pub(crate) fn eval_option_filter(
             if let Value::Lambda {
                 params,
                 body,
-                env: captured,
+                env: mut captured,
             } = func_arg
             {
                 let mut local_env = captured.clone();
                 if let Some(param) = params.first() {
                     local_env.insert(param.clone(), val.as_ref().clone());
                 }
-                let result = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                let result = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
                 if result.truthy() {
                     return Ok(Value::some(val.as_ref().clone()));
                 }
@@ -239,7 +239,7 @@ pub(crate) fn eval_result_map(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -267,7 +267,7 @@ pub(crate) fn eval_result_map_err(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -295,7 +295,7 @@ pub(crate) fn eval_result_and_then(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -321,7 +321,7 @@ pub(crate) fn eval_result_or_else(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -341,14 +341,14 @@ pub(crate) fn eval_result_or_else(
         if let Value::Lambda {
             params,
             body,
-            env: captured,
+            env: mut captured,
         } = func_arg
         {
             let mut local_env = captured.clone();
             if let Some(param) = params.first() {
                 local_env.insert(param.clone(), err_val.as_ref().clone());
             }
-            return evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods);
+            return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
         }
     }
     Ok(Value::err(Value::Nil))

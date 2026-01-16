@@ -104,18 +104,18 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
             // Skip specific unimplemented feature specs
             let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let unimplemented_specs = [
-                "strings_spec.spl",          // Uses ellipsis (...) syntax
-                "generators_spec.spl",       // Generator features not implemented
-                "hir_spec.spl",              // HIR features not implemented
-                "parser_spec.spl",           // Parser features not implemented
-                "sets_spec.spl",             // Set operations not implemented
-                "each_method_spec.spl",      // Each method not implemented
-                "integer_iteration_spec.spl", // Integer iteration not implemented
-                "empty_predicate_spec.spl",  // Empty predicate not implemented
-                "number_trait_spec.spl",     // Number trait not implemented
+                "strings_spec.spl",            // Uses ellipsis (...) syntax
+                "generators_spec.spl",         // Generator features not implemented
+                "hir_spec.spl",                // HIR features not implemented
+                "parser_spec.spl",             // Parser features not implemented
+                "sets_spec.spl",               // Set operations not implemented
+                "each_method_spec.spl",        // Each method not implemented
+                "integer_iteration_spec.spl",  // Integer iteration not implemented
+                "empty_predicate_spec.spl",    // Empty predicate not implemented
+                "number_trait_spec.spl",       // Number trait not implemented
                 "sorting_algorithms_spec.spl", // Sorting algorithms not implemented
-                "brevity_syntax_spec.spl",   // Brevity syntax not implemented
-                "custom_blocks_spec.spl",    // Custom blocks not implemented
+                "brevity_syntax_spec.spl",     // Brevity syntax not implemented
+                "custom_blocks_spec.spl",      // Custom blocks not implemented
             ];
 
             if unimplemented_specs.contains(&file_name) {

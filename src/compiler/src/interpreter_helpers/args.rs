@@ -11,7 +11,7 @@ pub(crate) fn eval_arg(
     args: &[simple_parser::ast::Argument],
     idx: usize,
     default: Value,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -28,7 +28,7 @@ pub(crate) fn eval_arg_int(
     args: &[simple_parser::ast::Argument],
     idx: usize,
     default: i64,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -52,7 +52,7 @@ pub(crate) fn eval_arg_usize(
     args: &[simple_parser::ast::Argument],
     idx: usize,
     default: usize,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -82,7 +82,7 @@ pub(crate) fn apply_lambda_to_vec(
             if let Some(param) = params.first() {
                 local_env.insert(param.clone(), item.clone());
             }
-            let result = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+            let result = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
             results.push(result);
         }
         Ok(results)

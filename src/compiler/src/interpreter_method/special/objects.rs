@@ -17,7 +17,7 @@ pub fn handle_trait_object_methods(
     inner: &Box<Value>,
     method: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -83,7 +83,7 @@ pub fn handle_constructor_methods(
     class_name: &str,
     method: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -110,12 +110,12 @@ pub fn handle_constructor_methods(
 
             // Bind default values for remaining parameters using an empty scope
             // to prevent caller's variables from shadowing defaults
-            let empty_env: HashMap<String, Value> = HashMap::new();
+            let mut empty_env: HashMap<String, Value> = HashMap::new();
             for param in &method_def.params {
                 if !local_env.contains_key(&param.name) {
                     if let Some(default_expr) = &param.default {
                         let default_val =
-                            evaluate_expr(default_expr, &empty_env, functions, classes, enums, impl_methods)?;
+                            evaluate_expr(default_expr, &mut empty_env, functions, classes, enums, impl_methods)?;
                         local_env.insert(param.name.clone(), default_val);
                     }
                 }

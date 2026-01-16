@@ -212,3 +212,123 @@ pub(super) fn compile_await<M: Module>(
     }
     Ok(())
 }
+
+// ============================================================================
+// Monoio Direct Await (Feature: monoio-direct)
+// ============================================================================
+
+/// Compile an await for MonoioFuture with direct polling.
+///
+/// This generates code that:
+/// 1. Polls the MonoioFuture using rt_monoio_poll
+/// 2. Checks if result is PENDING_MARKER (-1)
+/// 3. If pending, saves state and returns suspended
+/// 4. If ready, extracts result and continues
+///
+/// # Arguments
+/// * `ctx` - Instruction context
+/// * `builder` - Function builder
+/// * `dest` - Destination register for result
+/// * `future` - Register containing MonoioFuture
+/// * `mir_block_id` - Current MIR block ID
+/// * `entry_block` - Entry block for state machine
+#[allow(dead_code)]
+pub(super) fn compile_await_monoio<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    future: VReg,
+    mir_block_id: BlockId,
+    entry_block: cranelift_codegen::ir::Block,
+) -> InstrResult<()> {
+    let future_val = ctx.vreg_values[&future];
+
+    // Try to use the monoio-direct polling function
+    let poll_id = ctx.runtime_funcs.get("rt_monoio_poll").copied();
+
+    if let Some(poll_id) = poll_id {
+        // Call rt_monoio_poll(future) -> result or PENDING_MARKER
+        let poll_ref = ctx.module.declare_func_in_func(poll_id, builder.func);
+        let poll_call = builder.ins().call(poll_ref, &[future_val]);
+        let poll_result = builder.inst_results(poll_call)[0];
+
+        // Check if result is PENDING_MARKER (-1)
+        let pending_marker = builder.ins().iconst(types::I64, -1);
+        let is_pending = builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            poll_result,
+            pending_marker,
+        );
+
+        // Create blocks for pending and ready paths
+        let pending_block = builder.create_block();
+        let ready_block = builder.create_block();
+        let merge_block = builder.create_block();
+
+        builder.ins().brif(is_pending, pending_block, &[], ready_block, &[]);
+
+        // Pending path: save state and return
+        builder.switch_to_block(pending_block);
+        builder.seal_block(pending_block);
+
+        // Check if we have async state map for state machine
+        if let Some(async_state_map) = ctx.async_state_map.as_ref() {
+            if let Some(state) = async_state_map.get(&mir_block_id) {
+                // Save live variables to MonoioFuture context
+                let get_ctx_id = ctx.runtime_funcs.get("rt_monoio_future_get_ctx").copied();
+                if let Some(get_ctx_id) = get_ctx_id {
+                    let get_ctx_ref = ctx.module.declare_func_in_func(get_ctx_id, builder.func);
+                    let call = builder.ins().call(get_ctx_ref, &[future_val]);
+                    let ctx_val = builder.inst_results(call)[0];
+
+                    let push_id = ctx.runtime_funcs["rt_array_push"];
+                    let push_ref = ctx.module.declare_func_in_func(push_id, builder.func);
+                    for reg in &state.live_after_await {
+                        if let Some(val) = ctx.vreg_values.get(reg) {
+                            let _ = builder.ins().call(push_ref, &[ctx_val, *val]);
+                        }
+                    }
+                }
+
+                // Set next state on MonoioFuture
+                let set_state_id = ctx.runtime_funcs.get("rt_monoio_future_set_async_state").copied();
+                if let Some(set_state_id) = set_state_id {
+                    let set_state_ref = ctx.module.declare_func_in_func(set_state_id, builder.func);
+                    let next_state = builder.ins().iconst(types::I64, (state.state_id + 1) as i64);
+                    let _ = builder.ins().call(set_state_ref, &[future_val, next_state]);
+                }
+            }
+        }
+
+        // Return the future itself (suspended)
+        builder.ins().return_(&[future_val]);
+
+        // Ready path: result is in poll_result
+        builder.switch_to_block(ready_block);
+        builder.seal_block(ready_block);
+
+        // Get the actual result from the future
+        let get_result_id = ctx.runtime_funcs.get("rt_monoio_future_get_result").copied();
+        let result = if let Some(get_result_id) = get_result_id {
+            let get_result_ref = ctx.module.declare_func_in_func(get_result_id, builder.func);
+            let call = builder.ins().call(get_result_ref, &[future_val]);
+            builder.inst_results(call)[0]
+        } else {
+            poll_result
+        };
+
+        builder.ins().jump(merge_block, &[result]);
+
+        // Merge block
+        builder.switch_to_block(merge_block);
+        builder.append_block_param(merge_block, types::I64);
+        let merged_result = builder.block_params(merge_block)[0];
+        builder.seal_block(merge_block);
+
+        ctx.vreg_values.insert(dest, merged_result);
+        return Ok(());
+    }
+
+    // Fallback to standard await
+    compile_await(ctx, builder, dest, future, mir_block_id, entry_block)
+}

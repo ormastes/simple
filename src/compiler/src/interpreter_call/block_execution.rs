@@ -66,11 +66,7 @@ pub(super) fn exec_block_closure(
             Node::Expression(expr) => {
                 // Handle functional update (e.g., list->append(3))
                 if let Expr::FunctionalUpdate { target, method, args } = expr {
-                    if let Some((name, new_value)) = super::super::interpreter_helpers::handle_functional_update(
-                        target,
-                        method,
-                        args,
-                        &local_env,
+                    if let Some((name, new_value)) = super::super::interpreter_helpers::handle_functional_update(target, method, args, &mut local_env,
                         functions,
                         classes,
                         enums,
@@ -83,7 +79,7 @@ pub(super) fn exec_block_closure(
                 }
                 // Handle self-updating method calls (e.g., arr.append(3))
                 let (result, update) =
-                    handle_method_call_with_self_update(expr, &local_env, functions, classes, enums, impl_methods)?;
+                    handle_method_call_with_self_update(expr, &mut local_env, functions, classes, enums, impl_methods)?;
                 if let Some((name, new_self)) = update {
                     local_env.insert(name, new_self);
                 }
@@ -91,7 +87,7 @@ pub(super) fn exec_block_closure(
             }
             Node::Let(let_stmt) => {
                 if let Some(ref value_expr) = let_stmt.value {
-                    let val = evaluate_expr(value_expr, &local_env, functions, classes, enums, impl_methods)?;
+                    let val = evaluate_expr(value_expr, &mut local_env, functions, classes, enums, impl_methods)?;
                     if let simple_parser::ast::Pattern::Identifier(name) = &let_stmt.pattern {
                         local_env.insert(name.clone(), val);
                     } else if let simple_parser::ast::Pattern::MutIdentifier(name) = &let_stmt.pattern {
@@ -101,7 +97,14 @@ pub(super) fn exec_block_closure(
                 last_value = Value::Nil;
             }
             Node::Assignment(assign_stmt) => {
-                let val = evaluate_expr(&assign_stmt.value, &local_env, functions, classes, enums, impl_methods)?;
+                let val = evaluate_expr(
+                    &assign_stmt.value,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
                 if let simple_parser::ast::Expr::Identifier(name) = &assign_stmt.target {
                     // Check if this is a module-level global variable
                     let is_global = MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
@@ -118,8 +121,14 @@ pub(super) fn exec_block_closure(
                 last_value = Value::Nil;
             }
             Node::Context(ctx_stmt) => {
-                let context_obj =
-                    evaluate_expr(&ctx_stmt.context, &local_env, functions, classes, enums, impl_methods)?;
+                let context_obj = evaluate_expr(
+                    &ctx_stmt.context,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
 
                 match &context_obj {
                     Value::Str(name) | Value::Symbol(name) => {
@@ -147,7 +156,7 @@ pub(super) fn exec_block_closure(
 
                         if let Some(ctx_blocks) = ctx_def_blocks {
                             for ctx_block in ctx_blocks {
-                                exec_block_value(ctx_block, &local_env, functions, classes, enums, impl_methods)?;
+                                exec_block_value(ctx_block, &mut local_env, functions, classes, enums, impl_methods)?;
                             }
                         }
 
@@ -183,7 +192,14 @@ pub(super) fn exec_block_closure(
             }
             Node::If(if_stmt) => {
                 if let Some(pattern) = &if_stmt.let_pattern {
-                    let value = evaluate_expr(&if_stmt.condition, &local_env, functions, classes, enums, impl_methods)?;
+                    let value = evaluate_expr(
+                        &if_stmt.condition,
+                        &mut local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
                     let mut bindings = std::collections::HashMap::new();
                     if pattern_matches(pattern, &value, &mut bindings, enums)? {
                         for (name, val) in bindings {
@@ -210,7 +226,15 @@ pub(super) fn exec_block_closure(
                         last_value = Value::Nil;
                     }
                 } else {
-                    if evaluate_expr(&if_stmt.condition, &local_env, functions, classes, enums, impl_methods)?.truthy()
+                    if evaluate_expr(
+                        &if_stmt.condition,
+                        &mut local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?
+                    .truthy()
                     {
                         last_value = exec_block_closure_mut(
                             &if_stmt.then_block.statements,
@@ -235,7 +259,14 @@ pub(super) fn exec_block_closure(
                 }
             }
             Node::For(for_stmt) => {
-                let iterable = evaluate_expr(&for_stmt.iterable, &local_env, functions, classes, enums, impl_methods)?;
+                let iterable = evaluate_expr(
+                    &for_stmt.iterable,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
                 let iter_values = get_iterator_values(&iterable)?;
                 for val in iter_values {
                     if let simple_parser::ast::Pattern::Identifier(ref name) = for_stmt.pattern {

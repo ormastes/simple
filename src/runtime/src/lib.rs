@@ -22,6 +22,13 @@ pub mod monoio_tcp_v2;
 pub mod monoio_thread;
 #[cfg(feature = "monoio-net")]
 pub mod monoio_udp_v2;
+// Direct monoio integration (zero-overhead async I/O)
+#[cfg(feature = "monoio-direct")]
+pub mod monoio_buffer;
+#[cfg(feature = "monoio-direct")]
+pub mod monoio_direct;
+#[cfg(feature = "monoio-direct")]
+pub mod monoio_waker;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 
@@ -497,6 +504,70 @@ pub use monoio_udp_v2::{
     // Socket options
     monoio_udp_set_broadcast,
     monoio_udp_set_multicast_ttl,
+};
+
+// Re-export monoio-direct types and FFI functions (zero-overhead async I/O)
+#[cfg(feature = "monoio-direct")]
+pub use monoio_buffer::{OwnedBuf, SimpleBuf};
+
+#[cfg(feature = "monoio-direct")]
+pub use monoio_direct::{
+    // Runtime
+    rt_monoio_init,
+    rt_monoio_direct_stats,
+    // TCP operations
+    rt_monoio_tcp_accept,
+    rt_monoio_tcp_accept_async,
+    rt_monoio_tcp_close,
+    rt_monoio_tcp_connect,
+    rt_monoio_tcp_connect_async,
+    rt_monoio_tcp_listen,
+    rt_monoio_tcp_listener_close,
+    rt_monoio_tcp_read,
+    rt_monoio_tcp_read_async,
+    rt_monoio_tcp_write,
+    rt_monoio_tcp_write_async,
+    // UDP operations
+    rt_monoio_udp_bind,
+    rt_monoio_udp_close,
+    rt_monoio_udp_recv_from,
+    rt_monoio_udp_send_to,
+    // Future polling
+    rt_monoio_poll,
+};
+
+#[cfg(feature = "monoio-direct")]
+pub use monoio_waker::{
+    rt_monoio_waker_free,
+    rt_monoio_waker_get_wake_count,
+    rt_monoio_waker_new,
+    rt_monoio_waker_wake,
+    SimpleWaker,
+    WakerContext,
+};
+
+#[cfg(feature = "monoio-direct")]
+pub use monoio_runtime::direct::{
+    block_on as monoio_direct_block_on,
+    has_direct_runtime as monoio_direct_has_runtime,
+    init_direct_runtime as monoio_direct_init,
+    shutdown_direct_runtime as monoio_direct_shutdown,
+    with_registry as monoio_direct_with_registry,
+    rt_monoio_direct_available,
+    rt_monoio_direct_init,
+    rt_monoio_direct_resource_count,
+    rt_monoio_direct_shutdown,
+    IoRegistry,
+};
+
+#[cfg(feature = "monoio-direct")]
+pub use value::{
+    rt_monoio_future_free, rt_monoio_future_get_async_state, rt_monoio_future_get_ctx,
+    rt_monoio_future_get_io_handle, rt_monoio_future_get_operation_type, rt_monoio_future_get_result,
+    rt_monoio_future_get_state, rt_monoio_future_is_pending, rt_monoio_future_is_ready,
+    rt_monoio_future_new, rt_monoio_future_set_async_state, rt_monoio_future_set_error,
+    rt_monoio_future_set_result, rt_monoio_is_pending, IoOperationType, MonoioFuture,
+    FUTURE_STATE_ERROR, FUTURE_STATE_PENDING, FUTURE_STATE_READY, PENDING_MARKER,
 };
 
 // Unit tests

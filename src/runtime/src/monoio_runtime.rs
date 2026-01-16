@@ -373,6 +373,256 @@ pub(crate) fn bytes_to_runtime_array(data: &[u8]) -> RuntimeValue {
     array
 }
 
+// ============================================================================
+// Direct I/O Registry (Feature: monoio-direct)
+// ============================================================================
+
+#[cfg(feature = "monoio-direct")]
+pub mod direct {
+    use monoio::net::{TcpListener, TcpStream};
+    use monoio::net::udp::UdpSocket;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    /// Thread-local I/O resource registry
+    ///
+    /// Stores active TCP/UDP connections for the current thread.
+    /// Each thread has its own registry to avoid synchronization overhead.
+    pub struct IoRegistry {
+        next_id: i64,
+        tcp_listeners: HashMap<i64, TcpListener>,
+        tcp_streams: HashMap<i64, TcpStream>,
+        udp_sockets: HashMap<i64, UdpSocket>,
+    }
+
+    impl IoRegistry {
+        /// Create a new empty registry
+        pub fn new() -> Self {
+            Self {
+                next_id: 1,
+                tcp_listeners: HashMap::new(),
+                tcp_streams: HashMap::new(),
+                udp_sockets: HashMap::new(),
+            }
+        }
+
+        /// Allocate a new unique ID
+        pub fn alloc_id(&mut self) -> i64 {
+            let id = self.next_id;
+            self.next_id += 1;
+            id
+        }
+
+        /// Add a TCP listener and return its ID
+        pub fn add_tcp_listener(&mut self, listener: TcpListener) -> i64 {
+            let id = self.alloc_id();
+            self.tcp_listeners.insert(id, listener);
+            id
+        }
+
+        /// Add a TCP stream and return its ID
+        pub fn add_tcp_stream(&mut self, stream: TcpStream) -> i64 {
+            let id = self.alloc_id();
+            self.tcp_streams.insert(id, stream);
+            id
+        }
+
+        /// Add a UDP socket and return its ID
+        pub fn add_udp_socket(&mut self, socket: UdpSocket) -> i64 {
+            let id = self.alloc_id();
+            self.udp_sockets.insert(id, socket);
+            id
+        }
+
+        /// Get a mutable reference to a TCP listener
+        pub fn get_tcp_listener(&mut self, id: i64) -> Option<&mut TcpListener> {
+            self.tcp_listeners.get_mut(&id)
+        }
+
+        /// Get a mutable reference to a TCP stream
+        pub fn get_tcp_stream(&mut self, id: i64) -> Option<&mut TcpStream> {
+            self.tcp_streams.get_mut(&id)
+        }
+
+        /// Get a mutable reference to a UDP socket
+        pub fn get_udp_socket(&mut self, id: i64) -> Option<&mut UdpSocket> {
+            self.udp_sockets.get_mut(&id)
+        }
+
+        /// Take ownership of a TCP stream (removes from registry)
+        pub fn take_tcp_stream(&mut self, id: i64) -> Option<TcpStream> {
+            self.tcp_streams.remove(&id)
+        }
+
+        /// Take ownership of a TCP listener (removes from registry)
+        pub fn take_tcp_listener(&mut self, id: i64) -> Option<TcpListener> {
+            self.tcp_listeners.remove(&id)
+        }
+
+        /// Take ownership of a UDP socket (removes from registry)
+        pub fn take_udp_socket(&mut self, id: i64) -> Option<UdpSocket> {
+            self.udp_sockets.remove(&id)
+        }
+
+        /// Remove a TCP listener
+        pub fn remove_tcp_listener(&mut self, id: i64) -> bool {
+            self.tcp_listeners.remove(&id).is_some()
+        }
+
+        /// Remove a TCP stream
+        pub fn remove_tcp_stream(&mut self, id: i64) -> bool {
+            self.tcp_streams.remove(&id).is_some()
+        }
+
+        /// Remove a UDP socket
+        pub fn remove_udp_socket(&mut self, id: i64) -> bool {
+            self.udp_sockets.remove(&id).is_some()
+        }
+
+        /// Get the number of active TCP listeners
+        pub fn tcp_listener_count(&self) -> usize {
+            self.tcp_listeners.len()
+        }
+
+        /// Get the number of active TCP streams
+        pub fn tcp_stream_count(&self) -> usize {
+            self.tcp_streams.len()
+        }
+
+        /// Get the number of active UDP sockets
+        pub fn udp_socket_count(&self) -> usize {
+            self.udp_sockets.len()
+        }
+
+        /// Clear all resources
+        pub fn clear(&mut self) {
+            self.tcp_listeners.clear();
+            self.tcp_streams.clear();
+            self.udp_sockets.clear();
+        }
+    }
+
+    impl Default for IoRegistry {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    thread_local! {
+        /// Thread-local io_uring entries configuration
+        static DIRECT_ENTRIES: RefCell<u32> = const { RefCell::new(256) };
+
+        /// Thread-local flag indicating if runtime is initialized
+        static DIRECT_INITIALIZED: RefCell<bool> = const { RefCell::new(false) };
+
+        /// Thread-local I/O registry
+        static IO_REGISTRY: RefCell<IoRegistry> = RefCell::new(IoRegistry::new());
+    }
+
+    /// Initialize the direct monoio runtime for the current thread
+    pub fn init_direct_runtime(entries: u32) -> Result<(), std::io::Error> {
+        DIRECT_ENTRIES.with(|e| {
+            *e.borrow_mut() = entries;
+        });
+        DIRECT_INITIALIZED.with(|init| {
+            *init.borrow_mut() = true;
+        });
+        Ok(())
+    }
+
+    /// Check if the direct runtime is initialized for the current thread
+    pub fn has_direct_runtime() -> bool {
+        DIRECT_INITIALIZED.with(|init| *init.borrow())
+    }
+
+    /// Shutdown the direct runtime for the current thread
+    pub fn shutdown_direct_runtime() {
+        DIRECT_INITIALIZED.with(|init| {
+            *init.borrow_mut() = false;
+        });
+        IO_REGISTRY.with(|reg| {
+            reg.borrow_mut().clear();
+        });
+    }
+
+    /// Get configured entries
+    fn get_direct_entries() -> u32 {
+        DIRECT_ENTRIES.with(|e| *e.borrow())
+    }
+
+    /// Execute an async block by creating a new runtime instance
+    ///
+    /// Note: This creates a new runtime for each call, which has some overhead
+    /// but avoids the complexity of storing the runtime (which is !Send/!Sync).
+    /// For high-performance scenarios, consider using the thread-local runtime
+    /// pattern where the entire thread runs in the monoio context.
+    pub fn block_on<F, R>(future: F) -> Result<R, std::io::Error>
+    where
+        F: std::future::Future<Output = std::io::Result<R>>,
+    {
+        let entries = get_direct_entries();
+
+        // Create a new runtime for this call
+        let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
+            .with_entries(entries)
+            .build()
+            .map_err(|e| std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to create monoio runtime: {}", e)
+            ))?;
+
+        rt.block_on(future)
+    }
+
+    /// Access the I/O registry for the current thread
+    pub fn with_registry<F, R>(f: F) -> R
+    where
+        F: FnOnce(&mut IoRegistry) -> R,
+    {
+        IO_REGISTRY.with(|reg| f(&mut reg.borrow_mut()))
+    }
+
+    /// FFI: Initialize direct runtime
+    #[no_mangle]
+    pub extern "C" fn rt_monoio_direct_init(entries: i64) -> crate::value::RuntimeValue {
+        let entries = if entries < 1 || entries > 32768 {
+            256
+        } else {
+            entries as u32
+        };
+
+        match init_direct_runtime(entries) {
+            Ok(()) => crate::value::RuntimeValue::from_int(1),
+            Err(e) => {
+                tracing::error!("rt_monoio_direct_init: {}", e);
+                crate::value::RuntimeValue::from_int(0)
+            }
+        }
+    }
+
+    /// FFI: Check if direct runtime is available
+    #[no_mangle]
+    pub extern "C" fn rt_monoio_direct_available() -> crate::value::RuntimeValue {
+        crate::value::RuntimeValue::from_bool(has_direct_runtime())
+    }
+
+    /// FFI: Shutdown direct runtime
+    #[no_mangle]
+    pub extern "C" fn rt_monoio_direct_shutdown() -> crate::value::RuntimeValue {
+        shutdown_direct_runtime();
+        crate::value::RuntimeValue::from_int(1)
+    }
+
+    /// FFI: Get I/O resource counts for debugging
+    #[no_mangle]
+    pub extern "C" fn rt_monoio_direct_resource_count() -> crate::value::RuntimeValue {
+        let count = with_registry(|reg| {
+            reg.tcp_listener_count() + reg.tcp_stream_count() + reg.udp_socket_count()
+        });
+        crate::value::RuntimeValue::from_int(count as i64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +650,22 @@ mod tests {
     fn test_stats_reset() {
         let result = monoio_reset_stats();
         assert_eq!(result.as_int(), 1);
+    }
+}
+
+#[cfg(all(test, feature = "monoio-direct"))]
+mod direct_tests {
+    use super::direct::*;
+
+    #[test]
+    fn test_io_registry() {
+        let mut registry = IoRegistry::new();
+        assert_eq!(registry.tcp_stream_count(), 0);
+
+        let id = registry.alloc_id();
+        assert_eq!(id, 1);
+
+        let id2 = registry.alloc_id();
+        assert_eq!(id2, 2);
     }
 }

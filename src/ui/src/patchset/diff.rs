@@ -75,10 +75,7 @@ pub fn diff_children(parent_id: NodeId, old: &[ChildSnapshot], new: &[ChildSnaps
 
     // Insert new children and compute moves using LIS algorithm
     // The LIS of old indices tells us which elements don't need to move
-    let old_indices: Vec<usize> = new_order
-        .iter()
-        .filter_map(|&opt| opt)
-        .collect();
+    let old_indices: Vec<usize> = new_order.iter().filter_map(|&opt| opt).collect();
 
     let lis = longest_increasing_subsequence(&old_indices);
     let lis_set: HashSet<usize> = lis.into_iter().collect();

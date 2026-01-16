@@ -66,7 +66,7 @@ pub(crate) fn comprehension_iterate(
     iterable: &Value,
     pattern: &Pattern,
     condition: &Option<Box<Expr>>,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -195,9 +195,7 @@ fn execute_callable_with_arg(
             if let Some(first_param) = params.first() {
                 local_env.insert(first_param.clone(), arg);
             }
-            evaluate_expr(
-                &body,
-                &local_env,
+            evaluate_expr(&body, &mut local_env,
                 &mut ctx.functions,
                 &mut ctx.classes,
                 &ctx.enums,
@@ -230,13 +228,13 @@ pub(crate) fn spawn_future_with_callable(
 pub(crate) fn spawn_future_with_callable_and_env(
     callable: Value,
     arg: Value,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> FutureValue {
-    let env_clone = env.clone();
+    let mut env_clone = env.clone();
     let mut ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
     FutureValue::new(move || execute_callable_with_arg(callable, arg, Some(&env_clone), &mut ctx))
 }
@@ -245,18 +243,18 @@ pub(crate) fn spawn_future_with_callable_and_env(
 /// Clones all necessary context for thread-safe execution.
 pub(crate) fn spawn_future_with_expr(
     expr: Expr,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> FutureValue {
-    let env_clone = env.clone();
+    let mut env_clone = env.clone();
     let mut ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
     FutureValue::new(move || {
         evaluate_expr(
             &expr,
-            &env_clone,
+            &mut env_clone,
             &mut ctx.functions,
             &mut ctx.classes,
             &ctx.enums,

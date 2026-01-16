@@ -617,7 +617,7 @@ fn exec_method_function(
     method: &FunctionDef,
     args: &[simple_parser::ast::Argument],
     self_val: &Value,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,

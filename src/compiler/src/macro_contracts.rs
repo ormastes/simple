@@ -59,7 +59,7 @@ pub struct MacroContractResult {
 pub fn process_macro_contract(
     macro_def: &MacroDef,
     const_bindings: &HashMap<String, String>,
-    env: &Env,
+    env: &mut Env,
     functions: &HashMap<String, FunctionDef>,
     classes: &HashMap<String, ClassDef>,
 ) -> Result<MacroContractResult, CompileError> {
@@ -107,7 +107,7 @@ fn process_returns_item(returns: &MacroReturns, result: &mut MacroContractResult
 fn process_intro_item(
     intro: &MacroIntro,
     const_bindings: &HashMap<String, String>,
-    env: &Env,
+    env: &mut Env,
     existing_symbols: &SymbolScope,
     introduced_symbols: &mut HashSet<String>,
     result: &mut MacroContractResult,
@@ -128,7 +128,7 @@ fn process_intro_item(
 fn process_intro_spec(
     spec: &MacroIntroSpec,
     const_bindings: &HashMap<String, String>,
-    env: &Env,
+    env: &mut Env,
     existing_symbols: &SymbolScope,
     introduced_symbols: &mut HashSet<String>,
     intro_label: &str,
@@ -297,7 +297,7 @@ fn process_inject_item(inject: &MacroInject, result: &mut MacroContractResult) -
 fn eval_const_range(
     range: &MacroConstRange,
     const_bindings: &HashMap<String, String>,
-    env: &Env,
+    env: &mut Env,
 ) -> Result<(i64, i64), CompileError> {
     let start = eval_const_int_expr(&range.start, const_bindings, env)?;
     let end = eval_const_int_expr(&range.end, const_bindings, env)?;
@@ -313,7 +313,7 @@ fn eval_const_range(
 fn eval_const_condition(
     expr: &Expr,
     const_bindings: &HashMap<String, String>,
-    env: &Env,
+    env: &mut Env,
 ) -> Result<bool, CompileError> {
     // For now, support simple boolean literals and comparisons
     match expr {

@@ -18,7 +18,7 @@ type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 pub(super) fn eval_builtin(
     name: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -258,7 +258,7 @@ pub(super) fn eval_builtin(
             let inner_expr = args.get(0).ok_or_else(|| semantic_err!("generator expects a lambda"))?;
             let val = evaluate_expr(&inner_expr.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Lambda {
-                body, env: captured, ..
+                body, env: mut captured, ..
             } = val
             {
                 GENERATOR_YIELDS.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
@@ -314,7 +314,7 @@ fn eval_arg(
     args: &[Argument],
     index: usize,
     default: Value,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -331,7 +331,7 @@ fn eval_arg_int(
     args: &[Argument],
     index: usize,
     default: i64,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,

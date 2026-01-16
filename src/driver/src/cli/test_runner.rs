@@ -628,9 +628,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         .map(|result| result.path.clone())
         .collect();
 
-    if let Err(e) =
-        crate::feature_db::update_feature_db_from_sspec(&feature_db_path, &sspec_files, &failed_specs)
-    {
+    if let Err(e) = crate::feature_db::update_feature_db_from_sspec(&feature_db_path, &sspec_files, &failed_specs) {
         total_failed += 1;
         results.push(TestFileResult {
             path: feature_db_path,

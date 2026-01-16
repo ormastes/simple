@@ -372,6 +372,7 @@ impl RuntimeValue {
                 Some(HeapObjectType::Semaphore) => "semaphore",
                 Some(HeapObjectType::Barrier) => "barrier",
                 Some(HeapObjectType::Atomic) => "atomic",
+                Some(HeapObjectType::MonoioFuture) => "monoio_future",
                 None => "null",
             },
             _ => "unknown",

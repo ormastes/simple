@@ -21,7 +21,7 @@ pub(crate) fn evaluate_method_call(
     receiver: &Box<Expr>,
     method: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -45,11 +45,8 @@ pub(crate) fn evaluate_method_call(
     if let Value::Dict(module_dict) = &recv_val {
         if let Some(func_val) = module_dict.get(method) {
             if let Value::Function { def, captured_env, .. } = func_val {
-                return exec_function_with_captured_env(
-                    def,
-                    args,
-                    env,
-                    captured_env,
+                let mut captured_env_clone = captured_env.clone();
+                return exec_function_with_captured_env(def, args, env, &mut captured_env_clone,
                     functions,
                     classes,
                     enums,
@@ -402,7 +399,7 @@ pub(crate) fn evaluate_method_call_with_self_update(
     receiver: &Box<Expr>,
     method: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,

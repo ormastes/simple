@@ -186,10 +186,10 @@ pub fn clear_interpreter_state() {
 /// This eliminates the deeply nested `.with()` calls throughout the module.
 fn with_interp_state<F, R>(f: F) -> R
 where
-    F: FnOnce(&Env, &mut HashMap<String, FunctionDef>, &mut HashMap<String, ClassDef>, &Enums, &ImplMethods) -> R,
+    F: FnOnce(&mut Env, &mut HashMap<String, FunctionDef>, &mut HashMap<String, ClassDef>, &Enums, &ImplMethods) -> R,
 {
     INTERP_ENV.with(|env| {
-        let env = env.borrow();
+        let mut env = env.borrow_mut();
         INTERP_FUNCTIONS.with(|funcs| {
             let mut funcs = funcs.borrow_mut();
             INTERP_CLASSES.with(|classes| {
@@ -198,7 +198,7 @@ where
                     let enums = enums.borrow();
                     INTERP_IMPL_METHODS.with(|impl_methods| {
                         let impl_methods = impl_methods.borrow();
-                        f(&env, &mut funcs, &mut classes, &enums, &impl_methods)
+                        f(&mut env, &mut funcs, &mut classes, &enums, &impl_methods)
                     })
                 })
             })
@@ -259,7 +259,7 @@ pub unsafe extern "C" fn simple_interp_call(
     };
 
     // Look up and call the function
-    let result = with_interp_state(|env, funcs, classes, enums, impl_methods| {
+    let result = with_interp_state(|mut env, funcs, classes, enums, impl_methods| {
         if let Some(func) = funcs.get(name).cloned() {
             call_interpreted_function(&func, args.clone(), env, funcs, classes, enums, impl_methods)
         } else {
@@ -277,7 +277,7 @@ pub unsafe extern "C" fn simple_interp_call(
 fn call_interpreted_function(
     func: &FunctionDef,
     args: Vec<Value>,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -295,7 +295,7 @@ fn call_interpreted_function(
             local_env.insert(param.name.clone(), arg.clone());
         } else if let Some(default) = &param.default {
             // Use default value if not provided
-            let default_val = evaluate_expr(default, &local_env, functions, classes, enums, impl_methods)?;
+            let default_val = evaluate_expr(default, &mut local_env, functions, classes, enums, impl_methods)?;
             local_env.insert(param.name.clone(), default_val);
         }
     }
@@ -316,7 +316,7 @@ pub unsafe extern "C" fn simple_interp_eval_expr(expr_ptr: *const Expr) -> Bridg
     }
     let expr = &*expr_ptr;
 
-    let result = with_interp_state(|env, funcs, classes, enums, impl_methods| {
+    let result = with_interp_state(|mut env, funcs, classes, enums, impl_methods| {
         evaluate_expr(expr, env, funcs, classes, enums, impl_methods)
     });
 
@@ -394,7 +394,7 @@ pub unsafe extern "C" fn simple_interp_get_var(name: *const c_char) -> BridgeVal
 
 /// Call an interpreted function by name with Value arguments.
 pub fn call_interp_function(name: &str, args: Vec<Value>) -> Result<Value, CompileError> {
-    with_interp_state(|env, funcs, classes, enums, impl_methods| {
+    with_interp_state(|mut env, funcs, classes, enums, impl_methods| {
         if let Some(func) = funcs.get(name).cloned() {
             call_interpreted_function(&func, args, env, funcs, classes, enums, impl_methods)
         } else {
@@ -405,7 +405,7 @@ pub fn call_interp_function(name: &str, args: Vec<Value>) -> Result<Value, Compi
 
 /// Evaluate an expression using interpreter state.
 pub fn eval_expr_with_state(expr: &Expr) -> Result<Value, CompileError> {
-    with_interp_state(|env, funcs, classes, enums, impl_methods| {
+    with_interp_state(|mut env, funcs, classes, enums, impl_methods| {
         evaluate_expr(expr, env, funcs, classes, enums, impl_methods)
     })
 }
@@ -493,7 +493,7 @@ unsafe extern "C" fn interp_call_handler(
     };
 
     // Look up and call the function
-    let result = with_interp_state(|env, funcs, classes, enums, impl_methods| {
+    let result = with_interp_state(|mut env, funcs, classes, enums, impl_methods| {
         if let Some(func) = funcs.get(name).cloned() {
             call_interpreted_function(&func, args.clone(), env, funcs, classes, enums, impl_methods)
         } else {
@@ -525,7 +525,7 @@ extern "C" fn interp_eval_handler(expr_index: i64) -> simple_runtime::RuntimeVal
     let result = EXPR_REGISTRY.with(|registry| {
         let registry = registry.borrow();
         if let Some(expr) = registry.get(expr_index as usize) {
-            with_interp_state(|env, funcs, classes, enums, impl_methods| {
+            with_interp_state(|mut env, funcs, classes, enums, impl_methods| {
                 evaluate_expr(expr, env, funcs, classes, enums, impl_methods)
             })
         } else {

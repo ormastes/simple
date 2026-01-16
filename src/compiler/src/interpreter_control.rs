@@ -311,7 +311,7 @@ fn exec_method_body(
     method: &FunctionDef,
     receiver: &Value,
     fields: &HashMap<String, Value>,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -452,7 +452,7 @@ pub(super) fn exec_match(
                 for (name, value) in &bindings {
                     guard_env.insert(name.clone(), value.clone());
                 }
-                if !evaluate_expr(guard, &guard_env, functions, classes, enums, impl_methods)?.truthy() {
+                if !evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?.truthy() {
                     continue;
                 }
             }

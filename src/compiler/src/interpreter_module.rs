@@ -511,9 +511,7 @@ pub(super) fn evaluate_module_exports(
             Node::Let(stmt) => {
                 // Evaluate module-level let statements (for global variables)
                 if let Some(init) = &stmt.value {
-                    if let Ok(value) = evaluate_expr(
-                        init,
-                        &env,
+                    if let Ok(value) = evaluate_expr(init, &mut env,
                         &mut local_functions,
                         &mut local_classes,
                         &local_enums,
@@ -529,9 +527,7 @@ pub(super) fn evaluate_module_exports(
             Node::Assignment(stmt) => {
                 // Evaluate module-level assignments
                 if let Expr::Identifier(name) = &stmt.target {
-                    if let Ok(value) = evaluate_expr(
-                        &stmt.value,
-                        &env,
+                    if let Ok(value) = evaluate_expr(&stmt.value, &mut env,
                         &mut local_functions,
                         &mut local_classes,
                         &local_enums,

@@ -17,7 +17,7 @@ pub(super) fn dispatch_context_method(
     ctx: &Value,
     method: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,

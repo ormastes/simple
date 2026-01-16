@@ -57,7 +57,7 @@ pub(super) fn call_value_with_args(
                     local_env.insert(param.clone(), arg.clone());
                 }
             }
-            evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)
+            evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)
         }
         Value::Function { def, captured_env, .. } => {
             // Execute function with given args, using the captured environment for closure
@@ -173,9 +173,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     let mut decorated = func_value;
                     for decorator in f.decorators.iter().rev() {
                         // Evaluate the decorator expression
-                        let decorator_fn = evaluate_expr(
-                            &decorator.name,
-                            &env,
+                        let decorator_fn = evaluate_expr(&decorator.name, &mut env,
                             &mut functions,
                             &mut classes,
                             &enums,
@@ -186,9 +184,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         let actual_decorator = if let Some(args) = &decorator.args {
                             let mut arg_values = vec![];
                             for arg in args {
-                                arg_values.push(evaluate_expr(
-                                    &arg.value,
-                                    &env,
+                                arg_values.push(evaluate_expr(&arg.value, &mut env,
                                     &mut functions,
                                     &mut classes,
                                     &enums,
@@ -269,10 +265,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 let mut additional_fields = Vec::new();
                 for macro_invoc in &c.macro_invocations {
                     // Evaluate the macro invocation
-                    let _result = evaluate_macro_invocation(
-                        &macro_invoc.name,
-                        &macro_invoc.args,
-                        &env,
+                    let _result = evaluate_macro_invocation(&macro_invoc.name, &macro_invoc.args, &mut env,
                         &mut functions,
                         &mut classes,
                         &enums,
@@ -556,18 +549,14 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             }
             Node::Return(ret) => {
                 if let Some(expr) = &ret.value {
-                    let val = evaluate_expr(expr, &env, &mut functions, &mut classes, &enums, &impl_methods)?;
+                    let val = evaluate_expr(expr, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?;
                     return val.as_int().map(|v| v as i32);
                 }
                 return Ok(0);
             }
             Node::Expression(expr) => {
                 if let Expr::FunctionalUpdate { target, method, args } = expr {
-                    if let Some((name, new_value)) = handle_functional_update(
-                        target,
-                        method,
-                        args,
-                        &env,
+                    if let Some((name, new_value)) = handle_functional_update(target, method, args, &mut env,
                         &mut functions,
                         &mut classes,
                         &enums,
@@ -578,9 +567,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     }
                 }
                 // Handle method calls on objects - need to persist mutations to self
-                let (_, update) = handle_method_call_with_self_update(
-                    expr,
-                    &env,
+                let (_, update) = handle_method_call_with_self_update(expr, &mut env,
                     &mut functions,
                     &mut classes,
                     &enums,
@@ -749,7 +736,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
         let result = exec_function(
             &main_func,
             &[], // No arguments
-            &env,
+            &mut env,
             &mut functions,
             &mut classes,
             &enums,

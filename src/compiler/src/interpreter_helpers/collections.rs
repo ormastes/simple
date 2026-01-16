@@ -59,8 +59,8 @@ pub(crate) fn eval_array_filter(
     with_lambda_predicate(func, "filter", |params, body, captured| {
         let mut results = Vec::new();
         for item in arr {
-            let local_env = bind_lambda_param(captured, params, item);
-            if evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
+            let mut local_env = bind_lambda_param(captured, params, item);
+            if evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?.truthy() {
                 results.push(item.clone());
             }
         }
@@ -93,7 +93,7 @@ pub(crate) fn eval_array_reduce(
             } else if let Some(param) = params.first() {
                 local_env.insert(param.clone(), item.clone());
             }
-            acc = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+            acc = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
         }
         Ok(acc)
     } else {
@@ -112,8 +112,8 @@ pub(crate) fn eval_array_find(
 ) -> Result<Value, CompileError> {
     with_lambda_predicate(func, "find", |params, body, captured| {
         for item in arr {
-            let local_env = bind_lambda_param(captured, params, item);
-            if evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
+            let mut local_env = bind_lambda_param(captured, params, item);
+            if evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?.truthy() {
                 return Ok(item.clone());
             }
         }
@@ -132,8 +132,8 @@ pub(crate) fn eval_array_any(
 ) -> Result<Value, CompileError> {
     with_lambda_predicate(func, "any", |params, body, captured| {
         for item in arr {
-            let local_env = bind_lambda_param(captured, params, item);
-            if evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
+            let mut local_env = bind_lambda_param(captured, params, item);
+            if evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?.truthy() {
                 return Ok(Value::Bool(true));
             }
         }
@@ -152,8 +152,8 @@ pub(crate) fn eval_array_all(
 ) -> Result<Value, CompileError> {
     with_lambda_predicate(func, "all", |params, body, captured| {
         for item in arr {
-            let local_env = bind_lambda_param(captured, params, item);
-            if !evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
+            let mut local_env = bind_lambda_param(captured, params, item);
+            if !evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?.truthy() {
                 return Ok(Value::Bool(false));
             }
         }
@@ -190,8 +190,8 @@ pub(crate) fn eval_dict_map_values(
     with_dict_lambda(func, "map_values", |params, body, captured| {
         let mut new_map = HashMap::new();
         for (k, v) in map {
-            let local_env = bind_lambda_param(captured, params, v);
-            let new_val = evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)?;
+            let mut local_env = bind_lambda_param(captured, params, v);
+            let new_val = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
             new_map.insert(k.clone(), new_val);
         }
         Ok(Value::Dict(new_map))
@@ -217,7 +217,7 @@ pub(crate) fn eval_dict_filter(
             } else if let Some(param) = params.first() {
                 local_env.insert(param.clone(), v.clone());
             }
-            if evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
+            if evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?.truthy() {
                 new_map.insert(k.clone(), v.clone());
             }
         }

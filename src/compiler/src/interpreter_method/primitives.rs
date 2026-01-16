@@ -11,7 +11,7 @@ pub fn handle_int_methods(
     n: i64,
     method: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -85,7 +85,7 @@ pub fn handle_int_methods(
             if let Value::Lambda {
                 params,
                 body,
-                env: captured,
+                env: mut captured,
             } = func
             {
                 for i in 0..n.max(0) {
@@ -93,7 +93,7 @@ pub fn handle_int_methods(
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), Value::Int(i));
                     }
-                    let result = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                    let result = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
                     results.push(result);
                 }
             }
@@ -125,7 +125,7 @@ pub fn handle_float_methods(
     f: f64,
     method: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -260,7 +260,7 @@ pub fn handle_bool_methods(
     b: bool,
     method: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -276,7 +276,7 @@ pub fn handle_bool_methods(
                 if let Value::Lambda {
                     params: _,
                     body,
-                    env: captured,
+                    env: mut captured,
                 } = func
                 {
                     let result = evaluate_expr(&body, &mut captured, functions, classes, enums, impl_methods)?;
@@ -293,12 +293,10 @@ pub fn handle_bool_methods(
             if let Value::Lambda {
                 params: _,
                 body,
-                env: captured,
+                env: mut captured,
             } = func
             {
-                return Ok(Some(evaluate_expr(
-                    &body,
-                    &captured,
+                return Ok(Some(evaluate_expr(&body, &mut captured,
                     functions,
                     classes,
                     enums,
