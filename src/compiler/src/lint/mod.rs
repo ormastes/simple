@@ -291,8 +291,7 @@ val result = 42
 print("Test passed")
 "#;
         let module = parse_code(code);
-        let mut checker = LintChecker::new()
-            .with_source_file(Some(PathBuf::from("test_spec.spl")));
+        let mut checker = LintChecker::new().with_source_file(Some(PathBuf::from("test_spec.spl")));
         checker.check_module(&module.items);
 
         let diagnostics = checker.diagnostics();
@@ -311,8 +310,7 @@ print("Test passed")
 print("Regular file output")
 "#;
         let module = parse_code(code);
-        let mut checker = LintChecker::new()
-            .with_source_file(Some(PathBuf::from("regular.spl")));
+        let mut checker = LintChecker::new().with_source_file(Some(PathBuf::from("regular.spl")));
         checker.check_module(&module.items);
 
         let diagnostics = checker.diagnostics();
@@ -336,16 +334,12 @@ fn test():
         fs::write(&temp_file, code).unwrap();
 
         let module = parse_code(code);
-        let mut checker = LintChecker::new()
-            .with_source_file(Some(temp_file.path().to_path_buf()));
+        let mut checker = LintChecker::new().with_source_file(Some(temp_file.path().to_path_buf()));
         checker.check_module(&module.items);
 
         let diagnostics = checker.diagnostics();
         // Should not warn about properly formatted TODOs
-        let todo_warnings: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.lint == LintName::TodoFormat)
-            .collect();
+        let todo_warnings: Vec<_> = diagnostics.iter().filter(|d| d.lint == LintName::TodoFormat).collect();
         assert_eq!(todo_warnings.len(), 0);
     }
 
@@ -365,16 +359,12 @@ fn test():
         fs::write(&temp_file, code).unwrap();
 
         let module = parse_code(code);
-        let mut checker = LintChecker::new()
-            .with_source_file(Some(temp_file.path().to_path_buf()));
+        let mut checker = LintChecker::new().with_source_file(Some(temp_file.path().to_path_buf()));
         checker.check_module(&module.items);
 
         let diagnostics = checker.diagnostics();
         // Should warn about improperly formatted TODOs
-        let todo_warnings: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.lint == LintName::TodoFormat)
-            .collect();
+        let todo_warnings: Vec<_> = diagnostics.iter().filter(|d| d.lint == LintName::TodoFormat).collect();
         assert_eq!(todo_warnings.len(), 2); // Both TODOs are improperly formatted
         assert!(todo_warnings[0].message.contains("missing [area][priority]"));
     }
@@ -394,15 +384,11 @@ fn test():
         fs::write(&temp_file, code).unwrap();
 
         let module = parse_code(code);
-        let mut checker = LintChecker::new()
-            .with_source_file(Some(temp_file.path().to_path_buf()));
+        let mut checker = LintChecker::new().with_source_file(Some(temp_file.path().to_path_buf()));
         checker.check_module(&module.items);
 
         let diagnostics = checker.diagnostics();
-        let todo_warnings: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.lint == LintName::TodoFormat)
-            .collect();
+        let todo_warnings: Vec<_> = diagnostics.iter().filter(|d| d.lint == LintName::TodoFormat).collect();
         assert_eq!(todo_warnings.len(), 1);
         assert!(todo_warnings[0].message.contains("invalid area"));
     }
@@ -422,15 +408,11 @@ fn test():
         fs::write(&temp_file, code).unwrap();
 
         let module = parse_code(code);
-        let mut checker = LintChecker::new()
-            .with_source_file(Some(temp_file.path().to_path_buf()));
+        let mut checker = LintChecker::new().with_source_file(Some(temp_file.path().to_path_buf()));
         checker.check_module(&module.items);
 
         let diagnostics = checker.diagnostics();
-        let todo_warnings: Vec<_> = diagnostics
-            .iter()
-            .filter(|d| d.lint == LintName::TodoFormat)
-            .collect();
+        let todo_warnings: Vec<_> = diagnostics.iter().filter(|d| d.lint == LintName::TodoFormat).collect();
         assert_eq!(todo_warnings.len(), 1);
         assert!(todo_warnings[0].message.contains("invalid priority"));
     }

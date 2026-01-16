@@ -192,22 +192,16 @@ fn test_infix_to_strict_mode() {
 
 #[test]
 fn test_go_capture_form() {
-    // `go |x| \: x * 2` should parse as go expression with capture
-    let module = parse("go |x| \\: x * 2").unwrap();
+    // `go(x) \: x * 2` should parse as go expression that captures x
+    let module = parse("go(x) \\: x * 2").unwrap();
     assert_eq!(module.items.len(), 1);
-    if let Node::Expression(Expr::Go {
-        args,
-        params,
-        is_capture_form,
-        body,
-    }) = &module.items[0]
-    {
-        assert_eq!(*is_capture_form, true);
+    if let Node::Expression(Expr::Go { args, params, body }) = &module.items[0] {
+        // With args but no params, it's capture form
         assert_eq!(args.len(), 1);
         if let Expr::Identifier(name) = &args[0] {
             assert_eq!(name, "x");
         }
-        assert_eq!(params.len(), 0); // \: has no params
+        assert_eq!(params.len(), 0); // \: has no params (capture form)
                                      // Body should be x * 2
         if let Expr::Binary { op, .. } = &**body {
             assert_eq!(*op, BinOp::Mul);
@@ -219,17 +213,11 @@ fn test_go_capture_form() {
 
 #[test]
 fn test_go_args_form() {
-    // `go(x, y) \a, b: a + b` should parse as go expression with args
+    // `go(x, y) \a, b: a + b` should parse as go expression with args passed to params
     let module = parse("go(x, y) \\a, b: a + b").unwrap();
     assert_eq!(module.items.len(), 1);
-    if let Node::Expression(Expr::Go {
-        args,
-        params,
-        is_capture_form,
-        body,
-    }) = &module.items[0]
-    {
-        assert_eq!(*is_capture_form, false);
+    if let Node::Expression(Expr::Go { args, params, body }) = &module.items[0] {
+        // With both args and params, it's args form (passing args to params)
         assert_eq!(args.len(), 2);
         assert_eq!(params.len(), 2);
         assert_eq!(params[0], "a");
@@ -245,17 +233,122 @@ fn test_go_args_form() {
 
 #[test]
 fn test_go_multiple_captures() {
-    // `go |x, y, z| \: x + y + z`
-    let module = parse("go |x, y, z| \\: x + y + z").unwrap();
+    // `go(x, y, z) \: x + y + z` - capture multiple variables
+    let module = parse("go(x, y, z) \\: x + y + z").unwrap();
     assert_eq!(module.items.len(), 1);
-    if let Node::Expression(Expr::Go {
-        args, is_capture_form, ..
-    }) = &module.items[0]
-    {
-        assert_eq!(*is_capture_form, true);
+    if let Node::Expression(Expr::Go { args, params, .. }) = &module.items[0] {
+        // Multiple args with no params = capture those specific vars
         assert_eq!(args.len(), 3);
+        assert_eq!(params.len(), 0);
     } else {
         panic!("Expected Go expression");
+    }
+}
+
+#[test]
+fn test_go_capture_all_shorthand() {
+    // `go \ *: expr` - capture all immutables (shorthand)
+    let module = parse("go \\ *: 42").unwrap();
+    assert_eq!(module.items.len(), 1);
+    if let Node::Expression(Expr::Go { args, params, body }) = &module.items[0] {
+        // Empty args and params = capture all
+        assert_eq!(args.len(), 0);
+        assert_eq!(params.len(), 0);
+        // Body should be 42
+        assert!(matches!(**body, Expr::Integer(42)));
+    } else {
+        panic!("Expected Go expression with capture-all");
+    }
+}
+
+#[test]
+fn test_go_capture_all_empty_parens() {
+    // `go() \ *: expr` - capture all immutables (with parens)
+    let module = parse("go() \\ *: 42").unwrap();
+    assert_eq!(module.items.len(), 1);
+    if let Node::Expression(Expr::Go { args, params, body }) = &module.items[0] {
+        // Empty args and params = capture all
+        assert_eq!(args.len(), 0);
+        assert_eq!(params.len(), 0);
+        // Body should be 42
+        assert!(matches!(**body, Expr::Integer(42)));
+    } else {
+        panic!("Expected Go expression with capture-all");
+    }
+}
+
+#[test]
+fn test_go_capture_all_colon_only() {
+    // `go \: expr` - capture all immutables (empty colon)
+    let module = parse("go \\: 42").unwrap();
+    assert_eq!(module.items.len(), 1);
+    if let Node::Expression(Expr::Go { args, params, body }) = &module.items[0] {
+        // Empty args and params = capture all
+        assert_eq!(args.len(), 0);
+        assert_eq!(params.len(), 0);
+        // Body should be 42
+        assert!(matches!(**body, Expr::Integer(42)));
+    } else {
+        panic!("Expected Go expression with capture-all");
+    }
+}
+
+// === Lambda Tests ===
+
+#[test]
+fn test_lambda_with_params() {
+    // `\x: x * 2` - lambda with parameter
+    let module = parse("\\x: x * 2").unwrap();
+    assert_eq!(module.items.len(), 1);
+    if let Node::Expression(Expr::Lambda {
+        params, capture_all, ..
+    }) = &module.items[0]
+    {
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "x");
+        assert_eq!(*capture_all, false);
+    } else {
+        panic!("Expected Lambda expression");
+    }
+}
+
+#[test]
+fn test_lambda_capture_all_star() {
+    // `\ *: expr` - lambda that captures all immutables
+    let module = parse("\\ *: 42").unwrap();
+    assert_eq!(module.items.len(), 1);
+    if let Node::Expression(Expr::Lambda {
+        params,
+        capture_all,
+        body,
+        ..
+    }) = &module.items[0]
+    {
+        assert_eq!(params.len(), 0);
+        assert_eq!(*capture_all, true);
+        assert!(matches!(**body, Expr::Integer(42)));
+    } else {
+        panic!("Expected Lambda expression with capture-all");
+    }
+}
+
+#[test]
+fn test_lambda_capture_all_empty_colon() {
+    // `\: expr` - lambda with empty colon (also captures all)
+    let module = parse("\\: 42").unwrap();
+    assert_eq!(module.items.len(), 1);
+    if let Node::Expression(Expr::Lambda {
+        params,
+        capture_all,
+        body,
+        ..
+    }) = &module.items[0]
+    {
+        assert_eq!(params.len(), 0);
+        assert_eq!(*capture_all, true);
+        assert!(matches!(**body, Expr::Integer(42)));
+    } else {
+        panic!("Expected Lambda expression with capture-all");
     }
 }
 
