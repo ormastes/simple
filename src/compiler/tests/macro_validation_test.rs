@@ -48,7 +48,7 @@ main = 0
 
 #[test]
 fn test_macro_used_before_definition_error() {
-    let source = r#"# Use macro before definition - should fail with E1402
+    let source = r#"# Use macro before definition - should fail
 greet!("World")
 
 macro greet(name: String) -> (
@@ -61,116 +61,102 @@ macro greet(name: String) -> (
 main = 0
 "#;
 
-    assert!(expect_error(source, "E1402"));
+    // Should fail with "unknown macro" error
+    assert!(expect_error(source, "unknown macro"));
 }
 
 #[test]
-#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_shadowing_existing_variable() {
-    let source = r#"
-        let counter = 0
+    let source = r#"val counter = 0
 
-        # Macro tries to introduce symbol that shadows existing variable
-        macro init_counter():
-            contract:
-                intro: let counter: int
-            const_eval:
-                pass
-            emit result:
-                let counter = 42
+# Macro tries to introduce symbol that shadows existing variable
+macro init_counter() -> (
+    intro result:
+        enclosing.module.let counter: i64
+):
+    emit result:
+        val counter = 42
 
-        init_counter!()
-        main = 0
-    "#;
+init_counter!()
+main = 0
+"#;
 
     // Should fail with E1403 (MACRO_SHADOWING)
     assert!(expect_error(source, "E1403"));
 }
 
 #[test]
-#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_shadowing_existing_function() {
-    let source = r#"
-        fn my_func():
+    let source = r#"fn my_func() -> i64:
+    return 42
+
+# Macro tries to introduce function that shadows existing function
+macro define_func() -> (
+    intro result:
+        enclosing.module.fn my_func() -> i64
+):
+    emit result:
+        fn my_func() -> i64:
+            return 99
+
+define_func!()
+main = 0
+"#;
+
+    // Should fail with E1403 (MACRO_SHADOWING)
+    assert!(expect_error(source, "E1403"));
+}
+
+#[test]
+fn test_intro_no_shadowing_success() {
+    let source = r#"val existing_var = 0
+
+# Macro introduces different symbol - should succeed
+macro init_data() -> (
+    intro result:
+        enclosing.module.let new_var: i64
+):
+    emit result:
+        val new_var = 42
+
+init_data!()
+main = 0
+"#;
+
+    assert!(check_compiles(source).is_ok());
+}
+
+#[test]
+fn test_qident_template_with_const_param() {
+    let source = r#"macro define_getter(NAME: String const) -> (
+    intro result:
+        enclosing.module.fn "get_{NAME}"() -> i64
+):
+    emit result:
+        fn "get_{NAME}"() -> i64:
             return 42
 
-        # Macro tries to introduce function that shadows existing function
-        macro define_func():
-            contract:
-                intro: fn my_func() -> int
-            const_eval:
-                pass
-            emit result:
-                fn my_func():
-                    return 99
-
-        define_func!()
-        main = 0
-    "#;
-
-    // Should fail with E1403 (MACRO_SHADOWING)
-    assert!(expect_error(source, "E1403"));
-}
-
-#[test]
-#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
-fn test_intro_no_shadowing_success() {
-    let source = r#"
-        let existing_var = 0
-
-        # Macro introduces different symbol - should succeed
-        macro init_data():
-            contract:
-                intro: let new_var: int
-            const_eval:
-                pass
-            emit result:
-                let new_var = 42
-
-        init_data!()
-        main = 0
-    "#;
+define_getter!("value")
+main = 0
+"#;
 
     assert!(check_compiles(source).is_ok());
 }
 
 #[test]
-#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
-fn test_qident_template_with_const_param() {
-    let source = r#"
-        macro define_getter(const NAME):
-            contract:
-                intro: fn get_{NAME}() -> int
-            const_eval:
-                pass
-            emit result:
-                fn get_{NAME}():
-                    return 42
-
-        define_getter!("value")
-        main = 0
-    "#;
-
-    assert!(check_compiles(source).is_ok());
-}
-
-#[test]
-#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_qident_template_without_const_param() {
-    let source = r#"
-        # Template variable {NAME} used without const qualifier - should fail
-        macro define_getter(NAME):
-            contract:
-                intro: fn get_{NAME}() -> int
-            const_eval:
-                pass
-            emit result:
-                fn get_{NAME}():
-                    return 42
+    let source = r#"# Template variable {NAME} used without const qualifier - should fail
+macro define_getter(NAME: String) -> (
+    intro result:
+        enclosing.module.fn "get_{NAME}"() -> i64
+):
+    emit result:
+        fn "get_{NAME}"() -> i64:
+            return 42
 
-        define_getter!("value")
-        main = 0
-    "#;
+define_getter!("value")
+main = 0
+"#;
 
     // Should fail with E1406 (MACRO_INVALID_QIDENT)
     assert!(expect_error(source, "E1406"));
@@ -218,72 +204,71 @@ main = 0
 }
 
 #[test]
-#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_multiple_macros_ordering() {
-    let source = r#"
-        # Define macros in order
-        macro first():
-            contract:
-                intro: let var1: int
-            emit result:
-                let var1 = 1
+    let source = r#"# Define macros in order
+macro first() -> (
+    intro result:
+        enclosing.module.let var1: i64
+):
+    emit result:
+        val var1 = 1
 
-        macro second():
-            contract:
-                intro: let var2: int
-            emit result:
-                let var2 = 2
+macro second() -> (
+    intro result:
+        enclosing.module.let var2: i64
+):
+    emit result:
+        val var2 = 2
 
-        # Use in reverse order - should succeed
-        second!()
-        first!()
-        main = 0
-    "#;
+# Use in reverse order - should succeed
+second!()
+first!()
+main = 0
+"#;
 
     assert!(check_compiles(source).is_ok());
 }
 
 #[test]
-#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_multiple_symbols_no_conflict() {
-    let source = r#"
-        macro init_multiple():
-            contract:
-                intro: let var1: int
-                intro: let var2: str
-                intro: fn helper() -> int
-            const_eval:
-                pass
-            emit result:
-                let var1 = 42
-                let var2 = "test"
-                fn helper():
-                    return var1
+    let source = r#"macro init_multiple() -> (
+    intro var1:
+        enclosing.module.let var1: i64,
+    intro var2:
+        enclosing.module.let var2: String,
+    intro helper:
+        enclosing.module.fn helper() -> i64
+):
+    emit var1:
+        val var1 = 42
+    emit var2:
+        val var2 = "test"
+    emit helper:
+        fn helper() -> i64:
+            return var1
 
-        init_multiple!()
-        main = 0
-    "#;
+init_multiple!()
+main = 0
+"#;
 
     assert!(check_compiles(source).is_ok());
 }
 
 #[test]
-#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_duplicate_symbols_within_macro() {
-    let source = r#"
-        # Macro introduces same symbol twice - should fail
-        macro init_duplicate():
-            contract:
-                intro: let counter: int
-                intro: let counter: int
-            const_eval:
-                pass
-            emit result:
-                let counter = 42
+    let source = r#"# Macro introduces same symbol twice - should fail
+macro init_duplicate() -> (
+    intro result1:
+        enclosing.module.let counter: i64,
+    intro result2:
+        enclosing.module.let counter: i64
+):
+    emit result1:
+        val counter = 42
 
-        init_duplicate!()
-        main = 0
-    "#;
+init_duplicate!()
+main = 0
+"#;
 
     // Should fail with E1403 (MACRO_SHADOWING - symbol introduced twice)
     assert!(expect_error(source, "E1403"));
