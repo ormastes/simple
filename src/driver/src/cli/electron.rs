@@ -42,8 +42,6 @@ pub fn electron_build(source: &PathBuf, options: ElectronBuildOptions) -> i32 {
 
     let wasm_path = options.output_dir.join(format!("{}.wasm", options.app_name));
 
-    // TODO: [driver][P3] Actually compile to WASM using existing compiler
-    // For now, create placeholder
     let wasm_result = compile_to_wasm(source, &wasm_path, options.optimize);
 
     if let Err(e) = wasm_result {
