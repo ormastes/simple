@@ -223,10 +223,12 @@ impl<'a> CallSiteRewriter<'a> {
                 params,
                 body,
                 move_mode,
+                capture_all,
             } => Expr::Lambda {
                 params: params.clone(),
                 body: Box::new(self.rewrite_expr(body)),
                 move_mode: *move_mode,
+                capture_all: *capture_all,
             },
             Expr::If {
                 let_pattern,

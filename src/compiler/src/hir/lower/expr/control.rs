@@ -127,7 +127,6 @@ impl Lowerer {
         &mut self,
         args: &[Expr],
         params: &[String],
-        _is_capture_form: bool,
         body: &Expr,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {

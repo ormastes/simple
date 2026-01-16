@@ -494,6 +494,7 @@ impl<'a> Monomorphizer<'a> {
                 params,
                 body,
                 move_mode,
+                capture_all,
             } => {
                 let new_params: Vec<simple_parser::ast::LambdaParam> = params
                     .iter()
@@ -507,6 +508,7 @@ impl<'a> Monomorphizer<'a> {
                     params: new_params,
                     body: Box::new(self.substitute_in_expr(body, bindings)),
                     move_mode: *move_mode,
+                    capture_all: *capture_all,
                 }
             }
             // If expression

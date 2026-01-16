@@ -475,14 +475,14 @@ pub enum Expr {
     Spawn(Box<Expr>),
     /// Go-style thread spawn:
     /// - `go(x, y) \a, b: expr` - pass x, y as arguments to parameters a, b
-    /// - `go(x, y) \: expr` - capture x, y and use in expr
-    /// - `go(*) \: expr` or `go \: expr` - capture all immutables
+    /// - `go(x, y) \*: expr` or `go(x, y) \: expr` - capture x, y and use in expr
+    /// - `go() \*: expr`, `go() \: expr`, or `go \*:` - capture all immutables
     Go {
-        /// Arguments to pass or expressions to capture
-        /// Empty vec means capture all immutables
+        /// Arguments to pass to thread
+        /// Empty vec means capture all immutables in scope
         args: Vec<Expr>,
         /// Parameters received by thread lambda
-        /// Empty vec means capture form (no params, just captures)
+        /// Empty vec means capture form (no params, uses captures)
         params: Vec<String>,
         /// Body expression to execute in thread
         body: Box<Expr>,

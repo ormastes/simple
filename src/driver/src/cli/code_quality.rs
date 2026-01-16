@@ -216,18 +216,15 @@ pub fn run_fmt(args: &[String]) -> i32 {
         }
     };
 
-    // Parse and format the source code
-    let mut parser = Parser::new(&source);
-    let module = match parser.parse() {
-        Ok(m) => m,
+    // Format the source code
+    let mut formatter = Formatter::new();
+    let formatted = match formatter.format_source(&source) {
+        Ok(f) => f,
         Err(e) => {
-            eprintln!("error: parse failed: {}", e);
+            eprintln!("error: {}", e);
             return 1;
         }
     };
-
-    let mut formatter = Formatter::new();
-    let formatted = formatter.format_module(&module);
 
     if check_only {
         // Check if file is already formatted
