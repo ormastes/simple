@@ -1,6 +1,7 @@
 # config_env_spec
 
-*Source: `./vulkan-backend/simple/test/system/features/config_env/config_env_spec.spl`*
+*Source: `simple/test/system/features/config_env/config_env_spec.spl`*
+*Last Updated: 2026-01-16*
 
 ---
 

@@ -1,6 +1,7 @@
 # named_arguments_spec
 
-*Source: `./vulkan-backend/simple/test/system/features/named_arguments/named_arguments_spec.spl`*
+*Source: `simple/test/system/features/named_arguments/named_arguments_spec.spl`*
+*Last Updated: 2026-01-16*
 
 ---
 
