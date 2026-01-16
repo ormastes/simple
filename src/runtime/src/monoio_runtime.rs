@@ -566,10 +566,12 @@ pub mod direct {
         let mut rt = monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
             .with_entries(entries)
             .build()
-            .map_err(|e| std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to create monoio runtime: {}", e)
-            ))?;
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to create monoio runtime: {}", e),
+                )
+            })?;
 
         rt.block_on(future)
     }
@@ -616,9 +618,7 @@ pub mod direct {
     /// FFI: Get I/O resource counts for debugging
     #[no_mangle]
     pub extern "C" fn rt_monoio_direct_resource_count() -> crate::value::RuntimeValue {
-        let count = with_registry(|reg| {
-            reg.tcp_listener_count() + reg.tcp_stream_count() + reg.udp_socket_count()
-        });
+        let count = with_registry(|reg| reg.tcp_listener_count() + reg.tcp_stream_count() + reg.udp_socket_count());
         crate::value::RuntimeValue::from_int(count as i64)
     }
 }

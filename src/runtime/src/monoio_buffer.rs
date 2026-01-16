@@ -385,10 +385,7 @@ pub extern "C" fn rt_simplebuf_new(capacity: i64) -> RuntimeValue {
 /// This function updates the RuntimeArray's elements with the byte values
 /// read by monoio. Each byte becomes a RuntimeValue integer.
 #[no_mangle]
-pub extern "C" fn rt_simplebuf_sync_to_array(
-    array: RuntimeValue,
-    bytes_read: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_simplebuf_sync_to_array(array: RuntimeValue, bytes_read: i64) -> RuntimeValue {
     if !array.is_heap() || bytes_read <= 0 {
         return RuntimeValue::from_int(0);
     }
@@ -427,10 +424,7 @@ pub extern "C" fn rt_simplebuf_sync_to_array(
 /// This function prepares the buffer for monoio write operations by
 /// converting RuntimeValue integers to raw bytes.
 #[no_mangle]
-pub extern "C" fn rt_simplebuf_sync_from_array(
-    array: RuntimeValue,
-    max_len: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_simplebuf_sync_from_array(array: RuntimeValue, max_len: i64) -> RuntimeValue {
     if !array.is_heap() || max_len <= 0 {
         return RuntimeValue::from_int(0);
     }

@@ -227,7 +227,9 @@ pub fn handle_option_methods(
                 env: mut captured,
             } = func_arg
             {
-                return Ok(Some(evaluate_expr(&body, &mut captured,
+                return Ok(Some(evaluate_expr(
+                    &body,
+                    &mut captured,
                     functions,
                     classes,
                     enums,
@@ -453,7 +455,9 @@ pub fn handle_result_methods(
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), err_val.as_ref().clone());
                     }
-                    return Ok(Some(evaluate_expr(&body, &mut local_env,
+                    return Ok(Some(evaluate_expr(
+                        &body,
+                        &mut local_env,
                         functions,
                         classes,
                         enums,

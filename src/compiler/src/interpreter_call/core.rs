@@ -94,7 +94,10 @@ pub(crate) fn bind_args(
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
 ) -> Result<HashMap<String, Value>, CompileError> {
-    bind_args_with_injected(params, args, outer_env,
+    bind_args_with_injected(
+        params,
+        args,
+        outer_env,
         functions,
         classes,
         enums,

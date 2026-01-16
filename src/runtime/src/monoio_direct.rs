@@ -7,9 +7,7 @@
 use crate::monoio_buffer::OwnedBuf;
 use crate::monoio_runtime::direct::{block_on, init_direct_runtime, with_registry};
 use crate::monoio_runtime::{copy_to_buffer, extract_buffer_bytes};
-use crate::value::monoio_future::{
-    rt_monoio_future_new, IoOperationType, MonoioFuture, PENDING_MARKER,
-};
+use crate::value::monoio_future::{rt_monoio_future_new, IoOperationType, MonoioFuture, PENDING_MARKER};
 use crate::value::{HeapHeader, HeapObjectType, RuntimeValue};
 use monoio::io::{AsyncReadRent, AsyncReadRentExt, AsyncWriteRent, AsyncWriteRentExt};
 use monoio::net::{TcpListener, TcpStream};
@@ -90,9 +88,7 @@ pub extern "C" fn rt_monoio_tcp_accept(listener_handle: RuntimeValue) -> Runtime
 
     let result = block_on(async {
         // Get the listener from registry
-        let listener = with_registry(|reg| {
-            reg.take_tcp_listener(listener_id)
-        });
+        let listener = with_registry(|reg| reg.take_tcp_listener(listener_id));
 
         match listener {
             Some(l) => {
@@ -105,7 +101,11 @@ pub extern "C" fn rt_monoio_tcp_accept(listener_handle: RuntimeValue) -> Runtime
                             let _new_id = reg.add_tcp_listener(l);
                         });
                         let stream_id = with_registry(|reg| reg.add_tcp_stream(stream));
-                        tracing::debug!("rt_monoio_tcp_accept: Accepted from {} with handle {}", peer_addr, stream_id);
+                        tracing::debug!(
+                            "rt_monoio_tcp_accept: Accepted from {} with handle {}",
+                            peer_addr,
+                            stream_id
+                        );
                         Ok(stream_id)
                     }
                     Err(e) => {
@@ -119,7 +119,7 @@ pub extern "C" fn rt_monoio_tcp_accept(listener_handle: RuntimeValue) -> Runtime
             }
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "Invalid listener handle"
+                "Invalid listener handle",
             )),
         }
     });
@@ -158,9 +158,7 @@ pub extern "C" fn rt_monoio_tcp_connect(addr: RuntimeValue) -> RuntimeValue {
         }
     };
 
-    let result = block_on(async {
-        TcpStream::connect(socket_addr).await
-    });
+    let result = block_on(async { TcpStream::connect(socket_addr).await });
 
     match result {
         Ok(stream) => {
@@ -190,11 +188,7 @@ pub extern "C" fn rt_monoio_tcp_connect(addr: RuntimeValue) -> RuntimeValue {
 /// # Returns
 /// Number of bytes read (0 = EOF) or error code (negative)
 #[no_mangle]
-pub extern "C" fn rt_monoio_tcp_read(
-    stream_handle: RuntimeValue,
-    buffer: RuntimeValue,
-    max_len: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_monoio_tcp_read(stream_handle: RuntimeValue, buffer: RuntimeValue, max_len: i64) -> RuntimeValue {
     let stream_id = stream_handle.as_int();
 
     if max_len <= 0 {
@@ -222,7 +216,7 @@ pub extern "C" fn rt_monoio_tcp_read(
             }
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "Invalid stream handle"
+                "Invalid stream handle",
             )),
         }
     });
@@ -254,11 +248,7 @@ pub extern "C" fn rt_monoio_tcp_read(
 /// # Returns
 /// Number of bytes written or error code (negative)
 #[no_mangle]
-pub extern "C" fn rt_monoio_tcp_write(
-    stream_handle: RuntimeValue,
-    buffer: RuntimeValue,
-    len: i64,
-) -> RuntimeValue {
+pub extern "C" fn rt_monoio_tcp_write(stream_handle: RuntimeValue, buffer: RuntimeValue, len: i64) -> RuntimeValue {
     let stream_id = stream_handle.as_int();
 
     if len <= 0 {
@@ -295,7 +285,7 @@ pub extern "C" fn rt_monoio_tcp_write(
             }
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "Invalid stream handle"
+                "Invalid stream handle",
             )),
         }
     });
@@ -428,7 +418,7 @@ pub extern "C" fn rt_monoio_udp_send_to(
             }
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "Invalid socket handle"
+                "Invalid socket handle",
             )),
         }
     });
@@ -475,7 +465,7 @@ pub extern "C" fn rt_monoio_udp_recv_from(
             }
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "Invalid socket handle"
+                "Invalid socket handle",
             )),
         }
     });
@@ -583,11 +573,7 @@ pub extern "C" fn rt_monoio_tcp_write_async(
 ) -> RuntimeValue {
     let stream_id = stream_handle.as_int();
 
-    let future = rt_monoio_future_new(
-        stream_id,
-        IoOperationType::TcpWrite as i64,
-        buffer,
-    );
+    let future = rt_monoio_future_new(stream_id, IoOperationType::TcpWrite as i64, buffer);
 
     let result = rt_monoio_tcp_write(stream_handle, buffer, len);
     crate::value::monoio_future::rt_monoio_future_set_result(future, result);
@@ -615,11 +601,7 @@ pub extern "C" fn rt_monoio_tcp_connect_async(addr: RuntimeValue) -> RuntimeValu
 pub extern "C" fn rt_monoio_tcp_accept_async(listener_handle: RuntimeValue) -> RuntimeValue {
     let listener_id = listener_handle.as_int();
 
-    let future = rt_monoio_future_new(
-        listener_id,
-        IoOperationType::TcpAccept as i64,
-        RuntimeValue::NIL,
-    );
+    let future = rt_monoio_future_new(listener_id, IoOperationType::TcpAccept as i64, RuntimeValue::NIL);
 
     let result = rt_monoio_tcp_accept(listener_handle);
     crate::value::monoio_future::rt_monoio_future_set_result(future, result);
@@ -635,9 +617,7 @@ pub extern "C" fn rt_monoio_tcp_accept_async(listener_handle: RuntimeValue) -> R
 #[no_mangle]
 pub extern "C" fn rt_monoio_direct_stats() -> RuntimeValue {
     // Return resource count for now
-    let count = with_registry(|reg| {
-        reg.tcp_listener_count() + reg.tcp_stream_count() + reg.udp_socket_count()
-    });
+    let count = with_registry(|reg| reg.tcp_listener_count() + reg.tcp_stream_count() + reg.udp_socket_count());
     RuntimeValue::from_int(count as i64)
 }
 

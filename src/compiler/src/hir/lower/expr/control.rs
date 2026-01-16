@@ -61,7 +61,7 @@ impl Lowerer {
             // Capture all immutable variables from outer scope
             ctx.locals.iter().enumerate().map(|(i, _)| i).collect()
         } else {
-            // TODO: analyze body to determine which variables are actually used
+            // TODO: [compiler][P3] Analyze body to determine which variables are actually used
             // For now, capture all (conservative approach)
             ctx.locals.iter().enumerate().map(|(i, _)| i).collect()
         };

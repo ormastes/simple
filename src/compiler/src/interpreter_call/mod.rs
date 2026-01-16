@@ -125,7 +125,12 @@ pub(crate) fn evaluate_call(
                                 &def,
                                 args,
                                 env,
-                                &mut captured_env_clone, functions, classes, enums, impl_methods,);
+                                &mut captured_env_clone,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            );
                         }
                         if let Value::Constructor { class_name } = func_val {
                             return core::instantiate_class(
@@ -153,7 +158,12 @@ pub(crate) fn evaluate_call(
                         &def,
                         args,
                         env,
-                        &mut captured_env_clone, functions, classes, enums, impl_methods,);
+                        &mut captured_env_clone,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    );
                 }
             }
             bail_semantic!("unknown symbol {}.{}", module_name, field);
@@ -253,26 +263,35 @@ pub(crate) fn evaluate_call(
             env: captured,
         } => {
             let mut captured_clone = captured.clone();
-            core::exec_lambda(&params, &body, args, env, &mut captured_clone,
+            core::exec_lambda(
+                &params,
+                &body,
+                args,
+                env,
+                &mut captured_clone,
                 functions,
                 classes,
                 enums,
                 impl_methods,
             )
-        },
+        }
         Value::BlockClosure { nodes, env: captured } => {
             let mut captured_clone = captured.clone();
             block_execution::exec_block_closure(&nodes, &mut captured_clone, functions, classes, enums, impl_methods)
         }
         Value::Function { def, captured_env, .. } => {
             let mut captured_env_clone = captured_env.clone();
-            core::exec_function_with_captured_env(&def, args, env, &mut captured_env_clone,
+            core::exec_function_with_captured_env(
+                &def,
+                args,
+                env,
+                &mut captured_env_clone,
                 functions,
                 classes,
                 enums,
                 impl_methods,
             )
-        },
+        }
         Value::NativeFunction(native) => {
             let evaluated: Vec<Value> = args
                 .iter()

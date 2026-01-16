@@ -3,6 +3,7 @@
 pub mod analysis;
 pub mod audit;
 pub mod basic;
+pub mod check;
 pub mod code_quality;
 pub mod compile;
 pub mod diagram_gen;

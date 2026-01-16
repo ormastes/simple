@@ -258,7 +258,9 @@ pub(super) fn eval_builtin(
             let inner_expr = args.get(0).ok_or_else(|| semantic_err!("generator expects a lambda"))?;
             let val = evaluate_expr(&inner_expr.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Lambda {
-                body, env: mut captured, ..
+                body,
+                env: mut captured,
+                ..
             } = val
             {
                 GENERATOR_YIELDS.with(|cell| *cell.borrow_mut() = Some(Vec::new()));

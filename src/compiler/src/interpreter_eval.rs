@@ -173,7 +173,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     let mut decorated = func_value;
                     for decorator in f.decorators.iter().rev() {
                         // Evaluate the decorator expression
-                        let decorator_fn = evaluate_expr(&decorator.name, &mut env,
+                        let decorator_fn = evaluate_expr(
+                            &decorator.name,
+                            &mut env,
                             &mut functions,
                             &mut classes,
                             &enums,
@@ -184,7 +186,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         let actual_decorator = if let Some(args) = &decorator.args {
                             let mut arg_values = vec![];
                             for arg in args {
-                                arg_values.push(evaluate_expr(&arg.value, &mut env,
+                                arg_values.push(evaluate_expr(
+                                    &arg.value,
+                                    &mut env,
                                     &mut functions,
                                     &mut classes,
                                     &enums,
@@ -265,7 +269,10 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 let mut additional_fields = Vec::new();
                 for macro_invoc in &c.macro_invocations {
                     // Evaluate the macro invocation
-                    let _result = evaluate_macro_invocation(&macro_invoc.name, &macro_invoc.args, &mut env,
+                    let _result = evaluate_macro_invocation(
+                        &macro_invoc.name,
+                        &macro_invoc.args,
+                        &mut env,
                         &mut functions,
                         &mut classes,
                         &enums,
@@ -556,7 +563,11 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             }
             Node::Expression(expr) => {
                 if let Expr::FunctionalUpdate { target, method, args } = expr {
-                    if let Some((name, new_value)) = handle_functional_update(target, method, args, &mut env,
+                    if let Some((name, new_value)) = handle_functional_update(
+                        target,
+                        method,
+                        args,
+                        &mut env,
                         &mut functions,
                         &mut classes,
                         &enums,
@@ -567,7 +578,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     }
                 }
                 // Handle method calls on objects - need to persist mutations to self
-                let (_, update) = handle_method_call_with_self_update(expr, &mut env,
+                let (_, update) = handle_method_call_with_self_update(
+                    expr,
+                    &mut env,
                     &mut functions,
                     &mut classes,
                     &enums,

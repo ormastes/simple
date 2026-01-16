@@ -651,8 +651,16 @@ pub fn handle_dict_methods(
                         // Use the caller's env for evaluating arguments, but merge with captured_env for the function body
                         let mut merged_env = captured_env.clone();
                         merged_env.extend(env.clone());
-                        let result =
-                            exec_function(def, args, &mut merged_env, functions, classes, enums, impl_methods, None)?;
+                        let result = exec_function(
+                            def,
+                            args,
+                            &mut merged_env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                            None,
+                        )?;
                         return Ok(Some(result));
                     }
                     Value::Lambda {

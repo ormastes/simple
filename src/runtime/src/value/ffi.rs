@@ -4011,7 +4011,7 @@ pub extern "C" fn rt_torch_gt(_a: RuntimeValue, _b: RuntimeValue) -> RuntimeValu
 
 #[no_mangle]
 pub extern "C" fn rt_torch_index(_tensor: RuntimeValue, _indices: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement tensor indexing
+    // TODO: [runtime][P3] Implement tensor indexing
     RuntimeValue::NIL
 }
 
@@ -4065,7 +4065,7 @@ pub extern "C" fn rt_torch_narrow(_tensor: RuntimeValue, _dim: i64, _start: i64,
 
 #[no_mangle]
 pub extern "C" fn rt_torch_stack(_tensors: RuntimeValue, _dim: i64) -> RuntimeValue {
-    // TODO: Implement tensor stack
+    // TODO: [runtime][P3] Implement tensor stack
     RuntimeValue::NIL
 }
 
@@ -4073,41 +4073,41 @@ pub extern "C" fn rt_torch_stack(_tensors: RuntimeValue, _dim: i64) -> RuntimeVa
 
 #[no_mangle]
 pub extern "C" fn rt_torch_autograd_context_new() -> RuntimeValue {
-    // TODO: Implement autograd context
+    // TODO: [runtime][P3] Implement autograd context
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_autograd_context_save_tensor(_ctx: RuntimeValue, _tensor: RuntimeValue) {
-    // TODO: Implement save tensor
+    // TODO: [runtime][P3] Implement save tensor
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_autograd_context_save_value(_ctx: RuntimeValue, _value: RuntimeValue) {
-    // TODO: Implement save value
+    // TODO: [runtime][P3] Implement save value
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_autograd_context_get_saved_tensors(_ctx: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement get saved tensors
+    // TODO: [runtime][P3] Implement get saved tensors
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_autograd_context_get_value(_ctx: RuntimeValue, _key: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement get value
+    // TODO: [runtime][P3] Implement get value
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_autograd_function_apply(_func: RuntimeValue, _inputs: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement autograd function apply
+    // TODO: [runtime][P3] Implement autograd function apply
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_checkpoint(_func: RuntimeValue, _inputs: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement gradient checkpointing
+    // TODO: [runtime][P3] Implement gradient checkpointing
     RuntimeValue::NIL
 }
 
@@ -4181,19 +4181,19 @@ pub extern "C" fn rt_torch_cross_entropy_loss(_pred: RuntimeValue, _target: Runt
 
 #[no_mangle]
 pub extern "C" fn rt_torch_conv3d_new(_in_channels: i64, _out_channels: i64, _kernel_size: i64) -> RuntimeValue {
-    // TODO: Implement Conv3d layer
+    // TODO: [runtime][P3] Implement Conv3d layer
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_conv3d_forward(_layer: RuntimeValue, _input: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement Conv3d forward
+    // TODO: [runtime][P3] Implement Conv3d forward
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_rnn_new(_input_size: i64, _hidden_size: i64) -> RuntimeValue {
-    // TODO: Implement RNN layer
+    // TODO: [runtime][P3] Implement RNN layer
     RuntimeValue::NIL
 }
 
@@ -4203,13 +4203,13 @@ pub extern "C" fn rt_torch_rnn_forward(
     _input: RuntimeValue,
     _hidden: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: Implement RNN forward
+    // TODO: [runtime][P3] Implement RNN forward
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_multihead_attention_new(_embed_dim: i64, _num_heads: i64) -> RuntimeValue {
-    // TODO: Implement MultiheadAttention layer
+    // TODO: [runtime][P3] Implement MultiheadAttention layer
     RuntimeValue::NIL
 }
 
@@ -4220,31 +4220,31 @@ pub extern "C" fn rt_torch_multihead_attention_forward(
     _key: RuntimeValue,
     _value: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: Implement MultiheadAttention forward
+    // TODO: [runtime][P3] Implement MultiheadAttention forward
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_positional_encoding_new(_d_model: i64, _max_len: i64) -> RuntimeValue {
-    // TODO: Implement positional encoding
+    // TODO: [runtime][P3] Implement positional encoding
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_transformer_encoder_layer_new(_d_model: i64, _nhead: i64) -> RuntimeValue {
-    // TODO: Implement TransformerEncoderLayer
+    // TODO: [runtime][P3] Implement TransformerEncoderLayer
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_transformer_encoder_layer_forward(_layer: RuntimeValue, _src: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement TransformerEncoderLayer forward
+    // TODO: [runtime][P3] Implement TransformerEncoderLayer forward
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_transformer_decoder_layer_new(_d_model: i64, _nhead: i64) -> RuntimeValue {
-    // TODO: Implement TransformerDecoderLayer
+    // TODO: [runtime][P3] Implement TransformerDecoderLayer
     RuntimeValue::NIL
 }
 
@@ -4254,7 +4254,7 @@ pub extern "C" fn rt_torch_transformer_decoder_layer_forward(
     _tgt: RuntimeValue,
     _memory: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: Implement TransformerDecoderLayer forward
+    // TODO: [runtime][P3] Implement TransformerDecoderLayer forward
     RuntimeValue::NIL
 }
 
@@ -4262,7 +4262,7 @@ pub extern "C" fn rt_torch_transformer_decoder_layer_forward(
 
 #[no_mangle]
 pub extern "C" fn rt_torch_rmsprop_new(_params: RuntimeValue, _lr: f64) -> RuntimeValue {
-    // TODO: Implement RMSprop optimizer
+    // TODO: [runtime][P3] Implement RMSprop optimizer
     RuntimeValue::NIL
 }
 
@@ -4270,59 +4270,59 @@ pub extern "C" fn rt_torch_rmsprop_new(_params: RuntimeValue, _lr: f64) -> Runti
 
 #[no_mangle]
 pub extern "C" fn rt_torch_jit_script(_module: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement TorchScript compilation
+    // TODO: [runtime][P3] Implement TorchScript compilation
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_jit_trace(_func: RuntimeValue, _example_inputs: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement JIT tracing
+    // TODO: [runtime][P3] Implement JIT tracing
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_jit_load(_path_ptr: *const u8, _path_len: u64) -> RuntimeValue {
-    // TODO: Implement JIT model loading
+    // TODO: [runtime][P3] Implement JIT model loading
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_jit_save(_module: RuntimeValue, _path_ptr: *const u8, _path_len: u64) {
-    // TODO: Implement JIT model saving
+    // TODO: [runtime][P3] Implement JIT model saving
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_jit_forward(_module: RuntimeValue, _inputs: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement JIT forward pass
+    // TODO: [runtime][P3] Implement JIT forward pass
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_jit_eval(_module: RuntimeValue) {
-    // TODO: Implement JIT eval mode
+    // TODO: [runtime][P3] Implement JIT eval mode
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_jit_train(_module: RuntimeValue) {
-    // TODO: Implement JIT train mode
+    // TODO: [runtime][P3] Implement JIT train mode
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_jit_free(_module: RuntimeValue) {
-    // TODO: Implement JIT module free
+    // TODO: [runtime][P3] Implement JIT module free
 }
 
 // Model Serialization
 
 #[no_mangle]
 pub extern "C" fn rt_torch_load(_path_ptr: *const u8, _path_len: u64) -> RuntimeValue {
-    // TODO: Implement model loading
+    // TODO: [runtime][P3] Implement model loading
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_save(_tensor: RuntimeValue, _path_ptr: *const u8, _path_len: u64) {
-    // TODO: Implement model saving
+    // TODO: [runtime][P3] Implement model saving
 }
 
 // ONNX Export
@@ -4334,55 +4334,55 @@ pub extern "C" fn rt_torch_onnx_export(
     _path_ptr: *const u8,
     _path_len: u64,
 ) {
-    // TODO: Implement ONNX export
+    // TODO: [runtime][P3] Implement ONNX export
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_onnx_load(_path_ptr: *const u8, _path_len: u64) -> RuntimeValue {
-    // TODO: Implement ONNX model loading
+    // TODO: [runtime][P3] Implement ONNX model loading
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_onnx_run(_session: RuntimeValue, _inputs: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement ONNX inference
+    // TODO: [runtime][P3] Implement ONNX inference
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_onnx_check(_path_ptr: *const u8, _path_len: u64) -> i64 {
-    // TODO: Implement ONNX model validation
+    // TODO: [runtime][P3] Implement ONNX model validation
     0
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_onnx_free(_session: RuntimeValue) {
-    // TODO: Implement ONNX session free
+    // TODO: [runtime][P3] Implement ONNX session free
 }
 
 // Datasets
 
 #[no_mangle]
 pub extern "C" fn rt_torch_mnist_download(_path_ptr: *const u8, _path_len: u64) -> i64 {
-    // TODO: Implement MNIST dataset download
+    // TODO: [runtime][P3] Implement MNIST dataset download
     0
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_mnist_load(_path_ptr: *const u8, _path_len: u64, _train: i64) -> RuntimeValue {
-    // TODO: Implement MNIST dataset loading
+    // TODO: [runtime][P3] Implement MNIST dataset loading
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_cifar10_download(_path_ptr: *const u8, _path_len: u64) -> i64 {
-    // TODO: Implement CIFAR10 dataset download
+    // TODO: [runtime][P3] Implement CIFAR10 dataset download
     0
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_cifar10_load(_path_ptr: *const u8, _path_len: u64, _train: i64) -> RuntimeValue {
-    // TODO: Implement CIFAR10 dataset loading
+    // TODO: [runtime][P3] Implement CIFAR10 dataset loading
     RuntimeValue::NIL
 }
 
@@ -4405,52 +4405,52 @@ pub extern "C" fn rt_torch_dist_is_available() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_torch_dist_init_process_group(_backend_ptr: *const u8, _backend_len: u64) -> i64 {
-    // TODO: Implement distributed process group initialization
+    // TODO: [runtime][P3] Implement distributed process group initialization
     0
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_dist_destroy_process_group() {
-    // TODO: Implement distributed process group cleanup
+    // TODO: [runtime][P3] Implement distributed process group cleanup
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_dist_barrier() {
-    // TODO: Implement distributed barrier
+    // TODO: [runtime][P3] Implement distributed barrier
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_dist_all_reduce(_tensor: RuntimeValue, _op: i64) {
-    // TODO: Implement all-reduce operation
+    // TODO: [runtime][P3] Implement all-reduce operation
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_dist_all_gather(_tensor_list: RuntimeValue, _tensor: RuntimeValue) {
-    // TODO: Implement all-gather operation
+    // TODO: [runtime][P3] Implement all-gather operation
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_dist_broadcast(_tensor: RuntimeValue, _src: i64) {
-    // TODO: Implement broadcast operation
+    // TODO: [runtime][P3] Implement broadcast operation
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_dist_reduce_scatter(_output: RuntimeValue, _input_list: RuntimeValue) {
-    // TODO: Implement reduce-scatter operation
+    // TODO: [runtime][P3] Implement reduce-scatter operation
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_dist_ddp_new(_module: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement DistributedDataParallel wrapper
+    // TODO: [runtime][P3] Implement DistributedDataParallel wrapper
     RuntimeValue::NIL
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_dist_ddp_free(_ddp: RuntimeValue) {
-    // TODO: Implement DDP free
+    // TODO: [runtime][P3] Implement DDP free
 }
 
 #[no_mangle]
 pub extern "C" fn rt_torch_dist_ddp_set_sync(_ddp: RuntimeValue, _sync: i64) {
-    // TODO: Implement DDP sync control
+    // TODO: [runtime][P3] Implement DDP sync control
 }

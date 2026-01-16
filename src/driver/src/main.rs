@@ -29,6 +29,7 @@ use simple_pkg::commands::{add, cache_cmd, init, install, list, update};
 use simple_driver::cli::analysis::{run_info, run_query};
 use simple_driver::cli::audit::{run_replay, run_spec_coverage};
 use simple_driver::cli::basic::{create_runner, run_code, run_file, run_file_with_args, watch_file};
+use simple_driver::cli::check::{CheckOptions, run_check};
 use simple_driver::cli::code_quality::{run_fmt, run_lint};
 use simple_driver::cli::compile::{compile_file, list_linkers, list_targets};
 use simple_driver::cli::diagram_gen::{parse_diagram_args, print_diagram_help};
@@ -478,6 +479,44 @@ fn main() {
         "fmt" => {
             std::process::exit(run_fmt(&args));
         }
+        "check" => {
+            if args.len() < 2 {
+                eprintln!("error: check requires at least one source file");
+                eprintln!("Usage: simple check <file.spl> [options]");
+                eprintln!();
+                eprintln!("Options:");
+                eprintln!("  --json     Output JSON format for tooling");
+                eprintln!("  --verbose  Show additional details");
+                eprintln!("  --quiet    Only show errors, no progress");
+                eprintln!();
+                eprintln!("Examples:");
+                eprintln!("  simple check program.spl");
+                eprintln!("  simple check src/*.spl");
+                eprintln!("  simple check --json program.spl");
+                std::process::exit(1);
+            }
+
+            // Parse options
+            let json = args.iter().any(|a| a == "--json");
+            let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
+            let quiet = args.iter().any(|a| a == "--quiet" || a == "-q");
+
+            let options = CheckOptions { json, verbose, quiet };
+
+            // Collect file paths (skip "check" and flags)
+            let files: Vec<PathBuf> = args[1..]
+                .iter()
+                .filter(|a| !a.starts_with("--") && !a.starts_with("-"))
+                .map(PathBuf::from)
+                .collect();
+
+            if files.is_empty() {
+                eprintln!("error: no files specified");
+                std::process::exit(1);
+            }
+
+            std::process::exit(run_check(&files, options));
+        }
         "migrate" => {
             std::process::exit(run_migrate(&args));
         }
@@ -539,7 +578,7 @@ fn main() {
                 println!("  Exclude: {:?}", options.exclude_patterns);
             }
 
-            // TODO: Load profile data and generate diagrams
+            // TODO: [driver][P3] Load profile data and generate diagrams
             // For now, just show the help to indicate proper usage
             println!();
             println!("To generate diagrams, use with test command:");

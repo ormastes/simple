@@ -54,7 +54,6 @@ fn swap_and_sum(a: i64, b: i64) -> i64:
 }
 
 #[test]
-#[ignore = "Parser limitation with out clause in methods"]
 fn test_function_with_old_field_access() {
     // Function with old() capturing field access
     let source = r#"
@@ -127,9 +126,9 @@ fn process(x: i64) -> i64:
 }
 
 #[test]
-#[ignore = "Parser limitation with tuple return types in contracts"]
 fn test_combined_contracts_with_old() {
     // Test function with all contract types and old() captures
+    // Note: Contract clauses (in/out/invariant) must appear before regular statements
     let source = r#"
 fn transfer(from_balance: i64, to_balance: i64, amount: i64) -> (i64, i64):
     in:
@@ -138,12 +137,12 @@ fn transfer(from_balance: i64, to_balance: i64, amount: i64) -> (i64, i64):
     invariant:
         from_balance >= 0
         to_balance >= 0
-    let new_from = from_balance - amount
-    let new_to = to_balance + amount
     out(res):
         res.0 == old(from_balance) - amount
         res.1 == old(to_balance) + amount
         res.0 + res.1 == old(from_balance) + old(to_balance)
+    val new_from = from_balance - amount
+    val new_to = to_balance + amount
     return (new_from, new_to)
 "#;
 
