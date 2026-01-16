@@ -90,6 +90,7 @@ impl<'a> Parser<'a> {
             params: vec![],
             body: Box::new(block_expr),
             move_mode: MoveMode::Copy,
+            capture_all: false, // Do-block wrapping doesn't auto-capture
         }))
     }
 
@@ -245,7 +246,7 @@ impl<'a> Parser<'a> {
 
     /// Parse lambda body (params, colon, expression or block) with given move mode
     pub(super) fn parse_lambda_body(&mut self, move_mode: MoveMode) -> Result<Expr, ParseError> {
-        let params = self.parse_lambda_params()?;
+        let (params, capture_all) = self.parse_lambda_params()?;
         self.expect(&TokenKind::Colon)?;
 
         // Check if body is an indented block or inline expression
@@ -306,6 +307,7 @@ impl<'a> Parser<'a> {
             params,
             body: Box::new(body),
             move_mode,
+            capture_all,
         })
     }
 

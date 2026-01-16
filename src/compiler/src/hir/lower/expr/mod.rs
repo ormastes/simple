@@ -43,7 +43,7 @@ impl Lowerer {
                 else_branch,
                 ..
             } => self.lower_if(condition, then_branch, else_branch.as_deref(), ctx),
-            Expr::Lambda { params, body, .. } => self.lower_lambda(params, body, ctx),
+            Expr::Lambda { params, body, capture_all, .. } => self.lower_lambda(params, body, *capture_all, ctx),
             Expr::Yield(value) => self.lower_yield(value.as_deref(), ctx),
             Expr::ContractResult => self.lower_contract_result(ctx),
             Expr::ContractOld(inner) => self.lower_contract_old(inner, ctx),

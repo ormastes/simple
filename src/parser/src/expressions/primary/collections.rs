@@ -36,6 +36,7 @@ impl<'a> Parser<'a> {
                     params: vec![],
                     body: Box::new(body),
                     move_mode: MoveMode::Copy,
+                    capture_all: false, // Fat arrow syntax doesn't auto-capture
                 });
             }
             return Ok(Expr::Tuple(vec![]));
