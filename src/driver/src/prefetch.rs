@@ -53,6 +53,17 @@ impl PrefetchHandle {
 /// # Returns
 /// A handle that can be waited on to ensure prefetching is complete
 pub fn prefetch_files<P: AsRef<Path>>(files: &[P]) -> io::Result<PrefetchHandle> {
+    // Validate that all files exist before spawning background process
+    for file in files {
+        let path = file.as_ref();
+        if !path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("File not found: {}", path.display()),
+            ));
+        }
+    }
+
     #[cfg(unix)]
     {
         prefetch_files_unix(files)
@@ -326,7 +337,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "prefetch_file does not error on nonexistent files currently"]
     fn test_prefetch_nonexistent_file() {
         let result = prefetch_file("/nonexistent/file/path");
         assert!(result.is_err());

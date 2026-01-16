@@ -1,3 +1,4 @@
+pub mod cli;
 pub mod compile_options;
 pub mod dependency_cache;
 pub mod doctest;

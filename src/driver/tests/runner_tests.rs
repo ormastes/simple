@@ -244,7 +244,6 @@ fn runner_emits_gc_logs_in_verbose_mode() {
 }
 
 #[test]
-#[ignore = "SMF file not always generated in interpreter mode"]
 fn cli_flag_emits_gc_logs() {
     let dir = tempfile::tempdir().unwrap();
     let src_path = dir.path().join("main.spl");
@@ -253,11 +252,18 @@ fn cli_flag_emits_gc_logs() {
     let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.arg("run").arg(&src_path).arg("--gc-log");
 
-    cmd.assert()
-        .success()
-        .stdout(contains("gc:start").and(contains("gc:end")));
+    // Note: `simple run` uses interpreter mode and doesn't create .smf files
+    // Only `simple compile` creates .smf files
+    let output = cmd.output().expect("failed to execute command");
+    assert!(output.status.success());
 
-    assert!(src_path.with_extension("smf").exists());
+    // GC logs may be in stdout or stderr depending on configuration
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{}{}", stdout_str, stderr_str);
+
+    assert!(combined.contains("gc:start"), "Expected gc:start in output");
+    assert!(combined.contains("gc:end"), "Expected gc:end in output");
 }
 
 #[test]
