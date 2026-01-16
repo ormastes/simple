@@ -341,7 +341,9 @@ pub(super) fn eval_op_expr(
                 UnaryOp::Deref => val.deref_pointer(),
                 UnaryOp::ChannelRecv => {
                     // TODO: Implement channel receive operation
-                    return Err(CompileError::Semantic("Channel receive not yet implemented".to_string()));
+                    return Err(CompileError::Semantic(
+                        "Channel receive not yet implemented".to_string(),
+                    ));
                 }
             };
             Ok(Some(result))

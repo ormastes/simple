@@ -31,6 +31,10 @@ pub enum LintName {
     PrimitiveApi,
     /// Bare bool parameters (suggest enum)
     BareBool,
+    /// Print calls in test spec files
+    PrintInTestSpec,
+    /// Improperly formatted TODO/FIXME comments
+    TodoFormat,
 }
 
 impl LintName {
@@ -39,6 +43,8 @@ impl LintName {
         match self {
             LintName::PrimitiveApi => "primitive_api",
             LintName::BareBool => "bare_bool",
+            LintName::PrintInTestSpec => "print_in_test_spec",
+            LintName::TodoFormat => "todo_format",
         }
     }
 
@@ -47,6 +53,8 @@ impl LintName {
         match s {
             "primitive_api" => Some(LintName::PrimitiveApi),
             "bare_bool" => Some(LintName::BareBool),
+            "print_in_test_spec" => Some(LintName::PrintInTestSpec),
+            "todo_format" => Some(LintName::TodoFormat),
             _ => None,
         }
     }
@@ -56,6 +64,8 @@ impl LintName {
         match self {
             LintName::PrimitiveApi => LintLevel::Warn,
             LintName::BareBool => LintLevel::Warn,
+            LintName::PrintInTestSpec => LintLevel::Warn,
+            LintName::TodoFormat => LintLevel::Warn,
         }
     }
 
@@ -189,11 +199,132 @@ Or in simple.sdn:
     bare_bool = "allow"
 "#
             .to_string(),
+            LintName::PrintInTestSpec => r#"Lint: print_in_test_spec
+Level: warn (default)
+
+=== What it checks ===
+
+This lint warns when `print()` function calls are used in test specification
+files (files ending with `_spec.spl`).
+
+=== Why it matters ===
+
+Test specs should use triple-quoted strings for documentation output rather
+than print statements. This makes test output clearer and more maintainable.
+
+Print statements in test specs create noise and make it harder to distinguish
+between test documentation and actual test results.
+
+=== Examples ===
+
+Triggers the lint:
+    # In some_feature_spec.spl
+    print("Testing feature X")
+    print("  should work correctly")
+
+Does not trigger:
+    # In regular code (not _spec.spl)
+    print("Debug output")
+
+    # In _spec.spl with explicit allow
+    #[allow(print_in_test_spec)]
+    fn debug_helper():
+        print("Debug info")
+
+=== How to fix ===
+
+1. Use triple-quoted strings for test documentation:
+    """
+    Testing feature X
+      should work correctly
+    """
+
+2. If print is genuinely needed (e.g., debugging), add an attribute:
+    #[allow(print_in_test_spec)]
+    fn debug_test():
+        print("Debug output")
+
+=== How to suppress ===
+
+    #[allow(print_in_test_spec)]
+    fn test_with_print():
+        print("Needed for this test")
+
+Or in simple.sdn:
+    [lints]
+    print_in_test_spec = "allow"
+"#
+            .to_string(),
+            LintName::TodoFormat => r#"Lint: todo_format
+Level: warn (default)
+
+=== What it checks ===
+
+This lint warns when TODO or FIXME comments don't follow the required format:
+    TODO: [area][priority] description [#issue] [blocked:#issue,#issue]
+
+=== Why it matters ===
+
+Consistent TODO formatting enables:
+- Automated tracking and reporting
+- Priority-based categorization
+- Area-based filtering
+- Dependency management via blocked tags
+- Integration with issue trackers
+
+Unformatted TODOs are hard to track and often forgotten.
+
+=== Examples ===
+
+Triggers the lint:
+    # TODO: implement this feature
+    # TODO implement socket write
+    # FIXME: broken
+
+Does not trigger:
+    # TODO: [runtime][P1] Implement monoio TCP write [#234]
+    # TODO: [stdlib][P0] Fix memory leak [#567] [blocked:#123]
+    # TODO: [codegen][P2] Add SPIR-V validation
+    # FIXME: [parser][critical] Incorrect parsing [#890]
+
+=== How to fix ===
+
+Use the required format with:
+- Keyword: TODO: or FIXME:
+- Area: [runtime, codegen, compiler, parser, type, stdlib, gpu, ui, test, driver, loader, pkg, doc]
+- Priority: [P0/critical, P1/high, P2/medium, P3/low]
+- Description: Clear explanation
+- Optional: [#issue] for issue tracking
+- Optional: [blocked:#123,#456] for dependencies
+
+Examples:
+    # TODO: [runtime][P0] Implement monoio TCP write [#234]
+    # TODO: [stdlib][critical] Fix memory corruption [#567]
+    # TODO: [gpu][P1] Create Vector3 variant [#789] [blocked:#100]
+    # FIXME: [parser][P2] Handle edge case in expression parsing
+
+=== How to suppress ===
+
+If you have a TODO that doesn't fit the format (rare):
+    #[allow(todo_format)]
+
+Or in simple.sdn:
+    [lints]
+    todo_format = "allow"
+
+See also: .claude/skills/todo.md for full format specification
+"#
+            .to_string(),
         }
     }
 
     /// Get all available lint names
     pub fn all_lints() -> Vec<Self> {
-        vec![LintName::PrimitiveApi, LintName::BareBool]
+        vec![
+            LintName::PrimitiveApi,
+            LintName::BareBool,
+            LintName::PrintInTestSpec,
+            LintName::TodoFormat,
+        ]
     }
 }

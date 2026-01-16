@@ -145,7 +145,7 @@ impl CompilerPipeline {
         let module = monomorphize_module(&module);
 
         // Run lint checks
-        self.run_lint_checks(&module.items)?;
+        self.run_lint_checks(&module.items, source_file)?;
 
         // Validate function effects against module capabilities
         self.validate_capabilities(&module.items)?;
@@ -254,7 +254,7 @@ impl CompilerPipeline {
         let ast_module = monomorphize_module(&ast_module);
 
         // 3. Run lint checks
-        self.run_lint_checks(&ast_module.items)?;
+        self.run_lint_checks(&ast_module.items, None)?;
 
         // 4. Validate capabilities
         self.validate_capabilities(&ast_module.items)?;
@@ -337,7 +337,7 @@ impl CompilerPipeline {
         let ast_module = monomorphize_module(&ast_module);
 
         // 3. Run lint checks
-        self.run_lint_checks(&ast_module.items)?;
+        self.run_lint_checks(&ast_module.items, None)?;
 
         // 4. Validate capabilities
         self.validate_capabilities(&ast_module.items)?;
@@ -440,7 +440,7 @@ impl CompilerPipeline {
         let ast_module = monomorphize_module(&ast_module);
 
         // Run lint checks
-        self.run_lint_checks(&ast_module.items)?;
+        self.run_lint_checks(&ast_module.items, None)?;
 
         // Validate capabilities
         self.validate_capabilities(&ast_module.items)?;
