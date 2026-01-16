@@ -438,7 +438,7 @@ impl ExecCore {
         match extension {
             "smf" => self.run_smf(path),
             "spl" | "simple" | "sscript" | "" => {
-                let out_path = path.with_extension("smf");
+                let out_path = self.get_build_path_for_source(path)?;
                 self.compile_file(path, &out_path)?;
                 let module = self.load_module(&out_path)?;
                 self.execute_and_gc(&module)
@@ -448,6 +448,32 @@ impl ExecCore {
                 other
             )),
         }
+    }
+
+    /// Get the build path for a compiled SMF file
+    ///
+    /// Instead of polluting the source directory with .smf files, this creates
+    /// a .simple/build directory next to the source file.
+    ///
+    /// Example:
+    ///   simple/std_lib/test/features/arrays_spec.spl
+    ///   -> simple/std_lib/test/features/.simple/build/arrays_spec.smf
+    fn get_build_path_for_source(&self, source_path: &Path) -> Result<std::path::PathBuf, String> {
+        let parent = source_path
+            .parent()
+            .ok_or_else(|| format!("source file has no parent directory: {}", source_path.display()))?;
+
+        let file_stem = source_path
+            .file_stem()
+            .ok_or_else(|| format!("source file has no name: {}", source_path.display()))?;
+
+        // Create .simple/build directory
+        let build_dir = parent.join(".simple").join("build");
+        fs::create_dir_all(&build_dir)
+            .map_err(|e| format!("failed to create build directory {}: {}", build_dir.display(), e))?;
+
+        // Return path: .simple/build/{filename}.smf
+        Ok(build_dir.join(file_stem).with_extension("smf"))
     }
 
     /// Run a .spl file using the interpreter (not native compilation).
