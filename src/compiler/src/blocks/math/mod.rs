@@ -20,8 +20,10 @@ mod lexer;
 mod parser;
 mod eval;
 mod ast;
+pub mod tensor;
 
 pub use self::ast::MathExpr;
+pub use self::tensor::Tensor;
 use super::{BlockHandler, BlockResult};
 use crate::error::CompileError;
 use crate::value::Value;

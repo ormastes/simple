@@ -292,6 +292,26 @@ impl MathParser {
                 self.expect(MathToken::Pipe)?;
                 Ok(MathExpr::Abs(Box::new(expr)))
             }
+            MathToken::LBracket => {
+                // Array literal for tensor: [1, 2, 3] or [[1, 2], [3, 4]]
+                self.advance();
+                let mut elements = Vec::new();
+
+                if self.current() != &MathToken::RBracket {
+                    elements.push(self.parse_expression()?);
+
+                    while self.current() == &MathToken::Comma {
+                        self.advance();
+                        if self.current() == &MathToken::RBracket {
+                            break; // Allow trailing comma
+                        }
+                        elements.push(self.parse_expression()?);
+                    }
+                }
+
+                self.expect(MathToken::RBracket)?;
+                Ok(MathExpr::Array(elements))
+            }
             _ => Err(CompileError::Semantic(format!(
                 "unexpected token in math: {:?}",
                 self.current()
