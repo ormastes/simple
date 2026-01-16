@@ -176,3 +176,249 @@ pub fn normalize_function_name(name: &str) -> &str {
         _ => name,
     }
 }
+
+impl MathExpr {
+    /// Convert expression to LaTeX format
+    pub fn to_latex(&self) -> String {
+        match self {
+            // Literals
+            MathExpr::Int(n) => n.to_string(),
+            MathExpr::Float(f) => {
+                // Format float nicely
+                if f.fract() == 0.0 && f.abs() < 1e10 {
+                    format!("{:.0}", f)
+                } else {
+                    f.to_string()
+                }
+            }
+            MathExpr::Array(elements) => {
+                // Arrays as column vectors or matrices
+                if elements.is_empty() {
+                    return "\\begin{bmatrix}\\end{bmatrix}".to_string();
+                }
+                // Check if it's a matrix (array of arrays)
+                if matches!(elements[0], MathExpr::Array(_)) {
+                    let rows: Vec<String> = elements
+                        .iter()
+                        .map(|row| {
+                            if let MathExpr::Array(cols) = row {
+                                cols.iter().map(|e| e.to_latex()).collect::<Vec<_>>().join(" & ")
+                            } else {
+                                row.to_latex()
+                            }
+                        })
+                        .collect();
+                    format!("\\begin{{bmatrix}}\n{}\n\\end{{bmatrix}}", rows.join(" \\\\\n"))
+                } else {
+                    // Column vector
+                    let rows: Vec<String> = elements.iter().map(|e| e.to_latex()).collect();
+                    format!("\\begin{{bmatrix}}\n{}\n\\end{{bmatrix}}", rows.join(" \\\\\n"))
+                }
+            }
+
+            // Variables and constants
+            MathExpr::Var(name) => {
+                // Map to Greek letters
+                match name.as_str() {
+                    "alpha" => "\\alpha".to_string(),
+                    "beta" => "\\beta".to_string(),
+                    "gamma" => "\\gamma".to_string(),
+                    "delta" => "\\delta".to_string(),
+                    "epsilon" => "\\epsilon".to_string(),
+                    "theta" => "\\theta".to_string(),
+                    "lambda" => "\\lambda".to_string(),
+                    "mu" => "\\mu".to_string(),
+                    "pi" => "\\pi".to_string(),
+                    "sigma" => "\\sigma".to_string(),
+                    "tau" => "\\tau".to_string(),
+                    "phi" => "\\phi".to_string(),
+                    "omega" => "\\omega".to_string(),
+                    _ => name.clone(),
+                }
+            }
+
+            // Binary operators
+            MathExpr::Add(left, right) => format!("{} + {}", left.to_latex(), right.to_latex()),
+            MathExpr::Sub(left, right) => format!("{} - {}", left.to_latex(), right.to_latex()),
+            MathExpr::Mul(left, right) => {
+                // Use \cdot for explicit multiplication
+                format!("{} \\cdot {}", left.to_latex(), right.to_latex())
+            }
+            MathExpr::Div(left, right) => {
+                format!("\\frac{{{}}}{{{}}}", left.to_latex(), right.to_latex())
+            }
+            MathExpr::Pow(base, exp) => format!("{{{}}}^{{{}}}", base.to_latex(), exp.to_latex()),
+            MathExpr::Mod(left, right) => {
+                format!("{} \\bmod {}", left.to_latex(), right.to_latex())
+            }
+
+            // Unary operators
+            MathExpr::Neg(expr) => format!("-{}", expr.to_latex()),
+            MathExpr::Abs(expr) => format!("\\left|{}\\right|", expr.to_latex()),
+
+            // Functions
+            MathExpr::App(name, args) => {
+                match name.as_str() {
+                    "frac" if args.len() == 2 => {
+                        format!("\\frac{{{}}}{{{}}}", args[0].to_latex(), args[1].to_latex())
+                    }
+                    "sqrt" if args.len() == 1 => format!("\\sqrt{{{}}}", args[0].to_latex()),
+                    "sin" | "cos" | "tan" | "log" | "ln" | "exp" => {
+                        let args_str: Vec<String> = args.iter().map(|a| a.to_latex()).collect();
+                        format!("\\{} {}", name, args_str.join(", "))
+                    }
+                    "matmul" | "dot" | "transpose" | "reshape" | "zeros" | "ones" | "eye" | "arange" | "linspace"
+                    | "rand" | "randn" | "mean" | "sum" | "var" | "std" | "min" | "max" | "relu" | "sigmoid"
+                    | "softmax" | "tanh" => {
+                        // Tensor operations - use text mode
+                        let args_str: Vec<String> = args.iter().map(|a| a.to_latex()).collect();
+                        format!("\\text{{{}}}({})", name, args_str.join(", "))
+                    }
+                    _ => {
+                        let args_str: Vec<String> = args.iter().map(|a| a.to_latex()).collect();
+                        format!("{}({})", name, args_str.join(", "))
+                    }
+                }
+            }
+
+            // Subscript
+            MathExpr::Subscript(base, index) => {
+                format!("{}_{{{}}}", base.to_latex(), index.to_latex())
+            }
+
+            // Grouping
+            MathExpr::Group(expr) => format!("\\left({}\\right)", expr.to_latex()),
+
+            // Binders
+            MathExpr::Sum { var, range, body } => {
+                format!(
+                    "\\sum_{{{}={}}}^{{{}}} {}",
+                    var,
+                    range.start.to_latex(),
+                    range.end.to_latex(),
+                    body.to_latex()
+                )
+            }
+            MathExpr::Prod { var, range, body } => {
+                format!(
+                    "\\prod_{{{}={}}}^{{{}}} {}",
+                    var,
+                    range.start.to_latex(),
+                    range.end.to_latex(),
+                    body.to_latex()
+                )
+            }
+            MathExpr::Integral { var, range, body } => {
+                format!(
+                    "\\int_{{{}}}^{{{}}} {} \\, d{}",
+                    range.start.to_latex(),
+                    range.end.to_latex(),
+                    body.to_latex(),
+                    var
+                )
+            }
+
+            // Comparison operators
+            MathExpr::Eq(left, right) => format!("{} = {}", left.to_latex(), right.to_latex()),
+            MathExpr::Neq(left, right) => format!("{} \\neq {}", left.to_latex(), right.to_latex()),
+            MathExpr::Lt(left, right) => format!("{} < {}", left.to_latex(), right.to_latex()),
+            MathExpr::Le(left, right) => format!("{} \\leq {}", left.to_latex(), right.to_latex()),
+            MathExpr::Gt(left, right) => format!("{} > {}", left.to_latex(), right.to_latex()),
+            MathExpr::Ge(left, right) => format!("{} \\geq {}", left.to_latex(), right.to_latex()),
+            MathExpr::Approx(left, right) => {
+                format!("{} \\approx {}", left.to_latex(), right.to_latex())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_latex_basic_arithmetic() {
+        let expr = MathExpr::Add(Box::new(MathExpr::Int(2)), Box::new(MathExpr::Int(3)));
+        assert_eq!(expr.to_latex(), "2 + 3");
+    }
+
+    #[test]
+    fn test_latex_fraction() {
+        let expr = MathExpr::App("frac".to_string(), vec![MathExpr::Int(1), MathExpr::Int(2)]);
+        assert_eq!(expr.to_latex(), "\\frac{1}{2}");
+    }
+
+    #[test]
+    fn test_latex_sqrt() {
+        let expr = MathExpr::App("sqrt".to_string(), vec![MathExpr::Int(16)]);
+        assert_eq!(expr.to_latex(), "\\sqrt{16}");
+    }
+
+    #[test]
+    fn test_latex_power() {
+        let expr = MathExpr::Pow(Box::new(MathExpr::Var("x".to_string())), Box::new(MathExpr::Int(2)));
+        assert_eq!(expr.to_latex(), "{x}^{2}");
+    }
+
+    #[test]
+    fn test_latex_greek_letters() {
+        let expr = MathExpr::Var("pi".to_string());
+        assert_eq!(expr.to_latex(), "\\pi");
+
+        let expr = MathExpr::Var("alpha".to_string());
+        assert_eq!(expr.to_latex(), "\\alpha");
+    }
+
+    #[test]
+    fn test_latex_sum() {
+        let expr = MathExpr::Sum {
+            var: "i".to_string(),
+            range: Box::new(Range::new(MathExpr::Int(1), MathExpr::Var("n".to_string()))),
+            body: Box::new(MathExpr::Var("i".to_string())),
+        };
+        assert_eq!(expr.to_latex(), "\\sum_{i=1}^{n} i");
+    }
+
+    #[test]
+    fn test_latex_integral() {
+        let expr = MathExpr::Integral {
+            var: "x".to_string(),
+            range: Box::new(Range::new(MathExpr::Int(0), MathExpr::Int(1))),
+            body: Box::new(MathExpr::Var("x".to_string())),
+        };
+        assert_eq!(expr.to_latex(), "\\int_{0}^{1} x \\, dx");
+    }
+
+    #[test]
+    fn test_latex_array_vector() {
+        let expr = MathExpr::Array(vec![MathExpr::Int(1), MathExpr::Int(2), MathExpr::Int(3)]);
+        assert!(expr.to_latex().contains("\\begin{bmatrix}"));
+        assert!(expr.to_latex().contains("\\end{bmatrix}"));
+    }
+
+    #[test]
+    fn test_latex_array_matrix() {
+        let expr = MathExpr::Array(vec![
+            MathExpr::Array(vec![MathExpr::Int(1), MathExpr::Int(2)]),
+            MathExpr::Array(vec![MathExpr::Int(3), MathExpr::Int(4)]),
+        ]);
+        let latex = expr.to_latex();
+        assert!(latex.contains("\\begin{bmatrix}"));
+        assert!(latex.contains("1 & 2"));
+        assert!(latex.contains("3 & 4"));
+        assert!(latex.contains("\\end{bmatrix}"));
+    }
+
+    #[test]
+    fn test_latex_complex_expr() {
+        // (2 + 3) * 4
+        let expr = MathExpr::Mul(
+            Box::new(MathExpr::Group(Box::new(MathExpr::Add(
+                Box::new(MathExpr::Int(2)),
+                Box::new(MathExpr::Int(3)),
+            )))),
+            Box::new(MathExpr::Int(4)),
+        );
+        assert_eq!(expr.to_latex(), "\\left(2 + 3\\right) \\cdot 4");
+    }
+}

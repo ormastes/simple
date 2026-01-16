@@ -28,6 +28,12 @@ use super::{BlockHandler, BlockResult};
 use crate::error::CompileError;
 use crate::value::Value;
 
+/// Parse math expression and export to LaTeX
+pub fn to_latex(input: &str) -> Result<String, CompileError> {
+    let (expr, _warnings) = parser::parse_math(input)?;
+    Ok(expr.to_latex())
+}
+
 /// Math block handler
 pub struct MathBlock;
 
@@ -183,5 +189,36 @@ mod tests {
         } else {
             panic!("expected block with result");
         }
+    }
+
+    #[test]
+    fn test_to_latex_simple() {
+        let latex = to_latex("2 + 3").unwrap();
+        assert_eq!(latex, "2 + 3");
+    }
+
+    #[test]
+    fn test_to_latex_fraction() {
+        let latex = to_latex("frac(1, 2)").unwrap();
+        assert_eq!(latex, "\\frac{1}{2}");
+    }
+
+    #[test]
+    fn test_to_latex_sqrt() {
+        let latex = to_latex("sqrt(16)").unwrap();
+        assert_eq!(latex, "\\sqrt{16}");
+    }
+
+    #[test]
+    fn test_to_latex_complex() {
+        let latex = to_latex("(2 + 3) * 4").unwrap();
+        assert_eq!(latex, "\\left(2 + 3\\right) \\cdot 4");
+    }
+
+    #[test]
+    fn test_to_latex_from_latex_input() {
+        // Input LaTeX, output LaTeX
+        let latex = to_latex("\\frac{1}{2}").unwrap();
+        assert_eq!(latex, "\\frac{1}{2}");
     }
 }
