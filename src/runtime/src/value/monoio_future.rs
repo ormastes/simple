@@ -144,11 +144,7 @@ impl MonoioFuture {
 /// # Returns
 /// RuntimeValue containing pointer to new MonoioFuture
 #[no_mangle]
-pub extern "C" fn rt_monoio_future_new(
-    io_handle: i64,
-    operation_type: i64,
-    ctx: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_monoio_future_new(io_handle: i64, operation_type: i64, ctx: RuntimeValue) -> RuntimeValue {
     let layout = Layout::new::<MonoioFuture>();
     let ptr = unsafe { alloc(layout) as *mut MonoioFuture };
 

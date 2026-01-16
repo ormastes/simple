@@ -28,6 +28,8 @@ pub mod monoio_buffer;
 #[cfg(feature = "monoio-direct")]
 pub mod monoio_direct;
 #[cfg(feature = "monoio-direct")]
+pub mod monoio_executor;
+#[cfg(feature = "monoio-direct")]
 pub mod monoio_waker;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
@@ -538,36 +540,54 @@ pub use monoio_direct::{
 
 #[cfg(feature = "monoio-direct")]
 pub use monoio_waker::{
-    rt_monoio_waker_free,
-    rt_monoio_waker_get_wake_count,
-    rt_monoio_waker_new,
-    rt_monoio_waker_wake,
-    SimpleWaker,
+    rt_monoio_waker_free, rt_monoio_waker_get_wake_count, rt_monoio_waker_new, rt_monoio_waker_wake, SimpleWaker,
     WakerContext,
 };
 
 #[cfg(feature = "monoio-direct")]
 pub use monoio_runtime::direct::{
-    block_on as monoio_direct_block_on,
-    has_direct_runtime as monoio_direct_has_runtime,
-    init_direct_runtime as monoio_direct_init,
-    shutdown_direct_runtime as monoio_direct_shutdown,
-    with_registry as monoio_direct_with_registry,
-    rt_monoio_direct_available,
-    rt_monoio_direct_init,
-    rt_monoio_direct_resource_count,
-    rt_monoio_direct_shutdown,
-    IoRegistry,
+    block_on as monoio_direct_block_on, has_direct_runtime as monoio_direct_has_runtime,
+    init_direct_runtime as monoio_direct_init, shutdown_direct_runtime as monoio_direct_shutdown,
+    with_registry as monoio_direct_with_registry, rt_monoio_direct_available, rt_monoio_direct_init,
+    rt_monoio_direct_resource_count, rt_monoio_direct_shutdown, IoRegistry,
 };
 
 #[cfg(feature = "monoio-direct")]
 pub use value::{
-    rt_monoio_future_free, rt_monoio_future_get_async_state, rt_monoio_future_get_ctx,
-    rt_monoio_future_get_io_handle, rt_monoio_future_get_operation_type, rt_monoio_future_get_result,
-    rt_monoio_future_get_state, rt_monoio_future_is_pending, rt_monoio_future_is_ready,
-    rt_monoio_future_new, rt_monoio_future_set_async_state, rt_monoio_future_set_error,
-    rt_monoio_future_set_result, rt_monoio_is_pending, IoOperationType, MonoioFuture,
+    rt_monoio_future_free, rt_monoio_future_get_async_state, rt_monoio_future_get_ctx, rt_monoio_future_get_io_handle,
+    rt_monoio_future_get_operation_type, rt_monoio_future_get_result, rt_monoio_future_get_state,
+    rt_monoio_future_is_pending, rt_monoio_future_is_ready, rt_monoio_future_new, rt_monoio_future_set_async_state,
+    rt_monoio_future_set_error, rt_monoio_future_set_result, rt_monoio_is_pending, IoOperationType, MonoioFuture,
     FUTURE_STATE_ERROR, FUTURE_STATE_PENDING, FUTURE_STATE_READY, PENDING_MARKER,
+};
+
+// Re-export async executor types and FFI functions
+#[cfg(feature = "monoio-direct")]
+pub use monoio_executor::{
+    with_executor,
+    // FFI functions
+    rt_monoio_async_init,
+    rt_monoio_async_pending_count,
+    rt_monoio_async_poll_all,
+    rt_monoio_async_poll_one,
+    // TCP async operations
+    rt_monoio_async_tcp_accept,
+    rt_monoio_async_tcp_close,
+    rt_monoio_async_tcp_connect,
+    rt_monoio_async_tcp_listen,
+    rt_monoio_async_tcp_listener_close,
+    rt_monoio_async_tcp_read,
+    rt_monoio_async_tcp_write,
+    // UDP async operations
+    rt_monoio_async_udp_bind,
+    rt_monoio_async_udp_close,
+    // Types
+    AsyncExecutor,
+    HandleStore,
+    OpResult,
+    OpState,
+    OpType,
+    PendingOp,
 };
 
 // Unit tests

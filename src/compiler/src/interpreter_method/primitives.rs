@@ -296,7 +296,9 @@ pub fn handle_bool_methods(
                 env: mut captured,
             } = func
             {
-                return Ok(Some(evaluate_expr(&body, &mut captured,
+                return Ok(Some(evaluate_expr(
+                    &body,
+                    &mut captured,
                     functions,
                     classes,
                     enums,

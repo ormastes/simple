@@ -195,7 +195,9 @@ fn execute_callable_with_arg(
             if let Some(first_param) = params.first() {
                 local_env.insert(first_param.clone(), arg);
             }
-            evaluate_expr(&body, &mut local_env,
+            evaluate_expr(
+                &body,
+                &mut local_env,
                 &mut ctx.functions,
                 &mut ctx.classes,
                 &ctx.enums,

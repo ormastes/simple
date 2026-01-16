@@ -46,7 +46,11 @@ pub(crate) fn evaluate_method_call(
         if let Some(func_val) = module_dict.get(method) {
             if let Value::Function { def, captured_env, .. } = func_val {
                 let mut captured_env_clone = captured_env.clone();
-                return exec_function_with_captured_env(def, args, env, &mut captured_env_clone,
+                return exec_function_with_captured_env(
+                    def,
+                    args,
+                    env,
+                    &mut captured_env_clone,
                     functions,
                     classes,
                     enums,

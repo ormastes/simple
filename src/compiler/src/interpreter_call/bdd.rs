@@ -125,13 +125,18 @@ pub(crate) fn exec_block_value(
             env: captured,
         } => {
             let mut captured_clone = captured.clone();
-            exec_lambda(&params, &body, &[], env, &mut captured_clone,
+            exec_lambda(
+                &params,
+                &body,
+                &[],
+                env,
+                &mut captured_clone,
                 functions,
                 classes,
                 enums,
                 impl_methods,
             )
-        },
+        }
         Value::BlockClosure { nodes, env: captured } => {
             let mut captured_clone = captured.clone();
             exec_block_closure(&nodes, &mut captured_clone, functions, classes, enums, impl_methods)

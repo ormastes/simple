@@ -80,9 +80,13 @@ pub(crate) fn spawn_actor_with_expr(
                             );
                         }
                         Value::Lambda {
-                            body, env: mut lambda_env, ..
+                            body,
+                            env: mut lambda_env,
+                            ..
                         } => {
-                            let _ = evaluate_expr(&body, &mut lambda_env,
+                            let _ = evaluate_expr(
+                                &body,
+                                &mut lambda_env,
                                 &mut funcs,
                                 &mut classes_clone,
                                 &enums_clone,

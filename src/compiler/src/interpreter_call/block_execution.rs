@@ -66,7 +66,11 @@ pub(super) fn exec_block_closure(
             Node::Expression(expr) => {
                 // Handle functional update (e.g., list->append(3))
                 if let Expr::FunctionalUpdate { target, method, args } = expr {
-                    if let Some((name, new_value)) = super::super::interpreter_helpers::handle_functional_update(target, method, args, &mut local_env,
+                    if let Some((name, new_value)) = super::super::interpreter_helpers::handle_functional_update(
+                        target,
+                        method,
+                        args,
+                        &mut local_env,
                         functions,
                         classes,
                         enums,

@@ -340,7 +340,7 @@ pub(super) fn eval_op_expr(
                 UnaryOp::RefMut => Value::BorrowMut(BorrowMutValue::new(val)),
                 UnaryOp::Deref => val.deref_pointer(),
                 UnaryOp::ChannelRecv => {
-                    // TODO: Implement channel receive operation
+                    // TODO: [compiler][P2] Implement channel receive operation
                     return Err(CompileError::Semantic(
                         "Channel receive not yet implemented".to_string(),
                     ));

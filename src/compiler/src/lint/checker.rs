@@ -338,7 +338,7 @@ impl LintChecker {
                         if name == "print" {
                             checker.emit(
                                 LintName::PrintInTestSpec,
-                                Span::new(0, 0, 0, 0), // TODO: Use actual span from expr
+                                Span::new(0, 0, 0, 0), // TODO: [compiler][P3] Use actual span from expr
                                 "print() call in test spec file".to_string(),
                                 Some("use triple-quoted strings \"\"\" for test output, or add #[allow(print_in_test_spec)] if print is needed".to_string()),
                             );
@@ -518,7 +518,7 @@ impl LintChecker {
                 if !TODO_AREAS.contains(&area) {
                     self.emit(
                         LintName::TodoFormat,
-                        Span::new(0, 0, line_num, 0), // TODO: Use actual span
+                        Span::new(0, 0, line_num, 0), // TODO: [compiler][P3] Use actual span
                         format!("TODO/FIXME has invalid area '{}'", area),
                         Some(format!("valid areas: {}", TODO_AREAS.join(", "))),
                     );
@@ -528,7 +528,7 @@ impl LintChecker {
                 if !TODO_PRIORITIES.contains(&priority) {
                     self.emit(
                         LintName::TodoFormat,
-                        Span::new(0, 0, line_num, 0), // TODO: Use actual span
+                        Span::new(0, 0, line_num, 0), // TODO: [compiler][P3] Use actual span
                         format!("TODO/FIXME has invalid priority '{}'", priority),
                         Some(format!("valid priorities: {}", TODO_PRIORITIES.join(", "))),
                     );

@@ -592,11 +592,10 @@ pub use screenshot_ffi::{CaptureType, ImageFormat};
 // Re-export MonoioFuture types and FFI functions
 #[cfg(feature = "monoio-direct")]
 pub use monoio_future::{
-    rt_monoio_future_free, rt_monoio_future_get_async_state, rt_monoio_future_get_ctx,
-    rt_monoio_future_get_io_handle, rt_monoio_future_get_operation_type, rt_monoio_future_get_result,
-    rt_monoio_future_get_state, rt_monoio_future_is_pending, rt_monoio_future_is_ready,
-    rt_monoio_future_new, rt_monoio_future_set_async_state, rt_monoio_future_set_error,
-    rt_monoio_future_set_result, rt_monoio_is_pending, IoOperationType, MonoioFuture,
+    rt_monoio_future_free, rt_monoio_future_get_async_state, rt_monoio_future_get_ctx, rt_monoio_future_get_io_handle,
+    rt_monoio_future_get_operation_type, rt_monoio_future_get_result, rt_monoio_future_get_state,
+    rt_monoio_future_is_pending, rt_monoio_future_is_ready, rt_monoio_future_new, rt_monoio_future_set_async_state,
+    rt_monoio_future_set_error, rt_monoio_future_set_result, rt_monoio_is_pending, IoOperationType, MonoioFuture,
     FUTURE_STATE_ERROR, FUTURE_STATE_PENDING, FUTURE_STATE_READY, PENDING_MARKER,
 };
 

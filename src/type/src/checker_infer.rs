@@ -113,7 +113,7 @@ impl TypeChecker {
                     }
                     UnaryOp::ChannelRecv => {
                         // Channel receive: extract value type from channel
-                        // TODO: proper channel type inference
+                        // TODO: [type][P2] Implement proper channel type inference
                         Ok(operand_ty)
                     }
                 }
