@@ -246,6 +246,14 @@ impl<'a> Parser<'a> {
                     operand: Box::new(operand),
                 })
             }
+            TokenKind::ChannelArrow => {
+                self.advance();
+                let operand = self.parse_unary()?;
+                Ok(Expr::Unary {
+                    op: UnaryOp::ChannelRecv,
+                    operand: Box::new(operand),
+                })
+            }
             TokenKind::Await => {
                 self.advance();
                 let operand = self.parse_unary()?;

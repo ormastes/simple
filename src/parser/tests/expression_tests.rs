@@ -187,3 +187,59 @@ fn test_infix_to_strict_mode() {
         panic!("Expected MethodCall expression in strict mode");
     }
 }
+
+// === Channel Receive Operator Tests ===
+
+#[test]
+fn test_channel_receive_operator() {
+    // `<-rx` should parse as unary receive operation
+    let module = parse("<-rx").unwrap();
+    assert_eq!(module.items.len(), 1);
+    if let Node::Expression(Expr::Unary { op, operand }) = &module.items[0] {
+        assert_eq!(*op, UnaryOp::ChannelRecv);
+        assert_eq!(**operand, Expr::Identifier("rx".to_string()));
+    } else {
+        panic!("Expected Unary expression with ChannelRecv");
+    }
+}
+
+#[test]
+fn test_channel_receive_in_assignment() {
+    // `val x = <-rx` should parse correctly
+    let module = parse("val x = <-rx").unwrap();
+    assert_eq!(module.items.len(), 1);
+    if let Node::Declaration(Decl::Val { name, value, .. }) = &module.items[0] {
+        assert_eq!(name, "x");
+        if let Some(Expr::Unary { op, operand }) = value {
+            assert_eq!(*op, UnaryOp::ChannelRecv);
+            assert_eq!(**operand, Expr::Identifier("rx".to_string()));
+        } else {
+            panic!("Expected Unary expression in val initializer");
+        }
+    } else {
+        panic!("Expected Val declaration");
+    }
+}
+
+#[test]
+fn test_channel_receive_nested() {
+    // `<-<-nested_rx` should parse as nested unary receive operations
+    let module = parse("<-<-nested_rx").unwrap();
+    assert_eq!(module.items.len(), 1);
+    if let Node::Expression(Expr::Unary { op, operand }) = &module.items[0] {
+        assert_eq!(*op, UnaryOp::ChannelRecv);
+        // Inner operand should also be a channel receive
+        if let Expr::Unary {
+            op: inner_op,
+            operand: inner_operand,
+        } = &**operand
+        {
+            assert_eq!(*inner_op, UnaryOp::ChannelRecv);
+            assert_eq!(**inner_operand, Expr::Identifier("nested_rx".to_string()));
+        } else {
+            panic!("Expected nested Unary expression");
+        }
+    } else {
+        panic!("Expected Unary expression with ChannelRecv");
+    }
+}
