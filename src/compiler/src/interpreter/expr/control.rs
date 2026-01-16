@@ -17,7 +17,7 @@ pub(super) fn eval_control_expr(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     match expr {
-        Expr::Lambda {
+        Expr::Lambda { capture_all, 
             params,
             body,
             move_mode,

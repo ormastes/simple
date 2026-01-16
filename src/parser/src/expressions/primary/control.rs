@@ -74,21 +74,16 @@ impl<'a> Parser<'a> {
     fn parse_go_expr(&mut self) -> Result<Expr, ParseError> {
         self.advance(); // consume 'go'
 
-        // Parse arguments/captures: go(x, y) or go(*) or go \*:
+        // Parse arguments: go(x, y) or go() or go
         let args = if self.check(&TokenKind::LParen) {
             self.advance(); // consume '('
 
-            // Check for capture-all: go(*) \*:
-            if self.check(&TokenKind::Star) {
-                self.advance();
-                self.expect(&TokenKind::RParen)?;
-                Vec::new() // Empty vec means capture all
-            } else if self.check(&TokenKind::RParen) {
-                // Empty parens: go() \*: - also capture all
+            if self.check(&TokenKind::RParen) {
+                // Empty parens: go() \*: - capture all form
                 self.advance();
                 Vec::new()
             } else {
-                // Parse argument expressions: go(x, y)
+                // Parse argument expressions: go(x, y) \a, b: or go(x, y) \*:
                 let mut args = Vec::new();
                 loop {
                     args.push(self.parse_expression()?);
@@ -102,7 +97,7 @@ impl<'a> Parser<'a> {
                 args
             }
         } else if self.check(&TokenKind::Backslash) {
-            // Shorthand: go \*: means go(*) \*: (capture all)
+            // Shorthand: go \*: means capture all
             Vec::new()
         } else {
             return Err(ParseError::unexpected_token(
@@ -117,10 +112,9 @@ impl<'a> Parser<'a> {
 
         // Parse parameters or * for capture-all
         let mut params = Vec::new();
-        let capture_all = if self.check(&TokenKind::Star) {
+        if self.check(&TokenKind::Star) {
             // \*: means capture all immutables
             self.advance();
-            true
         } else if !self.check(&TokenKind::Colon) {
             // Parse parameter list: \a, b, c:
             loop {
@@ -131,11 +125,8 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
-            false
-        } else {
-            // Just \: with no params or * - treat as capture all
-            true
-        };
+        }
+        // else: empty \: also means capture all (no * needed)
 
         // Parse colon
         self.expect(&TokenKind::Colon)?;
@@ -143,8 +134,6 @@ impl<'a> Parser<'a> {
         // Parse body expression
         let body = Box::new(self.parse_expression()?);
 
-        // If capture_all is true and we have no args specified, it means capture all
-        // If we have args but no params, it means capture those specific vars
         Ok(Expr::Go {
             args,
             params,

@@ -62,13 +62,12 @@ impl Lowerer {
             Expr::Cast { expr, target_type } => self.lower_cast(expr, target_type, ctx),
             // Spawn expression: spawn expr
             Expr::Spawn(expr) => self.lower_spawn(expr, ctx),
-            // Go expression: go(...) or go |...|
+            // Go expression: go(...) \params: or go \*:
             Expr::Go {
                 args,
                 params,
-                is_capture_form,
                 body,
-            } => self.lower_go(args, params, *is_capture_form, body, ctx),
+            } => self.lower_go(args, params, body, ctx),
             _ => Err(LowerError::Unsupported(format!("{:?}", expr))),
         }
     }
