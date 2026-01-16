@@ -152,7 +152,10 @@ fn runner_runs_from_file() {
     let exit = runner.run_file(&src_path).expect("run from file");
     assert_eq!(exit, 0);
 
-    let smf_path = src_path.with_extension("smf");
+    // SMF files are now stored in .simple/build/ directory
+    let build_dir = src_path.parent().unwrap().join(".simple").join("build");
+    let file_stem = src_path.file_stem().unwrap();
+    let smf_path = build_dir.join(file_stem).with_extension("smf");
     let meta = std::fs::metadata(&smf_path).expect("smf emitted");
     assert!(meta.len() > 0, "smf should not be empty");
 }
