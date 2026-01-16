@@ -65,7 +65,7 @@ pub enum MathExpr {
         body: Box<MathExpr>,
     },
     /// Integral: int(var, range) body
-    Int {
+    Integral {
         var: String,
         range: Box<Range>,
         body: Box<MathExpr>,

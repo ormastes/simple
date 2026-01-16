@@ -106,7 +106,7 @@ fn eval_with_env(expr: &MathExpr, env: &mut HashMap<String, f64>) -> Result<Valu
 
         MathExpr::Prod { var, range, body } => eval_prod(var, range, body, env),
 
-        MathExpr::Int { var, range, body } => eval_integral(var, range, body, env),
+        MathExpr::Integral { var, range, body } => eval_integral(var, range, body, env),
 
         // Comparisons return boolean (as 0.0 or 1.0)
         MathExpr::Eq(left, right) => {
@@ -527,17 +527,18 @@ fn eval_integral(
     let n = 1000;
     let h = (b - a) / n as f64;
 
-    let f = |x: f64| -> Result<f64, CompileError> {
+    // Helper to evaluate at a point
+    let eval_at = |x: f64, env: &mut HashMap<String, f64>| -> Result<f64, CompileError> {
         env.insert(var.to_string(), x);
         eval_to_f64(body, env)
     };
 
-    let mut sum = f(a)? + f(b)?;
+    let mut sum = eval_at(a, env)? + eval_at(b, env)?;
 
     for i in 1..n {
         let x = a + i as f64 * h;
         let coeff = if i % 2 == 0 { 2.0 } else { 4.0 };
-        sum += coeff * f(x)?;
+        sum += coeff * eval_at(x, env)?;
     }
 
     env.remove(var);
