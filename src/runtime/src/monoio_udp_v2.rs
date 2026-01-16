@@ -162,26 +162,32 @@ pub extern "C" fn monoio_udp_recv_from(
 }
 
 /// Connect UDP socket to a peer (for send/recv without address)
+///
+/// NOTE: This channel-based version is deprecated. Use rt_monoio_udp_connect
+/// from monoio_direct.rs for zero-overhead direct implementation.
 #[no_mangle]
 pub extern "C" fn monoio_udp_connect(_socket_handle: RuntimeValue, _addr: RuntimeValue) -> RuntimeValue {
-    // TODO: [runtime][P1] Implement connected UDP
-    tracing::warn!("monoio_udp_connect: Not yet implemented");
-    RuntimeValue::from_int(1)
+    tracing::warn!("monoio_udp_connect: deprecated - use rt_monoio_udp_connect instead");
+    RuntimeValue::from_int(-1)
 }
 
 /// Send data to connected peer
+///
+/// NOTE: This channel-based version is deprecated. Use rt_monoio_udp_send
+/// from monoio_direct.rs for zero-overhead direct implementation.
 #[no_mangle]
 pub extern "C" fn monoio_udp_send(_socket_handle: RuntimeValue, _buffer: RuntimeValue, _len: i64) -> RuntimeValue {
-    // TODO: [runtime][P1] Implement connected send
-    tracing::warn!("monoio_udp_send: Not yet implemented");
+    tracing::warn!("monoio_udp_send: deprecated - use rt_monoio_udp_send instead");
     RuntimeValue::from_int(-1)
 }
 
 /// Receive data from connected peer
+///
+/// NOTE: This channel-based version is deprecated. Use rt_monoio_udp_recv
+/// from monoio_direct.rs for zero-overhead direct implementation.
 #[no_mangle]
 pub extern "C" fn monoio_udp_recv(_socket_handle: RuntimeValue, _buffer: RuntimeValue, _max_len: i64) -> RuntimeValue {
-    // TODO: [runtime][P1] Implement connected recv
-    tracing::warn!("monoio_udp_recv: Not yet implemented");
+    tracing::warn!("monoio_udp_recv: deprecated - use rt_monoio_udp_recv instead");
     RuntimeValue::from_int(-1)
 }
 
