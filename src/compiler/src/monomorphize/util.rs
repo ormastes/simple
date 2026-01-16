@@ -198,6 +198,7 @@ mod tests {
             contract: None,
             is_abstract: false,
             is_sync: false,
+            is_me_method: false,
             bounds_block: None,
         };
 

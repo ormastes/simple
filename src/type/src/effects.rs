@@ -401,6 +401,7 @@ mod tests {
             contract: None,
             is_abstract: false,
             is_sync: false,
+            is_me_method: false,
             bounds_block: None,
         };
 
@@ -429,6 +430,7 @@ mod tests {
             contract: None,
             is_abstract: false,
             is_sync: true, // Explicitly marked as sync
+            is_me_method: false,
             bounds_block: None,
         };
 
@@ -459,6 +461,7 @@ mod tests {
             contract: None,
             is_abstract: false,
             is_sync: true,
+            is_me_method: false,
             bounds_block: None,
         };
 
@@ -489,6 +492,7 @@ mod tests {
             contract: None,
             is_abstract: false,
             is_sync: false,
+            is_me_method: false,
             bounds_block: None,
         };
 
@@ -520,6 +524,7 @@ mod tests {
             contract: None,
             is_abstract: false,
             is_sync: false,
+            is_me_method: false,
             bounds_block: None,
         };
 

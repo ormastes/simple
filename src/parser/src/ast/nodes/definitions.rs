@@ -37,6 +37,9 @@ pub struct FunctionDef {
     pub is_sync: bool,
     /// Bounds block for @simd kernels (trailing bounds: clause)
     pub bounds_block: Option<BoundsBlock>,
+    /// Whether this is a mutable method (uses `me` keyword instead of `fn`)
+    /// Mutable methods can modify self and the changes persist
+    pub is_me_method: bool,
 }
 
 impl FunctionDef {

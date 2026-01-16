@@ -7,7 +7,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 
 use super::super::{
-    evaluate_call, evaluate_method_call, exec_method_function, ClassDef, Enums, Env, FunctionDef, ImplMethods,
+    evaluate_call, evaluate_method_call, evaluate_method_call_with_self_update, exec_method_function, ClassDef, Enums, Env, FunctionDef, ImplMethods,
 };
 
 pub(super) fn eval_call_expr(
@@ -28,16 +28,40 @@ pub(super) fn eval_call_expr(
             enums,
             impl_methods,
         )?)),
-        Expr::MethodCall { receiver, method, args } => Ok(Some(evaluate_method_call(
-            receiver,
-            method,
-            args,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?)),
+        Expr::MethodCall { receiver, method, args } => {
+            // For objects, use evaluate_method_call_with_self_update to handle `me` methods
+            // that mutate self and need to persist the changes
+            if let Expr::Identifier(obj_name) = receiver.as_ref() {
+                if let Some(Value::Object { .. }) = env.get(obj_name) {
+                    let (result, updated_self) = evaluate_method_call_with_self_update(
+                        receiver,
+                        method,
+                        args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
+                    // Update the variable with the potentially modified self
+                    if let Some(new_self) = updated_self {
+                        env.insert(obj_name.clone(), new_self);
+                    }
+                    return Ok(Some(result));
+                }
+            }
+            // For non-objects or complex receivers, use regular method call
+            Ok(Some(evaluate_method_call(
+                receiver,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?))
+        }
         Expr::FieldAccess { receiver, field } => {
             // Support module-style access (lib.foo) by resolving directly to functions/classes
             if let Expr::Identifier(module_name) = receiver.as_ref() {

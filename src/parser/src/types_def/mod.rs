@@ -534,11 +534,12 @@ impl<'a> Parser<'a> {
                 }
                 self.skip_newlines();
             } else if self.check(&TokenKind::Fn)
+                || self.check(&TokenKind::Me)  // Mutable method keyword
                 || self.check(&TokenKind::Async)
                 || self.check(&TokenKind::At)
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
-                || (self.check(&TokenKind::Pub) && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async)))
+                || (self.check(&TokenKind::Pub) && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async) || self.peek_is(&TokenKind::Me)))
             {
                 let start_span = self.current.span;
                 // Handle optional `static` keyword for static methods
