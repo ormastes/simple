@@ -601,11 +601,51 @@ simple gen-lean compare           # Check alignment
 simple gen-lean write --force     # Regenerate Lean files
 ```
 
+## Quick Reference
+
+### Starting a New Spec
+
+1. **Copy template:**
+   ```bash
+   cp .claude/templates/sspec_template.spl simple/test/system/features/my_feature/my_feature_spec.spl
+   ```
+
+2. **Fill in required metadata:**
+   - Feature IDs
+   - Category
+   - Status
+   - Overview
+
+3. **Write tests with docstrings**
+
+4. **Generate docs:**
+   ```bash
+   cargo run --bin gen-sspec-docs -- simple/test/system/features/**/*_spec.spl
+   ```
+
+### Common Mistakes to Avoid
+
+❌ **Don't:** Skip module-level docstring → Generator will warn "No documentation"
+✅ **Do:** Always start with `"""# Feature Name Specification..."""`
+
+❌ **Don't:** Use single-line `#` comments for docs → Not extracted
+✅ **Do:** Use triple-quoted `"""..."""` docstrings
+
+❌ **Don't:** Forget to import std.spec → Tests won't run
+✅ **Do:** `import std.spec` in every spec file
+
+❌ **Don't:** Mix test code with helpers → Hard to read
+✅ **Do:** Put helpers at the end under `# Helper Code` comment
+
+❌ **Don't:** Write specs without running tests → May have syntax errors
+✅ **Do:** Test → Document → Generate workflow
+
 ## See Also
 
-- `doc/spec/testing/testing_bdd_framework.md` - Full BDD spec
-- `doc/sspec_format.md` - SSpec format details
+- **[Complete Example](../../doc/guide/sspec_complete_example.md)** - Full workflow walkthrough
+- **[Template](.claude/templates/sspec_template.spl)** - Spec file template
+- `doc/spec/sspec_format.md` - Format details
+- `doc/guide/sspec_writing.md` - Writing guide
+- `doc/spec/sspec_manual.md` - User manual
 - `doc/test.md` - Test policy
-- `doc/spec/testing/sdoctest.md` - Documentation testing
-- `doc/formal_verification.md` - Lean verification docs
 - `/architecture` skill - Lean codegen, dependency analysis
