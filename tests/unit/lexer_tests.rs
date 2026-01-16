@@ -382,7 +382,13 @@ fn test_symbol_with_numbers() {
 fn test_identifier_simple() {
     assert_eq!(
         tokenize("foo"),
-        vec![TokenKind::Identifier("foo".to_string()), TokenKind::Eof]
+        vec![
+            TokenKind::Identifier {
+                name: "foo".to_string(),
+                pattern: NamePattern::Immutable
+            },
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -390,7 +396,13 @@ fn test_identifier_simple() {
 fn test_identifier_with_underscore_prefix() {
     assert_eq!(
         tokenize("_bar"),
-        vec![TokenKind::Identifier("_bar".to_string()), TokenKind::Eof]
+        vec![
+            TokenKind::Identifier {
+                name: "_bar".to_string(),
+                pattern: NamePattern::Private
+            },
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -398,7 +410,13 @@ fn test_identifier_with_underscore_prefix() {
 fn test_identifier_with_numbers() {
     assert_eq!(
         tokenize("baz123"),
-        vec![TokenKind::Identifier("baz123".to_string()), TokenKind::Eof]
+        vec![
+            TokenKind::Identifier {
+                name: "baz123".to_string(),
+                pattern: NamePattern::Immutable
+            },
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -406,7 +424,13 @@ fn test_identifier_with_numbers() {
 fn test_identifier_all_caps() {
     assert_eq!(
         tokenize("CONSTANT"),
-        vec![TokenKind::Identifier("CONSTANT".to_string()), TokenKind::Eof]
+        vec![
+            TokenKind::Identifier {
+                name: "CONSTANT".to_string(),
+                pattern: NamePattern::Constant
+            },
+            TokenKind::Eof
+        ]
     );
 }
 

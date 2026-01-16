@@ -11,7 +11,10 @@ fn test_python_def_detection() {
     use simple_parser::token::{NamePattern, Span, Token, TokenKind};
 
     let def_token = Token::new(
-        TokenKind::Identifier { name: "def".to_string(), pattern: NamePattern::Immutable },
+        TokenKind::Identifier {
+            name: "def".to_string(),
+            pattern: NamePattern::Immutable,
+        },
         Span::new(0, 3, 1, 1),
         "def".to_string(),
     );
@@ -40,7 +43,10 @@ fn test_python_none_detection() {
         use simple_parser::token::{NamePattern, Span, Token, TokenKind};
 
         let none_token = Token::new(
-            TokenKind::Identifier { name: "None".to_string(), pattern: NamePattern::TypeName },
+            TokenKind::Identifier {
+                name: "None".to_string(),
+                pattern: NamePattern::TypeName,
+            },
             Span::new(8, 12, 1, 9),
             "None".to_string(),
         );
@@ -57,7 +63,10 @@ fn test_python_true_false_detection() {
 
     // Test True
     let true_token = Token::new(
-        TokenKind::Identifier { name: "True".to_string(), pattern: NamePattern::TypeName },
+        TokenKind::Identifier {
+            name: "True".to_string(),
+            pattern: NamePattern::TypeName,
+        },
         Span::new(0, 4, 1, 1),
         "True".to_string(),
     );
@@ -68,7 +77,10 @@ fn test_python_true_false_detection() {
 
     // Test False
     let false_token = Token::new(
-        TokenKind::Identifier { name: "False".to_string(), pattern: NamePattern::TypeName },
+        TokenKind::Identifier {
+            name: "False".to_string(),
+            pattern: NamePattern::TypeName,
+        },
         Span::new(0, 5, 1, 1),
         "False".to_string(),
     );
@@ -82,7 +94,10 @@ fn test_rust_let_mut_detection() {
     use simple_parser::token::{NamePattern, Span, Token, TokenKind};
 
     let mut_token = Token::new(
-        TokenKind::Identifier { name: "mut".to_string(), pattern: NamePattern::Immutable },
+        TokenKind::Identifier {
+            name: "mut".to_string(),
+            pattern: NamePattern::Immutable,
+        },
         Span::new(4, 7, 1, 5),
         "mut".to_string(),
     );
@@ -97,7 +112,10 @@ fn test_typescript_const_detection() {
     use simple_parser::token::{NamePattern, Span, Token, TokenKind};
 
     let const_token = Token::new(
-        TokenKind::Identifier { name: "const".to_string(), pattern: NamePattern::Immutable },
+        TokenKind::Identifier {
+            name: "const".to_string(),
+            pattern: NamePattern::Immutable,
+        },
         Span::new(0, 5, 1, 1),
         "const".to_string(),
     );
@@ -112,7 +130,10 @@ fn test_typescript_function_detection() {
     use simple_parser::token::{NamePattern, Span, Token, TokenKind};
 
     let function_token = Token::new(
-        TokenKind::Identifier { name: "function".to_string(), pattern: NamePattern::Immutable },
+        TokenKind::Identifier {
+            name: "function".to_string(),
+            pattern: NamePattern::Immutable,
+        },
         Span::new(0, 8, 1, 1),
         "function".to_string(),
     );
@@ -127,13 +148,19 @@ fn test_java_public_class_detection() {
     use simple_parser::token::{NamePattern, Span, Token, TokenKind};
 
     let public_token = Token::new(
-        TokenKind::Identifier { name: "public".to_string(), pattern: NamePattern::Immutable },
+        TokenKind::Identifier {
+            name: "public".to_string(),
+            pattern: NamePattern::Immutable,
+        },
         Span::new(0, 6, 1, 1),
         "public".to_string(),
     );
     let prev = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "\n".to_string());
     let class_token = Token::new(
-        TokenKind::Identifier { name: "class".to_string(), pattern: NamePattern::Immutable },
+        TokenKind::Identifier {
+            name: "class".to_string(),
+            pattern: NamePattern::Immutable,
+        },
         Span::new(7, 12, 1, 8),
         "class".to_string(),
     );
@@ -166,7 +193,10 @@ fn test_typescript_let_detection() {
     let let_token = Token::new(TokenKind::Let, Span::new(0, 3, 1, 1), "let".to_string());
     let prev = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "\n".to_string());
     let next = Token::new(
-        TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
+        TokenKind::Identifier {
+            name: "x".to_string(),
+            pattern: NamePattern::Immutable,
+        },
         Span::new(4, 5, 1, 5),
         "x".to_string(),
     );
@@ -219,7 +249,10 @@ fn test_rust_macro_detection() {
 
     let not = Token::new(TokenKind::Not, Span::new(5, 6, 1, 6), "!".to_string());
     let ident = Token::new(
-        TokenKind::Identifier { name: "println".to_string(), pattern: NamePattern::Immutable },
+        TokenKind::Identifier {
+            name: "println".to_string(),
+            pattern: NamePattern::Immutable,
+        },
         Span::new(0, 5, 1, 1),
         "println".to_string(),
     );
@@ -235,12 +268,18 @@ fn test_wrong_brackets_detection() {
 
     let lbracket = Token::new(TokenKind::LBracket, Span::new(4, 5, 1, 5), "[".to_string());
     let ident = Token::new(
-        TokenKind::Identifier { name: "Vec".to_string(), pattern: NamePattern::TypeName },
+        TokenKind::Identifier {
+            name: "Vec".to_string(),
+            pattern: NamePattern::TypeName,
+        },
         Span::new(0, 3, 1, 1),
         "Vec".to_string(),
     );
     let type_param = Token::new(
-        TokenKind::Identifier { name: "String".to_string(), pattern: NamePattern::TypeName },
+        TokenKind::Identifier {
+            name: "String".to_string(),
+            pattern: NamePattern::TypeName,
+        },
         Span::new(5, 11, 1, 6),
         "String".to_string(),
     );
@@ -256,13 +295,19 @@ fn test_c_type_first_detection() {
 
     // Test "int x"
     let int_token = Token::new(
-        TokenKind::Identifier { name: "int".to_string(), pattern: NamePattern::Immutable },
+        TokenKind::Identifier {
+            name: "int".to_string(),
+            pattern: NamePattern::Immutable,
+        },
         Span::new(0, 3, 1, 1),
         "int".to_string(),
     );
     let prev = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "\n".to_string());
     let var_token = Token::new(
-        TokenKind::Identifier { name: "x".to_string(), pattern: NamePattern::Immutable },
+        TokenKind::Identifier {
+            name: "x".to_string(),
+            pattern: NamePattern::Immutable,
+        },
         Span::new(4, 5, 1, 5),
         "x".to_string(),
     );
@@ -272,12 +317,18 @@ fn test_c_type_first_detection() {
 
     // Test "float y"
     let float_token = Token::new(
-        TokenKind::Identifier { name: "float".to_string(), pattern: NamePattern::Immutable },
+        TokenKind::Identifier {
+            name: "float".to_string(),
+            pattern: NamePattern::Immutable,
+        },
         Span::new(0, 5, 1, 1),
         "float".to_string(),
     );
     let y_token = Token::new(
-        TokenKind::Identifier { name: "y".to_string(), pattern: NamePattern::Immutable },
+        TokenKind::Identifier {
+            name: "y".to_string(),
+            pattern: NamePattern::Immutable,
+        },
         Span::new(6, 7, 1, 7),
         "y".to_string(),
     );
