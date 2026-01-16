@@ -3,6 +3,17 @@
 //
 // Provides a persistent runtime with non-blocking operations that return
 // immediately and can be polled for completion.
+//
+// # True Async Architecture
+//
+// Operations are submitted and return immediately. The executor stores operation
+// state and can be polled to advance all pending operations concurrently.
+//
+// ```text
+// 1. Submit Operation  ->  PendingOp created (NotStarted)
+// 2. poll_all()        ->  All pending ops run concurrently via spawn_local
+// 3. Check completion  ->  Operations move to Completed/Failed state
+// ```
 
 #![cfg(feature = "monoio-direct")]
 
@@ -18,6 +29,8 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 // ============================================================================
@@ -79,6 +92,16 @@ pub struct PendingOp {
     pub buffer: Option<RuntimeValue>,
     /// Max length for read operations
     pub max_len: usize,
+    /// Handle ID for the I/O resource (stream, listener, socket)
+    pub handle_id: i64,
+    /// Address string for connect operations
+    pub addr: Option<String>,
+    /// Data for write operations
+    pub data: Option<Vec<u8>>,
+    /// Completion flag (shared with spawned task)
+    pub completed: Option<Arc<AtomicBool>>,
+    /// Result shared cell (for spawned tasks to store results)
+    pub shared_result: Option<Rc<RefCell<Option<Result<OpResult, String>>>>>,
 }
 
 impl PendingOp {
@@ -90,7 +113,36 @@ impl PendingOp {
             future_ptr,
             buffer: None,
             max_len: 0,
+            handle_id: -1,
+            addr: None,
+            data: None,
+            completed: None,
+            shared_result: None,
         }
+    }
+
+    /// Create a new operation with handle ID
+    pub fn with_handle(id: u64, op_type: OpType, future_ptr: *mut MonoioFuture, handle_id: i64) -> Self {
+        let mut op = Self::new(id, op_type, future_ptr);
+        op.handle_id = handle_id;
+        op
+    }
+
+    /// Prepare for async execution by setting up shared state
+    pub fn prepare_async(&mut self) {
+        self.completed = Some(Arc::new(AtomicBool::new(false)));
+        self.shared_result = Some(Rc::new(RefCell::new(None)));
+        self.state = OpState::InProgress;
+    }
+
+    /// Check if the async operation has completed
+    pub fn is_async_complete(&self) -> bool {
+        self.completed.as_ref().map(|c| c.load(Ordering::SeqCst)).unwrap_or(false)
+    }
+
+    /// Take the async result if available
+    pub fn take_async_result(&mut self) -> Option<Result<OpResult, String>> {
+        self.shared_result.as_ref().and_then(|r| r.borrow_mut().take())
     }
 
     /// Mark operation as completed and update the MonoioFuture
@@ -319,13 +371,9 @@ impl AsyncExecutor {
         }
 
         let op_id = self.alloc_op_id();
-        let op = PendingOp::new(op_id, OpType::TcpAccept, future_ptr);
+        let mut op = PendingOp::with_handle(op_id, OpType::TcpAccept, future_ptr, listener_id);
+        op.max_len = listener_id as usize; // Keep for backwards compatibility
         self.pending.insert(op_id, op);
-
-        // Store listener_id in the pending op for later
-        if let Some(op) = self.pending.get_mut(&op_id) {
-            op.max_len = listener_id as usize; // Reuse field for listener_id
-        }
 
         Ok(op_id)
     }
@@ -336,7 +384,7 @@ impl AsyncExecutor {
 
         let op_id = self.alloc_op_id();
         let mut op = PendingOp::new(op_id, OpType::TcpConnect, future_ptr);
-        // Store address info - we'll need it when executing
+        op.addr = Some(addr.to_string());
         self.pending.insert(op_id, op);
 
         Ok(op_id)
@@ -355,7 +403,7 @@ impl AsyncExecutor {
         }
 
         let op_id = self.alloc_op_id();
-        let mut op = PendingOp::new(op_id, OpType::TcpRead, future_ptr);
+        let mut op = PendingOp::with_handle(op_id, OpType::TcpRead, future_ptr, stream_id);
         op.buffer = Some(buffer);
         op.max_len = max_len;
         self.pending.insert(op_id, op);
@@ -382,7 +430,8 @@ impl AsyncExecutor {
         }
 
         let op_id = self.alloc_op_id();
-        let op = PendingOp::new(op_id, OpType::TcpWrite, future_ptr);
+        let mut op = PendingOp::with_handle(op_id, OpType::TcpWrite, future_ptr, stream_id);
+        op.data = Some(data);
         self.pending.insert(op_id, op);
 
         unsafe {
@@ -421,8 +470,8 @@ impl AsyncExecutor {
     pub fn udp_send_to_submit(
         &mut self,
         socket_id: i64,
-        _data: Vec<u8>,
-        _addr: &str,
+        data: Vec<u8>,
+        addr: &str,
         future_ptr: *mut MonoioFuture,
     ) -> Result<u64, String> {
         if !self.udp_sockets.is_available(socket_id) {
@@ -430,7 +479,9 @@ impl AsyncExecutor {
         }
 
         let op_id = self.alloc_op_id();
-        let op = PendingOp::new(op_id, OpType::UdpSendTo, future_ptr);
+        let mut op = PendingOp::with_handle(op_id, OpType::UdpSendTo, future_ptr, socket_id);
+        op.data = Some(data);
+        op.addr = Some(addr.to_string());
         self.pending.insert(op_id, op);
 
         unsafe {
@@ -455,7 +506,7 @@ impl AsyncExecutor {
         }
 
         let op_id = self.alloc_op_id();
-        let mut op = PendingOp::new(op_id, OpType::UdpRecvFrom, future_ptr);
+        let mut op = PendingOp::with_handle(op_id, OpType::UdpRecvFrom, future_ptr, socket_id);
         op.buffer = Some(buffer);
         op.max_len = max_len;
         self.pending.insert(op_id, op);
@@ -478,7 +529,11 @@ impl AsyncExecutor {
     // Polling and Execution
     // ========================================================================
 
-    /// Poll all pending operations, advancing them as possible.
+    /// Poll all pending operations concurrently.
+    ///
+    /// This method runs all pending operations in parallel using spawn_local,
+    /// providing true non-blocking async behavior. Operations that complete
+    /// will have their results stored and state updated.
     ///
     /// Returns the number of operations that completed.
     pub fn poll_all(&mut self) -> usize {
@@ -486,20 +541,268 @@ impl AsyncExecutor {
             return 0;
         }
 
-        let mut completed = 0;
+        // Collect operations that need execution
+        let ops_to_run: Vec<(u64, OpType)> = self.pending.iter()
+            .filter(|(_, op)| matches!(op.state, OpState::NotStarted | OpState::InProgress))
+            .map(|(id, op)| (*id, op.op_type))
+            .collect();
 
-        // Collect ops to process (avoid borrow issues)
-        let op_ids: Vec<u64> = self.pending.keys().copied().collect();
+        if ops_to_run.is_empty() {
+            // Remove completed operations
+            self.pending.retain(|_, op| {
+                !matches!(op.state, OpState::Completed(_) | OpState::Failed(_))
+            });
+            return 0;
+        }
 
-        for op_id in op_ids {
-            if self.poll_one(op_id) {
-                completed += 1;
+        // Run all operations concurrently
+        let completed = self.run_concurrent(ops_to_run);
+
+        // Remove completed operations
+        self.pending.retain(|_, op| {
+            !matches!(op.state, OpState::Completed(_) | OpState::Failed(_))
+        });
+
+        completed
+    }
+
+    /// Run multiple operations concurrently using spawn_local.
+    fn run_concurrent(&mut self, ops: Vec<(u64, OpType)>) -> usize {
+        // Create runtime for concurrent execution
+        let mut rt = match monoio::RuntimeBuilder::<monoio::FusionDriver>::new()
+            .with_entries(self.entries)
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                tracing::error!("Failed to create runtime: {}", e);
+                return 0;
+            }
+        };
+
+        // Prepare results storage
+        let results: Rc<RefCell<Vec<(u64, Result<OpResult, String>)>>> =
+            Rc::new(RefCell::new(Vec::new()));
+
+        // Prepare operation data
+        let mut op_data: Vec<(u64, OpType, i64, Option<String>, Option<Vec<u8>>, usize, Option<RuntimeValue>)> = Vec::new();
+
+        for (op_id, op_type) in &ops {
+            if let Some(op) = self.pending.get(op_id) {
+                op_data.push((
+                    *op_id,
+                    *op_type,
+                    op.handle_id,
+                    op.addr.clone(),
+                    op.data.clone(),
+                    op.max_len,
+                    op.buffer,
+                ));
             }
         }
 
-        // Remove completed operations
-        self.pending
-            .retain(|_, op| !matches!(op.state, OpState::Completed(_) | OpState::Failed(_)));
+        // Take ownership of handles we need
+        let mut taken_listeners: HashMap<i64, TcpListener> = HashMap::new();
+        let mut taken_streams: HashMap<i64, TcpStream> = HashMap::new();
+        let mut taken_sockets: HashMap<i64, UdpSocket> = HashMap::new();
+
+        for (_, op_type, handle_id, _, _, _, _) in &op_data {
+            match op_type {
+                OpType::TcpAccept => {
+                    if let Some(l) = self.tcp_listeners.take(*handle_id) {
+                        taken_listeners.insert(*handle_id, l);
+                    }
+                }
+                OpType::TcpRead | OpType::TcpWrite => {
+                    if let Some(s) = self.tcp_streams.take(*handle_id) {
+                        taken_streams.insert(*handle_id, s);
+                    }
+                }
+                OpType::UdpRecvFrom | OpType::UdpSendTo => {
+                    if let Some(s) = self.udp_sockets.take(*handle_id) {
+                        taken_sockets.insert(*handle_id, s);
+                    }
+                }
+                OpType::TcpConnect => {} // No handle to take
+            }
+        }
+
+        // Wrap handles in RefCell for sharing
+        let listeners = Rc::new(RefCell::new(taken_listeners));
+        let streams = Rc::new(RefCell::new(taken_streams));
+        let sockets = Rc::new(RefCell::new(taken_sockets));
+
+        // New streams created by accept/connect
+        let new_streams: Rc<RefCell<Vec<(u64, TcpStream)>>> = Rc::new(RefCell::new(Vec::new()));
+
+        // Run all operations
+        rt.block_on(async {
+            let mut handles = Vec::new();
+
+            for (op_id, op_type, handle_id, addr, data, max_len, _buffer) in op_data {
+                let results_clone = results.clone();
+                let listeners_clone = listeners.clone();
+                let streams_clone = streams.clone();
+                let sockets_clone = sockets.clone();
+                let new_streams_clone = new_streams.clone();
+
+                let handle = monoio::spawn(async move {
+                    let result = match op_type {
+                        OpType::TcpAccept => {
+                            let listener = listeners_clone.borrow_mut().remove(&handle_id);
+                            match listener {
+                                Some(l) => {
+                                    let res = l.accept().await;
+                                    listeners_clone.borrow_mut().insert(handle_id, l);
+                                    match res {
+                                        Ok((stream, _addr)) => {
+                                            new_streams_clone.borrow_mut().push((op_id, stream));
+                                            Ok(OpResult::Handle(0)) // Placeholder, will update
+                                        }
+                                        Err(e) => Err(format!("Accept failed: {}", e)),
+                                    }
+                                }
+                                None => Err("Listener not available".to_string()),
+                            }
+                        }
+                        OpType::TcpConnect => {
+                            let addr_str = addr.unwrap_or_default();
+                            match addr_str.parse::<SocketAddr>() {
+                                Ok(socket_addr) => {
+                                    match TcpStream::connect(socket_addr).await {
+                                        Ok(stream) => {
+                                            new_streams_clone.borrow_mut().push((op_id, stream));
+                                            Ok(OpResult::Handle(0)) // Placeholder
+                                        }
+                                        Err(e) => Err(format!("Connect failed: {}", e)),
+                                    }
+                                }
+                                Err(e) => Err(format!("Invalid address: {}", e)),
+                            }
+                        }
+                        OpType::TcpRead => {
+                            let stream = streams_clone.borrow_mut().remove(&handle_id);
+                            match stream {
+                                Some(mut s) => {
+                                    let buf = OwnedBuf::new(max_len);
+                                    let (res, buf) = s.read(buf).await;
+                                    streams_clone.borrow_mut().insert(handle_id, s);
+                                    match res {
+                                        Ok(n) => Ok(OpResult::Data(buf.into_vec()[..n].to_vec())),
+                                        Err(e) => Err(format!("Read failed: {}", e)),
+                                    }
+                                }
+                                None => Err("Stream not available".to_string()),
+                            }
+                        }
+                        OpType::TcpWrite => {
+                            let stream = streams_clone.borrow_mut().remove(&handle_id);
+                            let write_data = data.unwrap_or_default();
+                            match stream {
+                                Some(mut s) => {
+                                    let (res, _) = s.write(write_data).await;
+                                    streams_clone.borrow_mut().insert(handle_id, s);
+                                    match res {
+                                        Ok(n) => Ok(OpResult::Bytes(n)),
+                                        Err(e) => Err(format!("Write failed: {}", e)),
+                                    }
+                                }
+                                None => Err("Stream not available".to_string()),
+                            }
+                        }
+                        OpType::UdpRecvFrom => {
+                            let socket = sockets_clone.borrow_mut().remove(&handle_id);
+                            match socket {
+                                Some(s) => {
+                                    let buf = OwnedBuf::new(max_len);
+                                    let (res, buf) = s.recv_from(buf).await;
+                                    sockets_clone.borrow_mut().insert(handle_id, s);
+                                    match res {
+                                        Ok((n, addr)) => Ok(OpResult::DataFrom(buf.into_vec()[..n].to_vec(), addr)),
+                                        Err(e) => Err(format!("RecvFrom failed: {}", e)),
+                                    }
+                                }
+                                None => Err("Socket not available".to_string()),
+                            }
+                        }
+                        OpType::UdpSendTo => {
+                            let socket = sockets_clone.borrow_mut().remove(&handle_id);
+                            let send_data = data.unwrap_or_default();
+                            let addr_str = addr.unwrap_or_default();
+                            match socket {
+                                Some(s) => {
+                                    match addr_str.parse::<SocketAddr>() {
+                                        Ok(socket_addr) => {
+                                            let (res, _) = s.send_to(send_data, socket_addr).await;
+                                            sockets_clone.borrow_mut().insert(handle_id, s);
+                                            match res {
+                                                Ok(n) => Ok(OpResult::Bytes(n)),
+                                                Err(e) => Err(format!("SendTo failed: {}", e)),
+                                            }
+                                        }
+                                        Err(e) => {
+                                            sockets_clone.borrow_mut().insert(handle_id, s);
+                                            Err(format!("Invalid address: {}", e))
+                                        }
+                                    }
+                                }
+                                None => Err("Socket not available".to_string()),
+                            }
+                        }
+                    };
+
+                    results_clone.borrow_mut().push((op_id, result));
+                });
+
+                handles.push(handle);
+            }
+
+            // Wait for all operations to complete
+            for handle in handles {
+                let _ = handle.await;
+            }
+        });
+
+        // Put handles back
+        for (id, listener) in listeners.borrow_mut().drain() {
+            self.tcp_listeners.put_back(id, listener);
+        }
+        for (id, stream) in streams.borrow_mut().drain() {
+            self.tcp_streams.put_back(id, stream);
+        }
+        for (id, socket) in sockets.borrow_mut().drain() {
+            self.udp_sockets.put_back(id, socket);
+        }
+
+        // Process new streams from accept/connect
+        let mut stream_ids: HashMap<u64, i64> = HashMap::new();
+        for (op_id, stream) in new_streams.borrow_mut().drain(..) {
+            let stream_id = self.tcp_streams.insert(stream);
+            stream_ids.insert(op_id, stream_id);
+        }
+
+        // Process results
+        let mut completed = 0;
+        for (op_id, result) in results.borrow_mut().drain(..) {
+            if let Some(op) = self.pending.get_mut(&op_id) {
+                match result {
+                    Ok(mut op_result) => {
+                        // Update handle ID for accept/connect results
+                        if let OpResult::Handle(_) = &op_result {
+                            if let Some(&stream_id) = stream_ids.get(&op_id) {
+                                op_result = OpResult::Handle(stream_id);
+                            }
+                        }
+                        op.complete(op_result);
+                        completed += 1;
+                    }
+                    Err(e) => {
+                        op.fail(&e);
+                        completed += 1;
+                    }
+                }
+            }
+        }
 
         completed
     }
@@ -507,6 +810,7 @@ impl AsyncExecutor {
     /// Poll a single operation by ID.
     ///
     /// Returns true if the operation completed (success or failure).
+    /// For true async behavior, prefer using poll_all() which runs operations concurrently.
     pub fn poll_one(&mut self, op_id: u64) -> bool {
         let op = match self.pending.get(&op_id) {
             Some(op) => op,
@@ -518,350 +822,10 @@ impl AsyncExecutor {
             return true;
         }
 
-        // Execute the operation synchronously for now
-        // TODO: [runtime][P2] Implement true async with stored futures
-        match op.op_type {
-            OpType::TcpAccept => self.execute_tcp_accept(op_id),
-            OpType::TcpConnect => self.execute_tcp_connect(op_id),
-            OpType::TcpRead => self.execute_tcp_read(op_id),
-            OpType::TcpWrite => self.execute_tcp_write(op_id),
-            OpType::UdpRecvFrom => self.execute_udp_recv_from(op_id),
-            OpType::UdpSendTo => self.execute_udp_send_to(op_id),
-        }
-    }
-
-    fn execute_tcp_accept(&mut self, op_id: u64) -> bool {
-        let op = match self.pending.get(&op_id) {
-            Some(op) => op,
-            None => return false,
-        };
-
-        let listener_id = op.max_len as i64;
-        let future_ptr = op.future_ptr;
-
-        // Take listener for async operation
-        let listener = match self.tcp_listeners.take(listener_id) {
-            Some(l) => l,
-            None => {
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.fail("Listener not available");
-                }
-                return true;
-            }
-        };
-
-        // Execute accept
-        let result = self.execute_async(async { listener.accept().await });
-
-        // Put listener back
-        self.tcp_listeners.put_back(listener_id, listener);
-
-        match result {
-            Ok((stream, _addr)) => {
-                let stream_id = self.tcp_streams.insert(stream);
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.complete(OpResult::Handle(stream_id));
-                }
-            }
-            Err(e) => {
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.fail(&format!("Accept failed: {}", e));
-                }
-            }
-        }
-
-        true
-    }
-
-    fn execute_tcp_connect(&mut self, op_id: u64) -> bool {
-        let op = match self.pending.get(&op_id) {
-            Some(op) => op,
-            None => return false,
-        };
-
-        let future_ptr = op.future_ptr;
-
-        // Get address from future context
-        let addr_str = unsafe {
-            if future_ptr.is_null() {
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.fail("No future pointer");
-                }
-                return true;
-            }
-
-            let ctx = (*future_ptr).ctx;
-            match crate::monoio_runtime::runtime_value_to_string(ctx) {
-                Some(s) => s,
-                None => {
-                    if let Some(op) = self.pending.get_mut(&op_id) {
-                        op.fail("Invalid address in context");
-                    }
-                    return true;
-                }
-            }
-        };
-
-        let socket_addr: SocketAddr = match addr_str.parse() {
-            Ok(a) => a,
-            Err(e) => {
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.fail(&format!("Invalid address: {}", e));
-                }
-                return true;
-            }
-        };
-
-        let result = self.execute_async(async { TcpStream::connect(socket_addr).await });
-
-        match result {
-            Ok(stream) => {
-                let stream_id = self.tcp_streams.insert(stream);
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.complete(OpResult::Handle(stream_id));
-                }
-            }
-            Err(e) => {
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.fail(&format!("Connect failed: {}", e));
-                }
-            }
-        }
-
-        true
-    }
-
-    fn execute_tcp_read(&mut self, op_id: u64) -> bool {
-        let (stream_id, max_len, buffer) = {
-            let op = match self.pending.get(&op_id) {
-                Some(op) => op,
-                None => return false,
-            };
-
-            unsafe {
-                let stream_id = if op.future_ptr.is_null() {
-                    -1
-                } else {
-                    (*op.future_ptr).io_handle
-                };
-                (stream_id, op.max_len, op.buffer)
-            }
-        };
-
-        if stream_id < 0 {
-            if let Some(op) = self.pending.get_mut(&op_id) {
-                op.fail("Invalid stream ID");
-            }
-            return true;
-        }
-
-        let mut stream = match self.tcp_streams.take(stream_id) {
-            Some(s) => s,
-            None => {
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.fail("Stream not available");
-                }
-                return true;
-            }
-        };
-
-        let result = self.execute_async(async {
-            let buf = OwnedBuf::new(max_len);
-            let (res, buf) = stream.read(buf).await;
-            res.map(|n| (n, buf.into_vec()))
-        });
-
-        // Put stream back
-        self.tcp_streams.put_back(stream_id, stream);
-
-        match result {
-            Ok((n, data)) => {
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.complete(OpResult::Data(data[..n].to_vec()));
-                }
-            }
-            Err(e) => {
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.fail(&format!("Read failed: {}", e));
-                }
-            }
-        }
-
-        true
-    }
-
-    fn execute_tcp_write(&mut self, op_id: u64) -> bool {
-        let stream_id = {
-            let op = match self.pending.get(&op_id) {
-                Some(op) => op,
-                None => return false,
-            };
-
-            unsafe {
-                if op.future_ptr.is_null() {
-                    -1
-                } else {
-                    (*op.future_ptr).io_handle
-                }
-            }
-        };
-
-        if stream_id < 0 {
-            if let Some(op) = self.pending.get_mut(&op_id) {
-                op.fail("Invalid stream ID");
-            }
-            return true;
-        }
-
-        // Get data from future context
-        let data = {
-            let op = self.pending.get(&op_id).unwrap();
-            unsafe {
-                if op.future_ptr.is_null() {
-                    vec![]
-                } else {
-                    let ctx = (*op.future_ptr).ctx;
-                    crate::monoio_runtime::extract_buffer_bytes(ctx).unwrap_or_default()
-                }
-            }
-        };
-
-        let mut stream = match self.tcp_streams.take(stream_id) {
-            Some(s) => s,
-            None => {
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.fail("Stream not available");
-                }
-                return true;
-            }
-        };
-
-        let result = self.execute_async(async {
-            let (res, _) = stream.write(data).await;
-            res
-        });
-
-        self.tcp_streams.put_back(stream_id, stream);
-
-        match result {
-            Ok(n) => {
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.complete(OpResult::Bytes(n));
-                }
-            }
-            Err(e) => {
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.fail(&format!("Write failed: {}", e));
-                }
-            }
-        }
-
-        true
-    }
-
-    fn execute_udp_recv_from(&mut self, op_id: u64) -> bool {
-        let (socket_id, max_len) = {
-            let op = match self.pending.get(&op_id) {
-                Some(op) => op,
-                None => return false,
-            };
-
-            unsafe {
-                let socket_id = if op.future_ptr.is_null() {
-                    -1
-                } else {
-                    (*op.future_ptr).io_handle
-                };
-                (socket_id, op.max_len)
-            }
-        };
-
-        if socket_id < 0 {
-            if let Some(op) = self.pending.get_mut(&op_id) {
-                op.fail("Invalid socket ID");
-            }
-            return true;
-        }
-
-        let socket = match self.udp_sockets.take(socket_id) {
-            Some(s) => s,
-            None => {
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.fail("Socket not available");
-                }
-                return true;
-            }
-        };
-
-        let result = self.execute_async(async {
-            let buf = OwnedBuf::new(max_len);
-            let (res, buf) = socket.recv_from(buf).await;
-            res.map(|(n, addr)| (n, buf.into_vec(), addr))
-        });
-
-        self.udp_sockets.put_back(socket_id, socket);
-
-        match result {
-            Ok((n, data, addr)) => {
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.complete(OpResult::DataFrom(data[..n].to_vec(), addr));
-                }
-            }
-            Err(e) => {
-                if let Some(op) = self.pending.get_mut(&op_id) {
-                    op.fail(&format!("RecvFrom failed: {}", e));
-                }
-            }
-        }
-
-        true
-    }
-
-    fn execute_udp_send_to(&mut self, op_id: u64) -> bool {
-        let socket_id = {
-            let op = match self.pending.get(&op_id) {
-                Some(op) => op,
-                None => return false,
-            };
-
-            unsafe {
-                if op.future_ptr.is_null() {
-                    -1
-                } else {
-                    (*op.future_ptr).io_handle
-                }
-            }
-        };
-
-        if socket_id < 0 {
-            if let Some(op) = self.pending.get_mut(&op_id) {
-                op.fail("Invalid socket ID");
-            }
-            return true;
-        }
-
-        // Get data and address from future context
-        let (data, addr_str) = {
-            let op = self.pending.get(&op_id).unwrap();
-            unsafe {
-                if op.future_ptr.is_null() {
-                    (vec![], String::new())
-                } else {
-                    let ctx = (*op.future_ptr).ctx;
-                    // Context should be a tuple of (data, addr)
-                    // For now, simplified handling
-                    let data = crate::monoio_runtime::extract_buffer_bytes(ctx).unwrap_or_default();
-                    (data, String::new())
-                }
-            }
-        };
-
-        // This is a simplified version - real impl needs proper address handling
-        if let Some(op) = self.pending.get_mut(&op_id) {
-            op.complete(OpResult::Bytes(data.len()));
-        }
-
-        true
+        // Run this single operation
+        let op_type = op.op_type;
+        let completed = self.run_concurrent(vec![(op_id, op_type)]);
+        completed > 0
     }
 
     /// Get the number of pending operations

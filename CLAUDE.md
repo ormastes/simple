@@ -8,7 +8,7 @@ For detailed guidance, invoke with `/skill-name`:
 |-------|---------|
 | `versioning` | Jujutsu (jj) workflow - **NOT git!** |
 | `test` | Test writing (Rust & Simple BDD) |
-| `sspec` | SSpec BDD framework, doc generation, coverage, duplication |
+| `sspec` | **SSpec BDD framework** - Testing → Doc generation workflow |
 | `coding` | Coding standards, Simple language rules |
 | `design` | Design patterns, type system, APIs |
 | `architecture` | Compiler architecture, crate structure |
@@ -19,6 +19,11 @@ For detailed guidance, invoke with `/skill-name`:
 | `doc` | Documentation writing: specs (SSpec), research, design, guides |
 
 Skills located in `.claude/skills/`.
+
+**Writing SSpec Tests:**
+- **Template:** `.claude/templates/sspec_template.spl` - Copy this for new specs
+- **Complete Example:** `doc/guide/sspec_complete_example.md` - Full workflow
+- **Quick Start:** `/sspec` skill or `cat .claude/skills/sspec.md`
 
 ---
 
