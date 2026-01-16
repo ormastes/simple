@@ -125,7 +125,7 @@ impl Parser<'_> {
         self.expect(&TokenKind::Dot)?; // .
 
         // Parse variable name
-        let variable = if let TokenKind::Identifier { name: name, .. } = &self.current.kind {
+        let variable = if let TokenKind::Identifier { name, .. } = &self.current.kind {
             let name = name.clone();
             self.advance();
             name

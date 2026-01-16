@@ -140,7 +140,7 @@ impl Parser<'_> {
             self.expect(&TokenKind::LParen)?;
 
             // Parse the binding name (default: ret)
-            let binding = if let TokenKind::Identifier { name: name, .. } = &self.current.kind {
+            let binding = if let TokenKind::Identifier { name, .. } = &self.current.kind {
                 let name = name.clone();
                 self.advance();
                 name
@@ -176,7 +176,7 @@ impl Parser<'_> {
             self.expect(&TokenKind::LParen)?;
 
             // Parse the binding name (default: err)
-            let binding = if let TokenKind::Identifier { name: name, .. } = &self.current.kind {
+            let binding = if let TokenKind::Identifier { name, .. } = &self.current.kind {
                 let name = name.clone();
                 self.advance();
                 name
@@ -317,7 +317,7 @@ impl Parser<'_> {
                 self.advance();
                 Ok(Expr::ContractResult)
             }
-            TokenKind::Identifier { name: name, .. } if name == "result" => {
+            TokenKind::Identifier { name, .. } if name == "result" => {
                 self.advance();
                 Ok(Expr::ContractResult)
             }

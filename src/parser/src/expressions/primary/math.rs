@@ -114,7 +114,7 @@ impl<'a> Parser<'a> {
         self.advance(); // consume 'tensor'
 
         // Parse name: K
-        let _name = if let TokenKind::Identifier { name: name, .. } = &self.current.kind.clone() {
+        let _name = if let TokenKind::Identifier { name, .. } = &self.current.kind.clone() {
             let n = name.clone();
             self.advance();
             n
@@ -150,7 +150,7 @@ impl<'a> Parser<'a> {
             }
 
             // Parse dim_name=value
-            let dim_name = if let TokenKind::Identifier { name: name, .. } = &self.current.kind.clone() {
+            let dim_name = if let TokenKind::Identifier { name, .. } = &self.current.kind.clone() {
                 let n = name.clone();
                 self.advance();
                 n
@@ -272,7 +272,7 @@ impl<'a> Parser<'a> {
             self.advance(); // consume 'slice'
 
             // Parse dim_name=value
-            let dim_name = if let TokenKind::Identifier { name: name, .. } = &self.current.kind.clone() {
+            let dim_name = if let TokenKind::Identifier { name, .. } = &self.current.kind.clone() {
                 let n = name.clone();
                 self.advance();
                 n
