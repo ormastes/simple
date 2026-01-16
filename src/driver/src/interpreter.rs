@@ -420,7 +420,7 @@ impl Default for Interpreter {
 ///
 /// # Example
 /// ```
-/// use simple_driver::run_code;
+/// use crate::run_code;
 ///
 /// let result = run_code("main = 42", &[], "").unwrap();
 /// assert_eq!(result.exit_code, 42);
@@ -451,7 +451,7 @@ pub fn run_code(code: &str, args: &[String], stdin: &str) -> Result<RunResult, S
 ///
 /// # Example
 /// ```
-/// use simple_driver::run_jit;
+/// use crate::run_jit;
 ///
 /// let result = run_jit("fn main() -> i64:\n    return 42\n").unwrap();
 /// assert_eq!(result.exit_code, 42);

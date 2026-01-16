@@ -2,7 +2,7 @@
 
 use crate::ir::NodeId;
 use crate::patchset::{PatchOp, PatchSet, Subtree, SubtreeNode};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A snapshot of a child node for diffing
 #[derive(Debug, Clone)]
@@ -73,28 +73,29 @@ pub fn diff_children(parent_id: NodeId, old: &[ChildSnapshot], new: &[ChildSnaps
         }
     }
 
-    // Insert new children and compute moves
-    // Using a simple O(n) algorithm for now
-    // TODO: [ui][P1] Implement LIS for optimal moves
-    let mut current_pos = 0;
+    // Insert new children and compute moves using LIS algorithm
+    // The LIS of old indices tells us which elements don't need to move
+    let old_indices: Vec<usize> = new_order
+        .iter()
+        .filter_map(|&opt| opt)
+        .collect();
+
+    let lis = longest_increasing_subsequence(&old_indices);
+    let lis_set: HashSet<usize> = lis.into_iter().collect();
+
     for (new_idx, new_child) in new.iter().enumerate() {
         match new_order[new_idx] {
             Some(old_idx) => {
-                // Child exists, check if it needs to move
-                // For simplicity, we'll just track position
-                let expected_pos = old
-                    .iter()
-                    .take(old_idx)
-                    .filter(|c| used_old[old.iter().position(|x| x.id == c.id).unwrap()])
-                    .count();
-                if expected_pos != current_pos {
+                // Child exists, check if it's in the LIS (doesn't need to move)
+                if !lis_set.contains(&old_idx) {
+                    // Not in LIS, needs to move
+                    let from_idx = old.iter().position(|c| c.id == new_child.id).unwrap();
                     patches.push(PatchOp::MoveChild {
                         parent_id,
-                        from_idx: expected_pos,
+                        from_idx,
                         to_idx: new_idx,
                     });
                 }
-                current_pos = new_idx + 1;
             }
             None => {
                 // New child, insert it
@@ -109,6 +110,52 @@ pub fn diff_children(parent_id: NodeId, old: &[ChildSnapshot], new: &[ChildSnaps
     }
 
     patches
+}
+
+/// Compute the longest increasing subsequence (LIS) of indices
+/// Returns the values in the LIS, not their positions
+/// Used to minimize DOM moves by finding elements that are already in order
+fn longest_increasing_subsequence(arr: &[usize]) -> Vec<usize> {
+    if arr.is_empty() {
+        return Vec::new();
+    }
+
+    let n = arr.len();
+    // dp[i] = length of LIS ending at position i
+    let mut dp: Vec<usize> = vec![1; n];
+    // parent[i] = index of previous element in LIS ending at i
+    let mut parent: Vec<Option<usize>> = vec![None; n];
+
+    // Compute LIS lengths and parent pointers
+    for i in 1..n {
+        for j in 0..i {
+            if arr[j] < arr[i] && dp[j] + 1 > dp[i] {
+                dp[i] = dp[j] + 1;
+                parent[i] = Some(j);
+            }
+        }
+    }
+
+    // Find the ending position of the longest LIS
+    let mut max_len = 0;
+    let mut max_idx = 0;
+    for (i, &len) in dp.iter().enumerate() {
+        if len > max_len {
+            max_len = len;
+            max_idx = i;
+        }
+    }
+
+    // Reconstruct the LIS by following parent pointers
+    let mut lis = Vec::with_capacity(max_len);
+    let mut current = Some(max_idx);
+    while let Some(idx) = current {
+        lis.push(arr[idx]);
+        current = parent[idx];
+    }
+    lis.reverse();
+
+    lis
 }
 
 /// Convert a snapshot to a subtree for insertion

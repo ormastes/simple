@@ -14,8 +14,8 @@ use simple_compiler::{
     },
     save_global_coverage,
 };
-use simple_driver::doctest::{discover_doctests, discover_md_doctests, run_examples, DoctestStatus};
-use simple_driver::runner::Runner;
+use crate::doctest::{discover_doctests, discover_md_doctests, run_examples, DoctestStatus};
+use crate::runner::Runner;
 
 use super::test_discovery::{discover_tests, is_test_file, matches_tag};
 pub use super::test_output::print_summary;
@@ -544,12 +544,14 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
             if options.doctest_src && src_dir.is_dir() {
                 if let Ok(examples) = discover_doctests(&src_dir) {
-                    println!("  Src doctests (.spl):      {}", examples.len());
+                    let count: usize = examples.len();
+                    println!("  Src doctests (.spl):      {}", count);
                 }
             }
             if options.doctest_doc && doc_dir.is_dir() {
                 if let Ok(examples) = discover_doctests(&doc_dir) {
-                    println!("  Doc doctests (.md):       {}", examples.len());
+                    let count: usize = examples.len();
+                    println!("  Doc doctests (.md):       {}", count);
                 }
             }
         }
@@ -560,7 +562,8 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
             if md_dir.is_dir() {
                 if let Ok(examples) = discover_md_doctests(&md_dir) {
-                    println!("  MD doctests (README.md):  {}", examples.len());
+                    let count: usize = examples.len();
+                    println!("  MD doctests (README.md):  {}", count);
                 }
             }
         }
@@ -626,7 +629,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         .collect();
 
     if let Err(e) =
-        simple_driver::feature_db::update_feature_db_from_sspec(&feature_db_path, &sspec_files, &failed_specs)
+        crate::feature_db::update_feature_db_from_sspec(&feature_db_path, &sspec_files, &failed_specs)
     {
         total_failed += 1;
         results.push(TestFileResult {

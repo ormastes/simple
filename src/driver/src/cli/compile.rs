@@ -1,8 +1,8 @@
 //! Compilation commands: compile, list targets, list linkers.
 
 use simple_common::target::{Target, TargetArch};
-use simple_driver::runner::Runner;
-use simple_driver::CompileOptions;
+use crate::runner::Runner;
+use crate::CompileOptions;
 use std::path::PathBuf;
 
 /// Compile a source file to SMF format
@@ -13,7 +13,7 @@ pub fn compile_file(
     snapshot: bool,
     options: CompileOptions,
 ) -> i32 {
-    use simple_driver::jj::{BuildEvent, BuildState, JJConnector};
+    use crate::jj::{BuildEvent, BuildState, JJConnector};
     use std::time::Instant;
 
     // Set environment variable if deprecated syntax warnings should be suppressed

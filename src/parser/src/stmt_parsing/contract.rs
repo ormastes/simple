@@ -140,14 +140,18 @@ impl Parser<'_> {
             self.expect(&TokenKind::LParen)?;
 
             // Parse the binding name (default: ret)
-            let binding = if let TokenKind::Identifier { name, .. } = &self.current.kind {
+            // Allow underscore to skip binding (out(_):)
+            let binding = if self.check(&TokenKind::Underscore) {
+                self.advance();
+                None
+            } else if let TokenKind::Identifier { name, .. } = &self.current.kind {
                 let name = name.clone();
                 self.advance();
-                name
+                Some(name)
             } else {
-                "ret".to_string()
+                Some("ret".to_string())
             };
-            contract.postcondition_binding = Some(binding);
+            contract.postcondition_binding = binding;
 
             self.expect(&TokenKind::RParen)?;
             self.expect(&TokenKind::Colon)?;
@@ -176,14 +180,18 @@ impl Parser<'_> {
             self.expect(&TokenKind::LParen)?;
 
             // Parse the binding name (default: err)
-            let binding = if let TokenKind::Identifier { name, .. } = &self.current.kind {
+            // Allow underscore to skip binding (out_err(_):)
+            let binding = if self.check(&TokenKind::Underscore) {
+                self.advance();
+                None
+            } else if let TokenKind::Identifier { name, .. } = &self.current.kind {
                 let name = name.clone();
                 self.advance();
-                name
+                Some(name)
             } else {
-                "err".to_string()
+                Some("err".to_string())
             };
-            contract.error_binding = Some(binding);
+            contract.error_binding = binding;
 
             self.expect(&TokenKind::RParen)?;
             self.expect(&TokenKind::Colon)?;
@@ -477,5 +485,27 @@ out(ret):
         assert_eq!(contract.preconditions.len(), 1);
         assert!(contract.decreases.is_some());
         assert_eq!(contract.postconditions.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_out_underscore() {
+        let source = r#"
+out(_):
+    true
+"#;
+        let contract = parse_contract(source).unwrap();
+        assert_eq!(contract.postconditions.len(), 1);
+        assert_eq!(contract.postcondition_binding, None);
+    }
+
+    #[test]
+    fn test_parse_out_err_underscore() {
+        let source = r#"
+out_err(_):
+    true
+"#;
+        let contract = parse_contract(source).unwrap();
+        assert_eq!(contract.error_postconditions.len(), 1);
+        assert_eq!(contract.error_binding, None);
     }
 }

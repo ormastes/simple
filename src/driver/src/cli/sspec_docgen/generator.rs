@@ -4,6 +4,8 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use chrono::Local;
+
 use super::types::SspecDoc;
 
 /// Generate documentation for a single feature
@@ -18,9 +20,22 @@ pub fn generate_feature_doc(sspec_doc: &SspecDoc, output_dir: &Path) -> Result<(
 
     let mut md = String::new();
 
-    // Add header
-    md.push_str(&format!("# {}\n\n", feature_name));
-    md.push_str(&format!("*Source: `{}`*\n\n", sspec_doc.file_path.display()));
+    // Check if first doc block already has a title header
+    let has_title_in_content = sspec_doc
+        .doc_blocks
+        .first()
+        .map(|block| block.content.trim_start().starts_with('#'))
+        .unwrap_or(false);
+
+    // Add header only if content doesn't already have one
+    if !has_title_in_content {
+        md.push_str(&format!("# {}\n\n", feature_name));
+    }
+
+    // Add metadata with timestamp
+    let now = Local::now().format("%Y-%m-%d").to_string();
+    md.push_str(&format!("*Source: `{}`*\n", sspec_doc.file_path.display()));
+    md.push_str(&format!("*Last Updated: {}*\n\n", now));
 
     // Add feature IDs if present
     if !sspec_doc.feature_ids.is_empty() {

@@ -8,8 +8,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use simple_driver::feature_db::{generate_feature_docs, load_feature_db};
-use simple_driver::task_db::{generate_task_docs, load_task_db};
+use crate::feature_db::{generate_feature_docs, load_feature_db};
+use crate::task_db::{generate_task_docs, load_task_db};
 
 /// Run feature-gen command
 pub fn run_feature_gen(args: &[String]) -> i32 {

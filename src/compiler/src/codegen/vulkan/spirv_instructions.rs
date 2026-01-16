@@ -134,10 +134,12 @@ impl super::SpirvModule {
                     self.vreg_id_map.insert(*dest, var_id);
                     // Track that this VReg holds a parameter reference
                     self.vreg_param_map.insert(*dest, *local_index);
+                } else if let Some(&var_id) = self.local_var_map.get(local_index) {
+                    // Local variable - return the OpVariable ID
+                    self.vreg_id_map.insert(*dest, var_id);
                 } else {
-                    // TODO: [codegen][P1] Handle local variables (would need to track OpVariable for locals)
                     return Err(CompileError::Codegen(format!(
-                        "LocalAddr for non-parameter local {} not yet implemented",
+                        "LocalAddr for undefined local {} (not a parameter or local variable)",
                         local_index
                     )));
                 }

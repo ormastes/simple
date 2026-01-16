@@ -12,8 +12,8 @@ use rustyline::{Cmd, Config, Editor, EventContext, EventHandler, Helper, KeyEven
 use rustyline::{Event, RepeatCount};
 use rustyline::{KeyCode, Modifiers};
 
-use simple_driver::doctest::{append_to_prelude, build_source, is_definition_like};
-use simple_driver::runner::Runner;
+use crate::doctest::{append_to_prelude, build_source, is_definition_like};
+use crate::runner::Runner;
 
 /// Helper for REPL that handles smart indentation deletion
 #[derive(Clone)]
