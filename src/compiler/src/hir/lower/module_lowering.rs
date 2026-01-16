@@ -173,22 +173,11 @@ impl Lowerer {
                     });
                 }
                 Node::MockDecl(mock) => {
-                    // Convert MockExpectation to string representation for HIR
-                    // TODO: [compiler][P1] Update HIR to handle structured expectations
-                    let expectations = mock
-                        .expectations
-                        .iter()
-                        .map(|exp| {
-                            format!(
-                                "expect {}(...) -> {:?}",
-                                exp.method_name,
-                                exp.return_type
-                                    .as_ref()
-                                    .map(|t| format!("{:?}", t))
-                                    .unwrap_or_else(|| "()".to_string())
-                            )
-                        })
-                        .collect();
+                    // Convert MockExpectation to structured HIR representation
+                    let mut expectations = Vec::new();
+                    for exp in &mock.expectations {
+                        expectations.push(self.lower_mock_expectation(exp)?);
+                    }
 
                     self.module.mock_decls.push(HirMockDecl {
                         name: mock.name.clone(),
@@ -590,6 +579,47 @@ impl Lowerer {
             layout_hint,
             verification_mode,
             is_ghost: f.is_ghost(),
+        })
+    }
+
+    fn lower_mock_expectation(&mut self, exp: &ast::MockExpectation) -> LowerResult<HirMockExpectation> {
+        // Lower parameters
+        let mut params = Vec::new();
+        for param in &exp.params {
+            let ty = if let Some(t) = &param.ty {
+                self.resolve_type(t)?
+            } else {
+                return Err(LowerError::MissingParameterType(param.name.clone()));
+            };
+            params.push(LocalVar {
+                name: param.name.clone(),
+                ty,
+                mutability: param.mutability,
+                inject: param.inject,
+                is_ghost: false,
+            });
+        }
+
+        // Lower return type
+        let return_type = self.resolve_type_opt(&exp.return_type)?;
+
+        // Lower body statements
+        let mut ctx = FunctionContext::new(return_type);
+        for param in &params {
+            ctx.add_local(param.name.clone(), param.ty, param.mutability);
+        }
+        // Create a Block from the body statements
+        let block = ast::Block {
+            span: exp.span,
+            statements: exp.body.clone(),
+        };
+        let body = self.lower_block(&block, &mut ctx)?;
+
+        Ok(HirMockExpectation {
+            method_name: exp.method_name.clone(),
+            params,
+            return_type,
+            body,
         })
     }
 
