@@ -574,6 +574,12 @@ impl<'a> Parser<'a> {
             } else if self.is_macro_invocation_start() {
                 // Macro invocation: macro_name!(args)
                 macro_invocations.push(self.parse_class_body_macro_invocation()?);
+            } else if self.check(&TokenKind::Var) && self.peek_is(&TokenKind::Fn) {
+                // Common mistake: `var fn` instead of `me` for mutable methods
+                return Err(ParseError::syntax_error_with_span(
+                    "Use `me` keyword instead of `var fn` for mutable methods. Example: `me update(x: i32):` instead of `var fn update(x: i32):`",
+                    self.current.span,
+                ));
             } else {
                 fields.push(self.parse_field()?);
             }

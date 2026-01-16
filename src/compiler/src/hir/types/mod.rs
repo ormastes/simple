@@ -143,6 +143,7 @@ mod tests {
     fn test_hir_function() {
         let func = HirFunction {
             name: "add".to_string(),
+            span: None,
             params: vec![
                 LocalVar {
                     name: "a".to_string(),

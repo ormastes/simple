@@ -564,6 +564,7 @@ impl Lowerer {
 
         Ok(HirFunction {
             name,
+            span: Some(f.span),
             params,
             locals: ctx.locals[params_len..].to_vec(),
             return_type,

@@ -1,10 +1,13 @@
 use super::*;
 use simple_parser::ast::Visibility;
+use simple_parser::Span;
 
 /// HIR function definition
 #[derive(Debug, Clone)]
 pub struct HirFunction {
     pub name: String,
+    /// Source location span for error reporting and architecture rules
+    pub span: Option<Span>,
     pub params: Vec<LocalVar>,
     pub locals: Vec<LocalVar>,
     pub return_type: TypeId,
