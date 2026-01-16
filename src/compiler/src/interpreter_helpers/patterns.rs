@@ -39,7 +39,7 @@ pub(crate) fn handle_functional_update(
     target: &Expr,
     method: &str,
     args: &[simple_parser::ast::Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -106,7 +106,7 @@ const ARRAY_MUTATING_METHODS: &[&str] = &[
 /// Returns (result, optional_updated_self) where updated_self is the object with mutations
 pub(crate) fn handle_method_call_with_self_update(
     value_expr: &Expr,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -122,7 +122,7 @@ pub(crate) fn handle_method_call_with_self_update(
 
             // If there was an update from the inner method call, we need to use
             // the updated environment for the outer method call
-            let working_env = if let Some((ref obj_name, ref new_self)) = inner_update {
+            let mut working_env = if let Some((ref obj_name, ref new_self)) = inner_update {
                 let mut temp_env = env.clone();
                 temp_env.insert(obj_name.clone(), new_self.clone());
                 temp_env
@@ -143,7 +143,7 @@ pub(crate) fn handle_method_call_with_self_update(
                 inner_result,
                 method,
                 &eval_args,
-                &working_env,
+                &mut working_env,
                 functions,
                 classes,
                 enums,

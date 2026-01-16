@@ -18,8 +18,10 @@ fn main() {
 
     match sspec_docgen::generate_sspec_docs(&spec_files, &output_dir) {
         Ok(stats) => {
-            println!("\n✓ Generated {} docs ({} complete, {} stubs)",
-                stats.total_specs, stats.specs_with_docs, stats.specs_without_docs);
+            println!(
+                "\n✓ Generated {} docs ({} complete, {} stubs)",
+                stats.total_specs, stats.specs_with_docs, stats.specs_without_docs
+            );
         }
         Err(e) => {
             eprintln!("✗ Failed to generate documentation: {}", e);

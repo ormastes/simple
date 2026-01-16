@@ -40,7 +40,7 @@ use crate::value::{Env, Value};
 pub fn eval_builtin_macro(
     name: &str,
     macro_args: &[MacroArg],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, crate::interpreter::FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,

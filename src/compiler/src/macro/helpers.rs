@@ -32,7 +32,7 @@ use crate::value::{Env, Value};
 pub(crate) fn build_macro_const_bindings(
     macro_def: &MacroDef,
     args: &[MacroArg],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,

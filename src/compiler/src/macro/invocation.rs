@@ -93,7 +93,7 @@ fn expr_to_source_string(expr: &Expr) -> String {
 pub(crate) fn evaluate_macro_invocation(
     name: &str,
     macro_args: &[MacroArg],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,

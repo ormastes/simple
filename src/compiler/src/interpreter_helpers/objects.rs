@@ -28,14 +28,14 @@ pub(crate) fn create_range_object(start: i64, end: i64, bound: RangeBound) -> Va
 /// Spawn an actor with the given expression and environment
 pub(crate) fn spawn_actor_with_expr(
     expr: &Expr,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Value {
     let expr_clone = expr.clone();
-    let env_clone = env.clone();
+    let mut env_clone = env.clone();
     let mut funcs = functions.clone();
     let mut classes_clone = classes.clone();
     let enums_clone = enums.clone();
@@ -59,7 +59,7 @@ pub(crate) fn spawn_actor_with_expr(
             // Evaluate the expression to get the function/lambda, then call it
             match evaluate_expr(
                 &expr_clone,
-                &env_clone,
+                &mut env_clone,
                 &mut funcs,
                 &mut classes_clone,
                 &enums_clone,
@@ -80,11 +80,9 @@ pub(crate) fn spawn_actor_with_expr(
                             );
                         }
                         Value::Lambda {
-                            body, env: lambda_env, ..
+                            body, env: mut lambda_env, ..
                         } => {
-                            let _ = evaluate_expr(
-                                &body,
-                                &lambda_env,
+                            let _ = evaluate_expr(&body, &mut lambda_env,
                                 &mut funcs,
                                 &mut classes_clone,
                                 &enums_clone,

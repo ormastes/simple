@@ -45,7 +45,7 @@ impl SymbolScope {
 
 /// Extract current symbol scope from execution context
 pub fn extract_symbol_scope(
-    env: &Env,
+    env: &mut Env,
     functions: &HashMap<String, FunctionDef>,
     classes: &HashMap<String, ClassDef>,
 ) -> SymbolScope {

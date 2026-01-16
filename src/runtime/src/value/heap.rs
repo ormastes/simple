@@ -26,6 +26,8 @@ pub enum HeapObjectType {
     Semaphore = 0x13,
     Barrier = 0x14,
     Atomic = 0x15,
+    // Monoio direct async I/O (feature: monoio-direct)
+    MonoioFuture = 0x16,
 }
 
 /// Header for all heap-allocated objects

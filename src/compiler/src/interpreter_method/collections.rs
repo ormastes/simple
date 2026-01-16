@@ -15,7 +15,7 @@ pub fn handle_array_methods(
     arr: &[Value],
     method: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -303,7 +303,7 @@ pub fn handle_array_methods(
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
-                    let pred = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                    let pred = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
                     if !pred.truthy() {
                         break;
                     }
@@ -328,7 +328,7 @@ pub fn handle_array_methods(
                         if let Some(param) = params.first() {
                             local_env.insert(param.clone(), item.clone());
                         }
-                        let pred = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                        let pred = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
                         if !pred.truthy() {
                             dropping = false;
                             result.push(item.clone());
@@ -388,7 +388,7 @@ pub fn handle_array_methods(
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
-                    let pred = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                    let pred = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
                     if pred.truthy() {
                         count += 1;
                     }
@@ -413,7 +413,7 @@ pub fn handle_array_methods(
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
-                    let pred = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                    let pred = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
                     if pred.truthy() {
                         pass.push(item.clone());
                     } else {
@@ -437,7 +437,7 @@ pub fn handle_array_methods(
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
-                    let key = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                    let key = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
                     let key_str = key.to_key_string();
                     groups.entry(key_str).or_default().push(item.clone());
                 }
@@ -455,7 +455,7 @@ pub fn handle_tuple_methods(
     tup: &[Value],
     method: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -503,7 +503,7 @@ pub fn handle_tuple_methods(
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), item.clone());
                     }
-                    let mapped = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                    let mapped = evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods)?;
                     result.push(mapped);
                 }
                 Value::Tuple(result)
@@ -551,7 +551,7 @@ pub fn handle_dict_methods(
     map: &HashMap<String, Value>,
     method: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -652,7 +652,7 @@ pub fn handle_dict_methods(
                         let mut merged_env = captured_env.clone();
                         merged_env.extend(env.clone());
                         let result =
-                            exec_function(def, args, &merged_env, functions, classes, enums, impl_methods, None)?;
+                            exec_function(def, args, &mut merged_env, functions, classes, enums, impl_methods, None)?;
                         return Ok(Some(result));
                     }
                     Value::Lambda {
@@ -666,7 +666,7 @@ pub fn handle_dict_methods(
                             let arg_val = eval_arg(args, i, Value::Nil, env, functions, classes, enums, impl_methods)?;
                             local_env.insert(param.clone(), arg_val);
                         }
-                        let result = evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)?;
+                        let result = evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)?;
                         return Ok(Some(result));
                     }
                     Value::Constructor { class_name } => {

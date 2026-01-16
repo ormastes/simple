@@ -108,8 +108,18 @@ fn print_spec_status(sspec_doc: &SspecDoc, validation: &ValidationResult) {
 fn print_summary(stats: &DocStats, validations: &[ValidationResult]) {
     println!("\n{}", "=".repeat(60));
     println!("Summary:");
-    println!("  Complete documentation: {}/{} ({:.0}%)", stats.specs_with_docs, stats.total_specs, stats.coverage_percent());
-    println!("  Stubs: {}/{} ({:.0}%)", stats.specs_without_docs, stats.total_specs, (stats.specs_without_docs as f32 / stats.total_specs as f32) * 100.0);
+    println!(
+        "  Complete documentation: {}/{} ({:.0}%)",
+        stats.specs_with_docs,
+        stats.total_specs,
+        stats.coverage_percent()
+    );
+    println!(
+        "  Stubs: {}/{} ({:.0}%)",
+        stats.specs_without_docs,
+        stats.total_specs,
+        (stats.specs_without_docs as f32 / stats.total_specs as f32) * 100.0
+    );
     println!("  Total documentation: {} lines", stats.total_doc_lines);
 
     if stats.total_warnings > 0 {

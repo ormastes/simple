@@ -87,17 +87,14 @@ const METHOD_NEW: &str = "new";
 pub(crate) fn bind_args(
     params: &[Parameter],
     args: &[Argument],
-    outer_env: &Env,
+    outer_env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
 ) -> Result<HashMap<String, Value>, CompileError> {
-    bind_args_with_injected(
-        params,
-        args,
-        outer_env,
+    bind_args_with_injected(params, args, outer_env,
         functions,
         classes,
         enums,
@@ -134,7 +131,7 @@ pub(crate) fn bind_args_with_injected(
         // Check if this is a spread expression (args...)
         if let Expr::Spread(inner) = &arg.value {
             // Evaluate the inner expression (should be variadic/array/tuple)
-            let spread_val = evaluate_expr(inner, &mut outer_env, functions, classes, enums, impl_methods)?;
+            let spread_val = evaluate_expr(inner, outer_env, functions, classes, enums, impl_methods)?;
 
             // Extract values from spread
             let spread_values: Vec<Value> = match spread_val {
@@ -174,7 +171,7 @@ pub(crate) fn bind_args_with_injected(
             }
         } else {
             // Normal argument (not spread)
-            let val = evaluate_expr(&arg.value, &mut outer_env, functions, classes, enums, impl_methods)?;
+            let val = evaluate_expr(&arg.value, outer_env, functions, classes, enums, impl_methods)?;
 
             if let Some(name) = &arg.name {
                 // Named argument
@@ -222,7 +219,7 @@ pub(crate) fn bind_args_with_injected(
     for param in params_to_bind {
         if !bound.contains_key(&param.name) {
             if let Some(default_expr) = &param.default {
-                let v = evaluate_expr(default_expr, &mut outer_env, functions, classes, enums, impl_methods)?;
+                let v = evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?;
                 let v = wrap_trait_object!(v, param.ty.as_ref());
                 validate_unit!(
                     &v,
@@ -265,7 +262,7 @@ fn bind_args_with_values(
         let value = if idx < args.len() {
             args[idx].clone()
         } else if let Some(default_expr) = &param.default {
-            evaluate_expr(default_expr, &mut outer_env, functions, classes, enums, impl_methods)?
+            evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?
         } else {
             bail_semantic!("missing argument {}", param.name);
         };
@@ -282,8 +279,8 @@ pub(crate) fn exec_lambda(
     params: &[String],
     body: &simple_parser::ast::Expr,
     args: &[Argument],
-    call_env: &Env,
-    captured_env: &Env,
+    call_env: &mut Env,
+    captured_env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -320,16 +317,16 @@ pub(crate) fn exec_lambda(
     }
 
     if let Expr::DoBlock(nodes) = body {
-        return exec_block_closure(nodes, &local_env, functions, classes, enums, impl_methods);
+        return exec_block_closure(nodes, &mut local_env, functions, classes, enums, impl_methods);
     }
 
-    evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)
+    evaluate_expr(body, &mut local_env, functions, classes, enums, impl_methods)
 }
 
 pub(crate) fn exec_function(
     func: &FunctionDef,
     args: &[Argument],
-    outer_env: &Env,
+    outer_env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -344,14 +341,14 @@ pub(crate) fn exec_function(
 pub(crate) fn exec_function_with_values(
     func: &FunctionDef,
     args: &[Value],
-    outer_env: &Env,
+    outer_env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
-        exec_function_with_values_inner(func, args, &mut outer_env, functions, classes, enums, impl_methods)
+        exec_function_with_values_inner(func, args, outer_env, functions, classes, enums, impl_methods)
     })
 }
 
@@ -359,7 +356,7 @@ pub(crate) fn exec_function_with_values(
 pub(crate) fn exec_function_with_values_and_self(
     func: &FunctionDef,
     args: &[Value],
-    outer_env: &Env,
+    outer_env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -428,8 +425,8 @@ pub(crate) fn exec_function_with_values_and_self(
 pub(crate) fn exec_function_with_captured_env(
     func: &FunctionDef,
     args: &[Argument],
-    outer_env: &Env,
-    captured_env: &Env,
+    outer_env: &mut Env,
+    captured_env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -474,7 +471,7 @@ pub(crate) fn exec_function_with_captured_env(
 fn exec_function_inner(
     func: &FunctionDef,
     args: &[Argument],
-    outer_env: &Env,
+    outer_env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -559,7 +556,7 @@ fn exec_function_inner(
 fn exec_function_with_values_inner(
     func: &FunctionDef,
     args: &[Value],
-    outer_env: &Env,
+    outer_env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -616,7 +613,7 @@ fn exec_function_with_values_inner(
 pub(crate) fn instantiate_class(
     class_name: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -761,7 +758,7 @@ fn resolve_injected_args(
     params: &[Parameter],
     args: &[Argument],
     class_name: &str,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -836,7 +833,7 @@ fn param_type_name(param: &Parameter) -> Option<String> {
 fn resolve_binding_instance(
     impl_type: &str,
     scope: DiScope,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -931,7 +928,7 @@ fn invoke_runtime_around_chain(
         return instantiate_class(
             impl_type,
             &[],
-            ctx.env.as_ref(),
+            &mut (*ctx.env).clone(),
             &mut functions_clone,
             &mut classes_clone,
             ctx.enums.as_ref(),
@@ -972,7 +969,7 @@ fn invoke_runtime_around_chain(
     let result = exec_function_with_values(
         func,
         &[proceed],
-        ctx.env.as_ref(),
+        &mut (*ctx.env).clone(),
         &mut functions_clone,
         &mut classes_clone,
         ctx.enums.as_ref(),

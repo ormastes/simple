@@ -44,7 +44,7 @@ thread_local! {
 /// Build a helpful failure message for expect by inspecting the expression
 fn build_expect_failure_message(
     expr: &Expr,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -109,7 +109,7 @@ fn format_value_for_message(val: &Value) -> String {
 /// Execute a block value (lambda or block closure)
 pub(crate) fn exec_block_value(
     block: Value,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -123,19 +123,18 @@ pub(crate) fn exec_block_value(
             params,
             body,
             env: captured,
-        } => exec_lambda(
-            &params,
-            &body,
-            &[],
-            env,
-            &captured,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        ),
+        } => {
+            let mut captured_clone = captured.clone();
+            exec_lambda(&params, &body, &[], env, &mut captured_clone,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )
+        },
         Value::BlockClosure { nodes, env: captured } => {
-            exec_block_closure(&nodes, &mut captured, functions, classes, enums, impl_methods)
+            let mut captured_clone = captured.clone();
+            exec_block_closure(&nodes, &mut captured_clone, functions, classes, enums, impl_methods)
         }
         _ => Ok(Value::Nil),
     }
@@ -145,7 +144,7 @@ fn eval_arg(
     args: &[Argument],
     index: usize,
     default: Value,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -161,7 +160,7 @@ fn eval_arg(
 pub(super) fn eval_bdd_builtin(
     name: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,

@@ -33,7 +33,7 @@ pub fn handle_unit_methods(
     family: &Option<String>,
     method: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -155,7 +155,7 @@ pub fn handle_option_methods(
     payload: &Option<Box<Value>>,
     method: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -224,12 +224,10 @@ pub fn handle_option_methods(
             if let Value::Lambda {
                 params: _,
                 body,
-                env: captured,
+                env: mut captured,
             } = func_arg
             {
-                return Ok(Some(evaluate_expr(
-                    &body,
-                    &captured,
+                return Ok(Some(evaluate_expr(&body, &mut captured,
                     functions,
                     classes,
                     enums,
@@ -361,7 +359,7 @@ pub fn handle_result_methods(
     payload: &Option<Box<Value>>,
     method: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -448,16 +446,14 @@ pub fn handle_result_methods(
                 if let Value::Lambda {
                     params,
                     body,
-                    env: captured,
+                    env: mut captured,
                 } = func_arg
                 {
                     let mut local_env = captured.clone();
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), err_val.as_ref().clone());
                     }
-                    return Ok(Some(evaluate_expr(
-                        &body,
-                        &local_env,
+                    return Ok(Some(evaluate_expr(&body, &mut local_env,
                         functions,
                         classes,
                         enums,

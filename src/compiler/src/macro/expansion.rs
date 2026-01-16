@@ -18,7 +18,7 @@ use super::substitution::substitute_block_templates;
 pub(super) fn expand_user_macro(
     macro_def: &MacroDef,
     args: &[MacroArg],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -37,7 +37,7 @@ pub(super) fn expand_user_macro(
 fn expand_user_macro_inner(
     macro_def: &MacroDef,
     args: &[MacroArg],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,

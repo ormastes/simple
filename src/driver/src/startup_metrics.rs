@@ -13,6 +13,11 @@ pub fn enable_metrics() {
     METRICS_ENABLED.store(true, Ordering::Relaxed);
 }
 
+/// Disable startup metrics collection
+pub fn disable_metrics() {
+    METRICS_ENABLED.store(false, Ordering::Relaxed);
+}
+
 /// Check if metrics are enabled
 pub fn metrics_enabled() -> bool {
     METRICS_ENABLED.load(Ordering::Relaxed)
@@ -211,8 +216,9 @@ mod tests {
     use std::thread;
 
     #[test]
-    #[ignore = "Global state affected by parallel tests"]
     fn test_metrics_disabled_by_default() {
+        // Reset state to isolate from other tests
+        disable_metrics();
         assert!(!metrics_enabled());
     }
 

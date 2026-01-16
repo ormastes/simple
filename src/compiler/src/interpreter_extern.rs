@@ -108,7 +108,7 @@ extern "C" {
 pub(crate) fn call_extern_function(
     name: &str,
     args: &[Argument],
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,

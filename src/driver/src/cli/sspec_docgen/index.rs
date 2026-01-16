@@ -58,7 +58,11 @@ pub fn generate_index_page(
 
     // Generate categorized tables
     for category in categories {
-        md.push_str(&format!("## {} ({} features)\n\n", category.name, category.features.len()));
+        md.push_str(&format!(
+            "## {} ({} features)\n\n",
+            category.name,
+            category.features.len()
+        ));
         md.push_str("| Feature | Status | Difficulty | Coverage | Details |\n");
         md.push_str("|---------|--------|------------|----------|----------|\n");
 

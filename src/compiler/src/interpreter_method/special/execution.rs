@@ -26,7 +26,7 @@ pub fn find_and_exec_method_with_self(
     args: &[Argument],
     class: &str,
     fields: &HashMap<String, Value>,
-    env: &Env,
+    env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
@@ -73,7 +73,7 @@ pub fn find_and_exec_method_with_self(
 pub fn exec_function_with_self_return(
     func: &FunctionDef,
     args: &[Argument],
-    outer_env: &Env,
+    outer_env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
