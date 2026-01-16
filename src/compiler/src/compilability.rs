@@ -555,12 +555,12 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         }
 
         // Go statement (concurrency)
-        Expr::Go { expr, .. } => {
-            analyze_expr(expr, reasons);
-            add_reason(
-                reasons,
-                FallbackReason::NotYetImplemented("go statement (concurrency)".into()),
-            );
+        Expr::Go { args, body, .. } => {
+            for arg in args {
+                analyze_expr(arg, reasons);
+            }
+            analyze_expr(body, reasons);
+            // Go expressions are now fully implemented via HIR lowering
         }
     }
 }

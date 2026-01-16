@@ -98,14 +98,14 @@ impl LintChecker {
     /// Check a module for lint violations
     pub fn check_module(&mut self, items: &[Node]) {
         // Run file-based lints first
-        if let Some(ref source_file) = self.source_file {
+        if let Some(source_file) = self.source_file.clone() {
             // Check for print in test spec files
             if source_file.to_string_lossy().ends_with("_spec.spl") {
                 self.check_print_in_test_spec(items);
             }
 
             // Check TODO format
-            self.check_todo_format(source_file);
+            self.check_todo_format(&source_file);
         }
 
         // Run AST-based lints
@@ -338,7 +338,7 @@ impl LintChecker {
                         if name == "print" {
                             checker.emit(
                                 LintName::PrintInTestSpec,
-                                Span::default(), // TODO: Use actual span from expr
+                                Span::new(0, 0, 0, 0), // TODO: Use actual span from expr
                                 "print() call in test spec file".to_string(),
                                 Some("use triple-quoted strings \"\"\" for test output, or add #[allow(print_in_test_spec)] if print is needed".to_string()),
                             );
@@ -357,9 +357,7 @@ impl LintChecker {
                 Expr::MethodCall { receiver, args, .. } => {
                     check_expr(checker, receiver);
                     for arg in args {
-                        if let Some(ref value) = arg.value {
-                            check_expr(checker, value);
-                        }
+                        check_expr(checker, &arg.value);
                     }
                 }
                 Expr::FieldAccess { receiver, .. } => {
@@ -385,21 +383,7 @@ impl LintChecker {
                         check_expr(checker, elem);
                     }
                 }
-                Expr::Ternary {
-                    condition,
-                    then_expr,
-                    else_expr,
-                } => {
-                    check_expr(checker, condition);
-                    check_expr(checker, then_expr);
-                    check_expr(checker, else_expr);
-                }
-                Expr::Block { statements, .. } => {
-                    for stmt in statements {
-                        check_stmt(checker, stmt);
-                    }
-                }
-                Expr::DoBlock { statements, .. } => {
+                Expr::DoBlock(statements) => {
                     for stmt in statements {
                         check_stmt(checker, stmt);
                     }
@@ -427,49 +411,50 @@ impl LintChecker {
                         check_expr(checker, v);
                     }
                 }
-                Node::If(IfStmt {
-                    condition,
-                    then_branch,
-                    else_branch,
-                    ..
-                }) => {
-                    check_expr(checker, condition);
-                    for stmt in then_branch {
+                Node::If(if_stmt) => {
+                    check_expr(checker, &if_stmt.condition);
+                    for stmt in &if_stmt.then_block.statements {
                         check_stmt(checker, stmt);
                     }
-                    if let Some(ref else_stmts) = else_branch {
-                        for stmt in else_stmts {
+                    for (elif_cond, elif_block) in &if_stmt.elif_branches {
+                        check_expr(checker, elif_cond);
+                        for stmt in &elif_block.statements {
+                            check_stmt(checker, stmt);
+                        }
+                    }
+                    if let Some(ref else_block) = if_stmt.else_block {
+                        for stmt in &else_block.statements {
                             check_stmt(checker, stmt);
                         }
                     }
                 }
-                Node::Match(MatchStmt { expr, arms, .. }) => {
-                    check_expr(checker, expr);
-                    for arm in arms {
-                        for stmt in &arm.body {
+                Node::Match(match_stmt) => {
+                    check_expr(checker, &match_stmt.subject);
+                    for arm in &match_stmt.arms {
+                        for stmt in &arm.body.statements {
                             check_stmt(checker, stmt);
                         }
                     }
                 }
                 Node::For(for_stmt) => {
                     check_expr(checker, &for_stmt.iterable);
-                    for stmt in &for_stmt.body {
+                    for stmt in &for_stmt.body.statements {
                         check_stmt(checker, stmt);
                     }
                 }
                 Node::While(while_stmt) => {
                     check_expr(checker, &while_stmt.condition);
-                    for stmt in &while_stmt.body {
+                    for stmt in &while_stmt.body.statements {
                         check_stmt(checker, stmt);
                     }
                 }
                 Node::Loop(loop_stmt) => {
-                    for stmt in &loop_stmt.body {
+                    for stmt in &loop_stmt.body.statements {
                         check_stmt(checker, stmt);
                     }
                 }
                 Node::Function(func) => {
-                    for stmt in &func.body {
+                    for stmt in &func.body.statements {
                         check_stmt(checker, stmt);
                     }
                 }
@@ -533,7 +518,7 @@ impl LintChecker {
                 if !TODO_AREAS.contains(&area) {
                     self.emit(
                         LintName::TodoFormat,
-                        Span::default(), // TODO: Use actual span
+                        Span::new(0, 0, line_num, 0), // TODO: Use actual span
                         format!("TODO/FIXME has invalid area '{}'", area),
                         Some(format!("valid areas: {}", TODO_AREAS.join(", "))),
                     );
@@ -543,7 +528,7 @@ impl LintChecker {
                 if !TODO_PRIORITIES.contains(&priority) {
                     self.emit(
                         LintName::TodoFormat,
-                        Span::default(), // TODO: Use actual span
+                        Span::new(0, 0, line_num, 0), // TODO: Use actual span
                         format!("TODO/FIXME has invalid priority '{}'", priority),
                         Some(format!("valid priorities: {}", TODO_PRIORITIES.join(", "))),
                     );
@@ -552,7 +537,7 @@ impl LintChecker {
                 // Doesn't match format
                 self.emit(
                     LintName::TodoFormat,
-                    Span::default(), // TODO: Use actual span
+                    Span::new(0, 0, line_num, 0), // TODO: Use actual span
                     "TODO/FIXME missing [area][priority] format".to_string(),
                     Some(
                         "use format: TODO: [area][P0-P3] description (e.g., TODO: [runtime][P1] implement feature)"
