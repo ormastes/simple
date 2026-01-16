@@ -1,6 +1,6 @@
 # macros_spec
 
-*Source: `./vulkan-backend/simple/test/system/features/macros/macros_spec.spl`*
+*Source: `simple/std_lib/test/features/language/macros_spec.spl`*
 
 ---
 

@@ -1,6 +1,6 @@
 # context_blocks_spec
 
-*Source: `./vulkan-backend/simple/test/system/features/context_blocks/context_blocks_spec.spl`*
+*Source: `simple/std_lib/test/features/testing_framework/context_blocks_spec.spl`*
 
 ---
 

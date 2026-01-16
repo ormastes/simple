@@ -1,6 +1,6 @@
 # generics_spec
 
-*Source: `./vulkan-backend/simple/test/system/features/generics/generics_spec.spl`*
+*Source: `simple/std_lib/test/features/types/generics_spec.spl`*
 
 ---
 

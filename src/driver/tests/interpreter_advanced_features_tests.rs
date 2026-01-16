@@ -152,7 +152,7 @@ fn interpreter_result_is_ok() {
     // Check if result is Ok
     let code = r#"
 res = Ok(10)
-x = 0
+var x = 0
 if res.is_ok():
     x = 1
 main = x
@@ -166,7 +166,7 @@ fn interpreter_result_is_err() {
     // Check if result is Err
     let code = r#"
 res = Err("error")
-x = 0
+var x = 0
 if res.is_err():
     x = 1
 main = x
@@ -379,7 +379,7 @@ fn interpreter_if_let_some() {
     // If let with Option/Some pattern
     let code = r#"
 opt = Some(42)
-res = 0
+var res = 0
 if let Some(x) = opt:
     res = x
 main = res
@@ -393,7 +393,7 @@ fn interpreter_if_let_none_else() {
     // If let with else branch for non-matching
     let code = r#"
 opt = None
-res = 0
+var res = 0
 if let Some(x) = opt:
     res = x
 else:
@@ -409,7 +409,7 @@ fn interpreter_if_let_ok() {
     // If let with Result/Ok pattern
     let code = r#"
 res = Ok(100)
-output = 0
+var output = 0
 if let Ok(value) = res:
     output = value
 main = output
@@ -427,8 +427,8 @@ fn next_item(n):
         return Some(n)
     return None
 
-counter = 3
-sum = 0
+var counter = 3
+var sum = 0
 while let Some(value) = next_item(counter):
     sum = sum + value
     counter = counter - 1

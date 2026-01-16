@@ -166,7 +166,7 @@ main = if s[1] == "b": 1 else: 0
 #[test]
 fn interpreter_array_push() {
     let code = r#"
-arr = [1, 2, 3]
+var arr = [1, 2, 3]
 arr = arr.push(4)
 main = arr[3]
 "#;
@@ -279,7 +279,7 @@ main = rev[0]
 #[test]
 fn interpreter_dict_set() {
     let code = r#"
-d = {"a": 1}
+var d = {"a": 1}
 d = d.set("b", 2)
 main = d["b"]
 "#;
@@ -290,7 +290,7 @@ main = d["b"]
 #[test]
 fn interpreter_dict_remove() {
     let code = r#"
-d = {"a": 1, "b": 2}
+var d = {"a": 1, "b": 2}
 d = d.remove("a")
 main = d.len()
 "#;
@@ -558,7 +558,7 @@ main = if 0 <= x <= 10: 1 else: 0
 fn interpreter_with_basic() {
     // Basic with statement - just executes body
     let code = r#"
-counter = 0
+var counter = 0
 with 42:
     counter = 1
 main = counter

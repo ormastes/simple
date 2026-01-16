@@ -17,8 +17,8 @@ main = if x > 5: 1 else: 0
 #[test]
 fn interpreter_while_loop() {
     let code = r#"
-sum = 0
-i = 0
+var sum = 0
+var i = 0
 while i < 5:
     sum = sum + i
     i = i + 1
@@ -31,7 +31,7 @@ main = sum
 #[test]
 fn interpreter_for_loop() {
     let code = r#"
-sum = 0
+var sum = 0
 for i in range(1, 5):
     sum = sum + i
 main = sum

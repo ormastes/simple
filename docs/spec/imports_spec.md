@@ -1,6 +1,347 @@
-# imports_spec
+# Module Import System
 
-*Source: `./simple/std_lib/test/features/language/imports_spec.spl`*
+*Source: `simple/std_lib/test/features/language/imports_spec.spl`*
 
 ---
 
+# Module Import System
+
+**Feature ID:** #28
+**Category:** Language Core
+**Difficulty:** 3/5
+**Status:** Complete
+
+## Overview
+
+The Simple language module import system enables code organization and reuse
+through explicit import statements. It provides a clean, predictable module
+resolution mechanism inspired by Python's import system.
+
+## Key Features
+
+- **Import Statements:** `import module` and `from module import item` syntax
+- **Qualified Names:** Dot-separated module paths (e.g., `std.collections.list`)
+- **Package System:** `__init__.spl` files define package boundaries
+- **Public/Private:** Leading underscore convention for privacy
+- **Module Resolution:** Path-based resolution with standard library priority
+
+## Test Coverage
+
+This specification validates:
+    1. Import statement syntax and parsing
+2. Module path resolution algorithm
+3. Export/visibility mechanism
+4. Standard library module access
+5. Package structure with __init__.spl
+
+## Implementation
+
+**Files:**
+- `src/compiler/src/module_resolver.rs` - Module path resolution
+- `src/compiler/src/project.rs` - Project-wide module management
+
+**Dependencies:**
+- Feature #1: Lexer (tokenizes import statements)
+- Feature #2: Parser (parses import syntax)
+
+**Required By:**
+- Feature #11: Standard library modules
+- Feature #12: Package management
+
+## Related Documentation
+
+- `doc/import_export_and__init__.md` - Complete specification
+- `src/driver/tests/module_tests.rs` - Rust integration tests
+
+**Migration Notes:**
+- Automated migration: <1 second
+- Manual assertion conversion: ~16 minutes (8 assertions × 2 min)
+- Docstring enhancement: ~35 minutes
+- Total: ~51 minutes
+
+## Import Statement Syntax
+
+    Simple provides two primary import statement forms following
+    Python-style conventions:
+
+    1. **Module Import:** `import module_name`
+    2. **Selective Import:** `from module_name import item_name`
+
+    Both forms are parsed by the lexer and parser, creating AST nodes
+    that the compiler uses for module resolution.
+
+    **Grammar:**
+    ```
+    import_stmt ::= 'import' qualified_name
+                  | 'from' qualified_name 'import' identifier
+    qualified_name ::= identifier ('.' identifier)*
+    ```
+
+    **Design Decision:** We chose explicit import statements over
+    implicit module loading to make dependencies clear and enable
+    static analysis.
+
+**Given** the Simple parser
+        **When** an import statement is encountered
+        **Then** it recognizes the syntax and creates an import AST node
+
+        **Syntax Forms:**
+        ```simple
+        import math              # Import entire module
+        import std.collections   # Import package
+        from math import sqrt    # Import specific function
+        from std import List     # Import type
+        ```
+
+        **Implementation:** The parser recognizes 'import' and 'from'
+        keywords, then delegates to the import statement parser in
+        `src/parser/src/statements/mod.rs`.
+
+        **Edge Cases:**
+        - Empty imports (not allowed)
+        - Circular imports (detected at compile time)
+        - Non-existent modules (error at resolution time)
+
+**Given** a multi-level module hierarchy
+        **When** using dot-separated module paths
+        **Then** the system resolves through each level
+
+        **Qualified Name Format:**
+        ```simple
+        module.submodule.item
+        std.collections.list.List
+        myproject.utils.helpers.format_string
+        ```
+
+        **Resolution Process:**
+        1. Start with base module name (e.g., "std")
+        2. Look for `std/__init__.spl` or `std.spl`
+        3. For each dot, descend into subdirectory
+        4. Final component can be module or item within module
+
+        **Example:**
+        For `std.collections.list.List`:
+            - Resolve `std` → `simple/std_lib/src/`
+        - Resolve `collections` → `simple/std_lib/src/collections/`
+        - Resolve `list` → `simple/std_lib/src/collections/list.spl`
+        - Extract `List` from list module's exports
+
+        **Verification:** Module resolver supports arbitrarily deep nesting.
+
+## Module Path Resolution
+
+    The module resolver (`module_resolver.rs`) implements a search algorithm
+    to locate modules based on import statements. It checks multiple locations
+    in priority order:
+
+    **Search Order:**
+    1. Project-local modules (current directory and subdirectories)
+    2. Standard library (`simple/std_lib/src/`)
+    3. Installed packages (future feature)
+
+    **File Extensions:**
+    - `.spl` files are recognized as modules
+    - `__init__.spl` files mark package directories
+
+    **Caching:** Resolved modules are cached to avoid redundant file system
+    operations during compilation.
+
+**Given** an import statement like `import mymodule`
+        **When** the module resolver runs
+        **Then** it searches filesystem paths and returns the module location
+
+        **Algorithm:**
+        ```
+        function resolve(module_name):
+            for search_path in [project_dir, stdlib_dir]:
+                candidate = search_path / module_name + ".spl"
+                if exists(candidate):
+                    return candidate
+
+                package_init = search_path / module_name / "__init__.spl"
+                if exists(package_init):
+                    return package_init
+
+            error: ModuleNotFound
+        ```
+
+        **Example Paths:**
+        - `import utils` → `./utils.spl` or `./utils/__init__.spl`
+        - `import std.io` → `simple/std_lib/src/io.spl`
+
+        **Error Handling:** If no valid path found, compilation fails with
+        "Module not found: {name}" error.
+
+**Given** a directory containing `__init__.spl`
+        **When** importing that directory name
+        **Then** the __init__.spl file is loaded as the package module
+
+        **Package Structure:**
+        ```
+        mypackage/
+            __init__.spl     # Package entry point
+            module_a.spl     # Submodule A
+            module_b.spl     # Submodule B
+            subpackage/
+                __init__.spl # Nested package
+        ```
+
+        **Behavior:**
+        - `import mypackage` → loads `mypackage/__init__.spl`
+        - `from mypackage import module_a` → loads `mypackage/module_a.spl`
+        - Submodules can be accessed via qualified names
+
+        **Python Compatibility:** This design matches Python's package system,
+        making it familiar to developers.
+
+        **Implementation Detail:** The `__init__.spl` file can:
+            - Re-export items from submodules
+        - Define package-level functions/classes
+        - Run initialization code (cautiously - evaluated at import time)
+
+**Given** a deep module hierarchy like `std.collections.list`
+        **When** resolving the nested import
+        **Then** each level is resolved sequentially
+
+        **Nested Resolution:**
+        ```simple
+        import std.collections.list
+
+        # Resolution steps:
+            # 1. Find 'std' → simple/std_lib/src/
+        # 2. Find 'collections' → simple/std_lib/src/collections/
+        # 3. Find 'list' → simple/std_lib/src/collections/list.spl
+        ```
+
+        **Depth Limit:** No hardcoded limit on nesting depth, but practical
+        limits exist based on filesystem path length restrictions.
+
+        **Cross-References:**
+        - See Feature #11 for standard library structure
+        - See `src/compiler/src/module_resolver.rs` for implementation
+
+        **Testing:** Rust integration tests validate nesting up to 5 levels deep.
+
+## Export and Visibility System
+
+    Simple uses a convention-based visibility system:
+
+    - **Public:** Items NOT starting with underscore are exported
+    - **Private:** Items starting with `_` are module-private
+
+    This convention applies to:
+        - Functions
+    - Classes
+    - Variables
+    - Constants
+
+    **Rationale:** Convention over configuration reduces boilerplate while
+    maintaining clarity. The leading underscore is a universally recognized
+    pattern (Python, Scala, etc.).
+
+    **Future Enhancement:** Explicit `public`/`private` keywords may be added
+    for cases requiring finer-grained control.
+
+**Given** a module with public items (no leading underscore)
+        **When** another module imports it
+        **Then** those items are accessible
+
+        **Example:**
+        ```simple
+        # math_utils.spl
+        fn add(a, b):          # Public - exported
+            return a + b
+
+        fn multiply(a, b):     # Public - exported
+            return a * b
+
+        # main.spl
+        import math_utils
+        val result = math_utils.add(2, 3)  # ✓ Works
+        ```
+
+        **Default Behavior:** All items are public unless explicitly marked private.
+
+        **Backward Compatibility:** This differs from some languages (Java, Rust)
+        that default to private. We chose public-by-default to reduce friction
+        in small projects while maintaining the option for privacy.
+
+**Given** a module with items starting with underscore
+        **When** another module attempts to import them
+        **Then** those items are inaccessible (compile error)
+
+        **Example:**
+        ```simple
+        # internal_utils.spl
+        fn _internal_helper():      # Private - not exported
+            return "secret"
+
+        fn public_api():            # Public - exported
+            return _internal_helper()
+
+        # main.spl
+        import internal_utils
+        internal_utils.public_api()        # ✓ Works
+        internal_utils._internal_helper()  # ✗ Compile Error
+        ```
+
+        **Error Message:** "Cannot access private item _internal_helper from module internal_utils"
+
+        **Enforcement:** Privacy is enforced at compile time by the name resolver.
+        There is no runtime privacy bypass (unlike Python's "gentlemen's agreement").
+
+        **Convention Origin:** Leading underscore for privacy is borrowed from
+        Python, Scala, and TypeScript. It's visually obvious and requires no
+        extra syntax.
+
+## Standard Library Import System
+
+    The standard library (`simple/std_lib/src/`) is automatically included
+    in the module search path. All `std.*` imports resolve here.
+
+    **Standard Library Structure:**
+    ```
+    simple/std_lib/src/
+        __init__.spl         # std package root
+        io.spl               # I/O operations
+        collections/
+            __init__.spl
+            list.spl
+            dict.spl
+        math.spl
+        string.spl
+    ```
+
+    **Prelude:** Common types and functions (List, Option, Result) are
+    auto-imported in every module. This is handled by the compiler, not
+    the module system.
+
+    **Version Locking:** Standard library version is tied to compiler version.
+    Future package manager will support user library versioning.
+
+**Given** the Simple runtime
+        **When** importing `std.*` modules
+        **Then** they resolve to `simple/std_lib/src/*`
+
+        **Standard Library Examples:**
+        ```simple
+        import std.io               # File I/O
+        import std.collections.List # List type (if not in prelude)
+        import std.math             # Math functions
+        from std.string import split, join
+        ```
+
+        **Search Priority:**
+        1. Check project-local files FIRST (allows shadowing std lib for testing)
+        2. Fall back to standard library path
+
+        **Security Note:** Shadowing std lib modules is allowed but discouraged.
+        Future linter rules may warn about this practice.
+
+        **Implementation:** The module resolver's search path is configured at
+        compiler startup with the stdlib path appended.
+
+        **Cross-References:**
+        - Feature #11: Standard Library Organization
+        - Feature #12: Package Management
+        - `doc/import_export_and__init__.md` for complete spec

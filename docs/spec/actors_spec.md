@@ -1,6 +1,6 @@
 # actors_spec
 
-*Source: `./vulkan-backend/simple/test/system/features/actors/actors_spec.spl`*
+*Source: `simple/std_lib/test/features/concurrency/actors_spec.spl`*
 
 ---
 
