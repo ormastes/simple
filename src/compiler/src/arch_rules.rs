@@ -192,6 +192,9 @@ impl ArchRulesChecker {
 
         // Extract type usage from functions
         for func in &module.functions {
+            // Get line number from function span if available
+            let func_line = func.span.map(|s| s.line as usize).unwrap_or(0);
+
             // Extract from function signature (parameters and return type)
             for param in &func.params {
                 if let Some(type_name) = self.get_type_name(param.ty, &module.types) {
@@ -201,7 +204,7 @@ impl ArchRulesChecker {
                             location: module_name.to_string(),
                         },
                         source_file: module_name.to_string(),
-                        line: 0, // Requires HIR source location fields
+                        line: func_line,
                     });
                 }
             }
@@ -214,7 +217,7 @@ impl ArchRulesChecker {
                         location: module_name.to_string(),
                     },
                     source_file: module_name.to_string(),
-                    line: 0, // TODO: [compiler][P2] Track line numbers
+                    line: func_line,
                 });
             }
 
@@ -227,7 +230,7 @@ impl ArchRulesChecker {
                             location: module_name.to_string(),
                         },
                         source_file: module_name.to_string(),
-                        line: 0, // Requires HIR source location fields
+                        line: func_line,
                     });
                 }
             }
@@ -538,6 +541,7 @@ mod tests {
         // Create a function that uses a custom type
         let func = HirFunction {
             name: "process".to_string(),
+            span: None,
             params: vec![],
             locals: vec![],
             return_type: TypeId::I64,

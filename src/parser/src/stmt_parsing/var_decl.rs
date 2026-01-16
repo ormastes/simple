@@ -38,6 +38,15 @@ impl Parser<'_> {
     pub(crate) fn parse_var(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Var)?;
+
+        // Check for common mistake: `var fn` instead of `me` for mutable methods
+        if self.check(&TokenKind::Fn) {
+            return Err(ParseError::syntax_error_with_span(
+                "Use `me` keyword instead of `var fn` for mutable methods. Example: `me update(x: i32):` instead of `var fn update(x: i32):`",
+                self.current.span,
+            ));
+        }
+
         self.parse_let_impl(start_span, Mutability::Mutable, StorageClass::Auto, false)
     }
 

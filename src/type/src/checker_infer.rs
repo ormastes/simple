@@ -112,9 +112,33 @@ impl TypeChecker {
                         Ok(Type::Int)
                     }
                     UnaryOp::ChannelRecv => {
-                        // Channel receive: extract value type from channel
-                        // TODO: [type][P2] Implement proper channel type inference
-                        Ok(operand_ty)
+                        // Channel receive: extract value type from Channel<T>
+                        // Returns T when receiving from a channel
+                        let resolved = self.resolve(&operand_ty);
+                        match resolved {
+                            Type::Generic { name, args } if name == "Channel" && !args.is_empty() => {
+                                // Channel<T> -> T
+                                Ok(args[0].clone())
+                            }
+                            Type::Named(name) if name == "Channel" => {
+                                // Unparameterized Channel -> fresh type variable
+                                Ok(self.fresh_var())
+                            }
+                            Type::Var(_) => {
+                                // Type variable - create constraint that it must be Channel<T>
+                                let inner = self.fresh_var();
+                                let channel_ty = Type::Generic {
+                                    name: "Channel".to_string(),
+                                    args: vec![inner.clone()],
+                                };
+                                let _ = self.unify(&operand_ty, &channel_ty);
+                                Ok(inner)
+                            }
+                            _ => {
+                                // Not a channel type - return fresh var and let unification fail later
+                                Ok(self.fresh_var())
+                            }
+                        }
                     }
                 }
             }
