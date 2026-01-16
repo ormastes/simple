@@ -1,14 +1,14 @@
 # Test Specification Index
 
-*Generated: 2026-01-16 09:16:35*
+*Generated: 2026-01-16 09:30:37*
 
 ## Quick Stats
 
 - **Total Features:** 64
-- **Complete Documentation:** 5 (8%)
-- **Stubs Remaining:** 59
-- **Total Lines:** 696
-- **Warnings:** 62
+- **Complete Documentation:** 6 (9%)
+- **Stubs Remaining:** 58
+- **Total Lines:** 978
+- **Warnings:** 61
 
 ---
 
@@ -24,7 +24,7 @@
 |---------|--------|------------|----------|----------|
 | [Type Inference Specification](type_inference_spec.md) | ⚠️ Partial | 4/5 | 60% | 144 lines |
 
-## Other (59 features)
+## Other (58 features)
 
 | Feature | Status | Difficulty | Coverage | Details |
 |---------|--------|------------|----------|----------|
@@ -65,7 +65,6 @@
 | [mutability_control_spec](mutability_control_spec.md) | ❌ Stub | N/A | 0% | 0 lines |
 | [named_arguments_spec](named_arguments_spec.md) | ❌ Stub | N/A | 0% | 0 lines |
 | [no_paren_calls_spec](no_paren_calls_spec.md) | ❌ Stub | N/A | 0% | 0 lines |
-| [operators_arithmetic_spec](operators_arithmetic_spec.md) | ❌ Stub | N/A | 0% | 0 lines |
 | [option_type_spec](option_type_spec.md) | ❌ Stub | N/A | 0% | 0 lines |
 | [pattern_matching_spec](pattern_matching_spec.md) | ❌ Stub | N/A | 0% | 0 lines |
 | [pipeline_components_spec](pipeline_components_spec.md) | ❌ Stub | N/A | 0% | 0 lines |
@@ -88,10 +87,11 @@
 | [visibility_modifiers_spec](visibility_modifiers_spec.md) | ❌ Stub | N/A | 0% | 0 lines |
 | [weak_pointers_spec](weak_pointers_spec.md) | ❌ Stub | N/A | 0% | 0 lines |
 
-## Syntax (2 features)
+## Syntax (3 features)
 
 | Feature | Status | Difficulty | Coverage | Details |
 |---------|--------|------------|----------|----------|
+| [Arithmetic Operators Specification](operators_arithmetic_spec.md) | ✅ Complete | 2/5 | 80% | 282 lines |
 | [Comments Specification](comments_spec.md) | ⚠️ Partial | 1/5 | 60% | 189 lines |
 | [Trailing Blocks Specification](trailing_blocks_spec.md) | ⚠️ Partial | 3/5 | 60% | 190 lines |
 
