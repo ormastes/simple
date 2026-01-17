@@ -462,14 +462,12 @@ pub(super) fn exec_match(
             }
 
             // Use exec_block_fn to capture implicit return value from match arms
-            let (flow, last_val) = exec_block_fn(&arm.body, env, functions, classes, enums, impl_methods)?;
+            let (flow, _last_val) = exec_block_fn(&arm.body, env, functions, classes, enums, impl_methods)?;
             match flow {
                 Control::Return(_) | Control::Break(_) | Control::Continue => return Ok(flow),
                 Control::Next => {
-                    // If arm body has implicit return (last expression), return it
-                    if let Some(val) = last_val {
-                        return Ok(Control::Return(val));
-                    }
+                    // Match arm completed normally - continue after match
+                    // Note: implicit return from match arms should NOT return from function
                     return Ok(Control::Next);
                 }
             }

@@ -118,6 +118,25 @@ pub(crate) fn pattern_matches(
         Pattern::Wildcard => Ok(true),
 
         Pattern::Identifier(name) => {
+            // Special case: if matching an enum and the identifier matches a variant name,
+            // treat it as a unit variant pattern (not a binding)
+            if let Value::Enum {
+                enum_name,
+                variant,
+                payload,
+            } = value
+            {
+                // Check if this identifier is a known variant of the enum
+                if let Some(enum_def) = enums.get(enum_name) {
+                    let is_variant = enum_def.variants.iter().any(|v| &v.name == name);
+                    if is_variant {
+                        // This is a unit variant pattern - match only if variant matches
+                        // and the value has no payload (unit variant)
+                        return Ok(variant == name && payload.is_none());
+                    }
+                }
+            }
+            // Normal identifier pattern - bind the value
             bindings.insert(name.clone(), value.clone());
             Ok(true)
         }
