@@ -375,10 +375,10 @@ Creates a user and verifies that authentication fails with incorrect password.
 
 ```bash
 # Generate HTML documentation
-simple test --format html --output docs/specs/
+simple test --format html --output doc/specs/
 
 # Generate Markdown documentation
-simple test --format markdown --output docs/specs.md
+simple test --format markdown --output doc/specs.md
 
 # Generate with test results
 simple test --doc --html-output docs/test-report.html
@@ -397,7 +397,7 @@ simple test --doc --watch --output docs/
 format = "html"
 
 # Output directory
-output = "docs/specs"
+output = "doc/specs"
 
 # Include test status in documentation
 include_status = true

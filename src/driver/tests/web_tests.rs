@@ -12,8 +12,8 @@ use tempfile::TempDir;
 #[cfg(test)]
 mod web_e2e_tests {
     use super::*;
-    // TODO: [driver][P3] Enable when cli module is public
-    // use simple_driver::cli::web::{web_build, web_init, WebBuildOptions};
+    // Note: cli::web module is public, but tests require web_tests feature
+    use simple_driver::cli::web::{web_build, web_init, WebBuildOptions};
 
     /// Test helper: create temp directory
     fn setup_temp_dir() -> TempDir {

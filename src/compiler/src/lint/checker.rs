@@ -336,9 +336,10 @@ impl LintChecker {
                     // Check if callee is "print"
                     if let Expr::Identifier(name) = &**callee {
                         if name == "print" {
+                            // Note: Expr doesn't track source spans - would need AST refactor to support
                             checker.emit(
                                 LintName::PrintInTestSpec,
-                                Span::new(0, 0, 0, 0), // TODO: [compiler][P3] Use actual span from expr
+                                Span::new(0, 0, 0, 0),
                                 "print() call in test spec file".to_string(),
                                 Some("use triple-quoted strings \"\"\" for test output, or add #[allow(print_in_test_spec)] if print is needed".to_string()),
                             );
@@ -486,26 +487,42 @@ impl LintChecker {
         // Regex pattern for TODO format: TODO: [area][priority] description
         let todo_pattern = regex::Regex::new(r"(TODO|FIXME):\s*\[([^\]]+)\]\[([^\]]+)\]\s*(.+)").unwrap();
 
-        // Check each line
+        // Check each line, tracking byte offset for accurate spans
+        let mut byte_offset = 0usize;
         for (line_num, line) in source.lines().enumerate() {
             let line_num = line_num + 1; // 1-indexed
+            let line_start = byte_offset;
 
             // Skip if not a comment
             let trimmed = line.trim();
             if !trimmed.starts_with('#') {
+                byte_offset += line.len() + 1; // +1 for newline
                 continue;
             }
 
             // Check if contains TODO or FIXME
             if !trimmed.contains("TODO") && !trimmed.contains("FIXME") {
+                byte_offset += line.len() + 1;
                 continue;
             }
+
+            // Find the column where TODO/FIXME starts
+            let todo_col = line
+                .find("TODO")
+                .or_else(|| line.find("FIXME"))
+                .map(|pos| pos + 1) // 1-indexed column
+                .unwrap_or(1);
+
+            // Calculate byte positions for the TODO comment
+            let todo_start = line_start + todo_col.saturating_sub(1);
+            let todo_end = line_start + line.len();
 
             // Extract the comment content (after #)
             let comment = trimmed.trim_start_matches('#').trim();
 
             // Check if it starts with TODO: or FIXME:
             if !comment.starts_with("TODO:") && !comment.starts_with("FIXME:") {
+                byte_offset += line.len() + 1;
                 continue; // Not a standard TODO comment
             }
 
@@ -518,7 +535,7 @@ impl LintChecker {
                 if !TODO_AREAS.contains(&area) {
                     self.emit(
                         LintName::TodoFormat,
-                        Span::new(0, 0, line_num, 0), // TODO: [compiler][P3] Use actual span
+                        Span::new(todo_start, todo_end, line_num, todo_col),
                         format!("TODO/FIXME has invalid area '{}'", area),
                         Some(format!("valid areas: {}", TODO_AREAS.join(", "))),
                     );
@@ -528,7 +545,7 @@ impl LintChecker {
                 if !TODO_PRIORITIES.contains(&priority) {
                     self.emit(
                         LintName::TodoFormat,
-                        Span::new(0, 0, line_num, 0), // TODO: [compiler][P3] Use actual span
+                        Span::new(todo_start, todo_end, line_num, todo_col),
                         format!("TODO/FIXME has invalid priority '{}'", priority),
                         Some(format!("valid priorities: {}", TODO_PRIORITIES.join(", "))),
                     );
@@ -537,7 +554,7 @@ impl LintChecker {
                 // Doesn't match format
                 self.emit(
                     LintName::TodoFormat,
-                    Span::new(0, 0, line_num, 0), // TODO: Use actual span
+                    Span::new(todo_start, todo_end, line_num, todo_col),
                     "TODO/FIXME missing [area][priority] format".to_string(),
                     Some(
                         "use format: TODO: [area][P0-P3] description (e.g., TODO: [runtime][P1] implement feature)"
@@ -545,6 +562,8 @@ impl LintChecker {
                     ),
                 );
             }
+
+            byte_offset += line.len() + 1;
         }
     }
 }

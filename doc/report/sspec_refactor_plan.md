@@ -32,7 +32,7 @@ The SSpec documentation generation system successfully extracts markdown from te
 ### Directory Structure
 
 ```
-docs/spec/
+doc/spec/
 ├── INDEX.md              # Master index (87 features)
 ├── arrays_spec.md        # Comprehensive (425 lines)
 ├── config_system_spec.md # Very comprehensive (1,570 lines)
@@ -523,7 +523,7 @@ pub fn validate_spec(sspec_doc: &SspecDoc) -> ValidationResult {
 ```
 Generating BDD documentation...
   Input files: 80
-  Output dir: docs/spec
+  Output dir: doc/spec
 
 Processing specs:
   ✅ arrays_spec.spl (425 lines)

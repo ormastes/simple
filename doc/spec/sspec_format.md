@@ -130,7 +130,7 @@ test "test name":
 
 Generated docs go to:
 ```
-docs/spec/
+doc/spec/
   ├── mixin_spec.md
   ├── static_polymorphism_spec.md
   └── ...

@@ -4,6 +4,7 @@
 //! if expressions, lambda expressions, and yield expressions.
 
 use simple_parser::{self as ast, Expr};
+use std::collections::HashSet;
 
 use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::LowerResult;
@@ -61,9 +62,14 @@ impl Lowerer {
             // Capture all immutable variables from outer scope
             ctx.locals.iter().enumerate().map(|(i, _)| i).collect()
         } else {
-            // TODO: [compiler][P3] Analyze body to determine which variables are actually used
-            // For now, capture all (conservative approach)
-            ctx.locals.iter().enumerate().map(|(i, _)| i).collect()
+            // Analyze body to determine which variables are actually used
+            let used_vars = collect_used_identifiers(body);
+            ctx.locals
+                .iter()
+                .enumerate()
+                .filter(|(_, local)| used_vars.contains(&local.name))
+                .map(|(i, _)| i)
+                .collect()
         };
 
         // Collect parameter names and types
@@ -183,5 +189,113 @@ impl Lowerer {
                 ty: TypeId::I64, // Returns thread handle
             })
         }
+    }
+}
+
+/// Collect all identifiers used in an expression tree.
+///
+/// This function walks the expression tree and collects all variable
+/// identifiers that are referenced. Used for lambda capture optimization.
+fn collect_used_identifiers(expr: &Expr) -> HashSet<String> {
+    let mut identifiers = HashSet::new();
+    collect_identifiers_recursive(expr, &mut identifiers);
+    identifiers
+}
+
+/// Recursively walk the expression tree and collect identifiers.
+fn collect_identifiers_recursive(expr: &Expr, identifiers: &mut HashSet<String>) {
+    match expr {
+        Expr::Identifier(name) => {
+            identifiers.insert(name.clone());
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_identifiers_recursive(left, identifiers);
+            collect_identifiers_recursive(right, identifiers);
+        }
+        Expr::Unary { operand, .. } => {
+            collect_identifiers_recursive(operand, identifiers);
+        }
+        Expr::Call { callee, args } => {
+            collect_identifiers_recursive(callee, identifiers);
+            for arg in args {
+                collect_identifiers_recursive(&arg.value, identifiers);
+            }
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            collect_identifiers_recursive(receiver, identifiers);
+            for arg in args {
+                collect_identifiers_recursive(&arg.value, identifiers);
+            }
+        }
+        Expr::FieldAccess { receiver, .. } => {
+            collect_identifiers_recursive(receiver, identifiers);
+        }
+        Expr::Index { receiver, index } => {
+            collect_identifiers_recursive(receiver, identifiers);
+            collect_identifiers_recursive(index, identifiers);
+        }
+        Expr::Tuple(exprs) | Expr::Array(exprs) | Expr::VecLiteral(exprs) => {
+            for e in exprs {
+                collect_identifiers_recursive(e, identifiers);
+            }
+        }
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_identifiers_recursive(condition, identifiers);
+            collect_identifiers_recursive(then_branch, identifiers);
+            if let Some(eb) = else_branch {
+                collect_identifiers_recursive(eb, identifiers);
+            }
+        }
+        Expr::Lambda { body, .. } => {
+            // Note: We don't exclude lambda params here since they shadow outer scope
+            // The actual capture filtering happens when we compare against ctx.locals
+            collect_identifiers_recursive(body, identifiers);
+        }
+        Expr::Cast { expr, .. } => {
+            collect_identifiers_recursive(expr, identifiers);
+        }
+        Expr::FString(parts) => {
+            for part in parts {
+                if let simple_parser::FStringPart::Expr(e) = part {
+                    collect_identifiers_recursive(e, identifiers);
+                }
+            }
+        }
+        Expr::StructInit { fields, .. } => {
+            for (_, value) in fields {
+                collect_identifiers_recursive(value, identifiers);
+            }
+        }
+        Expr::New { expr, .. } => {
+            collect_identifiers_recursive(expr, identifiers);
+        }
+        Expr::Yield(value) => {
+            if let Some(v) = value {
+                collect_identifiers_recursive(v, identifiers);
+            }
+        }
+        Expr::Spawn(inner) => {
+            collect_identifiers_recursive(inner, identifiers);
+        }
+        Expr::Match { subject, arms } => {
+            collect_identifiers_recursive(subject, identifiers);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_identifiers_recursive(guard, identifiers);
+                }
+                for stmt in &arm.body.statements {
+                    if let simple_parser::ast::Node::Expression(e) = stmt {
+                        collect_identifiers_recursive(e, identifiers);
+                    }
+                }
+            }
+        }
+        // Literals and other expressions that don't contain identifiers
+        _ => {}
     }
 }

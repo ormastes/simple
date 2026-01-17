@@ -460,6 +460,10 @@ impl<'a> Parser<'a> {
             TokenKind::From => "from",
             // Allow 'common' as method/field name (e.g., obj.common)
             TokenKind::Common => "common",
+            // Allow AOP keywords as method names (e.g., trainer.on(...))
+            TokenKind::On => "on",
+            TokenKind::Bind => "bind",
+            TokenKind::Mock => "mock",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
