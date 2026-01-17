@@ -101,7 +101,8 @@ impl VulkanRenderer:
 
     # Create a new Vulkan renderer
     pub fn new(window_title: &str, width: u32, height: u32) -> Result<VulkanRenderer, RenderError>:
-        # TODO: [ui][P1] Create window handle (platform-specific)
+        # Create window handle using platform-specific windowing system
+        # On Linux: X11 or Wayland, Windows: Win32, macOS: Cocoa
         val window_handle = vulkan_create_window(window_title, width, height)
         if window_handle == 0:
             return Err(RenderError::IoError("Failed to create window".to_string()))
@@ -222,14 +223,32 @@ impl RenderBackend for VulkanRenderer:
         if not self.initialized:
             return Err(RenderError::NotInitialized)
 
-        # TODO: [ui][P1] Implement incremental updates
-        # For now, just re-render the whole tree
-        # Future optimization:
-        #   - Identify affected elements from patches
-        #   - Mark dirty regions
-        #   - Recompute layout only for affected subtrees
-        #   - Regenerate draw list only for dirty regions
-        #   - Use scissor rects to update only changed areas
+        # Incremental update implementation:
+        # 1. Identify affected elements from patches
+        var dirty_nodes: Set<NodeId> = Set::new()
+        for patch in patches.iter():
+            dirty_nodes.insert(patch.target_node())
+
+        # 2. Mark dirty regions in the layout cache
+        for node_id in dirty_nodes:
+            self.layout_engine.invalidate(node_id)
+
+        # 3. Recompute layout only for affected subtrees
+        for node_id in dirty_nodes:
+            if val Some(elem) = self.element_map.get(&node_id):
+                val constraints = self.get_constraints_for(elem)
+                self.layout_engine.compute(elem, constraints)
+
+        # 4. Regenerate draw list only for dirty regions
+        var dirty_draw_commands: Array<DrawCommand> = []
+        for node_id in dirty_nodes:
+            if val Some(layout) = self.layout_engine.get_cached(node_id):
+                if val Some(elem) = self.element_map.get(&node_id):
+                    val commands = self.element_processor.process(elem, layout)
+                    dirty_draw_commands.extend(commands)
+
+        # 5. Update GPU buffers with new draw commands
+        self.buffer_manager.update_draw_commands(&dirty_draw_commands)
 
         return Ok(())
 
@@ -401,26 +420,77 @@ impl VulkanDevice:
         })
 
     fn create_buffer(size: u64, usage: u32, memory_usage: u32) -> Result<Buffer, text>:
-        # TODO: [ui][P3] Create buffer using VMA
-        # vmaCreateBuffer(allocator, &buffer_info, &alloc_info, &buffer, &allocation)
+        # Create buffer using VMA (Vulkan Memory Allocator)
+        val buffer_info = VkBufferCreateInfo {
+            size: size,
+            usage: usage,
+            sharing_mode: VK_SHARING_MODE_EXCLUSIVE
+        }
+
+        val alloc_info = VmaAllocationCreateInfo {
+            usage: memory_usage,
+            flags: 0
+        }
+
+        val (buffer_handle, allocation_handle) = vma_create_buffer(
+            self.allocator,
+            &buffer_info,
+            &alloc_info
+        )?
 
         return Ok(Buffer {
-            handle: 0,         # TODO: [ui][P1] VkBuffer handle
-            allocation: 0,     # TODO: [ui][P1] VmaAllocation handle
+            handle: buffer_handle,
+            allocation: allocation_handle,
             size: size
         })
 
     fn create_image(width: u32, height: u32, format: u32, usage: u32) -> Result<Image, text>:
-        # TODO: [ui][P3] Create image using VMA
-        # vmaCreateImage(allocator, &image_info, &alloc_info, &image, &allocation)
+        # Create image using VMA (Vulkan Memory Allocator)
+        val image_info = VkImageCreateInfo {
+            image_type: VK_IMAGE_TYPE_2D,
+            format: format,
+            extent: VkExtent3D { width: width, height: height, depth: 1 },
+            mip_levels: 1,
+            array_layers: 1,
+            samples: VK_SAMPLE_COUNT_1_BIT,
+            tiling: VK_IMAGE_TILING_OPTIMAL,
+            usage: usage,
+            sharing_mode: VK_SHARING_MODE_EXCLUSIVE,
+            initial_layout: VK_IMAGE_LAYOUT_UNDEFINED
+        }
 
-        # TODO: [ui][P3] Create image view
-        # vkCreateImageView(device, &view_info, nullptr, &image_view)
+        val alloc_info = VmaAllocationCreateInfo {
+            usage: VMA_MEMORY_USAGE_GPU_ONLY,
+            flags: 0
+        }
+
+        val (image_handle, allocation_handle) = vma_create_image(
+            self.allocator,
+            &image_info,
+            &alloc_info
+        )?
+
+        # Create image view for accessing the image in shaders
+        val view_info = VkImageViewCreateInfo {
+            image: image_handle,
+            view_type: VK_IMAGE_VIEW_TYPE_2D,
+            format: format,
+            components: VkComponentMapping::identity(),
+            subresource_range: VkImageSubresourceRange {
+                aspect_mask: VK_IMAGE_ASPECT_COLOR_BIT,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1
+            }
+        }
+
+        val image_view = vk_create_image_view(self.device, &view_info)?
 
         return Ok(Image {
-            handle: 0,         # TODO: [ui][P1] VkImage handle
-            view: 0,           # TODO: [ui][P1] VkImageView handle
-            allocation: 0,     # TODO: [ui][P1] VmaAllocation handle
+            handle: image_handle,
+            view: image_view,
+            allocation: allocation_handle,
             width: width,
             height: height,
             format: format
@@ -544,29 +614,201 @@ impl LayoutEngine:
         return result
 
     fn layout_flexbox(elem: &Element, constraints: BoxConstraints) -> LayoutResult:
-        # TODO: [ui][P1] Implement flexbox layout algorithm
-        # - Determine main axis (row/column)
-        # - Calculate flex item sizes
-        # - Handle flex-grow, flex-shrink
-        # - Apply justify-content, align-items
+        # Flexbox layout algorithm implementation
+        val is_row = elem.kind == ElementKind::Row
+        val main_axis = if is_row: Axis::Horizontal else: Axis::Vertical
+        val cross_axis = if is_row: Axis::Vertical else: Axis::Horizontal
 
-        return LayoutResult::default()
+        val children = elem.children
+        val child_count = children.len()
+        if child_count == 0:
+            return LayoutResult {
+                size: Size { width: 0.0, height: 0.0 },
+                children: []
+            }
+
+        # Phase 1: Calculate base sizes and flex factors
+        var total_flex: f32 = 0.0
+        var total_fixed_size: f32 = 0.0
+        var child_infos: Array<FlexChildInfo> = []
+
+        for child in children:
+            val flex = child.style.flex_grow.unwrap_or(0.0)
+            val base_size = self.measure_child_base_size(child, constraints, main_axis)
+            total_flex += flex
+            if flex == 0.0:
+                total_fixed_size += base_size
+            child_infos.push(FlexChildInfo { flex: flex, base_size: base_size })
+
+        # Phase 2: Distribute remaining space
+        val available_main = if is_row: constraints.max_width else: constraints.max_height
+        val remaining_space = (available_main - total_fixed_size).max(0.0)
+        val space_per_flex = if total_flex > 0.0: remaining_space / total_flex else: 0.0
+
+        # Phase 3: Calculate final child sizes and positions
+        var child_layouts: Array<ChildLayout> = []
+        var main_offset: f32 = 0.0
+
+        for (i, child) in children.iter().enumerate():
+            val info = child_infos[i]
+            val main_size = if info.flex > 0.0:
+                info.base_size + (space_per_flex * info.flex)
+            else:
+                info.base_size
+
+            val child_constraints = if is_row:
+                BoxConstraints { min_width: main_size, max_width: main_size,
+                                 min_height: 0.0, max_height: constraints.max_height }
+            else:
+                BoxConstraints { min_width: 0.0, max_width: constraints.max_width,
+                                 min_height: main_size, max_height: main_size }
+
+            val child_result = self.compute_layout(child, child_constraints)
+
+            val position = if is_row:
+                Point { x: main_offset, y: 0.0 }
+            else:
+                Point { x: 0.0, y: main_offset }
+
+            child_layouts.push(ChildLayout {
+                id: child.id,
+                position: position,
+                size: child_result.size
+            })
+
+            main_offset += main_size
+
+        val final_size = if is_row:
+            Size { width: main_offset, height: constraints.max_height }
+        else:
+            Size { width: constraints.max_width, height: main_offset }
+
+        return LayoutResult { size: final_size, children: child_layouts }
 
     fn layout_grid(elem: &Element, constraints: BoxConstraints) -> LayoutResult:
-        # TODO: [ui][P1] Implement CSS grid layout algorithm
-        # - Parse grid-template-columns, grid-template-rows
-        # - Place items in grid cells
-        # - Handle grid gaps
+        # CSS Grid layout algorithm implementation
+        val style = elem.style
+        val columns = style.grid_template_columns.unwrap_or([TrackSize::Fr(1.0)])
+        val rows = style.grid_template_rows.unwrap_or([TrackSize::Auto])
+        val gap = style.gap.unwrap_or(0.0)
 
-        return LayoutResult::default()
+        val col_count = columns.len()
+        val row_count = rows.len().max((elem.children.len() + col_count - 1) / col_count)
+
+        # Calculate column widths
+        val available_width = constraints.max_width - (gap * (col_count - 1) as f32)
+        var total_fr: f32 = 0.0
+        var fixed_width: f32 = 0.0
+        for col in columns:
+            match col:
+                case TrackSize::Fr(fr): total_fr += fr
+                case TrackSize::Px(px): fixed_width += px
+                case TrackSize::Auto: pass  # Will be calculated later
+
+        val fr_unit = if total_fr > 0.0: (available_width - fixed_width) / total_fr else: 0.0
+        var col_widths: Array<f32> = []
+        for col in columns:
+            match col:
+                case TrackSize::Fr(fr): col_widths.push(fr * fr_unit)
+                case TrackSize::Px(px): col_widths.push(px)
+                case TrackSize::Auto: col_widths.push(available_width / col_count as f32)
+
+        # Calculate row heights (simplified: equal distribution)
+        val available_height = constraints.max_height - (gap * (row_count - 1) as f32)
+        val row_height = available_height / row_count as f32
+
+        # Place children in grid cells
+        var child_layouts: Array<ChildLayout> = []
+        for (i, child) in elem.children.iter().enumerate():
+            val col = i % col_count
+            val row = i / col_count
+
+            var x: f32 = 0.0
+            for c in 0..col:
+                x += col_widths[c] + gap
+
+            val y = row as f32 * (row_height + gap)
+
+            val child_constraints = BoxConstraints {
+                min_width: col_widths[col], max_width: col_widths[col],
+                min_height: row_height, max_height: row_height
+            }
+            val child_result = self.compute_layout(child, child_constraints)
+
+            child_layouts.push(ChildLayout {
+                id: child.id,
+                position: Point { x: x, y: y },
+                size: child_result.size
+            })
+
+        return LayoutResult {
+            size: Size { width: constraints.max_width, height: row_count as f32 * (row_height + gap) - gap },
+            children: child_layouts
+        }
 
     fn layout_block(elem: &Element, constraints: BoxConstraints) -> LayoutResult:
-        # TODO: [ui][P1] Implement block layout
-        # - Stack children vertically
-        # - Apply width, height constraints
-        # - Measure text if text element
+        # Block layout: stack children vertically with full width
+        var child_layouts: Array<ChildLayout> = []
+        var y_offset: f32 = 0.0
 
-        return LayoutResult::default()
+        for child in elem.children:
+            val child_constraints = BoxConstraints {
+                min_width: constraints.min_width,
+                max_width: constraints.max_width,
+                min_height: 0.0,
+                max_height: constraints.max_height - y_offset
+            }
+
+            val child_result = self.compute_layout(child, child_constraints)
+
+            child_layouts.push(ChildLayout {
+                id: child.id,
+                position: Point { x: 0.0, y: y_offset },
+                size: child_result.size
+            })
+
+            y_offset += child_result.size.height
+
+        # Handle text elements specially
+        if elem.kind == ElementKind::Text:
+            val text_size = self.measure_text(elem, constraints)
+            return LayoutResult {
+                size: text_size,
+                children: []
+            }
+
+        return LayoutResult {
+            size: Size { width: constraints.max_width, height: y_offset },
+            children: child_layouts
+        }
+
+    fn measure_child_base_size(child: &Element, constraints: BoxConstraints, axis: Axis) -> f32:
+        # Measure the intrinsic size of a child along the given axis
+        match axis:
+            case Axis::Horizontal:
+                return child.style.width.unwrap_or(constraints.max_width / 4.0)
+            case Axis::Vertical:
+                return child.style.height.unwrap_or(constraints.max_height / 4.0)
+
+    fn measure_text(elem: &Element, constraints: BoxConstraints) -> Size:
+        # Measure text dimensions using the text renderer
+        if val Some(text) = elem.text:
+            return self.text_renderer.measure(text, elem.style.font_size.unwrap_or(16.0), constraints.max_width)
+        return Size { width: 0.0, height: 0.0 }
+
+# Helper structs for layout
+struct FlexChildInfo:
+    flex: f32
+    base_size: f32
+
+enum Axis:
+    Horizontal
+    Vertical
+
+enum TrackSize:
+    Fr(f32)
+    Px(f32)
+    Auto
 
 # =============================================================================
 # Element Processor (CPU → GPU Data)

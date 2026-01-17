@@ -122,6 +122,93 @@ class Promise:
     fn is_pending() -> bool:
         return self.state.is_pending()
 
+    # Chain a transformation function
+    fn then(self, on_resolve) -> Promise:
+        match self.state:
+            case Resolved(v):
+                val result = on_resolve(v)
+                return Promise.resolved(result)
+            case Rejected(e):
+                return Promise.rejected(e)
+            case Pending:
+                return Promise.pending()
+
+    # Catch errors from a rejected promise
+    fn catch_err(self, on_reject) -> Promise:
+        match self.state:
+            case Resolved(v):
+                return Promise.resolved(v)
+            case Rejected(e):
+                val result = on_reject(e)
+                return Promise.resolved(result)
+            case Pending:
+                return Promise.pending()
+
+    # Finally - always executes regardless of state
+    # Takes a dummy arg since Simple doesn't support no-arg lambdas easily
+    fn finally(self, on_finally) -> Promise:
+        # Execute callback with nil as dummy value
+        on_finally(nil)
+        # Return original promise state
+        return self
+
+    # Get the error value (for testing)
+    fn get_error(self):
+        match self.state:
+            case Rejected(e): return e
+            case _: return nil
+
+    # Static combinator: all - wait for all promises
+    static fn all(promises) -> Promise:
+        var results = []
+        for p in promises:
+            if p.is_rejected():
+                return Promise.rejected(p.get_error())
+            elif p.is_pending():
+                return Promise.pending()
+            else:
+                results.append(p.get_value())
+        return Promise.resolved(results)
+
+    # Static combinator: race - return first settled promise
+    static fn race(promises) -> Promise:
+        for p in promises:
+            if p.is_resolved():
+                return Promise.resolved(p.get_value())
+            elif p.is_rejected():
+                return Promise.rejected(p.get_error())
+        return Promise.pending()
+
+    # Static combinator: any - return first success, reject only if all fail
+    static fn any(promises) -> Promise:
+        var errors = []
+        for p in promises:
+            if p.is_resolved():
+                return Promise.resolved(p.get_value())
+            elif p.is_rejected():
+                errors.append(p.get_error())
+        if errors.len() == promises.len():
+            return Promise.rejected(errors)
+        return Promise.pending()
+
+    # Static combinator: all_settled - wait for all, regardless of outcome
+    static fn all_settled(promises) -> Promise:
+        var results = []
+        for p in promises:
+            if p.is_pending():
+                return Promise.pending()
+            elif p.is_resolved():
+                results.append(("fulfilled", p.get_value()))
+            else:
+                results.append(("rejected", p.get_error()))
+        return Promise.resolved(results)
+
+    # Get the resolved value (for testing)
+    fn get_value(self):
+        match self.state:
+            case Resolved(v): return v
+            case _: return nil
+
 # =====================================================
 # BDD Specification Tests
 # =====================================================
@@ -143,30 +230,34 @@ var skipped = 0
 print('describe Promise creation:')
 print('  context static constructors:')
 
-print('    [SKIP] it creates resolved promise:')
-skipped = skipped + 1
-# TODO: [stdlib][P1] Implement when Promise type is available
-# val p = Promise.resolve(42)
+# Test: creates resolved promise
+val p_create_resolved = Promise.resolved(42)
+if p_create_resolved.is_resolved() and p_create_resolved.get_value() == 42:
+    print('    [PASS] it creates resolved promise:')
+    passed = passed + 1
+else:
+    print('    [FAIL] it creates resolved promise:')
+    failed = failed + 1
 
-print('    [SKIP] it creates rejected promise:')
-skipped = skipped + 1
-# TODO: [stdlib][P1] Implement when Promise type is available
-# val p = Promise.reject(Error("failed"))
+# Test: creates rejected promise
+val p_create_rejected = Promise.rejected("failed")
+if p_create_rejected.is_rejected():
+    print('    [PASS] it creates rejected promise:')
+    passed = passed + 1
+else:
+    print('    [FAIL] it creates rejected promise:')
+    failed = failed + 1
 
 print('')
 print('  context implicit wrapping:')
 
 print('    [SKIP] it wraps async fn return:')
 skipped = skipped + 1
-# TODO: [stdlib][P1] Implement when async-default works
-# fn fetch() -> User:  # Actually returns Promise<User>
-#     ...
+# TODO: [stdlib][P3] Requires async-default runtime
 
 print('    [SKIP] it avoids double wrapping:')
 skipped = skipped + 1
-# TODO: [stdlib][P1] Implement when Promise type is available
-# fn get_promise() -> Promise<User>:  # No double wrap
-#     return fetch_user(id)
+# TODO: [stdlib][P3] Requires async-default runtime
 
 # -----------------------------------------------------
 # Promise Chaining
@@ -176,33 +267,71 @@ print('')
 print('describe Promise chaining:')
 print('  context then combinator:')
 
-print('    [SKIP] it transforms result with then:')
-skipped = skipped + 1
-# TODO: [stdlib][P1] Implement when Promise.then is available
-# val name = fetch_user(id).then(\u: u.name)
+# Test: transforms result with then
+val p_then = Promise.resolved(10)
+val p_then_result = p_then.then(\x: x * 2)
+if p_then_result.get_value() == 20:
+    print('    [PASS] it transforms result with then:')
+    passed = passed + 1
+else:
+    print('    [FAIL] it transforms result with then:')
+    failed = failed + 1
 
-print('    [SKIP] it chains multiple then:')
-skipped = skipped + 1
-# TODO: [stdlib][P1] Implement when Promise chaining works
-# fetch_data()
-#     .then(\d: transform(d))
-#     .then(\d: save(d))
+# Test: chains multiple then
+val p_chain = Promise.resolved(5)
+val p_chain_result = p_chain.then(\x: x + 1).then(\x: x * 3)
+if p_chain_result.get_value() == 18:
+    print('    [PASS] it chains multiple then:')
+    passed = passed + 1
+else:
+    print('    [FAIL] it chains multiple then:')
+    failed = failed + 1
 
 print('')
 print('  context catch combinator:')
 
-print('    [SKIP] it handles rejection:')
-skipped = skipped + 1
-# TODO: [stdlib][P1] Implement when Promise.catch is available
-# fetch_user(id).catch(\e: default_user())
+# Test: handles rejection
+val p_reject = Promise.rejected("error!")
+val p_caught = p_reject.catch_err(\e: "caught")
+if p_caught.get_value() == "caught":
+    print('    [PASS] it handles rejection:')
+    passed = passed + 1
+else:
+    print('    [FAIL] it handles rejection:')
+    failed = failed + 1
+
+# Test: then on rejected passes through error
+val p_reject2 = Promise.rejected("fail")
+val p_pass_through = p_reject2.then(\x: x * 2)
+if p_pass_through.is_rejected():
+    print('    [PASS] it passes rejection through then:')
+    passed = passed + 1
+else:
+    print('    [FAIL] it passes rejection through then:')
+    failed = failed + 1
 
 print('')
 print('  context finally combinator:')
 
-print('    [SKIP] it always executes:')
-skipped = skipped + 1
-# TODO: [stdlib][P1] Implement when Promise.finally is available
-# fetch_user(id).finally(\: cleanup())
+# Test: finally preserves resolved value
+val p_finally_resolved = Promise.resolved(42)
+val p_finally_result = p_finally_resolved.finally(\x: x)
+if p_finally_result.get_value() == 42:
+    print('    [PASS] it preserves resolved value:')
+    passed = passed + 1
+else:
+    print('    [FAIL] it preserves resolved value:')
+    failed = failed + 1
+
+# Test: finally preserves rejected state
+val p_finally_rejected = Promise.rejected("error")
+val p_finally_rej_result = p_finally_rejected.finally(\x: x)
+if p_finally_rej_result.is_rejected():
+    print('    [PASS] it preserves rejected state:')
+    passed = passed + 1
+else:
+    print('    [FAIL] it preserves rejected state:')
+    failed = failed + 1
 
 # -----------------------------------------------------
 # Promise Combinators
@@ -212,37 +341,80 @@ print('')
 print('describe Promise combinators:')
 print('  context Promise.all:')
 
-print('    [SKIP] it waits for all promises:')
-skipped = skipped + 1
-# TODO: [stdlib][P1] Implement when Promise.all is available
-# val users ~= Promise.all([fetch_user(1), fetch_user(2)])
+# Test: Promise.all waits for all promises
+val p_all_1 = Promise.resolved(1)
+val p_all_2 = Promise.resolved(2)
+val p_all_3 = Promise.resolved(3)
+val p_all_result = Promise.all([p_all_1, p_all_2, p_all_3])
+if p_all_result.is_resolved():
+    val all_vals = p_all_result.get_value()
+    if all_vals[0] == 1 and all_vals[1] == 2 and all_vals[2] == 3:
+        print('    [PASS] it waits for all promises:')
+        passed = passed + 1
+    else:
+        print('    [FAIL] it waits for all promises:')
+        failed = failed + 1
+else:
+    print('    [FAIL] it waits for all promises:')
+    failed = failed + 1
 
-print('    [SKIP] it rejects if any rejects:')
-skipped = skipped + 1
-# TODO: [stdlib][P1] Implement when Promise.all rejection works
+# Test: Promise.all rejects if any rejects
+val p_all_ok = Promise.resolved(1)
+val p_all_fail = Promise.rejected("error")
+val p_all_reject_result = Promise.all([p_all_ok, p_all_fail])
+if p_all_reject_result.is_rejected():
+    print('    [PASS] it rejects if any rejects:')
+    passed = passed + 1
+else:
+    print('    [FAIL] it rejects if any rejects:')
+    failed = failed + 1
 
 print('')
 print('  context Promise.race:')
 
-print('    [SKIP] it resolves with first:')
-skipped = skipped + 1
-# TODO: [stdlib][P1] Implement when Promise.race is available
-# val first ~= Promise.race([slow(), fast()])
+# Test: Promise.race resolves with first settled
+val p_race_1 = Promise.resolved("first")
+val p_race_2 = Promise.pending()
+val p_race_result = Promise.race([p_race_1, p_race_2])
+if p_race_result.is_resolved() and p_race_result.get_value() == "first":
+    print('    [PASS] it resolves with first:')
+    passed = passed + 1
+else:
+    print('    [FAIL] it resolves with first:')
+    failed = failed + 1
 
 print('')
 print('  context Promise.any:')
 
-print('    [SKIP] it resolves with first success:')
-skipped = skipped + 1
-# TODO: [stdlib][P1] Implement when Promise.any is available
-# val result ~= Promise.any([might_fail(), backup()])
+# Test: Promise.any resolves with first success
+val p_any_fail = Promise.rejected("fail1")
+val p_any_ok = Promise.resolved("success")
+val p_any_result = Promise.any([p_any_fail, p_any_ok])
+if p_any_result.is_resolved() and p_any_result.get_value() == "success":
+    print('    [PASS] it resolves with first success:')
+    passed = passed + 1
+else:
+    print('    [FAIL] it resolves with first success:')
+    failed = failed + 1
 
 print('')
 print('  context Promise.all_settled:')
 
-print('    [SKIP] it waits for all without short-circuit:')
-skipped = skipped + 1
-# TODO: [stdlib][P1] Implement when Promise.all_settled is available
+# Test: Promise.all_settled waits for all without short-circuit
+val p_settled_ok = Promise.resolved("ok")
+val p_settled_fail = Promise.rejected("fail")
+val p_settled_result = Promise.all_settled([p_settled_ok, p_settled_fail])
+if p_settled_result.is_resolved():
+    val settled_vals = p_settled_result.get_value()
+    if settled_vals.len() == 2:
+        print('    [PASS] it waits for all without short-circuit:')
+        passed = passed + 1
+    else:
+        print('    [FAIL] it waits for all without short-circuit:')
+        failed = failed + 1
+else:
+    print('    [FAIL] it waits for all without short-circuit:')
+    failed = failed + 1
 
 # -----------------------------------------------------
 # Promise State Inspection

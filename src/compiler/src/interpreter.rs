@@ -118,6 +118,61 @@ pub(crate) enum Control {
     Continue,
 }
 
+/// Await a value if it's a Future or Promise.
+/// For FutureValue: blocks until the future completes and returns the result.
+/// For Promise objects: extracts the resolved value if already resolved.
+/// For other values: returns as-is.
+fn await_value(value: Value) -> Result<Value, CompileError> {
+    match value {
+        // Handle FutureValue - await the result
+        Value::Future(ref future) => {
+            match future.await_result() {
+                Ok(result) => Ok(result),
+                Err(e) => Err(CompileError::Runtime(format!("await failed: {}", e))),
+            }
+        }
+        // Handle Promise objects (Simple-level Promise type)
+        Value::Object { ref class, ref fields } if class == "Promise" => {
+            // Check the state field
+            if let Some(state) = fields.get("state") {
+                match state {
+                    Value::Enum { variant, payload, .. } => {
+                        match variant.as_str() {
+                            "Resolved" => {
+                                // Extract the value from Resolved(value)
+                                if let Some(inner) = payload {
+                                    Ok(inner.as_ref().clone())
+                                } else {
+                                    Ok(Value::Nil)
+                                }
+                            }
+                            "Rejected" => {
+                                // Extract error message from Rejected(error)
+                                if let Some(inner) = payload {
+                                    Err(CompileError::Runtime(format!("Promise rejected: {:?}", inner)))
+                                } else {
+                                    Err(CompileError::Runtime("Promise rejected".to_string()))
+                                }
+                            }
+                            "Pending" => {
+                                // For pending promises, we can't block in the interpreter
+                                // Return a pending indicator or error
+                                Err(CompileError::Runtime("Cannot await pending Promise in synchronous context".to_string()))
+                            }
+                            _ => Ok(value),
+                        }
+                    }
+                    _ => Ok(value),
+                }
+            } else {
+                Ok(value)
+            }
+        }
+        // Non-async values pass through unchanged
+        _ => Ok(value),
+    }
+}
+
 /// Evaluate the module and return the `main` binding as an i32.
 #[instrument(skip(items))]
 pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
@@ -166,6 +221,17 @@ pub(crate) fn exec_node(
                         mark_as_moved(source_name);
                     }
                 }
+
+                // Handle suspension operator (~=): await futures and promises
+                let value = if let_stmt.is_suspend {
+                    eprintln!("[DEBUG] is_suspend=true, value type: {:?}", std::mem::discriminant(&value));
+                    if let Value::Object { ref class, .. } = value {
+                        eprintln!("[DEBUG] Object class: {}", class);
+                    }
+                    await_value(value)?
+                } else {
+                    value
+                };
 
                 // Validate unit type annotation if present
                 // Type can come from either let_stmt.ty OR from a typed pattern (x: Type)

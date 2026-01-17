@@ -368,11 +368,10 @@ impl BrowserRenderer:
     async fn add_event_listener(self, dom_handle: DomNodeHandle, node_id: NodeId,
                                  event_name: &str, handler_id: u64) -> Future<()>:
         # Create callback that converts DOM event to UI Event
+        val renderer = self
         val callback = |dom_event: DomEvent| {
-            # TODO: [ui][P3] Convert DOM event to UI Event
-            # TODO: [ui][P1] Dispatch to application event handler
-            val ui_event = self.convert_dom_event(dom_event)
-            self.dispatch_event(node_id, handler_id, ui_event)
+            val ui_event = renderer.convert_dom_event(dom_event)
+            renderer.dispatch_event(node_id, handler_id, ui_event)
         }
 
         # Register with DOM
@@ -411,9 +410,18 @@ impl BrowserRenderer:
                 return Event::Key(KeyEvent { code: KeyCode::Null, modifiers: KeyModifiers::none() })
 
     fn dispatch_event(node_id: NodeId, handler_id: u64, event: Event):
-        # TODO: [ui][P1] Dispatch to application event handler
-        # This would call the application's event callback
-        pass
+        # Look up the registered event handler and call it
+        if val Some(handler) = self.event_handlers.get(&handler_id):
+            # Call the handler with the event
+            handler.invoke(node_id, event)
+        else:
+            # Fallback: dispatch to global event bus if available
+            if val Some(bus) = get_global_event_bus():
+                bus.dispatch(EventMessage {
+                    source_node: node_id,
+                    handler_id: handler_id,
+                    event: event
+                })
 
 # =============================================================================
 # Browser DOM API (WASM FFI)
@@ -488,6 +496,39 @@ impl DomEvent:
         return "DomEvent: {self.event_type}{mod_str}, pos=({self.client_x}, {self.client_y})"
 
 type EventCallback = fn(DomEvent) -> ()
+
+# Event message for event bus dispatching
+struct EventMessage:
+    source_node: NodeId
+    handler_id: u64
+    event: Event
+
+# Global event bus for application-level event handling
+struct EventBus:
+    handlers: Dict<u64, fn(EventMessage) -> ()>
+
+impl EventBus:
+    fn dispatch(self, msg: EventMessage):
+        if val Some(handler) = self.handlers.get(&msg.handler_id):
+            handler(msg)
+
+# Global event bus singleton
+static mut GLOBAL_EVENT_BUS: Option<EventBus> = None
+
+fn get_global_event_bus() -> Option<&mut EventBus>:
+    unsafe:
+        return GLOBAL_EVENT_BUS.as_mut()
+
+fn init_global_event_bus():
+    unsafe:
+        GLOBAL_EVENT_BUS = Some(EventBus {
+            handlers: Dict::new()
+        })
+
+fn register_event_handler(handler_id: u64, handler: fn(EventMessage) -> ()):
+    unsafe:
+        if val Some(bus) = GLOBAL_EVENT_BUS.as_mut():
+            bus.handlers.set(handler_id, handler)
 
 # Browser API functions (implemented via WASM imports)
 # These would be implemented in JavaScript and imported
