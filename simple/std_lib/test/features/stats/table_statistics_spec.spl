@@ -1,5 +1,5 @@
 """
-# SDN Table, TQL, and Statistics Specification
+# SDN Table, TQL, and Custom Blocks Specification
 
 **Feature IDs:** TBD
 **Category:** Stdlib
@@ -8,42 +8,28 @@
 
 ## Overview
 
-This specification defines the statistics library for Simple, including:
+This specification defines:
+- Unified block syntax (`{}` and `:` styles)
 - Collection statistics (mean, std, var, etc.)
 - DataFrame type with columnar storage
 - TQL (Table Query Language) for declarative queries
-- Aggregation and grouping operations
+- Custom blocks (math, regex, html, css, json)
 
-## Syntax
+## Unified Block Syntax
 
-### Table Construction
-
-```simple
-# Row-oriented (SDN-compatible)
-val users = sdn_table |id, age, city|:
-    1, 31.0, "Seoul"
-    2, 24.0, "Busan"
-    3, 28.0, "Seoul"
-
-# Column-oriented (DataFrame)
-val df = dataframe:
-    id:   [1, 2, 3]
-    age:  [31.0, 24.0, 28.0]
-    city: ["Seoul", "Busan", "Seoul"]
-```
-
-### TQL Queries
+Both styles produce identical AST:
 
 ```simple
-val adults = tql(users):
+# Indentation style
+val result = tql:
+    from users
     select @id, @age
-    where @age >= 18
 
-val city_stats = tql(users):
-    groupby @city
-    agg:
-        n: count()
-        avg_age: mean(@age)
+# Brace style
+val result = tql {
+    from users
+    select @id, @age
+}
 ```
 
 ## Key Concepts
@@ -52,612 +38,650 @@ val city_stats = tql(users):
 |---------|-------------|
 | `Table<Schema>` | Typed table with compile-time schema validation |
 | `Column<T>` | Typed column vector, vectorized operations |
-| `tql(source):` | Query block with select/where/groupby/orderby |
-| `@column` | Column reference prefix (disambiguates from variables) |
+| `tql` / `tql:` / `tql {}` | Query block (standalone or method chain) |
+| `@column` | Column reference prefix |
+| `math` / `regex` / etc. | Other custom block types |
 
-## Behavior
-
-- Tables are immutable; transformations produce new tables
-- TQL blocks are statically analyzed at compile time
-- Statistics functions operate on columns, not scalars
-- All operations are vectorized for performance
-
-## Implementation Notes
-
-- Phase 1: Collection statistics on Array/Vec
-- Phase 2: DataFrame type with column storage
-- Phase 3: TQL parser integration
-- Phase 4: Aggregation execution
-
-See `doc/plan/statistics_library_implementation.md` for full plan.
+See `doc/spec/dataframe.md` for full specification.
 """
 
 import std.spec
 
 
 # ============================================================================
-# Test Group 1: Collection Statistics
+# Test Group 1: Unified Block Syntax
+# ============================================================================
+
+describe "Unified Block Syntax":
+    """
+    ## Block Style Equivalence
+
+    Both `{}` and `:` block styles must produce identical behavior.
+    """
+
+    context "when using tql blocks":
+        """
+        ### Scenario: TQL Block Styles
+
+        Both brace and indent styles should work identically.
+        """
+
+        it "parses indent-style tql block":
+            val users = table |id, name, age|:
+                1, "Alice", 30
+                2, "Bob", 25
+
+            val result = tql:
+                from users
+                select @id, @name
+
+            expect(result.column_count()).to(eq(2))
+
+        it "parses brace-style tql block":
+            val users = table |id, name, age| {
+                1, "Alice", 30
+                2, "Bob", 25
+            }
+
+            val result = tql {
+                from users
+                select @id, @name
+            }
+
+            expect(result.column_count()).to(eq(2))
+
+        it "produces identical results from both styles":
+            val users = table |id, age|:
+                1, 30
+                2, 25
+                3, 35
+
+            val result_indent = tql:
+                from users
+                where @age >= 30
+
+            val result_brace = tql {
+                from users
+                where @age >= 30
+            }
+
+            expect(result_indent.len()).to(eq(result_brace.len()))
+            expect(result_indent.len()).to(eq(2))
+
+    context "when using method chain style":
+        """
+        ### Scenario: Method Chain TQL
+
+        Tables can use `.tql` method with either block style.
+        """
+
+        it "supports method chain with indent style":
+            val users = table |id, age|:
+                1, 30
+                2, 25
+
+            val result = users.tql:
+                where @age >= 30
+                select @id
+
+            expect(result.len()).to(eq(1))
+
+        it "supports method chain with brace style":
+            val users = table |id, age| {
+                1, 30
+                2, 25
+            }
+
+            val result = users.tql {
+                where @age >= 30
+                select @id
+            }
+
+            expect(result.len()).to(eq(1))
+
+    context "when nesting blocks":
+        """
+        ### Scenario: Mixed Block Styles
+
+        Nested blocks can use different styles.
+        """
+
+        it "allows indent inside braces":
+            val users = table |id, city, age|:
+                1, "Seoul", 30
+                2, "Seoul", 25
+                3, "Busan", 35
+
+            val result = tql {
+                from users
+                groupby @city
+                agg:
+                    count: count()
+                    avg: mean(@age)
+            }
+
+            expect(result.len()).to(eq(2))
+
+        it "allows braces inside indent":
+            val users = table |id, city, age|:
+                1, "Seoul", 30
+                2, "Seoul", 25
+                3, "Busan", 35
+
+            val result = tql:
+                from users
+                groupby @city
+                agg {
+                    count: count()
+                    avg: mean(@age)
+                }
+
+            expect(result.len()).to(eq(2))
+
+
+# ============================================================================
+# Test Group 2: Collection Statistics
 # ============================================================================
 
 describe "Collection Statistics":
     """
     ## Basic Statistics on Arrays
 
-    Simple arrays and vectors should support basic statistical operations
-    including mean, standard deviation, variance, min, max, and sum.
+    Arrays and vectors support statistical operations.
     """
 
     context "when computing descriptive statistics":
-        """
-        ### Scenario: Computing Mean and Standard Deviation
-
-        Basic descriptive statistics should work on numeric arrays.
-        """
-
-        it "computes mean of integer array":
-            # Arrange
+        it "computes mean - indent style setup":
             val data = [1, 2, 3, 4, 5]
+            expect(data.mean()).to(eq(3.0))
 
-            # Act
-            val result = data.mean()
-
-            # Assert
-            expect(result).to(eq(3.0))
-
-        it "computes mean of float array":
-            # Arrange
-            val data = [1.0, 2.0, 3.0, 4.0, 5.0]
-
-            # Act
-            val result = data.mean()
-
-            # Assert
-            expect(result).to(eq(3.0))
-
-        it "computes population standard deviation":
-            # Arrange
+        it "computes standard deviation":
             val data = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
+            expect(data.std()).to(be_close_to(2.0, 0.001))
 
-            # Act
-            val result = data.std()
-
-            # Assert - population std dev
-            expect(result).to(be_close_to(2.0, 0.001))
-
-        it "computes population variance":
-            # Arrange
+        it "computes variance":
             val data = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
+            expect(data.variance()).to(be_close_to(4.0, 0.001))
 
-            # Act
-            val result = data.variance()
-
-            # Assert
-            expect(result).to(be_close_to(4.0, 0.001))
+        it "computes min and max":
+            val data = [3, 1, 4, 1, 5, 9, 2, 6]
+            expect(data.min()).to(eq(1))
+            expect(data.max()).to(eq(9))
 
     context "when computing order statistics":
-        """
-        ### Scenario: Median and Quantiles
-
-        Order statistics require sorted data and interpolation.
-        """
-
         it "computes median of odd-length array":
-            # Arrange
             val data = [3, 1, 4, 1, 5]
-
-            # Act
-            val result = data.median()
-
-            # Assert - sorted: [1, 1, 3, 4, 5], median = 3
-            expect(result).to(eq(3.0))
+            expect(data.median()).to(eq(3.0))
 
         it "computes median of even-length array":
-            # Arrange
             val data = [1, 2, 3, 4]
+            expect(data.median()).to(eq(2.5))
 
-            # Act
-            val result = data.median()
-
-            # Assert - average of middle two: (2 + 3) / 2 = 2.5
-            expect(result).to(eq(2.5))
-
-        it "computes specified quantile":
-            # Arrange
+        it "computes quantiles":
             val data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
-
-            # Act
-            val q25 = data.quantile(0.25)
-            val q75 = data.quantile(0.75)
-
-            # Assert
-            expect(q25).to(be_close_to(3.25, 0.01))
-            expect(q75).to(be_close_to(7.75, 0.01))
-
-    context "when handling edge cases":
-        """
-        ### Scenario: Empty and Single-Element Arrays
-
-        Statistics on edge cases should return sensible values or errors.
-        """
-
-        it "returns None for mean of empty array":
-            # Arrange
-            val data: [f64] = []
-
-            # Act
-            val result = data.mean_opt()
-
-            # Assert
-            expect(result).to(be_none())
-
-        it "returns element for mean of single-element array":
-            # Arrange
-            val data = [42.0]
-
-            # Act
-            val result = data.mean()
-
-            # Assert
-            expect(result).to(eq(42.0))
-
-        it "returns 0 for std of single-element array":
-            # Arrange
-            val data = [42.0]
-
-            # Act
-            val result = data.std()
-
-            # Assert - no variance with one element
-            expect(result).to(eq(0.0))
+            expect(data.quantile(0.25)).to(be_close_to(3.25, 0.01))
+            expect(data.quantile(0.75)).to(be_close_to(7.75, 0.01))
 
 
 # ============================================================================
-# Test Group 2: DataFrame Construction
+# Test Group 3: Table Construction
 # ============================================================================
 
-describe "DataFrame Construction":
+describe "Table Construction":
     """
-    ## DataFrame Type
+    ## Table Literal Syntax
 
-    DataFrames provide column-oriented storage for analytics workloads.
-    Schema is validated at compile time.
+    Tables can be created with row or column orientation.
     """
 
-    context "when creating from column arrays":
-        """
-        ### Scenario: Column-Oriented Construction
-
-        DataFrames are built from named column arrays.
-        """
-
-        it "creates dataframe with integer and float columns":
-            # Arrange & Act
-            val df = dataframe:
-                id:  [1, 2, 3]
-                age: [31.0, 24.0, 28.0]
-
-            # Assert
-            expect(df.len()).to(eq(3))
-            expect(df.column_count()).to(eq(2))
-
-        it "infers schema from column types":
-            # Arrange
-            val df = dataframe:
-                name: ["Alice", "Bob"]
-                age:  [30, 25]
-
-            # Act
-            val schema = df.schema()
-
-            # Assert
-            expect(schema.get("name")).to(eq(Str))
-            expect(schema.get("age")).to(eq(Int))
-
-        it "rejects mismatched column lengths":
-            # This should fail at compile time or runtime
-            expect_raises SchemaError:
-                val df = dataframe:
-                    id:   [1, 2, 3]
-                    name: ["Alice", "Bob"]  # Length mismatch
-
-    context "when creating from SDN table":
-        """
-        ### Scenario: SDN Table Interop
-
-        SDN named tables can be converted to DataFrames.
-        """
-
-        it "converts SDN table to dataframe":
-            # Arrange
-            val sdn = sdn_table |id, name, age|:
+    context "when using row-oriented syntax":
+        it "creates table with indent style":
+            val users = table |id, name, age|:
                 1, "Alice", 30
                 2, "Bob", 25
+                3, "Carol", 28
 
-            # Act
-            val df = DataFrame.from_sdn(sdn)
+            expect(users.len()).to(eq(3))
+            expect(users.column_count()).to(eq(3))
 
-            # Assert
-            expect(df.len()).to(eq(2))
-            expect(df.get_column("name").to_array()).to(eq(["Alice", "Bob"]))
+        it "creates table with brace style":
+            val users = table |id, name, age| {
+                1, "Alice", 30
+                2, "Bob", 25
+                3, "Carol", 28
+            }
+
+            expect(users.len()).to(eq(3))
+
+    context "when using column-oriented syntax":
+        it "creates dataframe with indent style":
+            val df = dataframe:
+                id:   [1, 2, 3]
+                name: ["Alice", "Bob", "Carol"]
+                age:  [30, 25, 28]
+
+            expect(df.len()).to(eq(3))
+            expect(df.column_count()).to(eq(3))
+
+        it "creates dataframe with brace style":
+            val df = dataframe {
+                id:   [1, 2, 3]
+                name: ["Alice", "Bob", "Carol"]
+                age:  [30, 25, 28]
+            }
+
+            expect(df.len()).to(eq(3))
 
 
 # ============================================================================
-# Test Group 3: TQL Basic Queries
+# Test Group 4: TQL Queries
 # ============================================================================
 
-describe "TQL Basic Queries":
+describe "TQL Queries":
     """
     ## Table Query Language
 
-    TQL provides declarative queries over DataFrames.
-    Queries are parsed and optimized at compile time.
+    Declarative queries with select, where, groupby, orderby, limit.
     """
 
     before_each:
-        @users = dataframe:
-            id:   [1, 2, 3, 4, 5]
-            name: ["Alice", "Bob", "Carol", "Dave", "Eve"]
-            age:  [31.0, 24.0, 28.0, 35.0, 22.0]
-            city: ["Seoul", "Busan", "Seoul", "Seoul", "Busan"]
+        @users = table |id, name, age, city|:
+            1, "Alice", 31, "Seoul"
+            2, "Bob", 24, "Busan"
+            3, "Carol", 28, "Seoul"
+            4, "Dave", 35, "Seoul"
+            5, "Eve", 22, "Busan"
 
-    context "when using select":
-        """
-        ### Scenario: Column Projection
-
-        Select specifies which columns to include in result.
-        """
-
-        it "selects specific columns":
-            # Act
-            val result = tql(@users):
-                select @id, @name
-
-            # Assert
-            expect(result.column_count()).to(eq(2))
-            expect(result.has_column("age")).to(be_false())
-
-        it "selects all columns with star":
-            # Act
-            val result = tql(@users):
-                select *
-
-            # Assert
-            expect(result.column_count()).to(eq(4))
-
-    context "when using where":
-        """
-        ### Scenario: Row Filtering
-
-        Where filters rows based on predicates.
-        """
-
-        it "filters by comparison":
-            # Act
-            val adults = tql(@users):
+    context "when using select and where":
+        it "filters and projects - indent style":
+            val result = tql:
+                from @users
                 where @age >= 25
+                select @name, @age
 
-            # Assert
-            expect(adults.len()).to(eq(3))  # Alice, Carol, Dave
+            expect(result.len()).to(eq(3))
+            expect(result.column_count()).to(eq(2))
 
-        it "filters by equality":
-            # Act
-            val seoul = tql(@users):
-                where @city == "Seoul"
+        it "filters and projects - brace style":
+            val result = tql {
+                from @users
+                where @age >= 25
+                select @name, @age
+            }
 
-            # Assert
-            expect(seoul.len()).to(eq(3))  # Alice, Carol, Dave
+            expect(result.len()).to(eq(3))
 
-        it "combines multiple conditions":
-            # Act
-            val result = tql(@users):
-                where @age >= 25 and @city == "Seoul"
+        it "uses outer variables in predicates":
+            val min_age = 30
+            val result = tql {
+                from @users
+                where @age >= min_age
+            }
 
-            # Assert
-            expect(result.len()).to(eq(2))  # Alice, Dave
+            expect(result.len()).to(eq(2))
 
-    context "when using orderby":
-        """
-        ### Scenario: Result Ordering
-
-        Orderby sorts results by specified columns.
-        """
-
-        it "orders ascending by default":
-            # Act
-            val sorted = tql(@users):
-                orderby @age
-
-            # Assert
-            val ages = sorted.get_column("age").to_array()
-            expect(ages).to(eq([22.0, 24.0, 28.0, 31.0, 35.0]))
-
-        it "orders descending when specified":
-            # Act
-            val sorted = tql(@users):
-                orderby @age desc
-
-            # Assert
-            val ages = sorted.get_column("age").to_array()
-            expect(ages).to(eq([35.0, 31.0, 28.0, 24.0, 22.0]))
-
-    context "when using limit":
-        """
-        ### Scenario: Result Limiting
-
-        Limit restricts the number of returned rows.
-        """
-
-        it "limits result count":
-            # Act
-            val top3 = tql(@users):
+    context "when using orderby and limit":
+        it "orders and limits - indent style":
+            val result = tql:
+                from @users
                 orderby @age desc
                 limit 3
 
-            # Assert
-            expect(top3.len()).to(eq(3))
+            val ages = result.get_column("age").to_array()
+            expect(ages).to(eq([35, 31, 28]))
+
+        it "orders and limits - brace style":
+            val result = tql {
+                from @users
+                orderby @age
+                limit 2
+            }
+
+            val ages = result.get_column("age").to_array()
+            expect(ages).to(eq([22, 24]))
+
+    context "when using groupby and aggregations":
+        it "groups and aggregates - indent style":
+            val result = tql:
+                from @users
+                groupby @city
+                agg:
+                    n: count()
+                    avg_age: mean(@age)
+
+            expect(result.len()).to(eq(2))
+
+        it "groups and aggregates - brace style":
+            val result = tql {
+                from @users
+                groupby @city
+                agg {
+                    n: count()
+                    avg_age: mean(@age)
+                }
+            }
+
+            expect(result.len()).to(eq(2))
+
+        it "computes multiple statistics per group":
+            val result = tql {
+                from @users
+                groupby @city
+                agg {
+                    n: count()
+                    total_age: sum(@age)
+                    avg_age: mean(@age)
+                    min_age: min(@age)
+                    max_age: max(@age)
+                    std_age: std(@age)
+                }
+            }
+
+            val seoul = result.filter(@city == "Seoul").first()
+            expect(seoul.get("n")).to(eq(3))
+            expect(seoul.get("avg_age")).to(be_close_to(31.33, 0.01))
 
 
 # ============================================================================
-# Test Group 4: TQL Aggregations
+# Test Group 5: Math Block
 # ============================================================================
 
-describe "TQL Aggregations":
+describe "Math Block":
     """
-    ## Aggregation and Grouping
+    ## Symbolic Math Expressions
 
-    TQL supports SQL-like groupby with aggregation functions.
+    Compile-time math with symbolic computation.
     """
 
-    before_each:
-        @sales = dataframe:
-            region:  ["East", "West", "East", "West", "East"]
-            product: ["A", "A", "B", "B", "A"]
-            amount:  [100.0, 150.0, 200.0, 175.0, 125.0]
+    context "when defining functions":
+        it "defines and evaluates functions - brace style":
+            val f = math {
+                f(x) = x^2 + 2*x + 1
+            }
 
-    context "when using simple aggregations":
-        """
-        ### Scenario: Whole-Table Aggregations
+            expect(f.eval(2)).to(eq(9.0))  # 4 + 4 + 1
 
-        Aggregations without groupby apply to entire table.
-        """
+        it "defines and evaluates functions - indent style":
+            val g = math:
+                g(x) = sin(x) + cos(x)
 
-        it "computes count":
-            # Act
-            val result = tql(@sales):
-                agg:
-                    total: count()
+            expect(g.eval(0)).to(be_close_to(1.0, 0.001))  # sin(0) + cos(0) = 0 + 1
 
-            # Assert
-            expect(result.get("total")).to(eq(5))
+    context "when computing derivatives":
+        it "computes symbolic derivative":
+            val result = math {
+                d/dx (x^3 + 2*x^2 + x)
+            }
 
-        it "computes sum":
-            # Act
-            val result = tql(@sales):
-                agg:
-                    revenue: sum(@amount)
+            # Result: 3*x^2 + 4*x + 1
+            expect(result.eval(1)).to(eq(8.0))  # 3 + 4 + 1
 
-            # Assert
-            expect(result.get("revenue")).to(eq(750.0))
+        it "computes derivative - indent style":
+            val result = math:
+                d/dx (sin(x))
 
-        it "computes multiple aggregations":
-            # Act
-            val result = tql(@sales):
-                agg:
-                    n: count()
-                    total: sum(@amount)
-                    avg: mean(@amount)
-                    min_sale: min(@amount)
-                    max_sale: max(@amount)
+            # Result: cos(x)
+            expect(result.eval(0)).to(eq(1.0))  # cos(0) = 1
 
-            # Assert
-            expect(result.get("n")).to(eq(5))
-            expect(result.get("avg")).to(eq(150.0))
+    context "when performing matrix operations":
+        it "multiplies matrices - brace style":
+            val result = math {
+                A = [[1, 2], [3, 4]]
+                B = [[5, 6], [7, 8]]
+                C = A * B
+            }
 
-    context "when using groupby":
-        """
-        ### Scenario: Grouped Aggregations
+            # [[1*5+2*7, 1*6+2*8], [3*5+4*7, 3*6+4*8]]
+            # [[19, 22], [43, 50]]
+            expect(result.get("C")[0][0]).to(eq(19))
+            expect(result.get("C")[1][1]).to(eq(50))
 
-        Groupby partitions data before applying aggregations.
-        """
+        it "computes matrix transpose":
+            val result = math {
+                A = [[1, 2, 3], [4, 5, 6]]
+                B = transpose(A)
+            }
 
-        it "groups by single column":
-            # Act
-            val by_region = tql(@sales):
-                groupby @region
-                agg:
-                    n: count()
-                    total: sum(@amount)
+            expect(result.get("B").rows()).to(eq(3))
+            expect(result.get("B").cols()).to(eq(2))
 
-            # Assert
-            expect(by_region.len()).to(eq(2))  # East, West
+    context "when using inline expressions":
+        it "evaluates inline math":
+            val r = 5.0
+            val area = math { pi * r^2 }
 
-            val east = by_region.filter(@region == "East")
-            expect(east.get("total")).to(eq(425.0))
-
-        it "groups by multiple columns":
-            # Act
-            val by_region_product = tql(@sales):
-                groupby @region, @product
-                agg:
-                    n: count()
-                    total: sum(@amount)
-
-            # Assert
-            expect(by_region_product.len()).to(eq(4))
+            expect(area).to(be_close_to(78.54, 0.01))
 
 
 # ============================================================================
-# Test Group 5: Advanced Statistics
+# Test Group 6: Regex Block
+# ============================================================================
+
+describe "Regex Block":
+    """
+    ## Compile-Time Regex Patterns
+
+    Type-safe regex with named captures.
+    """
+
+    context "when defining patterns":
+        it "creates pattern - brace style":
+            val pattern = regex {
+                ^\d{3}-\d{4}$
+            }
+
+            expect(pattern.test("123-4567")).to(be_true())
+            expect(pattern.test("12-4567")).to(be_false())
+
+        it "creates pattern - indent style":
+            val pattern = regex:
+                ^[a-z]+$
+
+            expect(pattern.test("hello")).to(be_true())
+            expect(pattern.test("Hello")).to(be_false())
+
+    context "when using named captures":
+        it "extracts named groups":
+            val email_pattern = regex {
+                ^(?<user>[a-zA-Z0-9._%+-]+)@(?<domain>[a-zA-Z0-9.-]+)\.(?<tld>[a-zA-Z]{2,})$
+            }
+
+            val matches = email_pattern.match("alice@example.com")
+
+            expect(matches.get("user")).to(eq("alice"))
+            expect(matches.get("domain")).to(eq("example"))
+            expect(matches.get("tld")).to(eq("com"))
+
+    context "when using inline patterns":
+        it "tests inline regex":
+            val phone = "555-1234"
+            val is_valid = regex { ^\d{3}-\d{4}$ }.test(phone)
+
+            expect(is_valid).to(be_true())
+
+
+# ============================================================================
+# Test Group 7: JSON Block
+# ============================================================================
+
+describe "JSON Block":
+    """
+    ## Type-Safe JSON Construction
+
+    Compile-time JSON with schema validation.
+    """
+
+    context "when creating JSON objects":
+        it "creates JSON - brace style":
+            val config = json {
+                "name": "my-app",
+                "version": "1.0.0",
+                "debug": true
+            }
+
+            expect(config.get("name")).to(eq("my-app"))
+            expect(config.get("debug")).to(eq(true))
+
+        it "creates nested JSON":
+            val data = json {
+                "user": {
+                    "id": 123,
+                    "name": "Alice"
+                },
+                "settings": {
+                    "theme": "dark"
+                }
+            }
+
+            expect(data.get("user").get("name")).to(eq("Alice"))
+
+    context "when using schema validation":
+        it "validates against schema":
+            struct UserSchema:
+                id: Int
+                name: Str
+                email: Str
+
+            val user = json<UserSchema> {
+                "id": 123,
+                "name": "Alice",
+                "email": "alice@example.com"
+            }
+
+            expect(user.id).to(eq(123))
+            expect(user.name).to(eq("Alice"))
+
+
+# ============================================================================
+# Test Group 8: HTML Block
+# ============================================================================
+
+describe "HTML Block":
+    """
+    ## Type-Safe HTML Generation
+
+    Compile-time validated HTML.
+    """
+
+    context "when creating HTML elements":
+        it "creates HTML - brace style":
+            val div = html {
+                div class="container" {
+                    h1 { "Hello World" }
+                    p { "Welcome!" }
+                }
+            }
+
+            expect(div.to_string()).to(contain("<div class=\"container\">"))
+            expect(div.to_string()).to(contain("<h1>Hello World</h1>"))
+
+        it "creates HTML - indent style":
+            val card = html:
+                div class="card":
+                    h2: "Title"
+                    p: "Description"
+
+            expect(card.to_string()).to(contain("<div class=\"card\">"))
+
+    context "when using dynamic content":
+        it "interpolates variables":
+            val username = "Alice"
+            val greeting = html {
+                h1 { "Hello, " + username + "!" }
+            }
+
+            expect(greeting.to_string()).to(contain("Hello, Alice!"))
+
+        it "renders loops":
+            val items = ["Apple", "Banana", "Cherry"]
+            val list = html {
+                ul {
+                    for item in items {
+                        li { item }
+                    }
+                }
+            }
+
+            expect(list.to_string()).to(contain("<li>Apple</li>"))
+            expect(list.to_string()).to(contain("<li>Cherry</li>"))
+
+
+# ============================================================================
+# Test Group 9: Advanced TQL Statistics
 # ============================================================================
 
 describe "TQL Advanced Statistics":
     """
     ## Statistical Functions in TQL
 
-    TQL supports advanced statistical functions for analytics.
+    Advanced analytics within query blocks.
     """
 
     before_each:
-        @data = dataframe:
-            x: [1.0, 2.0, 3.0, 4.0, 5.0]
-            y: [2.0, 4.0, 5.0, 4.0, 5.0]
+        @data = table |x, y|:
+            1.0, 2.0
+            2.0, 4.0
+            3.0, 5.0
+            4.0, 4.0
+            5.0, 5.0
 
-    context "when computing inferential statistics":
-        """
-        ### Scenario: Correlation and Covariance
-
-        Relationship statistics between two columns.
-        """
-
-        it "computes covariance":
-            # Act
-            val result = tql(@data):
-                agg:
+    context "when computing correlation":
+        it "computes covariance and correlation":
+            val result = tql {
+                from @data
+                agg {
                     cov_xy: cov(@x, @y)
-
-            # Assert
-            expect(result.get("cov_xy")).to(be_close_to(1.5, 0.01))
-
-        it "computes correlation":
-            # Act
-            val result = tql(@data):
-                agg:
                     corr_xy: corr(@x, @y)
+                }
+            }
 
-            # Assert
+            expect(result.get("cov_xy")).to(be_close_to(1.5, 0.01))
             expect(result.get("corr_xy")).to(be_close_to(0.775, 0.01))
 
-    context "when computing order statistics":
-        """
-        ### Scenario: Quantiles and Percentiles
-
-        Distribution analysis functions.
-        """
-
-        it "computes median in aggregation":
-            # Act
-            val result = tql(@data):
-                agg:
-                    med_x: median(@x)
-                    med_y: median(@y)
-
-            # Assert
-            expect(result.get("med_x")).to(eq(3.0))
-            expect(result.get("med_y")).to(eq(4.0))
-
-        it "computes arbitrary quantile":
-            # Act
-            val result = tql(@data):
-                agg:
-                    q10: quantile(@x, 0.1)
-                    q90: quantile(@x, 0.9)
-
-            # Assert
-            expect(result.get("q10")).to(be_close_to(1.4, 0.01))
-            expect(result.get("q90")).to(be_close_to(4.6, 0.01))
-
-    context "when computing trends":
-        """
-        ### Scenario: Trend Analysis
-
-        Predictive statistics for time series analysis.
-        """
-
-        it "computes linear trend":
-            # Act
-            val result = tql(@data):
-                agg:
-                    trend_x: trend(@x)
-
-            # Assert - linear data has slope 1.0
-            expect(result.get("trend_x")).to(eq(1.0))
-
-        it "performs simple linear regression":
-            # Act
-            val result = tql(@data):
-                agg:
+    context "when computing regression":
+        it "performs linear regression":
+            val result = tql {
+                from @data
+                agg {
                     reg: regress(@y, @x)
+                }
+            }
 
-            # Assert
             expect(result.get("reg").slope).to(be_close_to(0.6, 0.01))
             expect(result.get("reg").intercept).to(be_close_to(2.2, 0.01))
 
+    context "when detecting trends":
+        it "computes linear trend":
+            val linear = table |t, value|:
+                1, 10
+                2, 20
+                3, 30
+                4, 40
 
-# ============================================================================
-# Test Group 6: Column Transformations
-# ============================================================================
+            val result = linear.tql {
+                agg {
+                    slope: trend(@value)
+                }
+            }
 
-describe "Column Transformations":
-    """
-    ## Column-Level Operations
-
-    Statistics that produce new columns rather than scalars.
-    """
-
-    before_each:
-        @measurements = dataframe:
-            value: [10.0, 20.0, 30.0, 40.0, 50.0]
-
-    context "when normalizing data":
-        """
-        ### Scenario: Z-Score Normalization
-
-        Transform values to standard scores.
-        """
-
-        it "computes zscore for column":
-            # Arrange
-            val df = @measurements
-
-            # Act
-            val normalized = df.with_column(
-                "zscore",
-                zscore(df.get_column("value"))
-            )
-
-            # Assert
-            val scores = normalized.get_column("zscore").to_array()
-            expect(scores[2]).to(be_close_to(0.0, 0.001))  # Mean = 30, zscore = 0
-
-    context "when detecting anomalies":
-        """
-        ### Scenario: Anomaly Detection
-
-        Identify outliers using IQR method.
-        """
-
-        it "flags anomalies":
-            # Arrange
-            val df = dataframe:
-                value: [10.0, 20.0, 30.0, 40.0, 50.0, 1000.0]  # 1000 is outlier
-
-            # Act
-            val flagged = df.with_column(
-                "is_anomaly",
-                anomaly(df.get_column("value"))
-            )
-
-            # Assert
-            val flags = flagged.get_column("is_anomaly").to_array()
-            expect(flags[5]).to(be_true())  # 1000 is anomaly
-            expect(flags[0]).to(be_false())
+            expect(result.get("slope")).to(eq(10.0))
 
 
 # ============================================================================
-# Helper Types and Functions
+# Helper Functions
 # ============================================================================
+
+fn be_close_to(expected: f64, tolerance: f64) -> Matcher<f64>:
+    Matcher.new(fn(actual):
+        (actual - expected).abs() <= tolerance
+    )
+
+fn contain(substring: Str) -> Matcher<Str>:
+    Matcher.new(fn(actual):
+        actual.contains(substring)
+    )
 
 struct Regression:
     slope: f64
     intercept: f64
     r_squared: f64
-
-struct Histogram:
-    bins: [f64]
-    counts: [u64]
-
-fn be_close_to(expected: f64, tolerance: f64) -> Matcher<f64>:
-    Matcher.new(fn(actual):
-        val diff = (actual - expected).abs()
-        diff <= tolerance
-    )
