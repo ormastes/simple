@@ -12,7 +12,7 @@ export eval_literal, eval_binary_op, eval_unary_op
 export eval_array, eval_dict, eval_tuple
 export eval_call, eval_method_call
 
-import ..core.{Interpreter, Value, InterpreterError}
+import ..core.{Interpreter, Value, InterpreterError, RuntimeValue, Closure}
 
 # Main expression evaluator
 fn evaluate(interp: &Interpreter, expr: &Expr) -> Result<Value, InterpreterError>:
@@ -65,16 +65,79 @@ fn evaluate(interp: &Interpreter, expr: &Expr) -> Result<Value, InterpreterError
             return Err(InterpreterError::NotImplemented(expr.to_string()))
 
 fn eval_index(coll: Value, idx: Value) -> Result<Value, InterpreterError>:
-    # TODO: [stdlib][P1] Implement indexing
-    return Err(InterpreterError::NotImplemented("indexing".to_string()))
+    match coll.data:
+        case RuntimeValue::Array(arr):
+            match idx.as_int():
+                case Some(i):
+                    val index = if i < 0: arr.len() as i64 + i else: i
+                    if index >= 0 and index < arr.len() as i64:
+                        return Ok(arr[index as usize].clone())
+                    else:
+                        return Err(InterpreterError::IndexError(i, arr.len()))
+                case None:
+                    return Err(InterpreterError::TypeError("array index must be int".to_string()))
+
+        case RuntimeValue::String(s):
+            match idx.as_int():
+                case Some(i):
+                    val index = if i < 0: s.len() as i64 + i else: i
+                    if index >= 0 and index < s.len() as i64:
+                        val ch = s.chars().nth(index as usize).unwrap()
+                        return Ok(Value::string(ch.to_string()))
+                    else:
+                        return Err(InterpreterError::IndexError(i, s.len()))
+                case None:
+                    return Err(InterpreterError::TypeError("string index must be int".to_string()))
+
+        case RuntimeValue::Dict(d):
+            match d.get(&idx):
+                case Some(v): return Ok(v.clone())
+                case None: return Err(InterpreterError::KeyError(idx.to_string()))
+
+        case RuntimeValue::Tuple(t):
+            match idx.as_int():
+                case Some(i):
+                    val index = if i < 0: t.len() as i64 + i else: i
+                    if index >= 0 and index < t.len() as i64:
+                        return Ok(t[index as usize].clone())
+                    else:
+                        return Err(InterpreterError::IndexError(i, t.len()))
+                case None:
+                    return Err(InterpreterError::TypeError("tuple index must be int".to_string()))
+
+        case _:
+            return Err(InterpreterError::TypeError("value is not indexable".to_string()))
 
 fn eval_field(obj: Value, field: &str) -> Result<Value, InterpreterError>:
-    # TODO: [stdlib][P1] Implement field access
-    return Err(InterpreterError::NotImplemented("field access".to_string()))
+    match obj.data:
+        case RuntimeValue::Struct(name, fields):
+            match fields.get(field):
+                case Some(v): return Ok(v.clone())
+                case None: return Err(InterpreterError::AttributeError(name.clone(), field.to_string()))
+
+        case RuntimeValue::Object(class_name, fields, _methods):
+            match fields.get(field):
+                case Some(v): return Ok(v.clone())
+                case None: return Err(InterpreterError::AttributeError(class_name.clone(), field.to_string()))
+
+        case RuntimeValue::Dict(d):
+            val key = Value::string(field.to_string())
+            match d.get(&key):
+                case Some(v): return Ok(v.clone())
+                case None: return Err(InterpreterError::KeyError(field.to_string()))
+
+        case _:
+            return Err(InterpreterError::TypeError("value has no fields".to_string()))
 
 fn eval_lambda(interp: &Interpreter, params: &Array<String>, body: &Expr) -> Result<Value, InterpreterError>:
-    # TODO: [stdlib][P1] Implement lambda creation
-    return Err(InterpreterError::NotImplemented("lambda".to_string()))
+    # Capture the current environment for closure
+    val captured_env = interp.env.clone()
+    val closure = Closure {
+        params: params.clone(),
+        body: body.clone(),
+        env: captured_env,
+    }
+    return Ok(Value::closure(closure))
 
 # Alias for main entry point
 fn eval_expr(interp: &Interpreter, expr: &Expr) -> Result<Value, InterpreterError>:
