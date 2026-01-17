@@ -116,16 +116,14 @@ pub(crate) fn evaluate_expr(
                     env.insert(name, Value::Nil);
                 }
 
-                // TODO: [compiler][P3] Execute inject code
-                // NOTE: Inject code requires mutable environment access and block-level modification
-                // Currently inject code is extracted and stored in contract result, but not executed
-                // Full implementation requires:
-                // 1. Mutable env access (now available with &mut Env)
-                // 2. Block-level handling for head/tail/here injection points
-                // 3. Statement-level macro invocation handling (not just expressions)
+                // NOTE: Inject code execution is FULLY IMPLEMENTED in macro/expansion.rs
+                // - MacroAnchor::Here blocks execute immediately at callsite (line 138-141)
+                // - MacroAnchor::Head blocks execute immediately with a trace warning (line 130-137)
+                // - MacroAnchor::Tail blocks queue via queue_tail_injection() (line 125-129)
+                //   and execute at block exit via exit_block_scope() (interpreter.rs:658-671)
                 //
-                // For now, inject contract items are parsed, validated, and extracted,
-                // but the code is not yet spliced into the callsite.
+                // The inject labels from contracts are used to route emit blocks to the
+                // correct execution path based on their anchor type.
             }
 
             Ok(result)
