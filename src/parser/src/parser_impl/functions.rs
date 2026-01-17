@@ -4,6 +4,7 @@
 //! attributes, doc comments, and contract blocks.
 
 use crate::ast::*;
+use crate::effect_inference::has_suspension_in_body;
 use crate::error::ParseError;
 use crate::token::{Span, TokenKind};
 
@@ -132,6 +133,13 @@ impl<'a> Parser<'a> {
             (body, contract, bounds_block)
         };
 
+        // Effect inference: if body contains suspension operators, infer async effect
+        let inferred_effects = if !is_abstract && has_suspension_in_body(&body) {
+            vec![Effect::Async]
+        } else {
+            vec![]
+        };
+
         Ok(Node::Function(FunctionDef {
             span: Span::new(
                 start_span.start,
@@ -146,7 +154,7 @@ impl<'a> Parser<'a> {
             where_clause,
             body,
             visibility: Visibility::Private,
-            effects: vec![],
+            effects: inferred_effects,
             decorators,
             attributes,
             doc_comment: None,

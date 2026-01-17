@@ -5,6 +5,14 @@
 extern fn vscode_document_provider_register(scheme: text, callback_id: i64): i64
 extern fn vscode_document_provider_fire_change(uri: text): void
 
+# FFI for file operations
+@extern("runtime", "rt_file_read_text")
+fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+# Provider callback storage
+var _provider_callbacks: Dict<i64, fn(text): text> = {}
+var _next_callback_id: i64 = 0
+
 # Import types
 use vscode.languages.TextDocument
 
@@ -80,8 +88,10 @@ pub fn register_text_document_content_provider(
         # Open virtual document:
         # vscode://simple-ast/path/to/file.spl
     """
-    # TODO: [stdlib][P3] Store provider callback
-    val callback_id = 0
+    # Store provider callback
+    val callback_id = _next_callback_id
+    _next_callback_id = _next_callback_id + 1
+    _provider_callbacks[callback_id] = provider.provide_fn
     vscode_document_provider_register(scheme, callback_id)
 
 # File system provider (for custom file systems)
@@ -192,7 +202,8 @@ pub fn create_ast_viewer(parser_fn: fn(source: text): text): TextDocumentContent
     provider.provide_fn = fn(uri):
         # Extract real file path from virtual URI
         val real_path = uri.replace("simple-ast://", "")
-        val source = ""  # TODO: [stdlib][P3] Read file from workspace
+        # Read file from workspace
+        val source = _rt_file_read_text(real_path.ptr(), real_path.len())
         parser_fn(source)
 
     provider
@@ -218,7 +229,8 @@ pub fn create_diagnostics_viewer(checker_fn: fn(source: text): text): TextDocume
     val provider = TextDocumentContentProvider.new("simple-diagnostics")
     provider.provide_fn = fn(uri):
         val real_path = uri.replace("simple-diagnostics://", "")
-        val source = ""  # TODO: [stdlib][P3] Read file
+        # Read file
+        val source = _rt_file_read_text(real_path.ptr(), real_path.len())
         checker_fn(source)
 
     provider

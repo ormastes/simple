@@ -24,10 +24,30 @@ pub class FileEntry:
         Returns:
             File entry with current mtime and hash
         """
+        # FFI declarations for file operations
+        @extern("runtime", "rt_file_mtime")
+        fn _rt_file_mtime(path_ptr: &u8, path_len: u64) -> i64
+
+        @extern("runtime", "rt_file_read_text")
+        fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+        @extern("runtime", "rt_sha256")
+        fn _rt_sha256(data_ptr: &u8, data_len: u64) -> text
+
+        # Get file modification time
+        val mtime = _rt_file_mtime(path.ptr(), path.len())
+
+        # Read file content and compute SHA256 hash
+        val content = _rt_file_read_text(path.ptr(), path.len())
+        val hash = if content.is_empty():
+            ""
+        else:
+            _rt_sha256(content.ptr(), content.len())
+
         FileEntry {
             path: path,
-            mtime: 0,  # TODO: [stdlib][P3] Get file mtime
-            hash: "",  # TODO: [stdlib][P3] Compute SHA256 hash
+            mtime: mtime,
+            hash: hash,
             language: language
         }
 
@@ -569,9 +589,37 @@ pub class IncrementalCompiler:
         """
         # Update file entries
         for file in compiled_files:
-            # TODO: [stdlib][P3] Detect language from file extension
-            val language = Language::Simple
+            # Detect language from file extension
+            val language = self.detect_language_from_extension(file)
             self.cache.add_file(file, language)
+
+    fn detect_language_from_extension(path: text): Language =
+        """Detect programming language from file extension.
+
+        Args:
+            path: File path
+
+        Returns:
+            Detected language
+        """
+        if path.ends_with(".spl"):
+            return Language::Simple
+        elif path.ends_with(".rs"):
+            return Language::Rust
+        elif path.ends_with(".py") or path.ends_with(".pyi"):
+            return Language::Python
+        elif path.ends_with(".js") or path.ends_with(".mjs") or path.ends_with(".cjs"):
+            return Language::JavaScript
+        elif path.ends_with(".ts") or path.ends_with(".tsx"):
+            return Language::TypeScript
+        elif path.ends_with(".go"):
+            return Language::Go
+        elif path.ends_with(".c") or path.ends_with(".h"):
+            return Language::C
+        elif path.ends_with(".cpp") or path.ends_with(".cc") or path.ends_with(".cxx") or path.ends_with(".hpp"):
+            return Language::Cpp
+        else:
+            return Language::Simple  # Default
 
         # Update dependencies
         for (file, deps) in dependencies.items():

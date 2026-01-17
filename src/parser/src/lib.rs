@@ -6,6 +6,7 @@ pub mod arena;
 pub mod ast;
 pub mod diagnostic;
 pub mod doc_gen;
+pub mod effect_inference;
 pub mod error;
 pub mod error_recovery;
 pub mod interner;

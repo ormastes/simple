@@ -46,9 +46,26 @@ pub class FileProvider:
     
     # Scan directory and register files
     pub fn scan_directory(self, pattern: text):
-        # TODO: [stdlib][P3] Use file system API when available
-        # For now, manual registration
-        pass
+        @extern("runtime", "rt_glob")
+        fn _rt_glob(pattern_ptr: &u8, pattern_len: u64) -> text
+
+        # Use glob to find files matching pattern
+        val full_pattern = self.base.root_path + "/" + pattern
+        val results_json = _rt_glob(full_pattern.ptr(), full_pattern.len())
+
+        # Parse results (newline-separated paths)
+        for path in results_json.split("\n"):
+            if not path.trim().is_empty():
+                # Determine MIME type from extension
+                val mime_type = if path.ends_with(".spl"):
+                    "text/x-simple"
+                elif path.ends_with(".json"):
+                    "application/json"
+                elif path.ends_with(".md"):
+                    "text/markdown"
+                else:
+                    "text/plain"
+                self.register_file(path, mime_type)
     
     pub fn register_file(self, path: text, mime_type: text):
         """Register a file resource.
@@ -72,11 +89,26 @@ impl ResourceProvider for FileProvider:
             resource = self.base.resources.get(uri)
             result.append(resource)
         return result
-    
+
     fn read_resource(uri: text) -> ResourceContents:
-        # TODO: [stdlib][P3] Read actual file when file I/O available
-        text = "# File: " + uri
-        return ResourceContents.new(uri, "text/plain", text)
+        @extern("runtime", "rt_file_read_text")
+        fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+        # Extract file path from URI
+        val path = uri.replace("file://", "")
+        val content = _rt_file_read_text(path.ptr(), path.len())
+
+        # Determine MIME type from path
+        val mime_type = if path.ends_with(".spl"):
+            "text/x-simple"
+        elif path.ends_with(".json"):
+            "application/json"
+        elif path.ends_with(".md"):
+            "text/markdown"
+        else:
+            "text/plain"
+
+        return ResourceContents.new(uri, mime_type, content)
 
 # Symbol-based provider for code navigation
 pub class SymbolProvider:
