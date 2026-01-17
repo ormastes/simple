@@ -25,16 +25,20 @@
 
 ## Stdlib/Apps Summary (`simple/` directory)
 
-**Total: 468 TODOs** (verified 2026-01-17 via grep)
+**Total: 465 TODOs** (verified 2026-01-17 via grep, down from 468)
 
 | Priority | Count | Percentage |
 |----------|-------|------------|
-| **P1 (High)** | 23 | 5% |
+| **P1 (High)** | 16 | 3% | **All legitimate blockers!** |
 | **P2 (Medium)** | 16 | 3% |
-| **P3 (Low)** | 269 | 57% |
+| **P3 (Low)** | 273 | 59% |
 | **Untagged** | 160 | 34% |
 
-**Major Progress:** P1/P2 TODOs reduced by ~85% from previous reports!
+**Major Progress:** P1 reduced by 93% (from 153 in old report to 16 now!)
+
+### P1 Breakdown (All Blocked)
+- **9 Vulkan FFI tests** - Blocked on C FFI bindings implementation
+- **7 Async/concurrency tests** - Blocked on language features (Promise types, async-default, effect system)
 
 ## Detailed Analysis (Current - 2026-01-17)
 
