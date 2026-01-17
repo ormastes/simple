@@ -4,7 +4,7 @@ export Tensor
 
 import device.{Device, device_code, device_from_code}
 import dtype.{DType, dtype_code, dtype_from_code}
-import tensor_ffi.{rt_torch_zeros, rt_torch_ones, rt_torch_randn, rt_torch_arange, rt_torch_free, rt_torch_clone, rt_torch_shape, rt_torch_numel, rt_torch_dtype, rt_torch_device, rt_torch_add, rt_torch_sub, rt_torch_mul, rt_torch_div, rt_torch_matmul, rt_torch_reshape, rt_torch_sum, rt_torch_mean, rt_torch_item, rt_torch_set_requires_grad, rt_torch_requires_grad, rt_torch_backward, rt_torch_grad, rt_torch_detach, rt_torch_to_device, rt_torch_to_cpu, rt_torch_to_cuda}
+import tensor_ffi.{rt_torch_zeros, rt_torch_ones, rt_torch_randn, rt_torch_arange, rt_torch_free, rt_torch_clone, rt_torch_shape, rt_torch_numel, rt_torch_dtype, rt_torch_device, rt_torch_add, rt_torch_sub, rt_torch_mul, rt_torch_div, rt_torch_matmul, rt_torch_reshape, rt_torch_transpose, rt_torch_sum, rt_torch_mean, rt_torch_item, rt_torch_set_requires_grad, rt_torch_requires_grad, rt_torch_backward, rt_torch_grad, rt_torch_detach, rt_torch_to_device, rt_torch_to_cpu, rt_torch_to_cuda}
 
 class Tensor:
     """Multi-dimensional array with GPU support."""
@@ -161,6 +161,143 @@ class Tensor:
             true if on any CUDA device
         """
         return self.device().is_cuda()
+
+    # Shape Operations
+    fn reshape(new_shape: [i64]) -> Tensor:
+        """Reshape tensor to new dimensions.
+
+        The total number of elements must remain the same.
+
+        Args:
+            new_shape: New shape dimensions. Use -1 for one dimension
+                       to infer its size automatically.
+
+        Returns:
+            Tensor with new shape (view if possible, copy otherwise)
+
+        Example:
+            val t = Tensor::zeros([2, 6])
+            val r = t.reshape([3, 4])    # → shape [3, 4]
+            val f = t.reshape([-1])      # → shape [12] (flatten)
+            val b = t.reshape([2, 3, 2]) # → shape [2, 3, 2]
+        """
+        val new_handle = rt_torch_reshape(self.handle, new_shape.data_ptr(), new_shape.len() as i32)
+        return Tensor(new_handle)
+
+    fn transpose(dim0: i64, dim1: i64) -> Tensor:
+        """Transpose two dimensions.
+
+        Args:
+            dim0: First dimension to swap
+            dim1: Second dimension to swap
+
+        Returns:
+            Tensor with swapped dimensions
+
+        Example:
+            val t = Tensor::zeros([2, 3, 4])
+            val r = t.transpose(0, 2)  # → shape [4, 3, 2]
+        """
+        val new_handle = rt_torch_transpose(self.handle, dim0, dim1)
+        return Tensor(new_handle)
+
+    fn t() -> Tensor:
+        """Transpose 2D tensor (swap dimensions 0 and 1).
+
+        Shorthand for transpose(0, 1) on 2D tensors.
+
+        Returns:
+            Transposed tensor
+
+        Example:
+            val t = Tensor::zeros([2, 3])
+            val r = t.t()  # → shape [3, 2]
+        """
+        return self.transpose(0, 1)
+
+    fn flatten() -> Tensor:
+        """Flatten tensor to 1D.
+
+        Returns:
+            1D tensor with all elements
+
+        Example:
+            val t = Tensor::zeros([2, 3, 4])
+            val f = t.flatten()  # → shape [24]
+        """
+        return self.reshape([-1i64])
+
+    fn view(new_shape: [i64]) -> Tensor:
+        """View tensor with new shape (alias for reshape).
+
+        Args:
+            new_shape: New shape dimensions
+
+        Returns:
+            Tensor with new shape
+
+        Example:
+            val t = Tensor::zeros([2, 6])
+            val v = t.view([3, 4])
+        """
+        return self.reshape(new_shape)
+
+    fn squeeze(dim: i64 = -1) -> Tensor:
+        """Remove dimensions of size 1.
+
+        Args:
+            dim: Dimension to squeeze (-1 for all size-1 dims)
+
+        Returns:
+            Tensor with size-1 dimensions removed
+
+        Example:
+            val t = Tensor::zeros([1, 3, 1, 4])
+            val s = t.squeeze()  # → shape [3, 4]
+        """
+        val current_shape = self.shape()
+        var new_shape: [i64] = []
+        var i = 0
+        while i < current_shape.len():
+            val d = current_shape[i]
+            if dim == -1:
+                if d != 1:
+                    new_shape = new_shape + [d]
+            else:
+                if i != dim or d != 1:
+                    new_shape = new_shape + [d]
+            i = i + 1
+        if new_shape.len() == 0:
+            new_shape = [1i64]
+        return self.reshape(new_shape)
+
+    fn unsqueeze(dim: i64) -> Tensor:
+        """Add dimension of size 1 at specified position.
+
+        Args:
+            dim: Position to insert new dimension
+
+        Returns:
+            Tensor with added dimension
+
+        Example:
+            val t = Tensor::zeros([3, 4])
+            val u = t.unsqueeze(0)  # → shape [1, 3, 4]
+            val v = t.unsqueeze(2)  # → shape [3, 4, 1]
+        """
+        val current_shape = self.shape()
+        var new_shape: [i64] = []
+        var i = 0
+        var inserted = false
+        while i < current_shape.len():
+            if i == dim and not inserted:
+                new_shape = new_shape + [1i64]
+                inserted = true
+            new_shape = new_shape + [current_shape[i]]
+            i = i + 1
+        if not inserted:
+            new_shape = new_shape + [1i64]
+        return self.reshape(new_shape)
 
     # Arithmetic Operations
     fn add(other: Tensor) -> Tensor:
