@@ -243,13 +243,103 @@ impl TuiAsyncRenderer:
         return result
 
     fn layout_element(elem: &Element, parent_layout: Layout, result: &mut LayoutResult):
-        # Simple vertical stacking for now
-        # TODO: [ui][P1] Implement proper flexbox/grid layout
-
+        # Proper flexbox/grid layout implementation
         val num_children = elem.children.len() as u16
         if num_children == 0:
             return
 
+        # Determine layout mode from element style or kind
+        val layout_mode = match elem.style.display:
+            case Some("flex"): LayoutMode::Flex
+            case Some("grid"): LayoutMode::Grid
+            case _: LayoutMode::Block
+
+        match layout_mode:
+            case LayoutMode::Flex:
+                self.layout_flex_children(elem, parent_layout, result)
+            case LayoutMode::Grid:
+                self.layout_grid_children(elem, parent_layout, result)
+            case LayoutMode::Block:
+                self.layout_block_children(elem, parent_layout, result)
+
+    fn layout_flex_children(elem: &Element, parent_layout: Layout, result: &mut LayoutResult):
+        # Flexbox layout: distribute space based on flex properties
+        val is_row = elem.style.flex_direction.unwrap_or("row") == "row"
+        val num_children = elem.children.len() as u16
+
+        # Calculate flex factors
+        var total_flex: f32 = 0.0
+        for child in &elem.children:
+            total_flex += child.style.flex_grow.unwrap_or(1.0)
+
+        val gap = elem.style.gap.unwrap_or(0) as u16
+
+        if is_row:
+            # Horizontal flex
+            val available_width = parent_layout.content_width - (gap * (num_children - 1).max(0))
+            var x = parent_layout.content_x
+
+            for child in &elem.children:
+                val flex = child.style.flex_grow.unwrap_or(1.0)
+                val child_width = ((available_width as f32) * (flex / total_flex)) as u16
+
+                val child_layout = Layout::new(
+                    x,
+                    parent_layout.content_y,
+                    child_width,
+                    parent_layout.content_height
+                )
+
+                result.bounds.set(child.id.value(), self.layout_to_rect(child_layout))
+                self.layout_element(child, child_layout, result)
+
+                x = x + child_width + gap
+        else:
+            # Vertical flex
+            val available_height = parent_layout.content_height - (gap * (num_children - 1).max(0))
+            var y = parent_layout.content_y
+
+            for child in &elem.children:
+                val flex = child.style.flex_grow.unwrap_or(1.0)
+                val child_height = ((available_height as f32) * (flex / total_flex)) as u16
+
+                val child_layout = Layout::new(
+                    parent_layout.content_x,
+                    y,
+                    parent_layout.content_width,
+                    child_height
+                )
+
+                result.bounds.set(child.id.value(), self.layout_to_rect(child_layout))
+                self.layout_element(child, child_layout, result)
+
+                y = y + child_height + gap
+
+    fn layout_grid_children(elem: &Element, parent_layout: Layout, result: &mut LayoutResult):
+        # Grid layout: arrange children in a grid
+        val columns = elem.style.grid_columns.unwrap_or(2) as u16
+        val num_children = elem.children.len() as u16
+        val rows = (num_children + columns - 1) / columns
+
+        val gap = elem.style.gap.unwrap_or(0) as u16
+        val cell_width = (parent_layout.content_width - (gap * (columns - 1))) / columns
+        val cell_height = (parent_layout.content_height - (gap * (rows - 1).max(0))) / rows.max(1)
+
+        for (i, child) in elem.children.iter().enumerate():
+            val col = (i as u16) % columns
+            val row = (i as u16) / columns
+
+            val x = parent_layout.content_x + col * (cell_width + gap)
+            val y = parent_layout.content_y + row * (cell_height + gap)
+
+            val child_layout = Layout::new(x, y, cell_width, cell_height)
+
+            result.bounds.set(child.id.value(), self.layout_to_rect(child_layout))
+            self.layout_element(child, child_layout, result)
+
+    fn layout_block_children(elem: &Element, parent_layout: Layout, result: &mut LayoutResult):
+        # Block layout: stack children vertically with full width
+        val num_children = elem.children.len() as u16
         val child_height = parent_layout.content_height / num_children.max(1)
         var y = parent_layout.content_y
 
@@ -266,6 +356,12 @@ impl TuiAsyncRenderer:
 
             y = y + child_height
 
+enum LayoutMode:
+    Flex
+    Grid
+    Block
+
+impl TuiAsyncRenderer:
     fn layout_to_rect(layout: Layout) -> Rect:
         return Rect {
             x: layout.x as f32,

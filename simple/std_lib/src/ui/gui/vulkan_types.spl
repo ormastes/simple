@@ -56,7 +56,7 @@ impl VulkanDevice:
         # TODO: [ui][P3] Create logical device
         val device = vulkan_create_device(physical_device, graphics_family, present_family)?
 
-        # TODO: [ui][P1] Get queue handles
+        # Get queue handles from the logical device
         val graphics_queue = vulkan_get_device_queue(device, graphics_family, 0)
         val present_queue = vulkan_get_device_queue(device, present_family, 0)
 
@@ -931,15 +931,31 @@ pub struct VkPhysicalDeviceMemoryProperties:
     memory_type_count: u32
 
 pub struct QueueFamilyFlags:
-    pass
+    value: u32
 
 impl QueueFamilyFlags:
     const Graphics: u32 = 0x01
     const Compute: u32 = 0x02
     const Transfer: u32 = 0x04
+    const SparseBinding: u32 = 0x08
+    const Protected: u32 = 0x10
 
-    fn bits() -> u32:
-        return 0  # TODO: [ui][P1] implement
+    fn bits(self) -> u32:
+        # Return the raw bit flags for this QueueFamilyFlags instance
+        # This allows combining flags: Graphics | Compute = 0x03
+        return self.value
+
+    fn contains(self, flag: u32) -> bool:
+        return (self.bits() & flag) == flag
+
+    fn is_graphics(self) -> bool:
+        return self.contains(Self::Graphics)
+
+    fn is_compute(self) -> bool:
+        return self.contains(Self::Compute)
+
+    fn is_transfer(self) -> bool:
+        return self.contains(Self::Transfer)
 
 # Vulkan constants
 const VK_SUCCESS: i32 = 0
@@ -1030,6 +1046,27 @@ fn clamp(value: u32, min: u32, max: u32) -> u32:
     return value
 
 fn spawn_blocking<T>(f: fn() -> T) -> Future<T>:
-    # TODO: [ui][P1] Implement blocking task spawning
-    # For now, just execute synchronously
-    return Future::ready(f())
+    # Spawn a blocking task on a thread pool to avoid blocking the async runtime
+    # This is crucial for CPU-intensive work like layout computation
+    val (sender, receiver) = channel::oneshot<T>()
+
+    # Submit to thread pool
+    thread_pool_submit(|| {
+        val result = f()
+        sender.send(result)
+    })
+
+    # Return a future that completes when the blocking task finishes
+    return receiver.into_future()
+
+# Thread pool for blocking tasks
+static mut THREAD_POOL: Option<ThreadPool> = None
+
+fn thread_pool_submit(task: fn() -> ()):
+    unsafe:
+        if THREAD_POOL.is_none():
+            THREAD_POOL = Some(ThreadPool::new(num_cpus()))
+        if val Some(pool) = THREAD_POOL.as_mut():
+            pool.submit(task)
+
+extern fn num_cpus() -> usize

@@ -35,7 +35,7 @@ class TensorShape:
     fn __init__(dims: List<Dim>):
         self.dims = dims
 
-    fn ndim() -> i32:
+    fn ndim(self) -> i32:
         self.dims.len()
 
 enum ShapeResult:
@@ -280,96 +280,81 @@ print("")
 # Memory Profiling
 # ============================================================================
 
-class MemoryProfile:
-    shape_name: text
-    shape: TensorShape
-    min_bytes: i32
-    max_bytes: i32
-    min_mb: i32
-    max_mb: i32
-
-    fn __init__(name: text, shape: TensorShape, elem_size: i32):
-        val (min_e, max_e) = count_elements(shape)
-        self.shape_name = name
-        self.shape = shape
-        self.min_bytes = min_e * elem_size
-        self.max_bytes = max_e * elem_size
-        self.min_mb = self.min_bytes / (1024 * 1024)
-        self.max_mb = self.max_bytes / (1024 * 1024)
-
-    fn to_string() -> text:
-        val shape_str = shape_to_string(self.shape)
-        if self.min_mb == self.max_mb:
-            "{self.shape_name}: {shape_str} = {self.min_mb} MB"
-        else:
-            "{self.shape_name}: {shape_str} = {self.min_mb}-{self.max_mb} MB"
+fn compute_memory_mb(shape: TensorShape, elem_size: i32) -> (i32, i32):
+    """Compute min and max memory in MB for a shape"""
+    val (min_e, max_e) = count_elements(shape)
+    val min_bytes = min_e * elem_size
+    val max_bytes = max_e * elem_size
+    val min_mb = min_bytes / (1024 * 1024)
+    val max_mb = max_bytes / (1024 * 1024)
+    (min_mb, max_mb)
 
 print("Test 3: Memory Profiling")
 print("------------------------------------------------------------")
 
 val elem_size = 4  # Float32
 
-# CNN layers
-val cnn_layers = [
-    MemoryProfile(
-        name: "Input (NCHW)",
-        shape: TensorShape(dims: [
-            Dim.Named(name: "batch", lo: 1, hi: 64),
-            Dim.Literal(value: 3),
-            Dim.Literal(value: 224),
-            Dim.Literal(value: 224)
-        ]),
-        elem_size: elem_size
-    ),
-    MemoryProfile(
-        name: "Conv1 Output",
-        shape: TensorShape(dims: [
-            Dim.Named(name: "batch", lo: 1, hi: 64),
-            Dim.Literal(value: 64),
-            Dim.Literal(value: 112),
-            Dim.Literal(value: 112)
-        ]),
-        elem_size: elem_size
-    ),
-    MemoryProfile(
-        name: "Conv2 Output",
-        shape: TensorShape(dims: [
-            Dim.Named(name: "batch", lo: 1, hi: 64),
-            Dim.Literal(value: 128),
-            Dim.Literal(value: 56),
-            Dim.Literal(value: 56)
-        ]),
-        elem_size: elem_size
-    ),
-    MemoryProfile(
-        name: "Flattened",
-        shape: TensorShape(dims: [
-            Dim.Named(name: "batch", lo: 1, hi: 64),
-            Dim.Literal(value: 401408)
-        ]),
-        elem_size: elem_size
-    )
-]
+# CNN layer shapes
+val input_shape = TensorShape(dims: [
+    Dim.Named(name: "batch", lo: 1, hi: 64),
+    Dim.Literal(value: 3),
+    Dim.Literal(value: 224),
+    Dim.Literal(value: 224)
+])
+
+val conv1_shape = TensorShape(dims: [
+    Dim.Named(name: "batch", lo: 1, hi: 64),
+    Dim.Literal(value: 64),
+    Dim.Literal(value: 112),
+    Dim.Literal(value: 112)
+])
+
+val conv2_shape = TensorShape(dims: [
+    Dim.Named(name: "batch", lo: 1, hi: 64),
+    Dim.Literal(value: 128),
+    Dim.Literal(value: 56),
+    Dim.Literal(value: 56)
+])
+
+val flat_shape = TensorShape(dims: [
+    Dim.Named(name: "batch", lo: 1, hi: 64),
+    Dim.Literal(value: 401408)
+])
 
 print("CNN Memory Profile (per layer):")
-for layer in cnn_layers:
-    print("  {layer.to_string()}")
+val (in_min, in_max) = compute_memory_mb(input_shape, elem_size)
+print(f"  Input (NCHW): {shape_to_string(input_shape)} = {in_min}-{in_max} MB")
 
-# Calculate total
-var total_min = 0
-var total_max = 0
-for layer in cnn_layers:
-    total_min = total_min + layer.min_mb
-    total_max = total_max + layer.max_mb
+val (c1_min, c1_max) = compute_memory_mb(conv1_shape, elem_size)
+print(f"  Conv1 Output: {shape_to_string(conv1_shape)} = {c1_min}-{c1_max} MB")
+
+val (c2_min, c2_max) = compute_memory_mb(conv2_shape, elem_size)
+print(f"  Conv2 Output: {shape_to_string(conv2_shape)} = {c2_min}-{c2_max} MB")
+
+val (fl_min, fl_max) = compute_memory_mb(flat_shape, elem_size)
+print(f"  Flattened: {shape_to_string(flat_shape)} = {fl_min}-{fl_max} MB")
+
+val total_min = in_min + c1_min + c2_min + fl_min
+val total_max = in_max + c1_max + c2_max + fl_max
 
 print("")
-print("Total Memory: {total_min}-{total_max} MB")
-print("Peak batch=64: {total_max} MB")
+print(f"Total Memory: {total_min}-{total_max} MB")
+print(f"Peak batch=64: {total_max} MB")
 print("")
 
 # ============================================================================
 # Runtime Shape Verification
 # ============================================================================
+
+fn check_dim_valid(actual_dim: i32, expected_dim: Dim) -> bool:
+    """Check if a single dimension matches constraints"""
+    match expected_dim:
+        case Dim.Literal(v):
+            actual_dim == v
+        case Dim.Named(_, lo, hi):
+            actual_dim >= lo and actual_dim <= hi
+        case _:
+            true
 
 fn verify_runtime_shape(actual: List<i32>, expected: TensorShape) -> bool:
     """Verify actual runtime shape matches expected constraints"""
@@ -381,16 +366,7 @@ fn verify_runtime_shape(actual: List<i32>, expected: TensorShape) -> bool:
         val actual_dim = actual[i]
         val expected_dim = expected.dims[i]
 
-        val valid: bool
-        match expected_dim:
-            case Dim.Literal(v):
-                valid = (actual_dim == v)
-            case Dim.Named(_, lo, hi):
-                valid = (actual_dim >= lo and actual_dim <= hi)
-            case _:
-                valid = true
-
-        if not valid:
+        if not check_dim_valid(actual_dim, expected_dim):
             return false
 
         i = i + 1
