@@ -126,8 +126,47 @@ fn match_pattern(pattern: &MacroPattern, args: &Array<Expr>, bindings: &mut Dict
         case MacroPattern::Sequence { pattern, separator, trailing }:
             # Match repeating sequence
             val items: Array<Expr> = []
-            # TODO: [stdlib][P1] Implement sequence matching
-            bindings.set("items".to_string(), MacroBinding::Sequence(items))
+            var idx = 0
+
+            while idx < args.len():
+                # Try to match the pattern at current position
+                val item_bindings: Dict<String, MacroBinding> = Dict::new()
+                if match_pattern(pattern, &[args[idx].clone()], &mut item_bindings):
+                    items.push(args[idx].clone())
+                    idx += 1
+
+                    # Check for separator if there's more input
+                    if idx < args.len():
+                        if val Some(sep) = separator:
+                            # Expect separator next
+                            match args[idx]:
+                                case Expr::Identifier(name):
+                                    if name == sep:
+                                        idx += 1  # Skip separator
+                                    else:
+                                        break  # No separator, end sequence
+                                case _:
+                                    break
+                else:
+                    break
+
+            # If trailing is true, allow a trailing separator
+            if trailing and idx < args.len():
+                if val Some(sep) = separator:
+                    match args[idx]:
+                        case Expr::Identifier(name):
+                            if name == sep:
+                                idx += 1  # Skip trailing separator
+                        case _:
+                            pass
+
+            # Extract the variable name from the pattern
+            val var_name = match pattern.as_ref():
+                case MacroPattern::Expr(name): name.clone()
+                case MacroPattern::Ident(name): name.clone()
+                case _: "items".to_string()
+
+            bindings.set(var_name, MacroBinding::Sequence(items))
             return true
 
         case MacroPattern::Group(patterns):
