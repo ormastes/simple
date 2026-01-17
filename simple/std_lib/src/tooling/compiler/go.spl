@@ -5,6 +5,10 @@ use tooling.core.project.{Language, LanguageConfig}
 use tooling.compiler.interface.{LanguageCompiler, CompilationMode, CompilationResult}
 use core.result.{Result, Ok, Err}
 
+# FFI for process execution
+@extern("runtime", "rt_process_run")
+fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64, args_ptr: &u8, args_len: u64) -> (i32, text, text)
+
 # Go compiler adapter
 pub class GoCompiler:
     pub language: Language
@@ -70,16 +74,26 @@ pub class GoCompiler:
         # Determine build command
         build_cmd = self.get_build_command(mode, config)
 
-        # TODO: [stdlib][P3] Execute go build command
-        # result = sys.exec(build_cmd, config.source_dir)
+        # Execute go build command
+        val cmd = "go"
+        val args = build_cmd.substring(3, build_cmd.len())  # Remove "go " prefix
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
 
-        # For now, return success placeholder
+        # Parse errors and warnings from output
+        var errors: List<text> = []
+        var warnings: List<text> = []
+        for line in stderr.lines():
+            if line.contains("error:"):
+                errors.append(line)
+            elif line.contains("warning:"):
+                warnings.append(line)
+
         CompilationResult {
-            status: "success",
+            status: if exit_code == 0 { "success" } else { "failed" },
             output_path: config.output_dir + "/" + config.name,
             duration_ms: time.now() - start_time,
-            errors: [],
-            warnings: []
+            errors: errors,
+            warnings: warnings
         }
 
     fn get_build_command(mode: CompilationMode, config: LanguageConfig): text =
@@ -138,15 +152,23 @@ pub class GoCompiler:
         """
         start_time = time.now()
 
-        # TODO: [stdlib][P3] Execute go test command
-        # result = sys.exec("go test ./...", config.source_dir)
+        # Execute go test command
+        val cmd = "go"
+        val args = "test ./..."
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        var errors: List<text> = []
+        var warnings: List<text> = []
+        for line in stderr.lines():
+            if line.contains("FAIL"):
+                errors.append(line)
 
         CompilationResult {
-            status: "success",
+            status: if exit_code == 0 { "success" } else { "failed" },
             output_path: "",
             duration_ms: time.now() - start_time,
-            errors: [],
-            warnings: []
+            errors: errors,
+            warnings: warnings
         }
 
     pub fn vet(self, config: LanguageConfig): List<text> =
@@ -158,10 +180,15 @@ pub class GoCompiler:
         Returns:
             List of vet warnings
         """
-        # TODO: [stdlib][P3] Execute go vet command
-        # result = sys.exec("go vet ./...", config.source_dir)
+        # Execute go vet command
+        val cmd = "go"
+        val args = "vet ./..."
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
 
-        []
+        var warnings: List<text> = []
+        for line in stderr.lines():
+            warnings.append(line)
+        warnings
 
     pub fn format(self, config: LanguageConfig): bool =
         """Format code using 'go fmt'.
@@ -172,10 +199,12 @@ pub class GoCompiler:
         Returns:
             True if successful
         """
-        # TODO: [stdlib][P3] Execute go fmt command
-        # result = sys.exec("go fmt ./...", config.source_dir)
+        # Execute go fmt command
+        val cmd = "go"
+        val args = "fmt ./..."
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
 
-        true
+        exit_code == 0
 
     pub fn mod_tidy(self, config: LanguageConfig): bool =
         """Run 'go mod tidy' to clean dependencies.
@@ -186,10 +215,12 @@ pub class GoCompiler:
         Returns:
             True if successful
         """
-        # TODO: [stdlib][P3] Execute go mod tidy command
-        # result = sys.exec("go mod tidy", config.source_dir)
+        # Execute go mod tidy command
+        val cmd = "go"
+        val args = "mod tidy"
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
 
-        true
+        exit_code == 0
 
 # Trait implementation
 impl LanguageCompiler for GoCompiler:

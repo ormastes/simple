@@ -39,7 +39,7 @@ use std::collections::HashMap;
 
 // Import parent interpreter types and functions
 use super::{
-    evaluate_expr, exec_block, exec_block_fn, Control, Enums, ImplMethods, BDD_CONTEXT_DEFS, BDD_INDENT,
+    await_value, evaluate_expr, exec_block, exec_block_fn, Control, Enums, ImplMethods, BDD_CONTEXT_DEFS, BDD_INDENT,
     BDD_LAZY_VALUES, CONTEXT_OBJECT, CONTEXT_VAR_NAME,
 };
 
@@ -89,11 +89,25 @@ pub(super) fn exec_if(
     }
 
     // Normal if condition
-    if evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?.truthy() {
+    // For if~ (is_suspend), await the condition value before checking truthiness
+    let cond_val = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
+    let cond_val = if if_stmt.is_suspend {
+        await_value(cond_val)?
+    } else {
+        cond_val
+    };
+
+    if cond_val.truthy() {
         return exec_block(&if_stmt.then_block, env, functions, classes, enums, impl_methods);
     }
     for (cond, block) in &if_stmt.elif_branches {
-        if evaluate_expr(cond, env, functions, classes, enums, impl_methods)?.truthy() {
+        let elif_val = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
+        let elif_val = if if_stmt.is_suspend {
+            await_value(elif_val)?
+        } else {
+            elif_val
+        };
+        if elif_val.truthy() {
             return exec_block(block, env, functions, classes, enums, impl_methods);
         }
     }
@@ -136,9 +150,16 @@ pub(super) fn exec_while(
     }
 
     // Normal while loop
+    // For while~ (is_suspend), await the condition value before checking truthiness
     loop {
         check_interrupt!();
-        if !evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?.truthy() {
+        let cond_val = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
+        let cond_val = if while_stmt.is_suspend {
+            await_value(cond_val)?
+        } else {
+            cond_val
+        };
+        if !cond_val.truthy() {
             break;
         }
         let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods)?;
@@ -386,12 +407,26 @@ pub(super) fn exec_for(
 ) -> Result<Control, CompileError> {
     let iterable = evaluate_expr(&for_stmt.iterable, env, functions, classes, enums, impl_methods)?;
 
+    // For for~ (is_suspend), await the iterable if it's a Promise
+    let iterable = if for_stmt.is_suspend {
+        await_value(iterable)?
+    } else {
+        iterable
+    };
+
     // Use iter_to_vec to handle all iterable types uniformly
     let items = iter_to_vec(&iterable)?;
 
     // If auto_enumerate, wrap items with indices as tuples
     for (index, item) in items.into_iter().enumerate() {
         check_interrupt!();
+
+        // For for~ (is_suspend), await each item if it's a Promise
+        let item = if for_stmt.is_suspend {
+            await_value(item)?
+        } else {
+            item
+        };
 
         // Create the value to bind - either (index, item) tuple or just item
         let bind_value = if for_stmt.auto_enumerate {
