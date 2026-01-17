@@ -41,33 +41,71 @@ impl Lowerer {
 
     /// Lower an i18n string to HIR
     ///
-    /// Currently lowered as a plain string literal (no locale lookup at HIR level).
-    /// Locale lookup happens at runtime.
-    pub(super) fn lower_i18n_string(&self, _name: &str, default_text: &str) -> LowerResult<HirExpr> {
-        // For now, just emit the default text as a string literal
-        // TODO: Add locale lookup support in native compilation
+    /// Performs compile-time locale lookup using the registry. If the string
+    /// is found in the current locale, that value is used; otherwise falls
+    /// back to the default text.
+    ///
+    /// Note: This means the locale is baked in at compile time. For different
+    /// locales, recompile with the appropriate locale loaded in the registry.
+    pub(super) fn lower_i18n_string(&self, name: &str, default_text: &str) -> LowerResult<HirExpr> {
+        // Look up in locale registry at compile time, fall back to default
+        let text = crate::i18n::lookup(name).unwrap_or_else(|| default_text.to_string());
         Ok(HirExpr {
-            kind: HirExprKind::String(default_text.to_string()),
+            kind: HirExprKind::String(text),
             ty: TypeId::STRING,
         })
     }
 
     /// Lower an i18n template to HIR
     ///
-    /// Not yet supported in native compilation - falls back to interpreter.
-    pub(super) fn lower_i18n_template(&self, _name: &str, _parts: &[ast::FStringPart], _args: &[(String, Expr)]) -> LowerResult<HirExpr> {
-        Err(LowerError::Unsupported(
-            "i18n template strings not yet supported in native compilation".to_string(),
-        ))
+    /// Performs compile-time locale lookup. If found in registry, uses that template.
+    /// Otherwise, builds the default template from parts.
+    ///
+    /// Note: Template arguments are not substituted at compile time in native
+    /// compilation. For full template support, use the interpreter mode.
+    pub(super) fn lower_i18n_template(&self, name: &str, parts: &[ast::FStringPart], _args: &[(String, Expr)]) -> LowerResult<HirExpr> {
+        // Try to look up the template in the locale registry
+        let template = if let Some(localized) = crate::i18n::lookup(name) {
+            localized
+        } else {
+            // Build the default template from parts
+            let mut default_template = String::new();
+            for part in parts {
+                match part {
+                    ast::FStringPart::Literal(lit) => default_template.push_str(lit),
+                    ast::FStringPart::Expr(e) => {
+                        // Convert expression to placeholder format
+                        if let Expr::Identifier(id) = e {
+                            default_template.push_str(&format!("{{{}}}", id));
+                        } else {
+                            // For complex expressions, just use a generic placeholder
+                            default_template.push_str("{...}");
+                        }
+                    }
+                }
+            }
+            default_template
+        };
+
+        // Return as a string literal (placeholders remain unsubstituted)
+        // Full template substitution requires runtime support
+        Ok(HirExpr {
+            kind: HirExprKind::String(template),
+            ty: TypeId::STRING,
+        })
     }
 
     /// Lower an i18n reference to HIR
     ///
-    /// Not yet supported in native compilation - falls back to interpreter.
-    pub(super) fn lower_i18n_ref(&self, _name: &str) -> LowerResult<HirExpr> {
-        Err(LowerError::Unsupported(
-            "i18n references not yet supported in native compilation".to_string(),
-        ))
+    /// Performs compile-time locale lookup using the registry.
+    /// Returns the localized string or a placeholder if not found.
+    pub(super) fn lower_i18n_ref(&self, name: &str) -> LowerResult<HirExpr> {
+        // Look up in locale registry at compile time
+        let text = crate::i18n::lookup_or_placeholder(name);
+        Ok(HirExpr {
+            kind: HirExprKind::String(text),
+            ty: TypeId::STRING,
+        })
     }
 
     /// Lower an FString (formatted string) to HIR
