@@ -4,7 +4,7 @@ export Tensor
 
 import device.{Device, device_code, device_from_code}
 import dtype.{DType, dtype_code, dtype_from_code}
-import tensor_ffi.{rt_torch_zeros, rt_torch_ones, rt_torch_randn, rt_torch_arange, rt_torch_free, rt_torch_clone, rt_torch_shape, rt_torch_numel, rt_torch_dtype, rt_torch_device, rt_torch_add, rt_torch_sub, rt_torch_mul, rt_torch_div, rt_torch_matmul, rt_torch_reshape, rt_torch_transpose, rt_torch_sum, rt_torch_mean, rt_torch_max, rt_torch_min, rt_torch_std, rt_torch_var, rt_torch_norm, rt_torch_item, rt_torch_set_requires_grad, rt_torch_requires_grad, rt_torch_backward, rt_torch_grad, rt_torch_detach, rt_torch_to_device, rt_torch_to_cpu, rt_torch_to_cuda}
+import tensor_ffi.{rt_torch_zeros, rt_torch_ones, rt_torch_randn, rt_torch_arange, rt_torch_free, rt_torch_clone, rt_torch_shape, rt_torch_numel, rt_torch_dtype, rt_torch_device, rt_torch_add, rt_torch_sub, rt_torch_mul, rt_torch_div, rt_torch_matmul, rt_torch_reshape, rt_torch_transpose, rt_torch_sum, rt_torch_mean, rt_torch_max, rt_torch_min, rt_torch_std, rt_torch_var, rt_torch_norm, rt_torch_item, rt_torch_set_requires_grad, rt_torch_requires_grad, rt_torch_backward, rt_torch_grad, rt_torch_detach, rt_torch_to_device, rt_torch_to_cpu, rt_torch_to_cuda, rt_torch_index, rt_torch_slice, rt_torch_select, rt_torch_narrow}
 
 class Tensor:
     """Multi-dimensional array with GPU support."""
@@ -481,6 +481,131 @@ class Tensor:
             val n = t.norm_dim(2.0, 1)  # → shape [3]
         """
         return Tensor(rt_torch_norm(self.handle, p, dim as i32, keepdim as i32))
+
+    # Indexing Operations
+    fn index(idx: i64) -> Tensor:
+        """Index into first dimension.
+
+        Args:
+            idx: Index along first dimension
+
+        Returns:
+            Tensor with first dimension indexed
+
+        Example:
+            val t = Tensor::randn([3, 4, 5])
+            val r = t.index(1)  # → shape [4, 5]
+        """
+        return Tensor(rt_torch_index(self.handle, idx))
+
+    fn select(dim: i64, idx: i64) -> Tensor:
+        """Select single index along a dimension.
+
+        Reduces the tensor by one dimension.
+
+        Args:
+            dim: Dimension to index into
+            idx: Index to select
+
+        Returns:
+            Tensor with dimension removed
+
+        Example:
+            val t = Tensor::randn([3, 4, 5])
+            val r = t.select(1, 2)  # → shape [3, 5]
+        """
+        return Tensor(rt_torch_select(self.handle, dim as i32, idx))
+
+    fn slice_dim(dim: i64, start: i64, end: i64, step: i64 = 1) -> Tensor:
+        """Slice along a dimension.
+
+        Args:
+            dim: Dimension to slice
+            start: Start index (inclusive)
+            end: End index (exclusive), use -1 for end
+            step: Step size (default: 1)
+
+        Returns:
+            Sliced tensor
+
+        Example:
+            val t = Tensor::randn([10, 4])
+            val r = t.slice_dim(0, 2, 8)     # → shape [6, 4]
+            val s = t.slice_dim(0, 0, 10, 2) # → shape [5, 4] (every 2nd)
+        """
+        return Tensor(rt_torch_slice(self.handle, dim as i32, start, end, step))
+
+    fn narrow(dim: i64, start: i64, length: i64) -> Tensor:
+        """Narrow tensor along a dimension.
+
+        Similar to slice but uses length instead of end index.
+
+        Args:
+            dim: Dimension to narrow
+            start: Start index
+            length: Number of elements to keep
+
+        Returns:
+            Narrowed tensor
+
+        Example:
+            val t = Tensor::randn([10, 4])
+            val r = t.narrow(0, 2, 5)  # → shape [5, 4]
+        """
+        return Tensor(rt_torch_narrow(self.handle, dim as i32, start, length))
+
+    fn get(indices: [i64]) -> Tensor:
+        """Get element or sub-tensor by multiple indices.
+
+        Args:
+            indices: List of indices for each dimension
+
+        Returns:
+            Indexed tensor
+
+        Example:
+            val t = Tensor::randn([3, 4, 5])
+            val r = t.get([1])        # → shape [4, 5]
+            val s = t.get([1, 2])     # → shape [5]
+            val v = t.get([1, 2, 3])  # → scalar tensor
+        """
+        var result = self
+        var i = 0
+        while i < indices.len():
+            result = result.select(0, indices[i])
+            i = i + 1
+        return result
+
+    fn head(n: i64) -> Tensor:
+        """Get first n elements along first dimension.
+
+        Args:
+            n: Number of elements
+
+        Returns:
+            Tensor with first n elements
+
+        Example:
+            val t = Tensor::randn([10, 4])
+            val h = t.head(3)  # → shape [3, 4]
+        """
+        return self.narrow(0, 0, n)
+
+    fn tail(n: i64) -> Tensor:
+        """Get last n elements along first dimension.
+
+        Args:
+            n: Number of elements
+
+        Returns:
+            Tensor with last n elements
+
+        Example:
+            val t = Tensor::randn([10, 4])
+            val t = t.tail(3)  # → shape [3, 4]
+        """
+        val size = self.shape()[0]
+        return self.narrow(0, size - n, n)
 
     # Data Access
     fn item() -> f64:
