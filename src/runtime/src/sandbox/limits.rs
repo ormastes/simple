@@ -112,14 +112,36 @@ mod tests {
 
     #[test]
     fn test_combined_limits() {
+        // NOTE: We do NOT apply memory limits in tests because RLIMIT_AS
+        // affects the entire test runner process, causing memory exhaustion
+        // for other tests running in parallel.
+
         let limits = ResourceLimits {
             cpu_time: Some(Duration::from_secs(30)),
-            memory: Some(512 * 1024 * 1024), // 512 MB (safe for tests)
+            memory: Some(512 * 1024 * 1024), // 512 MB
             file_descriptors: Some(512),
             ..Default::default()
         };
 
-        // This should succeed
+        // Validate config construction only (don't apply to test process)
+        assert!(limits.cpu_time.is_some());
+        assert!(limits.memory.is_some());
+        assert!(limits.file_descriptors.is_some());
+        assert_eq!(limits.cpu_time.unwrap().as_secs(), 30);
+        assert_eq!(limits.memory.unwrap(), 512 * 1024 * 1024);
+        assert_eq!(limits.file_descriptors.unwrap(), 512);
+    }
+
+    #[test]
+    fn test_apply_cpu_and_fd_limits_only() {
+        // Safe to apply: CPU time and FD limits don't cause memory exhaustion
+        let limits = ResourceLimits {
+            cpu_time: Some(Duration::from_secs(300)), // 5 minutes
+            file_descriptors: Some(1024),
+            ..Default::default()
+        };
+
+        // This is safe to apply - no memory limit
         let result = apply_resource_limits(&limits);
         assert!(result.is_ok());
     }
