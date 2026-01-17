@@ -398,6 +398,8 @@ impl<'a> Parser<'a> {
             TokenKind::Scenario => self.parse_scenario(),
             TokenKind::Examples => self.parse_examples(),
             TokenKind::Given | TokenKind::When | TokenKind::Then | TokenKind::AndThen => self.parse_step_ref_as_node(),
+            // Wildcard suspension: _ ~= expr (discard awaited result)
+            TokenKind::Underscore => self.parse_wildcard_suspend(),
             _ => self.parse_expression_or_assignment(),
         }
     }

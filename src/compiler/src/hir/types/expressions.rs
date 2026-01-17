@@ -398,6 +398,8 @@ pub enum BinOp {
     // Logical
     And,
     Or,
+    AndSuspend,
+    OrSuspend,
     // Bitwise
     BitAnd,
     BitOr,
@@ -425,6 +427,8 @@ impl From<simple_parser::BinOp> for BinOp {
             simple_parser::BinOp::GtEq => BinOp::GtEq,
             simple_parser::BinOp::And => BinOp::And,
             simple_parser::BinOp::Or => BinOp::Or,
+            simple_parser::BinOp::AndSuspend => BinOp::AndSuspend,
+            simple_parser::BinOp::OrSuspend => BinOp::OrSuspend,
             simple_parser::BinOp::BitAnd => BinOp::BitAnd,
             simple_parser::BinOp::BitOr => BinOp::BitOr,
             simple_parser::BinOp::BitXor => BinOp::BitXor,

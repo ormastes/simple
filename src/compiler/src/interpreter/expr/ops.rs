@@ -10,7 +10,7 @@ use crate::value::{
     BorrowMutValue, BorrowValue, ManualHandleValue, ManualSharedValue, ManualUniqueValue, ManualWeakValue, Value,
 };
 
-use super::super::{check_unit_binary_op, check_unit_unary_op, ClassDef, Enums, Env, FunctionDef, ImplMethods};
+use super::super::{await_value, check_unit_binary_op, check_unit_unary_op, ClassDef, Enums, Env, FunctionDef, ImplMethods};
 
 pub(super) fn eval_op_expr(
     expr: &Expr,
@@ -42,6 +42,35 @@ pub(super) fn eval_op_expr(
             Ok(Some(result?))
         }
         Expr::Binary { op, left, right } => {
+            // Handle suspension boolean operators specially (lazy evaluation with await)
+            // and~ : evaluate left, if truthy then await right and return logical AND
+            // or~  : evaluate left, if truthy return true, else await right and return result
+            match op {
+                BinOp::AndSuspend => {
+                    let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
+                    if !left_val.truthy() {
+                        // Short-circuit: left is falsy, don't evaluate right
+                        return Ok(Some(Value::Bool(false)));
+                    }
+                    // Left is truthy, await right and return logical AND
+                    let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+                    let awaited_right = await_value(right_val)?;
+                    return Ok(Some(Value::Bool(awaited_right.truthy())));
+                }
+                BinOp::OrSuspend => {
+                    let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
+                    if left_val.truthy() {
+                        // Short-circuit: left is truthy, don't evaluate right
+                        return Ok(Some(Value::Bool(true)));
+                    }
+                    // Left is falsy, await right and return its truthiness
+                    let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+                    let awaited_right = await_value(right_val)?;
+                    return Ok(Some(Value::Bool(awaited_right.truthy())));
+                }
+                _ => {} // Fall through to normal handling
+            }
+
             let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
             let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
 
@@ -221,8 +250,8 @@ pub(super) fn eval_op_expr(
                     _ => Ok(Value::Bool(left_val.as_int()? >= right_val.as_int()?)),
                 },
                 BinOp::Is => Ok(Value::Bool(left_val == right_val)),
-                BinOp::And => Ok(Value::Bool(left_val.truthy() && right_val.truthy())),
-                BinOp::Or => Ok(Value::Bool(left_val.truthy() || right_val.truthy())),
+                BinOp::And | BinOp::AndSuspend => Ok(Value::Bool(left_val.truthy() && right_val.truthy())),
+                BinOp::Or | BinOp::OrSuspend => Ok(Value::Bool(left_val.truthy() || right_val.truthy())),
                 BinOp::Pow => {
                     if use_float {
                         Ok(Value::Float(left_val.as_float()?.powf(right_val.as_float()?)))

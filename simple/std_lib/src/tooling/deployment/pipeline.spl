@@ -607,8 +607,68 @@ pub class DeploymentPipeline:
         if self.verbose:
             print("Rolling back deployment...")
 
-        # TODO: [stdlib][P1] Implement rollback logic
+        # Get deployment strategy
+        val strategy = self.config.get("strategy").unwrap_or("rolling")
+
+        match strategy:
+            "blue-green" ->
+                # Blue-green: Switch load balancer back to previous version
+                if self.verbose:
+                    print("Switching back to previous version...")
+                self.switch_traffic_to_previous()
+            "canary" ->
+                # Canary: Redirect 100% traffic to stable
+                if self.verbose:
+                    print("Redirecting all traffic to stable...")
+                self.set_traffic_weight(0)  # 0% to canary
+            "rolling" ->
+                # Rolling: Revert pods/instances to previous version
+                if self.verbose:
+                    print("Rolling back instances...")
+                self.rollback_instances()
+            _ ->
+                if self.verbose:
+                    print("Unknown strategy, using default rollback...")
+                self.rollback_instances()
+
+        if self.verbose:
+            print("Rollback complete")
+
         Ok(())
+
+    fn switch_traffic_to_previous(self):
+        """Switch traffic back to previous version (blue-green)."""
+        import shell
+
+        # Execute traffic switch command
+        val switch_cmd = self.config.get("rollback_command").unwrap_or("kubectl rollout undo")
+        val namespace = self.config.get("namespace").unwrap_or("default")
+        val app = self.config.get("app").unwrap_or("app")
+
+        shell.run("sh", ["-c", "{switch_cmd} deployment/{app} -n {namespace}"])
+
+    fn set_traffic_weight(self, canary_percent: i32):
+        """Set traffic weight for canary deployment."""
+        import shell
+
+        # Use Istio or similar for traffic splitting
+        val namespace = self.config.get("namespace").unwrap_or("default")
+        val app = self.config.get("app").unwrap_or("app")
+        val stable_percent = 100 - canary_percent
+
+        # Update virtual service weights
+        val cmd = "kubectl patch virtualservice {app} -n {namespace} --type=json -p='[{\"op\":\"replace\",\"path\":\"/spec/http/0/route/0/weight\",\"value\":{stable_percent}},{\"op\":\"replace\",\"path\":\"/spec/http/0/route/1/weight\",\"value\":{canary_percent}}]'"
+        shell.run("sh", ["-c", cmd])
+
+    fn rollback_instances(self):
+        """Roll back all instances to previous version."""
+        import shell
+
+        val namespace = self.config.get("namespace").unwrap_or("default")
+        val app = self.config.get("app").unwrap_or("app")
+
+        # Use kubectl rollout undo for Kubernetes
+        shell.run("kubectl", ["rollout", "undo", "deployment/{app}", "-n", namespace])
 
     pub fn health_check(self, url: text): Result<(), text> =
         """Perform health check on deployed service.

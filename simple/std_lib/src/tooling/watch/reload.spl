@@ -179,9 +179,50 @@ pub class HMRClient:
         """Connect to HMR server.
 
         Establishes connection for receiving reload events.
+        Uses HTTP long-polling for simplicity (WebSocket requires more infrastructure).
         """
-        # TODO: [stdlib][P1] Implement WebSocket or HTTP connection
-        self.connected = true
+        @extern("runtime", "rt_http_get")
+        fn _rt_http_get(url_ptr: &u8, url_len: u64) -> text
+
+        # Try to connect to HMR server
+        val url = "http://{self.server_url}/hmr/connect"
+        val response = _rt_http_get(url.ptr(), url.len())
+
+        if response.contains("connected"):
+            self.connected = true
+            # Start polling for events in background
+            self.start_event_polling()
+        else:
+            self.connected = false
+
+    fn start_event_polling(self):
+        """Start background polling for HMR events."""
+        import concurrency.threads.{rt_thread_spawn_isolated}
+
+        # Spawn polling thread
+        val poll_fn = || self.poll_events()
+        rt_thread_spawn_isolated(poll_fn, ())
+
+    fn poll_events(self):
+        """Poll for HMR events in a loop."""
+        @extern("runtime", "rt_http_get")
+        fn _rt_http_get(url_ptr: &u8, url_len: u64) -> text
+
+        @extern("runtime", "rt_thread_sleep")
+        fn _rt_thread_sleep(ms: i64)
+
+        while self.connected:
+            val url = "http://{self.server_url}/hmr/events"
+            val response = _rt_http_get(url.ptr(), url.len())
+
+            if not response.is_empty() and response != "none":
+                # Parse event and call callback
+                val modules = parse_hmr_event(response)
+                if self.on_reload_callback.is_some():
+                    self.on_reload_callback.unwrap()(modules)
+
+            # Poll every 100ms
+            _rt_thread_sleep(100)
 
     pub fn disconnect(self):
         """Disconnect from HMR server."""
@@ -231,10 +272,56 @@ pub class HMRServer:
     pub fn start(self):
         """Start HMR server.
 
-        Listens for client connections.
+        Listens for client connections using HTTP server.
+        Uses HTTP long-polling for simplicity.
         """
-        # TODO: [stdlib][P1] Implement WebSocket server
+        import concurrency.threads.{rt_thread_spawn_isolated}
+
         self.running = true
+
+        # Start HTTP server in background thread
+        val server_fn = || self.run_http_server()
+        rt_thread_spawn_isolated(server_fn, ())
+
+    fn run_http_server(self):
+        """Run HTTP server for HMR events."""
+        @extern("runtime", "rt_http_server_start")
+        fn _rt_http_server_start(port: i32) -> i64
+
+        @extern("runtime", "rt_http_server_accept")
+        fn _rt_http_server_accept(handle: i64) -> i64
+
+        @extern("runtime", "rt_http_request_path")
+        fn _rt_http_request_path(conn: i64) -> text
+
+        @extern("runtime", "rt_http_response_send")
+        fn _rt_http_response_send(conn: i64, body_ptr: &u8, body_len: u64)
+
+        val server_handle = _rt_http_server_start(self.port)
+        if server_handle < 0:
+            self.running = false
+            return
+
+        while self.running:
+            val conn = _rt_http_server_accept(server_handle)
+            if conn < 0:
+                continue
+
+            val path = _rt_http_request_path(conn)
+
+            if path == "/hmr/connect":
+                # Register client and respond
+                _rt_http_response_send(conn, "connected".ptr(), 9)
+            elif path == "/hmr/events":
+                # Return pending events or "none"
+                if self.pending_events.len() > 0:
+                    val events = self.pending_events.join(",")
+                    self.pending_events.clear()
+                    _rt_http_response_send(conn, events.ptr(), events.len())
+                else:
+                    _rt_http_response_send(conn, "none".ptr(), 4)
+            else:
+                _rt_http_response_send(conn, "not found".ptr(), 9)
 
     pub fn stop(self):
         """Stop HMR server."""
@@ -349,17 +436,83 @@ pub class ModuleReloader:
         if self.verbose:
             print("Reloading module: {module_path}")
 
-        # TODO: [stdlib][P1] Implement actual module reloading
-        # Steps:
+        # Module reloading steps:
         # 1. Unload old module
         # 2. Re-compile module
         # 3. Load new module
         # 4. Update function pointers
-        # 5. Preserve application state
 
-        self.loaded_modules[module_path] = 0  # TODO: [stdlib][P3] Get file mtime
+        # Check if file exists
+        @extern("runtime", "rt_file_exists")
+        fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
 
-        Ok(())
+        if not _rt_file_exists(module_path.ptr(), module_path.len()):
+            return Err("Module file not found: {module_path}")
+
+        # Step 1: Unload old module if loaded
+        if self.loaded_modules.contains_key(module_path):
+            if self.verbose:
+                print("Unloading old version of {module_path}")
+            self.unload_module(module_path)
+
+        # Step 2: Re-compile the module
+        if self.verbose:
+            print("Compiling {module_path}")
+
+        match self.compile_module(module_path):
+            Ok(compiled_path) ->
+                # Step 3: Load the new module
+                if self.verbose:
+                    print("Loading compiled module from {compiled_path}")
+
+                match self.load_compiled_module(compiled_path, module_path):
+                    Ok(module_handle) ->
+                        # Step 4: Register the loaded module
+                        self.loaded_modules[module_path] = module_handle
+
+                        if self.verbose:
+                            print("Module {module_path} reloaded successfully")
+
+                        Ok(())
+                    Err(load_err) ->
+                        Err("Failed to load module: {load_err}")
+            Err(compile_err) ->
+                Err("Failed to compile module: {compile_err}")
+
+    fn unload_module(self, module_path: text):
+        """Unload a previously loaded module."""
+        @extern("runtime", "rt_module_unload")
+        fn _rt_module_unload(handle: i64)
+
+        if self.loaded_modules.contains_key(module_path):
+            val handle = self.loaded_modules[module_path]
+            _rt_module_unload(handle)
+            self.loaded_modules.remove(module_path)
+
+    fn compile_module(self, module_path: text): Result<text, text> =
+        """Compile a module file to bytecode/native."""
+        import shell
+
+        # Use the Simple compiler
+        val output_path = module_path.replace(".spl", ".smf")
+        val result = shell.run("simple", ["compile", module_path, "-o", output_path])
+
+        if result.exit_code == 0:
+            Ok(output_path)
+        else:
+            Err(result.stderr)
+
+    fn load_compiled_module(self, compiled_path: text, module_path: text): Result<i64, text> =
+        """Load a compiled module into the runtime."""
+        @extern("runtime", "rt_module_load")
+        fn _rt_module_load(path_ptr: &u8, path_len: u64) -> i64
+
+        val handle = _rt_module_load(compiled_path.ptr(), compiled_path.len())
+
+        if handle > 0:
+            Ok(handle)
+        else:
+            Err("Runtime failed to load module")
 
     pub fn reload_modules(self, modules: List<text>): Result<(), text> =
         """Reload multiple modules.

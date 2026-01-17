@@ -61,7 +61,7 @@ impl<'a> super::Lexer<'a> {
             return self.scan_i18n_string(name);
         }
 
-        // Check for suspension keywords with tilde suffix (if~, while~, for~)
+        // Check for suspension keywords with tilde suffix (if~, while~, for~, and~, or~)
         // These must be checked before regular keyword matching
         if self.check('~') {
             match name.as_str() {
@@ -76,6 +76,14 @@ impl<'a> super::Lexer<'a> {
                 "for" => {
                     self.advance(); // consume '~'
                     return TokenKind::ForSuspend;
+                }
+                "and" => {
+                    self.advance(); // consume '~'
+                    return TokenKind::AndSuspend;
+                }
+                "or" => {
+                    self.advance(); // consume '~'
+                    return TokenKind::OrSuspend;
                 }
                 _ => {} // Not a suspension keyword, continue to regular keyword matching
             }

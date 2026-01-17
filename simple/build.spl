@@ -15,6 +15,7 @@ import std.io
 import std.fs
 import std.process
 import std.args
+import std.time
 import sdn.document.SdnDocument
 
 fn main():
@@ -322,27 +323,122 @@ fn clean_build(config: ProjectConfig):
     io.println("")
     io.println("=== Clean Complete ===")
 
+# Track file modification times for watching
+var watched_file_mtimes: Dict<String, Int> = {}
+var last_build_time: Int = 0
+
 fn watch_and_build(config: ProjectConfig):
-    """Watch files and rebuild on changes"""
+    """Watch files and rebuild on changes using mtime polling."""
     io.println("Watch mode enabled")
     io.println("Watching for changes in ${config.paths.source}...")
     io.println("")
 
     # Initial build
     build_all(config)
+    last_build_time = time.now_ms()
 
-    # Watch loop (simplified - real implementation would use file watcher)
+    # Initialize file mtimes
+    initialize_file_watching(config)
+
     io.println("")
     io.println("Watching for changes... (Press Ctrl+C to exit)")
 
-    loop:
-        # Sleep for a bit
-        process.sleep(1000)
+    val debounce_ms = 500  # Debounce delay
 
-        # Check for changes (simplified)
-        # Real implementation would use fs.watch() or similar
-        # For now, just rebuild periodically
-        # TODO: [compiler][P1] Implement proper file watching
+    loop:
+        # Sleep to avoid busy-waiting
+        process.sleep(100)
+
+        # Check for file changes
+        val changed_files = check_file_changes(config)
+
+        if changed_files.len() > 0:
+            val current_time = time.now_ms()
+
+            # Debounce: only rebuild if enough time has passed
+            if current_time - last_build_time > debounce_ms:
+                io.println("")
+                io.println("Changes detected:")
+                for file_path in changed_files:
+                    io.println("  - ${file_path}")
+                io.println("")
+
+                # Determine which targets need rebuilding
+                val targets_to_build = get_affected_targets(config, changed_files)
+
+                if targets_to_build.len() > 0:
+                    io.println("Rebuilding affected targets...")
+                    for target_name in targets_to_build:
+                        match config.targets.get(target_name):
+                            case Some(target):
+                                build_target_impl(target_name, target)
+                            case None:
+                                pass
+                else:
+                    # Rebuild all if can't determine affected targets
+                    build_all(config)
+
+                last_build_time = time.now_ms()
+                io.println("")
+                io.println("Watching for changes... (Press Ctrl+C to exit)")
+
+fn initialize_file_watching(config: ProjectConfig):
+    """Initialize file modification time tracking."""
+    import shell
+
+    # Find all .spl files in source directory
+    val source_files = shell.file.find(config.paths.source, "*.spl", recursive: True)
+
+    for file_path in source_files:
+        watched_file_mtimes[file_path] = get_file_modification_time(file_path)
+
+    io.println("  Watching ${source_files.len()} source files")
+
+fn check_file_changes(config: ProjectConfig) -> List<String>:
+    """Check for changed files and return list of changed paths."""
+    import shell
+    var changed: List<String> = []
+
+    # Find all .spl files in source directory
+    val source_files = shell.file.find(config.paths.source, "*.spl", recursive: True)
+
+    for file_path in source_files:
+        val current_mtime = get_file_modification_time(file_path)
+
+        match watched_file_mtimes.get(file_path):
+            case Some(old_mtime):
+                if current_mtime > old_mtime:
+                    changed.push(file_path)
+                    watched_file_mtimes[file_path] = current_mtime
+            case None:
+                # New file
+                watched_file_mtimes[file_path] = current_mtime
+                changed.push(file_path)
+
+    return changed
+
+fn get_file_modification_time(path: String) -> Int:
+    """Get file modification time in milliseconds."""
+    match fs.stat(path):
+        case Ok(stat_info):
+            return stat_info.mtime_ms
+        case Err(_):
+            return 0
+
+fn get_affected_targets(config: ProjectConfig, changed_files: List<String>) -> List<String>:
+    """Determine which targets are affected by changed files."""
+    var affected: List<String> = []
+
+    for (target_name, target) in config.targets.items():
+        # Check if any changed file is in this target's source
+        for changed_path in changed_files:
+            if changed_path.starts_with(target.source) or
+               target.source.contains(changed_path):
+                if not affected.contains(target_name):
+                    affected.push(target_name)
+                break
+
+    return affected
 
 ### Helper functions
 

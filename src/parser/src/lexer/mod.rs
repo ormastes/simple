@@ -187,7 +187,49 @@ impl<'a> Lexer<'a> {
                 TokenKind::Backslash
             }
             '^' => TokenKind::Caret,
-            '~' => self.match_char('=', TokenKind::TildeAssign, TokenKind::Tilde),
+            '~' => {
+                // Check for compound suspension operators: ~+=, ~-=, ~*=, ~/=
+                if self.check('+') {
+                    self.advance();
+                    if self.check('=') {
+                        self.advance();
+                        TokenKind::TildePlusAssign
+                    } else {
+                        // Put back the '+' - this is just ~+ which isn't valid
+                        // For now, treat as error or just return Tilde
+                        TokenKind::Tilde
+                    }
+                } else if self.check('-') {
+                    self.advance();
+                    if self.check('=') {
+                        self.advance();
+                        TokenKind::TildeMinusAssign
+                    } else {
+                        TokenKind::Tilde
+                    }
+                } else if self.check('*') {
+                    self.advance();
+                    if self.check('=') {
+                        self.advance();
+                        TokenKind::TildeStarAssign
+                    } else {
+                        TokenKind::Tilde
+                    }
+                } else if self.check('/') {
+                    self.advance();
+                    if self.check('=') {
+                        self.advance();
+                        TokenKind::TildeSlashAssign
+                    } else {
+                        TokenKind::Tilde
+                    }
+                } else if self.check('=') {
+                    self.advance();
+                    TokenKind::TildeAssign
+                } else {
+                    TokenKind::Tilde
+                }
+            }
             '?' => TokenKind::Question,
 
             // Multi-character operators

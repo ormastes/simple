@@ -299,6 +299,12 @@ impl<'a> Parser<'a> {
             // Allow logical/conversion operators as trait names
             TokenKind::Not => "Not".to_string(),
             TokenKind::From => "From".to_string(),
+            // Allow math keywords to be used as identifiers (e.g., struct Slice<T>)
+            // These are only keywords inside m{} math blocks
+            TokenKind::Slice => "Slice".to_string(),
+            TokenKind::Tensor => "Tensor".to_string(),
+            TokenKind::Grid => "Grid".to_string(),
+            TokenKind::Flat => "Flat".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -378,6 +384,11 @@ impl<'a> Parser<'a> {
             TokenKind::Examples => "examples", // Allow "examples" in export statements
             TokenKind::Outline => "outline",   // Allow "outline" in export statements
             TokenKind::Common => "common",     // Allow "common" in paths (stdlib directory name)
+            // Allow math keywords in paths/exports
+            TokenKind::Slice => "Slice",
+            TokenKind::Tensor => "Tensor",
+            TokenKind::Grid => "Grid",
+            TokenKind::Flat => "Flat",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -464,6 +475,15 @@ impl<'a> Parser<'a> {
             TokenKind::On => "on",
             TokenKind::Bind => "bind",
             TokenKind::Mock => "mock",
+            // Allow math keywords as method names (e.g., arr.slice(0, 5))
+            TokenKind::Slice => "slice",
+            TokenKind::Tensor => "tensor",
+            TokenKind::Grid => "grid",
+            TokenKind::Flat => "flat",
+            // Allow Gherkin keywords as method names
+            TokenKind::Examples => "examples",
+            TokenKind::Outline => "outline",
+            TokenKind::AndThen => "and_then",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",

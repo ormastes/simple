@@ -233,9 +233,9 @@ impl RustCompiler:
         Returns:
             Process output
         """
-        # TODO: [stdlib][P1] Implement actual process execution
-        # For now, return mock success
-        ProcessOutput.new(0, "{\"success\":true}", "")
+        import shell
+        val result = shell.run("cargo", args)
+        ProcessOutput.new(result.exit_code as i32, result.stdout, result.stderr)
 
     fn parse_artifacts(json_output: text,
         mode: CompilationMode,
@@ -299,13 +299,77 @@ impl RustCompiler:
 
         Returns:
             Compilation error
+
+        Cargo JSON diagnostic format:
+        {"level":"error","message":"...","spans":[{"file_name":"...","line_start":10,"column_start":5}]}
         """
-        # TODO: [stdlib][P1] Implement JSON parsing
-        CompilationError.new(
-            file: "",
-            line: 0,
-            column: 0,
-            message: "Parse error",
-            severity: ErrorSeverity::Error,
-            language: Language::Rust
-        )
+        import core.json.{parse, JsonValue}
+
+        match parse(json_msg):
+            case Ok(JsonValue.Object(obj)):
+                var file = ""
+                var line: i32 = 0
+                var column: i32 = 0
+                var message = ""
+                var severity = ErrorSeverity::Error
+
+                # Extract message
+                match obj.get("message"):
+                    case Some(JsonValue.text(msg)):
+                        message = msg
+                    case _:
+                        pass
+
+                # Extract level/severity
+                match obj.get("level"):
+                    case Some(JsonValue.text(level)):
+                        severity = match level:
+                            case "error": ErrorSeverity::Error
+                            case "warning": ErrorSeverity::Warning
+                            case _: ErrorSeverity::Error
+                    case _:
+                        pass
+
+                # Extract spans for location info
+                match obj.get("spans"):
+                    case Some(JsonValue.Array(spans)):
+                        if spans.len() > 0:
+                            match spans[0]:
+                                case JsonValue.Object(span):
+                                    match span.get("file_name"):
+                                        case Some(JsonValue.text(f)):
+                                            file = f
+                                        case _:
+                                            pass
+                                    match span.get("line_start"):
+                                        case Some(JsonValue.Integer(l)):
+                                            line = l as i32
+                                        case _:
+                                            pass
+                                    match span.get("column_start"):
+                                        case Some(JsonValue.Integer(c)):
+                                            column = c as i32
+                                        case _:
+                                            pass
+                                case _:
+                                    pass
+                    case _:
+                        pass
+
+                CompilationError.new(
+                    file: file,
+                    line: line,
+                    column: column,
+                    message: message,
+                    severity: severity,
+                    language: Language::Rust
+                )
+            case _:
+                CompilationError.new(
+                    file: "",
+                    line: 0,
+                    column: 0,
+                    message: "Failed to parse error JSON",
+                    severity: ErrorSeverity::Error,
+                    language: Language::Rust
+                )

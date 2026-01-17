@@ -70,7 +70,7 @@ impl TypeChecker {
                         Ok(Type::Bool)
                     }
                     // Logical operators: both operands should be Bool, result is Bool
-                    BinOp::And | BinOp::Or => {
+                    BinOp::And | BinOp::Or | BinOp::AndSuspend | BinOp::OrSuspend => {
                         let _ = self.unify(&left_ty, &Type::Bool);
                         let _ = self.unify(&right_ty, &Type::Bool);
                         Ok(Type::Bool)

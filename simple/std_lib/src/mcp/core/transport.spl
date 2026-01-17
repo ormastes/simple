@@ -235,33 +235,213 @@ impl Transport for StdioTransport:
     fn is_alive() -> bool:
         return self.alive
 
-# TCP transport (future)
+# TCP FFI imports
+import net.tcp.{monoio_tcp_connect, monoio_tcp_read, monoio_tcp_write, monoio_tcp_close}
+
+# TCP transport for MCP over network
 pub class TcpTransport:
     pub host: text
     pub port: i64
     pub alive: bool
+    pub stream_handle: i64
+    pub buffer: text
+    pub debug_mode: bool
 
     pub fn new(host: text, port: i64) -> TcpTransport:
         return TcpTransport:
             host: host
             port: port
             alive: false
+            stream_handle: -1
+            buffer: ""
+            debug_mode: false
+
+    pub fn connect() -> Result<(), text>:
+        """Connect to the MCP server."""
+        val addr = "{self.host}:{self.port}"
+        val handle = monoio_tcp_connect(addr)
+        if handle < 0:
+            return Err("Failed to connect to {addr}")
+        self.stream_handle = handle
+        self.alive = true
+        Ok(())
+
+    pub fn enable_debug():
+        self.debug_mode = true
+
+    fn log_debug(msg: text):
+        if self.debug_mode:
+            stderr_write("[MCP-TCP] " + msg + "\n")
+            stderr_flush()
+
+    fn read_line() -> Result<text, text>:
+        """Read a line from the TCP stream."""
+        var line = ""
+        var read_buf: List<u8> = [0]
+
+        while true:
+            val bytes_read = monoio_tcp_read(self.stream_handle, read_buf, 1)
+            if bytes_read <= 0:
+                if line == "":
+                    return Err("Connection closed")
+                return Ok(line)
+
+            val ch = read_buf[0] as char
+            if ch == '\n':
+                return Ok(line)
+            elif ch == '\r':
+                # Skip carriage return
+                continue
+            else:
+                line = line + ch.to_string()
+
+    fn read_exact(n: i64) -> Result<text, text>:
+        """Read exactly n bytes from the TCP stream."""
+        var result = ""
+        var read_buf: List<u8> = []
+        read_buf.resize(n as usize, 0)
+
+        var remaining = n
+        var offset = 0
+
+        while remaining > 0:
+            val bytes_read = monoio_tcp_read(self.stream_handle, read_buf, remaining)
+            if bytes_read <= 0:
+                return Err("Connection closed while reading body")
+
+            # Convert bytes to string
+            for i in offset..(offset + bytes_read):
+                result = result + (read_buf[i as usize] as char).to_string()
+
+            remaining = remaining - bytes_read
+            offset = offset + bytes_read
+
+        Ok(result)
+
+    fn parse_content_length(header: text) -> Option<i64>:
+        """Parse Content-Length header."""
+        if not header.starts_with("Content-Length:"):
+            return None
+
+        val value_part = header.substring(15, header.len()).trim()
+        var length: i64 = 0
+
+        for ch in value_part.chars():
+            if ch >= '0' and ch <= '9':
+                val digit = (ch as i64) - ('0' as i64)
+                length = length * 10 + digit
+            else:
+                break
+
+        Some(length)
 
 impl Transport for TcpTransport:
     fn read_message() -> Option<JsonRpcRequest>:
-        # TODO: [stdlib][P1] Implement TCP reading
-        return None
+        """Read MCP-framed message from TCP stream."""
+        if not self.alive:
+            return None
+
+        # Read Content-Length header
+        match self.read_line():
+            case Ok(header):
+                match self.parse_content_length(header):
+                    case Some(length):
+                        # Skip empty line after header
+                        match self.read_line():
+                            case Ok(_):
+                                pass
+                            case Err(_):
+                                self.alive = false
+                                return None
+
+                        # Read body
+                        match self.read_exact(length):
+                            case Ok(body):
+                                self.log_debug("Received: " + body)
+                                # Parse JSON-RPC request
+                                match parse(body):
+                                    case Ok(JsonValue.Object(obj)):
+                                        return parse_json_rpc_request(obj)
+                                    case _:
+                                        return None
+                            case Err(_):
+                                self.alive = false
+                                return None
+                    case None:
+                        return None
+            case Err(_):
+                self.alive = false
+                return None
 
     fn write_response(response: JsonRpcResponse):
-        # TODO: [stdlib][P1] Implement TCP writing
-        pass
+        """Write MCP-framed response to TCP stream."""
+        if not self.alive:
+            return
+
+        val body = response.to_json()
+        self.log_debug("Sending response: " + body)
+
+        val header = "Content-Length: " + body.len().to_string() + "\r\n\r\n"
+        val message = header + body
+
+        val bytes = message.as_bytes()
+        val written = monoio_tcp_write(self.stream_handle, bytes)
+        if written < 0:
+            self.alive = false
 
     fn write_error(id: i64, code: i64, message: text):
-        # TODO: [stdlib][P1] Implement TCP error writing
-        pass
+        """Write MCP-framed error response to TCP stream."""
+        if not self.alive:
+            return
+
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("jsonrpc", "2.0")
+        builder = builder.set_int("id", id)
+
+        var error_obj: Dict<text, JsonValue> = {}
+        error_obj["code"] = JsonValue.Integer(code)
+        error_obj["message"] = JsonValue.text(message)
+        builder = builder.set_object("error", error_obj)
+
+        val body = stringify(builder.build())
+        self.log_debug("Sending error: " + body)
+
+        val header = "Content-Length: " + body.len().to_string() + "\r\n\r\n"
+        val full_message = header + body
+
+        val bytes = full_message.as_bytes()
+        val written = monoio_tcp_write(self.stream_handle, bytes)
+        if written < 0:
+            self.alive = false
 
     fn is_alive() -> bool:
         return self.alive
+
+# Helper to parse JSON-RPC request from object
+fn parse_json_rpc_request(obj: Dict<text, JsonValue>) -> Option<JsonRpcRequest>:
+    var id: i64 = 0
+    var method = ""
+    var params: Dict<text, Any> = {}
+
+    match obj.get("id"):
+        case Some(JsonValue.Integer(i)):
+            id = i
+        case _:
+            pass
+
+    match obj.get("method"):
+        case Some(JsonValue.text(m)):
+            method = m
+        case _:
+            return None
+
+    match obj.get("params"):
+        case Some(JsonValue.Object(p)):
+            params = json_object_to_dict(p)
+        case _:
+            pass
+
+    Some(JsonRpcRequest(id: id, method: method, params: params))
 
 # Message-based transport (for testing)
 pub class MockTransport:

@@ -2,6 +2,7 @@
 # Language server implementation compiled to WASM for VSCode
 
 use core.result.{Result, Ok, Err}
+use core.json.{JsonBuilder, JsonValue, stringify}
 use vscode.languages.{TextDocument, Position, Range, CompletionItem, Hover, Diagnostic}
 
 # External FFI declarations for WASM LSP
@@ -9,6 +10,18 @@ extern fn wasm_lsp_initialize(capabilities: text): void
 extern fn wasm_lsp_register_handler(method: text, callback_id: i64): void
 extern fn wasm_lsp_send_notification(method: text, params: text): void
 extern fn wasm_lsp_send_response(request_id: i64, result: text): void
+
+# Global handler storage for callback dispatch
+var completion_handlers: Dict<i64, fn(TextDocument, Position) -> List<CompletionItem>> = {}
+var hover_handlers: Dict<i64, fn(TextDocument, Position) -> Option<Hover>> = {}
+var definition_handlers: Dict<i64, fn(TextDocument, Position) -> Option<Range>> = {}
+var next_callback_id: i64 = 1
+
+fn allocate_callback_id() -> i64:
+    """Allocate unique callback ID."""
+    val id = next_callback_id
+    next_callback_id = next_callback_id + 1
+    id
 
 # WASM LSP server
 pub class WasmLanguageServer:
@@ -35,7 +48,7 @@ pub class WasmLanguageServer:
             documents: {}
         }
 
-    pub fn set_capabilities(self, capabilities: ServerCapabilities):
+    pub fn set_capabilities(capabilities: ServerCapabilities):
         """Set server capabilities.
 
         Args:
@@ -44,17 +57,18 @@ pub class WasmLanguageServer:
         self.capabilities = capabilities
 
     pub fn register_completion_handler(
-        self,
-        handler: fn(document: TextDocument, position: Position): List<CompletionItem>
+        handler: fn(document: TextDocument, position: Position) -> List<CompletionItem>
     ):
         """Register completion handler.
 
         Args:
             handler: Completion provider function
         """
-        # TODO: [stdlib][P1] Store handler and register with WASM LSP
-        val callback_id = 1
+        val callback_id = allocate_callback_id()
+        completion_handlers[callback_id] = handler
+        self.handlers["textDocument/completion"] = callback_id
         wasm_lsp_register_handler("textDocument/completion", callback_id)
+        self.capabilities.completion_provider = true
 
     pub fn register_hover_handler(
         self,
@@ -229,14 +243,36 @@ pub class ServerCapabilities:
         self.document_formatting_provider = true
         self.rename_provider = true
 
-    pub fn to_json(self): text =
+    pub fn to_json(): text =
         """Convert to JSON string.
 
         Returns:
-            JSON representation
+            JSON representation with proper escaping
         """
-        # TODO: [stdlib][P1] Implement proper JSON serialization
-        "{}"
+        var builder = JsonBuilder.new()
+
+        # Completion provider (can be object with options)
+        if self.completion_provider:
+            var completion_opts: Dict<text, JsonValue> = {}
+            completion_opts["resolveProvider"] = JsonValue.bool(true)
+            builder = builder.set_object("completionProvider", completion_opts)
+
+        builder = builder.set_bool("hoverProvider", self.hover_provider)
+        builder = builder.set_bool("definitionProvider", self.definition_provider)
+        builder = builder.set_bool("referencesProvider", self.references_provider)
+        builder = builder.set_bool("documentSymbolProvider", self.document_symbol_provider)
+        builder = builder.set_bool("workspaceSymbolProvider", self.workspace_symbol_provider)
+        builder = builder.set_bool("codeActionProvider", self.code_action_provider)
+        builder = builder.set_bool("documentFormattingProvider", self.document_formatting_provider)
+        builder = builder.set_bool("renameProvider", self.rename_provider)
+
+        # Text document sync
+        var sync_opts: Dict<text, JsonValue> = {}
+        sync_opts["openClose"] = JsonValue.bool(true)
+        sync_opts["change"] = JsonValue.Integer(2)  # Incremental
+        builder = builder.set_object("textDocumentSync", sync_opts)
+
+        stringify(builder.build())
 
 # Document symbol
 pub class DocumentSymbol:

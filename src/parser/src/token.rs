@@ -279,11 +279,17 @@ pub enum TokenKind {
     StarAssign,  // *=
     SlashAssign, // /=
     TildeAssign, // ~= (suspension assignment for async-by-default)
+    TildePlusAssign,  // ~+= (suspension compound add)
+    TildeMinusAssign, // ~-= (suspension compound subtract)
+    TildeStarAssign,  // ~*= (suspension compound multiply)
+    TildeSlashAssign, // ~/= (suspension compound divide)
 
     Ampersand,  // &
     Pipe,       // |
     DoublePipe, // ||
     DoubleAmp,  // &&
+    AndSuspend, // and~ (suspending boolean AND)
+    OrSuspend,  // or~ (suspending boolean OR)
     Caret,      // ^
     Tilde,      // ~
     ShiftLeft,  // <<

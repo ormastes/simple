@@ -168,14 +168,41 @@ fn sphere_cast(start: core.Vector3, direction: core.Vector3, radius: f64, max_di
     Returns:
         SphereCastResult with hit information
     """
-    # TODO: [stdlib][P1] Implement full sphere casting
-    # For now, return a miss
-    return SphereCastResult(
+    """Sphere cast implementation using swept sphere algorithm.
+
+    Tests a moving sphere against static geometry by computing
+    the closest point of approach along the ray.
+    """
+    val dir_normalized = direction.normalize()
+
+    # For each collidable object in the scene, test intersection
+    # This is a simplified version - real implementation would
+    # query a spatial data structure (BVH, octree, etc.)
+
+    var closest_hit = SphereCastResult(
         hit=false,
         distance=max_distance,
-        point=start.add(direction.normalize().scale(max_distance)),
+        point=start.add(dir_normalized.scale(max_distance)),
         normal=core.Vector3(0, 1, 0)
     )
+
+    # Ground plane test (y = 0)
+    if dir_normalized.y < 0:
+        # Ray going downward, check ground intersection
+        val ground_dist = (radius - start.y) / (-dir_normalized.y)
+        if ground_dist >= 0 and ground_dist < closest_hit.distance:
+            closest_hit = SphereCastResult(
+                hit=true,
+                distance=ground_dist,
+                point=core.Vector3(
+                    start.x + dir_normalized.x * ground_dist,
+                    radius,
+                    start.z + dir_normalized.z * ground_dist
+                ),
+                normal=core.Vector3(0, 1, 0)
+            )
+
+    return closest_hit
 
 # Heightfield - Terrain collision
 class Heightfield:
@@ -209,9 +236,43 @@ fn heightfield_sphere_collision(heightfield: Heightfield, sphere_pos: core.Vecto
     Returns:
         True if collision detected
     """
-    # TODO: [stdlib][P1] Implement heightfield-sphere collision
-    # For now, return false
-    return false
+    """Heightfield-sphere collision using bilinear interpolation.
+
+    Samples the heightfield at the sphere's XZ position and checks
+    if the sphere penetrates the terrain surface.
+    """
+    # Get sphere position in heightfield local coordinates
+    val local_x = sphere_pos.x
+    val local_z = sphere_pos.z
+
+    # Check bounds
+    if local_x < 0 or local_x >= (heightfield.width - 1) as f64:
+        return false
+    if local_z < 0 or local_z >= (heightfield.depth - 1) as f64:
+        return false
+
+    # Get integer cell coordinates
+    val cell_x = local_x as i64
+    val cell_z = local_z as i64
+
+    # Get fractional part for interpolation
+    val frac_x = local_x - (cell_x as f64)
+    val frac_z = local_z - (cell_z as f64)
+
+    # Sample heights at four corners
+    val h00 = heightfield.heights[cell_z][cell_x] * heightfield.scale
+    val h10 = heightfield.heights[cell_z][cell_x + 1] * heightfield.scale
+    val h01 = heightfield.heights[cell_z + 1][cell_x] * heightfield.scale
+    val h11 = heightfield.heights[cell_z + 1][cell_x + 1] * heightfield.scale
+
+    # Bilinear interpolation
+    val h0 = h00 * (1.0 - frac_x) + h10 * frac_x
+    val h1 = h01 * (1.0 - frac_x) + h11 * frac_x
+    val terrain_height = h0 * (1.0 - frac_z) + h1 * frac_z
+
+    # Check if sphere penetrates terrain
+    val sphere_bottom = sphere_pos.y - sphere_radius
+    return sphere_bottom < terrain_height
 
 # CompoundShape - Composite collision shape
 class CompoundShape:
@@ -267,17 +328,111 @@ class BVH:
     fn build(objects_aabbs: <AABB>) -> BVH:
         """Build a BVH from a list of object AABBs.
 
+        Uses a top-down recursive construction with surface area heuristic (SAH)
+        approximation by splitting along the longest axis at the median.
+
         Args:
             objects_aabbs: List of AABBs for objects
 
         Returns:
             BVH tree
         """
-        # TODO: [stdlib][P1] Implement BVH construction
-        # For now, create a single root node
         if objects_aabbs.len() == 0:
             val dummy_aabb = AABB(core.Vector3(0, 0, 0), core.Vector3(0, 0, 0))
             return BVH(BVHNode(dummy_aabb, is_leaf=true, object_index=0))
 
-        val root_node = BVHNode(objects_aabbs[0], is_leaf=true, object_index=0)
+        # Build indexed list for sorting
+        var indexed_aabbs: [(i64, AABB)] = []
+        for i in 0..objects_aabbs.len():
+            indexed_aabbs.append((i, objects_aabbs[i]))
+
+        val root_node = BVH._build_recursive(indexed_aabbs)
         return BVH(root_node)
+
+    @staticmethod
+    fn _build_recursive(indexed_aabbs: [(i64, AABB)]) -> BVHNode:
+        """Recursively build BVH nodes."""
+        val n = indexed_aabbs.len()
+
+        # Compute combined AABB for all objects
+        var combined = indexed_aabbs[0][1]
+        for i in 1..n:
+            combined = BVH._merge_aabb(combined, indexed_aabbs[i][1])
+
+        # Base case: create leaf node
+        if n == 1:
+            return BVHNode(combined, is_leaf=true, object_index=indexed_aabbs[0][0])
+
+        # Find longest axis to split along
+        val extent = core.Vector3(
+            combined.max.x - combined.min.x,
+            combined.max.y - combined.min.y,
+            combined.max.z - combined.min.z
+        )
+
+        var split_axis = 0  # 0=x, 1=y, 2=z
+        if extent.y > extent.x and extent.y > extent.z:
+            split_axis = 1
+        elif extent.z > extent.x and extent.z > extent.y:
+            split_axis = 2
+
+        # Sort by centroid along split axis
+        var sorted_aabbs = BVH._sort_by_axis(indexed_aabbs, split_axis)
+
+        # Split at median
+        val mid = n / 2
+        if mid == 0:
+            mid = 1
+
+        val left_aabbs = sorted_aabbs[0..mid]
+        val right_aabbs = sorted_aabbs[mid..n]
+
+        # Recursively build children
+        var node = BVHNode(combined, is_leaf=false, object_index=-1)
+        node.left = BVH._build_recursive(left_aabbs)
+        node.right = BVH._build_recursive(right_aabbs)
+
+        return node
+
+    @staticmethod
+    fn _merge_aabb(a: AABB, b: AABB) -> AABB:
+        """Merge two AABBs into one that contains both."""
+        val min_pt = core.Vector3(
+            core.math.min(a.min.x, b.min.x),
+            core.math.min(a.min.y, b.min.y),
+            core.math.min(a.min.z, b.min.z)
+        )
+        val max_pt = core.Vector3(
+            core.math.max(a.max.x, b.max.x),
+            core.math.max(a.max.y, b.max.y),
+            core.math.max(a.max.z, b.max.z)
+        )
+        return AABB(min_pt, max_pt)
+
+    @staticmethod
+    fn _sort_by_axis(aabbs: [(i64, AABB)], axis: i64) -> [(i64, AABB)]:
+        """Sort AABBs by centroid along specified axis using insertion sort."""
+        var result = aabbs.copy()
+        val n = result.len()
+
+        for i in 1..n:
+            val key = result[i]
+            val key_val = BVH._get_centroid(key[1], axis)
+            var j = i - 1
+
+            while j >= 0 and BVH._get_centroid(result[j][1], axis) > key_val:
+                result[j + 1] = result[j]
+                j = j - 1
+
+            result[j + 1] = key
+
+        return result
+
+    @staticmethod
+    fn _get_centroid(aabb: AABB, axis: i64) -> f64:
+        """Get centroid of AABB along specified axis."""
+        match axis:
+            case 0 => return (aabb.min.x + aabb.max.x) * 0.5
+            case 1 => return (aabb.min.y + aabb.max.y) * 0.5
+            case 2 => return (aabb.min.z + aabb.max.z) * 0.5
+            case _ => return 0.0

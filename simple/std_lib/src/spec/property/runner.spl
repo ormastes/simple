@@ -133,9 +133,29 @@ module std.spec.property.runner:
 
     # Helper: Run function with timeout
     fn run_with_timeout<T>(f: fn() -> T, timeout_secs: f64) -> T:
-        # TODO: [stdlib][P1] Implement actual timeout mechanism
-        # For now, just run the function
-        return f()
+        """Execute function with timeout using thread-based execution.
+
+        Spawns the function in an isolated thread and polls for completion.
+        If the function doesn't complete within the timeout, raises an error.
+        """
+        import concurrency.threads.{rt_thread_spawn_isolated, rt_thread_sleep, ThreadHandle}
+
+        val handle = rt_thread_spawn_isolated(f, ())
+        val thread = ThreadHandle(_handle: handle)
+
+        val timeout_ms = (timeout_secs * 1000.0) as i64
+        val poll_interval_ms: i64 = 10
+        var elapsed_ms: i64 = 0
+
+        while elapsed_ms < timeout_ms:
+            if thread.is_done():
+                return thread.join() as T
+
+            rt_thread_sleep(poll_interval_ms)
+            elapsed_ms = elapsed_ms + poll_interval_ms
+
+        # Timeout reached
+        panic("Property test timed out after {timeout_secs} seconds")
 
     # Convenience function for simple property tests
     pub fn check_property<T>(

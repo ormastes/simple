@@ -53,16 +53,24 @@ class MarkdownFormatter:
         return "{prefix} {name}\n\n"
 
     fn format_example(name: text, status: text, error: Option<text>) -> text:
-        val icon = match status:
-            "pass" => "✅"
-            "fail" => "❌"
-            "skip" => "⏭️"
-            _ => "❓"
+        var icon = "❓"
+        match status:
+            case "pass":
+                icon = "✅"
+            case "fail":
+                icon = "❌"
+            case "skip":
+                icon = "⏭️"
+            case _:
+                icon = "❓"
 
         var result = "{icon} **{name}**\n\n"
 
-        if val Some(err) = error:
-            result = result + "```\nError: {err}\n```\n\n"
+        match error:
+            case Some(err):
+                result = result + "```\nError: {err}\n```\n\n"
+            case None:
+                pass
 
         return result
 
@@ -101,15 +109,16 @@ class MarkdownFormatter:
                 else:
                     # Show placeholder with generation instructions
                     return self.format_screenshot_placeholder(test_name, file)
-            case nil:
+            case None:
                 return ""
 
     fn format_screenshot_placeholder(test_name: text, test_file: text) -> text:
         val cmd = "simple test --refresh-gui-image {test_file}"
-        return "<details>\n<summary>Screenshots (not available)</summary>\n\n" +
-               "> **Screenshot not captured**\n>\n" +
-               "> To generate: `{cmd}`\n\n" +
-               "</details>\n\n"
+        var result = "<details>\n<summary>Screenshots (not available)</summary>\n\n"
+        result = result + "> **Screenshot not captured**\n>\n"
+        result = result + "> To generate: `{cmd}`\n\n"
+        result = result + "</details>\n\n"
+        return result
 
     fn format_diagram_section(test_name: text) -> text:
         match self.test_file:
@@ -117,21 +126,24 @@ class MarkdownFormatter:
                 val diagram_path = self.get_diagram_path(test_name, file)
                 if diagram_path.is_some():
                     val path = diagram_path.unwrap()
-                    return "<details>\n<summary>Sequence Diagram</summary>\n\n" +
-                           "```mermaid\n" +
-                           _read_diagram_content(path) +
-                           "\n```\n\n</details>\n\n"
+                    val content = _read_diagram_content(path)
+                    var result = "<details>\n<summary>Sequence Diagram</summary>\n\n"
+                    result = result + "```mermaid\n"
+                    result = result + content
+                    result = result + "\n```\n\n</details>\n\n"
+                    return result
                 else:
                     return self.format_diagram_placeholder(test_name, file)
-            case nil:
+            case None:
                 return ""
 
     fn format_diagram_placeholder(test_name: text, test_file: text) -> text:
         val cmd = "simple test --seq-diagram {test_file}"
-        return "<details>\n<summary>Diagram (not available)</summary>\n\n" +
-               "> **Diagram not generated**\n>\n" +
-               "> To generate: `{cmd}`\n\n" +
-               "</details>\n\n"
+        var result = "<details>\n<summary>Diagram (not available)</summary>\n\n"
+        result = result + "> **Diagram not generated**\n>\n"
+        result = result + "> To generate: `{cmd}`\n\n"
+        result = result + "</details>\n\n"
+        return result
 
     fn get_diagram_path(test_name: text, test_file: text) -> Option<text>:
         # Compute diagram path similar to screenshot path
@@ -149,7 +161,7 @@ class MarkdownFormatter:
         if fs.exists(path):
             return Some(path)
         else:
-            return nil
+            return None
 
     fn format_code_block(code: text, language: text) -> text:
         return "```{language}\n{code}\n```\n\n"
@@ -172,49 +184,67 @@ fn format_spec_to_markdown(spec_results: Dict<text, Any>) -> text:
     output = output + "# {suite_name}\n\n"
 
     # Add timestamp
-    if val Some(timestamp) = spec_results.get("timestamp"):
-        output = output + "*Generated: {timestamp}*\n\n"
+    match spec_results.get("timestamp"):
+        case Some(timestamp):
+            output = output + "*Generated: {timestamp}*\n\n"
+        case None:
+            pass
 
     # Process describe blocks
-    if val Some(describes) = spec_results.get("describe_blocks"):
-        for describe in describes:
-            output = output + formatter.format_describe(
-                describe.get("description").unwrap_or(""),
-                1
-            )
+    match spec_results.get("describe_blocks"):
+        case Some(describes):
+            for describe in describes:
+                output = output + formatter.format_describe(
+                    describe.get("description").unwrap_or(""),
+                    1
+                )
 
-            # Process contexts
-            if val Some(contexts) = describe.get("contexts"):
-                for context in contexts:
-                    output = output + formatter.format_context(
-                        context.get("description").unwrap_or(""),
-                        2
-                    )
+                # Process contexts
+                match describe.get("contexts"):
+                    case Some(contexts):
+                        for ctx in contexts:
+                            output = output + formatter.format_context(
+                                ctx.get("description").unwrap_or(""),
+                                2
+                            )
 
-                    # Process examples (it blocks)
-                    if val Some(example_list) = context.get("examples"):
-                        for example in example_list:
-                            val status = example.get("status").unwrap_or("unknown")
-                            val name = example.get("description").unwrap_or("")
-                            val error = example.get("error")
+                            # Process examples (it blocks)
+                            match ctx.get("examples"):
+                                case Some(example_list):
+                                    for example in example_list:
+                                        val status = example.get("status").unwrap_or("unknown")
+                                        val name = example.get("description").unwrap_or("")
+                                        val error = example.get("error")
 
-                            output = output + formatter.format_example(name, status, error)
+                                        output = output + formatter.format_example(name, status, error)
 
-                            # Add code if available
-                            if val Some(code) = example.get("code"):
-                                output = output + formatter.format_code_block(code, "simple")
+                                        # Add code if available
+                                        match example.get("code"):
+                                            case Some(code):
+                                                output = output + formatter.format_code_block(code, "simple")
+                                            case None:
+                                                pass
+                                case None:
+                                    pass
+                    case None:
+                        pass
+        case None:
+            pass
 
     # Add summary
-    if val Some(summary) = spec_results.get("summary"):
-        output = output + "\n---\n\n## Summary\n\n"
-        val total = summary.get("total").unwrap_or(0)
-        val passed = summary.get("passed").unwrap_or(0)
-        val failed = summary.get("failed").unwrap_or(0)
-        val skipped = summary.get("skipped").unwrap_or(0)
+    match spec_results.get("summary"):
+        case Some(summary):
+            output = output + "\n---\n\n## Summary\n\n"
+            val total = summary.get("total").unwrap_or(0)
+            val passed = summary.get("passed").unwrap_or(0)
+            val failed = summary.get("failed").unwrap_or(0)
+            val skipped = summary.get("skipped").unwrap_or(0)
 
-        output = output + "- **Total:** {total} tests\n"
-        output = output + "- **Passed:** {passed} ✅\n"
-        output = output + "- **Failed:** {failed} ❌\n"
-        output = output + "- **Skipped:** {skipped} ⏭️\n"
+            output = output + "- **Total:** {total} tests\n"
+            output = output + "- **Passed:** {passed} ✅\n"
+            output = output + "- **Failed:** {failed} ❌\n"
+            output = output + "- **Skipped:** {skipped} ⏭️\n"
+        case None:
+            pass
 
     return output

@@ -17,9 +17,39 @@ import mode_config.{
 
 # Parse SDN config file
 export fn parse_sdn_config(content: text) -> Option<DirectoryConfig>:
-    # TODO: [stdlib][P1] Implement SDN parsing when SDN parser is available
-    # For now, return default config
-    Some(DirectoryConfig.new())
+    """Parse SDN configuration for directory-level test settings.
+
+    Format:
+        modes: [interpreter, jit, smf_cranelift]
+        skip_modes: [smf_llvm]
+        mode_failure_strategy: skip_remaining
+    """
+    var config = DirectoryConfig.new()
+
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.is_empty() or trimmed.starts_with("#"):
+            continue
+
+        # Parse key: value pairs
+        if trimmed.contains(":"):
+            val parts = trimmed.split(":")
+            if parts.len() >= 2:
+                val key = parts[0].trim()
+                val value = parts[1..].join(":").trim()
+
+                match key:
+                    case "modes":
+                        config.modes = parse_mode_list(value)
+                    case "skip_modes":
+                        config.skip_modes = parse_mode_list(value)
+                    case "mode_failure_strategy":
+                        config.failure_strategy = string_to_failure_strategy(value)
+                    case _:
+                        pass
+
+    Some(config)
 
 # Example .spec_config.sdn format:
 # modes: [interpreter, jit, smf_cranelift]
@@ -31,9 +61,59 @@ export fn parse_sdn_config(content: text) -> Option<DirectoryConfig>:
 
 # Parse TOML [test] section
 export fn parse_toml_test_config(content: text) -> Option<ProjectConfig>:
-    # TODO: [stdlib][P1] Implement TOML parsing when TOML parser is available
-    # For now, return default config
-    Some(ProjectConfig.default())
+    """Parse TOML [test] section for project-level test configuration.
+
+    Format:
+        [test]
+        default_modes = ["interpreter", "jit", "smf_cranelift", "smf_llvm"]
+        mode_failure_strategy = "skip_remaining"
+    """
+    var config = ProjectConfig.default()
+    var in_test_section = false
+
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.is_empty() or trimmed.starts_with("#"):
+            continue
+
+        # Check for section headers
+        if trimmed.starts_with("["):
+            in_test_section = trimmed == "[test]"
+            continue
+
+        # Parse key = value pairs in [test] section
+        if in_test_section and trimmed.contains("="):
+            val parts = trimmed.split("=")
+            if parts.len() >= 2:
+                val key = parts[0].trim()
+                val value = parts[1..].join("=").trim()
+
+                match key:
+                    case "default_modes":
+                        config.default_modes = parse_mode_list(value)
+                    case "mode_failure_strategy":
+                        # Remove quotes if present
+                        val clean_value = value.replace("\"", "").replace("'", "")
+                        config.failure_strategy = string_to_failure_strategy(clean_value)
+                    case "timeout_seconds":
+                        config.timeout_seconds = parse_int(value)
+                    case "parallel":
+                        config.parallel = value.trim() == "true"
+                    case _:
+                        pass
+
+    Some(config)
+
+fn parse_int(s: text) -> i32:
+    """Parse integer from string."""
+    var result: i32 = 0
+    for ch in s.trim().chars():
+        if ch >= '0' and ch <= '9':
+            result = result * 10 + ((ch as i32) - ('0' as i32))
+        else:
+            break
+    result
 
 # Example simple.toml [test] section:
 # [test]
@@ -45,16 +125,64 @@ export fn parse_toml_test_config(content: text) -> Option<ProjectConfig>:
 
 # Parse file attributes for mode configuration
 export fn parse_file_attributes(content: text) -> FileConfig:
+    """Parse file-level attributes for mode configuration.
+
+    Supported attributes:
+        #[modes(interpreter, jit)]
+        #[skip_modes(smf_llvm)]
+        #[only_modes(interpreter)]
+        #[mode_failure_strategy(fail_all)]
+    """
     var config = FileConfig.new()
 
-    # TODO: [stdlib][P1] Implement attribute parsing
-    # Look for patterns like:
-    # #[modes(interpreter, jit)]
-    # #[skip_modes(smf_llvm)]
-    # #[only_modes(interpreter)]
-    # #[mode_failure_strategy(fail_all)]
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Look for #[attribute(...)] pattern
+        if trimmed.starts_with("#[") and trimmed.contains("]"):
+            # Extract attribute name and value
+            val attr_content = extract_attribute(trimmed)
+
+            match attr_content:
+                case Some((name, value)):
+                    match name:
+                        case "modes":
+                            config.modes = parse_mode_list(value)
+                        case "skip_modes":
+                            config.skip_modes = parse_mode_list(value)
+                        case "only_modes":
+                            # only_modes sets explicit list, clears skip
+                            config.modes = parse_mode_list(value)
+                            config.skip_modes = ModeSet.empty()
+                        case "mode_failure_strategy":
+                            config.failure_strategy = string_to_failure_strategy(value)
+                        case _:
+                            pass
+                case None:
+                    pass
 
     config
+
+fn extract_attribute(line: text) -> Option<(text, text)>:
+    """Extract attribute name and value from #[name(value)] pattern."""
+    # Find the attribute name (between #[ and ()
+    val start = 2  # After "#["
+    var paren_pos = line.find("(")
+
+    if paren_pos < 0:
+        return None
+
+    val name = line.substring(start, paren_pos).trim()
+
+    # Find the value (between ( and ))
+    val close_paren = line.rfind(")")
+    if close_paren <= paren_pos:
+        return None
+
+    val value = line.substring(paren_pos + 1, close_paren).trim()
+
+    Some((name, value))
 
 ## Configuration Discovery
 # Find and load configuration files in the hierarchy
@@ -77,9 +205,38 @@ export fn discover_directory_config(dir_path: text, parent: ModeConfig) -> ModeC
 
 # Discover file configuration from file attributes
 export fn discover_file_config(file_path: text, parent: ModeConfig) -> ModeConfig:
-    # TODO: [stdlib][P2] Read file and parse attributes
-    # For now, return parent config
-    parent
+    """Discover file-level configuration from file attributes.
+
+    Reads the file and parses any #[modes(...)] or similar attributes
+    to determine file-specific test configuration.
+
+    Args:
+        file_path: Path to the test file
+        parent: Parent configuration to inherit from
+
+    Returns:
+        ModeConfig with file-level overrides applied
+    """
+    @extern("runtime", "rt_file_read_text")
+    fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+    @extern("runtime", "rt_file_exists")
+    fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
+
+    # Check if file exists
+    if not _rt_file_exists(file_path.ptr(), file_path.len()):
+        return parent
+
+    # Read file content
+    val content = _rt_file_read_text(file_path.ptr(), file_path.len())
+    if content.is_empty():
+        return parent
+
+    # Parse file attributes
+    val file_config = parse_file_attributes(content)
+
+    # Apply file config to parent
+    file_config.to_mode_config(parent)
 
 ## Configuration Builder
 # Build complete configuration hierarchy for a test file

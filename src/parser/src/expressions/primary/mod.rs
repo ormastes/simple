@@ -45,7 +45,9 @@ impl<'a> Parser<'a> {
             | TokenKind::Context
             | TokenKind::Common
             | TokenKind::Vec
-            | TokenKind::Gpu => self.parse_primary_identifier(),
+            | TokenKind::Gpu
+            | TokenKind::Slice
+            | TokenKind::Flat => self.parse_primary_identifier(),
             TokenKind::Backslash | TokenKind::Pipe | TokenKind::Move => self.parse_primary_lambda(),
             TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => self.parse_primary_collection(),
             TokenKind::Old

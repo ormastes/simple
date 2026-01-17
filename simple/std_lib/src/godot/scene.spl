@@ -445,21 +445,46 @@ impl SceneManager:
 
     # Preload scene asynchronously
     pub async fn preload_scene_async(mut self, path: text) -> Result<(), text>:
-        # Check if already loading or cached
-        if self.loading.get(path).unwrap_or(false):
-            # Already loading, wait
-            # TODO: [stdlib][P1] Implement proper wait mechanism
-            return Err("Scene already loading")
-
+        # Check if already cached
         if self.cache.contains_key(path):
             return Ok(())
+
+        # Check if already loading - wait for it to complete
+        if self.loading.get(path).unwrap_or(false):
+            # Wait for loading to complete using polling with async yield
+            val max_wait_ms: i64 = 30000  # 30 second timeout
+            val poll_interval_ms: i64 = 16  # ~60fps polling
+            var waited_ms: i64 = 0
+
+            while waited_ms < max_wait_ms:
+                # Check if loading completed
+                if not self.loading.get(path).unwrap_or(false):
+                    # Loading done, check cache
+                    if self.cache.contains_key(path):
+                        return Ok(())
+                    else:
+                        # Loading failed - try again below
+                        break
+
+                # Async yield to allow other work
+                await async_sleep_ms(poll_interval_ms)
+                waited_ms = waited_ms + poll_interval_ms
+
+            # If still loading after timeout, return error
+            if self.loading.get(path).unwrap_or(false):
+                return Err("Timeout waiting for scene to load: {path}")
+
+            # Check if it loaded successfully
+            if self.cache.contains_key(path):
+                return Ok(())
+            # Otherwise fall through to load it ourselves
 
         # Mark as loading
         self.loading[path] = true
 
         # Load scene
         val result = await PackedScene::load_async(path)
-        
+
         # Mark as done loading
         self.loading[path] = false
 
@@ -592,6 +617,22 @@ impl SceneManager:
         """
         val count = self.get_cache_size()
         return "SceneManager: {count} cached scenes"
+
+
+# Helper: Async sleep for a given number of milliseconds
+async fn async_sleep_ms(ms: i64):
+    """Async sleep that yields control while waiting.
+
+    Uses thread sleep internally but yields the async runtime.
+
+    Args:
+        ms: Milliseconds to sleep
+    """
+    @extern("runtime", "rt_thread_sleep")
+    fn _rt_thread_sleep(ms: i64)
+
+    # In an async context, this will yield while sleeping
+    _rt_thread_sleep(ms)
 
 
 # TODO: [stdlib][P3] use actual Simple Array)

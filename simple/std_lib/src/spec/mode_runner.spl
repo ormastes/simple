@@ -4,6 +4,11 @@
 import execution_mode.{ExecutionMode, ModeSet, mode_to_string, is_mode_available}
 import mode_config.{ModeConfig, FailureStrategy}
 
+# FFI for runtime mode configuration
+extern fn runtime_set_jit_enabled(enabled: bool)
+extern fn runtime_set_backend(backend: text)
+extern fn get_current_time_ms() -> i32
+
 ## Test Result
 # Result of running a single test in a specific mode
 struct TestResult:
@@ -71,6 +76,30 @@ struct ModeRunner:
             results: []
         }
 
+    # Set execution mode for the runtime
+    fn set_execution_mode(mode: ExecutionMode):
+        """Configure the runtime to execute in the specified mode.
+
+        This sets the execution context so subsequent code runs
+        in the appropriate mode (interpreter, JIT, etc.).
+        """
+        match mode:
+            case ExecutionMode.Interpreter:
+                # Default mode - no special setup needed
+                pass
+            case ExecutionMode.Jit:
+                # Enable JIT compilation for this execution
+                runtime_set_jit_enabled(true)
+            case ExecutionMode.SmfCranelift:
+                # Use Cranelift backend
+                runtime_set_backend("cranelift")
+            case ExecutionMode.SmfLlvm:
+                # Use LLVM backend
+                runtime_set_backend("llvm")
+            case _:
+                # Unknown mode - use interpreter
+                pass
+
     # Run a test function in all configured modes
     var fn run_test(test_name: text, test_fn: fn() -> void) -> ModeExecutionResult:
         val modes = self.config.resolve_modes()
@@ -121,8 +150,10 @@ struct ModeRunner:
         var status = TestStatus.Passed
         var error = None
 
-        # TODO: [stdlib][P1] Actual mode switching will be implemented in Phase 3
-        # For now, just execute in interpreter mode
+        # Execute test in specified mode
+        # Mode switching is handled by setting execution context before running
+        self.set_execution_mode(mode)
+
         match self.try_execute(test_fn):
             case Ok(_) =>
                 status = TestStatus.Passed
@@ -138,15 +169,24 @@ struct ModeRunner:
             status: status,
             error: error,
             duration_ms: duration,
-            config_source: "test_level"  # TODO: [stdlib][P2] Track actual config source
+            config_source: self.config.get_effective_source()
         }
 
     # Try to execute a test function, catching errors
     fn try_execute(test_fn: fn() -> void) -> Result<void, text>:
-        # TODO: [stdlib][P1] Implement proper error handling
-        # For now, assume tests pass
-        test_fn()
-        Ok(())
+        """Execute test function with error catching.
+
+        Uses try/catch to capture any panics or errors during test execution.
+        """
+        try:
+            test_fn()
+            Ok(())
+        catch e: Exception:
+            Err("Test threw exception: {e.message}")
+        catch e: text:
+            Err("Test error: {e}")
+        catch:
+            Err("Test failed with unknown error")
 
     # Skip remaining modes after a failure
     fn skip_remaining_modes(mut exec_result: ModeExecutionResult, modes: ModeSet, failed_mode: ExecutionMode) -> ModeExecutionResult:

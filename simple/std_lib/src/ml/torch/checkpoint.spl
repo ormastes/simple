@@ -90,11 +90,77 @@ fn load(path: str, device: Device = Device::CPU) -> {str: any}:
     if handle == 0:
         panic("Failed to load checkpoint from {path}")
 
-    # Convert loaded data to Simple dict
-    # (Implementation depends on FFI design - simplified here)
-    val result = {}
-    # TODO: [stdlib][P1] Proper deserialization from handle
+    # Deserialize data from handle to Simple dict
+    val result = deserialize_checkpoint(handle)
+
+    # Free the handle after deserialization
+    rt_torch_checkpoint_free(handle)
+
     return result
+
+
+fn deserialize_checkpoint(handle: u64) -> dict:
+    """Deserialize a loaded checkpoint handle to a Simple dict.
+
+    Iterates through all keys in the checkpoint and converts
+    tensors/values to Simple equivalents.
+
+    Args:
+        handle: Checkpoint handle from rt_torch_load
+
+    Returns:
+        Dict containing checkpoint data
+    """
+    var result: dict = {}
+
+    # Get number of entries in checkpoint
+    val count = rt_torch_checkpoint_len(handle)
+
+    for i in 0..count:
+        # Get key name
+        val key = rt_torch_checkpoint_key(handle, i)
+
+        # Get value type (0=tensor, 1=int, 2=float, 3=string, 4=nested_dict)
+        val value_type = rt_torch_checkpoint_value_type(handle, i)
+
+        match value_type:
+            0 ->
+                # Tensor - get as raw data and wrap
+                val tensor_handle = rt_torch_checkpoint_get_tensor(handle, i)
+                result[key] = TensorWrapper(handle: tensor_handle)
+            1 ->
+                # Integer
+                val int_val = rt_torch_checkpoint_get_int(handle, i)
+                result[key] = int_val
+            2 ->
+                # Float
+                val float_val = rt_torch_checkpoint_get_float(handle, i)
+                result[key] = float_val
+            3 ->
+                # String
+                val str_val = rt_torch_checkpoint_get_string(handle, i)
+                result[key] = str_val
+            4 ->
+                # Nested dict - recursively deserialize
+                val nested_handle = rt_torch_checkpoint_get_nested(handle, i)
+                result[key] = deserialize_checkpoint(nested_handle)
+            _ ->
+                # Unknown type, skip
+                pass
+
+    return result
+
+
+# Wrapper for tensor data that preserves the handle for model loading
+class TensorWrapper:
+    handle: u64
+
+    fn __init__(handle: u64):
+        self.handle = handle
+
+    fn to_tensor(device: Device = Device.Cpu) -> Tensor:
+        """Convert wrapper to a Tensor on the specified device."""
+        return tensor_from_handle(self.handle, device)
 
 
 # ============================================================================
@@ -103,3 +169,12 @@ fn load(path: str, device: Device = Device::CPU) -> {str: any}:
 
 extern fn rt_torch_save(keys: *str, values: *any, count: i32, path: *u8, path_len: i32) -> i32
 extern fn rt_torch_load(path: *u8, path_len: i32, device: i32) -> u64
+extern fn rt_torch_checkpoint_free(handle: u64)
+extern fn rt_torch_checkpoint_len(handle: u64) -> i32
+extern fn rt_torch_checkpoint_key(handle: u64, index: i32) -> text
+extern fn rt_torch_checkpoint_value_type(handle: u64, index: i32) -> i32
+extern fn rt_torch_checkpoint_get_tensor(handle: u64, index: i32) -> u64
+extern fn rt_torch_checkpoint_get_int(handle: u64, index: i32) -> i64
+extern fn rt_torch_checkpoint_get_float(handle: u64, index: i32) -> f64
+extern fn rt_torch_checkpoint_get_string(handle: u64, index: i32) -> text
+extern fn rt_torch_checkpoint_get_nested(handle: u64, index: i32) -> u64

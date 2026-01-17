@@ -582,8 +582,83 @@ pub class ErrorAggregator:
         Returns:
             List of errors
         """
-        # TODO: [stdlib][P1] Implement JSON parsing
-        []
+        import core.json.{parse, JsonValue}
+
+        val errors: List<CompilationError> = []
+
+        # Cargo outputs one JSON object per line
+        val lines = json_output.split("\n")
+        for line in lines:
+            if line.trim().is_empty():
+                continue
+
+            match parse(line):
+                Ok(JsonValue.Object(obj)) ->
+                    # Check if this is a compiler message
+                    match obj.get("reason"):
+                        Some(JsonValue.String("compiler-message")) ->
+                            # Extract the message object
+                            match obj.get("message"):
+                                Some(JsonValue.Object(msg)) ->
+                                    val error = self.extract_cargo_message(msg)
+                                    if error.is_some():
+                                        errors.append(error.unwrap())
+                                _ -> pass
+                        _ -> pass
+                _ -> pass
+
+        errors
+
+    fn extract_cargo_message(msg: Dict<text, JsonValue>): Option<CompilationError> =
+        """Extract error from Cargo message object."""
+        import core.json.{JsonValue}
+
+        # Get severity
+        val level = match msg.get("level"):
+            Some(JsonValue.String(s)) -> s
+            _ -> return None
+
+        val severity = match level:
+            "error" -> ErrorSeverity.Error
+            "warning" -> ErrorSeverity.Warning
+            _ -> ErrorSeverity.Info
+
+        # Get message text
+        val message_text = match msg.get("message"):
+            Some(JsonValue.String(s)) -> s
+            _ -> return None
+
+        # Get span info (file, line, column)
+        var file_path = ""
+        var line: i32 = 0
+        var column: i32 = 0
+
+        match msg.get("spans"):
+            Some(JsonValue.Array(spans)) ->
+                if spans.len() > 0:
+                    match spans[0]:
+                        JsonValue.Object(span) ->
+                            file_path = match span.get("file_name"):
+                                Some(JsonValue.String(s)) -> s
+                                _ -> ""
+                            line = match span.get("line_start"):
+                                Some(JsonValue.Number(n)) -> n as i32
+                                _ -> 0
+                            column = match span.get("column_start"):
+                                Some(JsonValue.Number(n)) -> n as i32
+                                _ -> 0
+                        _ -> pass
+            _ -> pass
+
+        Some(CompilationError {
+            file: file_path,
+            line: line,
+            column: column,
+            severity: severity,
+            code: "",
+            message: message_text,
+            context: []
+        })
 
     fn parse_mypy_output(output: text): List<CompilationError> =
         """Parse mypy text output.
@@ -698,9 +773,89 @@ pub class ErrorAggregator:
 
         Returns:
             List of errors
+
+        ESLint JSON format:
+        [{
+            "filePath": "/path/to/file.js",
+            "messages": [{
+                "ruleId": "no-unused-vars",
+                "severity": 2,
+                "message": "'x' is defined but never used",
+                "line": 10,
+                "column": 5
+            }]
+        }]
         """
-        # TODO: [stdlib][P1] Implement JSON parsing
-        []
+        import core.json.{parse, JsonValue}
+
+        val errors: List<CompilationError> = []
+
+        match parse(json_output):
+            Ok(JsonValue.Array(files)) ->
+                for file_result in files:
+                    match file_result:
+                        JsonValue.Object(file_obj) ->
+                            val file_path = match file_obj.get("filePath"):
+                                Some(JsonValue.String(s)) -> s
+                                _ -> ""
+
+                            match file_obj.get("messages"):
+                                Some(JsonValue.Array(messages)) ->
+                                    for msg in messages:
+                                        match msg:
+                                            JsonValue.Object(msg_obj) ->
+                                                val error = self.extract_eslint_message(file_path, msg_obj)
+                                                if error.is_some():
+                                                    errors.append(error.unwrap())
+                                            _ -> pass
+                                _ -> pass
+                        _ -> pass
+            _ -> pass
+
+        errors
+
+    fn extract_eslint_message(file_path: text, msg: Dict<text, JsonValue>): Option<CompilationError> =
+        """Extract error from ESLint message object."""
+        import core.json.{JsonValue}
+
+        # Get message text
+        val message_text = match msg.get("message"):
+            Some(JsonValue.String(s)) -> s
+            _ -> return None
+
+        # Get severity (1=warning, 2=error)
+        val severity = match msg.get("severity"):
+            Some(JsonValue.Number(n)) ->
+                if n >= 2.0:
+                    ErrorSeverity.Error
+                else:
+                    ErrorSeverity.Warning
+            _ -> ErrorSeverity.Warning
+
+        # Get location
+        val line = match msg.get("line"):
+            Some(JsonValue.Number(n)) -> n as i32
+            _ -> 0
+
+        val column = match msg.get("column"):
+            Some(JsonValue.Number(n)) -> n as i32
+            _ -> 0
+
+        # Get rule ID as error code
+        val code = match msg.get("ruleId"):
+            Some(JsonValue.String(s)) -> s
+            Some(JsonValue.Null) -> ""
+            _ -> ""
+
+        Some(CompilationError {
+            file: file_path,
+            line: line,
+            column: column,
+            severity: severity,
+            code: code,
+            message: message_text,
+            context: []
+        })
 
     pub fn print_summary(self):
         """Print error summary.

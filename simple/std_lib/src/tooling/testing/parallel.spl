@@ -385,9 +385,36 @@ pub class ParallelExecutor:
         Returns:
             Test results
         """
-        # TODO: [stdlib][P1] Implement thread-based parallelism
-        # Use thread pool to execute work items
-        []
+        import concurrency.threads.{rt_thread_spawn_isolated, rt_thread_join, ThreadHandle}
+
+        val results: List<TestRunResult> = []
+        var handles: List<(i64, WorkItem)> = []
+
+        # Spawn a thread for each work item (up to worker count)
+        var spawned = 0
+        for item in work_items:
+            if spawned >= self.worker_count:
+                # Wait for one to complete before spawning more
+                if handles.len() > 0:
+                    val (handle, completed_item) = handles.remove(0)
+                    val thread = ThreadHandle(_handle: handle)
+                    val result = thread.join() as TestRunResult
+                    results.append(result)
+                    spawned -= 1
+
+            # Spawn worker thread
+            val work_fn = || runner(item.suite)
+            val handle = rt_thread_spawn_isolated(work_fn, ())
+            handles.append((handle, item))
+            spawned += 1
+
+        # Wait for remaining threads
+        for (handle, item) in handles:
+            val thread = ThreadHandle(_handle: handle)
+            val result = thread.join() as TestRunResult
+            results.append(result)
+
+        results
 
     fn execute_with_processes(work_items: List<WorkItem>,
         runner: (TestSuite) -> TestRunResult
@@ -401,11 +428,29 @@ pub class ParallelExecutor:
         Returns:
             Test results
         """
-        # TODO: [stdlib][P1] Implement process-based parallelism
-        # Fork N worker processes
-        # Distribute work items across workers
-        # Collect results via IPC
-        <>
+        import shell
+
+        val results: List<TestRunResult> = []
+
+        # Serialize work items to temp files and spawn processes
+        for item in work_items:
+            # Create temp file with test spec
+            val temp_path = "/tmp/test_work_{item.id}.json"
+            serialize_work_item(temp_path, item)
+
+            # Run test in subprocess
+            val proc_result = shell.run("simple", ["test", "--work-file", temp_path])
+
+            # Parse result from subprocess output
+            val result = parse_test_output(proc_result.stdout)
+            results.append(result)
+
+            # Cleanup temp file
+            @extern("runtime", "rt_file_delete")
+            fn _rt_file_delete(path_ptr: &u8, path_len: u64)
+            _rt_file_delete(temp_path.ptr(), temp_path.len())
+
+        results
 
     fn execute_with_actors(work_items: List<WorkItem>,
         runner: (TestSuite) -> TestRunResult
@@ -419,11 +464,97 @@ pub class ParallelExecutor:
         Returns:
             Test results
         """
-        # TODO: [stdlib][P1] Implement actor-based parallelism
-        # Spawn N worker actors
-        # Send work items to actors
-        # Receive results via messages
-        []
+        @extern("runtime", "rt_actor_spawn")
+        fn _rt_actor_spawn(fn_ptr: u64, initial_state: Any) -> i64
+
+        @extern("runtime", "rt_actor_send")
+        fn _rt_actor_send(actor: i64, message: Any)
+
+        @extern("runtime", "rt_actor_recv")
+        fn _rt_actor_recv(timeout_ms: i64) -> Any
+
+        val results: List<TestRunResult> = []
+
+        # Create worker actor function
+        fn worker_actor(state: Any):
+            while true:
+                val msg = _rt_actor_recv(-1)  # Block until message
+                match msg:
+                    WorkItem(item) ->
+                        val result = runner(item.suite)
+                        # Send result back
+                        _rt_actor_send(state as i64, result)
+                    StopMessage ->
+                        break
+                    _ ->
+                        pass
+
+        # Spawn worker actors
+        var workers: List<i64> = []
+        val coordinator_actor = _rt_actor_spawn(0, ())  # Self as coordinator
+
+        for i in 0..self.worker_count:
+            val worker = _rt_actor_spawn(worker_actor as u64, coordinator_actor)
+            workers.append(worker)
+
+        # Distribute work items round-robin
+        var worker_idx = 0
+        for item in work_items:
+            _rt_actor_send(workers[worker_idx], item)
+            worker_idx = (worker_idx + 1) % self.worker_count
+
+        # Collect results
+        for _ in 0..work_items.len():
+            val result = _rt_actor_recv(30000) as TestRunResult  # 30s timeout
+            results.append(result)
+
+        # Stop workers
+        for worker in workers:
+            _rt_actor_send(worker, StopMessage)
+
+        results
+
+
+# Helper functions for process-based parallelism
+fn serialize_work_item(path: text, item: WorkItem):
+    """Serialize work item to JSON file."""
+    @extern("runtime", "rt_file_write")
+    fn _rt_file_write(path_ptr: &u8, path_len: u64, data_ptr: &u8, data_len: u64) -> bool
+
+    val json = "{\"id\": {item.id}, \"suite\": \"{item.suite.name}\"}"
+    _rt_file_write(path.ptr(), path.len(), json.ptr(), json.len())
+
+fn parse_test_output(output: text): TestRunResult =
+    """Parse test result from subprocess output."""
+    # Simple parsing - expect JSON-like output
+    var result = TestRunResult.new()
+
+    if output.contains("\"passed\":"):
+        val passed_start = output.find("\"passed\":") + 9
+        val passed_end = output.find(",", passed_start)
+        result.passed = parse_int(output.substring(passed_start, passed_end))
+
+    if output.contains("\"failed\":"):
+        val failed_start = output.find("\"failed\":") + 9
+        val failed_end = output.find(",", failed_start)
+        result.failed = parse_int(output.substring(failed_start, failed_end))
+
+    result
+
+fn parse_int(s: text): i32 =
+    """Parse integer from string."""
+    var result: i32 = 0
+    for ch in s.trim().chars():
+        if ch >= '0' and ch <= '9':
+            result = result * 10 + ((ch as i32) - ('0' as i32))
+        else:
+            break
+    result
+
+# Message types for actor-based parallelism
+enum ActorMessage:
+    WorkItem(WorkItem)
+    StopMessage
 
     fn aggregate_results(results: List<TestRunResult>): TestRunResult =
         """Aggregate parallel test results.
