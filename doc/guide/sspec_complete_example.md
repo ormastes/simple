@@ -394,12 +394,12 @@ Pipeline Operators - Edge Cases
 cargo run --bin gen-sspec-docs -- \
   simple/test/system/features/pipeline_operators/pipeline_operators_spec.spl
 
-# Output will be in docs/spec/pipeline_operators_spec.md
+# Output will be in doc/spec/pipeline_operators_spec.md
 ```
 
 ## Step 5: Review Generated Documentation
 
-The generator creates `docs/spec/pipeline_operators_spec.md`:
+The generator creates `doc/spec/pipeline_operators_spec.md`:
 
 ```markdown
 # Pipeline Operators Specification
@@ -448,7 +448,7 @@ val result = 5 |> double
 
 ## Step 6: View in Index
 
-The index (`docs/spec/README.md`) automatically includes your spec:
+The index (`doc/spec/README.md`) automatically includes your spec:
 
 ```markdown
 ## Language

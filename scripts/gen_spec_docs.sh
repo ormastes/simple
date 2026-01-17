@@ -5,7 +5,7 @@
 set -e
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DOCS_DIR="$REPO_ROOT/docs/spec"
+DOCS_DIR="$REPO_ROOT/doc/spec"
 TEST_DIR="$REPO_ROOT/simple/std_lib/test"
 
 echo "╔════════════════════════════════════════════════════════════════════════════╗"
@@ -190,7 +190,7 @@ echo "╔═══════════════════════�
 echo "║                    Documentation Generation Complete                       ║"
 echo "╚════════════════════════════════════════════════════════════════════════════╝"
 echo ""
-echo "📄 Generated files in docs/spec/:"
+echo "📄 Generated files in doc/spec/:"
 echo "   - MIXIN_FEATURES.md"
 echo "   - SPEC_CATALOG.md"
 echo "   - README.md (updated)"

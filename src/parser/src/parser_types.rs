@@ -113,6 +113,19 @@ impl<'a> Parser<'a> {
             _ => {}
         }
 
+        // Handle dict type: {K: V}
+        if self.check(&TokenKind::LBrace) {
+            self.advance();
+            let key_type = self.parse_type()?;
+            self.expect(&TokenKind::Colon)?;
+            let value_type = self.parse_type()?;
+            self.expect(&TokenKind::RBrace)?;
+            return Ok(Type::Generic {
+                name: "Dict".to_string(),
+                args: vec![key_type, value_type],
+            });
+        }
+
         // Handle tuple type
         if self.check(&TokenKind::LParen) {
             let types = self.parse_paren_type_list()?;

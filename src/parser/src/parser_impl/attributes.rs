@@ -81,8 +81,8 @@ impl<'a> Parser<'a> {
             self.advance();
             Expr::Identifier("bounds".to_string())
         } else {
-            // Parse the decorator name (can be dotted: @module.decorator)
-            self.parse_primary()?
+            // Parse the decorator expression (can be dotted/called: @module.decorator or @trainer.on(Events.X))
+            self.parse_postfix()?
         };
 
         // Check for arguments: @decorator(arg1, arg2) or @decorator(name=value)

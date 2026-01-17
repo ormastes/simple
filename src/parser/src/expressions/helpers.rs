@@ -136,9 +136,24 @@ impl<'a> Parser<'a> {
             }
 
             // Check for named argument with '=' or ':' syntax
+            // Also support keywords as named argument names (e.g., type="model", default=true)
             let mut name = None;
-            if let TokenKind::Identifier { name: id, .. } = &self.current.kind {
-                let id_clone = id.clone();
+            let maybe_name = match &self.current.kind {
+                TokenKind::Identifier { name: id, .. } => Some(id.clone()),
+                // Allow keywords as named argument names
+                TokenKind::Type => Some("type".to_string()),
+                TokenKind::Default => Some("default".to_string()),
+                TokenKind::Result => Some("result".to_string()),
+                TokenKind::From => Some("from".to_string()),
+                TokenKind::To => Some("to".to_string()),
+                TokenKind::In => Some("in".to_string()),
+                TokenKind::Is => Some("is".to_string()),
+                TokenKind::As => Some("as".to_string()),
+                TokenKind::Match => Some("match".to_string()),
+                TokenKind::Use => Some("use".to_string()),
+                _ => None,
+            };
+            if let Some(id_clone) = maybe_name {
                 // Peek ahead for '=' or ':' without consuming the stream
                 let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
                     let tok = self.lexer.next_token();
@@ -147,16 +162,15 @@ impl<'a> Parser<'a> {
                 });
                 if next.kind == TokenKind::Assign {
                     name = Some(id_clone);
-                    self.advance(); // consume identifier
+                    self.advance(); // consume identifier/keyword
                     self.expect(&TokenKind::Assign)?; // consume '='
                 } else if next.kind == TokenKind::Colon {
                     // Support colon syntax: name: value
                     name = Some(id_clone);
-                    self.advance(); // consume identifier
+                    self.advance(); // consume identifier/keyword
                     self.expect(&TokenKind::Colon)?; // consume ':'
-                } else {
-                    // leave current untouched; pending_tokens already holds the peeked token
                 }
+                // else leave current untouched; pending_tokens already holds the peeked token
             }
 
             let mut value = self.parse_expression()?;

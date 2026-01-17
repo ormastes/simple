@@ -213,7 +213,7 @@ simple-context app.spl --stats            # Show reduction
 3. `src/compiler/Cargo.toml` (binary)
 4. `src/compiler/src/lib.rs` (exports)
 
-**Total:** 27 files, ~700 lines of code, ~60,000 bytes of docs/specs
+**Total:** 27 files, ~700 lines of code, ~60,000 bytes of doc/specs
 
 ### Modified (7 files)
 

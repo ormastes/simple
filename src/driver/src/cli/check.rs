@@ -2,12 +2,14 @@
 //!
 //! The `simple check` command validates Simple source code by:
 //! - Parsing source code and reporting syntax errors
-//! - Validating import statements
+//! - Validating import statements (module resolution)
 //! - Checking type correctness (basic validation)
 //! - Supporting multiple files and glob patterns
 //! - Providing human-readable or JSON output
 
 use serde::{Deserialize, Serialize};
+use simple_compiler::module_resolver::ModuleResolver;
+use simple_parser::ast::Node;
 use simple_parser::{Parser, ParseError};
 use std::path::{Path, PathBuf};
 use std::fs;
@@ -163,11 +165,9 @@ fn check_file(path: &Path) -> FileCheckResult {
     // Parse source
     let mut parser = Parser::new(&source);
     match parser.parse() {
-        Ok(_module) => {
-            // Parsing succeeded, check for imports
-            // For now, we just validate that imports are syntactically correct
-            // More advanced validation (checking if modules exist) would go here
-            // TODO: [driver][P3] Validate import resolution in check command
+        Ok(module) => {
+            // Parsing succeeded, validate imports
+            validate_imports(path, &module.items, &mut errors);
         }
         Err(e) => {
             // Convert ParseError to CheckError
@@ -186,6 +186,75 @@ fn check_file(path: &Path) -> FileCheckResult {
         status,
         errors,
     }
+}
+
+/// Validate import statements in a module
+fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckError>) {
+    // Create a module resolver for the file's directory
+    let parent = file_path.parent().unwrap_or(Path::new("."));
+    let resolver = ModuleResolver::single_file(file_path);
+
+    for item in items {
+        match item {
+            Node::UseStmt(use_stmt) => {
+                // Try to resolve the import path
+                if let Err(e) = resolver.resolve(&use_stmt.path, file_path) {
+                    // Only report as warning since the module might be in a different project location
+                    errors.push(CheckError {
+                        file: file_path.display().to_string(),
+                        line: use_stmt.span.line,
+                        column: use_stmt.span.column,
+                        severity: ErrorSeverity::Warning,
+                        message: format!(
+                            "unresolved import '{}': {}",
+                            use_stmt.path.segments.join("."),
+                            e
+                        ),
+                        expected: None,
+                        found: None,
+                    });
+                }
+            }
+            Node::CommonUseStmt(common_use) => {
+                if let Err(e) = resolver.resolve(&common_use.path, file_path) {
+                    errors.push(CheckError {
+                        file: file_path.display().to_string(),
+                        line: common_use.span.line,
+                        column: common_use.span.column,
+                        severity: ErrorSeverity::Warning,
+                        message: format!(
+                            "unresolved common import '{}': {}",
+                            common_use.path.segments.join("."),
+                            e
+                        ),
+                        expected: None,
+                        found: None,
+                    });
+                }
+            }
+            Node::ExportUseStmt(export_use) => {
+                if let Err(e) = resolver.resolve(&export_use.path, file_path) {
+                    errors.push(CheckError {
+                        file: file_path.display().to_string(),
+                        line: export_use.span.line,
+                        column: export_use.span.column,
+                        severity: ErrorSeverity::Warning,
+                        message: format!(
+                            "unresolved export import '{}': {}",
+                            export_use.path.segments.join("."),
+                            e
+                        ),
+                        expected: None,
+                        found: None,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Suppress unused variable warning for parent - it's used by resolver internally
+    let _ = parent;
 }
 
 /// Convert ParseError to CheckError

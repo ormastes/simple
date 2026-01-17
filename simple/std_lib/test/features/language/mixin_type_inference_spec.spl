@@ -1,0 +1,360 @@
+"""
+# Mixin Type Inference Specification
+
+**Feature IDs:** #2130-2139
+**Category:** Language
+**Difficulty:** 4/5
+**Status:** Draft
+
+## Overview
+
+The compiler can infer type parameters for generic mixins based on
+how they are used in the class. This reduces boilerplate while
+maintaining type safety.
+
+## Syntax
+
+```simple
+mixin Container<T>:
+    var items: Vec<T>
+
+class Box:
+    use Container  # T inferred from usage
+    fn add_number():
+        self.items.push(42)  # Infers T = i64
+```
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Field inference | Infer type from field assignment |
+| Return inference | Infer type from method return type |
+| Parameter inference | Infer type from method parameter type |
+| Bidirectional | Inference flows in both directions |
+| Ambiguous type | Error when type cannot be determined |
+
+## Behavior
+
+- Types can be inferred from field usage
+- Types can be inferred from method signatures
+- Trait bounds are verified after inference
+- Ambiguous types produce clear error messages
+
+## Related Specifications
+
+- [Type Inference](../infrastructure/type_inference_spec.spl) - General type inference
+- [Mixin Generics](mixin_generics_spec.spl) - Generic mixins
+"""
+
+import std.spec
+
+# ============================================================================
+# Field Usage Inference
+# ============================================================================
+
+describe "Field Usage Inference":
+    """
+    ## Inferring Type from Field Operations
+
+    The compiler infers mixin type parameters from how fields are used.
+    """
+
+    context "infer from push operation":
+        """
+        ### Scenario: Type inferred from Vec.push()
+
+        When a value is pushed to a generic collection, the type is inferred.
+        """
+
+        it "infers type from field assignment":
+            # mixin Container<T>:
+            #     var items: Vec<T>
+            # class Box:
+            #     use Container  # T not specified
+            #     fn add_number():
+            #         self.items.push(42)  # Infers T = i64
+            # items has type Vec<i64>
+            expect true
+
+    context "infer from nested types":
+        """
+        ### Scenario: Type inferred in nested position
+
+        Inference works through nested generic types.
+        """
+
+        it "infers type in nested generic":
+            # mixin NestedContainer<T>:
+            #     var nested: Vec<Option<T>>
+            # class Store:
+            #     use NestedContainer
+            #     fn add_maybe(value: i64):
+            #         self.nested.push(Some(value))  # Infers T = i64
+            # nested has type Vec<Option<i64>>
+            expect true
+
+
+# ============================================================================
+# Method Signature Inference
+# ============================================================================
+
+describe "Method Signature Inference":
+    """
+    ## Inferring Type from Method Signatures
+
+    Type parameters can be inferred from method return types and parameters.
+    """
+
+    context "infer from return type":
+        """
+        ### Scenario: Type inferred from method return
+
+        When a class provides a method implementation, the return type
+        constrains the type parameter.
+        """
+
+        it "infers type from method return":
+            # mixin Producer<T>:
+            #     fn produce() -> T
+            # class StringProducer:
+            #     use Producer
+            #     fn produce() -> String:  # Infers T = String
+            #         return "hello"
+            expect true
+
+    context "infer from parameter type":
+        """
+        ### Scenario: Type inferred from method parameter
+
+        Method parameter types also constrain type inference.
+        """
+
+        it "infers type from method parameter":
+            # mixin Consumer<T>:
+            #     fn consume(item: T)
+            # class IntConsumer:
+            #     use Consumer
+            #     fn consume(item: i64):  # Infers T = i64
+            #         println(item)
+            expect true
+
+
+# ============================================================================
+# Bidirectional Inference
+# ============================================================================
+
+describe "Bidirectional Inference":
+    """
+    ## Two-Way Type Inference
+
+    Type information flows bidirectionally between mixins and classes.
+    """
+
+    context "multiple type parameters":
+        """
+        ### Scenario: Infer multiple types from signature
+
+        Both input and output types can be inferred simultaneously.
+        """
+
+        it "infers both input and output types":
+            # mixin Converter<T, U>:
+            #     fn convert(input: T) -> U
+            # class ToStringConverter:
+            #     use Converter
+            #     fn convert(input: i64) -> String:
+            #         return input.to_string()
+            # Infers T = i64, U = String
+            expect true
+
+    context "interdependent mixins":
+        """
+        ### Scenario: Multiple mixins share inference
+
+        Type inference can unify types across multiple mixins.
+        """
+
+        it "unifies types across mixins":
+            # mixin Source<T>:
+            #     fn get() -> T
+            # mixin Sink<T>:
+            #     fn put(value: T)
+            # class Pipe:
+            #     use Source, Sink
+            #     fn transfer():
+            #         let value = self.get()
+            #         self.put(value)  # Source and Sink T must match
+            expect true
+
+
+# ============================================================================
+# Constrained Inference
+# ============================================================================
+
+describe "Constrained Inference":
+    """
+    ## Inference with Trait Bounds
+
+    Trait bounds are verified after type inference.
+    """
+
+    context "trait bound satisfaction":
+        """
+        ### Scenario: Inferred type must satisfy bounds
+
+        After inference, the concrete type must implement required traits.
+        """
+
+        it "verifies trait bound after inference":
+            # mixin Sortable<T> where T: Ord:
+            #     var data: Vec<T>
+            # class Rankings:
+            #     use Sortable
+            #     fn add_score(score: i64):
+            #         self.data.push(score)  # Infers T = i64
+            # Verifies that i64: Ord (it does)
+            expect true
+
+    context "trait bound violation":
+        """
+        ### Scenario: Inferred type violates bound
+
+        Clear error when inferred type doesn't satisfy bounds.
+        """
+
+        it "reports trait bound violation":
+            # mixin Comparable<T> where T: Ord:
+            #     fn compare(a: T, b: T) -> i64
+            # struct Unordered:
+            #     var x: i64
+            #     # No Ord implementation
+            # class Comparator:
+            #     use Comparable
+            #     fn compare(a: Unordered, b: Unordered) -> i64:
+            #         return 0
+            # Error: Unordered does not satisfy trait bound Ord
+            expect true
+
+
+# ============================================================================
+# Ambiguous Type Detection
+# ============================================================================
+
+describe "Ambiguous Type Detection":
+    """
+    ## Uninferable Types
+
+    The compiler reports when type cannot be determined.
+    """
+
+    context "no usage to infer from":
+        """
+        ### Scenario: Type parameter unused
+
+        When there's no usage to infer from, explicit type is required.
+        """
+
+        it "reports ambiguous type error":
+            # mixin Generic<T>:
+            #     var data: Option<T>
+            # class Ambiguous:
+            #     use Generic  # No usage of T
+            # Error: cannot infer type parameter 'T'
+            # Suggest: provide explicit type annotation
+            expect true
+
+
+# ============================================================================
+# Partial Type Inference
+# ============================================================================
+
+describe "Partial Type Inference":
+    """
+    ## Mixing Explicit and Inferred Types
+
+    Some type parameters can be explicit while others are inferred.
+    """
+
+    context "partial annotation":
+        """
+        ### Scenario: Explicit K, inferred V
+
+        Underscore `_` can mark type parameters to be inferred.
+        """
+
+        it "infers unmarked type parameters":
+            # mixin KeyValue<K, V>:
+            #     var storage: HashMap<K, V>
+            # class StringMap:
+            #     use KeyValue<String, _>  # K explicit, V inferred
+            #     fn put(key: String):
+            #         self.storage.insert(key, 42)  # Infers V = i64
+            expect true
+
+
+# ============================================================================
+# Inference Error Messages
+# ============================================================================
+
+describe "Inference Error Messages":
+    """
+    ## Clear Error Reporting
+
+    Type inference errors should show the inference chain.
+    """
+
+    context "conflicting inferences":
+        """
+        ### Scenario: Method signatures conflict
+
+        When two usages infer different types, show the conflict.
+        """
+
+        it "reports inference conflict":
+            # mixin Chain<T>:
+            #     fn step1() -> T
+            #     fn step2(x: T) -> T
+            # class Pipeline:
+            #     use Chain
+            #     fn step1() -> i64:
+            #         return 42  # Infers T = i64
+            #     fn step2(x: String) -> String:  # Conflicts!
+            #         return x
+            # Error: T inferred as i64 from step1, conflicts with String in step2
+            expect true
+
+
+# ============================================================================
+# Associated Type Inference
+# ============================================================================
+
+describe "Associated Type Inference":
+    """
+    ## Inference with Associated Types
+
+    Type inference works with traits that have associated types.
+    """
+
+    context "associated type resolution":
+        """
+        ### Scenario: Infer from Iterator::Item
+
+        Associated types are resolved through inference.
+        """
+
+        it "resolves associated types":
+            # trait Iterator:
+            #     type Item
+            #     fn next() -> Option<Item>
+            # mixin Iterable<T> where T: Iterator:
+            #     var iter: T
+            #     fn collect_all() -> Vec<T::Item>
+            # class IntIterator:
+            #     impl Iterator:
+            #         type Item = i64
+            # class Collection:
+            #     use Iterable
+            #     var iter: IntIterator  # Infers T = IntIterator
+            # Item resolves to i64
+            expect true

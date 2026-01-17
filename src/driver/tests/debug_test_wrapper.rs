@@ -7,7 +7,7 @@ use std::path::Path;
 #[test]
 fn test_json_two_tests_with_cache_clear() {
     clear_module_cache(); // This is what cargo test wrapper does
-    let path = Path::new("/home/ormastes/dev/pub/simple/test_json_two_tests.spl");
+    let path = Path::new("/home/ormastes/dev/pub/simple/simple/std_lib/test/features/stdlib/json_spec.spl");
     let result = run_test_file(path);
     println!("Result WITH cache clear: {:?}", result);
     assert!(result.is_success(), "Test should pass: {:?}", result);
@@ -16,7 +16,7 @@ fn test_json_two_tests_with_cache_clear() {
 #[test]
 fn test_json_two_tests_without_cache_clear() {
     // Don't clear cache
-    let path = Path::new("/home/ormastes/dev/pub/simple/test_json_two_tests.spl");
+    let path = Path::new("/home/ormastes/dev/pub/simple/simple/std_lib/test/features/stdlib/json_spec.spl");
     let result = run_test_file(path);
     println!("Result WITHOUT cache clear: {:?}", result);
     assert!(result.is_success(), "Test should pass: {:?}", result);
@@ -33,8 +33,9 @@ fn test_json_spec() {
 
 #[test]
 fn test_json_no_spec_framework() {
-    let path = Path::new("/home/ormastes/dev/pub/simple/test_json_no_spec.spl");
+    // Use the simple_fn test as a basic test without complex dependencies
+    let path = Path::new("/home/ormastes/dev/pub/simple/simple/std_lib/test/examples/language_features/test_simple_fn.spl");
     let result = run_test_file(path);
-    println!("Result (no spec framework): {:?}", result);
+    println!("Result (simple fn test): {:?}", result);
     assert!(result.is_success(), "Test should pass: {:?}", result);
 }

@@ -14,7 +14,7 @@ fn main() {
     }
 
     let spec_files: Vec<PathBuf> = args[1..].iter().map(PathBuf::from).collect();
-    let output_dir = PathBuf::from("docs/spec");
+    let output_dir = PathBuf::from("doc/spec");
 
     match sspec_docgen::generate_sspec_docs(&spec_files, &output_dir) {
         Ok(stats) => {
