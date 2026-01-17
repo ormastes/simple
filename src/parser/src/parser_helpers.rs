@@ -484,6 +484,8 @@ impl<'a> Parser<'a> {
             TokenKind::Examples => "examples",
             TokenKind::Outline => "outline",
             TokenKind::AndThen => "and_then",
+            // Allow set operation keywords as method names
+            TokenKind::Union => "union",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",

@@ -6,6 +6,10 @@
 use core.*
 use mcp.core.protocol.*
 
+# FFI for process execution
+@extern("runtime", "rt_process_run")
+fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64, args_ptr: &u8, args_len: u64) -> (i32, text, text)
+
 # Tooling integration manager
 pub struct McpTooling:
     workspace_root: text
@@ -161,7 +165,26 @@ impl McpTooling:
         }
 
         self.task_manager.running_tasks.insert(task_id.clone(), task)
-        # TODO: [stdlib][P3] Execute compilation command
+
+        # Execute compilation in background
+        val cmd = "simple"
+        val args = "build " + target + " " + flags.join(" ")
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        # Store output in logs
+        var logs: Array<text> = []
+        for line in stdout.lines():
+            logs.append(line)
+        for line in stderr.lines():
+            logs.append(line)
+        self.task_manager.task_logs.insert(task_id.clone(), logs)
+
+        # Update task status based on exit code
+        if exit_code == 0:
+            task.status = TaskStatus::Completed
+        else:
+            task.status = TaskStatus::Failed
+
         return Ok(task_id)
 
     # #1261: run_test(filter, parallel)
@@ -175,7 +198,30 @@ impl McpTooling:
         }
 
         self.task_manager.running_tasks.insert(task_id.clone(), task)
-        # TODO: [stdlib][P3] Execute tests
+
+        # Execute tests
+        val cmd = "simple"
+        var args = "test"
+        if filter.len() > 0:
+            args = args + " --filter " + filter
+        if parallel:
+            args = args + " --parallel"
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        # Store output in logs
+        var logs: Array<text> = []
+        for line in stdout.lines():
+            logs.append(line)
+        for line in stderr.lines():
+            logs.append(line)
+        self.task_manager.task_logs.insert(task_id.clone(), logs)
+
+        # Update task status
+        if exit_code == 0:
+            task.status = TaskStatus::Completed
+        else:
+            task.status = TaskStatus::Failed
+
         return Ok(task_id)
 
     # #1262: run_deploy(target, config)
@@ -189,7 +235,26 @@ impl McpTooling:
         }
 
         self.task_manager.running_tasks.insert(task_id.clone(), task)
-        # TODO: [stdlib][P3] Execute deployment
+
+        # Execute deployment
+        val cmd = "simple"
+        val args = "deploy " + target + " --config " + config
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        # Store output in logs
+        var logs: Array<text> = []
+        for line in stdout.lines():
+            logs.append(line)
+        for line in stderr.lines():
+            logs.append(line)
+        self.task_manager.task_logs.insert(task_id.clone(), logs)
+
+        # Update task status
+        if exit_code == 0:
+            task.status = TaskStatus::Completed
+        else:
+            task.status = TaskStatus::Failed
+
         return Ok(task_id)
 
     # #1263: read_task_log(task_id, group)

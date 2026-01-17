@@ -189,19 +189,48 @@ fn extract_attribute(line: text) -> Option<(text, text)>:
 
 # Discover project configuration from simple.toml
 export fn discover_project_config(project_root: text) -> ProjectConfig:
+    @extern("runtime", "rt_file_read_text")
+    fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+    @extern("runtime", "rt_file_exists")
+    fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
+
     val toml_path = "{project_root}/simple.toml"
 
-    # TODO: [stdlib][P3] Check if file exists and read it
-    # For now, return default
-    ProjectConfig.default()
+    # Check if file exists
+    if not _rt_file_exists(toml_path.ptr(), toml_path.len()):
+        return ProjectConfig.default()
+
+    # Read and parse TOML
+    val content = _rt_file_read_text(toml_path.ptr(), toml_path.len())
+    if content.is_empty():
+        return ProjectConfig.default()
+
+    # Parse TOML content for test config section
+    parse_project_toml(content)
 
 # Discover directory configuration from .spec_config.sdn
 export fn discover_directory_config(dir_path: text, parent: ModeConfig) -> ModeConfig:
+    @extern("runtime", "rt_file_read_text")
+    fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+    @extern("runtime", "rt_file_exists")
+    fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
+
     val sdn_path = "{dir_path}/.spec_config.sdn"
 
-    # TODO: [stdlib][P3] Check if file exists and read it
-    # For now, return parent config
-    parent
+    # Check if file exists
+    if not _rt_file_exists(sdn_path.ptr(), sdn_path.len()):
+        return parent
+
+    # Read and parse SDN config
+    val content = _rt_file_read_text(sdn_path.ptr(), sdn_path.len())
+    if content.is_empty():
+        return parent
+
+    # Parse SDN format to DirectoryConfig
+    val dir_config = parse_directory_config(content)
+    dir_config.to_mode_config(parent)
 
 # Discover file configuration from file attributes
 export fn discover_file_config(file_path: text, parent: ModeConfig) -> ModeConfig:
@@ -255,14 +284,17 @@ struct ConfigHierarchy:
         # Load configurations
         val project = discover_project_config(project_root)
 
-        # TODO: [stdlib][P3] Load directory and file configs
-        val directory = None
-        val file = None
+        # Load directory and file configs
+        val parent_config = project.to_mode_config()
+        val dir_config = discover_directory_config(dir_path, parent_config)
+        val file_config = discover_file_config(file_path, dir_config)
 
+        # Note: We use ModeConfig as the unified format, directory/file stored as None
+        # since we apply them sequentially above
         ConfigHierarchy {
             project: project,
-            directory: directory,
-            file: file
+            directory: None,
+            file: None
         }
 
     # Build ModeConfig from the hierarchy

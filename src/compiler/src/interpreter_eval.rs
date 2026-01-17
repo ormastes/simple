@@ -16,9 +16,10 @@ use crate::error::CompileError;
 use crate::value::{Env, Value};
 
 use super::{
-    bind_pattern_value, check_enum_exhaustiveness, control_to_value, create_range_object, dispatch_context_method,
-    evaluate_expr, evaluate_macro_invocation, evaluate_method_call_with_self_update, exec_block, exec_context,
-    exec_for, exec_function, exec_if, exec_loop, exec_match, exec_node, exec_while, exec_with, find_and_exec_method,
+    await_value, bind_pattern_value, check_enum_exhaustiveness, control_to_value, create_range_object,
+    dispatch_context_method, evaluate_expr, evaluate_macro_invocation, evaluate_method_call_with_self_update,
+    exec_block, exec_context, exec_for, exec_function, exec_if, exec_loop, exec_match, exec_node, exec_while,
+    exec_with, find_and_exec_method,
     get_di_config, get_import_alias, get_pattern_name, get_type_name, handle_functional_update,
     handle_method_call_with_self_update, is_unit_type, iter_to_vec, load_and_merge_module, message_to_value,
     normalize_index, pattern_matches, register_trait_impl, slice_collection, spawn_actor_with_expr,
@@ -756,10 +757,15 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             &impl_methods,
             None, // No self context
         )?;
+        // Await the result if it's a Promise (async function)
+        let result = await_value(result)?;
         return result.as_int().map(|v| v as i32);
     }
 
     // Fall back to checking for `main = <value>` binding
-    let main_val = env.get("main").cloned().unwrap_or(Value::Int(0)).as_int()? as i32;
+    let main_val = env.get("main").cloned().unwrap_or(Value::Int(0));
+    // Await the value if it's a Promise (async expression result)
+    let main_val = await_value(main_val)?;
+    let main_val = main_val.as_int()? as i32;
     Ok(main_val)
 }

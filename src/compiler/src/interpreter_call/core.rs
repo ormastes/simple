@@ -57,8 +57,8 @@ use crate::aop_config::AopConfig;
 use crate::di::DiScope;
 use crate::error::CompileError;
 use crate::interpreter::{
-    evaluate_expr, exec_block, exec_block_fn, get_aop_config, get_di_config, with_effect_context, Control,
-    DI_SINGLETONS,
+    await_value, evaluate_expr, exec_block, exec_block_fn, get_aop_config, get_di_config, with_effect_context,
+    Control, DI_SINGLETONS,
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
@@ -207,6 +207,8 @@ pub(crate) fn bind_args_with_injected(
         } else {
             // Normal argument (not spread)
             let val = evaluate_expr(&arg.value, outer_env, functions, classes, enums, impl_methods)?;
+            // Automatically await Promise arguments
+            let val = await_value(val)?;
 
             if let Some(name) = &arg.name {
                 // Named argument
@@ -295,7 +297,8 @@ fn bind_args_with_values(
     let mut bound = HashMap::new();
     for (idx, param) in params_to_bind.iter().enumerate() {
         let value = if idx < args.len() {
-            args[idx].clone()
+            // Automatically await Promise arguments
+            await_value(args[idx].clone())?
         } else if let Some(default_expr) = &param.default {
             evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?
         } else {
@@ -334,6 +337,8 @@ pub(crate) fn exec_lambda(
 
     for arg in args {
         let val = evaluate_expr(&arg.value, call_env, functions, classes, enums, impl_methods)?;
+        // Automatically await Promise arguments
+        let val = await_value(val)?;
         if let Some(name) = &arg.name {
             local_env.insert(name.clone(), val);
         } else {
