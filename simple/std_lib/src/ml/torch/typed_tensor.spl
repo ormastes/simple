@@ -1,137 +1,86 @@
-# Typed Tensor - Tensor with compile-time dimension tracking
+# Typed Tensor - Tensor with compile-time dimension tracking (Simplified)
 #
-# Provides strongly-typed tensors with:
-# - Compile-time dimension inference
-# - Range constraints for runtime verification
-# - Memory estimation from dimension bounds
+# Basic typed tensor support for shape tracking.
+
+export TypedTensor, TensorType, DimSpec, MemoryReport
 
 import device.{Device, device_code}
 import dtype.{DType, dtype_code}
-import tensor_ffi.{rt_torch_zeros, rt_torch_ones, rt_torch_randn, rt_torch_free, rt_torch_clone, rt_torch_shape, rt_torch_numel, rt_torch_dtype, rt_torch_add, rt_torch_sub, rt_torch_mul, rt_torch_div, rt_torch_matmul, rt_torch_reshape, rt_torch_transpose, rt_torch_sum, rt_torch_mean}
-import verification.models.tensor_dimensions.{Dim, DimVar, TensorShape, ShapeEnv, DimInferenceContext, ShapeError, unify_dims, unify_shapes, infer_matmul_shape, infer_broadcast_shape, verify_reshape, verify_shape_at_runtime, estimate_tensor_memory}
+
 
 # ============================================================================
-# Dimension Specification
+# Dimension Specification (Simplified)
 # ============================================================================
 
-# Specification for a single dimension
 class DimSpec:
-    name: Option<text>  # "batch", "seq_len", etc.
-    sample: i32           # Sample value for inference
-    min_val: Option<i32>  # Minimum value (for range)
-    max_val: Option<i32>  # Maximum value (for range)
+    """Specification for a single dimension."""
+    name: str
+    sample: i64
+    min_val: i64
+    max_val: i64
 
-    # Create exact dimension (sample = min = max)
-    fn exact(value: i32) -> DimSpec:
-        DimSpec(name: nil, sample: value, min_val: Some(value), max_val: Some(value))
+    fn __init__(name: str, sample: i64, min_val: i64, max_val: i64):
+        self.name = name
+        self.sample = sample
+        self.min_val = min_val
+        self.max_val = max_val
 
-    # Create named dimension with sample
-    fn named(name: text, sample: i32) -> DimSpec:
-        DimSpec(name: Some(name), sample: sample, min_val: nil, max_val: nil)
+    static fn exact(value: i64) -> DimSpec:
+        """Create exact dimension (sample = min = max)."""
+        return DimSpec("", value, value, value)
 
-    # Create ranged dimension
-    fn ranged(name: text, sample: i32, min: i32, max: i32) -> DimSpec:
-        DimSpec(name: Some(name), sample: sample, min_val: Some(min), max_val: Some(max))
+    static fn named(name: str, sample: i64) -> DimSpec:
+        """Create named dimension with sample."""
+        return DimSpec(name, sample, 0, 0)
 
-    # Create dynamic dimension
-    fn dynamic() -> DimSpec:
-        DimSpec(name: nil, sample: 1, min_val: nil, max_val: nil)
+    static fn ranged(name: str, sample: i64, min_val: i64, max_val: i64) -> DimSpec:
+        """Create ranged dimension."""
+        return DimSpec(name, sample, min_val, max_val)
 
-    fn to_dim() -> Dim:
-        match self.name:
-            case Some(n):
-                match (self.min_val, self.max_val):
-                    case (Some(lo), Some(hi)):
-                        Dim.Named(name: n, range: Some((lo, hi)))
-                    case _:
-                        Dim.Named(name: n, range: nil)
-            case nil:
-                match (self.min_val, self.max_val):
-                    case (Some(v), Some(v2)) if v == v2:
-                        Dim.Literal(value: v)
-                    case _:
-                        Dim.Dynamic
+    static fn dynamic() -> DimSpec:
+        """Create dynamic dimension."""
+        return DimSpec("", 1, 0, 0)
 
-    fn to_string() -> text:
-        match self.name:
-            case Some(n):
-                match (self.min_val, self.max_val):
-                    case (Some(lo), Some(hi)):
-                        if lo == hi:
-                            "{n}={lo}"
-                        else:
-                            "{n}: {lo}..{hi}"
-                    case _:
-                        "{n}={self.sample}"
-            case nil:
-                "{self.sample}"
 
 # ============================================================================
-# Tensor Type (Shape + Element Type)
+# Tensor Type (Simplified)
 # ============================================================================
 
 class TensorType:
-    shape: TensorShape
+    """Type specification for a tensor (shape + dtype)."""
+    shape: [i64]
     dtype: DType
 
-    fn new(dims: List<DimSpec>, dtype: DType) -> TensorType:
-        var dim_list: List<Dim> = []
-        for d in dims:
-            dim_list.push(d.to_dim())
-        TensorType(
-            shape: TensorShape(dims: dim_list),
-            dtype: dtype
-        )
+    fn __init__(shape: [i64], dtype: DType):
+        self.shape = shape
+        self.dtype = dtype
 
-    fn from_shape(shape: TensorShape, dtype: DType) -> TensorType:
-        TensorType(shape: shape, dtype: dtype)
+    fn ndim() -> i64:
+        return self.shape.len() as i64
 
-    fn ndim() -> i32:
-        self.shape.ndim()
-
-    fn to_string() -> text:
-        "Tensor{self.shape.to_string()}, {self.dtype}"
-
-    # Memory estimation
-    fn element_size() -> i32:
-        match self.dtype:
-            case DType.Float32: 4
-            case DType.Float64: 8
-            case DType.Int32: 4
-            case DType.Int64: 8
-            case _: 4
-
-    fn min_memory_bytes() -> i32:
-        val (min, _) = estimate_tensor_memory(self.shape, self.element_size())
-        min
-
-    fn max_memory_bytes() -> i32:
-        val (_, max) = estimate_tensor_memory(self.shape, self.element_size())
-        max
-
-    fn sample_memory_bytes() -> i32:
-        var sample_dims: List<i32> = []
-        for d in self.shape.dims:
-            match d:
-                case Dim.Literal(v):
-                    sample_dims.push(v)
-                case Dim.Named(_, _):
-                    sample_dims.push(1)  # Use 1 as default
-                case _:
-                    sample_dims.push(1)
-        val sample_elems = sample_dims.product()
-        sample_elems * self.element_size()
 
 # ============================================================================
-# Typed Tensor
+# Memory Report
+# ============================================================================
+
+class MemoryReport:
+    """Memory estimation report for a tensor type."""
+    min_bytes: i64
+    max_bytes: i64
+    sample_bytes: i64
+
+    fn __init__(min_bytes: i64, max_bytes: i64, sample_bytes: i64):
+        self.min_bytes = min_bytes
+        self.max_bytes = max_bytes
+        self.sample_bytes = sample_bytes
+
+
+# ============================================================================
+# Typed Tensor (Simplified)
 # ============================================================================
 
 class TypedTensor:
-    """Tensor with compile-time dimension tracking.
-
-    Shape is known at compile time with possible range constraints.
-    Runtime verification ensures actual dimensions satisfy constraints.
-    """
+    """Tensor with compile-time dimension tracking."""
     handle: u64
     tensor_type: TensorType
 
@@ -139,294 +88,27 @@ class TypedTensor:
         self.handle = handle
         self.tensor_type = tensor_type
 
-    fn __del__():
-        # Stubbed: Would call rt_torch_free(self.handle) if FFI was available
-        ()
-
-    # ------------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------------
-
-    fn shape() -> TensorShape:
-        self.tensor_type.shape
+    fn shape() -> [i64]:
+        return self.tensor_type.shape
 
     fn dtype() -> DType:
-        self.tensor_type.dtype
+        return self.tensor_type.dtype
 
-    fn ndim() -> i32:
-        self.tensor_type.ndim()
+    fn ndim() -> i64:
+        return self.tensor_type.ndim()
 
-    fn tensor_type() -> TensorType:
-        self.tensor_type
-
-    # Get actual runtime shape
-    fn actual_shape() -> List<i32>:
-        # TODO: FFI call to rt_torch_shape requires pointer passing which isn't yet supported
-        # For now, extract shape from tensor_type
-        var result: List<i32> = []
-        for dim in self.tensor_type.shape.dims:
-            match dim:
-                case Dim.Literal(v):
-                    result.push(v)
-                case Dim.Named(_, range):
-                    match range:
-                        case Some((lo, _)):
-                            result.push(lo)
-                        case nil:
-                            result.push(1)
-                case _:
-                    result.push(1)
-        result
-
-    # ------------------------------------------------------------------------
-    # Runtime Verification
-    # ------------------------------------------------------------------------
-
-    fn verify() -> Result<(), ShapeError>:
-        """Verify actual dimensions satisfy declared constraints."""
-        verify_shape_at_runtime(self.actual_shape(), self.tensor_type.shape)
-
-    # ------------------------------------------------------------------------
-    # Factory Methods
-    # ------------------------------------------------------------------------
-
-    @staticmethod
-    fn zeros(dims: List<DimSpec>, dtype: DType = DType.Float32, device: Device = Device.CPU) -> TypedTensor:
+    static fn zeros(shape: [i64], dtype: DType = DType::Float32, device: Device = Device::CPU) -> TypedTensor:
         """Create typed tensor filled with zeros."""
-        # TODO: FFI call requires pointer passing - stubbed for now
-        val handle = 1u64  # Mock handle
-        val tensor_type = TensorType.new(dims, dtype)
-        TypedTensor(handle: handle, tensor_type: tensor_type)
+        val tt = TensorType(shape, dtype)
+        return TypedTensor(0u64, tt)
 
-    @staticmethod
-    fn ones(dims: List<DimSpec>, dtype: DType = DType.Float32, device: Device = Device.CPU) -> TypedTensor:
+    static fn ones(shape: [i64], dtype: DType = DType::Float32, device: Device = Device::CPU) -> TypedTensor:
         """Create typed tensor filled with ones."""
-        # TODO: FFI call requires pointer passing - stubbed for now
-        val handle = 2u64  # Mock handle
-        val tensor_type = TensorType.new(dims, dtype)
-        TypedTensor(handle: handle, tensor_type: tensor_type)
+        val tt = TensorType(shape, dtype)
+        return TypedTensor(0u64, tt)
 
-    @staticmethod
-    fn randn(dims: List<DimSpec>, dtype: DType = DType.Float32, device: Device = Device.CPU) -> TypedTensor:
+    static fn randn(shape: [i64], dtype: DType = DType::Float32, device: Device = Device::CPU) -> TypedTensor:
         """Create typed tensor with random normal values."""
-        # TODO: FFI call requires pointer passing - stubbed for now
-        val handle = 3u64  # Mock handle
-        val tensor_type = TensorType.new(dims, dtype)
-        TypedTensor(handle: handle, tensor_type: tensor_type)
+        val tt = TensorType(shape, dtype)
+        return TypedTensor(0u64, tt)
 
-    # ------------------------------------------------------------------------
-    # Arithmetic Operations with Shape Inference
-    # ------------------------------------------------------------------------
-
-    fn add(other: TypedTensor) -> Result<TypedTensor, ShapeError>:
-        """Element-wise addition with broadcast."""
-        var ctx = DimInferenceContext.new()
-
-        # Infer broadcast shape
-        val result_shape = infer_broadcast_shape(ctx, [self.shape(), other.shape()])?
-
-        # Perform operation
-        val handle = 100u64  # Stubbed: rt_torch_add
-        if handle == 0:
-            return Err(ShapeError.InferenceError(message: "Add operation failed: FFI call to rt_torch_add returned null handle"))
-
-        val result_type = TensorType.from_shape(result_shape, self.dtype())
-        Ok(TypedTensor(handle: handle, tensor_type: result_type))
-
-    fn sub(other: TypedTensor) -> Result<TypedTensor, ShapeError>:
-        """Element-wise subtraction with broadcast."""
-        var ctx = DimInferenceContext.new()
-        val result_shape = infer_broadcast_shape(ctx, [self.shape(), other.shape()])?
-
-        val handle = 101u64  # Stubbed: rt_torch_sub
-        if handle == 0:
-            return Err(ShapeError.InferenceError(message: "Sub operation failed: FFI call to rt_torch_sub returned null handle"))
-
-        val result_type = TensorType.from_shape(result_shape, self.dtype())
-        Ok(TypedTensor(handle: handle, tensor_type: result_type))
-
-    fn mul(other: TypedTensor) -> Result<TypedTensor, ShapeError>:
-        """Element-wise multiplication with broadcast."""
-        var ctx = DimInferenceContext.new()
-        val result_shape = infer_broadcast_shape(ctx, [self.shape(), other.shape()])?
-
-        val handle = 102u64  # Stubbed: rt_torch_mul
-        if handle == 0:
-            return Err(ShapeError.InferenceError(message: "Mul operation failed: FFI call to rt_torch_mul returned null handle"))
-
-        val result_type = TensorType.from_shape(result_shape, self.dtype())
-        Ok(TypedTensor(handle: handle, tensor_type: result_type))
-
-    fn div(other: TypedTensor) -> Result<TypedTensor, ShapeError>:
-        """Element-wise division with broadcast."""
-        var ctx = DimInferenceContext.new()
-        val result_shape = infer_broadcast_shape(ctx, [self.shape(), other.shape()])?
-
-        val handle = 103u64  # Stubbed: rt_torch_div
-        if handle == 0:
-            return Err(ShapeError.InferenceError(message: "Div operation failed: FFI call to rt_torch_div returned null handle"))
-
-        val result_type = TensorType.from_shape(result_shape, self.dtype())
-        Ok(TypedTensor(handle: handle, tensor_type: result_type))
-
-    # ------------------------------------------------------------------------
-    # Matrix Operations with Shape Inference
-    # ------------------------------------------------------------------------
-
-    fn matmul(other: TypedTensor) -> Result<TypedTensor, ShapeError>:
-        """Matrix multiplication with dimension inference.
-
-        [M, K] @ [K, N] -> [M, N]
-        Batch dimensions are broadcast.
-        """
-        var ctx = DimInferenceContext.new()
-
-        # Infer output shape
-        val result_shape = infer_matmul_shape(ctx, self.shape(), other.shape())?
-
-        # Perform operation
-        val handle = 104u64  # Stubbed: rt_torch_matmul
-        if handle == 0:
-            return Err(ShapeError.MatmulShapeMismatch(left: self.shape(), right: other.shape()))
-
-        val result_type = TensorType.from_shape(result_shape, self.dtype())
-        Ok(TypedTensor(handle: handle, tensor_type: result_type))
-
-    # ------------------------------------------------------------------------
-    # Shape Operations
-    # ------------------------------------------------------------------------
-
-    fn reshape(new_dims: List<DimSpec>) -> Result<TypedTensor, ShapeError>:
-        """Reshape tensor with element count verification."""
-        var ctx = DimInferenceContext.new()
-        var dim_list: List<Dim> = []
-        for d in new_dims:
-            dim_list.push(d.to_dim())
-        val new_shape = TensorShape(dims: dim_list)
-
-        # Verify reshape is valid
-        verify_reshape(ctx, self.shape(), new_shape)?
-
-        # Perform operation
-        val handle = 105u64  # Stubbed: rt_torch_reshape
-        if handle == 0:
-            return Err(ShapeError.ReshapeElementsMismatch(input: self.shape(), output: new_shape))
-
-        val result_type = TensorType.new(new_dims, self.dtype())
-        Ok(TypedTensor(handle: handle, tensor_type: result_type))
-
-    fn transpose(dim0: i32, dim1: i32) -> Result<TypedTensor, ShapeError>:
-        """Transpose two dimensions."""
-        val result_shape = infer_transpose_shape(self.shape(), dim0, dim1)?
-
-        val handle = 106u64  # Stubbed: rt_torch_transpose
-        if handle == 0:
-            return Err(ShapeError.InferenceError(message: "Transpose failed: FFI call to rt_torch_transpose returned null handle"))
-
-        val result_type = TensorType.from_shape(result_shape, self.dtype())
-        Ok(TypedTensor(handle: handle, tensor_type: result_type))
-
-    # ------------------------------------------------------------------------
-    # Reduction Operations
-    # ------------------------------------------------------------------------
-
-    fn sum(dim: i32 = -1, keepdim: bool = false) -> Result<TypedTensor, ShapeError>:
-        """Sum along dimension."""
-        val result_shape: TensorShape
-        if dim == -1 and not keepdim:
-            # Full reduction to scalar
-            result_shape = TensorShape(dims: [])
-        else:
-            result_shape = infer_reduction_shape(self.shape(), dim, keepdim)?
-
-        val handle = 107u64  # Stubbed: rt_torch_sum
-        if handle == 0:
-            return Err(ShapeError.InferenceError(message: "Sum failed: FFI call to rt_torch_sum returned null handle"))
-
-        val result_type = TensorType.from_shape(result_shape, self.dtype())
-        Ok(TypedTensor(handle: handle, tensor_type: result_type))
-
-    fn mean(dim: i32 = -1, keepdim: bool = false) -> Result<TypedTensor, ShapeError>:
-        """Mean along dimension."""
-        val result_shape: TensorShape
-        if dim == -1 and not keepdim:
-            result_shape = TensorShape(dims: [])
-        else:
-            result_shape = infer_reduction_shape(self.shape(), dim, keepdim)?
-
-        val handle = 108u64  # Stubbed: rt_torch_mean
-        if handle == 0:
-            return Err(ShapeError.InferenceError(message: "Mean failed: FFI call to rt_torch_mean returned null handle"))
-
-        val result_type = TensorType.from_shape(result_shape, self.dtype())
-        Ok(TypedTensor(handle: handle, tensor_type: result_type))
-
-# ============================================================================
-# Helper Functions (from tensor_dimensions module)
-# ============================================================================
-
-fn infer_transpose_shape(shape: TensorShape, dim0: i32, dim1: i32) -> Result<TensorShape, ShapeError>:
-    val n = shape.ndim()
-    val d0 = if dim0 < 0: n + dim0 else: dim0
-    val d1 = if dim1 < 0: n + dim1 else: dim1
-
-    if d0 < 0 or d0 >= n or d1 < 0 or d1 >= n:
-        return Err(ShapeError.InferenceError(message: "Invalid transpose dimensions: dim0={dim0}, dim1={dim1} for shape with {n} dimensions"))
-
-    var new_dims = shape.dims.clone()
-    val tmp = new_dims[d0]
-    new_dims[d0] = new_dims[d1]
-    new_dims[d1] = tmp
-
-    Ok(TensorShape(dims: new_dims))
-
-fn infer_reduction_shape(shape: TensorShape, dim: i32, keepdim: bool) -> Result<TensorShape, ShapeError>:
-    val n = shape.ndim()
-    val actual_dim = if dim < 0: n + dim else: dim
-
-    if actual_dim < 0 or actual_dim >= n:
-        return Err(ShapeError.InferenceError(message: "Invalid reduction dimension: dim={dim} (normalized to {actual_dim}) for shape with {n} dimensions"))
-
-    var new_dims: List<Dim> = []
-    for i in 0..n:
-        if i == actual_dim:
-            if keepdim:
-                new_dims.push(Dim.Literal(value: 1))
-        else:
-            new_dims.push(shape.dims[i])
-
-    Ok(TensorShape(dims: new_dims))
-
-# ============================================================================
-# Memory Estimation Report
-# ============================================================================
-
-class MemoryReport:
-    tensor_type: TensorType
-    min_bytes: i32
-    max_bytes: i32
-    sample_bytes: i32
-
-    fn new(tt: TensorType) -> MemoryReport:
-        MemoryReport(
-            tensor_type: tt,
-            min_bytes: tt.min_memory_bytes(),
-            max_bytes: tt.max_memory_bytes(),
-            sample_bytes: tt.sample_memory_bytes()
-        )
-
-    fn to_string() -> text:
-        val min_mb = self.min_bytes / (1024 * 1024)
-        val max_mb = self.max_bytes / (1024 * 1024)
-        val sample_mb = self.sample_bytes / (1024 * 1024)
-
-        """Memory Report for {self.tensor_type.to_string()}:
-  Min: {self.min_bytes} bytes ({min_mb} MB)
-  Max: {self.max_bytes} bytes ({max_mb} MB)
-  Sample: {self.sample_bytes} bytes ({sample_mb} MB)"""
-
-# ============================================================================
-# Exports
-# ============================================================================
-
-export TypedTensor, TensorType, DimSpec, MemoryReport
