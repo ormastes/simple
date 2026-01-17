@@ -182,13 +182,64 @@ main = x + y + z + result  # 10 + 20 + 30 + 6 = 66
 // ============================================================================
 // Pattern Matching Tests
 // ============================================================================
-// NOTE: Pattern matching and lambda syntax not yet fully supported in Simple
-// These tests are commented out until the syntax is implemented
 
-// #[test]
-// fn hygiene_pattern_matching_variables() {
-// TODO: [driver][P3] Enable when pattern matching syntax is supported
-// }
+#[test]
+fn hygiene_pattern_matching_variables() {
+    // Pattern variables in macros should not capture outer scope
+    let code = r#"
+macro make_pair() -> (returns result: Int):
+    emit result:
+        let (x, y) = (10, 20)
+        x + y
+
+let x = 100
+let y = 200
+let result = make_pair!()
+main = x + y + result  # 100 + 200 + 30 = 330
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(
+        result.exit_code, 330,
+        "Pattern variables in macros should not capture outer scope"
+    );
+}
+
+#[test]
+fn hygiene_tuple_destructuring_in_macro() {
+    // Tuple destructuring inside macros should be isolated
+    let code = r#"
+macro swap_values() -> (returns result: Int):
+    emit result:
+        let (a, b) = (5, 10)
+        b - a
+
+let a = 1
+let b = 2
+let result = swap_values!()
+main = a + b + result  # 1 + 2 + 5 = 8
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 8, "Tuple destructuring should be hygienic");
+}
+
+#[test]
+fn hygiene_array_destructuring_in_macro() {
+    // Array destructuring inside macros should be isolated
+    let code = r#"
+macro sum_array() -> (returns result: Int):
+    emit result:
+        let [x, y, z] = [1, 2, 3]
+        x + y + z
+
+let x = 10
+let y = 20
+let z = 30
+let result = sum_array!()
+main = x + y + z + result  # 10 + 20 + 30 + 6 = 66
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 66, "Array destructuring should be hygienic");
+}
 
 // ============================================================================
 // Function Parameter Tests (替代 Lambda tests)
