@@ -75,6 +75,7 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
                 mutability: let_stmt.mutability,
                 storage_class: let_stmt.storage_class,
                 is_ghost: let_stmt.is_ghost,
+                is_suspend: let_stmt.is_suspend,
             })
         }
         Node::Const(const_stmt) => {
