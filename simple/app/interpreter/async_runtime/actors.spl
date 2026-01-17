@@ -67,9 +67,15 @@ fn eval_spawn(interp: &Interpreter, handler: &Expr) -> Result<Value, Interpreter
     # Create actor
     match handler_val.as_function():
         case Some(func):
+            # Capture the interpreter and function for handler invocation
+            val captured_interp = interp.clone()
+            val captured_func = func.clone()
+
             val actor = Actor::new(id, |msg| {
-                # TODO: [stdlib][P1] Actually invoke the handler
-                Ok(())
+                # Invoke the handler function with the message
+                match call_handler(&captured_interp, &captured_func, msg.payload):
+                    case Ok(_): Ok(())
+                    case Err(e): Err(e)
             })
 
             val actor_ref = actor.get_ref()
@@ -81,6 +87,11 @@ fn eval_spawn(interp: &Interpreter, handler: &Expr) -> Result<Value, Interpreter
 
         case None:
             return Err(InterpreterError::TypeError("spawn requires function".to_string()))
+
+# Helper to invoke handler function
+fn call_handler(interp: &Interpreter, func: &Value, msg: Value) -> Result<Value, InterpreterError>:
+    import ..expr.calls.{call_value}
+    return call_value(interp, func.clone(), [msg])
 
 # Send a message to an actor
 fn eval_send(interp: &Interpreter, target: &Expr, message: &Expr) -> Result<Value, InterpreterError>:
@@ -122,6 +133,9 @@ fn eval_receive(interp: &Interpreter, timeout: Option<&Expr>) -> Result<Value, I
 fn eval_receive_match(interp: &Interpreter, patterns: &Array<MatchArm>) -> Result<Value, InterpreterError>:
     match interp.current_actor():
         case Some(actor):
+            # Stash for messages that don't match (selective receive)
+            val stash: Array<Message> = []
+
             # Keep receiving until we get a matching message
             loop:
                 val msg = actor.receive_blocking()
@@ -129,18 +143,55 @@ fn eval_receive_match(interp: &Interpreter, patterns: &Array<MatchArm>) -> Resul
                 # Try to match against patterns
                 for arm in patterns:
                     if val Some(result) = try_match_message(interp, &msg.payload, arm)?:
+                        # Requeue stashed messages before returning
+                        for stashed_msg in stash.iter().rev():
+                            actor.mailbox.send_front(stashed_msg.clone())
                         return Ok(result)
 
-                # No match, put message back (selective receive)
-                # TODO: [stdlib][P1] Implement message requeuing
+                # No match, stash the message for later
+                stash.push(msg)
+
+                # Safety limit to prevent infinite loops
+                if stash.len() > 10000:
+                    for stashed_msg in stash.iter().rev():
+                        actor.mailbox.send_front(stashed_msg.clone())
+                    return Err(InterpreterError::RuntimeError("receive stash overflow".to_string()))
 
         case None:
             return Err(InterpreterError::RuntimeError("receive called outside actor".to_string()))
 
 # Helper to try matching a message
 fn try_match_message(interp: &Interpreter, msg: &Value, arm: &MatchArm) -> Result<Option<Value>, InterpreterError>:
-    # TODO: [stdlib][P1] Implement pattern matching on messages
-    return Ok(None)
+    import ..control.match.{match_pattern}
+
+    # Try to match the message against the pattern
+    match match_pattern(msg, &arm.pattern)?:
+        case Some(bindings):
+            # Pattern matched, check guard if present
+            if val Some(guard) = arm.guard.as_ref():
+                interp.env.push_scope()
+                for (name, val) in bindings:
+                    interp.env.define(name, val)
+
+                val guard_result = interp.evaluate(guard)?
+                if not guard_result.is_truthy():
+                    interp.env.pop_scope()
+                    return Ok(None)
+
+                val result = interp.evaluate(&arm.body)?
+                interp.env.pop_scope()
+                return Ok(Some(result))
+            else:
+                interp.env.push_scope()
+                for (name, val) in bindings:
+                    interp.env.define(name, val)
+
+                val result = interp.evaluate(&arm.body)?
+                interp.env.pop_scope()
+                return Ok(Some(result))
+
+        case None:
+            return Ok(None)
 
 # Self reference - get current actor's ref
 fn eval_self(interp: &Interpreter) -> Result<Value, InterpreterError>:

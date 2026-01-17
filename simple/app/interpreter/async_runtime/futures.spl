@@ -108,14 +108,59 @@ fn join_all(interp: &Interpreter, futures: Array<Future>) -> Result<Array<Value>
 
 # Select first completed future
 fn select_first(interp: &Interpreter, futures: Array<Future>) -> Result<(usize, Value), InterpreterError>:
-    # Simple implementation: try each in order
-    # TODO: [stdlib][P1] Real implementation would use proper polling
-    for (idx, mut future) in futures.iter_mut().enumerate():
-        if future.is_ready():
-            val val = future.get_result().unwrap()
-            return Ok((idx, val))
+    # Poll-based implementation for proper async behavior
+    loop:
+        # First pass: check if any future is already ready
+        for (idx, future) in futures.iter().enumerate():
+            if future.is_ready():
+                val val = future.get_result().unwrap()
+                return Ok((idx, val))
 
-    # None ready, await first
-    var first = futures[0]
-    val val = await_future(interp, &mut first)?
-    return Ok((0, val))
+        # Second pass: try to make progress on pending futures
+        var made_progress = false
+        for (idx, mut future) in futures.iter_mut().enumerate():
+            if future.is_pending():
+                # Try to poll the future
+                match poll_and_advance(interp, &mut future):
+                    case Ok(true):
+                        made_progress = true
+                        # Check if it completed
+                        if future.is_ready():
+                            val val = future.get_result().unwrap()
+                            return Ok((idx, val))
+                    case Ok(false):
+                        pass  # Still pending
+                    case Err(e):
+                        return Err(e)
+
+        # If no progress was made and none are ready, await the first pending
+        if not made_progress:
+            for (idx, mut future) in futures.iter_mut().enumerate():
+                if future.is_pending():
+                    val val = await_future(interp, &mut future)?
+                    return Ok((idx, val))
+
+        # If all futures completed but we haven't returned, check again
+        # This handles race conditions
+
+# Poll a future and try to advance it
+fn poll_and_advance(interp: &Interpreter, future: &mut Future) -> Result<bool, InterpreterError>:
+    if not future.is_pending():
+        return Ok(false)
+
+    # Try to execute one step of the future body
+    match future.body.as_ref():
+        case Some(body):
+            # For simple futures, we execute the whole body
+            # A more sophisticated implementation would use coroutines
+            match interp.evaluate(&*body):
+                case Ok(val):
+                    future.state = FutureState::Ready(val)
+                    future.body = None
+                    return Ok(true)
+                case Err(e):
+                    future.state = FutureState::Failed(e)
+                    future.body = None
+                    return Ok(true)
+        case None:
+            return Ok(false)
