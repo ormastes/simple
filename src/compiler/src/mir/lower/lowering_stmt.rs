@@ -4,7 +4,7 @@
 //! including control flow (if, while, loop, break, continue) and assignments.
 
 use super::lowering_core::{LoopContext, MirLowerResult, MirLowerer};
-use crate::hir::{HirContract, HirStmt};
+use crate::hir::{HirContract, HirExpr, HirExprKind, HirStmt, HirType};
 use crate::mir::blocks::Terminator;
 use crate::mir::instructions::MirInst;
 
@@ -73,18 +73,21 @@ impl<'a> MirLowerer<'a> {
                 // Emit contract checks before the actual return based on contract mode
                 if let Some(contract) = contract {
                     if self.should_emit_contracts() {
-                        // TODO: [compiler][P3] Detect Result::Err variant to call emit_error_contracts
-                        // For now, we always emit success postconditions. Future improvement:
-                        // 1. Check if return expression is enum variant construction
-                        // 2. If variant name is "Err" and enum is "Result", call emit_error_contracts
-                        // 3. Otherwise, call emit_exit_contracts
-                        //
-                        // This requires:
-                        // - Type information about the return value
-                        // - Pattern matching on HirExprKind to detect enum construction
-                        // - Variant name resolution
+                        // Detect if this is a Result::Err return to call the appropriate contract handler
+                        let is_error_return = value
+                            .as_ref()
+                            .map(|v| self.is_result_err_construction(v))
+                            .unwrap_or(false);
 
-                        self.emit_exit_contracts(contract, ret_reg)?;
+                        if is_error_return && !contract.error_postconditions.is_empty() {
+                            // This is an error return - emit error postconditions
+                            if let Some(ret) = ret_reg {
+                                self.emit_error_contracts(contract, ret)?;
+                            }
+                        } else {
+                            // This is a success return - emit normal postconditions
+                            self.emit_exit_contracts(contract, ret_reg)?;
+                        }
                     }
                 }
 
@@ -256,5 +259,45 @@ impl<'a> MirLowerer<'a> {
                 Ok(())
             }
         }
+    }
+
+    /// Check if an expression constructs a Result::Err variant
+    ///
+    /// This is used to determine whether to emit error postconditions or
+    /// normal postconditions when processing a return statement.
+    ///
+    /// Detection strategies:
+    /// 1. Check if it's a Call to a Global("Err") function
+    /// 2. Check if the type is a Result enum and look at the construction pattern
+    fn is_result_err_construction(&self, expr: &HirExpr) -> bool {
+        // Strategy 1: Check if it's a direct call to Err()
+        if let HirExprKind::Call { func, args: _ } = &expr.kind {
+            if let HirExprKind::Global(name) = &func.kind {
+                if name == "Err" {
+                    return true;
+                }
+            }
+        }
+
+        // Strategy 2: Check if the type is Result and look up variant info
+        if let Some(registry) = self.type_registry {
+            if let Some(hir_type) = registry.get(expr.ty) {
+                if let HirType::Enum { name, variants: _ } = hir_type {
+                    // If the type is named "Result", check the expression pattern
+                    if name == "Result" {
+                        // For StructInit, check if the type name contains "Err"
+                        if let HirExprKind::StructInit { ty, fields: _ } = &expr.kind {
+                            if let Some(struct_type) = registry.get(*ty) {
+                                if let HirType::Struct { name: struct_name, .. } = struct_type {
+                                    return struct_name.contains("Err");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        false
     }
 }
