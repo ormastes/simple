@@ -25,6 +25,22 @@ impl<'a> Parser<'a> {
         let mut func = self.parse_function()?;
         if let Node::Function(ref mut f) = func {
             f.is_sync = true;
+
+            // Validate: sync functions cannot use suspension operators
+            if crate::effect_inference::has_suspension_in_body(&f.body) {
+                return Err(ParseError::syntax_error_with_span(
+                    format!(
+                        "Suspension operators (~=, if~, while~, etc.) are not allowed in sync functions.\n\
+                         Function '{}' is marked as 'sync' but contains suspension operators.\n\
+                         \n\
+                         To fix:\n\
+                         - Remove the 'sync' keyword to allow async behavior, OR\n\
+                         - Remove suspension operators from the function body",
+                        f.name
+                    ),
+                    f.span,
+                ));
+            }
         }
         Ok(func)
     }
