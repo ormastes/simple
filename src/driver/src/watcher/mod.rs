@@ -78,7 +78,15 @@ pub fn watch(entry: &Path, verbose: bool) -> Result<(), String> {
 }
 
 fn rebuild(source: &Path, runner: &Runner, cache: &mut BuildCache, verbose: bool) -> Result<(), String> {
-    let out = source.with_extension("smf");
+    // Output SMF files to .simple/build/ directory
+    let parent = source.parent().unwrap_or(Path::new("."));
+    let build_dir = parent.join(".simple").join("build");
+    std::fs::create_dir_all(&build_dir).map_err(|e| format!("create build dir: {e}"))?;
+    
+    let file_stem = source.file_stem()
+        .ok_or_else(|| "source has no file stem".to_string())?;
+    let out = build_dir.join(file_stem).with_extension("smf");
+    
     runner.compile_file(source, &out)?;
 
     // Update dependency info
