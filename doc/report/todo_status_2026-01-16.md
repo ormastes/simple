@@ -1,315 +1,252 @@
 # Simple Language - TODO Status Report
 
-**Date:** 2026-01-16
-**Commit:** 4b668439 (main)
+**Date:** 2026-01-17 (Updated)
+**Previous Date:** 2026-01-16
 
 ---
 
 ## Executive Summary
 
-**Total TODOs:** 119
+**Total TODOs:** 772
 
-| Priority | Count | Percentage | Status |
-|----------|-------|------------|--------|
-| P1 (High) | 15 | 13% | ⚠️ All blocked by monoio architecture |
-| P2 (Medium) | 2 | 2% | Ready |
-| P3 (Low) | 34 | 29% | Ready |
-| Untagged | 68 | 57% | Needs triage |
+| Priority | Count | Percentage | Notes |
+|----------|-------|------------|-------|
+| P1 (High) | 153 | 20% | Many in concurrency/async specs |
+| P2 (Medium) | 59 | 8% | Mixed: Godot, tooling, parsing |
+| P3 (Low) | 414 | 54% | Vulkan UI, stdlib, tooling |
+| Untagged | 146 | 19% | Needs triage |
 
-**Key Insight:** 15 P1 TODOs are blocked by a single architectural issue in the monoio runtime. Once resolved, this unblocks 13% of high-priority work.
-
----
-
-## P1 TODOs - High Priority (15 items)
-
-### ⚠️ ARCHITECTURAL BLOCKER
-
-**Issue:** Monoio types (`TcpStream`, `UdpSocket`) are `!Send` and `!Sync`, preventing storage in global static maps.
-
-**Affected Files:**
-- `src/runtime/monoio_tcp.rs` (5 TODOs)
-- `src/runtime/monoio_udp.rs` (7 TODOs)
-- `src/runtime/monoio_udp_v2.rs` (3 TODOs)
-
-### TCP Operations (5 items)
-```rust
-// TODO: [runtime][P1] Get stream from handle and write data
-// TODO: [runtime][P1] Get stream from handle and flush
-// TODO: [runtime][P1] Get stream from handle and shutdown
-// TODO: [runtime][P1] Get stream from handle and set option (2x)
-```
-
-### UDP Operations (10 items)
-```rust
-// UDP v1 (7 items)
-// TODO: [runtime][P1] Get socket from handle and connect
-// TODO: [runtime][P1] Get socket from handle and send data
-// TODO: [runtime][P1] Get socket from handle and receive data
-// TODO: [runtime][P1] Get socket from handle and set option (2x)
-// TODO: [runtime][P1] Get socket from handle and join multicast
-// TODO: [runtime][P1] Get socket from handle and leave multicast
-
-// UDP v2 (3 items)
-// TODO: [runtime][P1] Implement connected UDP
-// TODO: [runtime][P1] Implement connected send
-// TODO: [runtime][P1] Implement connected recv
-```
-
-### Required Solution
-
-Redesign runtime architecture to use message-passing pattern:
-
-1. **Spawn dedicated monoio runtime thread**
-   - Single thread owns all monoio resources
-   - Never moves !Send types across threads
-
-2. **Use channels for operation requests**
-   - Request channel: Send operations to monoio thread
-   - Response channel: Return results to caller
-
-3. **Handle operations within monoio context**
-   - All TCP/UDP operations stay in monoio thread
-   - Type safety maintained
-
-4. **Return results via response channels**
-   - Async/await compatible
-   - No global state needed
-
-**Estimated Effort:** 1-2 days for design + implementation
+**Key Changes from Previous Report:**
+- Total count increased from 119 to 772 (comprehensive scan)
+- Previous report only counted src/ directory; this includes simple/ (stdlib + apps)
+- No monoio P1 blockers found in current scan (may have been resolved)
 
 ---
 
-## P2 TODOs - Medium Priority (2 items)
-
-### 1. SPIR-V Validation
-```rust
-// TODO: [codegen][P2] Add SPIR-V validation
-```
-**Location:** `src/compiler/src/lint/types.rs`
-**Effort:** 1-2 hours
-**Value:** High (catches codegen bugs early)
-
-### 2. Line Number Tracking
-```rust
-// TODO: [compiler][P2] Track line numbers
-```
-**Location:** `src/compiler/src/arch_rules.rs`
-**Effort:** 1-2 hours
-**Value:** Medium (better error messages)
-
----
-
-## P3 TODOs - Low Priority (34 items)
+## P1 TODOs - High Priority (153 items)
 
 ### By Area
 
-#### Driver (26 items)
+#### Concurrency Features (49 items)
+Placeholder tests awaiting language feature implementation:
+- `suspension_operator_spec.spl` (12 items) - `~=` operator support
+- `promise_type_spec.spl` (16 items) - Promise type implementation
+- `effect_inference_spec.spl` (13 items) - Effect inference system
+- `async_default_spec.spl` (8 items) - Async-default mode
 
-**Electron Integration (11 items):**
-- WASM compilation (2 items)
-- FFI bindings:
-  - Tray operations (2 items)
-  - Power monitoring (2 items)
-  - Notifications (1 item)
-  - Clipboard (1 item)
-  - Shortcuts (1 item)
-  - IPC messaging (1 item)
-  - String pointer conversion (1 item)
+#### UI/Vulkan (22 items)
+- `vulkan.spl` (10 items) - Layout algorithms, incremental updates
+- `vulkan_types.spl` (3 items) - Queue handles, implement functions
+- `hot_reload.spl` (4 items) - File system operations
+- `vscode.spl` (2 items) - Secure random generation
+- `browser.spl` (2 items) - Event dispatch
+- `vulkan/layout.spl` (1 item) - Layout algorithm
 
-**VSCode Integration (6 items):**
-- WASM compilation (1 item)
-- Command registration/execution (2 items)
-- LSP features:
-  - Completion provider (1 item)
-  - Hover provider (1 item)
-  - Configuration (1 item)
-  - String pointer conversion (1 item)
+#### Compiler/Parser (11 items)
+- `watch.spl` (3 items) - File watching, formatting, linting
+- `build.spl` (1 item) - File watching
+- `parser/treesitter/` (4 items) - Sibling/parent navigation, grammar loading
+- `mode_config_parser.spl` (3 items) - SDN/TOML/attribute parsing
 
-**GPU Initialization (6 items):**
-- Window creation with winit (1 item)
-- Vulkan instance creation (1 item)
-- Physical device selection (1 item)
-- Logical device creation (1 item)
-- Swapchain creation (1 item)
-- Shader loading (1 item)
+#### Interpreter (14 items)
+- `expr/__init__.spl` (3 items) - Indexing, field access, lambda
+- `async_runtime/actors.spl` (3 items) - Handler invoke, message requeue, pattern match
+- `ffi/builtins.spl` (2 items) - Proper comparison
+- `ffi/extern.spl` (2 items) - Type marshalling
+- `helpers/macros.spl` (1 item) - Sequence matching
+- `control/match.spl` (1 item) - Struct pattern matching
+- `expr/calls.spl` (1 item) - Closure calls
+- `async_runtime/futures.spl` (1 item) - Proper polling
 
-**Test Enablement (2 items):**
-- Pattern matching syntax support (1 item)
-- CLI module visibility (1 item)
+#### LSP/MCP (8 items)
+- `lsp/handlers/completion.spl` (2 items) - Context analysis, prefix extraction
+- `lsp/handlers/references.spl` (1 item) - Scope-based filtering
+- `mcp/main.spl` (1 item) - Search across files
+- `mcp/core/transport.spl` (3 items) - TCP reading/writing
+- `mcp/advanced.spl` (1 item) - Protobuf encoding
 
-**Other (1 item):**
-- Misc driver improvements
+#### Stdlib Core (25 items)
+- `io/fs.spl` (1 item) - Variant selection
+- `lms/server.spl` (1 item) - Resource reading
+- `spec/mode_runner.spl` (2 items) - Mode switching, error handling
+- `spec/property/runner.spl` (1 item) - Timeout mechanism
+- `core/decorators.spl` (1 item) - Timeout mechanism
+- `vscode/` (4 items) - LSP handler, JSON serialization
+- `tooling/` (15 items) - Various compiler/testing/deployment tasks
 
-#### Compiler (5 items)
-Various compiler improvements and enhancements.
+#### Physics/Verification (7 items)
+- `physics/collision/__init__.spl` (3 items) - Sphere casting, BVH
+- `verification/lean/expressions.spl` (1 item) - Module prefix matching
+- `ml/torch/checkpoint.spl` (1 item) - Deserialization
 
-#### Codegen (2 items)
-Code generation enhancements.
-
-#### Runtime (1 item)
-Runtime improvements.
-
----
-
-## Untagged TODOs (68 items)
-
-These TODOs lack priority tags and should be triaged.
-
-### Recommended Triage Process
-
-1. **Categorize by Impact:**
-   - Critical: Affects correctness or security
-   - High: Affects performance or UX significantly
-   - Medium: Nice-to-have improvements
-   - Low: Cosmetic or minor enhancements
-
-2. **Categorize by Effort:**
-   - Trivial: < 1 hour
-   - Easy: 1-4 hours
-   - Medium: 0.5-2 days
-   - Hard: > 2 days
-
-3. **Assign Priorities:**
-   - High Impact + Low Effort → P1
-   - High Impact + Medium Effort → P2
-   - Medium Impact + Low Effort → P2
-   - Low Impact or High Effort → P3
-
-**Estimated Triage Effort:** 2-3 hours
+#### Tests/Validation (8 items)
+- `vulkan_phase1_validation.spl` (9 items) - FFI implementation tests
+- `union_impl_spec.spl` (1 item) - Union type implementation
 
 ---
 
-## Recently Completed ✅
+## P2 TODOs - Medium Priority (59 items)
 
-### Feature #210: CLI Check Command
+### By Area
 
-**Status:** BDD Specification Complete
-**Commit:** 4b668439
-**Date:** 2026-01-16
+#### Godot Integration (22 items)
+- `world.spl` (6 items) - RID parsing
+- `tilemap.spl` (4 items) - Vector2 variants
+- `navigation.spl` (4 items) - Vector2/3 parsing
+- `camera.spl` (3 items) - Vector parsing
+- `saveload.spl` (2 items) - PackedStringArray
+- `networking.spl` (2 items) - Events, PackedInt32Array
+- `ui_advanced.spl` (1 item) - PackedInt32Array
 
-**Deliverables:**
-- ✅ `cli_check_spec.spl` (514 lines)
-- ✅ 21 test cases (7 describe blocks)
-- ✅ All tests passing
-- ✅ Complete documentation
+#### Tooling (16 items)
+- `testing/runner.spl` (4 items) - Spec/process execution
+- `testing/aggregation.spl` (2 items) - Output parsing
+- `compiler/rust.spl` (2 items) - JSON parsing
+- `core/dependency.spl` (2 items) - Tree-sitter parsing
+- Various others (6 items)
 
-**Test Coverage:**
-1. Syntax validation (3 tests)
-2. Type validation (3 tests)
-3. Import resolution (3 tests)
-4. Multiple file checking (3 tests)
-5. Output formats (3 tests)
-6. Performance (3 tests)
-7. Integration (3 tests)
+#### Vulkan Renderer (6 items)
+- `vulkan_renderer.spl` (6 items) - Attribute parsing, optimizations
 
-**Ready For:** Implementation in `src/driver/src/cli/check.rs`
+#### MCP/Multi-lang (6 items)
+- `multi_lang/` (4 items) - Ruby, Go, Erlang, C parsing
+- `examples/template_provider.spl` (1 item) - Language parsing
+- `simple_lang/coverage.spl` (1 item) - Coverage JSON
+
+#### Other (9 items)
+- `interpreter/main.spl` (2 items) - Load/parse, evaluate
+- `dap/server.spl` (1 item) - Program path parsing
+- `vscode/` (2 items) - JSON parsing, webview
+- `cli/parsed_args.spl` (1 item) - Arg tracking
+- `unreal/ubt.spl` (1 item) - JSON version file
+- `mcp/advanced.spl` (1 item) - Chunk parsing
+- `contracts_spec.spl` (1 item) - Contract blocks
 
 ---
 
-## Recommended Action Plan
+## P3 TODOs - Low Priority (414 items)
 
-### Immediate (This Week)
+### Distribution
 
-1. **✨ Implement CLI Check Command** (Feature #210)
-   - Priority: High
-   - Effort: 2-4 hours
-   - Value: Immediate developer productivity gain
-   - Files: `src/driver/src/cli/check.rs`, `src/driver/src/main.rs`
+| Category | Count | Notes |
+|----------|-------|-------|
+| Vulkan/UI | ~150 | Types, renderer, pipelines, fonts |
+| Godot | ~60 | Physics3D, scene, particles, lighting |
+| Tooling | ~80 | Deployment, packaging, testing |
+| VSCode | ~25 | Providers, manifest, workspace |
+| MCP | ~30 | Multi-lang, tooling, providers |
+| Stdlib | ~40 | Collections, doctest, specs |
+| Other | ~29 | Various |
 
-2. **📐 Design Monoio Architecture**
-   - Priority: Critical
-   - Effort: 1-2 days
-   - Value: Unblocks 15 P1 TODOs
-   - Deliverable: Design document + prototype
+### Notable P3 Categories
 
-3. **🔍 Triage Untagged TODOs**
-   - Priority: Medium
-   - Effort: 2-3 hours
-   - Value: Better prioritization
-   - Deliverable: All 68 TODOs categorized
+**Vulkan UI (150+ items):**
+- Instance/device creation
+- Swapchain management
+- Render pass and framebuffers
+- Pipeline and shaders
+- Draw calls and presentation
 
-### Short-term (This Month)
+**Tooling/Deployment (80+ items):**
+- Container builds
+- Package formats (deb, rpm, npm, pip)
+- Optimization passes
+- CI/CD automation
 
-4. **⚡ Implement Monoio Redesign**
-   - Implement message-passing architecture
-   - Complete all 15 P1 TCP/UDP operations
-   - Add tests and documentation
+**Godot Integration (60+ items):**
+- 3D physics vectors
+- Scene management
+- Particle systems
+- Navigation meshes
 
-5. **✅ Complete P2 TODOs**
-   - SPIR-V validation
-   - Line number tracking
-   - Low effort, high value
+---
 
-6. **🎯 Address High-Value P3 TODOs**
-   - Focus on most impactful items
-   - GPU initialization
-   - Test enablement
+## Untagged TODOs (146 items)
 
-### Long-term (This Quarter)
+TODOs without priority tags that need triage:
+- `simple/` directory: 142 items
+- `src/` directory: 4 items
 
-7. **🖥️ Complete Electron/VSCode Integration**
-   - 17 P3 TODOs
-   - Major feature additions
-   - Significant UX improvements
+### Recommended Triage
 
-8. **🎮 Implement GPU Pipeline**
-   - 6 P3 TODOs
-   - Complete Vulkan integration
-   - Enable GPU compute features
+Run the TODO lint to identify and prioritize these:
+```bash
+./target/debug/simple lint --check-todos simple/
+```
 
-9. **🧹 Review and Close Stale TODOs**
-   - Identify obsolete TODOs
-   - Update or remove as needed
-   - Keep TODO list current
+---
+
+## Comparison with Previous Report
+
+| Metric | Previous (01-16) | Current (01-17) | Change |
+|--------|------------------|-----------------|--------|
+| Total | 119 | 772 | +653 |
+| P1 | 15 | 153 | +138 |
+| P2 | 2 | 59 | +57 |
+| P3 | 34 | 414 | +380 |
+| Untagged | 68 | 146 | +78 |
+
+**Note:** Previous report only scanned `src/` directory. Current report includes full `simple/` directory (stdlib, apps, tests).
+
+---
+
+## Recommendations
+
+### Immediate Actions
+
+1. **Triage Untagged TODOs** (146 items)
+   - Run TODO lint on simple/ directory
+   - Prioritize by impact and effort
+
+2. **Review Concurrency P1s** (49 items)
+   - These are spec placeholders
+   - Will be resolved when parser/type system supports features
+
+3. **Vulkan P1s** (22 items)
+   - Core rendering infrastructure
+   - Should prioritize layout algorithms and event dispatch
+
+### Short-term
+
+4. **Parser/Compiler P1s** (11 items)
+   - File watching for watch mode
+   - Tree-sitter improvements
+
+5. **Interpreter P1s** (14 items)
+   - Core expression evaluation
+   - FFI type marshalling
+
+### Long-term
+
+6. **P3 Cleanup** (414 items)
+   - Many are implementation placeholders
+   - Review for obsolete items
 
 ---
 
 ## Metrics
 
 ### TODO Density
-- **Total TODOs:** 119
-- **Codebase Size:** ~100K+ lines
-- **TODO Density:** ~0.1% (healthy range)
+- **Total TODOs:** 772
+- **Codebase:** simple/ + src/
+- **Status:** Active development phase
 
-### Prioritization Status
-- **Prioritized:** 51/119 (43%)
-- **Needs Triage:** 68/119 (57%)
+### Priority Distribution
+```
+P1: ████████████████████ 20%
+P2: ████████ 8%
+P3: ██████████████████████████████████████████████████████ 54%
+Untagged: ███████████████████ 19%
+```
 
-### Blocker Status
-- **Blocked:** 15/119 (13% - all monoio)
-- **Ready:** 104/119 (87%)
-
-### Completion Velocity
-- **Recent:** Feature #210 spec completed (1 session)
-- **Next Target:** Implement Feature #210 (2-4 hours)
-
----
-
-## Risk Assessment
-
-### High Risk
-- ⚠️ **Monoio Architecture:** Blocks 15 P1 TODOs
-  - Mitigation: Design doc in progress, prototype scheduled
-
-### Medium Risk
-- ⚠️ **Untagged TODOs:** 57% lack prioritization
-  - Mitigation: Triage scheduled this week
-
-### Low Risk
-- ✅ P2/P3 TODOs are well-documented and ready
-- ✅ Recent work shows good velocity
-- ✅ Test coverage is comprehensive
+### By Directory
+- `simple/std_lib/src/`: ~400 TODOs
+- `simple/std_lib/test/`: ~100 TODOs
+- `simple/app/`: ~120 TODOs
+- `src/`: ~9 TODOs (+ lint test examples)
 
 ---
 
-## Notes
-
-- TODO format follows `.claude/skills/todo.md` guidelines
-- All TODOs use format: `TODO: [area][P0-P3] description`
-- Lint rule enforces proper TODO formatting
-- TODOs in `src/compiler/src/lint/` are test examples, not real TODOs
-
----
-
-*Report generated: 2026-01-16 07:42 UTC*
-*Source: Comprehensive codebase scan (119 TODOs found)*
+*Report generated: 2026-01-17*
+*Method: grep -r "TODO:" with priority pattern matching*
+*Excludes: vscode-test vendor files, lint test examples*

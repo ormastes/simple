@@ -635,4 +635,169 @@ mod tests {
         let handle: WindowHandle = 42;
         assert_eq!(handle, 42u64);
     }
+
+    #[test]
+    fn test_window_event_resize() {
+        let event = WindowEvent::Resized {
+            window: 1,
+            width: 1920,
+            height: 1080,
+        };
+
+        if let WindowEvent::Resized { window, width, height } = event {
+            assert_eq!(window, 1);
+            assert_eq!(width, 1920);
+            assert_eq!(height, 1080);
+        } else {
+            panic!("Expected Resized event");
+        }
+    }
+
+    #[test]
+    fn test_window_event_close_requested() {
+        let event = WindowEvent::CloseRequested { window: 42 };
+
+        if let WindowEvent::CloseRequested { window } = event {
+            assert_eq!(window, 42);
+        } else {
+            panic!("Expected CloseRequested event");
+        }
+    }
+
+    #[test]
+    fn test_window_event_focused() {
+        let event = WindowEvent::Focused {
+            window: 1,
+            focused: true,
+        };
+
+        if let WindowEvent::Focused { window, focused } = event {
+            assert_eq!(window, 1);
+            assert!(focused);
+        } else {
+            panic!("Expected Focused event");
+        }
+    }
+
+    #[test]
+    fn test_window_event_mouse_moved() {
+        let event = WindowEvent::MouseMoved {
+            window: 1,
+            x: 100.5,
+            y: 200.5,
+        };
+
+        if let WindowEvent::MouseMoved { window, x, y } = event {
+            assert_eq!(window, 1);
+            assert!((x - 100.5).abs() < 0.001);
+            assert!((y - 200.5).abs() < 0.001);
+        } else {
+            panic!("Expected MouseMoved event");
+        }
+    }
+
+    #[test]
+    fn test_window_event_mouse_button() {
+        let event = WindowEvent::MouseButton {
+            window: 1,
+            button: 0, // Left button
+            pressed: true,
+        };
+
+        if let WindowEvent::MouseButton { window, button, pressed } = event {
+            assert_eq!(window, 1);
+            assert_eq!(button, 0);
+            assert!(pressed);
+        } else {
+            panic!("Expected MouseButton event");
+        }
+    }
+
+    #[test]
+    fn test_window_event_key_event() {
+        let event = WindowEvent::KeyEvent {
+            window: 1,
+            key_code: 27, // Escape key
+            pressed: true,
+        };
+
+        if let WindowEvent::KeyEvent { window, key_code, pressed } = event {
+            assert_eq!(window, 1);
+            assert_eq!(key_code, 27);
+            assert!(pressed);
+        } else {
+            panic!("Expected KeyEvent event");
+        }
+    }
+
+    #[test]
+    fn test_window_event_moved() {
+        let event = WindowEvent::Moved {
+            window: 1,
+            x: 100,
+            y: 200,
+        };
+
+        if let WindowEvent::Moved { window, x, y } = event {
+            assert_eq!(window, 1);
+            assert_eq!(x, 100);
+            assert_eq!(y, 200);
+        } else {
+            panic!("Expected Moved event");
+        }
+    }
+
+    #[test]
+    fn test_fullscreen_mode_clone() {
+        let mode = FullscreenMode::Borderless;
+        let cloned = mode.clone();
+        assert_eq!(mode, cloned);
+    }
+
+    #[test]
+    fn test_fullscreen_mode_copy() {
+        let mode = FullscreenMode::Exclusive;
+        let copied = mode; // Copy
+        assert_eq!(mode, copied); // Both should still be usable
+    }
+
+    #[test]
+    fn test_window_event_clone() {
+        let event = WindowEvent::Resized {
+            window: 1,
+            width: 800,
+            height: 600,
+        };
+        let cloned = event.clone();
+
+        if let WindowEvent::Resized { width, height, .. } = cloned {
+            assert_eq!(width, 800);
+            assert_eq!(height, 600);
+        } else {
+            panic!("Clone failed");
+        }
+    }
+
+    #[test]
+    fn test_window_handle_uniqueness() {
+        // Window handles should be unique u64 values
+        let handles: Vec<WindowHandle> = (1..=10).collect();
+        let unique_count = handles.iter().collect::<std::collections::HashSet<_>>().len();
+        assert_eq!(unique_count, handles.len());
+    }
+
+    #[test]
+    fn test_fullscreen_mode_debug() {
+        let mode = FullscreenMode::Windowed;
+        let debug_str = format!("{:?}", mode);
+        assert!(debug_str.contains("Windowed"));
+    }
+
+    #[test]
+    fn test_window_event_debug() {
+        let event = WindowEvent::CloseRequested { window: 42 };
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("CloseRequested"));
+        assert!(debug_str.contains("42"));
+    }
 }

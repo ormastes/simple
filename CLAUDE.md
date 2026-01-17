@@ -100,7 +100,7 @@ See `/coding` skill for full details.
 - ❌ **NEVER remove TODO markers** unless the feature is fully implemented and working
 - ✅ Can add documentation/implementation notes to existing TODOs
 - ✅ Only delete TODO comment when code implementing that feature is complete
-- 📊 **Current Status**: 143 TODOs remaining (32 P1, 3 P2, 39 P3, 69 untagged)
+- 📊 **Status**: See `doc/report/todo_status_2026-01-16.md`
 
 ---
 

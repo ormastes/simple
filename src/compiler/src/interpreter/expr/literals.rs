@@ -88,41 +88,45 @@ pub(super) fn eval_literal_expr(
         Expr::Symbol(s) => Ok(Some(Value::Symbol(s.clone()))),
 
         // i18n string literals
-        Expr::I18nString { name: _, default_text } => {
-            // For now, just return the default text
-            // TODO: Look up in locale registry when implemented
-            Ok(Some(Value::Str(default_text.clone())))
+        Expr::I18nString { name, default_text } => {
+            // Look up in locale registry, fallback to default text
+            let text = crate::i18n::lookup(name).unwrap_or_else(|| default_text.clone());
+            Ok(Some(Value::Str(text)))
         }
 
         // i18n template strings
         Expr::I18nTemplate {
-            name: _,
+            name,
             parts,
             args,
         } => {
-            // First, build the template string from parts
-            let mut template = String::new();
-            let mut placeholders = Vec::new();
-
-            for part in parts {
-                match part {
-                    FStringPart::Literal(lit) => template.push_str(lit),
-                    FStringPart::Expr(e) => {
-                        // Record the placeholder position
-                        if let Expr::Identifier(id) = e {
-                            placeholders.push(id.clone());
-                            template.push_str(&format!("{{{}}}", id));
-                        } else {
-                            // For complex expressions, evaluate inline
-                            let v = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
-                            template.push_str(&v.to_display_string());
+            // Try to look up the template in the locale registry first
+            let template = if let Some(localized) = crate::i18n::lookup(name) {
+                // Use the localized template
+                localized
+            } else {
+                // Build the default template from parts
+                let mut default_template = String::new();
+                for part in parts {
+                    match part {
+                        FStringPart::Literal(lit) => default_template.push_str(lit),
+                        FStringPart::Expr(e) => {
+                            // Record placeholder for substitution
+                            if let Expr::Identifier(id) = e {
+                                default_template.push_str(&format!("{{{}}}", id));
+                            } else {
+                                // For complex expressions, evaluate inline
+                                let v = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
+                                default_template.push_str(&v.to_display_string());
+                            }
                         }
                     }
                 }
-            }
+                default_template
+            };
 
-            // Now substitute the args
-            let mut result = template.clone();
+            // Substitute the args into the template
+            let mut result = template;
             for (key, value_expr) in args {
                 let value = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
                 result = result.replace(&format!("{{{}}}", key), &value.to_display_string());
@@ -133,9 +137,9 @@ pub(super) fn eval_literal_expr(
 
         // i18n reference (named string without inline default)
         Expr::I18nRef(name) => {
-            // TODO: Look up in locale registry
-            // For now, return the name as a placeholder
-            Ok(Some(Value::Str(format!("[i18n:{}]", name))))
+            // Look up in locale registry, return placeholder if not found
+            let text = crate::i18n::lookup_or_placeholder(name);
+            Ok(Some(Value::Str(text)))
         }
 
         // Custom block expressions: m{...}, sh{...}, sql{...}, re{...}, etc.

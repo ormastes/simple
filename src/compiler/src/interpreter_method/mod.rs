@@ -392,9 +392,30 @@ pub(crate) fn evaluate_method_call(
         _ => {}
     }
 
-    Err(CompileError::Semantic(format!(
-        "method call on unsupported type: {method}"
-    )))
+    // Provide helpful error messages for common type conversion attempts
+    let hint = match method {
+        "to_f64" | "to_f32" | "to_float" => {
+            Some("Hint: Use implicit conversion (e.g., `float_val / int_val` auto-converts) or explicit cast: `val as f64`")
+        }
+        "to_i64" | "to_i32" | "to_int" => {
+            Some("Hint: Use explicit cast: `val as i64` or `val as i32`")
+        }
+        "to_str" | "to_string" | "toString" => {
+            Some("Hint: Use `str(val)` function or f-string: `f\"{val}\"`")
+        }
+        _ => None,
+    };
+
+    if let Some(hint) = hint {
+        Err(CompileError::Semantic(format!(
+            "method `{method}` not found on type `{}`. {hint}",
+            recv_val.type_name()
+        )))
+    } else {
+        Err(CompileError::Semantic(format!(
+            "method call on unsupported type: {method}"
+        )))
+    }
 }
 
 /// Evaluate a method call and return both the result and the potentially modified self.

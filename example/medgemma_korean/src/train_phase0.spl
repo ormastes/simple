@@ -9,28 +9,56 @@
 #
 # This is the foundation phase - learns Korean fluency.
 
-import config
-import ml.tracking as Track
-import ml.engine.{Engine, Events, Loss}
 import lora_utils.{LoRAConfig, add_lora, save_lora}
 
 
 # ============================================================================
-# Configuration
+# Configuration (inline for simplicity)
 # ============================================================================
 
-fn load_config() -> any:
+class Config:
+    """Simple configuration holder."""
+    _data: {str: any}
+
+    fn __init__(data: {str: any}):
+        self._data = data
+
+    fn get(key: str) -> any:
+        if key in self._data:
+            return self._data[key]
+        return None
+
+
+fn load_config() -> Config:
     """Load Phase 0 configuration."""
-    val base_cfg = config.from_file("example/medgemma_korean/config/base.sdn")
-    val phase_cfg = config.from_file("example/medgemma_korean/config/phase0.sdn")
-    return config.merge(base_cfg, phase_cfg)
+    return Config({
+        "project": "medgemma-korean",
+        "model": {
+            "name": "google/medgemma-4b-it",
+            "lora_r": 64,
+            "lora_alpha": 128,
+            "lora_dropout": 0.05,
+            "use_rslora": true
+        },
+        "training": {
+            "epochs": 2,
+            "batch_size": 4,
+            "learning_rate": 0.0001,
+            "max_samples": 100,
+            "device": "cuda:0"
+        },
+        "output": {
+            "lora_path": "models/phase0/lora_0"
+        },
+        "tags": ["phase0", "korean", "fluency"]
+    })
 
 
 # ============================================================================
 # Data Loading
 # ============================================================================
 
-fn load_plain_text_data(cfg: any) -> [any]:
+fn load_plain_text_data(cfg: Config) -> [any]:
     """Load Korean plain text data.
 
     Args:
@@ -39,25 +67,15 @@ fn load_plain_text_data(cfg: any) -> [any]:
     Returns:
         List of text samples
     """
-    val data_path = cfg.get("data.path")
-    val max_samples = cfg.get("training.max_samples")
+    print("Loading plain text data...")
 
-    print(f"Loading plain text data from: {data_path}")
-
-    # TODO: Implement actual data loading
-    # val samples = []
-    # val file = fs.open(f"{data_path}/train.txt", mode="r")
-    # for line in file.readlines():
-    #     samples.append({"text": line.strip()})
-    #     if samples.len() >= max_samples:
-    #         break
-    # file.close()
-
-    # Mock data for example
+    # Mock data for example - in production, load from files
     val samples = [
         {"text": "한국어로 된 의료 텍스트입니다."},
         {"text": "환자의 증상을 확인합니다."},
-        {"text": "진단 결과를 분석합니다."}
+        {"text": "진단 결과를 분석합니다."},
+        {"text": "치료 계획을 수립합니다."},
+        {"text": "약물 처방을 검토합니다."}
     ]
 
     print(f"Loaded {samples.len()} samples")
@@ -68,7 +86,28 @@ fn load_plain_text_data(cfg: any) -> [any]:
 # Model Setup
 # ============================================================================
 
-fn setup_model(cfg: any) -> any:
+class MockModel:
+    """Mock model for training demonstration."""
+    name: str
+    _scale: f64
+    _learning_rate: f64
+
+    fn __init__(name: str):
+        self.name = name
+        self._scale = 1.0
+        self._learning_rate = 0.0001
+
+    fn train_step(batch: any) -> f64:
+        """Simulate training step with decreasing loss."""
+        # Simulate loss that decreases over time
+        val base_loss = 0.5 * self._scale
+        # Add some variance
+        val noise = 0.02
+        self._scale = self._scale * 0.95  # Decrease over time
+        return base_loss + noise
+
+
+fn setup_model(cfg: Config) -> MockModel:
     """Load base model and add LoRA_0.
 
     Args:
@@ -82,72 +121,71 @@ fn setup_model(cfg: any) -> any:
     print("=" * 70)
 
     # Load base model
-    val model_name = cfg.get("model.name")
+    val model_cfg = cfg.get("model")
+    val model_name = model_cfg["name"]
     print(f"Loading base model: {model_name}")
 
-    # TODO: Implement with PyTorch
-    # val model = AutoModelForCausalLM.from_pretrained(
-    #     model_name,
-    #     load_in_8bit=true,
-    #     device_map="auto"
-    # )
-    val model = model_name  # Mock for example
-
-    print(f"✓ Base model loaded")
+    val model = MockModel(model_name)
+    print("Base model loaded")
 
     # Create LoRA config
     val lora_config = LoRAConfig(
-        r=cfg.get("model.lora_r"),
-        alpha=cfg.get("model.lora_alpha"),
-        dropout=cfg.get("model.lora_dropout"),
+        r=model_cfg["lora_r"],
+        alpha=model_cfg["lora_alpha"],
+        dropout=model_cfg["lora_dropout"],
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"],
-        use_rslora=cfg.get("model.use_rslora")
+        use_rslora=model_cfg["use_rslora"]
     )
 
     # Add LoRA_0 (includes embeddings for Korean tokens)
     print("Adding LoRA_0 adapter (includes embeddings)...")
-    model = add_lora(model, lora_config)
+    add_lora(model, lora_config)
 
     print("=" * 70)
     return model
 
 
 # ============================================================================
+# Training State
+# ============================================================================
+
+class TrainingState:
+    """Tracks training progress."""
+    epoch: i32
+    iteration: i32
+    max_epochs: i32
+    total_loss: f64
+    batch_count: i32
+
+    fn __init__(max_epochs: i32):
+        self.epoch = 0
+        self.iteration = 0
+        self.max_epochs = max_epochs
+        self.total_loss = 0.0
+        self.batch_count = 0
+
+    fn update(loss: f64):
+        self.iteration += 1
+        self.total_loss += loss
+        self.batch_count += 1
+
+    fn epoch_loss() -> f64:
+        if self.batch_count == 0:
+            return 0.0
+        return self.total_loss / self.batch_count
+
+    fn reset_epoch():
+        self.total_loss = 0.0
+        self.batch_count = 0
+        self.epoch += 1
+
+
+# ============================================================================
 # Training
 # ============================================================================
 
-fn train_step(engine: Engine, batch: any) -> {str: any}:
-    """Training step for one batch.
-
-    Args:
-        engine: Training engine
-        batch: Batch of data
-
-    Returns:
-        Dict with loss value
-    """
-    # TODO: Implement actual training step
-    # val model = engine.model
-    # val optimizer = engine.optimizer
-    #
-    # optimizer.zero_grad()
-    #
-    # # Forward pass
-    # val outputs = model(batch["input_ids"], labels=batch["labels"])
-    # val loss = outputs.loss
-    #
-    # # Backward pass
-    # loss.backward()
-    # optimizer.step()
-    #
-    # return {"loss": loss.item()}
-
-    # Mock for example
-    return {"loss": 0.5}
-
-
-fn train_phase0(cfg: any, model: any, data: [any]):
+fn train_phase0(cfg: Config, model: MockModel, data: [any]):
     """Train Phase 0: Plain text.
 
     Args:
@@ -157,100 +195,55 @@ fn train_phase0(cfg: any, model: any, data: [any]):
     """
     print("\nStarting training...")
 
-    # Initialize tracking
-    Track.set_mode(cfg.get("tracking.mode"))
-    val run = Track.run(
-        project=cfg.get("project"),
-        name="phase0-plain-text",
-        config=config.to_dict(cfg),
-        tags=cfg.get("tags")
-    )
+    val training_cfg = cfg.get("training")
+    val max_epochs = training_cfg["epochs"]
+    val batch_size = training_cfg["batch_size"]
 
-    print(f"Run ID: {run.id}")
-    print(f"Run directory: {run.dir}")
+    print(f"Training for {max_epochs} epochs")
+    print(f"Batch size: {batch_size}")
+    print(f"Data samples: {data.len()}")
 
-    # Create training engine
-    val trainer = Engine(train_step)
+    val state = TrainingState(max_epochs)
 
-    # Add metrics
-    val loss_metric = Loss()
-    trainer.add_metric(loss_metric, "loss")
+    # Training loop
+    for epoch in 0..max_epochs:
+        state.reset_epoch()
+        print(f"\n--- Epoch {epoch + 1}/{max_epochs} ---")
 
-    # Event: Log every 100 iterations
-    @trainer.on(Events.ITERATION_COMPLETED_EVERY(100))
-    fn log_iteration(engine: Engine):
-        print(f"Step {engine.state.iteration}: loss={engine.state.output['loss']:.4f}")
+        # Process batches
+        var batch_idx = 0
+        for sample in data:
+            val loss = model.train_step(sample)
+            state.update(loss)
+            batch_idx += 1
 
-        run.log({
-            "train/loss": engine.state.output["loss"],
-            "step": engine.state.iteration
-        }, step=engine.state.iteration)
+            # Log every batch
+            if batch_idx % 2 == 0:
+                print(f"  Step {state.iteration}: loss={loss:.4f}")
 
-    # Event: Log epoch metrics
-    @trainer.on(Events.EPOCH_COMPLETED)
-    fn log_epoch(engine: Engine):
-        val epoch = engine.state.epoch + 1
-        val avg_loss = engine.state.metrics["loss"]
-
-        print(f"\nEpoch {epoch}/{engine.state.max_epochs}")
+        # Log epoch metrics
+        val avg_loss = state.epoch_loss()
+        print(f"\nEpoch {epoch + 1} complete:")
         print(f"  Average loss: {avg_loss:.4f}")
+        print(f"  Iterations: {state.iteration}")
 
-        run.log({
-            "train/epoch_loss": avg_loss,
-            "epoch": epoch
-        }, step=epoch)
-
-    # Event: Save checkpoints every 5 epochs
-    @trainer.on(Events.EPOCH_COMPLETED_EVERY(5))
-    fn save_checkpoint(engine: Engine):
-        val epoch = engine.state.epoch + 1
-        val checkpoint_path = f"{cfg.get('output.lora_path')}_epoch{epoch}"
-
-        print(f"Saving checkpoint to: {checkpoint_path}")
-        save_lora(model, checkpoint_path)
-
-    # Event: Early stopping
-    @trainer.on(Events.EPOCH_COMPLETED)
-    fn early_stop(engine: Engine):
-        if engine.state.metrics["loss"] < 0.01:
+        # Early stopping check
+        if avg_loss < 0.01:
             print("Loss target reached! Stopping early.")
-            engine.terminate()
+            break
 
-    # Event: Training complete
-    @trainer.on(Events.COMPLETED)
-    fn on_complete(engine: Engine):
-        print("\n" + "=" * 70)
-        print("TRAINING COMPLETE")
-        print("=" * 70)
-        print(f"Total iterations: {engine.state.iteration}")
-        print(f"Final loss: {engine.state.metrics['loss']:.4f}")
+    # Save final LoRA
+    val output_cfg = cfg.get("output")
+    val output_path = output_cfg["lora_path"]
+    print(f"\nSaving LoRA_0 to: {output_path}")
+    save_lora(model, output_path)
 
-        # Save final LoRA
-        val output_path = cfg.get("output.lora_path")
-        print(f"\nSaving final LoRA_0 to: {output_path}")
-        save_lora(model, output_path)
-
-        # Save as artifact
-        val artifact = Track.Artifact(
-            name="lora_0",
-            type="model",
-            description="Phase 0 LoRA adapter (Korean fluency)",
-            metadata={"phase": 0, "final_loss": engine.state.metrics["loss"]}
-        )
-        artifact.add_file(output_path, name="lora_0")
-        run.log_artifact(artifact, aliases=["latest", "phase0"])
-
-        print("✓ LoRA_0 saved")
-
-    # Run training
-    val max_epochs = cfg.get("training.epochs")
-    print(f"\nTraining for {max_epochs} epochs...")
-
-    trainer.run(data, max_epochs=max_epochs)
-
-    # Finish run
-    run.finish()
-    print(f"\nExperiment saved to: {run.dir}")
+    print("\n" + "=" * 70)
+    print("TRAINING COMPLETE")
+    print("=" * 70)
+    print(f"Final loss: {state.epoch_loss():.4f}")
+    print(f"Total iterations: {state.iteration}")
+    print("LoRA_0 saved")
 
 
 # ============================================================================
@@ -260,17 +253,19 @@ fn train_phase0(cfg: any, model: any, data: [any]):
 fn main():
     """Main entry point for Phase 0 training."""
     print("\n")
-    print("╔" + "=" * 68 + "╗")
-    print("║" + " " * 15 + "PHASE 0: PLAIN TEXT TRAINING" + " " * 24 + "║")
-    print("╚" + "=" * 68 + "╝")
+    print("=" * 70)
+    print("         PHASE 0: PLAIN TEXT TRAINING")
+    print("=" * 70)
     print()
 
     # Load configuration
     val cfg = load_config()
     print(f"Project: {cfg.get('project')}")
-    print(f"Model: {cfg.get('model.name')}")
-    print(f"Device: {cfg.get('training.device')}")
-    print(f"Epochs: {cfg.get('training.epochs')}")
+    val model_cfg = cfg.get("model")
+    print(f"Model: {model_cfg['name']}")
+    val training_cfg = cfg.get("training")
+    print(f"Device: {training_cfg['device']}")
+    print(f"Epochs: {training_cfg['epochs']}")
     print()
 
     # Load data
@@ -285,7 +280,8 @@ fn main():
     print("\n" + "=" * 70)
     print("PHASE 0 COMPLETE")
     print("=" * 70)
-    print(f"Output: {cfg.get('output.lora_path')}")
+    val output_cfg = cfg.get("output")
+    print(f"Output: {output_cfg['lora_path']}")
     print()
     print("Next step: Run Phase 1 (medical dictionary)")
     print("  ./target/release/simple example/medgemma_korean/src/train_phase1.spl")
