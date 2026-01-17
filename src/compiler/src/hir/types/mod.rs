@@ -187,6 +187,8 @@ mod tests {
             layout_hint: None,
             verification_mode: VerificationMode::default(),
             is_ghost: false,
+            is_sync: false,
+            has_suspension: false,
         };
 
         assert_eq!(func.name, "add");

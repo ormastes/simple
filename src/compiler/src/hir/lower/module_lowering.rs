@@ -455,6 +455,9 @@ impl Lowerer {
 
         let body = self.lower_block(&f.body, &mut ctx)?;
 
+        // Detect suspension operators in function body for async/sync validation
+        let has_suspension = simple_parser::effect_inference::has_suspension_in_body(&f.body);
+
         // Lower contract if present, or create one for type invariants
         let mut contract = if let Some(ref ast_contract) = f.contract {
             Some(self.lower_contract(ast_contract, &mut ctx)?)
@@ -580,6 +583,8 @@ impl Lowerer {
             layout_hint,
             verification_mode,
             is_ghost: f.is_ghost(),
+            is_sync: f.is_sync,
+            has_suspension,
         })
     }
 

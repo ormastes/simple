@@ -557,6 +557,8 @@ mod tests {
             layout_hint: None,
             verification_mode: crate::hir::VerificationMode::default(),
             is_ghost: false,
+            is_sync: false,
+            has_suspension: false,
         };
 
         module.functions.push(func);
