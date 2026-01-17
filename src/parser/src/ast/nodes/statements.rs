@@ -16,6 +16,9 @@ pub struct LetStmt {
     /// Ghost variable - only exists for verification, erased at runtime
     /// Used in @verify mode for Lean proof generation
     pub is_ghost: bool,
+    /// Suspension let binding (val x ~= expr) for async-by-default
+    /// When true, the expression is awaited before assignment
+    pub is_suspend: bool,
 }
 
 /// Compile-time constant declaration

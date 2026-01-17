@@ -84,7 +84,7 @@ impl Parser<'_> {
     ) -> Result<Node, ParseError> {
         let mut pattern = self.parse_pattern()?;
         let ty = self.parse_optional_type_annotation()?;
-        let value = self.parse_optional_assignment()?;
+        let (value, is_suspend) = self.parse_optional_assignment_with_suspend()?;
 
         // Wrap pattern in Pattern::Typed if there's a type annotation
         // This provides the typed pattern that tests and code expect
@@ -108,6 +108,7 @@ impl Parser<'_> {
             mutability,
             storage_class,
             is_ghost,
+            is_suspend,
         }))
     }
 
@@ -118,6 +119,20 @@ impl Parser<'_> {
             Ok(Some(self.parse_type()?))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Parse optional assignment `= expr` or `~= expr` (suspension assignment)
+    /// Returns (Option<Expr>, bool) where bool indicates if this is a suspension assignment
+    fn parse_optional_assignment_with_suspend(&mut self) -> Result<(Option<Expr>, bool), ParseError> {
+        if self.check(&TokenKind::Assign) {
+            self.advance();
+            Ok((Some(self.parse_expression()?), false))
+        } else if self.check(&TokenKind::TildeAssign) {
+            self.advance();
+            Ok((Some(self.parse_expression()?), true))
+        } else {
+            Ok((None, false))
         }
     }
 

@@ -155,16 +155,24 @@ fn extract_startup_config_from_decorators(decorators: &[simple_parser::ast::Deco
     let mut config = StartupConfig::default();
 
     for decorator in decorators {
-        // Check decorator name
-        let name = match &decorator.name {
-            Expr::Identifier(name) => name.as_str(),
+        // Check decorator name - can be Identifier or Call
+        let (name, args) = match &decorator.name {
+            Expr::Identifier(name) => (name.as_str(), decorator.args.as_ref()),
+            Expr::Call { callee, args } => {
+                // @app_type("gui") is parsed as Call { callee: Identifier("app_type"), args: [...] }
+                if let Expr::Identifier(name) = callee.as_ref() {
+                    (name.as_str(), Some(args))
+                } else {
+                    continue;
+                }
+            }
             _ => continue,
         };
 
         match name {
             "app_type" => {
                 // @app_type("gui") - first positional argument is the type
-                if let Some(args) = &decorator.args {
+                if let Some(args) = args {
                     if let Some(first_arg) = args.first() {
                         if let Some(type_str) = extract_string_from_arg(first_arg) {
                             if let Some(app_type) = StartupAppType::from_str(&type_str) {
@@ -177,7 +185,7 @@ fn extract_startup_config_from_decorators(decorators: &[simple_parser::ast::Deco
             }
             "window_hints" => {
                 // @window_hints(width=1920, height=1080, title="My App")
-                if let Some(args) = &decorator.args {
+                if let Some(args) = args {
                     for arg in args {
                         // Argument is a struct with name: Option<String> and value: Expr
                         if let Some(arg_name) = &arg.name {

@@ -74,7 +74,7 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::At)?;
 
         // Handle keywords specially since they can be decorator names
-        let name = if self.check(&TokenKind::Async) {
+        let expr = if self.check(&TokenKind::Async) {
             self.advance();
             Expr::Identifier("async".to_string())
         } else if self.check(&TokenKind::Bounds) {
@@ -85,11 +85,23 @@ impl<'a> Parser<'a> {
             self.parse_postfix()?
         };
 
-        // Check for arguments: @decorator(arg1, arg2) or @decorator(name=value)
-        let args = if self.check(&TokenKind::LParen) {
-            Some(self.parse_arguments()?)
-        } else {
-            None
+        // If the expression is a Call, extract the callee as name and arguments
+        // This handles both @decorator(args) and @obj.method(args)
+        let (name, args) = match expr {
+            Expr::Call { callee, args: call_args } => {
+                // Convert Argument to the decorator's args format
+                (*callee, Some(call_args))
+            }
+            other => {
+                // Check for additional arguments after a non-call expression
+                // This handles the rare case of @decorator followed by separate args
+                let args = if self.check(&TokenKind::LParen) {
+                    Some(self.parse_arguments()?)
+                } else {
+                    None
+                };
+                (other, args)
+            }
         };
 
         Ok(Decorator {

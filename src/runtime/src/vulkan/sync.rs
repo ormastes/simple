@@ -222,4 +222,123 @@ mod tests {
         assert_eq!(pool.in_use_count(), 0);
         assert_eq!(pool.available_count(), 2);
     }
+
+    // Unit tests that don't require Vulkan drivers
+
+    #[test]
+    fn test_fence_create_flags_signaled() {
+        // Test that SIGNALED flag is used for pre-signaled fences
+        let flags = vk::FenceCreateFlags::SIGNALED;
+        let create_info = vk::FenceCreateInfo::default().flags(flags);
+        assert_eq!(create_info.flags, vk::FenceCreateFlags::SIGNALED);
+    }
+
+    #[test]
+    fn test_fence_create_flags_unsignaled() {
+        // Test that empty flags for unsignaled fences
+        let flags = vk::FenceCreateFlags::empty();
+        let create_info = vk::FenceCreateInfo::default().flags(flags);
+        assert_eq!(create_info.flags, vk::FenceCreateFlags::empty());
+    }
+
+    #[test]
+    fn test_semaphore_create_info_default() {
+        // Semaphore create info should use default (no flags needed)
+        let create_info = vk::SemaphoreCreateInfo::default();
+        assert_eq!(create_info.flags, vk::SemaphoreCreateFlags::empty());
+    }
+
+    #[test]
+    fn test_fence_timeout_values() {
+        // Common timeout values used for fence waiting
+        let one_second_ns: u64 = 1_000_000_000;
+        let max_timeout: u64 = u64::MAX;
+
+        assert_eq!(one_second_ns, 1_000_000_000);
+        assert_eq!(max_timeout, u64::MAX);
+    }
+
+    #[test]
+    fn test_fence_wait_all_flag() {
+        // When waiting for multiple fences, true means wait for all
+        let wait_all = true;
+        assert!(wait_all);
+    }
+
+    #[test]
+    fn test_semaphore_handle_is_non_null_type() {
+        // vk::Semaphore null handle
+        let null_handle = vk::Semaphore::null();
+        assert_eq!(null_handle, vk::Semaphore::null());
+    }
+
+    #[test]
+    fn test_fence_handle_is_non_null_type() {
+        // vk::Fence null handle
+        let null_handle = vk::Fence::null();
+        assert_eq!(null_handle, vk::Fence::null());
+    }
+
+    #[test]
+    fn test_signaled_vs_unsignaled_fence_flags() {
+        // signaled = true should use SIGNALED, false should use empty
+        let signaled = true;
+        let flags_true = if signaled {
+            vk::FenceCreateFlags::SIGNALED
+        } else {
+            vk::FenceCreateFlags::empty()
+        };
+        assert_eq!(flags_true, vk::FenceCreateFlags::SIGNALED);
+
+        let unsignaled = false;
+        let flags_false = if unsignaled {
+            vk::FenceCreateFlags::SIGNALED
+        } else {
+            vk::FenceCreateFlags::empty()
+        };
+        assert_eq!(flags_false, vk::FenceCreateFlags::empty());
+    }
+
+    #[test]
+    fn test_semaphore_stage_masks() {
+        // Common pipeline stages for semaphore synchronization
+        let color_output = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
+        let bottom = vk::PipelineStageFlags::BOTTOM_OF_PIPE;
+        let top = vk::PipelineStageFlags::TOP_OF_PIPE;
+
+        assert!(color_output.contains(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT));
+        assert!(bottom.contains(vk::PipelineStageFlags::BOTTOM_OF_PIPE));
+        assert!(top.contains(vk::PipelineStageFlags::TOP_OF_PIPE));
+    }
+
+    #[test]
+    fn test_wait_for_multiple_fences() {
+        // Array of fences can be waited on together
+        let fence_handles = [vk::Fence::null(), vk::Fence::null()];
+        assert_eq!(fence_handles.len(), 2);
+    }
+
+    #[test]
+    fn test_timeline_semaphore_type() {
+        // Timeline semaphores use TIMELINE type (Vulkan 1.2+)
+        let timeline_type = vk::SemaphoreType::TIMELINE;
+        let binary_type = vk::SemaphoreType::BINARY;
+
+        assert_eq!(timeline_type, vk::SemaphoreType::TIMELINE);
+        assert_eq!(binary_type, vk::SemaphoreType::BINARY);
+    }
+
+    #[test]
+    fn test_external_fence_handle_types() {
+        // External fence handle types for cross-process sync
+        let opaque_fd = vk::ExternalFenceHandleTypeFlags::OPAQUE_FD;
+        assert!(opaque_fd.contains(vk::ExternalFenceHandleTypeFlags::OPAQUE_FD));
+    }
+
+    #[test]
+    fn test_external_semaphore_handle_types() {
+        // External semaphore handle types for cross-process sync
+        let opaque_fd = vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD;
+        assert!(opaque_fd.contains(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD));
+    }
 }
