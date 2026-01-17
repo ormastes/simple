@@ -98,6 +98,8 @@ pub enum PointerKind {
     Handle,
     Borrow,
     BorrowMut,
+    RawConst,
+    RawMut,
 }
 
 impl std::fmt::Display for ConcreteType {
@@ -128,6 +130,8 @@ impl std::fmt::Display for ConcreteType {
                     PointerKind::Handle => "Handle",
                     PointerKind::Borrow => "Borrow",
                     PointerKind::BorrowMut => "BorrowMut",
+                    PointerKind::RawConst => "RawConst",
+                    PointerKind::RawMut => "RawMut",
                 };
                 write!(f, "{}_{}", k, inner)
             }

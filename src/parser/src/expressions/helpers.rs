@@ -104,8 +104,15 @@ impl<'a> Parser<'a> {
             Some(Box::new(self.parse_if_expr()?))
         } else if self.check(&TokenKind::Else) {
             self.advance();
-            self.expect(&TokenKind::Colon)?;
-            Some(Box::new(self.parse_expression()?))
+            // Support both 'else if' and 'else:' syntax (matching statement parser)
+            if self.check(&TokenKind::If) {
+                // This is 'else if', treat it as elif
+                self.advance(); // consume 'if'
+                Some(Box::new(self.parse_if_expr()?))
+            } else {
+                self.expect(&TokenKind::Colon)?;
+                Some(Box::new(self.parse_expression()?))
+            }
         } else {
             None
         };

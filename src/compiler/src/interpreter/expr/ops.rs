@@ -38,6 +38,9 @@ pub(super) fn eval_op_expr(
                 PointerKind::Handle => Ok(Value::Handle(ManualHandleValue::new(inner))),
                 PointerKind::Borrow => Ok(Value::Borrow(BorrowValue::new(inner))),
                 PointerKind::BorrowMut => Ok(Value::BorrowMut(BorrowMutValue::new(inner))),
+                // Raw pointers for FFI - treat as shared pointers at runtime
+                PointerKind::RawConst => Ok(Value::Shared(ManualSharedValue::new(inner))),
+                PointerKind::RawMut => Ok(Value::Shared(ManualSharedValue::new(inner))),
             };
             Ok(Some(result?))
         }

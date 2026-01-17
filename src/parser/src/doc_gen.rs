@@ -568,6 +568,8 @@ fn format_type(ty: &Type) -> String {
             PointerKind::Handle => format!("+{}", format_type(inner)),
             PointerKind::Borrow => format!("&{}", format_type(inner)),
             PointerKind::BorrowMut => format!("&mut {}", format_type(inner)),
+            PointerKind::RawConst => format!("*const {}", format_type(inner)),
+            PointerKind::RawMut => format!("*mut {}", format_type(inner)),
         },
         Type::Union(types) => types.iter().map(format_type).collect::<Vec<_>>().join(" | "),
         Type::DynTrait(trait_name) => format!("dyn {}", trait_name),

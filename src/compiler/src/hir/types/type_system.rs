@@ -245,6 +245,8 @@ pub enum PointerKind {
     Handle,
     Borrow,
     BorrowMut,
+    RawConst,
+    RawMut,
 }
 
 impl From<simple_parser::PointerKind> for PointerKind {
@@ -256,6 +258,8 @@ impl From<simple_parser::PointerKind> for PointerKind {
             simple_parser::PointerKind::Handle => PointerKind::Handle,
             simple_parser::PointerKind::Borrow => PointerKind::Borrow,
             simple_parser::PointerKind::BorrowMut => PointerKind::BorrowMut,
+            simple_parser::PointerKind::RawConst => PointerKind::RawConst,
+            simple_parser::PointerKind::RawMut => PointerKind::RawMut,
         }
     }
 }

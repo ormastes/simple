@@ -45,6 +45,12 @@ pub(super) fn compile_pointer_new<M: Module>(
             ctx.vreg_values.insert(dest, value_val);
             return Ok(());
         }
+        PointerKind::RawConst | PointerKind::RawMut => {
+            // FFI raw pointers - pass through the address without wrapping
+            // Used for extern function parameters
+            ctx.vreg_values.insert(dest, value_val);
+            return Ok(());
+        }
     };
 
     let func_id = ctx.runtime_funcs[rt_func];
@@ -102,6 +108,11 @@ pub(super) fn compile_pointer_deref<M: Module>(
         }
         PointerKind::Borrow | PointerKind::BorrowMut => {
             // Borrows are currently transparent - just return the value
+            ctx.vreg_values.insert(dest, ptr_val);
+            return Ok(());
+        }
+        PointerKind::RawConst | PointerKind::RawMut => {
+            // FFI raw pointers - transparent dereference
             ctx.vreg_values.insert(dest, ptr_val);
             return Ok(());
         }
