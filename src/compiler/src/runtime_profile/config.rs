@@ -1,5 +1,6 @@
 //! Profiling configuration
 
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Profile mode - determines what data is collected
@@ -194,7 +195,7 @@ pub struct FunctionRuntimeStats {
 }
 
 /// Call type for sequence events
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CallType {
     /// Direct function call
     Direct,
@@ -215,7 +216,7 @@ impl Default for CallType {
 }
 
 /// A single call event in the sequence
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SequenceEvent {
     /// Sequence number (global ordering)
     pub sequence_num: u64,
@@ -303,5 +304,84 @@ impl SequenceEvent {
     /// Get callee participant name for diagrams
     pub fn callee_participant(&self) -> &str {
         self.callee_class.as_deref().unwrap_or(&self.callee)
+    }
+}
+
+// ============================================================================
+// Profile Data File Format
+// ============================================================================
+
+/// Profile data that can be saved to and loaded from a file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileData {
+    /// Version of the profile format
+    pub version: String,
+    /// Name of the profiled test/program
+    pub name: String,
+    /// Sequence events captured during profiling
+    pub events: Vec<SequenceEvent>,
+    /// Architectural entities (classes, services, actors)
+    #[serde(default)]
+    pub architectural_entities: Vec<String>,
+    /// Optional metadata
+    #[serde(default)]
+    pub metadata: ProfileMetadata,
+}
+
+/// Metadata about the profiling session
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileMetadata {
+    /// Timestamp when profiling started
+    #[serde(default)]
+    pub start_time: Option<String>,
+    /// Timestamp when profiling ended
+    #[serde(default)]
+    pub end_time: Option<String>,
+    /// Total duration in milliseconds
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// Source file that was profiled
+    #[serde(default)]
+    pub source_file: Option<String>,
+}
+
+impl ProfileData {
+    /// Create a new empty profile data
+    pub fn new(name: &str) -> Self {
+        Self {
+            version: "1.0".to_string(),
+            name: name.to_string(),
+            events: Vec::new(),
+            architectural_entities: Vec::new(),
+            metadata: ProfileMetadata::default(),
+        }
+    }
+
+    /// Load profile data from a JSON file
+    pub fn load_from_file(path: &std::path::Path) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read profile file: {}", e))?;
+
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse profile JSON: {}", e))
+    }
+
+    /// Save profile data to a JSON file
+    pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), String> {
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize profile data: {}", e))?;
+
+        std::fs::write(path, content)
+            .map_err(|e| format!("Failed to write profile file: {}", e))
+    }
+
+    /// Get events as a slice (for diagram generation)
+    pub fn get_events(&self) -> &[SequenceEvent] {
+        &self.events
+    }
+
+    /// Get architectural entities as a HashSet (for diagram generation)
+    pub fn get_architectural_entities(&self) -> std::collections::HashSet<String> {
+        self.architectural_entities.iter().cloned().collect()
     }
 }

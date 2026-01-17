@@ -46,6 +46,8 @@ pub struct DiagramGenOptions {
     pub max_events: usize,
     /// Test name (for output file naming)
     pub test_name: String,
+    /// Profile data file to load from
+    pub from_file: Option<PathBuf>,
 }
 
 impl Default for DiagramGenOptions {
@@ -60,6 +62,7 @@ impl Default for DiagramGenOptions {
             include_returns: true,
             max_events: 0,
             test_name: "diagram".to_string(),
+            from_file: None,
         }
     }
 }
@@ -364,6 +367,16 @@ pub fn parse_diagram_args(args: &[String]) -> DiagramGenOptions {
                     options.max_events = args[i].parse().unwrap_or(0);
                 }
             }
+            "--from-file" | "-f" => {
+                i += 1;
+                if i < args.len() {
+                    options.from_file = Some(PathBuf::from(&args[i]));
+                }
+            }
+            arg if arg.ends_with(".json") && options.from_file.is_none() => {
+                // Positional argument: treat .json file as profile data
+                options.from_file = Some(PathBuf::from(arg));
+            }
             _ => {}
         }
         i += 1;
@@ -377,26 +390,38 @@ pub fn print_diagram_help() {
     println!("Diagram Generation");
     println!();
     println!("USAGE:");
-    println!("    simple diagram [OPTIONS]");
+    println!("    simple diagram [OPTIONS] [PROFILE_FILE.json]");
     println!();
-    println!("OPTIONS:");
+    println!("INPUT:");
+    println!("    -f, --from-file <FILE>  Load profile data from JSON file");
+    println!("    <FILE.json>             Positional argument: profile data file");
+    println!();
+    println!("DIAGRAM TYPES:");
     println!("    -s, --seq-diagram       Generate sequence diagram");
     println!("    -c, --class-diagram     Generate class diagram");
     println!("    -a, --arch-diagram      Generate architecture diagram");
     println!("    -A, --diagram-all       Generate all diagram types");
     println!();
+    println!("FILTERS:");
     println!("    -i, --include <PATTERN> Include only matching calls (comma-separated)");
     println!("    -e, --exclude <PATTERN> Exclude matching calls (comma-separated)");
     println!();
+    println!("OUTPUT:");
     println!("    -o, --output <DIR>      Output directory (default: target/diagrams)");
     println!("    -n, --name <NAME>       Base name for output files");
     println!();
+    println!("FORMATTING:");
     println!("    --no-timing             Exclude timing information");
     println!("    --no-args               Exclude argument values");
     println!("    --no-returns            Exclude return values");
     println!("    --max-events <N>        Maximum events to include");
     println!();
     println!("EXAMPLES:");
-    println!("    simple diagram -A -n my_test");
-    println!("    simple diagram -s --include \"*Service\" --exclude \"*Helper\"");
+    println!("    simple diagram profile.json");
+    println!("    simple diagram -f profile.json -A -n my_test");
+    println!("    simple diagram profile.json -s --include \"*Service\"");
+    println!();
+    println!("PROFILE FILE FORMAT:");
+    println!("    JSON file with: version, name, events[], architectural_entities[]");
+    println!("    Generate with: simple test --seq-diagram my_test.spl");
 }
