@@ -83,16 +83,26 @@ pub class JavaScriptCompiler:
         # Determine build command
         build_cmd = self.get_build_command(mode, incremental)
 
-        # TODO: [stdlib][P3] Execute npm/webpack command
-        # result = sys.exec(build_cmd, config.source_dir)
+        # Execute npm/webpack/tsc command
+        val cmd = if self.use_typescript: "npx" else: "npx"
+        val args = build_cmd
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
 
-        # For now, return success placeholder
+        # Parse errors and warnings from output
+        var errors: List<text> = []
+        var warnings: List<text> = []
+        for line in stderr.lines():
+            if line.contains("error") or line.contains("Error"):
+                errors.append(line)
+            elif line.contains("warning") or line.contains("Warning"):
+                warnings.append(line)
+
         CompilationResult {
-            status: "success",
+            status: if exit_code == 0 { "success" } else { "failed" },
             output_path: config.output_dir + "/dist",
             duration_ms: time.now() - start_time,
-            errors: [],
-            warnings: []
+            errors: errors,
+            warnings: warnings
         }
 
     fn get_build_command(mode: CompilationMode, incremental: bool): text =
@@ -151,14 +161,21 @@ pub class JavaScriptCompiler:
         """
         start_time = time.now()
 
-        # TODO: [stdlib][P3] Execute jest command
-        # result = sys.exec("jest", config.source_dir)
+        # Execute jest command
+        val cmd = "npx"
+        val args = "jest --no-coverage"
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        var errors: List<text> = []
+        for line in stderr.lines():
+            if line.contains("FAIL") or line.contains("Error"):
+                errors.append(line)
 
         CompilationResult {
-            status: "success",
+            status: if exit_code == 0 { "success" } else { "failed" },
             output_path: "",
             duration_ms: time.now() - start_time,
-            errors: [],
+            errors: errors,
             warnings: []
         }
 
@@ -171,10 +188,15 @@ pub class JavaScriptCompiler:
         Returns:
             List of lint warnings/errors
         """
-        # TODO: [stdlib][P3] Execute eslint command
-        # result = sys.exec("eslint .", config.source_dir)
+        val cmd = "npx"
+        val args = "eslint ."
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
 
-        []
+        var warnings: List<text> = []
+        for line in stdout.lines():
+            if not line.trim().is_empty():
+                warnings.append(line)
+        warnings
 
     pub fn format(self, config: LanguageConfig): bool =
         """Format code using Prettier.
@@ -185,10 +207,11 @@ pub class JavaScriptCompiler:
         Returns:
             True if successful
         """
-        # TODO: [stdlib][P3] Execute prettier command
-        # result = sys.exec("prettier --write .", config.source_dir)
+        val cmd = "npx"
+        val args = "prettier --write ."
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
 
-        true
+        exit_code == 0
 
 # Trait implementation
 impl LanguageCompiler for JavaScriptCompiler:

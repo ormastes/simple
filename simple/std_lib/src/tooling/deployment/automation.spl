@@ -3,6 +3,13 @@
 
 use core.result.{Result, Ok, Err}
 
+# FFI for process execution and file operations
+@extern("runtime", "rt_process_run")
+fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64, args_ptr: &u8, args_len: u64) -> (i32, text, text)
+
+@extern("runtime", "rt_file_size")
+fn _rt_file_size(path_ptr: &u8, path_len: u64) -> i64
+
 # Release type
 pub enum ReleaseType:
     Major      # Breaking changes
@@ -100,9 +107,18 @@ pub enum ReleaseType:
         Returns:
             Integer value
         """
-        # TODO: [stdlib][P3] Proper i32 parsing with error handling
-        # For now, this is a stub
-        0
+        val trimmed = s.trim()
+        if trimmed.is_empty():
+            return 0
+
+        var result: i32 = 0
+        for ch in trimmed.chars():
+            if ch >= '0' and ch <= '9':
+                val digit = (ch as i32) - ('0' as i32)
+                result = result * 10 + digit
+            else:
+                break
+        result
 
 # Release artifact
 pub class ReleaseArtifact:
@@ -126,7 +142,7 @@ pub class ReleaseArtifact:
             name: name,
             path: path,
             platform: platform,
-            size_bytes: 0  # TODO: [stdlib][P3] Get file size
+            size_bytes: _rt_file_size(path.ptr(), path.len())
         }
 
     pub fn size_mb(self): f64 =
@@ -451,11 +467,51 @@ pub class ReleaseAutomation:
         if self.verbose:
             print("Generating changelog for {git_range}")
 
-        # TODO: [stdlib][P3] Execute: git log --oneline git_range
-        # Parse commits and categorize (feat, fix, docs, etc.)
-        # Generate markdown
+        # Execute git log to get commits
+        val cmd = "git"
+        val args = "log --oneline {git_range}"
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
 
-        "# TODO: [stdlib][P3] Generate from commits\n"
+        if exit_code != 0:
+            return "# Changelog\n\nNo commits found.\n"
+
+        # Parse commits and categorize
+        var features: List<text> = []
+        var fixes: List<text> = []
+        var other: List<text> = []
+
+        for line in stdout.lines():
+            if line.is_empty():
+                continue
+            if line.contains("feat:") or line.contains("feat("):
+                features.append(line)
+            elif line.contains("fix:") or line.contains("fix("):
+                fixes.append(line)
+            else:
+                other.append(line)
+
+        # Generate markdown
+        var changelog = "# Changelog\n\n"
+
+        if features.len() > 0:
+            changelog += "## Features\n"
+            for f in features:
+                changelog += "- {f}\n"
+            changelog += "\n"
+
+        if fixes.len() > 0:
+            changelog += "## Bug Fixes\n"
+            for f in fixes:
+                changelog += "- {f}\n"
+            changelog += "\n"
+
+        if other.len() > 0:
+            changelog += "## Other Changes\n"
+            for o in other:
+                changelog += "- {o}\n"
+            changelog += "\n"
+
+        changelog
 
     pub fn create_git_tag(self, version: text, message: text): Result<(), text> =
         """Create git tag.
@@ -473,8 +529,15 @@ pub class ReleaseAutomation:
         if self.verbose:
             print("Creating git tag: {version}")
 
-        # TODO: [stdlib][P3] Execute: git tag -a version -m message
-        Ok(())
+        # Execute git tag command
+        val cmd = "git"
+        val args = "tag -a {version} -m \"{message}\""
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        if exit_code == 0:
+            Ok(())
+        else:
+            Err("Failed to create git tag: {stderr}")
 
     pub fn build_artifacts(self, platforms: List<text>): List<ReleaseArtifact> =
         """Build artifacts for all platforms.
@@ -540,8 +603,17 @@ pub class ReleaseAutomation:
 
         self.repo = repo
 
-        # TODO: [stdlib][P3] Execute: gh release create VERSION --title TITLE [--draft]
-        Ok(())
+        # Execute gh release create command
+        val cmd = "gh"
+        var args = "release create --title \"{title}\""
+        if draft:
+            args = args + " --draft"
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        if exit_code == 0:
+            Ok(())
+        else:
+            Err("Failed to create GitHub release: {stderr}")
 
     pub fn upload_artifacts(self, artifacts: List<ReleaseArtifact>): Result<(), text> =
         """Upload artifacts to GitHub release.
@@ -562,8 +634,13 @@ pub class ReleaseAutomation:
             if self.verbose:
                 print("Uploading {artifact.name}...")
 
-            # TODO: [stdlib][P3] Execute: gh release upload VERSION artifact.path
-            pass
+            # Execute gh release upload command
+            val cmd = "gh"
+            val args = "release upload latest {artifact.path}"
+            val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+            if exit_code != 0:
+                return Err("Failed to upload artifact {artifact.name}: {stderr}")
 
         Ok(())
 
@@ -626,13 +703,19 @@ pub class ReleaseAutomation:
 
         match registry:
             "npm":
-                # TODO: [stdlib][P3] Execute: npm publish
-                Ok(())
+                val cmd = "npm"
+                val args = "publish"
+                val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+                if exit_code == 0: Ok(()) else: Err("npm publish failed: {stderr}")
             "pypi":
-                # TODO: [stdlib][P3] Execute: twine upload dist/*
-                Ok(())
+                val cmd = "twine"
+                val args = "upload dist/*"
+                val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+                if exit_code == 0: Ok(()) else: Err("twine upload failed: {stderr}")
             "crates":
-                # TODO: [stdlib][P3] Execute: cargo publish
-                Ok(())
+                val cmd = "cargo"
+                val args = "publish"
+                val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+                if exit_code == 0: Ok(()) else: Err("cargo publish failed: {stderr}")
             _:
                 Err("Unknown registry: {registry}")
