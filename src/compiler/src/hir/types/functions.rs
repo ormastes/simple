@@ -39,6 +39,13 @@ pub struct HirFunction {
     /// Ghost functions exist only for verification and are completely erased at runtime.
     /// They are included in Lean output but not in compiled code.
     pub is_ghost: bool,
+    /// Whether this function is explicitly marked as sync (non-suspending).
+    /// sync fn = cannot contain suspension operators (~=, if~, while~, for~)
+    /// Default (false) = async-by-default, may suspend
+    pub is_sync: bool,
+    /// Whether this function contains suspension operators (inferred via effect_inference).
+    /// If true, the function is async and should return Promise<T> (not enforced yet)
+    pub has_suspension: bool,
 }
 
 impl HirFunction {
