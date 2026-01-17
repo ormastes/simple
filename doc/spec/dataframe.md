@@ -11,7 +11,7 @@ Simple provides a static, SDN-native Table system for structured data processing
 Key properties:
 
 - Tables are first-class SDN values
-- Queries are written using `tql(source):` custom blocks
+- Queries are written using `tql` custom blocks
 - Statistics and predictions are deterministic and static
 - Execution targets CPU or CUDA backends
 - No runtime SQL, no string DSL, no dynamic schema mutation
@@ -20,9 +20,85 @@ This system is designed for compile-time analyzable analytics.
 
 ---
 
-## 2. SDN Table Type
+## 2. Unified Block Syntax
 
-### 2.1 Table Type Definition
+Simple supports two equivalent block styles that share a common processing interface:
+
+### 2.1 Block Styles
+
+```simple
+# Style A: Indentation-based (Python-like)
+val result = tql:
+    from users
+    select @id, @age
+
+# Style B: Brace-based (Rust/C-like)
+val result = tql {
+    from users
+    select @id, @age
+}
+
+# Both produce identical AST and behavior
+```
+
+### 2.2 Unified Block Grammar
+
+```
+Block := IndentBlock | BraceBlock
+
+IndentBlock := ":" INDENT Statement+ DEDENT
+BraceBlock  := "{" Statement+ "}"
+
+CustomBlock := BlockKeyword Block
+            |  Expr "." BlockKeyword Block
+
+BlockKeyword := "tql" | "math" | "regex" | "html" | "css" | "json" | ...
+```
+
+### 2.3 Common Block Interface
+
+All custom blocks implement a shared processing interface:
+
+```simple
+trait BlockProcessor<Input, Output>:
+    fn parse(block: BlockNode) -> Result<Input, ParseError>
+    fn validate(input: Input) -> Result<Input, ValidationError>
+    fn compile(input: Input) -> Output
+```
+
+This enables:
+- Consistent syntax across all DSL blocks
+- Shared tooling (formatters, linters)
+- Unified error reporting
+- Mixed block styles in same file
+
+### 2.4 Nested Block Styles
+
+Nested blocks can use different styles:
+
+```simple
+val result = tql {
+    from users
+    groupby @city
+    agg:                    # Indent inside braces
+        n: count()
+        avg: mean(@age)
+}
+
+val result2 = tql:
+    from users
+    groupby @city
+    agg {                   # Braces inside indent
+        n: count()
+        avg: mean(@age)
+    }
+```
+
+---
+
+## 3. SDN Table Type
+
+### 3.1 Table Type Definition
 
 A table is represented as:
 
@@ -49,7 +125,7 @@ Properties:
 
 ---
 
-### 2.2 Column Semantics
+### 3.2 Column Semantics
 
 Each column is a vector:
 
@@ -65,45 +141,56 @@ Rules:
 
 ---
 
-## 3. Table Construction Grammar
+## 4. Table Construction
 
-### 3.1 Row-Oriented Table Literal (SDN-Compatible)
+### 4.1 Row-Oriented Table Literal (SDN-Compatible)
 
 ```simple
-val users = sdn_table |id, age, city|:
+# Indentation style
+val users = table |id, age, city|:
     1, 31.0, "Seoul"
     2, 24.0, "Busan"
     3, 28.0, "Seoul"
+
+# Brace style
+val users = table |id, age, city| {
+    1, 31.0, "Seoul"
+    2, 24.0, "Busan"
+    3, 28.0, "Seoul"
+}
 ```
 
 Rules:
 
-- Uses existing SDN named-table syntax
+- Uses SDN named-table syntax with `|field|` header
 - All rows must have same column count
 - Types inferred from literals
 - Produces `Table<{id: Int, age: Float, city: Str}>`
 
-### 3.2 Column-Oriented DataFrame Literal
+### 4.2 Column-Oriented DataFrame Literal
 
 ```simple
+# Indentation style
 val users = dataframe:
     id:   [1, 2, 3]
     age:  [31.0, 24.0, 28.0]
     city: ["Seoul", "Busan", "Seoul"]
+
+# Brace style
+val users = dataframe {
+    id:   [1, 2, 3]
+    age:  [31.0, 24.0, 28.0]
+    city: ["Seoul", "Busan", "Seoul"]
+}
 ```
-
-Rules:
-
-- All columns must have equal length
-- Types inferred from array literals
-- Produces `Table<{id: Int, age: Float, city: Str}>`
 
 ---
 
-### 3.3 External Sources
+### 4.3 External Sources
 
 ```simple
 val data = read_csv("users.csv")
+val json_data = read_json("data.json")
 ```
 
 - Schema inferred or provided
@@ -111,16 +198,34 @@ val data = read_csv("users.csv")
 
 ---
 
-## 4. Table Query Language (tql)
+## 5. Table Query Language (tql)
 
-### 4.1 Definition
+### 5.1 TQL Block Syntax
 
-`tql(source):` is a custom block that defines a static table query and analytics plan.
+TQL supports three forms:
 
 ```simple
-val adults = tql(users):
+# Form 1: Standalone with 'from' statement
+val adults = tql:
+    from users
     select @id, @age
     where @age >= 18
+
+val adults = tql {
+    from users
+    select @id, @age
+    where @age >= 18
+}
+
+# Form 2: Method chain on table
+val adults = users.tql:
+    select @id, @age
+    where @age >= 18
+
+val adults = users.tql {
+    select @id, @age
+    where @age >= 18
+}
 ```
 
 Properties:
@@ -133,11 +238,17 @@ Properties:
 
 ---
 
-### 4.2 Grammar (LL(1)-Friendly)
+### 5.2 TQL Grammar (LL(1)-Friendly)
 
 ```
 TqlBlock
-  := "tql" "(" Expr ")" ":" INDENT TqlStmt+ DEDENT
+  := "tql" Block
+  |  Expr ".tql" Block
+
+TqlStatements
+  := FromStmt? TqlStmt+
+
+FromStmt    := "from" Expr NEWLINE
 
 TqlStmt
   := SelectStmt
@@ -145,6 +256,7 @@ TqlStmt
    | GroupByStmt
    | OrderByStmt
    | LimitStmt
+   | JoinStmt
    | AggStmt
 
 SelectStmt  := "select" ColumnList NEWLINE
@@ -158,11 +270,14 @@ OrderByStmt := "orderby" ColumnList ("asc" | "desc")? NEWLINE
 
 LimitStmt   := "limit" IntLiteral NEWLINE
 
-AggStmt     := "agg" ":" INDENT AggBinding+ DEDENT
+JoinStmt    := "join" Expr "on" BoolExpr NEWLINE
+
+AggStmt     := "agg" Block
 
 AggBinding  := IDENT ":" AggExpr NEWLINE
 
 ColumnRef   := "@" IDENT
+             | "@" IDENT "." IDENT    # For joins: @users.id
 ColumnList  := ColumnRef ("," ColumnRef)*
 ```
 
@@ -170,25 +285,26 @@ Each statement starts with a distinct keyword, allowing one-pass parsing.
 
 ---
 
-## 5. Expressions in tql
+### 5.3 Column Resolution Rules
 
-### 5.1 Column Resolution Rules
-
-Inside `tql(source):`:
+Inside `tql` blocks:
 
 - Column references use `@` prefix: `@age`, `@city`
+- Qualified columns for joins: `@users.id`, `@orders.total`
 - Outer variables accessed without prefix
 - No mutation or assignment
 
 ```simple
 val threshold = 25
-val adults = tql(users):
+val adults = tql {
+    from users
     where @age > threshold  # @age = column, threshold = variable
+}
 ```
 
 ---
 
-### 5.2 Expression Subset
+### 5.4 Expression Subset
 
 ```
 Expr
@@ -200,6 +316,7 @@ Expr
    | Expr ("and" | "or") Expr
    | "not" Expr
    | "(" Expr ")"
+   | FunctionCall
 ```
 
 All column expressions are vectorized.
@@ -209,8 +326,6 @@ All column expressions are vectorized.
 ## 6. Statistics & Analytics
 
 ### 6.1 Descriptive Statistics
-
-Supported aggregation functions:
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
@@ -249,9 +364,7 @@ Supported aggregation functions:
 
 ---
 
-### 6.4 Predictive (Deterministic) Analytics
-
-`tql` supports value-producing predictions, not model training:
+### 6.4 Predictive Analytics
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
@@ -261,14 +374,27 @@ Supported aggregation functions:
 | `predict(col, window)` | `(@Col, u64) -> f64` | Simple prediction |
 | `anomaly(col)` | `(@Col) -> Column<Bool>` | Anomaly detection (IQR) |
 
-All results are scalars or columns.
-
 ---
 
 ### 6.5 Statistics Usage Example
 
 ```simple
-val city_stats = tql(users):
+# Brace style
+val city_stats = tql {
+    from users
+    groupby @city
+    agg {
+        n: count()
+        avg_age: mean(@age)
+        std_age: std(@age)
+        slope: trend(@age)
+        q95: quantile(@age, 0.95)
+    }
+}
+
+# Indent style
+val city_stats = tql:
+    from users
     groupby @city
     agg:
         n: count()
@@ -276,6 +402,15 @@ val city_stats = tql(users):
         std_age: std(@age)
         slope: trend(@age)
         q95: quantile(@age, 0.95)
+
+# Method chain style
+val city_stats = users.tql {
+    groupby @city
+    agg {
+        n: count()
+        avg_age: mean(@age)
+    }
+}
 ```
 
 Result schema:
@@ -293,11 +428,230 @@ Table<{
 
 ---
 
-## 7. Execution Model
+## 7. Other Custom Blocks
 
-### 7.1 Lazy Semantics
+The unified block syntax extends to other domain-specific languages:
 
-`tql(source):` constructs a logical plan.
+### 7.1 Math Block
+
+Compile-time mathematical expressions with symbolic computation:
+
+```simple
+# Symbolic math expressions
+val formula = math {
+    f(x) = x^2 + 2*x + 1
+    g(x) = sin(x) + cos(x)
+    h = f(g(pi/4))
+}
+
+val derivative = math:
+    d/dx (x^3 + 2*x^2)    # Returns 3*x^2 + 4*x
+
+# Matrix operations
+val result = math {
+    A = [[1, 2], [3, 4]]
+    B = [[5, 6], [7, 8]]
+    C = A * B + transpose(A)
+}
+
+# Inline math expression
+val area = math { pi * r^2 }
+```
+
+**Math Block Grammar:**
+
+```
+MathBlock := "math" Block
+
+MathStmt
+  := Assignment
+   | Expression
+
+Assignment := IDENT "=" MathExpr
+           |  IDENT "(" ParamList ")" "=" MathExpr
+
+MathExpr
+  := MathExpr ("+" | "-" | "*" | "/" | "^") MathExpr
+   | FunctionCall
+   | Matrix
+   | IDENT
+   | NUMBER
+   | "(" MathExpr ")"
+   | DerivativeExpr
+   | IntegralExpr
+
+DerivativeExpr := "d" "/" "d" IDENT MathExpr
+IntegralExpr   := "integrate" MathExpr "d" IDENT
+```
+
+---
+
+### 7.2 Regex Block
+
+Compile-time regex with named captures and validation:
+
+```simple
+# Define regex pattern
+val email_pattern = regex {
+    ^
+    (?<user>[a-zA-Z0-9._%+-]+)
+    @
+    (?<domain>[a-zA-Z0-9.-]+)
+    \.
+    (?<tld>[a-zA-Z]{2,})
+    $
+}
+
+# Usage
+val matches = email_pattern.match("user@example.com")
+val user = matches.get("user")  # Type-safe named capture
+
+# Inline regex
+val is_valid = regex { ^\d{3}-\d{4}$ }.test(phone)
+```
+
+---
+
+### 7.3 HTML Block
+
+Type-safe HTML generation with compile-time validation:
+
+```simple
+val page = html {
+    doctype html
+    html lang="en" {
+        head {
+            title { "My Page" }
+            meta charset="utf-8"
+        }
+        body {
+            div class="container" {
+                h1 { "Hello, " + username }
+                p { "Welcome to the site." }
+                ul {
+                    for item in items {
+                        li { item.name }
+                    }
+                }
+            }
+        }
+    }
+}
+
+# Indent style
+val card = html:
+    div class="card":
+        h2: title
+        p: description
+```
+
+---
+
+### 7.4 CSS Block
+
+Type-safe CSS with compile-time validation:
+
+```simple
+val styles = css {
+    .container {
+        display: flex
+        justify-content: center
+        padding: 20px
+    }
+
+    .card {
+        background: #fff
+        border-radius: 8px
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1)
+
+        &:hover {
+            transform: scale(1.02)
+        }
+    }
+}
+
+# Scoped styles
+val button_style = css {
+    background: $primary_color    # Variable interpolation
+    padding: 10px 20px
+    border: none
+    cursor: pointer
+}
+```
+
+---
+
+### 7.5 JSON Block
+
+Type-safe JSON with schema validation:
+
+```simple
+val config = json {
+    "name": "my-app",
+    "version": "1.0.0",
+    "dependencies": {
+        "simple-core": "^2.0",
+        "simple-web": "^1.5"
+    },
+    "settings": {
+        "debug": true,
+        "port": 8080
+    }
+}
+
+# With schema validation
+val user_data = json<UserSchema> {
+    "id": 123,
+    "name": "Alice",
+    "email": "alice@example.com"
+}
+```
+
+---
+
+### 7.6 SQL Block (Raw SQL Escape Hatch)
+
+For cases where TQL is insufficient:
+
+```simple
+val result = sql {
+    SELECT u.name, COUNT(o.id) as order_count
+    FROM users u
+    LEFT JOIN orders o ON u.id = o.user_id
+    WHERE u.created_at > $cutoff_date
+    GROUP BY u.id
+    HAVING COUNT(o.id) > 5
+}
+```
+
+---
+
+### 7.7 GraphQL Block
+
+```simple
+val query = graphql {
+    query GetUser($id: ID!) {
+        user(id: $id) {
+            name
+            email
+            posts {
+                title
+                createdAt
+            }
+        }
+    }
+}
+
+val result = api.execute(query, {id: user_id})
+```
+
+---
+
+## 8. Execution Model
+
+### 8.1 Lazy Semantics
+
+`tql` blocks construct a logical plan.
 
 Execution is triggered by:
 
@@ -307,7 +661,7 @@ Execution is triggered by:
 
 ---
 
-### 7.2 Logical Plan Nodes
+### 8.2 Logical Plan Nodes
 
 ```simple
 enum LogicalPlan:
@@ -315,6 +669,7 @@ enum LogicalPlan:
     Filter(pred: Predicate, input: Box<LogicalPlan>)
     Project(cols: [Str], input: Box<LogicalPlan>)
     GroupBy(groups: [Str], aggs: [Aggregation], input: Box<LogicalPlan>)
+    Join(left: Box<LogicalPlan>, right: Box<LogicalPlan>, on: Predicate)
     Sort(cols: [Str], desc: Bool, input: Box<LogicalPlan>)
     Limit(n: u64, input: Box<LogicalPlan>)
 ```
@@ -323,9 +678,9 @@ Statistics compile into aggregation kernels.
 
 ---
 
-## 8. Backend Architecture
+## 9. Backend Architecture
 
-### 8.1 Backend Abstraction
+### 9.1 Backend Abstraction
 
 ```simple
 trait TableBackend:
@@ -345,7 +700,7 @@ Implementations:
 
 ---
 
-### 8.2 CUDA Backend
+### 9.2 CUDA Backend
 
 CUDA backend may leverage:
 
@@ -358,7 +713,7 @@ Statistics are implemented as compiled kernel graphs, not library calls.
 
 ---
 
-## 9. GPU Capability & Fallback
+## 10. GPU Capability & Fallback
 
 Each operation declares:
 
@@ -376,7 +731,7 @@ Compiler behavior:
 
 ---
 
-## 10. Memory Model
+## 11. Memory Model
 
 - Columnar buffers
 - Explicit CPU <-> GPU transfer nodes
@@ -385,14 +740,14 @@ Compiler behavior:
 
 ---
 
-## 11. Determinism Guarantees
+## 12. Determinism Guarantees
 
-`tql` guarantees:
+Custom blocks guarantee:
 
 - Deterministic execution
 - No hidden randomness
 - No mutable state
-- Stable schema
+- Stable output types
 
 This enables:
 
@@ -402,26 +757,18 @@ This enables:
 
 ---
 
-## 12. Explicit Non-Goals
-
-The following are intentionally excluded:
-
-- Runtime SQL parsing
-- Pandas-style mutable DataFrames
-- Dynamic schema mutation
-- Stateful ML training
-
-These belong to future `model{}` / `train{}` blocks.
-
----
-
 ## 13. Summary
 
 | Component | Description |
 |-----------|-------------|
+| Unified Blocks | `{}` and `:` styles share common interface |
 | SDN Table | Row-oriented data interchange format |
 | DataFrame | Column-oriented analytics type |
-| `tql(t):` | Static query + analytics IR |
+| `tql` | Static query + analytics DSL |
+| `math` | Symbolic math and matrix operations |
+| `regex` | Compile-time regex patterns |
+| `html`/`css` | Type-safe web markup |
+| `json` | Schema-validated JSON |
 | Statistics | Deterministic aggregation kernels |
 | CUDA | Explicit, composable GPU support |
 
@@ -433,4 +780,5 @@ This design keeps Simple fast, analyzable, and compiler-driven.
 
 - `doc/research/statistics_library.md` - Research findings
 - `doc/plan/statistics_library_implementation.md` - Implementation plan
+- `doc/spec/custom_blocks.md` - Full custom block specification
 - `simple/std_lib/test/features/stats/table_statistics_spec.spl` - Test specification

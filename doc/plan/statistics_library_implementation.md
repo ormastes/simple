@@ -65,46 +65,80 @@ val df = dataframe:
     city: ["Seoul", "Busan", "Seoul"]
 ```
 
-### 2.4 TQL Query Syntax (Fixed)
+### 2.4 TQL Query Syntax (Unified Block)
+
+TQL supports both `{}` and `:` block styles with a common `BlockProcessor` interface:
 
 ```simple
-# Block syntax with colon + indentation
-val adults = tql(users):
+# Brace style with 'from' inside
+val adults = tql {
+    from users
+    select @id, @age
+    where @age >= 18
+}
+
+# Indent style with 'from' inside
+val adults = tql:
+    from users
+    select @id, @age
+    where @age >= 18
+
+# Method chain style (source already known)
+val adults = users.tql {
+    select @id, @age
+    where @age >= 18
+}
+
+val adults = users.tql:
     select @id, @age
     where @age >= 18
 
 # @ prefix for column references
 # Outer variables accessed without prefix
 val threshold = 18
-val adults = tql(users):
+val adults = tql {
+    from users
     where @age >= threshold
+}
 ```
 
-### 2.5 TQL Grammar (Fixed, LL(1)-Friendly)
+### 2.5 TQL Grammar (Unified Block, LL(1)-Friendly)
 
 ```
+# Unified block syntax - both styles share BlockProcessor interface
+Block := IndentBlock | BraceBlock
+IndentBlock := ":" INDENT Statement+ DEDENT
+BraceBlock  := "{" Statement+ "}"
+
 TqlBlock
-  := "tql" "(" Expr ")" ":" INDENT TqlStmt+ DEDENT
+  := "tql" Block                    # Standalone with 'from' inside
+  |  Expr ".tql" Block              # Method chain (source is receiver)
 
 TqlStmt
-  := SelectStmt
+  := FromStmt
+   | SelectStmt
    | WhereStmt
    | GroupByStmt
    | OrderByStmt
    | LimitStmt
+   | JoinStmt
    | AggStmt
 
+FromStmt    := "from" Expr NEWLINE
 SelectStmt  := "select" ColumnList NEWLINE
+             | "select" "*" NEWLINE
 WhereStmt   := "where" BoolExpr NEWLINE
-GroupByStmt := "groupby" ColumnList NEWLINE      # Single keyword
+GroupByStmt := "groupby" ColumnList NEWLINE
 OrderByStmt := "orderby" ColumnList ("asc"|"desc")? NEWLINE
 LimitStmt   := "limit" IntLiteral NEWLINE
-AggStmt     := "agg" ":" INDENT AggBindings DEDENT
+JoinStmt    := "join" Expr "on" BoolExpr NEWLINE
+AggStmt     := "agg" Block          # Nested block (either style)
 
 AggBinding  := IDENT ":" AggFunc NEWLINE
-AggFunc     := IDENT "(" ColumnRef? ")"
+AggFunc     := IDENT "(" ColumnRef? ("," Expr)* ")"
 
 ColumnRef   := "@" IDENT
+             | "@" IDENT "." IDENT  # For joins: @users.id
 ColumnList  := ColumnRef ("," ColumnRef)*
 ```
 

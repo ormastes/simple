@@ -87,22 +87,32 @@ users |id, name, email|
 
 The spec's column-oriented syntax conflicts with SDN's row-oriented named tables.
 
-#### Issue #4: TQL Block Syntax
-**Spec proposes:**
+#### Issue #4: TQL Block Syntax (RESOLVED)
+**Original spec proposed:** `tql(users) { ... }` with explicit source parameter
+
+**Corrected design:** Unified block syntax supporting both styles with `from` inside:
 ```simple
-let adults = tql(users) {
-    select id, age
-    where age >= 18
+# Brace style
+val adults = tql {
+    from users
+    select @id, @age
+    where @age >= 18
+}
+
+# Indent style
+val adults = tql:
+    from users
+    select @id, @age
+    where @age >= 18
+
+# Method chain style
+val adults = users.tql {
+    select @id, @age
+    where @age >= 18
 }
 ```
 
-**Simple's block syntax pattern:**
-```simple
-# Blocks use colon + indentation, not braces
-val adults = tql(users):
-    select id, age
-    where age >= 18
-```
+Both `{}` and `:` block styles share a common `BlockProcessor` interface.
 
 ### 2.2 Grammar Conflicts
 
@@ -305,31 +315,99 @@ trait TableBackend:
 ## Appendix A: Corrected Table Literal Syntax
 
 ```simple
-# SDN-compatible row-oriented table
-val users = sdn_table |id, age, city|:
+# SDN-compatible row-oriented table (both styles)
+val users = table |id, age, city|:
     1, 31.0, "Seoul"
     2, 24.0, "Busan"
     3, 28.0, "Seoul"
 
-# New column-oriented DataFrame (proposed)
+val users = table |id, age, city| {
+    1, 31.0, "Seoul"
+    2, 24.0, "Busan"
+    3, 28.0, "Seoul"
+}
+
+# Column-oriented DataFrame (both styles)
 val df = dataframe:
     id:   [1, 2, 3]
     age:  [31.0, 24.0, 28.0]
     city: ["Seoul", "Busan", "Seoul"]
+
+val df = dataframe {
+    id:   [1, 2, 3]
+    age:  [31.0, 24.0, 28.0]
+    city: ["Seoul", "Busan", "Seoul"]
+}
 ```
 
-## Appendix B: Corrected TQL Syntax
+## Appendix B: Corrected TQL Syntax (Unified Block)
 
 ```simple
-# Using Simple's indentation-based blocks
-val adults = tql(users):
+# Brace style with 'from' inside
+val adults = tql {
+    from users
+    select @id, @age
+    where @age >= 18
+}
+
+# Indent style with 'from' inside
+val adults = tql:
+    from users
     select @id, @age
     where @age >= 18
 
-val city_stats = tql(users):
+# Method chain style (source already known)
+val adults = users.tql {
+    select @id, @age
+    where @age >= 18
+}
+
+val city_stats = tql {
+    from users
     groupby @city
-    agg:
+    agg {
         n: count()
         avg_age: mean(@age)
         std_age: std(@age)
+    }
+}
+
+# Mixed nested styles allowed
+val city_stats = tql:
+    from users
+    groupby @city
+    agg {
+        n: count()
+        avg_age: mean(@age)
+    }
+```
+
+## Appendix C: Other Custom Blocks
+
+```simple
+# Math block
+val formula = math {
+    f(x) = x^2 + 2*x + 1
+    derivative = d/dx f(x)
+}
+
+val area = math { pi * r^2 }
+
+# Regex block
+val pattern = regex {
+    ^(?<user>\w+)@(?<domain>\w+)\.(?<tld>\w+)$
+}
+
+# JSON block
+val config = json {
+    "name": "app",
+    "version": "1.0"
+}
+
+# HTML block
+val page = html {
+    div class="container" {
+        h1 { "Hello" }
+    }
+}
 ```
