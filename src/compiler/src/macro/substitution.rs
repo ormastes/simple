@@ -114,6 +114,7 @@ fn substitute_node_templates(node: &Node, const_bindings: &HashMap<String, Strin
             mutability: let_stmt.mutability,
             storage_class: let_stmt.storage_class,
             is_ghost: let_stmt.is_ghost,
+            is_suspend: let_stmt.is_suspend,
         }),
         Node::Assignment(assign) => Node::Assignment(AssignmentStmt {
             span: assign.span,
