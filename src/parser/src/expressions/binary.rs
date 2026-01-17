@@ -51,13 +51,16 @@ impl<'a> Parser<'a> {
     // Precedence (lowest to highest): or, and, equality, comparison, bitwise_or, bitwise_xor, bitwise_and, shift, term, factor, power
 
     // Logical operators (support both keyword and symbol forms: or/||, and/&&)
+    // Also supports suspension variants: and~, or~ (awaits RHS before evaluation)
     parse_binary_multi!(parse_or, parse_and,
         Or => BinOp::Or,
         DoublePipe => BinOp::Or,
+        OrSuspend => BinOp::OrSuspend,
     );
     parse_binary_multi!(parse_and, parse_equality,
         And => BinOp::And,
         DoubleAmp => BinOp::And,
+        AndSuspend => BinOp::AndSuspend,
     );
     parse_binary_single!(parse_bitwise_or, parse_bitwise_xor, Pipe, BinOp::BitOr);
     parse_binary_single!(parse_bitwise_xor, parse_bitwise_and, Caret, BinOp::BitXor);

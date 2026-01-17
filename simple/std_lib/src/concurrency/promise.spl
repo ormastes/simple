@@ -204,9 +204,12 @@ class Promise<T>:
                 for (on_resolve, on_reject) in promise.callbacks:
                     on_reject(error)
 
-        # Execute the executor function
-        # TODO: [stdlib][P2] Add try-catch when error handling is implemented
-        executor(resolve, reject)
+        # Execute the executor function with error handling
+        try:
+            executor(resolve, reject)
+        catch e:
+            # If executor throws, reject the promise
+            reject(e)
 
         return promise
 
@@ -234,13 +237,15 @@ class Promise<T>:
     # Chain a transformation function
     # Returns a new promise that applies the function to the resolved value.
     fn then<U>(self, on_resolve) -> Promise<U>:
-        # Simplified implementation for interpreter compatibility
         if self.state.is_resolved():
             match self.state:
                 case PromiseState.Resolved(v):
-                    # TODO: [stdlib][P2] Add try-catch when error handling is implemented
-                    val result = on_resolve(v)
-                    return Promise.resolved(result)
+                    # Execute callback with error handling
+                    try:
+                        val result = on_resolve(v)
+                        return Promise.resolved(result)
+                    catch e:
+                        return Promise.rejected(e)
                 case _:
                     return Promise.rejected("unreachable")
         elif self.state.is_rejected():
@@ -250,13 +255,27 @@ class Promise<T>:
                 case _:
                     return Promise.rejected("unreachable")
         else:
-            # Pending - return a pending promise
-            # TODO: [stdlib][P2] Implement callback registration for pending promises
-            return Promise.pending()
+            # Pending - register callback and return a new promise
+            var result_promise = Promise.pending()
+
+            # Create callback that will resolve/reject the result promise
+            fn resolve_callback(value):
+                try:
+                    val transformed = on_resolve(value)
+                    result_promise.state = PromiseState.Resolved(transformed)
+                catch e:
+                    result_promise.state = PromiseState.Rejected(e)
+
+            fn reject_callback(error):
+                result_promise.state = PromiseState.Rejected(error)
+
+            # Register the callbacks
+            self.callbacks.append((resolve_callback, reject_callback))
+
+            return result_promise
 
     # Catch errors from a rejected promise
     fn catch<U>(self, on_reject) -> Promise<U>:
-        # Simplified implementation for interpreter compatibility
         if self.state.is_resolved():
             match self.state:
                 case PromiseState.Resolved(v):
@@ -266,15 +285,33 @@ class Promise<T>:
         elif self.state.is_rejected():
             match self.state:
                 case PromiseState.Rejected(e):
-                    # TODO: [stdlib][P2] Add try-catch when error handling is implemented
-                    val result = on_reject(e)
-                    return Promise.resolved(result)
+                    # Execute error handler with error handling
+                    try:
+                        val result = on_reject(e)
+                        return Promise.resolved(result)
+                    catch handler_error:
+                        return Promise.rejected(handler_error)
                 case _:
                     return Promise.rejected("unreachable")
         else:
-            # Pending - return a pending promise
-            # TODO: [stdlib][P2] Implement callback registration for pending promises
-            return Promise.pending()
+            # Pending - register callback and return a new promise
+            var result_promise = Promise.pending()
+
+            # Create callbacks for catch - on resolve, just pass through
+            fn resolve_callback(value):
+                result_promise.state = PromiseState.Resolved(value)
+
+            fn reject_callback(error):
+                try:
+                    val recovered = on_reject(error)
+                    result_promise.state = PromiseState.Resolved(recovered)
+                catch handler_error:
+                    result_promise.state = PromiseState.Rejected(handler_error)
+
+            # Register the callbacks
+            self.callbacks.append((resolve_callback, reject_callback))
+
+            return result_promise
 
     # Finally - always executes regardless of state
     # The callback receives nil as a dummy argument since Simple doesn't support no-arg lambdas easily
@@ -378,6 +415,24 @@ fn all_settled<T>(promises: List<Promise<T>>) -> Promise<List<Result<T>>>:
 
 # Create a promise that resolves after a delay
 fn delay<T>(milliseconds: i32, v: T) -> Promise<T>:
-    # Simplified implementation - resolves immediately
-    # TODO: [stdlib][P2] Implement actual timer-based delay
-    return Promise.resolved(v)
+    """Create a promise that resolves after a specified delay.
+
+    Uses thread-based sleeping to implement the delay.
+
+    Args:
+        milliseconds: Delay in milliseconds
+        v: Value to resolve with after delay
+
+    Returns:
+        Promise that resolves with v after delay
+    """
+    return Promise.new(|resolve, reject|:
+        @extern("runtime", "rt_thread_sleep")
+        fn _rt_thread_sleep(ms: i64)
+
+        # Sleep for the specified duration
+        _rt_thread_sleep(milliseconds as i64)
+
+        # Resolve with the value
+        resolve(v)
+    )

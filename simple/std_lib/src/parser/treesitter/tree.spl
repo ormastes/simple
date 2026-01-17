@@ -101,14 +101,23 @@ struct Tree:
         return TreeCursor(
             tree: self,
             current: self.root_node,
-            depth: 0
+            depth: 0,
+            parent_stack: [],
+            current_child_index: 0
         )
+
+# Parent tracking entry for cursor navigation
+struct ParentEntry:
+    node_id: NodeId
+    child_index: i64
 
 # Tree cursor for efficient traversal
 struct TreeCursor:
     tree: Tree
     current: NodeId
     depth: i64
+    parent_stack: <ParentEntry>  # Stack of (parent_id, child_index)
+    current_child_index: i64     # Index within current parent's children
 
     fn node() -> Option<Node>:
         return self.tree.get_node(self.current)
@@ -118,7 +127,13 @@ struct TreeCursor:
             case Some(node):
                 match node.child(0):
                     case Some(child_id):
+                        # Push current onto parent stack
+                        self.parent_stack.push(ParentEntry {
+                            node_id: self.current,
+                            child_index: self.current_child_index
+                        })
                         self.current = child_id
+                        self.current_child_index = 0
                         self.depth = self.depth + 1
                         return true
                     case None:
@@ -127,9 +142,31 @@ struct TreeCursor:
                 return false
 
     var fn goto_next_sibling() -> bool:
-        # TODO: [parser][P1] Implement sibling navigation (requires parent tracking)
-        return false
+        # Navigate to next sibling using parent tracking
+        if self.parent_stack.len() == 0:
+            return false  # At root, no siblings
+
+        val parent_entry = self.parent_stack[self.parent_stack.len() - 1]
+        match self.tree.get_node(parent_entry.node_id):
+            case Some(parent_node):
+                val next_index = self.current_child_index + 1
+                match parent_node.child(next_index):
+                    case Some(sibling_id):
+                        self.current = sibling_id
+                        self.current_child_index = next_index
+                        return true
+                    case None:
+                        return false  # No more siblings
+            case None:
+                return false
 
     var fn goto_parent() -> bool:
-        # TODO: [parser][P1] Implement parent navigation (requires parent tracking)
-        return false
+        # Navigate to parent using parent stack
+        if self.parent_stack.len() == 0:
+            return false  # Already at root
+
+        val parent_entry = self.parent_stack.pop().unwrap()
+        self.current = parent_entry.node_id
+        self.current_child_index = parent_entry.child_index
+        self.depth = self.depth - 1
+        return true

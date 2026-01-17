@@ -632,6 +632,8 @@ pub enum BinOp {
     // Logical
     And,
     Or,
+    AndSuspend, // and~ (suspending AND - awaits RHS)
+    OrSuspend,  // or~ (suspending OR - awaits RHS)
     // Bitwise
     BitAnd,
     BitOr,

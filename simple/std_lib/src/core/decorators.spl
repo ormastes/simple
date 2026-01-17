@@ -148,21 +148,89 @@ fn deprecated(message = nil):
 
 # Timeout Decorator (#1072)
 #
-# Enforces execution time limits (placeholder - requires async runtime)
+# Enforces execution time limits using isolated threads
+
+import concurrency.threads.{rt_thread_sleep, rt_thread_spawn_isolated, ThreadHandle}
+
+# Result type for timeout execution
+enum TimeoutResult:
+    Success(value: Any)
+    TimedOut
+
+impl TimeoutResult:
+    fn is_success() -> bool:
+        match self:
+            case Success(_): true
+            case _: false
+
+    fn is_timed_out() -> bool:
+        match self:
+            case TimedOut: true
+            case _: false
+
+    fn unwrap() -> Any:
+        match self:
+            case Success(v): v
+            case TimedOut: panic("Called unwrap on TimedOut result")
+
+    fn unwrap_or(default: Any) -> Any:
+        match self:
+            case Success(v): v
+            case TimedOut: default
 
 class TimeoutFunction:
-    """Wrapper that enforces execution timeout"""
+    """Wrapper that enforces execution timeout using threads"""
 
     fn __init__(func, seconds):
         self.func = func
         self.timeout_seconds = seconds
 
     fn __call__(args...):
-        """Call function with timeout (not yet implemented)"""
-        # TODO: [stdlib][P1] Implement actual timeout mechanism
-        # For now, just call the function normally
-        print("[TIMEOUT] Function has {self.timeout_seconds}s timeout (not enforced yet)")
-        return self.func(args...)
+        """Call function with timeout enforcement.
+
+        Spawns the function in an isolated thread and polls for completion.
+        If the function doesn't complete within the timeout, returns None.
+
+        Note: The spawned thread may continue running after timeout.
+        """
+        # Spawn function in isolated thread
+        val handle = rt_thread_spawn_isolated(self.func, args)
+        val thread = ThreadHandle(_handle: handle)
+
+        # Calculate timeout in milliseconds
+        val timeout_ms = (self.timeout_seconds * 1000) as i64
+        val poll_interval_ms: i64 = 10  # Check every 10ms
+        var elapsed_ms: i64 = 0
+
+        # Poll for completion
+        while elapsed_ms < timeout_ms:
+            if thread.is_done():
+                return thread.join()
+
+            rt_thread_sleep(poll_interval_ms)
+            elapsed_ms = elapsed_ms + poll_interval_ms
+
+        # Timeout reached - function did not complete in time
+        print("[TIMEOUT] Function exceeded {self.timeout_seconds}s timeout")
+        return nil
+
+    fn call_with_result(args...) -> TimeoutResult:
+        """Call function and return TimeoutResult instead of nil on timeout."""
+        val handle = rt_thread_spawn_isolated(self.func, args)
+        val thread = ThreadHandle(_handle: handle)
+
+        val timeout_ms = (self.timeout_seconds * 1000) as i64
+        val poll_interval_ms: i64 = 10
+        var elapsed_ms: i64 = 0
+
+        while elapsed_ms < timeout_ms:
+            if thread.is_done():
+                return TimeoutResult.Success(thread.join())
+
+            rt_thread_sleep(poll_interval_ms)
+            elapsed_ms = elapsed_ms + poll_interval_ms
+
+        return TimeoutResult.TimedOut
 
 fn timeout(seconds):
     """
@@ -174,8 +242,19 @@ fn timeout(seconds):
             # ... work ...
             pass
 
-    Note: Full implementation requires async runtime support.
-    Currently only logs the timeout value.
+        # Returns nil if function takes longer than 5 seconds
+        result = slow_function()
+
+        # Or use call_with_result for explicit timeout handling:
+        @timeout(5)
+        fn compute(x: i64) -> i64:
+            return x * x
+
+        match compute.call_with_result(10):
+            case TimeoutResult.Success(v):
+                print("Got result: {v}")
+            case TimeoutResult.TimedOut:
+                print("Function timed out")
     """
     fn decorator(func):
         return TimeoutFunction(func, seconds)

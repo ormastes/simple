@@ -352,8 +352,48 @@ pub class LmsServer:
             _ ->
                 pass
 
-        # TODO: [stdlib][P1] Implement resource reading
-        Err(error.LmsError.InternalError("Resource reading not yet implemented"))
+        # Extract uri from request params
+        val params = match request.get("params"):
+            Some(p) -> p
+            None -> return Err(error.LmsError.InvalidParams("Missing params"))
+
+        val uri = match params.get("uri"):
+            Some(text(u)) -> u
+            Some(_) -> return Err(error.LmsError.InvalidParams("uri must be a string"))
+            None -> return Err(error.LmsError.InvalidParams("Missing uri parameter"))
+
+        # Check cache first
+        if self.resource_cache.contains_key(uri):
+            val cached_content = self.resource_cache.get(uri).unwrap()
+            return Ok({
+                "contents": [{
+                    "uri": uri,
+                    "mimeType": "text/plain",
+                    "text": cached_content
+                }]
+            })
+
+        # Handle different URI schemes
+        if uri.starts_with("file://"):
+            # Read local file
+            val path = uri.substring(7, uri.len())  # Remove "file://"
+            val content = read_file_content(path)
+            match content:
+                Some(text) ->
+                    # Cache the content
+                    self.resource_cache[uri] = text
+                    return Ok({
+                        "contents": [{
+                            "uri": uri,
+                            "mimeType": guess_mime_type(path),
+                            "text": text
+                        }]
+                    })
+                None ->
+                    return Err(error.LmsError.ResourceNotFound("File not found: {path}"))
+        else:
+            # Unknown URI scheme
+            return Err(error.LmsError.InvalidParams("Unsupported URI scheme: {uri}"))
 
     # Execute a tool
     var fn execute_tool(tool_name: text, arguments: Option<Dict>) -> Result<Dict, error.LmsError>:
@@ -485,3 +525,69 @@ static fn create_default_tools() -> Dict<text, protocol.Tool>:
     }
 
     tools
+
+
+# Helper: Read file content
+fn read_file_content(path: text) -> Option<text>:
+    """Read file content as text.
+
+    Args:
+        path: File path
+
+    Returns:
+        File content or None if not readable
+    """
+    @extern("runtime", "rt_file_read_text")
+    fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+    @extern("runtime", "rt_file_exists")
+    fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
+
+    # Check if file exists
+    if not _rt_file_exists(path.ptr(), path.len()):
+        return None
+
+    # Read content
+    val content = _rt_file_read_text(path.ptr(), path.len())
+    if content.is_empty():
+        return Some("")  # Empty file is valid
+
+    Some(content)
+
+
+# Helper: Guess MIME type from file path
+fn guess_mime_type(path: text) -> text:
+    """Guess MIME type from file extension.
+
+    Args:
+        path: File path
+
+    Returns:
+        MIME type string
+    """
+    if path.ends_with(".spl"):
+        return "text/x-simple"
+    elif path.ends_with(".json"):
+        return "application/json"
+    elif path.ends_with(".md"):
+        return "text/markdown"
+    elif path.ends_with(".py"):
+        return "text/x-python"
+    elif path.ends_with(".rs"):
+        return "text/x-rust"
+    elif path.ends_with(".js"):
+        return "text/javascript"
+    elif path.ends_with(".ts"):
+        return "text/typescript"
+    elif path.ends_with(".html"):
+        return "text/html"
+    elif path.ends_with(".css"):
+        return "text/css"
+    elif path.ends_with(".xml"):
+        return "application/xml"
+    elif path.ends_with(".yaml") or path.ends_with(".yml"):
+        return "application/yaml"
+    elif path.ends_with(".toml"):
+        return "application/toml"
+    else:
+        return "text/plain"

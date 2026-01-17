@@ -122,7 +122,7 @@ pub(crate) enum Control {
 /// For FutureValue: blocks until the future completes and returns the result.
 /// For Promise objects: extracts the resolved value if already resolved.
 /// For other values: returns as-is.
-fn await_value(value: Value) -> Result<Value, CompileError> {
+pub(crate) fn await_value(value: Value) -> Result<Value, CompileError> {
     match value {
         // Handle FutureValue - await the result
         Value::Future(ref future) => {
@@ -224,10 +224,6 @@ pub(crate) fn exec_node(
 
                 // Handle suspension operator (~=): await futures and promises
                 let value = if let_stmt.is_suspend {
-                    eprintln!("[DEBUG] is_suspend=true, value type: {:?}", std::mem::discriminant(&value));
-                    if let Value::Object { ref class, .. } = value {
-                        eprintln!("[DEBUG] Object class: {}", class);
-                    }
                     await_value(value)?
                 } else {
                     value
@@ -450,22 +446,33 @@ pub(crate) fn exec_node(
                 Err(CompileError::Semantic("unsupported assignment target".into()))
             }
         }
-        // Handle augmented assignments (+=, -=, *=, /=)
+        // Handle augmented assignments (+=, -=, *=, /=) and suspension variants (~+=, ~-=, etc.)
         Node::Assignment(assign) => {
+            // Check if this is a suspension assignment that needs await
+            let is_suspend = matches!(
+                assign.op,
+                AssignOp::SuspendAssign
+                    | AssignOp::SuspendAddAssign
+                    | AssignOp::SuspendSubAssign
+                    | AssignOp::SuspendMulAssign
+                    | AssignOp::SuspendDivAssign
+            );
+
             // Get the binary operation corresponding to the augmented assign op
             let bin_op = match assign.op {
-                AssignOp::AddAssign => BinOp::Add,
-                AssignOp::SubAssign => BinOp::Sub,
-                AssignOp::MulAssign => BinOp::Mul,
-                AssignOp::DivAssign => BinOp::Div,
-                AssignOp::SuspendAssign | AssignOp::Assign => {
+                AssignOp::AddAssign | AssignOp::SuspendAddAssign => Some(BinOp::Add),
+                AssignOp::SubAssign | AssignOp::SuspendSubAssign => Some(BinOp::Sub),
+                AssignOp::MulAssign | AssignOp::SuspendMulAssign => Some(BinOp::Mul),
+                AssignOp::DivAssign | AssignOp::SuspendDivAssign => Some(BinOp::Div),
+                AssignOp::SuspendAssign => None, // ~= is simple await assignment
+                AssignOp::Assign => {
                     return Err(CompileError::Semantic(
-                        "unsupported augmented assignment operator".into(),
+                        "plain assignment should be handled elsewhere".into(),
                     ))
                 }
             };
 
-            // Handle identifier targets: x += 1
+            // Handle identifier targets: x += 1 or x ~+= promise
             if let Expr::Identifier(name) = &assign.target {
                 let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(name));
                 if is_const {
@@ -474,13 +481,36 @@ pub(crate) fn exec_node(
                     )));
                 }
 
-                // Create a binary expression: target_expr op value_expr
-                let binary_expr = Expr::Binary {
-                    op: bin_op,
-                    left: Box::new(assign.target.clone()),
-                    right: Box::new(assign.value.clone()),
+                // Evaluate the RHS
+                let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+
+                // If suspension, await the value
+                if is_suspend {
+                    rhs_value = await_value(rhs_value)?;
+                }
+
+                // If compound assignment, combine with current value
+                let new_value = if let Some(op) = bin_op {
+                    // Create a binary expression and evaluate it
+                    let current = env.get(name).cloned().ok_or_else(|| {
+                        CompileError::Semantic(format!("undefined variable '{name}'"))
+                    })?;
+                    // Insert rhs as temp var, create binary expr, evaluate
+                    let temp_name = "__rhs_temp__".to_string();
+                    env.insert(temp_name.clone(), rhs_value);
+                    let binary_expr = Expr::Binary {
+                        op,
+                        left: Box::new(assign.target.clone()),
+                        right: Box::new(Expr::Identifier(temp_name.clone())),
+                    };
+                    let result = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
+                    env.remove(&temp_name);
+                    result
+                } else {
+                    // Simple ~= assignment
+                    rhs_value
                 };
-                let new_value = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
+
                 env.insert(name.clone(), new_value);
                 Ok(Control::Next)
             }
@@ -490,13 +520,38 @@ pub(crate) fn exec_node(
                     if let Some(obj_val) = env.get(obj_name).cloned() {
                         match obj_val {
                             Value::Object { class, mut fields } => {
-                                // Create a binary expression: target_expr op value_expr
-                                let binary_expr = Expr::Binary {
-                                    op: bin_op,
-                                    left: Box::new(assign.target.clone()),
-                                    right: Box::new(assign.value.clone()),
+                                // Evaluate the RHS
+                                let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+
+                                // If suspension, await the value
+                                if is_suspend {
+                                    rhs_value = await_value(rhs_value)?;
+                                }
+
+                                // If compound assignment, combine with current value
+                                let new_value = if let Some(op) = bin_op {
+                                    // Create a binary expression and evaluate it
+                                    let current = fields.get(field).cloned().ok_or_else(|| {
+                                        CompileError::Semantic(format!("undefined field '{field}'"))
+                                    })?;
+                                    // Insert temps and evaluate
+                                    let temp_lhs = "__lhs_temp__".to_string();
+                                    let temp_rhs = "__rhs_temp__".to_string();
+                                    env.insert(temp_lhs.clone(), current);
+                                    env.insert(temp_rhs.clone(), rhs_value);
+                                    let binary_expr = Expr::Binary {
+                                        op,
+                                        left: Box::new(Expr::Identifier(temp_lhs.clone())),
+                                        right: Box::new(Expr::Identifier(temp_rhs.clone())),
+                                    };
+                                    let result = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
+                                    env.remove(&temp_lhs);
+                                    env.remove(&temp_rhs);
+                                    result
+                                } else {
+                                    rhs_value
                                 };
-                                let new_value = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
+
                                 fields.insert(field.clone(), new_value);
                                 env.insert(obj_name.clone(), Value::Object { class, fields });
                                 Ok(Control::Next)

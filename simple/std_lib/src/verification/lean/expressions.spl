@@ -679,21 +679,132 @@ fn translate_stmt(stmt: SimpleStmt, in_do_block: bool = True) -> text:
 # Contract Expression Translation
 # Translates ContractExpr from verification.models.contracts to Lean syntax
 # =============================================================================
-# TODO: [stdlib][P1] Module prefix in match patterns not yet supported
-# These functions are stubbed out until parser supports this syntax
+# Workaround: Match on expr.kind field instead of module-prefixed enum variants
+# (Module prefix in match patterns not yet supported by parser)
 
 fn translate_contract_expr(expr: contracts.ContractExpr) -> text:
-    # Stub - full implementation requires module-qualified match patterns
-    return "_"
+    """Translate a ContractExpr to Lean syntax.
+
+    Args:
+        expr: Contract expression to translate
+
+    Returns:
+        Lean syntax string
+    """
+    import verification.models.contracts.ContractExprKind
+
+    match expr.kind:
+        case ContractExprKind.True_ ->
+            return "True"
+        case ContractExprKind.False_ ->
+            return "False"
+        case ContractExprKind.Var ->
+            val name = expr.name.unwrap_or("_")
+            return lean_ident(name)
+        case ContractExprKind.OldValue ->
+            val child = translate_contract_expr(expr.children[0])
+            return "(old {child})"
+        case ContractExprKind.Result ->
+            return "result"
+        case ContractExprKind.And ->
+            return translate_binary_contract(expr, "∧")
+        case ContractExprKind.Or ->
+            return translate_binary_contract(expr, "∨")
+        case ContractExprKind.Not ->
+            val child = translate_contract_expr(expr.children[0])
+            return "¬{child}"
+        case ContractExprKind.Implies ->
+            return translate_binary_contract(expr, "→")
+        case ContractExprKind.Iff ->
+            return translate_binary_contract(expr, "↔")
+        case ContractExprKind.Forall ->
+            val var_name = expr.name.unwrap_or("x")
+            val type_name = expr.type_name.unwrap_or("α")
+            val body = translate_contract_expr(expr.children[0])
+            return "∀ {lean_ident(var_name)} : {type_name}, {body}"
+        case ContractExprKind.Exists ->
+            val var_name = expr.name.unwrap_or("x")
+            val type_name = expr.type_name.unwrap_or("α")
+            val body = translate_contract_expr(expr.children[0])
+            return "∃ {lean_ident(var_name)} : {type_name}, {body}"
+        case ContractExprKind.Eq ->
+            return translate_binary_contract(expr, "=")
+        case ContractExprKind.Ne ->
+            return translate_binary_contract(expr, "≠")
+        case ContractExprKind.Lt ->
+            return translate_binary_contract(expr, "<")
+        case ContractExprKind.Le ->
+            return translate_binary_contract(expr, "≤")
+        case ContractExprKind.Gt ->
+            return translate_binary_contract(expr, ">")
+        case ContractExprKind.Ge ->
+            return translate_binary_contract(expr, "≥")
+        case ContractExprKind.Add ->
+            return translate_binary_contract(expr, "+")
+        case ContractExprKind.Sub ->
+            return translate_binary_contract(expr, "-")
+        case ContractExprKind.Mul ->
+            return translate_binary_contract(expr, "*")
+        case ContractExprKind.Div ->
+            return translate_binary_contract(expr, "/")
+        case ContractExprKind.Mod ->
+            return translate_binary_contract(expr, "%")
+        case ContractExprKind.Neg ->
+            val child = translate_contract_expr(expr.children[0])
+            return "-{child}"
+        case ContractExprKind.Len ->
+            val child = translate_contract_expr(expr.children[0])
+            return "({child}).length"
+        case ContractExprKind.Index ->
+            val collection = translate_contract_expr(expr.children[0])
+            val index = translate_contract_expr(expr.children[1])
+            return "{collection}[{index}]"
+        case ContractExprKind.Contains ->
+            val elem = translate_contract_expr(expr.children[0])
+            val collection = translate_contract_expr(expr.children[1])
+            return "{elem} ∈ {collection}"
+        case ContractExprKind.Call ->
+            val func_name = expr.name.unwrap_or("_")
+            var args_parts: List<text> = []
+            for child in expr.children:
+                args_parts.append(translate_contract_expr(child))
+            val args_str = args_parts.join(" ")
+            return "({lean_ident(func_name)} {args_str})"
+        case _ ->
+            return "_"
 
 # Helper for binary operations
 fn translate_binary_contract(expr: contracts.ContractExpr, op: text) -> text:
-    return "_"
+    """Translate a binary contract expression."""
+    if expr.children.len() >= 2:
+        val left = translate_contract_expr(expr.children[0])
+        val right = translate_contract_expr(expr.children[1])
+        return "({left} {op} {right})"
+    else:
+        return "_"
 
 # Translate a decreases expression for termination proofs
 fn translate_decreases_expr(exprs: List<contracts.ContractExpr>) -> text:
-    return "_"
+    """Translate decreases expressions for termination proofs."""
+    if exprs.len() == 0:
+        return ""
+
+    if exprs.len() == 1:
+        return "termination_by {translate_contract_expr(exprs[0])}"
+
+    # Multiple decreases arguments - create tuple
+    var parts: List<text> = []
+    for expr in exprs:
+        parts.append(translate_contract_expr(expr))
+
+    val tuple_str = parts.join(", ")
+    return "termination_by ({tuple_str})"
 
 # Generate a Lean proposition from a contract expression
 fn to_lean_prop(expr: contracts.ContractExpr) -> text:
-    return "_"
+    """Convert a contract expression to a Lean proposition.
+
+    This wraps the expression in a Prop type context.
+    """
+    val translated = translate_contract_expr(expr)
+    return translated

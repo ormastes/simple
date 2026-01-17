@@ -1,7 +1,7 @@
 # VSCode Extension Manifest Generator
 # Auto-generate package.json from Simple extension code
 
-use core.json
+use core.json.{JsonBuilder, JsonValue, stringify, stringify_pretty}
 use core.result.{Result, Ok, Err}
 
 # Extension manifest
@@ -104,40 +104,55 @@ pub class ExtensionManifest:
         self.contributes.add_command(command, title)
         self.add_activation_event("onCommand:{command}")
 
-    pub fn to_json(self): text =
+    pub fn to_json(): text =
         """Generate package.json content.
 
         Returns:
-            JSON string for package.json
+            JSON string for package.json with proper escaping
         """
-        # TODO: [stdlib][P1] Implement proper JSON serialization when available
-        val json = "{\n"
-        json = json + "  \"name\": \"{self.name}\",\n"
-        json = json + "  \"displayName\": \"{self.display_name}\",\n"
-        json = json + "  \"description\": \"{self.description}\",\n"
-        json = json + "  \"version\": \"{self.version}\",\n"
-        json = json + "  \"publisher\": \"{self.publisher}\",\n"
-        json = json + "  \"engines\": {\n"
-        json = json + "    \"vscode\": \"^1.80.0\"\n"
-        json = json + "  },\n"
-        json = json + "  \"categories\": [\n"
-        for (i, cat) in self.categories.enumerate():
-            json = json + "    \"{cat}\""
-            if i < self.categories.len() - 1:
-                json = json + ","
-            json = json + "\n"
-        json = json + "  ],\n"
-        json = json + "  \"activationEvents\": [\n"
-        for (i, event) in self.activationEvents.enumerate():
-            json = json + "    \"{event}\""
-            if i < self.activationEvents.len() - 1:
-                json = json + ","
-            json = json + "\n"
-        json = json + "  ],\n"
-        json = json + "  \"main\": \"{self.main}\",\n"
-        json = json + "  \"contributes\": " + self.contributes.to_json() + "\n"
-        json = json + "}\n"
-        json
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("name", self.name)
+        builder = builder.set_string("displayName", self.display_name)
+        builder = builder.set_string("description", self.description)
+        builder = builder.set_string("version", self.version)
+        builder = builder.set_string("publisher", self.publisher)
+
+        # Engines
+        var engines_dict: Dict<text, JsonValue> = {}
+        for (key, value) in self.engines.items():
+            engines_dict[key] = JsonValue.text(value)
+        builder = builder.set_object("engines", engines_dict)
+
+        # Categories array
+        var categories_values: List<JsonValue> = []
+        for cat in self.categories:
+            categories_values.push(JsonValue.text(cat))
+        builder = builder.set_array("categories", categories_values)
+
+        # Activation events array
+        var events_values: List<JsonValue> = []
+        for event in self.activationEvents:
+            events_values.push(JsonValue.text(event))
+        builder = builder.set_array("activationEvents", events_values)
+
+        builder = builder.set_string("main", self.main)
+
+        # Contributes
+        builder = builder.set("contributes", self.contributes.to_json_value())
+
+        # Scripts
+        var scripts_dict: Dict<text, JsonValue> = {}
+        for (key, value) in self.scripts.items():
+            scripts_dict[key] = JsonValue.text(value)
+        builder = builder.set_object("scripts", scripts_dict)
+
+        # DevDependencies
+        var deps_dict: Dict<text, JsonValue> = {}
+        for (key, value) in self.devDependencies.items():
+            deps_dict[key] = JsonValue.text(value)
+        builder = builder.set_object("devDependencies", deps_dict)
+
+        stringify_pretty(builder.build(), 2)
 
 # Manifest contributions section
 pub class ManifestContributes:
@@ -185,36 +200,50 @@ pub class ManifestContributes:
         }
         self.commands.append(cmd)
 
-    pub fn to_json(self): text =
-        """Convert to JSON string.
-
-        Returns:
-            JSON representation
-        """
-        val json = "{\n"
+    pub fn to_json_value() -> JsonValue:
+        """Convert to JsonValue for proper serialization."""
+        var obj: Dict<text, JsonValue> = {}
 
         # Languages
         if self.languages.len() > 0:
-            json = json + "    \"languages\": [\n"
-            for (i, lang) in self.languages.enumerate():
-                json = json + "      " + lang.to_json()
-                if i < self.languages.len() - 1:
-                    json = json + ","
-                json = json + "\n"
-            json = json + "    ],\n"
+            var langs: List<JsonValue> = []
+            for lang in self.languages:
+                langs.push(lang.to_json_value())
+            obj["languages"] = JsonValue.Array(langs)
 
         # Commands
         if self.commands.len() > 0:
-            json = json + "    \"commands\": [\n"
-            for (i, cmd) in self.commands.enumerate():
-                json = json + "      " + cmd.to_json()
-                if i < self.commands.len() - 1:
-                    json = json + ","
-                json = json + "\n"
-            json = json + "    ]\n"
+            var cmds: List<JsonValue> = []
+            for cmd in self.commands:
+                cmds.push(cmd.to_json_value())
+            obj["commands"] = JsonValue.Array(cmds)
 
-        json = json + "  }"
-        json
+        # Grammars
+        if self.grammars.len() > 0:
+            var grams: List<JsonValue> = []
+            for gram in self.grammars:
+                grams.push(gram.to_json_value())
+            obj["grammars"] = JsonValue.Array(grams)
+
+        # Themes
+        if self.themes.len() > 0:
+            var thms: List<JsonValue> = []
+            for theme in self.themes:
+                thms.push(theme.to_json_value())
+            obj["themes"] = JsonValue.Array(thms)
+
+        # Configuration
+        match self.configuration:
+            case Some(config):
+                obj["configuration"] = config.to_json_value()
+            case None:
+                pass
+
+        JsonValue.Object(obj)
+
+    pub fn to_json(): text =
+        """Convert to JSON string."""
+        stringify(self.to_json_value())
 
 # Language contribution
 pub class LanguageContribution:
@@ -223,8 +252,26 @@ pub class LanguageContribution:
     pub aliases: List<text>
     pub configuration: text
 
-    pub fn to_json(self): text =
-        "{{\n        \"id\": \"{self.id}\",\n        \"extensions\": [\"{self.extensions[0]}\"],\n        \"aliases\": [\"{self.aliases[0]}\"],\n        \"configuration\": \"{self.configuration}\"\n      }}"
+    pub fn to_json_value() -> JsonValue:
+        """Convert to JsonValue."""
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("id", self.id)
+
+        var exts: List<JsonValue> = []
+        for ext in self.extensions:
+            exts.push(JsonValue.text(ext))
+        builder = builder.set_array("extensions", exts)
+
+        var aliases: List<JsonValue> = []
+        for alias in self.aliases:
+            aliases.push(JsonValue.text(alias))
+        builder = builder.set_array("aliases", aliases)
+
+        builder = builder.set_string("configuration", self.configuration)
+        builder.build()
+
+    pub fn to_json(): text =
+        stringify(self.to_json_value())
 
 # Command contribution
 pub class CommandContribution:
@@ -232,8 +279,16 @@ pub class CommandContribution:
     pub title: text
     pub category: text
 
-    pub fn to_json(self): text =
-        "{{\n        \"command\": \"{self.command}\",\n        \"title\": \"{self.title}\",\n        \"category\": \"{self.category}\"\n      }}"
+    pub fn to_json_value() -> JsonValue:
+        """Convert to JsonValue."""
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("command", self.command)
+        builder = builder.set_string("title", self.title)
+        builder = builder.set_string("category", self.category)
+        builder.build()
+
+    pub fn to_json(): text =
+        stringify(self.to_json_value())
 
 # Grammar contribution
 pub class GrammarContribution:
@@ -241,22 +296,58 @@ pub class GrammarContribution:
     pub scopeName: text
     pub path: text
 
+    pub fn to_json_value() -> JsonValue:
+        """Convert to JsonValue."""
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("language", self.language)
+        builder = builder.set_string("scopeName", self.scopeName)
+        builder = builder.set_string("path", self.path)
+        builder.build()
+
 # Theme contribution
 pub class ThemeContribution:
     pub label: text
     pub uiTheme: text
     pub path: text
 
+    pub fn to_json_value() -> JsonValue:
+        """Convert to JsonValue."""
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("label", self.label)
+        builder = builder.set_string("uiTheme", self.uiTheme)
+        builder = builder.set_string("path", self.path)
+        builder.build()
+
 # Configuration contribution
 pub class ConfigurationContribution:
     pub title: text
     pub properties: Dict<text, ConfigProperty>
+
+    pub fn to_json_value() -> JsonValue:
+        """Convert to JsonValue."""
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("title", self.title)
+
+        var props_obj: Dict<text, JsonValue> = {}
+        for (key, prop) in self.properties.items():
+            props_obj[key] = prop.to_json_value()
+        builder = builder.set_object("properties", props_obj)
+
+        builder.build()
 
 # Configuration property
 pub class ConfigProperty:
     pub property_type: text
     pub default: text
     pub description: text
+
+    pub fn to_json_value() -> JsonValue:
+        """Convert to JsonValue."""
+        var builder = JsonBuilder.new()
+        builder = builder.set_string("type", self.property_type)
+        builder = builder.set_string("default", self.default)
+        builder = builder.set_string("description", self.description)
+        builder.build()
 
 # Manifest generator - extract info from extension code
 pub class ManifestGenerator:

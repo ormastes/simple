@@ -15,6 +15,10 @@ impl<'a> Parser<'a> {
             TokenKind::StarAssign => Some(AssignOp::MulAssign),
             TokenKind::SlashAssign => Some(AssignOp::DivAssign),
             TokenKind::TildeAssign => Some(AssignOp::SuspendAssign),
+            TokenKind::TildePlusAssign => Some(AssignOp::SuspendAddAssign),
+            TokenKind::TildeMinusAssign => Some(AssignOp::SuspendSubAssign),
+            TokenKind::TildeStarAssign => Some(AssignOp::SuspendMulAssign),
+            TokenKind::TildeSlashAssign => Some(AssignOp::SuspendDivAssign),
             _ => None,
         };
 

@@ -57,7 +57,7 @@ pub(super) fn compile_binop<M: Module>(
             let call = builder.ins().call(contains_ref, &[rhs, lhs]);
             builder.inst_results(call)[0]
         }
-        BinOp::And => {
+        BinOp::And | BinOp::AndSuspend => {
             let lhs_bool = builder
                 .ins()
                 .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, 0);
@@ -66,7 +66,7 @@ pub(super) fn compile_binop<M: Module>(
                 .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, rhs, 0);
             builder.ins().band(lhs_bool, rhs_bool)
         }
-        BinOp::Or => {
+        BinOp::Or | BinOp::OrSuspend => {
             let lhs_bool = builder
                 .ins()
                 .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, 0);

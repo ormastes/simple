@@ -274,9 +274,35 @@ pub struct HotReloadManager extends godot.node.Node:
 # Helper functions (placeholders)
 
 fn get_file_modified_time(path: text) -> f64:
-    # TODO: [stdlib][P1] Implement actual file stat
-    # For now, return current time as placeholder
-    return get_current_time()
+    """Get a unique identifier for file state using content hash.
+
+    Since mtime FFI is not available, we use a content-based approach
+    which is actually more reliable for detecting real file changes.
+    The hash is converted to a float to fit the expected interface.
+
+    Args:
+        path: File path to check
+
+    Returns:
+        A float representing the file's current state (based on content hash)
+    """
+    @extern("runtime", "rt_file_read_text")
+    fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+    @extern("runtime", "rt_fnv_hash")
+    fn _rt_fnv_hash(data_ptr: &u8, data_len: u64) -> u64
+
+    # Read file content
+    val content = _rt_file_read_text(path.ptr(), path.len())
+    if content.is_empty():
+        # File doesn't exist or empty - return 0
+        return 0.0
+
+    # Compute FNV-1a hash of content
+    val hash = _rt_fnv_hash(content.ptr(), content.len())
+
+    # Convert hash to float (high bits give us uniqueness)
+    return (hash as f64)
 
 fn get_files_recursive(dir: text, ext: text) -> Array<text>:
     """Recursively find all files with given extension.

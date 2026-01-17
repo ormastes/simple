@@ -775,14 +775,241 @@ pub class DependencyTracker:
 
         Builds complete dependency graph by parsing all source files.
         """
-        # TODO: [stdlib][P1] Implement language-specific dependency extraction
-        # - Simple: Parse import statements with Tree-sitter
-        # - Rust: Parse use/mod statements
-        # - Python: Parse import/from statements
-        # - JavaScript: Parse import/require statements
-
         if self.verbose:
             print("Analyzing dependencies...")
+
+        # Find and analyze all source files by language
+        val extensions = [
+            (".spl", Language::Simple),
+            (".rs", Language::Rust),
+            (".py", Language::Python),
+            (".js", Language::JavaScript),
+            (".ts", Language::TypeScript)
+        ]
+
+        for (ext, lang) in extensions:
+            val files = find_files_with_extension(self.root, ext)
+            for file in files:
+                self.analyze_file(file, lang)
+
+        if self.verbose:
+            print("Found {self.get_node_count()} files with {self.get_edge_count()} dependencies")
+
+
+fn find_files_with_extension(root: text, ext: text): List<text> =
+    """Find all files with given extension recursively.
+
+    Args:
+        root: Root directory
+        ext: File extension (e.g., ".spl")
+
+    Returns:
+        List of file paths
+    """
+    @extern("runtime", "rt_dir_list")
+    fn _rt_dir_list(path_ptr: &u8, path_len: u64) -> Any
+
+    @extern("runtime", "rt_file_stat")
+    fn _rt_file_stat(
+        path_ptr: &u8,
+        path_len: u64,
+        out_exists: &mut bool,
+        out_is_file: &mut bool,
+        out_is_dir: &mut bool,
+        out_is_readable: &mut bool,
+        out_is_writable: &mut bool,
+        out_size: &mut i64
+    )
+
+    var results: List<text> = []
+
+    val entries = _rt_dir_list(root.ptr(), root.len())
+    if entries.is_nil():
+        return results
+
+    # Cast to list of strings
+    val entry_list = entries as List<text>
+    for entry in entry_list:
+        val full_path = root + "/" + entry
+
+        var exists = false
+        var is_file = false
+        var is_dir = false
+        var is_readable = false
+        var is_writable = false
+        var size: i64 = 0
+
+        _rt_file_stat(
+            full_path.ptr(), full_path.len(),
+            &mut exists, &mut is_file, &mut is_dir,
+            &mut is_readable, &mut is_writable, &mut size
+        )
+
+        if is_file and full_path.ends_with(ext):
+            results.append(full_path)
+        elif is_dir and not entry.starts_with("."):
+            # Recurse into subdirectory
+            val sub_files = find_files_with_extension(full_path, ext)
+            for f in sub_files:
+                results.append(f)
+
+    results
+
+
+fn parse_simple_imports(file_path: text): List<text> =
+    """Parse Simple language import statements.
+
+    Args:
+        file_path: Path to .spl file
+
+    Returns:
+        List of imported module paths
+    """
+    @extern("runtime", "rt_file_read_text")
+    fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+    val content = _rt_file_read_text(file_path.ptr(), file_path.len())
+    var imports: List<text> = []
+
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        # Match: import module.path
+        if trimmed.starts_with("import "):
+            val module = trimmed.substring(7, trimmed.len()).trim()
+            # Remove 'as alias' if present
+            val as_pos = module.find(" as ")
+            val clean_module = if as_pos >= 0:
+                module.substring(0, as_pos)
+            else:
+                module
+            imports.append(clean_module)
+        # Match: from module import ...
+        elif trimmed.starts_with("from "):
+            val rest = trimmed.substring(5, trimmed.len()).trim()
+            val import_pos = rest.find(" import ")
+            if import_pos >= 0:
+                val module = rest.substring(0, import_pos).trim()
+                imports.append(module)
+
+    imports
+
+
+fn parse_rust_imports(file_path: text): List<text> =
+    """Parse Rust use statements.
+
+    Args:
+        file_path: Path to .rs file
+
+    Returns:
+        List of imported crate/module paths
+    """
+    @extern("runtime", "rt_file_read_text")
+    fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+    val content = _rt_file_read_text(file_path.ptr(), file_path.len())
+    var imports: List<text> = []
+
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        # Match: use crate::path;
+        if trimmed.starts_with("use "):
+            var path = trimmed.substring(4, trimmed.len()).trim()
+            # Remove trailing semicolon
+            if path.ends_with(";"):
+                path = path.substring(0, path.len() - 1)
+            # Remove braces for grouped imports
+            val brace_pos = path.find("{")
+            if brace_pos >= 0:
+                path = path.substring(0, brace_pos)
+            imports.append(path)
+        # Match: mod module;
+        elif trimmed.starts_with("mod ") and trimmed.ends_with(";"):
+            val module = trimmed.substring(4, trimmed.len() - 1).trim()
+            imports.append(module)
+
+    imports
+
+
+fn parse_python_imports(file_path: text): List<text> =
+    """Parse Python import statements.
+
+    Args:
+        file_path: Path to .py file
+
+    Returns:
+        List of imported modules
+    """
+    @extern("runtime", "rt_file_read_text")
+    fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+    val content = _rt_file_read_text(file_path.ptr(), file_path.len())
+    var imports: List<text> = []
+
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        # Match: import module
+        if trimmed.starts_with("import "):
+            val rest = trimmed.substring(7, trimmed.len()).trim()
+            # Handle "import a, b, c"
+            val parts = rest.split(",")
+            for part in parts:
+                var module = part.trim()
+                # Remove "as alias"
+                val as_pos = module.find(" as ")
+                if as_pos >= 0:
+                    module = module.substring(0, as_pos)
+                imports.append(module)
+        # Match: from module import ...
+        elif trimmed.starts_with("from "):
+            val rest = trimmed.substring(5, trimmed.len()).trim()
+            val import_pos = rest.find(" import ")
+            if import_pos >= 0:
+                val module = rest.substring(0, import_pos).trim()
+                imports.append(module)
+
+    imports
+
+
+fn parse_js_imports(file_path: text): List<text> =
+    """Parse JavaScript/TypeScript import statements.
+
+    Args:
+        file_path: Path to .js/.ts file
+
+    Returns:
+        List of imported modules
+    """
+    @extern("runtime", "rt_file_read_text")
+    fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+    val content = _rt_file_read_text(file_path.ptr(), file_path.len())
+    var imports: List<text> = []
+
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        # Match: import ... from "module"
+        if trimmed.starts_with("import "):
+            val from_pos = trimmed.find(" from ")
+            if from_pos >= 0:
+                var module = trimmed.substring(from_pos + 6, trimmed.len()).trim()
+                # Remove quotes and semicolon
+                module = module.replace("\"", "").replace("'", "").replace(";", "")
+                imports.append(module)
+        # Match: const x = require("module")
+        val require_pos = trimmed.find("require(")
+        if require_pos >= 0:
+            var start = require_pos + 8
+            val close = trimmed.find(")", start)
+            if close > start:
+                var module = trimmed.substring(start, close).trim()
+                module = module.replace("\"", "").replace("'", "")
+                imports.append(module)
+
+    imports
 
     pub fn analyze_file(self, file: text, language: Language):
         """Analyze dependencies for single file.

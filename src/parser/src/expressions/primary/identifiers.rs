@@ -39,6 +39,9 @@ impl<'a> Parser<'a> {
             TokenKind::AndThen => self.parse_keyword_identifier("and_then"),
             TokenKind::Context => self.parse_keyword_identifier("context"),
             TokenKind::Common => self.parse_keyword_identifier("common"),
+            // Allow math keywords to be used as identifiers outside m{} blocks
+            TokenKind::Slice => self.parse_keyword_identifier("Slice"),
+            TokenKind::Flat => self.parse_keyword_identifier("Flat"),
             TokenKind::Vec => self.parse_vec_keyword(),
             TokenKind::Gpu => {
                 self.advance();

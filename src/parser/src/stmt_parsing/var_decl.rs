@@ -75,6 +75,31 @@ impl Parser<'_> {
         self.parse_let_impl(start_span, mutability, StorageClass::Auto, true)
     }
 
+    /// Parse wildcard suspension: `_ ~= expr`
+    /// Evaluates expr with await and discards the result
+    pub(crate) fn parse_wildcard_suspend(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Underscore)?;
+        self.expect(&TokenKind::TildeAssign)?;
+        let value = self.parse_expression()?;
+
+        Ok(Node::Let(LetStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            pattern: Pattern::Wildcard,
+            ty: None,
+            value: Some(value),
+            mutability: Mutability::Immutable,
+            storage_class: StorageClass::Auto,
+            is_ghost: false,
+            is_suspend: true,
+        }))
+    }
+
     fn parse_let_impl(
         &mut self,
         start_span: Span,
