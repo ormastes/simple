@@ -203,31 +203,34 @@ trait Iterator:
 
 # FromIterator trait - create collections from iterators
 trait FromIterator<T>:
-    fn from_iter<I: Iterator<Item=T>>(iter: I) -> Self
+    # TODO: Parser limitation - associated type constraints like Iterator<Item=T> not supported
+    fn from_iter<I: Iterator>(iter: I) -> Self
 
 # IntoIterator trait - convert to iterator
 trait IntoIterator:
     type Item
-    type IntoIter: Iterator<Item=Self::Item>
+    # TODO: Parser limitation - associated type constraints not supported
+    type IntoIter  # Should be: Iterator<Item=Self::Item>
     fn into_iter() -> Self::IntoIter
 
 # Add trait - addition operator
-trait Add<Rhs = Self>:
+# TODO: Parser limitation - default type parameters not supported
+trait Add<Rhs>:  # Should be: Add<Rhs = Self>
     type Output
     fn add(rhs: Rhs) -> Self::Output
 
 # Sub trait - subtraction operator
-trait Sub<Rhs = Self>:
+trait Sub<Rhs>:  # Should be: Sub<Rhs = Self>
     type Output
     fn sub(rhs: Rhs) -> Self::Output
 
 # Mul trait - multiplication operator
-trait Mul<Rhs = Self>:
+trait Mul<Rhs>:  # Should be: Mul<Rhs = Self>
     type Output
     fn mul(rhs: Rhs) -> Self::Output
 
 # Div trait - division operator
-trait Div<Rhs = Self>:
+trait Div<Rhs>:  # Should be: Div<Rhs = Self>
     type Output
     fn div(rhs: Rhs) -> Self::Output
 
@@ -247,7 +250,8 @@ trait Index<Idx>:
     fn index(idx: Idx) -> &Self::Output
 
 # IndexMut trait - mutable indexing
-trait IndexMut<Idx>: Index<Idx>:
+# TODO: Parser limitation - trait inheritance with generics not supported
+trait IndexMut<Idx>:  # Should inherit: Index<Idx>
     fn index_mut(idx: Idx) -> &mut Self::Output
 
 # Deref trait - dereference
@@ -266,7 +270,11 @@ trait Drop:
     fn drop()
 
 # Sized trait - types with known size at compile time (marker)
-trait Sized
+# Marker trait - has no methods, just indicates the type has a known size
+trait Sized:
+    # Marker trait - no methods required
+    fn is_sized() -> bool:
+        true
 
 # ============================================
 # I/O Traits
@@ -374,14 +382,13 @@ impl SeekFrom:
         Example: SeekFrom::Current(5).summary()
                 # → "SeekFrom: current(5) (Seek from current position with offset 5, relative)"
         """
-        val repr = self.to_string()
+        val str_repr = self.to_string()
         val desc = self.description()
-        val seek_type = if self.is_absolute():
-            "absolute"
-        else:
-            "relative"
+        var seek_type = "relative"
+        if self.is_absolute():
+            seek_type = "absolute"
 
-        "SeekFrom: {repr} ({desc}, {seek_type})"
+        "SeekFrom: {str_repr} ({desc}, {seek_type})"
 
 # Read trait - for types that can be read from
 trait Read:
@@ -390,7 +397,9 @@ trait Read:
     fn read_exact(buf: &mut [u8]) -> Result<(), IoError>:
         var offset: usize = 0
         while offset < buf.len():
-            match self.read(&mut buf[offset..]):
+            # TODO: Parser limitation - buf[offset..] slice syntax not supported
+            val remaining = buf.slice_from(offset)
+            match self.read(&mut remaining):
                 case Ok(0): return Err(IoError::UnexpectedEof)
                 case Ok(n): offset = offset + n
                 case Err(e): return Err(e)
@@ -398,12 +407,16 @@ trait Read:
 
     fn read_to_end(buf: &mut Array<u8>) -> Result<usize, IoError>:
         var total: usize = 0
-        var chunk = [0u8; 4096]
+        # TODO: Parser limitation - [0u8; 4096] array init not supported
+        var chunk = Array::with_capacity(4096)
+        chunk.resize(4096, 0u8)
         loop:
             match self.read(&mut chunk):
                 case Ok(0): return Ok(total)
                 case Ok(n):
-                    buf.extend_from_slice(&chunk[0..n])
+                    # TODO: Parser limitation - chunk[0..n] slice not supported
+                    val chunk_slice = chunk.slice(0, n)
+                    buf.extend_from_slice(&chunk_slice)
                     total = total + n
                 case Err(e): return Err(e)
 
@@ -424,7 +437,9 @@ trait Write:
     fn write_all(buf: &[u8]) -> Result<(), IoError>:
         var offset: usize = 0
         while offset < buf.len():
-            match self.write(&buf[offset..]):
+            # TODO: Parser limitation - buf[offset..] slice syntax not supported
+            val remaining = buf.slice_from(offset)
+            match self.write(&remaining):
                 case Ok(0): return Err(IoError::WriteZero)
                 case Ok(n): offset = offset + n
                 case Err(e): return Err(e)
@@ -438,7 +453,8 @@ trait Seek:
     fn seek(pos: SeekFrom) -> Result<u64, IoError>
 
     fn rewind() -> Result<(), IoError>:
-        self.seek(SeekFrom::Start(0)).map(|_| ())
+        # TODO: Parser limitation - |_| closure pattern not supported
+        self.seek(SeekFrom::Start(0)).map(|ignored| ())
 
     fn stream_position() -> Result<u64, IoError>:
         self.seek(SeekFrom::Current(0))
@@ -453,7 +469,7 @@ trait Seek:
 # BufRead trait - for buffered reading
 # TODO: Parser doesn't support trait inheritance - logically requires Read
 trait BufRead:
-    fn fill_buf() -> Result<&[u8>, IoError]
+    fn fill_buf() -> Result<Slice<u8>, IoError>
     fn consume(amt: usize)
 
     fn read_until(byte: u8, buf: &mut Array<u8>) -> Result<usize, IoError>:
@@ -463,9 +479,12 @@ trait BufRead:
             if available.is_empty():
                 return Ok(read)
 
-            match available.iter().position(|&b| b == byte):
+            # TODO: Parser limitation - |&b| closure pattern not supported
+            match available.iter().position(|b| b == byte):
                 case Some(i):
-                    buf.extend_from_slice(&available[0..=i])
+                    # TODO: Parser limitation - available[0..=i] slice not supported
+                    val slice_to_i = available.slice(0, i + 1)
+                    buf.extend_from_slice(&slice_to_i)
                     self.consume(i + 1)
                     return Ok(read + i + 1)
                 case None:
@@ -495,20 +514,23 @@ trait Len:
         self.len() == 0
 
     # Ruby-style alias for is_empty
-    fn empty?() -> bool:
+    # TODO: Parser limitation - Ruby-style method names with ? not supported
+    fn empty_check() -> bool:
         self.is_empty()
 
 # Extend trait - extend collection with items
 trait Extend<A>:
-    fn extend<I: IntoIterator<Item=A>>(self, iter: I)
+    # TODO: Parser limitation - associated type constraints like IntoIterator<Item=A> not supported
+    fn extend<I: IntoIterator>(self, iter: I)
 
 # AsSlice trait - view as slice
 trait AsSlice<T>:
-    fn as_slice() -> &<T>
+    fn as_slice() -> Slice<T>
 
 # AsMutSlice trait - view as mutable slice
-trait AsMutSlice<T>: AsSlice<T>:
-    fn as_mut_slice() -> &mut <T>
+# TODO: Parser limitation - trait inheritance with generics not supported
+trait AsMutSlice<T>:  # Should inherit: AsSlice<T>
+    fn as_mut_slice() -> MutSlice<T>
 
 # Clear trait - clear contents
 trait Clear:
@@ -543,7 +565,8 @@ trait Borrow<Borrowed>:
     fn borrow() -> &Borrowed
 
 # BorrowMut trait - mutable borrowing
-trait BorrowMut<Borrowed>: Borrow<Borrowed>:
+# TODO: Parser limitation - trait inheritance with generics not supported
+trait BorrowMut<Borrowed>:  # Should inherit: Borrow<Borrowed>
     fn borrow_mut() -> &mut Borrowed
 
 # ToOwned trait - create owned copy
@@ -620,16 +643,19 @@ trait ExactSizeIterator:
 # Send trait - safe to send between threads (marker)
 # Note: Renamed from Send to avoid keyword conflicts
 trait Sendable:
-    pass
+    fn is_sendable() -> bool:
+        true
 
 # Sync trait - safe to share between threads (marker)
 # Note: Renamed from Sync to avoid keyword conflicts
 trait Shareable:
-    pass
+    fn is_shareable() -> bool:
+        true
 
 # Unpin trait - safe to move after pinning (marker)
 trait Unpinnable:
-    pass
+    fn is_unpinnable() -> bool:
+        true
 
 # ============================================
 # Function Traits
@@ -640,7 +666,8 @@ trait Fn<Args, Output>:
     fn call(args: Args) -> Output
 
 # FnMut trait - callable by mutable reference
-trait FnMut<Args, Output>: Fn<Args, Output>:
+# TODO: Parser limitation - trait inheritance with generics not supported
+trait FnMut<Args, Output>:  # Should inherit: Fn<Args, Output>
     fn call_mut(args: Args) -> Output
 
 # FnOnce trait - callable by value (consuming)

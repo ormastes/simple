@@ -64,7 +64,7 @@ use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
 
 // Diagram tracing for call flow profiling
-use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, Parameter, SelfMode, Type};
+use simple_parser::ast::{Argument, ClassDef, Effect, EnumDef, Expr, FunctionDef, Parameter, SelfMode, Type};
 use simple_runtime::value::diagram_ffi;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -83,6 +83,38 @@ type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
 const METHOD_SELF: &str = "self";
 const METHOD_NEW: &str = "new";
+
+/// Wrap a value in a Promise (Resolved state) for async function returns.
+/// Creates a Promise object with state = PromiseState.Resolved(value).
+fn wrap_in_promise(value: Value) -> Value {
+    // Don't double-wrap if the value is already a Promise
+    if let Value::Object { ref class, .. } = value {
+        if class == "Promise" {
+            return value;
+        }
+    }
+
+    let mut fields = HashMap::new();
+    fields.insert(
+        "state".to_string(),
+        Value::Enum {
+            enum_name: "PromiseState".to_string(),
+            variant: "Resolved".to_string(),
+            payload: Some(Box::new(value)),
+        },
+    );
+    fields.insert("callbacks".to_string(), Value::Array(vec![]));
+
+    Value::Object {
+        class: "Promise".to_string(),
+        fields,
+    }
+}
+
+/// Check if a function is async (has Effect::Async in its effects)
+fn is_async_function(func: &FunctionDef) -> bool {
+    func.effects.iter().any(|e| matches!(e, Effect::Async))
+}
 
 pub(crate) fn bind_args(
     params: &[Parameter],
@@ -553,6 +585,13 @@ fn exec_function_inner(
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
 
+    // Wrap result in Promise for async functions (async fn returns Promise<T>)
+    let result = if is_async_function(func) {
+        wrap_in_promise(result)
+    } else {
+        result
+    };
+
     Ok(result)
 }
 
@@ -609,6 +648,13 @@ fn exec_function_with_values_inner(
 
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
+
+    // Wrap result in Promise for async functions (async fn returns Promise<T>)
+    let result = if is_async_function(func) {
+        wrap_in_promise(result)
+    } else {
+        result
+    };
 
     Ok(result)
 }

@@ -383,11 +383,39 @@ pub class ManifestGenerator:
         - languages.register_*_provider() calls
         - workspace.create_file_system_watcher() patterns
         """
-        # TODO: [stdlib][P2] Parse extension file and extract:
-        # - Command registrations → add_command()
-        # - Language providers → add_language()
-        # - Activation events
-        pass
+        @extern("runtime", "rt_file_read_text")
+        fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+        val content = _rt_file_read_text(path.ptr(), path.len())
+
+        # Parse extension file and extract registration patterns
+        for line in content.lines():
+            val trimmed = line.trim()
+
+            # Command registrations: commands.register_command("name", ...)
+            if trimmed.contains("register_command("):
+                val start = trimmed.index_of("\"").unwrap_or(-1)
+                if start >= 0:
+                    val after_quote = trimmed.substring(start + 1, trimmed.len())
+                    val end = after_quote.index_of("\"").unwrap_or(-1)
+                    if end >= 0:
+                        val cmd_name = after_quote.substring(0, end)
+                        self.manifest.add_command(cmd_name, cmd_name)
+
+            # Language provider registrations: languages.register_*_provider
+            elif trimmed.contains("register_language(") or trimmed.contains("register_*_provider("):
+                val start = trimmed.index_of("\"").unwrap_or(-1)
+                if start >= 0:
+                    val after_quote = trimmed.substring(start + 1, trimmed.len())
+                    val end = after_quote.index_of("\"").unwrap_or(-1)
+                    if end >= 0:
+                        val lang_id = after_quote.substring(0, end)
+                        self.manifest.add_language(lang_id, lang_id, [])
+
+            # Activation events: onLanguage:*, onCommand:*, etc.
+            elif trimmed.contains("activationEvents"):
+                # Will be handled when full JSON parsing is available
+                pass
 
     pub fn set_metadata(
         self,

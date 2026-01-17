@@ -1021,8 +1021,7 @@ fn parse_js_imports(file_path: text): List<text> =
         # Add node
         self.graph.add_node(file, language)
 
-        # TODO: [stdlib][P2] Parse file and extract dependencies
-        # For now, this is a stub
+        # Parse file and extract dependencies using language-specific patterns
         val deps = self.extract_dependencies(file, language)
 
         for dep in deps:
@@ -1039,8 +1038,60 @@ fn parse_js_imports(file_path: text): List<text> =
         Returns:
             List of dependency files
         """
-        # TODO: [stdlib][P2] Use Tree-sitter to parse imports/includes
-        []
+        @extern("runtime", "rt_file_read_text")
+        fn _rt_file_read_text(path_ptr: &u8, path_len: u64) -> text
+
+        val content = _rt_file_read_text(file.ptr(), file.len())
+        var deps: List<text> = []
+
+        # Use regex-like pattern matching for import statements
+        match language:
+            case Language::Simple:
+                # Pattern: import module.submodule
+                for line in content.lines():
+                    val trimmed = line.trim()
+                    if trimmed.starts_with("import "):
+                        val module = trimmed.substring(7, trimmed.len()).trim()
+                        deps.append(module.replace(".", "/") + ".spl")
+            case Language::Rust:
+                # Pattern: use crate::module; or mod module;
+                for line in content.lines():
+                    val trimmed = line.trim()
+                    if trimmed.starts_with("use ") or trimmed.starts_with("mod "):
+                        val parts = trimmed.split(" ")
+                        if parts.len() >= 2:
+                            val module = parts[1].replace(";", "").replace("::", "/")
+                            deps.append(module + ".rs")
+            case Language::Python:
+                # Pattern: import module or from module import ...
+                for line in content.lines():
+                    val trimmed = line.trim()
+                    if trimmed.starts_with("import "):
+                        val module = trimmed.substring(7, trimmed.len()).split(" ")[0]
+                        deps.append(module.replace(".", "/") + ".py")
+                    elif trimmed.starts_with("from "):
+                        val parts = trimmed.split(" ")
+                        if parts.len() >= 2:
+                            val module = parts[1]
+                            deps.append(module.replace(".", "/") + ".py")
+            case Language::TypeScript:
+                # Pattern: import ... from "module"
+                for line in content.lines():
+                    val trimmed = line.trim()
+                    if trimmed.starts_with("import "):
+                        # Find quoted module path
+                        val quote_start = trimmed.index_of("\"").unwrap_or(trimmed.index_of("'").unwrap_or(-1))
+                        if quote_start >= 0:
+                            val after_quote = trimmed.substring(quote_start + 1, trimmed.len())
+                            val quote_end = after_quote.index_of("\"").unwrap_or(after_quote.index_of("'").unwrap_or(-1))
+                            if quote_end >= 0:
+                                val module = after_quote.substring(0, quote_end)
+                                deps.append(module + ".ts")
+            case _:
+                # Unsupported language - return empty
+                pass
+
+        deps
 
     pub fn get_dependencies(self, file: text): List<text> =
         """Get dependencies of file.
