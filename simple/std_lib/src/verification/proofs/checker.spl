@@ -4,6 +4,13 @@
 
 import verification.proofs.obligations as ob
 
+# FFI for process execution and file operations
+@extern("runtime", "rt_process_run")
+fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64, args_ptr: &u8, args_len: u64) -> (i32, text, text)
+
+@extern("runtime", "rt_file_write_text")
+fn _rt_file_write_text(path_ptr: &u8, path_len: u64, content_ptr: &u8, content_len: u64) -> bool
+
 # Lean invocation result
 enum LeanResult:
     Success
@@ -101,9 +108,23 @@ class ProofChecker:
         return ProofChecker(config)
 
     fn check_file(file_path: text) -> FileCheckResult:
-        # TODO: [stdlib][P3] Actually invoke Lean via subprocess
-        # For now, return a placeholder result
-        return FileCheckResult.create(file_path, LeanResult.Success)
+        # Invoke Lean via subprocess
+        val cmd = self.config.lean_path
+        val args = "--run {file_path}"
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        val result = if exit_code == 0:
+            LeanResult.Success
+        elif stderr.contains("type mismatch") or stderr.contains("type error"):
+            LeanResult.TypeError(stderr)
+        elif stderr.contains("failed to prove") or stderr.contains("proof"):
+            LeanResult.ProofError(stderr)
+        elif stderr.contains("not found") or exit_code == 127:
+            LeanResult.NotFound
+        else:
+            LeanResult.ProofError(stderr)
+
+        return FileCheckResult.create(file_path, result)
 
     fn check_files(file_paths: List<text>) -> BatchCheckResult:
         result = BatchCheckResult.create()
@@ -118,7 +139,7 @@ class ProofChecker:
 
         # Write to temp file
         temp_file = "/tmp/proof_obligations_" + obligations.module_name + ".lean"
-        # TODO: [stdlib][P3] Write file
+        _rt_file_write_text(temp_file.ptr(), temp_file.len(), content.ptr(), content.len())
 
         # Check the file
         return self.check_files([temp_file])

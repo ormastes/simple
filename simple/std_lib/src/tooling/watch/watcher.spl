@@ -4,6 +4,16 @@
 use host.async_nogc_mut.io.fs
 use core.result.{Result, Ok, Err}
 
+# FFI for file operations
+@extern("runtime", "rt_file_mtime")
+fn _rt_file_mtime(path_ptr: &u8, path_len: u64) -> i64
+
+@extern("runtime", "rt_dir_entries")
+fn _rt_dir_entries(path_ptr: &u8, path_len: u64) -> text
+
+# Track file modification times
+var _file_mtimes: Dict<text, i64> = {}
+
 # File system event type
 pub enum WatchEvent:
     Created
@@ -315,9 +325,56 @@ pub class Watcher:
         This is a fallback implementation.
         Production code should use OS-native file watching.
         """
-        # TODO: [stdlib][P3] Scan directories and check mtimes
-        # This is inefficient but works as fallback
-        pass
+        # Scan directories and check mtimes for changes
+        for dir in self.config.directories:
+            self.scan_directory_for_changes(dir)
+
+    fn scan_directory_for_changes(dir: text):
+        """Scan a directory for file changes by comparing mtimes."""
+        # Get directory entries
+        val entries_raw = _rt_dir_entries(dir.ptr(), dir.len())
+        if entries_raw.is_empty():
+            return
+
+        # Parse entries (newline-separated)
+        for entry in entries_raw.split("\n"):
+            if entry.is_empty():
+                continue
+
+            val path = "{dir}/{entry}"
+
+            # Check if file matches patterns
+            var matches = false
+            for pattern in self.config.patterns:
+                if path.ends_with(pattern.trim_start_matches("*")):
+                    matches = true
+                    break
+
+            if not matches:
+                continue
+
+            # Get current mtime
+            val current_mtime = _rt_file_mtime(path.ptr(), path.len())
+
+            # Check if file is new or modified
+            match _file_mtimes.get(path):
+                case Some(old_mtime):
+                    if current_mtime != old_mtime:
+                        # File was modified
+                        _file_mtimes[path] = current_mtime
+                        self.pending_changes.push(FileChange {
+                            path: path,
+                            event: WatchEvent::Modified,
+                            timestamp: current_mtime
+                        })
+                case None:
+                    # New file
+                    _file_mtimes[path] = current_mtime
+                    self.pending_changes.push(FileChange {
+                        path: path,
+                        event: WatchEvent::Created,
+                        timestamp: current_mtime
+                    })
 
     fn check_and_trigger():
         """Check if debounce period elapsed and trigger callback.

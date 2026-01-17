@@ -250,6 +250,12 @@ pub fn create_test_terminal(): Terminal =
 
     create_terminal(opts)
 
+# Callback storage for execute_and_wait
+var _exit_callbacks: Dict<i64, fn(i32): void> = {}
+var _next_exit_callback_id: i64 = 0
+
+extern fn vscode_terminal_on_exit(terminal_id: i64, callback_id: i64): void
+
 # Helper: Execute and wait
 pub fn execute_and_wait(command: text, callback: fn(exit_code: i32): void):
     """Execute command and call callback when done.
@@ -269,6 +275,30 @@ pub fn execute_and_wait(command: text, callback: fn(exit_code: i32): void):
     val term = Terminal.new("Execution")
     term.send_text(command)
 
-    # TODO: [stdlib][P3] Wait for exit and call callback
-    # This requires async support or polling
-    pass
+    # Register callback for terminal exit
+    val callback_id = _next_exit_callback_id
+    _next_exit_callback_id = _next_exit_callback_id + 1
+    _exit_callbacks[callback_id] = callback
+
+    # Register with VSCode to call back when terminal exits
+    vscode_terminal_on_exit(term.id, callback_id)
+
+# Called by VSCode when terminal exits
+pub fn _on_terminal_exit(callback_id: i64, exit_code: i32):
+    """Internal callback handler for terminal exit.
+
+    Args:
+        callback_id: Registered callback ID
+        exit_code: Terminal exit code
+    """
+    match _exit_callbacks.get(callback_id):
+        some(callback):
+            callback(exit_code)
+            # Remove callback after use
+            var new_callbacks: Dict<i64, fn(i32): void> = {}
+            for (id, cb) in _exit_callbacks.items():
+                if id != callback_id:
+                    new_callbacks[id] = cb
+            _exit_callbacks = new_callbacks
+        none:
+            pass

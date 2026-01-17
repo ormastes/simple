@@ -194,18 +194,29 @@ pub struct HotReloadManager extends godot.node.Node:
 
     # Compile Simple script
     fn compile_simple_script(script_path: text) -> Result<(), text>:
-        # TODO: [stdlib][P3] Call Simple compiler
-        # For now, just simulate compilation
-        
-        # In real implementation:
-        # 1. Call `simple build --hot-reload script_path`
-        # 2. Compiler generates .smf in build/
-        # 3. Return Ok if successful, Err with message if failed
+        # Call Simple compiler for hot-reload compilation
+        @extern("runtime", "rt_process_run")
+        fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64, args_ptr: &u8, args_len: u64) -> (i32, text, text)
 
-        # Simulate compilation delay
-        # await sleep(0.1)
+        # Build the command - use configured compiler path or default
+        val compiler = if self.simple_compiler_path.is_empty():
+            "simple"
+        else:
+            self.simple_compiler_path
 
-        return Ok(())
+        # Hot-reload compilation: generate .smf in .simple/build/
+        val args = "build --hot-reload {script_path}"
+        val (exit_code, stdout, stderr) = _rt_process_run(
+            compiler.ptr(), compiler.len(),
+            args.ptr(), args.len()
+        )
+
+        if exit_code == 0:
+            return Ok(())
+        else:
+            # Return compilation error message
+            val error_msg = if stderr.is_empty(): stdout else: stderr
+            return Err(error_msg)
 
     # Reload Godot resource (scene, texture, etc.)
     var fn reload_godot_resource(resource_path: text):
@@ -213,9 +224,22 @@ pub struct HotReloadManager extends godot.node.Node:
 
         # Force Godot to reload the resource from disk
         val loader = godot.resource.ResourceLoader::get_singleton()
-        
-        # Clear from cache
-        # TODO: [stdlib][P3] Add to ResourceLoader
+
+        # Clear resource from cache to force reload
+        # Use Godot's ResourceLoader.set_abort_on_missing_resources(false) first
+        val loader_obj = variant.Object::from_ptr(loader.singleton_ptr)
+
+        # Check if resource exists in cache
+        val path_var = variant.Variant::from_string(resource_path)
+        val has_cached = loader_obj.call1("has_cached", path_var)
+
+        if has_cached.as_bool():
+            # Clear cache for this resource by requesting fresh reload
+            # Godot doesn't expose direct cache clear, but we can use
+            # ResourceLoader.load with reload_cache = true parameter
+            val cache_mode_var = variant.Variant::from_int(2)  # CACHE_MODE_REPLACE
+            loader_obj.call3("load", path_var, variant.Variant::null(), cache_mode_var)
+            println("Cleared and reloaded resource cache: {resource_path}")
 
         # If it's the current scene, reload it
         if resource_path.ends_with(".tscn"):
@@ -243,19 +267,98 @@ pub struct HotReloadManager extends godot.node.Node:
 
         val root = current.unwrap()
 
-        # TODO: [stdlib][P3] Walk scene tree and save state
-        # For now, just save a simple marker
-        self.saved_state["scene_loaded"] = variant.Variant::from_bool(true)
+        # Walk scene tree and save state for nodes with hot-reload metadata
+        self.saved_state.clear()
+        self.save_node_state_recursive(root, "")
 
-        println("State saved")
+        println("State saved ({self.saved_state.len()} properties)")
+
+    # Recursively save node state
+    var fn save_node_state_recursive(node: godot.node.Node, path_prefix: text):
+        val node_obj = variant.Object::from_ptr(node.node_ptr)
+
+        # Get node path
+        val name_var = node_obj.call0("get_name")
+        val node_name = name_var.as_string()
+        val node_path = if path_prefix.is_empty():
+            node_name
+        else:
+            "{path_prefix}/{node_name}"
+
+        # Check if node has "hot_reload_preserve" metadata
+        val meta_key = variant.Variant::from_string("hot_reload_preserve")
+        val has_meta = node_obj.call1("has_meta", meta_key)
+
+        if has_meta.as_bool():
+            # Get list of properties to preserve from metadata
+            val props_var = node_obj.call1("get_meta", meta_key)
+            val props = props_var.as_string()
+
+            # Parse comma-separated property names
+            for prop_name in props.split(","):
+                val prop_name_trimmed = prop_name.trim()
+                if prop_name_trimmed.is_empty():
+                    continue
+
+                # Get property value
+                val prop_var = variant.Variant::from_string(prop_name_trimmed)
+                val value = node_obj.call1("get", prop_var)
+
+                # Store with full path key
+                val state_key = "{node_path}:{prop_name_trimmed}"
+                self.saved_state[state_key] = value
+
+        # Recurse into children
+        val child_count_var = node_obj.call0("get_child_count")
+        val child_count = child_count_var.as_int()
+
+        for i in 0..child_count:
+            val idx_var = variant.Variant::from_int(i)
+            val child_var = node_obj.call1("get_child", idx_var)
+            val child_ptr = child_var.as_object_ptr()
+            val child_node = godot.node.Node(node_ptr: child_ptr)
+            self.save_node_state_recursive(child_node, node_path)
 
     # Restore scene state (after reload)
     var fn restore_scene_state():
         println("Restoring scene state...")
 
-        # TODO: [stdlib][P3] Restore saved state to scene nodes
-        
-        println("State restored")
+        # Get current scene root after reload
+        val current = self.scene_tree.get_current_scene()
+
+        if current.is_none():
+            println("Warning: No current scene to restore state to")
+            return
+
+        val root = current.unwrap()
+        val root_obj = variant.Object::from_ptr(root.node_ptr)
+
+        # Restore each saved property
+        var restored_count = 0
+        for (state_key, value) in self.saved_state.items():
+            # Parse state key: "NodePath:property_name"
+            val colon_idx = state_key.rfind(":")
+            if colon_idx < 0:
+                continue
+
+            val node_path = state_key[0:colon_idx]
+            val prop_name = state_key[colon_idx + 1:]
+
+            # Find node by path
+            val path_var = variant.Variant::from_string(node_path)
+            val node_var = root_obj.call1("get_node_or_null", path_var)
+
+            if node_var.is_null():
+                println("Warning: Node not found after reload: {node_path}")
+                continue
+
+            # Set property value
+            val target_obj = variant.Object::from_ptr(node_var.as_object_ptr())
+            val prop_var = variant.Variant::from_string(prop_name)
+            target_obj.call2("set", prop_var, value)
+            restored_count = restored_count + 1
+
+        println("State restored ({restored_count} properties)")
 
     # Enable/disable hot-reload
     pub fn set_enabled(mut self, enabled: bool):
@@ -377,9 +480,12 @@ fn get_files_recursive(dir: text, ext: text) -> Array<text>:
     return results
 
 fn get_current_time() -> f64:
-    # TODO: [stdlib][P3] Use actual time API
-    # For now, return placeholder
-    return 0.0
+    # Use actual time API - get current Unix time in seconds
+    @extern("runtime", "rt_time_now_unix_micros")
+    fn _rt_time_now_unix_micros() -> i64
+
+    val micros = _rt_time_now_unix_micros()
+    return (micros as f64) / 1000000.0
 
 fn sleep(seconds: f64):
     """Sleep for specified seconds.

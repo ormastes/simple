@@ -5,6 +5,10 @@
 use core.*
 use mcp.core.protocol.*
 
+# FFI for process execution
+@extern("runtime", "rt_process_run")
+fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64, args_ptr: &u8, args_len: u64) -> (i32, text, text)
+
 # Advanced MCP features manager
 pub struct McpAdvanced:
     cache: McpCache
@@ -367,9 +371,30 @@ pub fn diff_mode(old_output: &McpOutput, new_output: &McpOutput) -> McpOutput:
 
 pub fn add_blame_info(output: &mut McpOutput, git_repo: &str) -> Result<(), McpError>:
     for item in &mut output.items:
-        # TODO: [stdlib][P3] Get git blame info
-        item.metadata.add_overlay("author", "unknown")
-        item.metadata.add_overlay("commit", "unknown")
+        # Get git blame info for each item's location
+        val file_path = item.metadata.location.file
+        val line = item.metadata.location.line
+
+        val cmd = "git"
+        val args = "-C {git_repo} blame -L {line},{line} --porcelain {file_path}"
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        if exit_code == 0 and not stdout.is_empty():
+            # Parse porcelain output
+            var author = "unknown"
+            var commit = "unknown"
+
+            for blame_line in stdout.lines():
+                if blame_line.starts_with("author "):
+                    author = blame_line.substring(7, blame_line.len())
+                elif blame_line.len() == 40 and not blame_line.contains(" "):
+                    commit = blame_line.substring(0, 8)  # Short commit hash
+
+            item.metadata.add_overlay("author", author)
+            item.metadata.add_overlay("commit", commit)
+        else:
+            item.metadata.add_overlay("author", "unknown")
+            item.metadata.add_overlay("commit", "unknown")
     return Ok(())
 
 pub fn inline_call_sites(output: &mut McpOutput, call_graph: &CallGraph) -> Result<(), McpError>:
