@@ -50,6 +50,8 @@ pub struct I18nExtractor {
     result: ExtractionResult,
     current_file: PathBuf,
     current_scope: Vec<String>,
+    /// Current line number for tracking source locations
+    current_line: usize,
 }
 
 impl I18nExtractor {
@@ -59,6 +61,7 @@ impl I18nExtractor {
             result: ExtractionResult::default(),
             current_file: PathBuf::new(),
             current_scope: Vec::new(),
+            current_line: 0,
         }
     }
 
@@ -66,6 +69,7 @@ impl I18nExtractor {
     pub fn extract_module(&mut self, module: &Module, file_path: PathBuf) {
         self.current_file = file_path;
         self.current_scope.clear();
+        self.current_line = 0;
 
         for item in &module.items {
             self.visit_node(item);
@@ -98,11 +102,13 @@ impl I18nExtractor {
         match node {
             Node::Function(func) => self.visit_function(func),
             Node::Struct(s) => {
+                self.current_line = s.span.line;
                 self.current_scope.push(s.name.clone());
                 // No body in struct, but could have default values
                 self.current_scope.pop();
             }
             Node::Class(c) => {
+                self.current_line = c.span.line;
                 self.current_scope.push(c.name.clone());
                 for method in &c.methods {
                     self.visit_function(method);
@@ -110,6 +116,7 @@ impl I18nExtractor {
                 self.current_scope.pop();
             }
             Node::Impl(impl_block) => {
+                self.current_line = impl_block.span.line;
                 // Extract type name from Type
                 let type_name = type_to_string(&impl_block.target_type);
                 self.current_scope.push(type_name);
@@ -120,16 +127,19 @@ impl I18nExtractor {
             }
             Node::Expression(expr) => self.visit_expr(expr),
             Node::Let(stmt) => {
+                self.current_line = stmt.span.line;
                 if let Some(init) = &stmt.value {
                     self.visit_expr(init);
                 }
             }
             Node::Return(ret) => {
+                self.current_line = ret.span.line;
                 if let Some(value) = &ret.value {
                     self.visit_expr(value);
                 }
             }
             Node::If(if_stmt) => {
+                self.current_line = if_stmt.span.line;
                 self.visit_expr(&if_stmt.condition);
                 self.visit_block(&if_stmt.then_block);
                 for elif in &if_stmt.elif_branches {
@@ -141,17 +151,21 @@ impl I18nExtractor {
                 }
             }
             Node::For(for_stmt) => {
+                self.current_line = for_stmt.span.line;
                 self.visit_expr(&for_stmt.iterable);
                 self.visit_block(&for_stmt.body);
             }
             Node::While(while_stmt) => {
+                self.current_line = while_stmt.span.line;
                 self.visit_expr(&while_stmt.condition);
                 self.visit_block(&while_stmt.body);
             }
             Node::Loop(loop_stmt) => {
+                self.current_line = loop_stmt.span.line;
                 self.visit_block(&loop_stmt.body);
             }
             Node::Match(match_stmt) => {
+                self.current_line = match_stmt.span.line;
                 self.visit_expr(&match_stmt.subject);
                 for arm in &match_stmt.arms {
                     self.visit_block(&arm.body);
@@ -163,6 +177,7 @@ impl I18nExtractor {
 
     /// Visit a function definition
     fn visit_function(&mut self, func: &FunctionDef) {
+        self.current_line = func.span.line;
         self.current_scope.push(func.name.clone());
         self.visit_block(&func.body);
         self.current_scope.pop();
@@ -313,7 +328,7 @@ impl I18nExtractor {
             default_text,
             template_vars,
             source_file: self.current_file.clone(),
-            line: 0, // TODO: Track line numbers
+            line: self.current_line,
             scope,
         };
 
@@ -378,5 +393,29 @@ fn login():
 
         assert!(result.strings.contains_key("Error_"));
         assert_eq!(result.strings["Error_"].scope, "login");
+    }
+
+    #[test]
+    fn test_extract_with_line_numbers() {
+        let source = r#"fn greet():
+    print(Hello_"Hello!")
+
+fn login():
+    print(Error_"Login failed")
+"#;
+        let module = parse_module(source);
+        let mut extractor = I18nExtractor::new();
+        extractor.extract_module(&module, PathBuf::from("test.spl"));
+        let result = extractor.finish();
+
+        // Line numbers should be tracked from the containing function
+        assert!(result.strings.contains_key("Hello_"));
+        assert!(result.strings["Hello_"].line > 0);
+
+        assert!(result.strings.contains_key("Error_"));
+        assert!(result.strings["Error_"].line > 0);
+
+        // The login function should have a higher line number than greet
+        assert!(result.strings["Error_"].line > result.strings["Hello_"].line);
     }
 }
