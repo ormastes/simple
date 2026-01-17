@@ -199,7 +199,10 @@ pub(crate) fn pattern_matches(
                 payload: value_payload,
             } = value
             {
-                if enum_name == ve && variant == vv {
+                // Handle "_" placeholder for unqualified user-defined enum variants
+                // When pattern has enum_name="_", match any enum with the correct variant
+                let enum_matches = enum_name == "_" || enum_name == ve;
+                if enum_matches && variant == vv {
                     // Both have no payload
                     if payload.is_none() && value_payload.is_none() {
                         return Ok(true);
