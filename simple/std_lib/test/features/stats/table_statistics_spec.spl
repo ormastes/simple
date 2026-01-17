@@ -1,0 +1,663 @@
+"""
+# SDN Table, TQL, and Statistics Specification
+
+**Feature IDs:** TBD
+**Category:** Stdlib
+**Difficulty:** 4/5
+**Status:** Draft
+
+## Overview
+
+This specification defines the statistics library for Simple, including:
+- Collection statistics (mean, std, var, etc.)
+- DataFrame type with columnar storage
+- TQL (Table Query Language) for declarative queries
+- Aggregation and grouping operations
+
+## Syntax
+
+### Table Construction
+
+```simple
+# Row-oriented (SDN-compatible)
+val users = sdn_table |id, age, city|:
+    1, 31.0, "Seoul"
+    2, 24.0, "Busan"
+    3, 28.0, "Seoul"
+
+# Column-oriented (DataFrame)
+val df = dataframe:
+    id:   [1, 2, 3]
+    age:  [31.0, 24.0, 28.0]
+    city: ["Seoul", "Busan", "Seoul"]
+```
+
+### TQL Queries
+
+```simple
+val adults = tql(users):
+    select @id, @age
+    where @age >= 18
+
+val city_stats = tql(users):
+    groupby @city
+    agg:
+        n: count()
+        avg_age: mean(@age)
+```
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| `Table<Schema>` | Typed table with compile-time schema validation |
+| `Column<T>` | Typed column vector, vectorized operations |
+| `tql(source):` | Query block with select/where/groupby/orderby |
+| `@column` | Column reference prefix (disambiguates from variables) |
+
+## Behavior
+
+- Tables are immutable; transformations produce new tables
+- TQL blocks are statically analyzed at compile time
+- Statistics functions operate on columns, not scalars
+- All operations are vectorized for performance
+
+## Implementation Notes
+
+- Phase 1: Collection statistics on Array/Vec
+- Phase 2: DataFrame type with column storage
+- Phase 3: TQL parser integration
+- Phase 4: Aggregation execution
+
+See `doc/plan/statistics_library_implementation.md` for full plan.
+"""
+
+import std.spec
+
+
+# ============================================================================
+# Test Group 1: Collection Statistics
+# ============================================================================
+
+describe "Collection Statistics":
+    """
+    ## Basic Statistics on Arrays
+
+    Simple arrays and vectors should support basic statistical operations
+    including mean, standard deviation, variance, min, max, and sum.
+    """
+
+    context "when computing descriptive statistics":
+        """
+        ### Scenario: Computing Mean and Standard Deviation
+
+        Basic descriptive statistics should work on numeric arrays.
+        """
+
+        it "computes mean of integer array":
+            # Arrange
+            val data = [1, 2, 3, 4, 5]
+
+            # Act
+            val result = data.mean()
+
+            # Assert
+            expect(result).to(eq(3.0))
+
+        it "computes mean of float array":
+            # Arrange
+            val data = [1.0, 2.0, 3.0, 4.0, 5.0]
+
+            # Act
+            val result = data.mean()
+
+            # Assert
+            expect(result).to(eq(3.0))
+
+        it "computes population standard deviation":
+            # Arrange
+            val data = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
+
+            # Act
+            val result = data.std()
+
+            # Assert - population std dev
+            expect(result).to(be_close_to(2.0, 0.001))
+
+        it "computes population variance":
+            # Arrange
+            val data = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
+
+            # Act
+            val result = data.variance()
+
+            # Assert
+            expect(result).to(be_close_to(4.0, 0.001))
+
+    context "when computing order statistics":
+        """
+        ### Scenario: Median and Quantiles
+
+        Order statistics require sorted data and interpolation.
+        """
+
+        it "computes median of odd-length array":
+            # Arrange
+            val data = [3, 1, 4, 1, 5]
+
+            # Act
+            val result = data.median()
+
+            # Assert - sorted: [1, 1, 3, 4, 5], median = 3
+            expect(result).to(eq(3.0))
+
+        it "computes median of even-length array":
+            # Arrange
+            val data = [1, 2, 3, 4]
+
+            # Act
+            val result = data.median()
+
+            # Assert - average of middle two: (2 + 3) / 2 = 2.5
+            expect(result).to(eq(2.5))
+
+        it "computes specified quantile":
+            # Arrange
+            val data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+
+            # Act
+            val q25 = data.quantile(0.25)
+            val q75 = data.quantile(0.75)
+
+            # Assert
+            expect(q25).to(be_close_to(3.25, 0.01))
+            expect(q75).to(be_close_to(7.75, 0.01))
+
+    context "when handling edge cases":
+        """
+        ### Scenario: Empty and Single-Element Arrays
+
+        Statistics on edge cases should return sensible values or errors.
+        """
+
+        it "returns None for mean of empty array":
+            # Arrange
+            val data: [f64] = []
+
+            # Act
+            val result = data.mean_opt()
+
+            # Assert
+            expect(result).to(be_none())
+
+        it "returns element for mean of single-element array":
+            # Arrange
+            val data = [42.0]
+
+            # Act
+            val result = data.mean()
+
+            # Assert
+            expect(result).to(eq(42.0))
+
+        it "returns 0 for std of single-element array":
+            # Arrange
+            val data = [42.0]
+
+            # Act
+            val result = data.std()
+
+            # Assert - no variance with one element
+            expect(result).to(eq(0.0))
+
+
+# ============================================================================
+# Test Group 2: DataFrame Construction
+# ============================================================================
+
+describe "DataFrame Construction":
+    """
+    ## DataFrame Type
+
+    DataFrames provide column-oriented storage for analytics workloads.
+    Schema is validated at compile time.
+    """
+
+    context "when creating from column arrays":
+        """
+        ### Scenario: Column-Oriented Construction
+
+        DataFrames are built from named column arrays.
+        """
+
+        it "creates dataframe with integer and float columns":
+            # Arrange & Act
+            val df = dataframe:
+                id:  [1, 2, 3]
+                age: [31.0, 24.0, 28.0]
+
+            # Assert
+            expect(df.len()).to(eq(3))
+            expect(df.column_count()).to(eq(2))
+
+        it "infers schema from column types":
+            # Arrange
+            val df = dataframe:
+                name: ["Alice", "Bob"]
+                age:  [30, 25]
+
+            # Act
+            val schema = df.schema()
+
+            # Assert
+            expect(schema.get("name")).to(eq(Str))
+            expect(schema.get("age")).to(eq(Int))
+
+        it "rejects mismatched column lengths":
+            # This should fail at compile time or runtime
+            expect_raises SchemaError:
+                val df = dataframe:
+                    id:   [1, 2, 3]
+                    name: ["Alice", "Bob"]  # Length mismatch
+
+    context "when creating from SDN table":
+        """
+        ### Scenario: SDN Table Interop
+
+        SDN named tables can be converted to DataFrames.
+        """
+
+        it "converts SDN table to dataframe":
+            # Arrange
+            val sdn = sdn_table |id, name, age|:
+                1, "Alice", 30
+                2, "Bob", 25
+
+            # Act
+            val df = DataFrame.from_sdn(sdn)
+
+            # Assert
+            expect(df.len()).to(eq(2))
+            expect(df.get_column("name").to_array()).to(eq(["Alice", "Bob"]))
+
+
+# ============================================================================
+# Test Group 3: TQL Basic Queries
+# ============================================================================
+
+describe "TQL Basic Queries":
+    """
+    ## Table Query Language
+
+    TQL provides declarative queries over DataFrames.
+    Queries are parsed and optimized at compile time.
+    """
+
+    before_each:
+        @users = dataframe:
+            id:   [1, 2, 3, 4, 5]
+            name: ["Alice", "Bob", "Carol", "Dave", "Eve"]
+            age:  [31.0, 24.0, 28.0, 35.0, 22.0]
+            city: ["Seoul", "Busan", "Seoul", "Seoul", "Busan"]
+
+    context "when using select":
+        """
+        ### Scenario: Column Projection
+
+        Select specifies which columns to include in result.
+        """
+
+        it "selects specific columns":
+            # Act
+            val result = tql(@users):
+                select @id, @name
+
+            # Assert
+            expect(result.column_count()).to(eq(2))
+            expect(result.has_column("age")).to(be_false())
+
+        it "selects all columns with star":
+            # Act
+            val result = tql(@users):
+                select *
+
+            # Assert
+            expect(result.column_count()).to(eq(4))
+
+    context "when using where":
+        """
+        ### Scenario: Row Filtering
+
+        Where filters rows based on predicates.
+        """
+
+        it "filters by comparison":
+            # Act
+            val adults = tql(@users):
+                where @age >= 25
+
+            # Assert
+            expect(adults.len()).to(eq(3))  # Alice, Carol, Dave
+
+        it "filters by equality":
+            # Act
+            val seoul = tql(@users):
+                where @city == "Seoul"
+
+            # Assert
+            expect(seoul.len()).to(eq(3))  # Alice, Carol, Dave
+
+        it "combines multiple conditions":
+            # Act
+            val result = tql(@users):
+                where @age >= 25 and @city == "Seoul"
+
+            # Assert
+            expect(result.len()).to(eq(2))  # Alice, Dave
+
+    context "when using orderby":
+        """
+        ### Scenario: Result Ordering
+
+        Orderby sorts results by specified columns.
+        """
+
+        it "orders ascending by default":
+            # Act
+            val sorted = tql(@users):
+                orderby @age
+
+            # Assert
+            val ages = sorted.get_column("age").to_array()
+            expect(ages).to(eq([22.0, 24.0, 28.0, 31.0, 35.0]))
+
+        it "orders descending when specified":
+            # Act
+            val sorted = tql(@users):
+                orderby @age desc
+
+            # Assert
+            val ages = sorted.get_column("age").to_array()
+            expect(ages).to(eq([35.0, 31.0, 28.0, 24.0, 22.0]))
+
+    context "when using limit":
+        """
+        ### Scenario: Result Limiting
+
+        Limit restricts the number of returned rows.
+        """
+
+        it "limits result count":
+            # Act
+            val top3 = tql(@users):
+                orderby @age desc
+                limit 3
+
+            # Assert
+            expect(top3.len()).to(eq(3))
+
+
+# ============================================================================
+# Test Group 4: TQL Aggregations
+# ============================================================================
+
+describe "TQL Aggregations":
+    """
+    ## Aggregation and Grouping
+
+    TQL supports SQL-like groupby with aggregation functions.
+    """
+
+    before_each:
+        @sales = dataframe:
+            region:  ["East", "West", "East", "West", "East"]
+            product: ["A", "A", "B", "B", "A"]
+            amount:  [100.0, 150.0, 200.0, 175.0, 125.0]
+
+    context "when using simple aggregations":
+        """
+        ### Scenario: Whole-Table Aggregations
+
+        Aggregations without groupby apply to entire table.
+        """
+
+        it "computes count":
+            # Act
+            val result = tql(@sales):
+                agg:
+                    total: count()
+
+            # Assert
+            expect(result.get("total")).to(eq(5))
+
+        it "computes sum":
+            # Act
+            val result = tql(@sales):
+                agg:
+                    revenue: sum(@amount)
+
+            # Assert
+            expect(result.get("revenue")).to(eq(750.0))
+
+        it "computes multiple aggregations":
+            # Act
+            val result = tql(@sales):
+                agg:
+                    n: count()
+                    total: sum(@amount)
+                    avg: mean(@amount)
+                    min_sale: min(@amount)
+                    max_sale: max(@amount)
+
+            # Assert
+            expect(result.get("n")).to(eq(5))
+            expect(result.get("avg")).to(eq(150.0))
+
+    context "when using groupby":
+        """
+        ### Scenario: Grouped Aggregations
+
+        Groupby partitions data before applying aggregations.
+        """
+
+        it "groups by single column":
+            # Act
+            val by_region = tql(@sales):
+                groupby @region
+                agg:
+                    n: count()
+                    total: sum(@amount)
+
+            # Assert
+            expect(by_region.len()).to(eq(2))  # East, West
+
+            val east = by_region.filter(@region == "East")
+            expect(east.get("total")).to(eq(425.0))
+
+        it "groups by multiple columns":
+            # Act
+            val by_region_product = tql(@sales):
+                groupby @region, @product
+                agg:
+                    n: count()
+                    total: sum(@amount)
+
+            # Assert
+            expect(by_region_product.len()).to(eq(4))
+
+
+# ============================================================================
+# Test Group 5: Advanced Statistics
+# ============================================================================
+
+describe "TQL Advanced Statistics":
+    """
+    ## Statistical Functions in TQL
+
+    TQL supports advanced statistical functions for analytics.
+    """
+
+    before_each:
+        @data = dataframe:
+            x: [1.0, 2.0, 3.0, 4.0, 5.0]
+            y: [2.0, 4.0, 5.0, 4.0, 5.0]
+
+    context "when computing inferential statistics":
+        """
+        ### Scenario: Correlation and Covariance
+
+        Relationship statistics between two columns.
+        """
+
+        it "computes covariance":
+            # Act
+            val result = tql(@data):
+                agg:
+                    cov_xy: cov(@x, @y)
+
+            # Assert
+            expect(result.get("cov_xy")).to(be_close_to(1.5, 0.01))
+
+        it "computes correlation":
+            # Act
+            val result = tql(@data):
+                agg:
+                    corr_xy: corr(@x, @y)
+
+            # Assert
+            expect(result.get("corr_xy")).to(be_close_to(0.775, 0.01))
+
+    context "when computing order statistics":
+        """
+        ### Scenario: Quantiles and Percentiles
+
+        Distribution analysis functions.
+        """
+
+        it "computes median in aggregation":
+            # Act
+            val result = tql(@data):
+                agg:
+                    med_x: median(@x)
+                    med_y: median(@y)
+
+            # Assert
+            expect(result.get("med_x")).to(eq(3.0))
+            expect(result.get("med_y")).to(eq(4.0))
+
+        it "computes arbitrary quantile":
+            # Act
+            val result = tql(@data):
+                agg:
+                    q10: quantile(@x, 0.1)
+                    q90: quantile(@x, 0.9)
+
+            # Assert
+            expect(result.get("q10")).to(be_close_to(1.4, 0.01))
+            expect(result.get("q90")).to(be_close_to(4.6, 0.01))
+
+    context "when computing trends":
+        """
+        ### Scenario: Trend Analysis
+
+        Predictive statistics for time series analysis.
+        """
+
+        it "computes linear trend":
+            # Act
+            val result = tql(@data):
+                agg:
+                    trend_x: trend(@x)
+
+            # Assert - linear data has slope 1.0
+            expect(result.get("trend_x")).to(eq(1.0))
+
+        it "performs simple linear regression":
+            # Act
+            val result = tql(@data):
+                agg:
+                    reg: regress(@y, @x)
+
+            # Assert
+            expect(result.get("reg").slope).to(be_close_to(0.6, 0.01))
+            expect(result.get("reg").intercept).to(be_close_to(2.2, 0.01))
+
+
+# ============================================================================
+# Test Group 6: Column Transformations
+# ============================================================================
+
+describe "Column Transformations":
+    """
+    ## Column-Level Operations
+
+    Statistics that produce new columns rather than scalars.
+    """
+
+    before_each:
+        @measurements = dataframe:
+            value: [10.0, 20.0, 30.0, 40.0, 50.0]
+
+    context "when normalizing data":
+        """
+        ### Scenario: Z-Score Normalization
+
+        Transform values to standard scores.
+        """
+
+        it "computes zscore for column":
+            # Arrange
+            val df = @measurements
+
+            # Act
+            val normalized = df.with_column(
+                "zscore",
+                zscore(df.get_column("value"))
+            )
+
+            # Assert
+            val scores = normalized.get_column("zscore").to_array()
+            expect(scores[2]).to(be_close_to(0.0, 0.001))  # Mean = 30, zscore = 0
+
+    context "when detecting anomalies":
+        """
+        ### Scenario: Anomaly Detection
+
+        Identify outliers using IQR method.
+        """
+
+        it "flags anomalies":
+            # Arrange
+            val df = dataframe:
+                value: [10.0, 20.0, 30.0, 40.0, 50.0, 1000.0]  # 1000 is outlier
+
+            # Act
+            val flagged = df.with_column(
+                "is_anomaly",
+                anomaly(df.get_column("value"))
+            )
+
+            # Assert
+            val flags = flagged.get_column("is_anomaly").to_array()
+            expect(flags[5]).to(be_true())  # 1000 is anomaly
+            expect(flags[0]).to(be_false())
+
+
+# ============================================================================
+# Helper Types and Functions
+# ============================================================================
+
+struct Regression:
+    slope: f64
+    intercept: f64
+    r_squared: f64
+
+struct Histogram:
+    bins: [f64]
+    counts: [u64]
+
+fn be_close_to(expected: f64, tolerance: f64) -> Matcher<f64>:
+    Matcher.new(fn(actual):
+        val diff = (actual - expected).abs()
+        diff <= tolerance
+    )
