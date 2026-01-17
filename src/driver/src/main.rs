@@ -32,7 +32,7 @@ use simple_driver::cli::basic::{create_runner, run_code, run_file, run_file_with
 use simple_driver::cli::check::{CheckOptions, run_check};
 use simple_driver::cli::code_quality::{run_fmt, run_lint};
 use simple_driver::cli::compile::{compile_file, list_linkers, list_targets};
-use simple_driver::cli::diagram_gen::{parse_diagram_args, print_diagram_help};
+use simple_driver::cli::diagram_gen::{generate_diagrams_from_events, parse_diagram_args, print_diagram_help};
 use simple_driver::cli::doc_gen::{run_feature_gen, run_spec_gen, run_task_gen};
 use simple_driver::cli::gen_lean::run_gen_lean;
 use simple_driver::cli::help::{print_help, print_version, version};
@@ -567,30 +567,67 @@ fn main() {
             let diagram_args: Vec<String> = args[1..].to_vec();
             let options = parse_diagram_args(&diagram_args);
 
-            // For now, diagram command generates from profile data or loads from file
-            // This is a placeholder - actual implementation would hook into test runner
-            // or load recorded profile data
-            println!("Diagram generation options:");
-            println!("  Types: {:?}", options.diagram_types);
-            println!("  Output: {}", options.output_dir.display());
-            println!("  Name: {}", options.test_name);
-            if !options.include_patterns.is_empty() {
-                println!("  Include: {:?}", options.include_patterns);
-            }
-            if !options.exclude_patterns.is_empty() {
-                println!("  Exclude: {:?}", options.exclude_patterns);
-            }
+            // Check if we have a profile file to load
+            if let Some(ref profile_path) = options.from_file {
+                // Load profile data from file
+                match simple_compiler::runtime_profile::ProfileData::load_from_file(profile_path) {
+                    Ok(profile_data) => {
+                        println!("Loaded profile: {} ({} events)", profile_data.name, profile_data.events.len());
 
-            // TODO: [driver][P3] Load profile data and generate diagrams
-            // For now, just show the help to indicate proper usage
-            println!();
-            println!("To generate diagrams, use with test command:");
-            println!("  simple test --seq-diagram my_test.spl");
-            println!();
-            println!("Or run profiler directly:");
-            println!("  simple diagram --help");
+                        // Generate diagrams from the loaded profile data
+                        let architectural = profile_data.get_architectural_entities();
+                        match generate_diagrams_from_events(
+                            profile_data.get_events(),
+                            &architectural,
+                            &options,
+                        ) {
+                            Ok(result) => {
+                                if let Some(path) = result.sequence_path {
+                                    println!("  Sequence diagram: {}", path.display());
+                                }
+                                if let Some(path) = result.class_path {
+                                    println!("  Class diagram: {}", path.display());
+                                }
+                                if let Some(path) = result.arch_path {
+                                    println!("  Architecture diagram: {}", path.display());
+                                }
+                                println!("Diagrams generated successfully.");
+                                std::process::exit(0);
+                            }
+                            Err(e) => {
+                                eprintln!("error: failed to generate diagrams: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // No profile file specified - show usage help
+                println!("Diagram generation options:");
+                println!("  Types: {:?}", options.diagram_types);
+                println!("  Output: {}", options.output_dir.display());
+                println!("  Name: {}", options.test_name);
+                if !options.include_patterns.is_empty() {
+                    println!("  Include: {:?}", options.include_patterns);
+                }
+                if !options.exclude_patterns.is_empty() {
+                    println!("  Exclude: {:?}", options.exclude_patterns);
+                }
 
-            std::process::exit(0);
+                println!();
+                println!("No profile file specified. Usage:");
+                println!("  simple diagram <profile.json>           Load and generate diagrams");
+                println!("  simple diagram -f <file> -A             Generate all diagram types");
+                println!();
+                println!("To record profile data, use:");
+                println!("  simple test --seq-diagram my_test.spl");
+
+                std::process::exit(0);
+            }
         }
         "init" => {
             let name = args.get(1).map(|s| s.as_str());

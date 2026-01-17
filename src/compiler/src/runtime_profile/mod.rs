@@ -44,7 +44,9 @@ pub mod stats;
 mod tests;
 
 // Re-export public API
-pub use config::{CallType, FunctionRuntimeStats, ProfileConfig, ProfileMode, SequenceEvent};
+pub use config::{
+    CallType, FunctionRuntimeStats, ProfileConfig, ProfileData, ProfileMetadata, ProfileMode, SequenceEvent,
+};
 pub use diagram::{
     generate_arch_diagram, generate_arch_from_events, generate_class_diagram, generate_class_from_events,
     generate_sequence_diagram, generate_sequence_from_events, DiagramFormat, DiagramOptions,
