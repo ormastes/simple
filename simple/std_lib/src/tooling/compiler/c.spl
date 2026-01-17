@@ -57,16 +57,29 @@ pub class CCompiler:
         else:
             self.get_compiler_command(mode, config)
 
-        # TODO: [stdlib][P3] Execute build command
-        # result = sys.exec(build_cmd, config.source_dir)
+        # Execute build command
+        val cmd = if self.use_cmake: "cmake" else: self.compiler_cmd
+        val args = if self.use_cmake:
+            "-B {config.output_dir} && cmake --build {config.output_dir}"
+        else:
+            build_cmd.substring(cmd.len() + 1, build_cmd.len())
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
 
-        # For now, return success placeholder
+        # Parse errors and warnings from output
+        var errors: List<text> = []
+        var warnings: List<text> = []
+        for line in stderr.lines():
+            if line.contains("error:"):
+                errors.append(line)
+            elif line.contains("warning:"):
+                warnings.append(line)
+
         CompilationResult {
-            status: "success",
+            status: if exit_code == 0 { "success" } else { "failed" },
             output_path: config.output_dir + "/" + config.name,
             duration_ms: time.now() - start_time,
-            errors: [],
-            warnings: []
+            errors: errors,
+            warnings: warnings
         }
 
     fn get_compiler_command(mode: CompilationMode, config: LanguageConfig): text =
@@ -227,15 +240,21 @@ pub class CCompiler:
         """
         start_time = time.now()
 
-        # TODO: [stdlib][P3] Execute test binaries
-        # Find test executables and run them
-        # result = sys.exec("./test_runner", config.output_dir)
+        # Execute test runner - ctest if cmake, or test_runner binary
+        val cmd = if self.use_cmake: "ctest" else: "./test_runner"
+        val args = if self.use_cmake: "--test-dir {config.output_dir}" else: ""
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        var errors: List<text> = []
+        for line in stderr.lines():
+            if line.contains("FAIL") or line.contains("error"):
+                errors.append(line)
 
         CompilationResult {
-            status: "success",
+            status: if exit_code == 0 { "success" } else { "failed" },
             output_path: "",
             duration_ms: time.now() - start_time,
-            errors: [],
+            errors: errors,
             warnings: []
         }
 
@@ -248,10 +267,16 @@ pub class CCompiler:
         Returns:
             List of lint warnings
         """
-        # TODO: [stdlib][P3] Execute clang-tidy command
-        # result = sys.exec("clang-tidy src/*.c", config.source_dir)
+        val src_ext = if self.language == Language.Cpp then "cpp" else "c"
+        val cmd = "clang-tidy"
+        val args = "src/*.{src_ext}"
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
 
-        []
+        var warnings: List<text> = []
+        for line in stdout.lines():
+            if not line.trim().is_empty():
+                warnings.append(line)
+        warnings
 
     pub fn format(self, config: LanguageConfig): bool =
         """Format code using clang-format.
@@ -262,10 +287,12 @@ pub class CCompiler:
         Returns:
             True if successful
         """
-        # TODO: [stdlib][P3] Execute clang-format command
-        # result = sys.exec("clang-format -i src/*", config.source_dir)
+        val src_ext = if self.language == Language.Cpp then "cpp" else "c"
+        val cmd = "clang-format"
+        val args = "-i src/*.{src_ext}"
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
 
-        true
+        exit_code == 0
 
 # Trait implementation
 impl LanguageCompiler for CCompiler:

@@ -4,6 +4,13 @@
 use tooling.core.project.Language
 use core.result.{Result, Ok, Err}
 
+# FFI for process execution and file operations
+@extern("runtime", "rt_process_run")
+fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64, args_ptr: &u8, args_len: u64) -> (i32, text, text)
+
+@extern("runtime", "rt_file_write_text")
+fn _rt_file_write_text(path_ptr: &u8, path_len: u64, content_ptr: &u8, content_len: u64) -> bool
+
 # Base image selection
 pub enum BaseImage:
     Alpine(text)      # Alpine Linux version
@@ -587,8 +594,38 @@ pub class ContainerBuilder:
         - Python applications
         - Node.js applications
         """
-        # TODO: [stdlib][P3] Scan project for language markers
-        []
+        @extern("runtime", "rt_file_exists")
+        fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
+
+        var languages: List<Language> = []
+
+        # Check for Cargo.toml (Rust)
+        val rust_marker = "Cargo.toml"
+        if _rt_file_exists(rust_marker.ptr(), rust_marker.len()):
+            languages.append(Language::Rust)
+
+        # Check for package.json (Node.js/JavaScript)
+        val node_marker = "package.json"
+        if _rt_file_exists(node_marker.ptr(), node_marker.len()):
+            languages.append(Language::JavaScript)
+
+        # Check for requirements.txt or pyproject.toml (Python)
+        val py_marker1 = "requirements.txt"
+        val py_marker2 = "pyproject.toml"
+        if _rt_file_exists(py_marker1.ptr(), py_marker1.len()) or _rt_file_exists(py_marker2.ptr(), py_marker2.len()):
+            languages.append(Language::Python)
+
+        # Check for go.mod (Go)
+        val go_marker = "go.mod"
+        if _rt_file_exists(go_marker.ptr(), go_marker.len()):
+            languages.append(Language::Go)
+
+        # Check for simple.toml (Simple)
+        val simple_marker = "simple.toml"
+        if _rt_file_exists(simple_marker.ptr(), simple_marker.len()):
+            languages.append(Language::Simple)
+
+        languages
 
     pub fn add_artifacts(self, artifact_path: text):
         """Add artifacts to image.
@@ -619,7 +656,20 @@ pub class ContainerBuilder:
         # Start from base
         self.dockerfile_builder.from_base(self.base_image)
 
-        # TODO: [stdlib][P3] Add runtime-specific instructions
+        # Add runtime-specific instructions based on detected languages
+        val languages = self.detect_runtime()
+        for lang in languages:
+            match lang:
+                Language::Python:
+                    self.dockerfile_builder.run("pip install --no-cache-dir -r requirements.txt")
+                Language::JavaScript:
+                    self.dockerfile_builder.run("npm ci --only=production")
+                Language::Go:
+                    self.dockerfile_builder.run("go build -o /app/main .")
+                Language::Rust:
+                    self.dockerfile_builder.run("cargo build --release")
+                _:
+                    pass
 
         self.dockerfile_builder.generate()
 
@@ -649,9 +699,21 @@ pub class ContainerBuilder:
         # Generate Dockerfile
         val dockerfile = self.generate_dockerfile()
 
-        # TODO: [stdlib][P3] Write Dockerfile to temp file
-        # TODO: [stdlib][P3] Execute docker build
-        # For multi-platform: docker buildx build --platform linux/amd64,linux/arm64
+        # Write Dockerfile to temp file
+        val dockerfile_path = ".dockerfile.tmp"
+        _rt_file_write_text(dockerfile_path.ptr(), dockerfile_path.len(), dockerfile.ptr(), dockerfile.len())
+
+        # Execute docker build
+        val cmd = "docker"
+        val platform_str = self.get_platform_string()
+        var args = if self.is_multi_platform():
+            "buildx build --platform {platform_str} -t {tag} -f {dockerfile_path} ."
+        else:
+            "build -t {tag} -f {dockerfile_path} ."
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        if self.verbose and exit_code != 0:
+            print("Docker build failed: {stderr}")
 
         ContainerImage.new(tag, platforms)
 
@@ -671,10 +733,24 @@ pub class ContainerImage:
         Returns:
             Container image
         """
+        # Get image size using docker inspect
+        val cmd = "docker"
+        val args = "image inspect {tag} --format='{{.Size}}'"
+        val (exit_code, stdout, stderr) = _rt_process_run(cmd.ptr(), cmd.len(), args.ptr(), args.len())
+
+        var size: f64 = 0.0
+        if exit_code == 0 and not stdout.trim().is_empty():
+            # Parse size from stdout (bytes) and convert to MB
+            var bytes: i64 = 0
+            for ch in stdout.trim().chars():
+                if ch >= '0' and ch <= '9':
+                    bytes = bytes * 10 + ((ch as i64) - ('0' as i64))
+            size = (bytes as f64) / (1024.0 * 1024.0)
+
         ContainerImage {
             tag: tag,
             platforms: platforms,
-            size_mb: 0.0  # TODO: [stdlib][P3] Get actual size
+            size_mb: size
         }
 
     pub fn push(self, registry: text): Result<(), text> =
