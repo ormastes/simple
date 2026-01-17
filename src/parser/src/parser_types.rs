@@ -88,9 +88,19 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Star => {
                 self.advance();
+                // Check for *const T or *mut T (similar to &mut T handling)
+                let kind = if self.check(&TokenKind::Const) {
+                    self.advance();
+                    PointerKind::RawConst
+                } else if self.check(&TokenKind::Mut) {
+                    self.advance();
+                    PointerKind::RawMut
+                } else {
+                    PointerKind::Shared
+                };
                 let inner = self.parse_single_type()?;
                 return Ok(Type::Pointer {
-                    kind: PointerKind::Shared,
+                    kind,
                     inner: Box::new(inner),
                 });
             }

@@ -349,6 +349,8 @@ pub enum PointerKind {
     Handle,    // +T
     Borrow,    // &T_borrow (immutable borrow)
     BorrowMut, // &mut T_borrow (mutable borrow)
+    RawConst,  // *const T (FFI const pointer)
+    RawMut,    // *mut T (FFI mutable pointer)
 }
 
 /// Function effect annotations for capability-based effect tracking.

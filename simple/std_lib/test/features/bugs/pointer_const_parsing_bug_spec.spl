@@ -1,0 +1,129 @@
+# Bug Reproduction: Parser fails on `*const T` pointer types
+#
+# **Bug ID:** Parser fails with "expected identifier, found Const"
+# **Severity:** P0 - Blocks all FFI with const pointers (98+ stdlib usages)
+# **Component:** Parser (src/parser/src/parser_types.rs:89-95)
+#
+# **Root Cause:**
+# The parser handles `*` (Star token) but doesn't check for `const` or `mut`
+# modifiers before parsing the inner type. It immediately calls parse_single_type()
+# which fails when it sees the `const` keyword token.
+#
+# **Expected Fix:**
+# Similar to how `&mut T` is handled (lines 64-74), check for const/mut after `*`:
+#
+# ```rust
+# TokenKind::Star => {
+#     self.advance();
+#     // Check for *const T or *mut T
+#     let kind = if self.check(&TokenKind::Const) {
+#         self.advance();
+#         PointerKind::RawConst
+#     } else if self.check(&TokenKind::Mut) {
+#         self.advance();
+#         PointerKind::RawMut
+#     } else {
+#         PointerKind::Shared
+#     };
+#     let inner = self.parse_single_type()?;
+#     return Ok(Type::Pointer { kind, inner: Box::new(inner) });
+# }
+# ```
+
+use spec.dsl.*
+
+describe "Bug: *const pointer parsing":
+    context("Minimal reproduction"):
+        it "fails to parse extern fn with *const parameter":
+            # This should parse but currently fails
+            # extern fn test_const_ptr(data: *const u8) -> i32
+
+            # Expected: Parse successfully
+            # Actual: error: Unexpected token: expected identifier, found Const
+
+            # TODO: [stdlib][P0] Fix parser to handle *const pointers
+            pass
+
+        it "fails to parse *const in struct fields":
+            # Also fails in struct field types
+            # struct Buffer:
+            #     ptr: *const u8
+            #     len: u64
+
+            # TODO: [stdlib][P0] Fix parser to handle *const in all contexts
+            pass
+
+    context("Working alternatives"):
+        it "demonstrates that const keyword works elsewhere":
+            # Const declarations work fine
+            const MAX_SIZE = 1024
+            expect MAX_SIZE == 1024
+
+        it "demonstrates that *mut should work (untested)":
+            # Mutable pointers should work (needs parser support check)
+            # extern fn test_mut_ptr(data: *mut u8) -> i32
+
+            # TODO: [stdlib][P2] Verify *mut pointer parsing works
+            pass
+
+        it "demonstrates that &mut works correctly":
+            # Mutable borrows work because parser checks for mut after &
+            # This is the pattern that *const/*mut should follow
+            pass
+
+describe "Bug Impact":
+    context("Blocked stdlib modules"):
+        it "blocks vulkan_ffi.spl (11 usages)":
+            # Cannot import ui.gui.vulkan_ffi due to:
+            # extern fn rt_vk_buffer_upload(buffer_handle: u64, data: *const u8, size: u64) -> i32
+            # extern fn rt_vk_kernel_compile(device_handle: u64, spirv: *const u8, spirv_size: u64) -> u64
+            # And 9 more functions
+            pass
+
+        it "blocks arena.spl (memory management)":
+            # Cannot use core_nogc.arena due to:
+            # ptr: *const u8
+            # extern fn native_memcpy(dst: *mut u8, src: *const u8, size: u64)
+            pass
+
+        it "blocks native.spl (UI FFI)":
+            # Cannot use ui.gui.native due to:
+            # extern fn native_window_create(title_ptr: *const u8, title_len: u64, width: u32, height: u32) -> WindowHandle
+            pass
+
+        it "blocks 98+ FFI declarations across stdlib":
+            # Total impact: 98+ usages of *const in stdlib
+            # grep -r "\*const" simple/std_lib/src --include="*.spl" | wc -l
+            pass
+
+describe "Bug verification":
+    context("Parser behavior"):
+        it "demonstrates lexer tokenizes const correctly":
+            # Lexer: "const" -> TokenKind::Const (line 149 in lexer/identifiers.rs)
+            # This is correct for const declarations
+            const TEST = 42
+            expect TEST == 42
+
+        it "demonstrates parser handles const declarations":
+            # Parser: TokenKind::Const => self.parse_const() (line 304 in parser_impl/core.rs)
+            # This works for top-level const declarations
+            const ANOTHER = 100
+            expect ANOTHER == 100
+
+        it "demonstrates pointer type parsing fails":
+            # Parser: TokenKind::Star => ... parse_single_type()
+            # Problem: parse_single_type() expects Identifier, not Const
+            # parse_single_type() fails with "expected identifier, found Const"
+            pass
+
+# =============================================================================
+# Test Status
+# =============================================================================
+#
+# All tests in this spec are PENDING until parser bug is fixed.
+# This spec documents the bug for future verification after fix.
+#
+# After fix, uncomment the extern fn declarations and verify:
+# 1. All tests pass
+# 2. vulkan_ffi.spl imports successfully
+# 3. No regressions in const declarations

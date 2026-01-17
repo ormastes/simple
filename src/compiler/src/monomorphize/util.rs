@@ -102,6 +102,8 @@ pub fn ast_type_to_concrete(ty: &AstType, bindings: &HashMap<String, ConcreteTyp
                 simple_parser::ast::PointerKind::Handle => PointerKind::Handle,
                 simple_parser::ast::PointerKind::Borrow => PointerKind::Borrow,
                 simple_parser::ast::PointerKind::BorrowMut => PointerKind::BorrowMut,
+                simple_parser::ast::PointerKind::RawConst => PointerKind::RawConst,
+                simple_parser::ast::PointerKind::RawMut => PointerKind::RawMut,
             };
             ConcreteType::Pointer {
                 kind: pk,
@@ -319,6 +321,8 @@ pub fn concrete_to_ast_type(concrete: &ConcreteType) -> AstType {
                 PointerKind::Handle => simple_parser::ast::PointerKind::Handle,
                 PointerKind::Borrow => simple_parser::ast::PointerKind::Borrow,
                 PointerKind::BorrowMut => simple_parser::ast::PointerKind::BorrowMut,
+                PointerKind::RawConst => simple_parser::ast::PointerKind::RawConst,
+                PointerKind::RawMut => simple_parser::ast::PointerKind::RawMut,
             };
             AstType::Pointer {
                 kind: ast_kind,
