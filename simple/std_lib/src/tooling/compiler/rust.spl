@@ -254,22 +254,47 @@ impl RustCompiler:
         Cargo JSON format:
         {"reason":"compiler-artifact","target":{"name":"app","kind":["bin"]},"filenames":["/path/to/app"],"...}
         """
+        import core.json.{parse, JsonValue}
+
         val artifacts: List<Artifact> = []
 
-        # TODO: [stdlib][P2] Parse JSON when available
-        # For now, infer artifact path
-        val mode_dir = match mode:
-            CompilationMode::Debug: "debug"
-            CompilationMode::Release: "release"
-            CompilationMode::Profile: "release"
+        # Parse JSON output line by line (cargo outputs one JSON object per line)
+        for line in json_output.lines():
+            val trimmed = line.trim()
+            if trimmed.is_empty():
+                continue
 
-        val artifact_path = "{root}/target/{mode_dir}/app"
-        val artifact = Artifact.new(
-            artifact_path,
-            ArtifactType::Executable,
-            Language::Rust
-        )
-        artifacts.append(artifact)
+            match parse(trimmed):
+                case Ok(JsonValue.Object(obj)):
+                    # Check if this is an artifact message
+                    if val Some(JsonValue.String(reason)) = obj.get("reason"):
+                        if reason == "compiler-artifact":
+                            # Extract artifact info
+                            if val Some(JsonValue.Array(filenames)) = obj.get("filenames"):
+                                for filename in filenames:
+                                    if val JsonValue.String(path) = filename:
+                                        val artifact_type = if path.ends_with(".rlib"):
+                                            ArtifactType::Library
+                                        elif path.ends_with(".so") or path.ends_with(".dylib"):
+                                            ArtifactType::SharedLibrary
+                                        else:
+                                            ArtifactType::Executable
+                                        val artifact = Artifact.new(path, artifact_type, Language::Rust)
+                                        artifacts.append(artifact)
+                case _:
+                    # Not valid JSON, skip
+                    pass
+
+        # Fallback if no artifacts parsed: infer from mode
+        if artifacts.is_empty():
+            val mode_dir = match mode:
+                CompilationMode::Debug: "debug"
+                CompilationMode::Release: "release"
+                CompilationMode::Profile: "release"
+
+            val artifact_path = "{root}/target/{mode_dir}/app"
+            val artifact = Artifact.new(artifact_path, ArtifactType::Executable, Language::Rust)
+            artifacts.append(artifact)
 
         artifacts
 
@@ -285,10 +310,57 @@ impl RustCompiler:
         Cargo JSON diagnostic format:
         {"reason":"compiler-message","message":{"level":"error","message":"...","spans":[{"file_name":"...","line_start":10,"column_start":5}]}}
         """
+        import core.json.{parse, JsonValue}
+
         val errors: List<CompilationError> = []
 
-        # TODO: [stdlib][P2] Parse JSON when available
-        # For now, return empty list
+        # Parse JSON output line by line
+        for line in json_output.lines():
+            val trimmed = line.trim()
+            if trimmed.is_empty():
+                continue
+
+            match parse(trimmed):
+                case Ok(JsonValue.Object(obj)):
+                    # Check if this is a compiler message
+                    if val Some(JsonValue.String(reason)) = obj.get("reason"):
+                        if reason == "compiler-message":
+                            # Extract message info
+                            if val Some(JsonValue.Object(msg)) = obj.get("message"):
+                                var file = ""
+                                var line_num: i32 = 0
+                                var column: i32 = 0
+                                var message = ""
+                                var severity = ErrorSeverity::Error
+
+                                if val Some(JsonValue.String(msg_text)) = msg.get("message"):
+                                    message = msg_text
+
+                                if val Some(JsonValue.String(level)) = msg.get("level"):
+                                    severity = match level:
+                                        "error": ErrorSeverity::Error
+                                        "warning": ErrorSeverity::Warning
+                                        "note": ErrorSeverity::Info
+                                        "help": ErrorSeverity::Hint
+                                        _: ErrorSeverity::Error
+
+                                # Extract span info
+                                if val Some(JsonValue.Array(spans)) = msg.get("spans"):
+                                    if spans.len() > 0:
+                                        if val JsonValue.Object(span) = spans[0]:
+                                            if val Some(JsonValue.String(fname)) = span.get("file_name"):
+                                                file = fname
+                                            if val Some(JsonValue.Number(ln)) = span.get("line_start"):
+                                                line_num = ln as i32
+                                            if val Some(JsonValue.Number(col)) = span.get("column_start"):
+                                                column = col as i32
+
+                                val error = CompilationError.new(file, line_num, column, message, severity)
+                                errors.append(error)
+                case _:
+                    # Not valid JSON, skip
+                    pass
+
         errors
 
     fn parse_error_message(json_msg: text): CompilationError =

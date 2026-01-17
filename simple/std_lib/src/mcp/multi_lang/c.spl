@@ -21,7 +21,58 @@ impl LanguageProvider for CProvider:
 
     fn fold(source: &str, opts: &FoldOptions) -> Result<McpOutput, McpError>:
         var output = McpOutput::new()
-        # TODO: [stdlib][P2] Parse C/C++ code and extract functions, structs, classes
+
+        # Parse C/C++ code patterns for functions, structs, classes
+        var current_line = 0
+        var in_multiline_comment = false
+
+        for line in source.lines():
+            current_line += 1
+            val trimmed = line.trim()
+
+            # Skip comments
+            if trimmed.starts_with("/*"):
+                in_multiline_comment = true
+            if in_multiline_comment:
+                if trimmed.contains("*/"):
+                    in_multiline_comment = false
+                continue
+            if trimmed.starts_with("//"):
+                continue
+
+            # Struct: struct Name { or typedef struct { } Name
+            if trimmed.starts_with("struct ") and not trimmed.contains("*"):
+                val parts = trimmed.split(" ")
+                if parts.len() >= 2:
+                    val struct_name = parts[1].split("{")[0].split(";")[0].trim()
+                    if struct_name.len() > 0:
+                        output.add_symbol(Symbol::new(struct_name, SymbolKind::Struct, current_line))
+
+            # Class (C++): class Name or class Name : public Base
+            elif trimmed.starts_with("class ") and not trimmed.contains("*"):
+                val parts = trimmed.split(" ")
+                if parts.len() >= 2:
+                    val class_name = parts[1].split(":")[0].split("{")[0].trim()
+                    if class_name.len() > 0:
+                        output.add_symbol(Symbol::new(class_name, SymbolKind::Class, current_line))
+
+            # Enum: enum Name {
+            elif trimmed.starts_with("enum "):
+                val parts = trimmed.split(" ")
+                if parts.len() >= 2:
+                    val enum_name = parts[1].split("{")[0].trim()
+                    if enum_name.len() > 0:
+                        output.add_symbol(Symbol::new(enum_name, SymbolKind::Enum, current_line))
+
+            # Function: type name(args) { or type name(args);
+            elif trimmed.contains("(") and not trimmed.starts_with("#"):
+                val before_paren = trimmed.split("(")[0]
+                val parts = before_paren.split(" ")
+                if parts.len() >= 2:
+                    val func_name = parts[parts.len() - 1].split("*").last().unwrap_or("").trim()
+                    if func_name.len() > 0 and not func_name.starts_with("if") and not func_name.starts_with("while") and not func_name.starts_with("for"):
+                        output.add_symbol(Symbol::new(func_name, SymbolKind::Function, current_line))
+
         return Ok(output)
 
     fn get_symbols(source: &str) -> Result<Array<Symbol>, McpError>:
