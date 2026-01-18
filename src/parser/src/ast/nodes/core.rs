@@ -207,17 +207,21 @@ impl DocComment {
 /// ```simple
 /// fn make[T]() -> T where T: Clone + Default:
 ///     return T.default()
+/// fn sum[T]() -> T where T: Add<Output=T>:
+///     ...
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct WhereBound {
     pub span: Span,
     /// The type parameter being constrained (e.g., "T")
     pub type_param: String,
-    /// The trait bounds (e.g., ["Clone", "Default"])
-    pub bounds: Vec<String>,
+    /// The trait bounds as full type expressions
+    /// Can be simple: `Clone`, `Default`
+    /// Or parameterized: `Add<Output=T>`, `Iterator<Item=String>`
+    pub bounds: Vec<Type>,
     /// Negative bounds: bounds that must NOT be implemented (#1151)
     /// Example: T: !Clone means T must NOT implement Clone
-    pub negative_bounds: Vec<String>,
+    pub negative_bounds: Vec<Type>,
 }
 
 /// A where clause containing multiple bounds

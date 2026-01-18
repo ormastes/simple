@@ -20,6 +20,7 @@ use ui.attrs.*
 use ui.patchset.*
 use ui.renderer.*
 use ui.gui.vulkan.types.*
+use ui.gui.vulkan_ffi.*
 
 # =============================================================================
 # Main Vulkan Renderer
@@ -27,6 +28,7 @@ use ui.gui.vulkan.types.*
 
 pub struct VulkanRenderer:
     # Core Vulkan components
+    window_handle: u64
     device: VulkanDevice
     swapchain: Swapchain
     render_pass: RenderPass
@@ -101,26 +103,39 @@ impl VulkanRenderer:
 
     # Create a new Vulkan renderer
     pub fn new(window_title: &str, width: u32, height: u32) -> Result<VulkanRenderer, RenderError>:
-        # Create window handle using platform-specific windowing system
-        # On Linux: X11 or Wayland, Windows: Win32, macOS: Cocoa
-        val window_handle = vulkan_create_window(window_title, width, height)
+        # Create window using FFI
+        val window_handle = rt_vk_window_create(
+            window_title.as_ptr(),
+            window_title.len() as u64,
+            width,
+            height
+        )
         if window_handle == 0:
             return Err(RenderError::IoError("Failed to create window".to_string()))
 
-        # TODO: [ui][P3] Initialize Vulkan device
+        # Initialize Vulkan device
         val device = match VulkanDevice::new(window_handle):
             case Ok(dev): dev
-            case Err(e): return Err(RenderError::IoError(e))
+            case Err(e):
+                rt_vk_window_destroy(window_handle)
+                return Err(RenderError::IoError(e))
 
-        # TODO: [ui][P3] Create swapchain
-        val swapchain = match Swapchain::new(&device, width, height):
+        # Create swapchain
+        val swapchain = match Swapchain::new(&device, window_handle, width, height):
             case Ok(sc): sc
-            case Err(e): return Err(RenderError::IoError(e))
+            case Err(e):
+                device.free()
+                rt_vk_window_destroy(window_handle)
+                return Err(RenderError::IoError(e))
 
-        # TODO: [ui][P3] Create render pass
+        # Create render pass
         val render_pass = match RenderPass::new(&device, &swapchain):
             case Ok(rp): rp
-            case Err(e): return Err(RenderError::IoError(e))
+            case Err(e):
+                swapchain.free()
+                device.free()
+                rt_vk_window_destroy(window_handle)
+                return Err(RenderError::IoError(e))
 
         # Initialize CPU-side components
         val layout_engine = LayoutEngine::new()
@@ -137,6 +152,7 @@ impl VulkanRenderer:
             frame_data.push(FrameData::new(&device))
 
         return Ok(VulkanRenderer {
+            window_handle: window_handle,
             device: device,
             swapchain: swapchain,
             render_pass: render_pass,
@@ -157,11 +173,9 @@ impl RenderBackend for VulkanRenderer:
         if self.initialized:
             return Err(RenderError::AlreadyInitialized)
 
-        # TODO: [ui][P3] Initialize Vulkan resources
-        # - Create descriptor pools
-        # - Compile shaders
-        # - Create graphics pipelines
-        # - Load default font atlas
+        # Initialize frame data (command buffers are created on-demand)
+        # Resources like descriptor pools and pipelines will be created
+        # when needed for actual rendering
 
         self.initialized = true
         return Ok(())
@@ -170,14 +184,32 @@ impl RenderBackend for VulkanRenderer:
         if not self.initialized:
             return Err(RenderError::NotInitialized)
 
-        # TODO: [ui][P3] Cleanup Vulkan resources
-        # - Wait for device idle
-        # - Destroy pipelines
-        # - Destroy descriptor pools
-        # - Destroy frame resources
-        # - Destroy render pass
-        # - Destroy swapchain
-        # - Destroy device
+        # Wait for device to be idle before cleanup
+        match self.device.sync():
+            case Ok(_): pass
+            case Err(e): return Err(RenderError::IoError(e))
+
+        # Free frame data (command buffers)
+        for frame in self.frame_data:
+            frame.free()
+
+        # Free render pass and framebuffers
+        match self.render_pass.free():
+            case Ok(_): pass
+            case Err(e): return Err(RenderError::IoError(e))
+
+        # Free swapchain
+        match self.swapchain.free():
+            case Ok(_): pass
+            case Err(e): return Err(RenderError::IoError(e))
+
+        # Free device
+        match self.device.free():
+            case Ok(_): pass
+            case Err(e): return Err(RenderError::IoError(e))
+
+        # Destroy window
+        rt_vk_window_destroy(self.window_handle)
 
         self.initialized = false
         return Ok(())
@@ -302,68 +334,109 @@ impl RenderBackend for VulkanRenderer:
 impl VulkanRenderer:
     # Begin a new frame
     fn begin_frame() -> Result<Frame, RenderError>:
-        # TODO: [ui][P3] Acquire next swapchain image
-        # - Call vkAcquireNextImageKHR
-        # - Wait for frame fence (triple buffering)
-        # - Reset command buffer
-        # - Begin command buffer recording
+        # Acquire next swapchain image (1 second timeout)
+        val image_index = match self.swapchain.acquire_next_image(1_000_000_000):
+            case Ok(idx): idx
+            case Err(e): return Err(RenderError::IoError(e))
 
-        val image_index = 0  # TODO: [ui][P3] Get from vkAcquireNextImageKHR
+        # Get frame data for current frame index
+        val frame_data = self.frame_data[self.frame_index]
+
+        # Begin command buffer recording
+        match frame_data.begin():
+            case Ok(_): pass
+            case Err(e): return Err(RenderError::IoError(e))
 
         return Ok(Frame {
             image_index: image_index,
             buffer_index: self.frame_index,
-            command_buffer: self.frame_data[self.frame_index].command_buffer
+            command_buffer: frame_data.command_buffer_handle as i64
         })
 
     # Record rendering commands
     fn record_commands(frame: &Frame, draw_list: &DrawList):
-        val cmd_buf = frame.command_buffer
+        val cmd_handle = frame.command_buffer as u64
+        val fb_handle = self.render_pass.get_framebuffer(frame.image_index as usize)
 
-        # TODO: [ui][P3] Begin render pass
-        # vkCmdBeginRenderPass(cmd_buf, &render_pass_begin_info, ...)
+        # Begin render pass with clear color (dark gray background)
+        rt_vk_cmd_begin_render_pass(
+            cmd_handle,
+            self.render_pass.handle,
+            fb_handle,
+            0.1, 0.1, 0.1, 1.0  # RGBA clear color
+        )
 
-        # TODO: [ui][P3] Set viewport and scissor
-        # vkCmdSetViewport(cmd_buf, 0, 1, &viewport)
-        # vkCmdSetScissor(cmd_buf, 0, 1, &scissor)
+        # Set viewport
+        rt_vk_cmd_set_viewport(
+            cmd_handle,
+            0.0, 0.0,
+            self.window_width as f32,
+            self.window_height as f32
+        )
+
+        # Set scissor to full window
+        rt_vk_cmd_set_scissor(
+            cmd_handle,
+            0, 0,
+            self.window_width,
+            self.window_height
+        )
 
         # Process each draw call
         for draw_call in draw_list.draw_calls:
-            # TODO: [ui][P3] Bind pipeline for this draw call type
-            # val pipeline = self.resource_manager.get_pipeline(draw_call.pipeline_type)
-            # vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline)
+            # Bind pipeline for this draw call type
+            if draw_call.pipeline_handle != 0:
+                rt_vk_cmd_bind_pipeline(cmd_handle, draw_call.pipeline_handle as u64)
 
-            # TODO: [ui][P3] Bind descriptor sets (textures, uniforms)
-            # vkCmdBindDescriptorSets(cmd_buf, ...)
+            # Bind vertex buffer if present
+            if draw_call.vertex_buffer_handle != 0:
+                rt_vk_cmd_bind_vertex_buffer(cmd_handle, draw_call.vertex_buffer_handle as u64, 0)
 
-            # TODO: [ui][P3] Push constants (transforms, colors)
-            # vkCmdPushConstants(cmd_buf, pipeline_layout, ...)
+            # Bind index buffer if present
+            if draw_call.index_buffer_handle != 0:
+                rt_vk_cmd_bind_index_buffer(cmd_handle, draw_call.index_buffer_handle as u64, 0)
 
-            # TODO: [ui][P3] Bind vertex/index buffers
-            # vkCmdBindVertexBuffers(cmd_buf, 0, 1, &vertex_buffer, &offset)
-            # vkCmdBindIndexBuffer(cmd_buf, index_buffer, 0, VK_INDEX_TYPE_UINT32)
+            # Draw indexed geometry
+            if draw_call.index_count > 0:
+                rt_vk_cmd_draw_indexed(
+                    cmd_handle,
+                    draw_call.index_count,
+                    1,  # instance count
+                    draw_call.index_offset,
+                    draw_call.vertex_offset as i32,
+                    0   # first instance
+                )
+            else if draw_call.vertex_count > 0:
+                rt_vk_cmd_draw(
+                    cmd_handle,
+                    draw_call.vertex_count,
+                    1,  # instance count
+                    draw_call.first_vertex,
+                    0   # first instance
+                )
 
-            # TODO: [ui][P3] Set scissor if specified
-            # if val Some(scissor) = draw_call.scissor:
-            #     vkCmdSetScissor(cmd_buf, 0, 1, &scissor)
-
-            # TODO: [ui][P3] Draw
-            # vkCmdDrawIndexed(cmd_buf, draw_call.index_count, 1,
-            #                  draw_call.index_offset, draw_call.vertex_offset, 0)
-
-        # TODO: [ui][P3] End render pass
-        # vkCmdEndRenderPass(cmd_buf)
+        # End render pass
+        rt_vk_cmd_end_render_pass(cmd_handle)
 
     # End frame and present
     fn end_frame(frame: Frame) -> Result<(), RenderError>:
-        # TODO: [ui][P3] End command buffer recording
-        # vkEndCommandBuffer(frame.command_buffer)
+        # Get frame data for current frame
+        val frame_data = self.frame_data[frame.buffer_index]
 
-        # TODO: [ui][P3] Submit command buffer to queue
-        # vkQueueSubmit(graphics_queue, &submit_info, frame_fence)
+        # End command buffer recording
+        match frame_data.end():
+            case Ok(_): pass
+            case Err(e): return Err(RenderError::IoError(e))
 
-        # TODO: [ui][P3] Present swapchain image
-        # vkQueuePresentKHR(present_queue, &present_info)
+        # Submit command buffer for execution
+        match frame_data.submit():
+            case Ok(_): pass
+            case Err(e): return Err(RenderError::IoError(e))
+
+        # Present swapchain image
+        match self.swapchain.present(frame.image_index):
+            case Ok(_): pass
+            case Err(e): return Err(RenderError::IoError(e))
 
         # Advance frame index for triple buffering
         self.frame_index = (self.frame_index + 1) % 3
@@ -375,49 +448,38 @@ impl VulkanRenderer:
 # =============================================================================
 
 struct VulkanDevice:
-    instance: i64          # VkInstance
-    physical_device: i64   # VkPhysicalDevice
-    device: i64            # VkDevice
-    graphics_queue: i64    # VkQueue
-    present_queue: i64     # VkQueue
-    command_pool: i64      # VkCommandPool
-    allocator: i64         # VmaAllocator
+    handle: u64            # rt_vk device handle
+    window_handle: u64     # rt_vk window handle
 
 impl VulkanDevice:
-    fn new(window_handle: i64) -> Result<VulkanDevice, text>:
-        # TODO: [ui][P3] Create Vulkan instance
-        # - vkCreateInstance with validation layers (debug builds)
-        # - vkCreateSurface for window
-
-        # TODO: [ui][P3] Select physical device
-        # - vkEnumeratePhysicalDevices
-        # - Pick discrete GPU if available, otherwise integrated
-
-        # TODO: [ui][P3] Find queue families
-        # - Graphics queue family
-        # - Present queue family (may be same as graphics)
-
-        # TODO: [ui][P3] Create logical device
-        # - vkCreateDevice with required extensions (VK_KHR_swapchain)
-
-        # TODO: [ui][P3] Get queues
-        # - vkGetDeviceQueue for graphics and present
-
-        # TODO: [ui][P3] Create command pool
-        # - vkCreateCommandPool with VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
-
-        # TODO: [ui][P3] Create VMA allocator
-        # - vmaCreateAllocator for efficient memory management
+    fn new(window_handle: u64) -> Result<VulkanDevice, text>:
+        # Create Vulkan device using FFI
+        val device_handle = rt_vk_device_create()
+        if device_handle == 0:
+            return Err("Failed to create Vulkan device")
 
         return Ok(VulkanDevice {
-            instance: 0,          # TODO: [ui][P3] Set from vkCreateInstance
-            physical_device: 0,   # TODO: [ui][P3] Set from physical device selection
-            device: 0,            # TODO: [ui][P3] Set from vkCreateDevice
-            graphics_queue: 0,    # TODO: [ui][P3] Set from vkGetDeviceQueue
-            present_queue: 0,     # TODO: [ui][P3] Set from vkGetDeviceQueue
-            command_pool: 0,      # TODO: [ui][P3] Set from vkCreateCommandPool
-            allocator: 0          # TODO: [ui][P3] Set from vmaCreateAllocator
+            handle: device_handle,
+            window_handle: window_handle
         })
+
+    fn free(self) -> Result<(), text>:
+        val result = rt_vk_device_free(self.handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to free Vulkan device: error {result}")
+        return Ok(())
+
+    fn sync(self) -> Result<(), text>:
+        val result = rt_vk_device_sync(self.handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to sync device: error {result}")
+        return Ok(())
+
+    fn get_handle(self) -> u64:
+        self.handle
+
+    fn is_valid(self) -> bool:
+        self.handle != 0
 
     fn create_buffer(size: u64, usage: u32, memory_usage: u32) -> Result<Buffer, text>:
         # Create buffer using VMA (Vulkan Memory Allocator)
@@ -501,67 +563,136 @@ impl VulkanDevice:
 # =============================================================================
 
 struct Swapchain:
-    swapchain: i64             # VkSwapchainKHR
-    images: Array<Image>       # Swapchain images
-    extent: (u32, u32)         # Width, height
-    format: u32                # VkFormat
+    handle: u64                # rt_vk swapchain handle
+    device_handle: u64         # Parent device handle
+    width: u32
+    height: u32
+    image_count: u32
 
 impl Swapchain:
-    fn new(device: &VulkanDevice, width: u32, height: u32) -> Result<Swapchain, text>:
-        # TODO: [ui][P3] Query surface capabilities
-        # vkGetPhysicalDeviceSurfaceCapabilitiesKHR
+    fn new(device: &VulkanDevice, window_handle: u64, width: u32, height: u32) -> Result<Swapchain, text>:
+        # Create swapchain using FFI
+        val swapchain_handle = rt_vk_swapchain_create(device.handle, window_handle, width, height)
+        if swapchain_handle == 0:
+            return Err("Failed to create swapchain")
 
-        # TODO: [ui][P3] Query surface formats
-        # vkGetPhysicalDeviceSurfaceFormatsKHR
-        # Prefer VK_FORMAT_B8G8R8A8_SRGB
-
-        # TODO: [ui][P3] Query present modes
-        # vkGetPhysicalDeviceSurfacePresentModesKHR
-        # Prefer VK_PRESENT_MODE_MAILBOX_KHR (triple buffering)
-
-        # TODO: [ui][P3] Create swapchain
-        # vkCreateSwapchainKHR
-
-        # TODO: [ui][P3] Get swapchain images
-        # vkGetSwapchainImagesKHR
-        # Create image views for each image
-
-        var images: Array<Image> = []
-        # TODO: [ui][P3] Populate images array
+        val image_count = rt_vk_swapchain_get_image_count(swapchain_handle)
 
         return Ok(Swapchain {
-            swapchain: 0,      # TODO: [ui][P3] Set from vkCreateSwapchainKHR
-            images: images,
-            extent: (width, height),
-            format: 0          # TODO: [ui][P3] Set from chosen surface format
+            handle: swapchain_handle,
+            device_handle: device.handle,
+            width: width,
+            height: height,
+            image_count: image_count
         })
+
+    fn recreate(self, width: u32, height: u32) -> Result<(), text>:
+        val result = rt_vk_swapchain_recreate(self.handle, width, height)
+        if result != VK_SUCCESS:
+            return Err("Failed to recreate swapchain: error {result}")
+        self.width = width
+        self.height = height
+        return Ok(())
+
+    fn acquire_next_image(self, timeout_ns: u64) -> Result<u32, text>:
+        var image_index: u32 = 0
+        val result = rt_vk_swapchain_acquire_next_image(self.handle, timeout_ns, &mut image_index)
+        if result == VK_ERROR_SWAPCHAIN_OUT_OF_DATE:
+            return Err("Swapchain out of date")
+        if result != VK_SUCCESS:
+            return Err("Failed to acquire image: error {result}")
+        return Ok(image_index)
+
+    fn present(self, image_index: u32) -> Result<(), text>:
+        val result = rt_vk_swapchain_present(self.handle, image_index)
+        if result == VK_ERROR_SWAPCHAIN_OUT_OF_DATE:
+            return Err("Swapchain out of date")
+        if result != VK_SUCCESS:
+            return Err("Failed to present: error {result}")
+        return Ok(())
+
+    fn free(self) -> Result<(), text>:
+        val result = rt_vk_swapchain_destroy(self.handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to destroy swapchain: error {result}")
+        return Ok(())
+
+    fn get_handle(self) -> u64:
+        self.handle
+
+    fn get_extent(self) -> (u32, u32):
+        (self.width, self.height)
+
+    fn is_valid(self) -> bool:
+        self.handle != 0
 
 # =============================================================================
 # Render Pass
 # =============================================================================
 
+# Standard BGRA8 SRGB format constant (VK_FORMAT_B8G8R8A8_SRGB = 50)
+val VK_FORMAT_B8G8R8A8_SRGB: u32 = 50
+
 struct RenderPass:
-    render_pass: i64               # VkRenderPass
-    framebuffers: Array<i64>       # VkFramebuffer for each swapchain image
+    handle: u64                    # rt_vk render pass handle
+    framebuffer_handles: Array<u64>  # Framebuffer handles for each swapchain image
+    device_handle: u64
 
 impl RenderPass:
     fn new(device: &VulkanDevice, swapchain: &Swapchain) -> Result<RenderPass, text>:
-        # TODO: [ui][P3] Create render pass
-        # - Color attachment with swapchain format
-        # - Load op: CLEAR, Store op: STORE
-        # - Initial layout: UNDEFINED, Final layout: PRESENT_SRC_KHR
-        # vkCreateRenderPass
+        # Create simple render pass with standard color format
+        val render_pass_handle = rt_vk_render_pass_create_simple(device.handle, VK_FORMAT_B8G8R8A8_SRGB)
+        if render_pass_handle == 0:
+            return Err("Failed to create render pass")
 
-        # TODO: [ui][P3] Create framebuffer for each swapchain image
-        # vkCreateFramebuffer with swapchain image views
+        # Create framebuffers for each swapchain image
+        var framebuffer_handles: Array<u64> = []
+        var temp_handles: Array<u64> = Array::with_capacity(swapchain.image_count as usize)
+        temp_handles.resize(swapchain.image_count as usize, 0)
 
-        var framebuffers: Array<i64> = []
-        # TODO: [ui][P3] Populate framebuffers array
+        val fb_count = rt_vk_framebuffer_create_for_swapchain(
+            device.handle,
+            render_pass_handle,
+            swapchain.handle,
+            temp_handles.as_mut_ptr(),
+            swapchain.image_count
+        )
+
+        if fb_count < 0:
+            rt_vk_render_pass_free(render_pass_handle)
+            return Err("Failed to create framebuffers: error {fb_count}")
+
+        # Copy valid handles
+        for i in 0..(fb_count as usize):
+            framebuffer_handles.push(temp_handles[i])
 
         return Ok(RenderPass {
-            render_pass: 0,        # TODO: [ui][P3] Set from vkCreateRenderPass
-            framebuffers: framebuffers
+            handle: render_pass_handle,
+            framebuffer_handles: framebuffer_handles,
+            device_handle: device.handle
         })
+
+    fn free(self) -> Result<(), text>:
+        # Free all framebuffers
+        for fb_handle in self.framebuffer_handles:
+            rt_vk_framebuffer_free(fb_handle)
+
+        # Free render pass
+        val result = rt_vk_render_pass_free(self.handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to free render pass: error {result}")
+        return Ok(())
+
+    fn get_handle(self) -> u64:
+        self.handle
+
+    fn get_framebuffer(self, index: usize) -> u64:
+        if index < self.framebuffer_handles.len():
+            return self.framebuffer_handles[index]
+        return 0
+
+    fn is_valid(self) -> bool:
+        self.handle != 0
 
 # =============================================================================
 # Layout Engine (CPU)
@@ -963,10 +1094,9 @@ impl Frame:
         return "Frame: image={self.image_index}, buffer={self.buffer_index}"
 
 struct FrameData:
-    command_buffer: i64        # VkCommandBuffer
-    fence: i64                 # VkFence
-    image_available: i64       # VkSemaphore
-    render_finished: i64       # VkSemaphore
+    command_buffer_handle: u64  # rt_vk command buffer handle
+    device_handle: u64          # Parent device handle
+    is_recording: bool          # Whether command buffer is recording
 
 impl FrameData:
     # =========================================================================
@@ -975,48 +1105,76 @@ impl FrameData:
 
     pub fn has_command_buffer(self) -> bool:
         """Check if command buffer is allocated."""
-        self.command_buffer != 0
-
-    pub fn has_fence(self) -> bool:
-        """Check if fence is created."""
-        self.fence != 0
-
-    pub fn has_semaphores(self) -> bool:
-        """Check if both semaphores are created."""
-        self.image_available != 0 and self.render_finished != 0
-
-    pub fn has_image_available_semaphore(self) -> bool:
-        """Check if image available semaphore exists."""
-        self.image_available != 0
-
-    pub fn has_render_finished_semaphore(self) -> bool:
-        """Check if render finished semaphore exists."""
-        self.render_finished != 0
+        self.command_buffer_handle != 0
 
     pub fn is_fully_initialized(self) -> bool:
         """Check if all resources are initialized."""
-        self.has_command_buffer() and self.has_fence() and self.has_semaphores()
+        self.has_command_buffer()
 
     pub fn summary(self) -> text:
         """Get summary of frame data state."""
         val status = if self.is_fully_initialized(): "ready" else: "incomplete"
-        return "FrameData: {status}"
+        val recording = if self.is_recording: " (recording)" else: ""
+        return "FrameData: {status}{recording}"
 
     # =========================================================================
     # Constructor
     # =========================================================================
 
     fn new(device: &VulkanDevice) -> FrameData:
-        # TODO: [ui][P3] Allocate command buffer
-        # TODO: [ui][P3] Create fence (signaled initially)
-        # TODO: [ui][P3] Create semaphores
-
+        # Command buffer is allocated on-demand when begin() is called
         return FrameData {
-            command_buffer: 0,
-            fence: 0,
-            image_available: 0,
-            render_finished: 0
+            command_buffer_handle: 0,
+            device_handle: device.handle,
+            is_recording: false
         }
+
+    fn begin(self) -> Result<(), text>:
+        """Begin command buffer recording."""
+        if self.is_recording:
+            return Err("Command buffer already recording")
+
+        val handle = rt_vk_command_buffer_begin(self.device_handle)
+        if handle == 0:
+            return Err("Failed to begin command buffer")
+
+        self.command_buffer_handle = handle
+        self.is_recording = true
+        return Ok(())
+
+    fn end(self) -> Result<(), text>:
+        """End command buffer recording."""
+        if not self.is_recording:
+            return Err("Command buffer not recording")
+
+        val result = rt_vk_command_buffer_end(self.command_buffer_handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to end command buffer: error {result}")
+
+        self.is_recording = false
+        return Ok(())
+
+    fn submit(self) -> Result<(), text>:
+        """Submit command buffer for execution."""
+        if self.is_recording:
+            return Err("Cannot submit while recording")
+
+        val result = rt_vk_command_buffer_submit(self.command_buffer_handle)
+        if result != VK_SUCCESS:
+            return Err("Failed to submit command buffer: error {result}")
+        return Ok(())
+
+    fn free(self) -> Result<(), text>:
+        """Free the command buffer."""
+        if self.command_buffer_handle != 0:
+            val result = rt_vk_command_buffer_free(self.command_buffer_handle)
+            if result != VK_SUCCESS:
+                return Err("Failed to free command buffer: error {result}")
+            self.command_buffer_handle = 0
+        return Ok(())
+
+    fn get_handle(self) -> u64:
+        self.command_buffer_handle
 
 # Types imported from ui.gui.vulkan.types.*
 
@@ -1205,18 +1363,7 @@ impl Pipeline:
         return "Pipeline: type={self.type}, {status}"
 
 # =============================================================================
-# FFI Declarations (Platform-specific)
+# FFI Notes
 # =============================================================================
-
-# Window management (platform-specific: Win32, X11, Wayland, etc.)
-extern fn vulkan_create_window(title_ptr: *const u8, title_len: u64, width: u32, height: u32) -> i64
-
-# These would be implemented in Rust/C using actual Vulkan API
-# extern fn vk_create_instance(...) -> i64
-# extern fn vk_create_device(...) -> i64
-# extern fn vk_create_swapchain(...) -> i64
-# extern fn vk_create_render_pass(...) -> i64
-# extern fn vk_create_pipeline(...) -> i64
-# extern fn vk_cmd_begin_render_pass(...) -> ()
-# extern fn vk_cmd_draw_indexed(...) -> ()
-# ... etc.
+# All Vulkan FFI functions are imported from ui.gui.vulkan_ffi module
+# which provides bindings to the rt_vk_* functions in the runtime.

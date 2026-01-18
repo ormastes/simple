@@ -1011,9 +1011,7 @@ pub(crate) fn call_extern_function(
             Ok(Value::Int(available as i64))
         }
         #[cfg(not(feature = "vulkan"))]
-        "rt_vk_available" => {
-            Ok(Value::Int(0))
-        }
+        "rt_vk_available" => Ok(Value::Int(0)),
         #[cfg(feature = "vulkan")]
         "rt_vk_device_create" => {
             let handle = rt_vk_device_create();

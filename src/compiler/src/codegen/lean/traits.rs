@@ -340,7 +340,7 @@ impl<'a> TraitTranslator<'a> {
             .iter()
             .map(|bound| {
                 let ty = self.to_lean_name(&bound.type_param);
-                let traits: Vec<String> = bound.bounds.iter().map(|b| self.to_lean_name(b)).collect();
+                let traits: Vec<String> = bound.bounds.iter().map(|b| self.type_to_lean_constraint(b)).collect();
                 format!("{} : {}", ty, traits.join(" "))
             })
             .collect();
@@ -419,6 +419,32 @@ impl<'a> TraitTranslator<'a> {
                 }
             })
             .collect()
+    }
+
+    /// Convert a Type to a Lean constraint string
+    /// Handles simple types (Clone) and generic types (Add<Output=T>)
+    fn type_to_lean_constraint(&self, ty: &AstType) -> String {
+        match ty {
+            AstType::Simple(name) => self.to_lean_name(name),
+            AstType::Generic { name, args } => {
+                let name = self.to_lean_name(name);
+                let args_str: Vec<String> = args.iter().map(|a| self.type_to_lean_constraint(a)).collect();
+                if args_str.is_empty() {
+                    name
+                } else {
+                    format!("({} {})", name, args_str.join(" "))
+                }
+            }
+            AstType::TypeBinding { name, value } => {
+                // Associated type constraint: Output=T becomes (Output := T)
+                format!(
+                    "({} := {})",
+                    self.to_lean_name(name),
+                    self.type_to_lean_constraint(value)
+                )
+            }
+            _ => "Unit".to_string(), // Fallback for unsupported types
+        }
     }
 }
 
