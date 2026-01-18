@@ -413,6 +413,62 @@ pub(crate) fn exec_node(
                         "field assignment requires identifier as object".into(),
                     ))
                 }
+            } else if let Expr::Index { receiver, index } = &assign.target {
+                // Handle index assignment: arr[i] = value or dict["key"] = value
+                let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+                let index_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
+
+                // Get the container name (must be an identifier for now)
+                if let Expr::Identifier(container_name) = receiver.as_ref() {
+                    if let Some(container) = env.get(container_name).cloned() {
+                        let new_container = match container {
+                            Value::Array(mut arr) => {
+                                let idx = index_val.as_int()? as usize;
+                                if idx < arr.len() {
+                                    arr[idx] = value;
+                                } else {
+                                    // Extend array if index is at the end
+                                    while arr.len() < idx {
+                                        arr.push(Value::Nil);
+                                    }
+                                    arr.push(value);
+                                }
+                                Value::Array(arr)
+                            }
+                            Value::Dict(mut dict) => {
+                                let key = index_val.to_key_string();
+                                dict.insert(key, value);
+                                Value::Dict(dict)
+                            }
+                            Value::Tuple(mut tup) => {
+                                let idx = index_val.as_int()? as usize;
+                                if idx < tup.len() {
+                                    tup[idx] = value;
+                                    Value::Tuple(tup)
+                                } else {
+                                    return Err(CompileError::Semantic(format!(
+                                        "tuple index {} out of bounds (len={})",
+                                        idx,
+                                        tup.len()
+                                    )));
+                                }
+                            }
+                            _ => {
+                                return Err(CompileError::Semantic(
+                                    "index assignment requires array, dict, or tuple".into(),
+                                ))
+                            }
+                        };
+                        env.insert(container_name.clone(), new_container);
+                        Ok(Control::Next)
+                    } else {
+                        Err(CompileError::Semantic(format!("undefined variable '{container_name}'")))
+                    }
+                } else {
+                    Err(CompileError::Semantic(
+                        "index assignment requires identifier as container".into(),
+                    ))
+                }
             } else if let Expr::Tuple(targets) = &assign.target {
                 // Handle tuple unpacking: (a, b) = (x, y)
                 let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
@@ -697,6 +753,12 @@ pub(crate) fn exec_block_fn(
                 last_expr_value = Some(val);
                 continue;
             }
+            // Handle match as last statement - capture implicit return from match arm
+            if let Node::Match(match_stmt) = stmt {
+                let val = exec_match_expr(match_stmt, env, functions, classes, enums, impl_methods)?;
+                last_expr_value = Some(val);
+                continue;
+            }
         }
 
         match exec_node(stmt, env, functions, classes, enums, impl_methods)? {
@@ -800,7 +862,7 @@ pub(crate) use interpreter_patterns::{
 // Control flow functions (if, while, loop, for, match)
 #[path = "interpreter_control.rs"]
 mod interpreter_control;
-use interpreter_control::{exec_context, exec_for, exec_if, exec_loop, exec_match, exec_while, exec_with};
+use interpreter_control::{exec_context, exec_for, exec_if, exec_loop, exec_match, exec_match_expr, exec_while, exec_with};
 
 /// Helper to execute a method function with self context (for auto-forwarding properties)
 fn exec_method_function(

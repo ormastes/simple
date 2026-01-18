@@ -1,8 +1,21 @@
 # Parser Limitation: Nested Generic Parameters - 2026-01-12
 
-## Summary
+## ✅ RESOLVED (2026-01-18)
 
-The Simple language parser currently does not support nested generic type parameters in return types (e.g., `Option<MutexGuard<T>>`). This blocks the implementation of several core concurrency primitives in `sync.spl`.
+**Status:** Nested generics now fully work. The parser correctly handles:
+- 2-level nesting: `Option<Guard<T>>`
+- 3-level nesting: `Option<Result<List<T>, E>>`
+- `>>` token splitting for `List<List<i32>>`
+- Struct fields with nested generics
+- Function parameters with nested generics
+
+The `synchronization.spl` module loads and parses correctly with all `try_lock()`, `try_read()`, `try_write()` methods.
+
+---
+
+## Historical Context (Original Report)
+
+The Simple language parser previously did not support nested generic type parameters in return types (e.g., `Option<MutexGuard<T>>`). This blocked the implementation of several core concurrency primitives in `sync.spl`.
 
 ## Issue
 
@@ -201,8 +214,9 @@ fn process(items: Vec<Option<T>>) -> Vec<T>
 
 ---
 
-**Status**: 🔴 BLOCKING (sync.spl cannot load)
-**Priority**: P1 (High - blocks core stdlib)
+**Status**: ✅ RESOLVED
+**Priority**: P1 (High - blocks core stdlib) → Completed
 **Complexity**: Medium
 **Date**: 2026-01-12
+**Resolved**: 2026-01-18
 **Reported By**: Claude (Simple Language Compiler Team)

@@ -427,14 +427,22 @@ pub(super) fn evaluate_module_exports(
                 );
             }
             Node::Impl(impl_block) => {
-                // Add impl block methods to the corresponding class/struct
+                // Add impl block methods to the corresponding class/struct/enum
                 // Extract type name from target_type (e.g., Type::Simple("ModeSet"))
                 if let simple_parser::ast::Type::Simple(type_name) = &impl_block.target_type {
+                    // Handle classes
                     if let Some(class_def) = local_classes.get_mut(type_name) {
                         class_def.methods.extend(impl_block.methods.clone());
                     }
                     if let Some(class_def) = global_classes.get_mut(type_name) {
                         class_def.methods.extend(impl_block.methods.clone());
+                    }
+                    // Handle enums - add impl methods to enum definition
+                    if let Some(enum_def) = local_enums.get_mut(type_name) {
+                        enum_def.methods.extend(impl_block.methods.clone());
+                    }
+                    if let Some(enum_def) = global_enums.get_mut(type_name) {
+                        enum_def.methods.extend(impl_block.methods.clone());
                     }
                 }
             }

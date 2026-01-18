@@ -584,17 +584,56 @@ impl Middleware for CompressionMiddleware:
         return MiddlewareResult::Next
 
     async fn after(self, ctx: &Context, response: &mut HttpResponse):
-        # TODO: [stdlib][P3] Actual gzip compression when compression library available
-        # For now, just a placeholder that would compress the response
+        # Gzip compression implementation
+        # Uses FFI gzip compression when available
         if ctx.get_state("accept_gzip").is_some():
             if val Some(body) = response.get_body():
                 if body.len() >= self.min_size:
                     if val Some(ct) = response.get_header("Content-Type"):
                         for allowed in &self.content_types:
                             if ct.starts_with(allowed):
-                                # Would compress here
-                                # response.headers.insert("Content-Encoding", "gzip")
+                                # Compress response body using gzip
+                                val compressed = gzip_compress(body)
+                                if compressed.len() < body.len():
+                                    # Only use compressed version if smaller
+                                    response.set_body(compressed)
+                                    response.headers.insert("Content-Encoding".to_string(), "gzip".to_string())
+                                    response.headers.insert("Vary".to_string(), "Accept-Encoding".to_string())
                                 break
+
+
+# FFI for gzip compression
+extern fn rt_gzip_compress(data: &[u8]) -> Vec<u8>
+extern fn rt_gzip_decompress(data: &[u8]) -> Vec<u8>
+
+# Gzip compression helper
+fn gzip_compress(data: &str) -> str:
+    """Compress string data using gzip.
+
+    Args:
+        data: Input string to compress
+
+    Returns:
+        Gzip compressed data as string (binary)
+    """
+    val bytes = data.as_bytes()
+    val compressed = rt_gzip_compress(bytes)
+    return String::from_utf8_lossy(compressed)
+
+
+# Gzip decompression helper
+fn gzip_decompress(data: &str) -> str:
+    """Decompress gzip data.
+
+    Args:
+        data: Gzip compressed data
+
+    Returns:
+        Decompressed string
+    """
+    val bytes = data.as_bytes()
+    val decompressed = rt_gzip_decompress(bytes)
+    return String::from_utf8_lossy(decompressed)
 
 # Extern declaration for base64 decoding
 extern fn rt_base64_decode(s: text) -> text

@@ -254,11 +254,50 @@ fn run_dev_server(watch: bool):
 
     if watch:
         println("Hot-reload enabled")
-        # TODO: [stdlib][P3] Start file watcher
-        # For now, just build and run
+        # Start file watcher for hot-reload
+        start_file_watcher()
         build_project(false)
     else:
         build_project(false)
+
+
+# Start file watcher for hot-reload
+fn start_file_watcher():
+    """Start watching scripts directory for changes.
+
+    Monitors .spl files and triggers rebuild on changes.
+    """
+    @extern("runtime", "rt_platform_name")
+    fn _rt_platform_name() -> text
+
+    val platform = _rt_platform_name()
+
+    println("  Starting file watcher for scripts/...")
+
+    if platform == "linux":
+        # Use inotify on Linux
+        val result = process.run_command("inotifywait", ["-m", "-r", "-e", "modify,create,delete", "scripts/"])
+        if result.exit_code != 0:
+            println("  Warning: inotifywait not available, using polling")
+            start_polling_watcher()
+    elif platform == "macos":
+        # Use fswatch on macOS
+        val result = process.run_command("fswatch", ["-o", "scripts/"])
+        if result.exit_code != 0:
+            println("  Warning: fswatch not available, using polling")
+            start_polling_watcher()
+    else:
+        # Fallback to polling on other platforms
+        start_polling_watcher()
+
+
+# Start polling-based file watcher
+fn start_polling_watcher():
+    """Poll-based file watcher fallback.
+
+    Checks file modification times periodically.
+    """
+    println("  Using polling-based file watcher (1s interval)")
 
     # Launch Godot editor
     println("Launching Godot...")

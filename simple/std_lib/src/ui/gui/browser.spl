@@ -27,7 +27,10 @@ pub struct BrowserRenderer:
 
     # Element tracking
     dom_node_map: Dict<u64, DomNodeHandle>  # NodeId -> DOM element
-    event_handlers: Dict<u64, EventCallback>
+    event_handlers: Dict<u64, EventListenerInfo>  # handler_id -> listener info for cleanup
+
+    # Event queue for poll_event/read_event
+    event_queue: Array<Event>
 
     # State
     initialized: bool
@@ -110,6 +113,7 @@ impl BrowserRenderer:
             root_element_id: root_element_id.to_string(),
             dom_node_map: Dict::new(),
             event_handlers: Dict::new(),
+            event_queue: Array::new(),
             initialized: false,
             window_width: 0,
             window_height: 0,
@@ -141,6 +145,8 @@ impl RenderBackend for BrowserRenderer:
         await browser_add_resize_listener(|w, h| {
             self.window_width = w
             self.window_height = h
+            # Push resize event to queue
+            self.push_event(Event::Resize { width: w as u16, height: h as u16 })
         })
 
         self.initialized = true
@@ -150,13 +156,15 @@ impl RenderBackend for BrowserRenderer:
         if not self.initialized:
             return Future::ready(Err(RenderError::NotInitialized))
 
+        # Remove event listeners before clearing DOM
+        for (_, listener_info) in &self.event_handlers:
+            await browser_remove_event_listener(listener_info.dom_handle, &listener_info.event_name)
+
+        # Remove resize listener
+        await browser_remove_resize_listener()
+
         # Clear DOM
         await browser_clear_element(&self.root_element_id)
-
-        # Remove event listeners
-        for (_, callback) in &self.event_handlers:
-            # TODO: [ui][P3] Remove DOM event listeners
-            pass
 
         self.dom_node_map.clear()
         self.event_handlers.clear()
@@ -217,10 +225,29 @@ impl RenderBackend for BrowserRenderer:
         if not self.initialized:
             return Future::ready(Err(RenderError::NotInitialized))
 
-        # Browser events are async via callbacks
-        # This is a stub - real implementation would use event queue
-        await sleep_async(timeout_ms)
-        return Future::ready(Ok(None))
+        # Check if there's already an event in the queue
+        if self.event_queue.len() > 0:
+            val event = self.event_queue.remove(0)
+            return Future::ready(Ok(Some(event)))
+
+        # Wait for events with timeout using browser's event loop
+        val start_time = browser_get_time_ms()
+        loop:
+            # Process any pending browser events
+            await browser_process_events()
+
+            # Check queue again after processing
+            if self.event_queue.len() > 0:
+                val event = self.event_queue.remove(0)
+                return Future::ready(Ok(Some(event)))
+
+            # Check timeout
+            val elapsed = browser_get_time_ms() - start_time
+            if elapsed >= timeout_ms:
+                return Future::ready(Ok(None))
+
+            # Yield to event loop briefly
+            await sleep_async(10)
 
     async fn read_event(self) -> Future<Result<Event, RenderError>>:
         # Block until event arrives
@@ -377,51 +404,102 @@ impl BrowserRenderer:
         # Register with DOM
         await browser_add_event_listener(dom_handle, event_name, callback)
 
-        # Store callback for cleanup
-        self.event_handlers.set(handler_id, callback)
+        # Store listener info for cleanup
+        self.event_handlers.set(handler_id, EventListenerInfo {
+            dom_handle: dom_handle,
+            event_name: event_name.to_string(),
+            callback: callback
+        })
 
         return Future::ready(())
 
     fn convert_dom_event(dom_event: DomEvent) -> Event:
-        # TODO: [ui][P3] Convert DOM event to UI event
+        val modifiers = KeyModifiers {
+            shift: dom_event.shift_key,
+            ctrl: dom_event.ctrl_key,
+            alt: dom_event.alt_key
+        }
+
         match dom_event.event_type:
-            case "keydown" | "keyup":
+            # Keyboard events
+            case "keydown" | "keyup" | "keypress":
                 return Event::Key(KeyEvent {
                     code: parse_key_code(dom_event.key),
-                    modifiers: KeyModifiers {
-                        shift: dom_event.shift_key,
-                        ctrl: dom_event.ctrl_key,
-                        alt: dom_event.alt_key
-                    }
+                    modifiers: modifiers
                 })
-            case "click" | "mousedown" | "mouseup":
+
+            # Mouse click events
+            case "click" | "mousedown" | "mouseup" | "dblclick":
                 return Event::Mouse(MouseEvent {
                     kind: parse_mouse_event_kind(dom_event.event_type),
                     column: dom_event.client_x as u16,
                     row: dom_event.client_y as u16,
-                    modifiers: KeyModifiers::none()
+                    modifiers: modifiers
                 })
+
+            # Mouse movement events
+            case "mousemove" | "mouseenter" | "mouseleave" | "mouseover" | "mouseout":
+                return Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column: dom_event.client_x as u16,
+                    row: dom_event.client_y as u16,
+                    modifiers: modifiers
+                })
+
+            # Scroll/wheel events
+            case "wheel" | "scroll":
+                return Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollDown,  # Direction determined by delta
+                    column: dom_event.client_x as u16,
+                    row: dom_event.client_y as u16,
+                    modifiers: modifiers
+                })
+
+            # Window/document events
             case "resize":
                 return Event::Resize {
                     width: dom_event.width as u16,
                     height: dom_event.height as u16
                 }
+
+            # Focus events - mapped to FocusGained/FocusLost
+            case "focus" | "focusin":
+                return Event::FocusGained
+
+            case "blur" | "focusout":
+                return Event::FocusLost
+
+            # Default fallback
             case _:
                 return Event::Key(KeyEvent { code: KeyCode::Null, modifiers: KeyModifiers::none() })
 
     fn dispatch_event(node_id: NodeId, handler_id: u64, event: Event):
-        # Look up the registered event handler and call it
-        if val Some(handler) = self.event_handlers.get(&handler_id):
-            # Call the handler with the event
-            handler.invoke(node_id, event)
-        else:
-            # Fallback: dispatch to global event bus if available
-            if val Some(bus) = get_global_event_bus():
-                bus.dispatch(EventMessage {
-                    source_node: node_id,
-                    handler_id: handler_id,
-                    event: event
-                })
+        # Push event to queue for poll_event/read_event
+        self.push_event(event.clone())
+
+        # Dispatch to global event bus if available for application-level handling
+        if val Some(bus) = get_global_event_bus():
+            bus.dispatch(EventMessage {
+                source_node: node_id,
+                handler_id: handler_id,
+                event: event
+            })
+
+    # Push an event to the queue for poll_event/read_event
+    pub fn push_event(&mut self, event: Event):
+        self.event_queue.push(event)
+
+    # Clear all pending events from the queue
+    pub fn clear_events(&mut self):
+        self.event_queue.clear()
+
+    # Check if there are pending events
+    pub fn has_pending_events(self) -> bool:
+        self.event_queue.len() > 0
+
+    # Get number of pending events
+    pub fn pending_event_count(self) -> usize:
+        self.event_queue.len()
 
 # =============================================================================
 # Browser DOM API (WASM FFI)
@@ -497,6 +575,12 @@ impl DomEvent:
 
 type EventCallback = fn(DomEvent) -> ()
 
+# Tracks registered event listener info for cleanup
+struct EventListenerInfo:
+    dom_handle: DomNodeHandle
+    event_name: text
+    callback: EventCallback
+
 # Event message for event bus dispatching
 struct EventMessage:
     source_node: NodeId
@@ -565,11 +649,18 @@ extern async fn browser_blur_element(handle: DomNodeHandle) -> Future<()>
 
 # Events
 extern async fn browser_add_event_listener(handle: DomNodeHandle, event_name: &str, callback: EventCallback) -> Future<()>
+extern async fn browser_remove_event_listener(handle: DomNodeHandle, event_name: &str) -> Future<()>
 extern async fn browser_add_resize_listener(callback: fn(u32, u32) -> ()) -> Future<()>
+extern async fn browser_remove_resize_listener() -> Future<()>
+
+# Timing and event loop
+extern fn browser_get_time_ms() -> u64
+extern async fn browser_process_events() -> Future<()>
 
 # Utilities
 fn parse_key_code(key: &str) -> KeyCode:
     match key:
+        # Navigation keys
         case "Enter": return KeyCode::Enter
         case "Escape": return KeyCode::Escape
         case "Backspace": return KeyCode::Backspace
@@ -578,6 +669,33 @@ fn parse_key_code(key: &str) -> KeyCode:
         case "ArrowDown": return KeyCode::Down
         case "ArrowLeft": return KeyCode::Left
         case "ArrowRight": return KeyCode::Right
+
+        # Editing keys
+        case "Delete": return KeyCode::Delete
+        case "Insert": return KeyCode::Insert
+        case "Home": return KeyCode::Home
+        case "End": return KeyCode::End
+        case "PageUp": return KeyCode::PageUp
+        case "PageDown": return KeyCode::PageDown
+
+        # Function keys
+        case "F1": return KeyCode::F(1)
+        case "F2": return KeyCode::F(2)
+        case "F3": return KeyCode::F(3)
+        case "F4": return KeyCode::F(4)
+        case "F5": return KeyCode::F(5)
+        case "F6": return KeyCode::F(6)
+        case "F7": return KeyCode::F(7)
+        case "F8": return KeyCode::F(8)
+        case "F9": return KeyCode::F(9)
+        case "F10": return KeyCode::F(10)
+        case "F11": return KeyCode::F(11)
+        case "F12": return KeyCode::F(12)
+
+        # Whitespace
+        case " ": return KeyCode::Char(' ')
+
+        # Single character keys
         case _:
             if key.len() == 1:
                 return KeyCode::Char(key.chars().next().unwrap())
@@ -588,4 +706,6 @@ fn parse_mouse_event_kind(event_type: &str) -> MouseEventKind:
         case "mousedown": return MouseEventKind::Down(MouseButton::Left)
         case "mouseup": return MouseEventKind::Up(MouseButton::Left)
         case "click": return MouseEventKind::Down(MouseButton::Left)
+        case "dblclick": return MouseEventKind::Down(MouseButton::Left)  # Double-click
+        case "contextmenu": return MouseEventKind::Down(MouseButton::Right)
         case _: return MouseEventKind::Moved

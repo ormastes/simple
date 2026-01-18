@@ -455,11 +455,37 @@ class GrammarCompiler:
             case Token(_):
                 pass  # Terminals don't have follow sets
             case Sequence(patterns):
-                # Each element's follow includes first of next (if not nullable)
+                # Each element's follow includes first of next elements
+                # If next element is nullable, also include first of element after that
                 for i in 0..patterns.len():
+                    # Recursively process this pattern
+                    self.propagate_follow_sets(rule_name, patterns[i], compiled)
+
+                    # For each pattern, compute what can follow it
                     if i + 1 < patterns.len():
-                        # TODO: [parser][P3] Propagate follow sets through sequence
-                        pass
+                        # Get the reference names from this pattern to update their follow sets
+                        val refs = self.get_references(patterns[i])
+
+                        for ref_name in refs:
+                            # Add FIRST of all subsequent nullable patterns
+                            for j in (i + 1)..patterns.len():
+                                self.add_first_tokens(patterns[j], compiled, &mut compiled.follow_sets[ref_name])
+                                if not self.is_pattern_nullable(patterns[j], compiled):
+                                    break
+
+                            # If all remaining patterns are nullable, add FOLLOW(rule)
+                            var all_nullable = true
+                            for j in (i + 1)..patterns.len():
+                                if not self.is_pattern_nullable(patterns[j], compiled):
+                                    all_nullable = false
+                                    break
+
+                            if all_nullable:
+                                match compiled.follow_sets.get(rule_name):
+                                    case Some(follow):
+                                        compiled.follow_sets[ref_name].union(follow)
+                                    case None:
+                                        pass
             case Choice(patterns):
                 for p in patterns:
                     self.propagate_follow_sets(rule_name, p, compiled)
@@ -503,6 +529,30 @@ class GrammarCompiler:
                 self.collect_token_types(p, token_set)
             case Reference(_):
                 pass  # References don't contain tokens directly
+
+    # Get all reference names from a pattern
+    fn get_references(pattern: RulePattern) -> List<text>:
+        var refs: List<text> = []
+        self.collect_references(pattern, &mut refs)
+        return refs
+
+    # Collect reference names from pattern
+    fn collect_references(pattern: RulePattern, refs: &mut List<text>):
+        match pattern:
+            case Token(_):
+                pass
+            case Sequence(patterns):
+                for p in patterns:
+                    self.collect_references(p, refs)
+            case Choice(patterns):
+                for p in patterns:
+                    self.collect_references(p, refs)
+            case Repeat(p):
+                self.collect_references(p, refs)
+            case Optional(p):
+                self.collect_references(p, refs)
+            case Reference(rule_name):
+                refs.append(rule_name)
 
 # Grammar cache for compiled grammars
 class GrammarCache:

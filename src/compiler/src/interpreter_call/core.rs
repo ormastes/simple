@@ -83,6 +83,7 @@ type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
 const METHOD_SELF: &str = "self";
 const METHOD_NEW: &str = "new";
+const METHOD_INIT: &str = "__init__";
 
 /// Wrap a value in a Promise (Resolved state) for async function returns.
 /// Creates a Promise object with state = PromiseState.Resolved(value).
@@ -543,7 +544,8 @@ fn exec_function_inner(
         // Check if this is an enum method (fields contains just "self")
         if fields.len() == 1 && fields.contains_key("self") {
             // For enum methods, self should be the enum value directly, not wrapped in Object
-            local_env.insert("self".into(), fields.get("self").unwrap().clone());
+            let self_val = fields.get("self").unwrap().clone();
+            local_env.insert("self".into(), self_val);
         } else {
             // For class methods, self is an Object
             local_env.insert(
@@ -774,8 +776,56 @@ pub(crate) fn instantiate_class(
         }
     }
 
+    // Check if class has __init__ method for Python-style initialization
+    if let Some(init_method) = class_def.methods.iter().find(|m| m.name == METHOD_INIT) {
+        // Create the object with default field values first
+        let self_val = Value::Object {
+            class: class_name.to_string(),
+            fields: fields.clone(),
+        };
+
+        // Set up local environment for __init__
+        let mut local_env = env.clone();
+        local_env.insert(METHOD_SELF.to_string(), self_val);
+
+        // Bind arguments to __init__ parameters (skipping self)
+        let self_mode = SelfMode::SkipSelf;
+        let bound = bind_args(
+            &init_method.params,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            self_mode,
+        )?;
+        for (name, val) in bound {
+            local_env.insert(name, val);
+        }
+
+        // Execute __init__ body
+        match exec_block(
+            &init_method.body,
+            &mut local_env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        ) {
+            Ok(_) | Err(CompileError::TryError(_)) => {}
+            Err(e) => return Err(e),
+        }
+
+        // Return the modified self from local_env
+        return Ok(local_env.get(METHOD_SELF).cloned().unwrap_or(Value::Object {
+            class: class_name.to_string(),
+            fields,
+        }));
+    }
+
     // Field-based construction
-    // Used when there's no `new` method with special attributes
+    // Used when there's no `__init__` or `new` method with special attributes
     let mut positional_idx = 0;
     for arg in args {
         let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;

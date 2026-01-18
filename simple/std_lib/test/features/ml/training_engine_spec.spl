@@ -41,6 +41,7 @@ import std.spec
 
 # Import the ML engine module - use braced import for specific classes
 import ml.engine.{State, Metric, Accuracy, Loss, MSE, MAE, RMSE, abs, sqrt, min}
+import ml.torch.training.{EarlyStopping, ParameterStats, ParameterTracker}
 
 
 # ============================================================================
@@ -495,3 +496,180 @@ describe "Engine composition":
         """
         # TODO: [stdlib][P3] Add integration example
         expect true  # Pattern documented
+
+
+# ============================================================================
+# EarlyStopping Tests
+# ============================================================================
+
+describe "EarlyStopping":
+    """
+    ## EarlyStopping
+
+    Early stopping prevents overfitting by monitoring validation loss
+    and stopping training when loss stops improving.
+
+    **Status:** Placeholder tests - `me` method issues with test framework
+    """
+
+    it "initializes with custom patience":
+        """
+        **Given** an EarlyStopping instance
+        **When** created with custom patience
+        **Then** patience reflects the provided value
+
+        **Usage:**
+        ```simple
+        var early_stop = EarlyStopping(patience=10)
+        expect early_stop.patience == 10
+        ```
+        """
+        var early_stop = EarlyStopping(10)
+        expect early_stop.patience == 10
+        expect early_stop.counter == 0
+        expect early_stop.should_stop == false
+
+    it "tracks loss improvement and stops after patience exceeded":
+        """
+        **Given** an EarlyStopping instance with patience=3
+        **When** loss fails to improve for 3 consecutive checks
+        **Then** check returns false and should_stop is true
+
+        **Expected Behavior:**
+        ```simple
+        var early_stop = EarlyStopping(patience=3)
+        early_stop.check(1.0)  # Sets best_loss
+        early_stop.check(1.5)  # counter=1, returns true
+        early_stop.check(1.5)  # counter=2, returns true
+        early_stop.check(1.5)  # counter=3, returns false, should_stop=true
+        ```
+        """
+        var early_stop = EarlyStopping(3)
+        early_stop.check(1.0)  # Sets best_loss
+        early_stop.check(1.5)  # counter=1
+        early_stop.check(1.5)  # counter=2
+        early_stop.check(1.5)  # counter=3, patience exceeded
+        expect early_stop.should_stop == true
+        expect early_stop.counter == 3
+
+    it "resets counter when loss improves":
+        """
+        **Given** an EarlyStopping instance with incremented counter
+        **When** loss improves below best_loss
+        **Then** counter resets to 0 and best_loss updates
+
+        **Expected Behavior:**
+        ```simple
+        var early_stop = EarlyStopping(patience=5)
+        early_stop.check(1.0)  # best_loss=1.0
+        early_stop.check(1.5)  # counter=1
+        early_stop.check(0.8)  # best_loss=0.8, counter=0
+        ```
+        """
+        var early_stop = EarlyStopping(5)
+        early_stop.check(1.0)  # Sets best_loss to 1.0
+        early_stop.check(1.5)  # Worse, counter=1
+        expect early_stop.counter == 1
+        early_stop.check(0.8)  # Better! Resets counter
+        expect early_stop.counter == 0
+        expect early_stop.best_loss == 0.8
+
+
+# ============================================================================
+# ParameterStats Tests
+# ============================================================================
+
+describe "ParameterStats":
+    """
+    ## ParameterStats
+
+    Simple data class for holding parameter statistics.
+    """
+
+    it "creates stats with all fields":
+        """
+        **Given** a ParameterStats instance
+        **When** created with name, mean, std, norm
+        **Then** all fields are accessible
+        """
+        val stats = ParameterStats(name="weight", mean=0.01, std=0.1, norm=1.5)
+        expect stats.name == "weight"
+        expect stats.mean == 0.01
+        expect stats.std == 0.1
+        expect stats.norm == 1.5
+
+    it "supports different parameter names":
+        """
+        **Given** ParameterStats instances
+        **When** created with different names
+        **Then** names are stored correctly
+        """
+        val w_stats = ParameterStats(name="layer1.weight", mean=0.0, std=0.1, norm=2.0)
+        val b_stats = ParameterStats(name="layer1.bias", mean=0.5, std=0.01, norm=0.5)
+
+        expect w_stats.name == "layer1.weight"
+        expect b_stats.name == "layer1.bias"
+
+
+# ============================================================================
+# ParameterTracker Tests
+# ============================================================================
+
+describe "ParameterTracker":
+    """
+    ## ParameterTracker
+
+    Tracks parameter and gradient statistics during training.
+
+    **Status:** Fully implemented with array field access
+    """
+
+    it "tracks parameter statistics":
+        """
+        **Given** a ParameterTracker instance
+        **When** adding ParameterStats
+        **Then** stats are accumulated in insertion order
+
+        **Usage:**
+        ```simple
+        var tracker = ParameterTracker()
+        tracker.add_stat(ParameterStats(name="w1", mean=0.0, std=0.1, norm=1.0))
+        tracker.add_stat(ParameterStats(name="w2", mean=0.01, std=0.2, norm=2.0))
+        # tracker.stats.len() == 2
+        # tracker.stats[0].name == "w1"
+        ```
+        """
+        var tracker = ParameterTracker()
+        expect tracker.stats.len() == 0
+
+        tracker.add_stat(ParameterStats(name="w1", mean=0.0, std=0.1, norm=1.0))
+        tracker.add_stat(ParameterStats(name="w2", mean=0.01, std=0.2, norm=2.0))
+
+        expect tracker.stats.len() == 2
+        val first = tracker.stats[0]
+        val second = tracker.stats[1]
+        expect first.name == "w1"
+        expect second.name == "w2"
+
+    it "monitors gradient norms for exploding/vanishing gradients":
+        """
+        **Given** a ParameterTracker tracking gradient statistics
+        **When** adding gradient stats
+        **Then** norms can be checked for healthy training
+
+        **Usage:**
+        ```simple
+        var tracker = ParameterTracker()
+        tracker.add_stat(ParameterStats(name="grad_layer1", mean=0.0, std=0.1, norm=0.8))
+        # Healthy norm: 0.1 < norm < 10.0
+        # Vanishing gradient: norm < 1e-7
+        # Exploding gradient: norm > 1e3
+        ```
+        """
+        var tracker = ParameterTracker()
+        tracker.add_stat(ParameterStats(name="grad_layer1", mean=0.0, std=0.1, norm=0.8))
+
+        val stat = tracker.stats[0]
+        expect stat.name == "grad_layer1"
+        expect stat.norm > 0.1
+        expect stat.norm < 10.0

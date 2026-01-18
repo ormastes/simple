@@ -300,12 +300,19 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Type) {
                 associated_types.push(self.parse_associated_type_def()?);
             } else {
+                // Handle optional decorators (@deprecated, etc.)
+                let mut decorators = Vec::new();
+                while self.check(&TokenKind::At) {
+                    decorators.push(self.parse_decorator()?);
+                    self.skip_newlines();
+                }
                 // Handle async methods in trait blocks
                 let is_async = self.check(&TokenKind::Async);
                 if is_async {
                     self.advance();
                 }
                 let mut method = self.parse_trait_method()?;
+                method.decorators = decorators;
                 if is_async {
                     method.effects.push(crate::ast::Effect::Async);
                 }

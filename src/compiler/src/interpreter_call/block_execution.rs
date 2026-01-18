@@ -121,6 +121,19 @@ pub(super) fn exec_block_closure(
                         // Update or create local variable
                         local_env.insert(name.clone(), val);
                     }
+                } else if let simple_parser::ast::Expr::FieldAccess { receiver, field } = &assign_stmt.target {
+                    // Handle field assignment: obj.field = value
+                    if let simple_parser::ast::Expr::Identifier(obj_name) = receiver.as_ref() {
+                        if let Some(obj_val) = local_env.get(obj_name).cloned() {
+                            match obj_val {
+                                Value::Object { class, mut fields } => {
+                                    fields.insert(field.clone(), val);
+                                    local_env.insert(obj_name.clone(), Value::Object { class, fields });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                 }
                 last_value = Value::Nil;
             }
@@ -377,6 +390,19 @@ fn exec_block_closure_mut(
                     } else {
                         // Update or create local variable
                         local_env.insert(name.clone(), val);
+                    }
+                } else if let simple_parser::ast::Expr::FieldAccess { receiver, field } = &assign_stmt.target {
+                    // Handle field assignment: obj.field = value
+                    if let simple_parser::ast::Expr::Identifier(obj_name) = receiver.as_ref() {
+                        if let Some(obj_val) = local_env.get(obj_name).cloned() {
+                            match obj_val {
+                                Value::Object { class, mut fields } => {
+                                    fields.insert(field.clone(), val);
+                                    local_env.insert(obj_name.clone(), Value::Object { class, fields });
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 last_value = Value::Nil;

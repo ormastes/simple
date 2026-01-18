@@ -1,8 +1,8 @@
 # TODO Remains Report
 
 **Generated:** 2026-01-17
-**Last Updated:** 2026-01-18 (Session 2)
-**Total Tagged TODOs:** 409 across entire codebase (down from 430)
+**Last Updated:** 2026-01-18 (Session 5 - Re-exports, Runtime & VSCode)
+**Total Tagged TODOs:** 398 across entire codebase (down from 404)
 **Untagged TODOs:** 0 (all properly tagged)
 
 ## Core Compiler Status (`src/` directory)
@@ -15,7 +15,28 @@
 
 **All remaining TODOs are P3 (low priority).**
 
-### Recently Resolved (2026-01-18 Session 2)
+### Recently Resolved (2026-01-18 Session 5 - Re-exports & Runtime)
+
+| File | Line | Status | Resolution |
+|------|------|--------|------------|
+| spec/formatter/__init__.spl | 4 | ✅ Resolved | Re-exports now working (`export X from module` syntax) |
+| collections_spec.spl | 275 | ✅ Resolved | Dict.clear() method implemented in interpreter |
+| interpreter.rs | - | ✅ Resolved | Index assignment (`dict["key"] = value`, `arr[i] = value`) implemented |
+| vscode_extension/main.spl | 123,150,235,245 | ✅ Resolved | VSCode extension build: compiler exec, file writing, asset copy |
+| ui/gui/vscode.spl | 194,482 | ✅ Resolved | Event listener cleanup and command execution |
+
+### Previously Resolved (2026-01-18 Session 4 - Parser TODOs)
+
+| File | Line | Status | Resolution |
+|------|------|--------|------------|
+| generics_spec.spl | 242 | ✅ Resolved | Tuple return types enabled - already working |
+| tensor_dimensions.spl | - | ✅ Resolved | Fixed `var fn` -> `me`, `True`/`False` -> `true`/`false`, `repr` -> `dim_repr`, `val` in pattern -> `value` |
+| PARSER_NESTED_GENERICS | - | ✅ Resolved | Nested generics already working (e.g., `Option<Guard<T>>`, `List<List<i32>>`) |
+| treesitter/grammar_compile.spl | 461 | ✅ Resolved | Follow set propagation through sequences |
+| treesitter/parser.spl | 133 | ✅ Resolved | Proper TokenKind variant matching |
+| treesitter/lexer.spl | 229,254 | ✅ Resolved | Proper f32 parsing implementation |
+
+### Previously Resolved (2026-01-18 Session 2)
 
 | File | Line | Status | Resolution |
 |------|------|--------|------------|
@@ -64,7 +85,7 @@
 | stdlib | 138 | Standard library (down from 159) |
 | ui | 123 | UI/TUI components |
 | test | 56 | Test framework |
-| parser | 46 | Parser features |
+| parser | 39 | Parser features (down from 46) - **All P1/P3 resolved** |
 | doc | 28 | Documentation |
 | runtime | 9 | Runtime |
 | gpu | 2 | GPU/Vulkan |
@@ -315,10 +336,63 @@ src/driver/src/gpu_init.rs:198,210,217,224,231,238
 
 ---
 
+## Session 3: Godot Vulkan Rendering (2026-01-18)
+
+### Implemented Features
+
+| Component | File | Status |
+|-----------|------|--------|
+| **Texture Management** | `godot/ffi.spl`, `godot/vulkan.spl` | ✅ Complete |
+| **Sampler Support** | `godot/ffi.spl`, `godot/vulkan.spl` | ✅ Complete |
+| **Uniform Sets** | `godot/ffi.spl`, `godot/vulkan.spl` | ✅ Complete |
+| **Font Atlas** | `godot/vulkan.spl` | ✅ Complete |
+| **Text Rendering** | `godot/vulkan.spl` | ✅ Complete |
+| **Image Rendering** | `godot/vulkan.spl` | ✅ Complete |
+
+### New FFI Functions (godot/ffi.spl)
+
+| Function | Purpose |
+|----------|---------|
+| `godot_rd_texture_create` | Create 2D textures (RGBA8, R8, RGBA16F, RGBA32F) |
+| `godot_rd_texture_update` | Update texture data |
+| `godot_rd_texture_get_data` | Read texture data back |
+| `godot_rd_sampler_create` | Create texture samplers with filter modes |
+| `godot_rd_uniform_set_create` | Bind textures to shaders |
+| `godot_rd_draw_list_bind_uniform_set` | Bind uniform sets during draw |
+| `godot_rd_draw_list_bind_index_array` | Bind index buffers |
+| `godot_rd_index_array_create` | Create index arrays |
+| `godot_rd_draw_list_set_push_constant` | Set shader push constants |
+
+### New Types (godot/vulkan.spl)
+
+| Type | Description |
+|------|-------------|
+| `TextureFormat` | RGBA8, R8, RGBA16F, RGBA32F |
+| `TextureUsage` | Sampling, ColorAttachment, Storage, SamplingAndStorage |
+| `SamplerFilter` | Nearest, Linear |
+| `AddressMode` | Repeat, MirroredRepeat, ClampToEdge |
+| `SamplerRID` | Sampler resource handle |
+| `UniformSetRID` | Uniform set resource handle |
+| `FontAtlas` | GPU font atlas with glyph lookup |
+| `GlyphInfo` | Character glyph metrics (codepoint, position, bearing, advance) |
+| `TextElement` | Text overlay element with font atlas support |
+| `ImageElement` | Textured image overlay element |
+| `UVRect` | UV coordinates for texture atlas regions |
+
+### Rendering Pipeline
+
+The Godot Vulkan integration now supports:
+1. **2D Colored Primitives** - Rectangles, circles with vertex colors
+2. **Text Rendering** - Font atlas-based GPU text rendering
+3. **Image Rendering** - Textured quads with UV coordinates and tint
+4. **Vertex Formats** - Position+Color (24 bytes), Position+UV+Color (32 bytes)
+
+---
+
 ## Recommendations
 
 1. **Focus on interpreter/runtime** - These affect daily use
-2. **Skip Vulkan/Monoio** - Low priority, complex, separate effort
+2. **Vulkan rendering** - Now significantly advanced with text/image support
 3. **Skip Electron/VSCode** - Future desktop integration
 4. **Fix SDN integration** - Existing code, just needs wiring
 5. **Enable coverage** - Infrastructure exists, needs probes

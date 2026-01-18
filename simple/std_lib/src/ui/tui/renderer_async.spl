@@ -619,8 +619,128 @@ impl TuiAsyncRenderer:
                 })
 
     fn apply_patches_to_tree(tree: &ElementTree, patches: &PatchSet) -> ElementTree:
-        # TODO: [ui][P3] Apply patches to tree
-        return tree.clone()
+        # Apply each patch operation to the tree
+        # Note: Modifies tree in-place since Simple uses reference semantics
+        for patch in patches.iter():
+            apply_single_patch(tree, patch)
+        return tree
+
+
+# Apply a single patch operation to the element tree
+fn apply_single_patch(tree: &ElementTree, patch: &PatchOp):
+    match patch:
+        case SetText { node_id, text }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.text = Some(text)
+
+        case SetAttr { node_id, name, value }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.attrs.insert(name, value)
+
+        case RemoveAttr { node_id, name }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.attrs.remove(name)
+
+        case AddClass { node_id, class }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                if not elem.classes.contains(class):
+                    elem.classes.push(class)
+
+        case RemoveClass { node_id, class }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.classes = elem.classes.filter(fn(c): c != class)
+
+        case SetStyle { node_id, property, value }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.styles.insert(property, value)
+
+        case RemoveStyle { node_id, property }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.styles.remove(property)
+
+        case InsertChild { parent_id, index, element }:
+            if val Some(parent) = find_element_mut(tree, parent_id):
+                val idx = index as i64
+                if idx >= parent.children.len() as i64:
+                    parent.children.push(element)
+                else:
+                    parent.children.insert(idx, element)
+
+        case RemoveChild { parent_id, child_id }:
+            if val Some(parent) = find_element_mut(tree, parent_id):
+                parent.children = parent.children.filter(fn(c): c.id != child_id)
+
+        case ReplaceChild { parent_id, old_id, element }:
+            if val Some(parent) = find_element_mut(tree, parent_id):
+                for i in 0..parent.children.len():
+                    if parent.children[i].id == old_id:
+                        parent.children[i] = element
+                        break
+
+        case MoveChild { parent_id, child_id, from_index, to_index }:
+            if val Some(parent) = find_element_mut(tree, parent_id):
+                val from_i = from_index as i64
+                val to_i = to_index as i64
+                if from_i < parent.children.len() as i64:
+                    val child = parent.children.remove(from_i)
+                    if to_i >= parent.children.len() as i64:
+                        parent.children.push(child)
+                    else:
+                        parent.children.insert(to_i, child)
+
+        case ReplaceSubtree { node_id, element }:
+            # Find parent and replace the subtree
+            replace_subtree_recursive(&mut tree.root, node_id, element)
+
+        case SetFocus { node_id }:
+            tree.set_focus(node_id)
+
+        case ClearFocus { node_id }:
+            if tree.focus_id == Some(node_id):
+                tree.focus_id = None
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.focused = false
+
+        case BindEvent { node_id, event, handler_id }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.events.insert(event, handler_id)
+
+        case UnbindEvent { node_id, event }:
+            if val Some(elem) = find_element_mut(tree, node_id):
+                elem.events.remove(event)
+
+
+# Find element by ID (mutable reference via tree traversal)
+fn find_element_mut(tree: &ElementTree, id: NodeId) -> Option<&Element>:
+    return find_element_in_subtree(&mut tree.root, id)
+
+
+fn find_element_in_subtree(elem: &mut Element, id: NodeId) -> Option<&Element>:
+    if elem.id == id:
+        return Some(elem)
+    for child in &mut elem.children:
+        match find_element_in_subtree(child, id):
+            case Some(found): return Some(found)
+            case None: pass
+    return None
+
+
+fn replace_subtree_recursive(elem: &mut Element, target_id: NodeId, replacement: Element) -> bool:
+    # Check if this element is the target
+    if elem.id == target_id:
+        # Can't replace root from within, caller handles this
+        return false
+
+    # Check children
+    for i in 0..elem.children.len():
+        if elem.children[i].id == target_id:
+            elem.children[i] = replacement
+            return true
+        # Recurse into child
+        if replace_subtree_recursive(&mut elem.children[i], target_id, replacement):
+            return true
+
+    return false
 
 # =============================================================================
 # Terminal Buffer (Double Buffering)

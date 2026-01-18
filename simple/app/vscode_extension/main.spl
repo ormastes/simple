@@ -9,6 +9,7 @@
 use host.async_nogc_mut.io.stdio
 use vscode.manifest
 use sys
+import shell.{shell, file, dir, path}
 
 # Build options
 class BuildOptions:
@@ -108,6 +109,9 @@ class VsCodeBuilder:
         Returns:
             Compilation result
         """
+        # Ensure output directory exists
+        dir.create(self.options.output_dir, true)
+
         # Build compile command
         var args: List<String> = ["build", "--target", "wasm32-unknown-unknown"]
 
@@ -120,13 +124,23 @@ class VsCodeBuilder:
 
         args.append("{self.options.source_dir}/extension.spl")
 
-        # TODO: [stdlib][P3] Execute simple compiler
-        # For now, return success
-        CompileResult {
-            success: true,
-            path: wasm_path,
-            errors: []
-        }
+        # Execute simple compiler
+        val result = shell.run("simple", args)
+
+        if result.ok():
+            CompileResult {
+                success: true,
+                path: wasm_path,
+                errors: []
+            }
+        else:
+            # Parse errors from stderr
+            val error_lines = result.stderr.split("\n").filter(|line| line.trim().len() > 0)
+            CompileResult {
+                success: false,
+                path: "",
+                errors: error_lines
+            }
 
     fn generate_manifest(): ManifestResult =
         """Generate package.json manifest.
@@ -147,7 +161,7 @@ class VsCodeBuilder:
 
         # Write to file
         val manifest_path = "package.json"
-        # TODO: [stdlib][P3] Write file when fs module available
+        file.write_text(manifest_path, json)
 
         ManifestResult {
             success: true,
@@ -232,7 +246,7 @@ module.exports = {
 
         # Write wrapper
         val wrapper_path = "{self.options.output_dir}/extension.js"
-        # TODO: [stdlib][P3] Write file
+        file.write_text(wrapper_path, wrapper_code)
 
         WrapperResult {
             success: true,
@@ -241,9 +255,17 @@ module.exports = {
         }
 
     fn copy_assets():
-        """Copy assets to output directory."""
-        # TODO: [stdlib][P3] Copy README.md, CHANGELOG.md, etc.
-        pass
+        """Copy assets to output directory.
+
+        Copies standard files like README.md, CHANGELOG.md, LICENSE if they exist.
+        """
+        val assets = ["README.md", "CHANGELOG.md", "LICENSE", "LICENSE.md", "icon.png"]
+
+        for asset in assets:
+            if file.exists(asset):
+                val dest = path.join(self.options.output_dir, asset)
+                file.copy(asset, dest)
+                stdio.println("  Copied {asset}")
 
 # Helper result types
 class CompileResult:

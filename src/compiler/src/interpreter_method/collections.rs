@@ -608,6 +608,10 @@ pub fn handle_dict_methods(
                 return Err(CompileError::Semantic("merge expects dict argument".into()));
             }
         }
+        "clear" => {
+            // Return empty dict (functional style - original is not modified)
+            Value::Dict(HashMap::new())
+        }
         "get_or" => {
             let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
             let default = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;

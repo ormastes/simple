@@ -454,16 +454,137 @@ class RigidBody:
 
         return self.mass * g_mag * height
 
-    fn to_device(device: torch.Device):
+    fn to_device(device: torch.Device) -> RigidBodyGPU:
         """Transfer body data to GPU device.
 
-        For future GPU batch processing.
+        Converts position, velocity, force, rotation data to GPU tensors
+        for batch physics processing.
 
         Args:
-            device: Target device
+            device: Target device (CPU or CUDA)
+
+        Returns:
+            GPU-backed rigid body representation
+
+        Example:
+            ```simple
+            val gpu_body = body.to_device(torch.Device::cuda(0))
+            # Process on GPU
+            gpu_body.integrate_batch(dt, bodies)
+            ```
         """
-        # TODO: [stdlib][P3] Convert position, velocity, etc. to GPU tensors
-        pass
+        # Convert position to tensor [x, y, z]
+        val pos_tensor = torch.tensor(
+            [self.position.x, self.position.y, self.position.z],
+            dtype=torch.float32,
+            device=device
+        )
+
+        # Convert velocity to tensor [vx, vy, vz]
+        val vel_tensor = torch.tensor(
+            [self.velocity.x, self.velocity.y, self.velocity.z],
+            dtype=torch.float32,
+            device=device
+        )
+
+        # Convert force to tensor [fx, fy, fz]
+        val force_tensor = torch.tensor(
+            [self.force.x, self.force.y, self.force.z],
+            dtype=torch.float32,
+            device=device
+        )
+
+        # Convert rotation quaternion to tensor [w, x, y, z]
+        val rot_tensor = torch.tensor(
+            [self.rotation.w, self.rotation.x, self.rotation.y, self.rotation.z],
+            dtype=torch.float32,
+            device=device
+        )
+
+        # Convert angular velocity to tensor [wx, wy, wz]
+        val ang_vel_tensor = torch.tensor(
+            [self.angular_velocity.x, self.angular_velocity.y, self.angular_velocity.z],
+            dtype=torch.float32,
+            device=device
+        )
+
+        return RigidBodyGPU {
+            position: pos_tensor,
+            velocity: vel_tensor,
+            force: force_tensor,
+            rotation: rot_tensor,
+            angular_velocity: ang_vel_tensor,
+            mass: self.mass,
+            inertia: self.inertia,
+            linear_damping: self.linear_damping,
+            angular_damping: self.angular_damping,
+            device: device
+        }
+
+
+# GPU-backed rigid body representation for batch processing
+class RigidBodyGPU:
+    """GPU tensor representation of rigid body for batch processing.
+
+    Stores body state as GPU tensors for efficient parallel physics.
+    """
+    position: torch.Tensor       # [3] float32
+    velocity: torch.Tensor       # [3] float32
+    force: torch.Tensor          # [3] float32
+    rotation: torch.Tensor       # [4] float32 (quaternion)
+    angular_velocity: torch.Tensor  # [3] float32
+    mass: f64
+    inertia: f64
+    linear_damping: f64
+    angular_damping: f64
+    device: torch.Device
+
+    fn to_cpu(self) -> RigidBody:
+        """Transfer back to CPU.
+
+        Returns:
+            CPU-backed RigidBody
+        """
+        val pos_cpu = self.position.cpu().tolist()
+        val vel_cpu = self.velocity.cpu().tolist()
+        val rot_cpu = self.rotation.cpu().tolist()
+        val ang_vel_cpu = self.angular_velocity.cpu().tolist()
+
+        return RigidBody(
+            mass=self.mass,
+            position=core.Vector3(pos_cpu[0], pos_cpu[1], pos_cpu[2]),
+            velocity=core.Vector3(vel_cpu[0], vel_cpu[1], vel_cpu[2]),
+            rotation=core.Quaternion(rot_cpu[0], rot_cpu[1], rot_cpu[2], rot_cpu[3]),
+            angular_velocity=core.Vector3(ang_vel_cpu[0], ang_vel_cpu[1], ang_vel_cpu[2]),
+            linear_damping=self.linear_damping,
+            angular_damping=self.angular_damping
+        )
+
+    fn integrate_gpu(self, dt: f64):
+        """Integrate physics on GPU.
+
+        Args:
+            dt: Time step
+        """
+        if self.mass <= 0:
+            return
+
+        # Acceleration = Force / Mass
+        val inv_mass = 1.0 / self.mass
+        val acceleration = self.force * inv_mass
+
+        # Update velocity: v = v + a * dt
+        self.velocity = self.velocity + acceleration * dt
+
+        # Apply damping
+        val damping = 1.0 - (self.linear_damping * dt)
+        self.velocity = self.velocity * damping
+
+        # Update position: x = x + v * dt
+        self.position = self.position + self.velocity * dt
+
+        # Clear force
+        self.force = torch.zeros(3, device=self.device)
 
     fn is_static() -> bool:
         """Check if body is static (infinite mass).

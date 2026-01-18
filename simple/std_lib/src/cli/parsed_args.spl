@@ -89,13 +89,79 @@ pub struct ParsedArgs:
         return None
 
     # Get an option value with default
-    pub fn get_option_or(self, name: text, default: text) -> text:
+    pub fn get_option_or(self, name: text, default_val: text) -> text:
         val result = ""
         if self.options.contains_key(name):
             result = self.options.get(name).unwrap()
         else:
-            result = default
+            result = default_val
         return result
+
+    # Get an option value as an integer
+    pub fn get_option_int(self, name: text) -> Option<i64>:
+        """Get an option value parsed as an integer.
+
+        Args:
+            name: Option name
+
+        Returns:
+            Some(value) if option exists and can be parsed as integer, None otherwise
+
+        Example:
+            val count = args.get_option_int("count").unwrap_or(10)
+        """
+        if self.options.contains_key(name):
+            val s = self.options.get(name).unwrap()
+            return Some(parse_int_safe(s))
+        return None
+
+    # Get an option value as a float
+    pub fn get_option_float(self, name: text) -> Option<f64>:
+        """Get an option value parsed as a float.
+
+        Args:
+            name: Option name
+
+        Returns:
+            Some(value) if option exists and can be parsed as float, None otherwise
+
+        Example:
+            val rate = args.get_option_float("rate").unwrap_or(0.01)
+        """
+        if self.options.contains_key(name):
+            val s = self.options.get(name).unwrap()
+            return Some(parse_float_safe(s))
+        return None
+
+    # Get an option value as integer with default
+    pub fn get_option_int_or(self, name: text, default_val: i64) -> i64:
+        """Get an option value as integer, with a default.
+
+        Args:
+            name: Option name
+            default_val: Value to return if option missing or invalid
+
+        Returns:
+            Parsed integer or the default value
+        """
+        match self.get_option_int(name):
+            case Some(v): return v
+            case None: return default_val
+
+    # Get an option value as float with default
+    pub fn get_option_float_or(self, name: text, default_val: f64) -> f64:
+        """Get an option value as float, with a default.
+
+        Args:
+            name: Option name
+            default_val: Value to return if option missing or invalid
+
+        Returns:
+            Parsed float or the default value
+        """
+        match self.get_option_float(name):
+            case Some(v): return v
+            case None: return default_val
 
     # Get a positional argument by index
     pub fn get_positional_at(self, index: i32) -> Option<text>:
@@ -126,3 +192,143 @@ pub struct ParsedArgs:
                 return Some(self.files.staged()[index])
 
         return None
+
+
+# ============================================================================
+# Helper Functions for Parsing
+# ============================================================================
+
+fn parse_int_safe(s: text) -> i64:
+    """Parse a string as an integer, returning 0 for invalid input.
+
+    Supports:
+    - Positive and negative integers
+    - Leading whitespace is trimmed
+    - Invalid characters stop parsing
+
+    Args:
+        s: String to parse
+
+    Returns:
+        Parsed integer or 0 if invalid
+    """
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return 0
+
+    var result: i64 = 0
+    var negative = false
+    var start = 0
+
+    if trimmed.char_at(0) == "-":
+        negative = true
+        start = 1
+    elif trimmed.char_at(0) == "+":
+        start = 1
+
+    for i in start..trimmed.len():
+        val ch = trimmed.char_at(i)
+        if ch >= "0" and ch <= "9":
+            val digit = ch.ord() - 48  # 48 is ord('0')
+            result = result * 10 + digit
+        else:
+            break  # Stop at first non-digit
+
+    if negative:
+        return -result
+    return result
+
+
+fn parse_float_safe(s: text) -> f64:
+    """Parse a string as a float, returning 0.0 for invalid input.
+
+    Supports:
+    - Positive and negative numbers
+    - Decimal points
+    - Scientific notation (e.g., 1.5e-3)
+    - Leading whitespace is trimmed
+
+    Args:
+        s: String to parse
+
+    Returns:
+        Parsed float or 0.0 if invalid
+    """
+    val trimmed = s.trim()
+    if trimmed.len() == 0:
+        return 0.0
+
+    var negative = false
+    var pos = 0
+
+    # Check for sign
+    if trimmed.char_at(0) == "-":
+        negative = true
+        pos = 1
+    elif trimmed.char_at(0) == "+":
+        pos = 1
+
+    # Parse integer part
+    var int_part: f64 = 0.0
+    while pos < trimmed.len():
+        val ch = trimmed.char_at(pos)
+        if ch >= "0" and ch <= "9":
+            val digit = (ch.ord() - 48) as f64
+            int_part = int_part * 10.0 + digit
+            pos = pos + 1
+        else:
+            break
+
+    var result = int_part
+
+    # Parse decimal part if present
+    if pos < trimmed.len() and trimmed.char_at(pos) == ".":
+        pos = pos + 1
+        var decimal_part: f64 = 0.0
+        var decimal_places: f64 = 0.1
+
+        while pos < trimmed.len():
+            val ch = trimmed.char_at(pos)
+            if ch >= "0" and ch <= "9":
+                val digit = (ch.ord() - 48) as f64
+                decimal_part = decimal_part + digit * decimal_places
+                decimal_places = decimal_places * 0.1
+                pos = pos + 1
+            else:
+                break
+
+        result = result + decimal_part
+
+    # Parse exponent if present (e.g., e-3, E+5)
+    if pos < trimmed.len() and (trimmed.char_at(pos) == "e" or trimmed.char_at(pos) == "E"):
+        pos = pos + 1
+        var exp_negative = false
+
+        if pos < trimmed.len() and trimmed.char_at(pos) == "-":
+            exp_negative = true
+            pos = pos + 1
+        elif pos < trimmed.len() and trimmed.char_at(pos) == "+":
+            pos = pos + 1
+
+        var exponent: i64 = 0
+        while pos < trimmed.len():
+            val ch = trimmed.char_at(pos)
+            if ch >= "0" and ch <= "9":
+                val digit = ch.ord() - 48
+                exponent = exponent * 10 + digit
+                pos = pos + 1
+            else:
+                break
+
+        # Apply exponent
+        var exp_factor: f64 = 1.0
+        for _ in 0..exponent:
+            if exp_negative:
+                exp_factor = exp_factor * 0.1
+            else:
+                exp_factor = exp_factor * 10.0
+        result = result * exp_factor
+
+    if negative:
+        return -result
+    return result
