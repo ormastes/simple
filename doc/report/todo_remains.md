@@ -29,35 +29,33 @@
 
 | Priority | Count | Percentage |
 |----------|-------|------------|
-| **P1 (High)** | 16 | 3% | **All legitimate blockers!** |
+| **P1 (High)** | 7 | 1.5% | ~~16~~ → 7 after Vulkan FFI completion |
 | **P2 (Medium)** | 16 | 3% |
 | **P3 (Low)** | 273 | 59% |
 | **Untagged** | 160 | 34% |
 
-**Major Progress:** P1 reduced by 93% (from 153 in old report to 16 now!)
+**Major Progress:** P1 reduced by 95% (from 153 in old report to 7 now!)
 
-### P1 Breakdown (All Blocked)
-- **9 Vulkan FFI tests** - Blocked on C FFI bindings implementation
+### P1 Breakdown
+- **~~9 Vulkan FFI tests~~** - ✅ **RESOLVED** (2026-01-18): FFI implemented in Rust, tests updated
 - **7 Async/concurrency tests** - Blocked on language features (Promise types, async-default, effect system)
 
 ## Detailed Analysis (Current - 2026-01-17)
 
 ### P1 High Priority (23 items)
 
-#### Vulkan FFI Tests (9 items)
+#### ~~Vulkan FFI Tests (9 items)~~ ✅ RESOLVED
 **File:** `simple/std_lib/test/unit/ui/vulkan_phase1_validation.spl`
 
-Waiting for FFI implementation:
-- Device creation test
-- Swapchain creation test
-- Render pass creation test
-- Shader loading tests (2)
-- Builder pattern test
-- Pipeline creation test
-- Integration test
-- Clear screen test
+**Resolution (2026-01-18):**
+- ✅ Vulkan FFI (`rt_vk_*` functions) fully implemented in Rust
+- ✅ 23 GPU unit tests now passing (no longer `#[ignore]`)
+- ✅ Fixed use-after-free bug in `VulkanDevice::Drop`
+- ✅ Test file updated with working FFI examples
 
-**Status:** Tests written, blocked on FFI bindings to Vulkan C API.
+**Remaining work (P3):**
+- High-level `VulkanAsyncRenderer` needs to be wired to `rt_vk_*` FFI
+- Window/swapchain tests require display server (manual validation only)
 
 ---
 
@@ -77,7 +75,7 @@ Various stdlib modules - mostly test placeholders and feature stubs.
 
 ---
 
-### P2 Medium Priority (16 items)
+### P2 Medium Priority (15 items)
 
 #### UI Attribute Parsing (6 items)
 **File:** `simple/std_lib/src/ui/gui/vulkan_renderer.spl`
@@ -103,8 +101,7 @@ Missing attribute parsers:
 
 ---
 
-#### Other P2 Items (7 items)
-- Contract blocks parser support
+#### Other P2 Items (6 items)
 - Mode runner improvements
 
 ---
