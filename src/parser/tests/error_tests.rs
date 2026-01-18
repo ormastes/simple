@@ -89,8 +89,5 @@ impl MyStruct:
         return true
 "#,
     );
-    assert!(
-        result.is_ok(),
-        "is_* prefix predicates should parse correctly"
-    );
+    assert!(result.is_ok(), "is_* prefix predicates should parse correctly");
 }

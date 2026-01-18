@@ -647,7 +647,10 @@ process_data()
         assert_eq!(result.shared_state.len(), 1);
         assert_eq!(result.shared_state[0].name, "config");
         assert_eq!(result.shared_state[0].type_annotation, Some("Config".to_string()));
-        assert_eq!(result.shared_state[0].initializer, Some("Config::default()".to_string()));
+        assert_eq!(
+            result.shared_state[0].initializer,
+            Some("Config::default()".to_string())
+        );
     }
 
     #[test]

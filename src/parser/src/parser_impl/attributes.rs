@@ -10,7 +10,7 @@ use super::core::Parser;
 
 impl<'a> Parser<'a> {
     /// Parse a single attribute: #[name] or #[name = value] or #[name(args)]
-    pub(super) fn parse_attribute(&mut self) -> Result<Attribute, ParseError> {
+    pub(crate) fn parse_attribute(&mut self) -> Result<Attribute, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Hash)?;
         self.expect(&TokenKind::LBracket)?;
@@ -69,7 +69,7 @@ impl<'a> Parser<'a> {
     /// Parse a single decorator: @name or @name(args)
     /// Also handles @async which uses a keyword instead of identifier.
     /// Supports named arguments: @bounds(default="return", strict=true)
-    pub(super) fn parse_decorator(&mut self) -> Result<Decorator, ParseError> {
+    pub(crate) fn parse_decorator(&mut self) -> Result<Decorator, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::At)?;
 

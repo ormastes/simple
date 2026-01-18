@@ -2,6 +2,7 @@
 # Manage versioning across multi-language projects
 
 use core.result.{Result, Ok, Err}
+use shell.{file, path}
 
 # Semantic version
 pub class SemVer:
@@ -594,20 +595,201 @@ pub class VersionManager:
 
         Ok(())
 
-    fn update_version_file(file: text, version: text): Result<(), text> =
+    fn update_version_file(file_path: text, version: text): Result<(), text> =
         """Update version in single file.
 
         Args:
-            file: File to update
+            file_path: File to update
             version: New version
 
         Returns:
             Ok if successful
         """
-        # TODO: [stdlib][P3] Read file
-        # TODO: [stdlib][P3] Update version line based on file type
-        # TODO: [stdlib][P3] Write file back
+        # Read file content
+        if not file.exists(file_path):
+            return Err("File not found: {file_path}")
+
+        val content = file.read_text(file_path)
+        val ext = path.ext(file_path)
+        val basename = path.basename(file_path)
+
+        # Update version based on file type
+        val updated_content = match basename:
+            "Cargo.toml":
+                self.update_cargo_toml(content, version)
+            "package.json":
+                self.update_package_json(content, version)
+            "pyproject.toml":
+                self.update_pyproject_toml(content, version)
+            "simple.sdn":
+                self.update_simple_sdn(content, version)
+            "VERSION":
+                version
+            _:
+                match ext:
+                    ".toml":
+                        self.update_generic_toml(content, version)
+                    ".json":
+                        self.update_generic_json(content, version)
+                    _:
+                        return Err("Unknown file type: {file_path}")
+
+        # Write file back
+        file.write_text(file_path, updated_content)
         Ok(())
+
+    fn update_cargo_toml(content: text, version: text): text =
+        """Update version in Cargo.toml.
+
+        Args:
+            content: File content
+            version: New version
+
+        Returns:
+            Updated content
+        """
+        var lines: List<text> = []
+        var in_package = false
+
+        for line in content.lines():
+            if line.trim() == "[package]":
+                in_package = true
+                lines.append(line)
+            elif line.trim().starts_with("[") and line.trim() != "[package]":
+                in_package = false
+                lines.append(line)
+            elif in_package and line.trim().starts_with("version"):
+                lines.append("version = \"{version}\"")
+            else:
+                lines.append(line)
+
+        lines.join("\n")
+
+    fn update_package_json(content: text, version: text): text =
+        """Update version in package.json.
+
+        Args:
+            content: File content
+            version: New version
+
+        Returns:
+            Updated content
+        """
+        var lines: List<text> = []
+
+        for line in content.lines():
+            if line.trim().starts_with("\"version\""):
+                val indent = self.get_indent(line)
+                lines.append("{indent}\"version\": \"{version}\",")
+            else:
+                lines.append(line)
+
+        lines.join("\n")
+
+    fn update_pyproject_toml(content: text, version: text): text =
+        """Update version in pyproject.toml.
+
+        Args:
+            content: File content
+            version: New version
+
+        Returns:
+            Updated content
+        """
+        var lines: List<text> = []
+        var in_project = false
+
+        for line in content.lines():
+            if line.trim() == "[project]" or line.trim() == "[tool.poetry]":
+                in_project = true
+                lines.append(line)
+            elif line.trim().starts_with("[") and not line.trim().starts_with("[project") and not line.trim().starts_with("[tool.poetry"):
+                in_project = false
+                lines.append(line)
+            elif in_project and line.trim().starts_with("version"):
+                lines.append("version = \"{version}\"")
+            else:
+                lines.append(line)
+
+        lines.join("\n")
+
+    fn update_simple_sdn(content: text, version: text): text =
+        """Update version in simple.sdn.
+
+        Args:
+            content: File content
+            version: New version
+
+        Returns:
+            Updated content
+        """
+        var lines: List<text> = []
+
+        for line in content.lines():
+            if line.trim().starts_with("version:"):
+                lines.append("version: {version}")
+            else:
+                lines.append(line)
+
+        lines.join("\n")
+
+    fn update_generic_toml(content: text, version: text): text =
+        """Update version in generic TOML file.
+
+        Args:
+            content: File content
+            version: New version
+
+        Returns:
+            Updated content
+        """
+        var lines: List<text> = []
+
+        for line in content.lines():
+            if line.trim().starts_with("version"):
+                lines.append("version = \"{version}\"")
+            else:
+                lines.append(line)
+
+        lines.join("\n")
+
+    fn update_generic_json(content: text, version: text): text =
+        """Update version in generic JSON file.
+
+        Args:
+            content: File content
+            version: New version
+
+        Returns:
+            Updated content
+        """
+        var lines: List<text> = []
+
+        for line in content.lines():
+            if line.trim().starts_with("\"version\""):
+                val indent = self.get_indent(line)
+                lines.append("{indent}\"version\": \"{version}\",")
+            else:
+                lines.append(line)
+
+        lines.join("\n")
+
+    fn get_indent(line: text): text =
+        """Get leading whitespace from line.
+
+        Args:
+            line: Line to check
+
+        Returns:
+            Leading whitespace
+        """
+        var indent = ""
+        for ch in line.chars():
+            if ch == ' ' or ch == '\t':
+                indent += ch
+            else:
+                break
+        indent
 
     pub fn validate(self, version: text): Result<(), text> =
         """Validate version string.
