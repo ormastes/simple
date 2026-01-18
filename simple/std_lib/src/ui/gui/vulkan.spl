@@ -293,10 +293,19 @@ impl RenderBackend for VulkanRenderer:
             case Ok(f): f
             case Err(e): return Err(e)
 
-        # TODO: [ui][P3] Clear framebuffer
-        # - Begin render pass with clear color
-        # - End render pass
-        # - Submit command buffer
+        val cmd_handle = frame.command_buffer as u64
+        val fb_handle = self.render_pass.get_framebuffer(frame.image_index as usize)
+
+        # Begin render pass with clear color (clears the framebuffer)
+        rt_vk_cmd_begin_render_pass(
+            cmd_handle,
+            self.render_pass.handle,
+            fb_handle,
+            0.0, 0.0, 0.0, 1.0  # Black clear color
+        )
+
+        # End render pass immediately (just clear, no drawing)
+        rt_vk_cmd_end_render_pass(cmd_handle)
 
         return self.end_frame(frame)
 
@@ -304,32 +313,89 @@ impl RenderBackend for VulkanRenderer:
         if not self.initialized:
             return Err(RenderError::NotInitialized)
 
-        # TODO: [ui][P3] Wait for GPU to finish pending work
-        # vkDeviceWaitIdle(device)
-
-        return Ok(())
+        # Wait for GPU to finish pending work
+        match self.device.sync():
+            case Ok(_): return Ok(())
+            case Err(e): return Err(RenderError::IoError(e))
 
     fn poll_event(timeout_ms: u64) -> Result<Option<Event>, RenderError>:
         if not self.initialized:
             return Err(RenderError::NotInitialized)
 
-        # TODO: [ui][P3] Poll window events (platform-specific)
-        # - Check for window resize
-        # - Check for input events (keyboard, mouse)
-        # - Return None if no events within timeout
+        # Poll window events using FFI
+        var event_type: i32 = 0
+        var event_data: Array<u8> = Array::with_capacity(64)
+        event_data.resize(64, 0)
 
-        return Ok(None)
+        val result = rt_vk_window_poll_event(
+            self.window_handle,
+            &mut event_type,
+            event_data.as_mut_ptr(),
+            64
+        )
+
+        if result != VK_SUCCESS:
+            return Err(RenderError::IoError("Failed to poll events: error {result}"))
+
+        if event_type == 0:
+            return Ok(None)
+
+        # Convert raw event to Event type
+        val window_event = WindowEvent::from_raw(event_type, &event_data)
+        return Ok(Some(self.convert_window_event(window_event)))
 
     fn read_event() -> Result<Event, RenderError>:
         if not self.initialized:
             return Err(RenderError::NotInitialized)
 
-        # TODO: [ui][P3] Block until next event arrives
+        # Block until next event arrives using FFI wait
+        var event_type: i32 = 0
+        var event_data: Array<u8> = Array::with_capacity(64)
+        event_data.resize(64, 0)
+
+        # Wait with 1 second timeout, loop until we get an event
         loop:
-            match self.poll_event(1000):
-                case Ok(Some(event)): return Ok(event)
-                case Ok(None): pass  # Continue waiting
-                case Err(e): return Err(e)
+            val result = rt_vk_window_wait_event(
+                self.window_handle,
+                1000,  # 1 second timeout
+                &mut event_type,
+                event_data.as_mut_ptr(),
+                64
+            )
+
+            if result != VK_SUCCESS:
+                return Err(RenderError::IoError("Failed to wait for events: error {result}"))
+
+            if event_type != 0:
+                val window_event = WindowEvent::from_raw(event_type, &event_data)
+                return Ok(self.convert_window_event(window_event))
+            # event_type == 0 means timeout, continue waiting
+
+    # Helper to convert WindowEvent to ui.renderer.Event
+    fn convert_window_event(window_event: WindowEvent) -> Event:
+        match window_event:
+            case WindowEvent::Resize(w, h):
+                # Update renderer dimensions
+                self.window_width = w
+                self.window_height = h
+                # Recreate swapchain for new size
+                self.swapchain.recreate(w, h)
+                return Event::Resize(w as u16, h as u16)
+            case WindowEvent::Close:
+                return Event::Quit
+            case WindowEvent::KeyPress(key, mods):
+                return Event::KeyDown(key, mods)
+            case WindowEvent::KeyRelease(key, mods):
+                return Event::KeyUp(key, mods)
+            case WindowEvent::MouseMove(x, y):
+                return Event::MouseMove(x as u16, y as u16)
+            case WindowEvent::MouseButton(button, pressed, x, y):
+                if pressed:
+                    return Event::MouseDown(button, x as u16, y as u16)
+                else:
+                    return Event::MouseUp(button, x as u16, y as u16)
+            case _:
+                return Event::None
 
 impl VulkanRenderer:
     # Begin a new frame
