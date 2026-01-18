@@ -25,10 +25,18 @@ use crate::ast::{
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
+/// use simple_parser::{AstArena, ast::{Expr, Node}};
+///
 /// let arena = AstArena::new();
-/// let expr = arena.alloc_expr(Expr::Int(42, Span::default()));
-/// let node = arena.alloc_node(Node::Expr(expr.clone()));
+/// let expr = arena.alloc_expr(Expr::Integer(42));
+/// let node = arena.alloc_node(Node::Expression(expr.clone()));
+///
+/// // Verify the expression was allocated
+/// if let Expr::Integer(value) = expr {
+///     assert_eq!(*value, 42);
+/// }
+///
 /// // All nodes deallocated when arena is dropped
 /// ```
 pub struct AstArena {

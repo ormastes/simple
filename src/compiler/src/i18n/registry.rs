@@ -5,17 +5,21 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```no_run
 //! use simple_compiler::i18n::registry;
+//! use std::path::Path;
 //!
+//! # fn main() -> std::io::Result<()> {
 //! // Load a locale file
-//! registry::load_locale_file(Path::new("i18n/__init__.ko-KR.spl"));
+//! registry::load_from_file(Path::new("i18n/__init__.ko-KR.spl"))?;
 //!
 //! // Set active locale
 //! registry::set_locale("ko-KR");
 //!
 //! // Lookup a string
 //! let text = registry::lookup("Greeting_");
+//! # Ok(())
+//! # }
 //! ```
 
 use std::cell::RefCell;

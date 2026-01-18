@@ -76,9 +76,23 @@ impl<'a> Parser<'a> {
 
                 // Check for enum variant: Name::Variant or Name::Variant(...)
                 // Also supports dot syntax: Name.Variant or Name.Variant(...)
+                // Now supports qualified paths: module.Type.Variant
                 if self.check(&TokenKind::DoubleColon) || self.check(&TokenKind::Dot) {
-                    self.advance();
-                    let variant = self.expect_identifier()?;
+                    // Build the full qualified path
+                    let mut path = vec![name];
+
+                    // Consume path segments (module.Type.Variant)
+                    while self.check(&TokenKind::DoubleColon) || self.check(&TokenKind::Dot) {
+                        self.advance();
+                        path.push(self.expect_identifier()?);
+                    }
+
+                    // Last segment is the variant name
+                    let variant = path.pop().unwrap();
+
+                    // Join remaining path as the enum name
+                    let enum_name = path.join(".");
+
                     let payload = if self.check(&TokenKind::LParen) {
                         self.advance();
                         let mut patterns = Vec::new();
@@ -93,7 +107,7 @@ impl<'a> Parser<'a> {
                     } else {
                         None
                     };
-                    return Ok(Pattern::Enum { name, variant, payload });
+                    return Ok(Pattern::Enum { name: enum_name, variant, payload });
                 }
 
                 // Check for unit enum variants without parentheses: None

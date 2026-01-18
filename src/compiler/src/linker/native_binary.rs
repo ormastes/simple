@@ -13,14 +13,17 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```no_run
 //! use simple_compiler::linker::NativeBinaryBuilder;
 //!
-//! let builder = NativeBinaryBuilder::new()
-//!     .source("main.spl")
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let object_code = vec![]; // Object code from compilation
+//! let result = NativeBinaryBuilder::new(object_code)
 //!     .output("app")
 //!     .layout_optimize(true)
 //!     .build()?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::io::Write;

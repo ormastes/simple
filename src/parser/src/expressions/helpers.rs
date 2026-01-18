@@ -98,7 +98,41 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
         let (let_pattern, condition) = self.parse_optional_let_pattern()?;
         self.expect(&TokenKind::Colon)?;
-        let then_branch = self.parse_expression()?;
+
+        // Support both inline and block-form syntax for then branch
+        let then_branch = if self.check(&TokenKind::Newline) {
+            // Block-form: parse as DoBlock expression
+            self.advance(); // consume Newline
+            self.expect(&TokenKind::Indent)?;
+
+            let mut statements = Vec::new();
+            while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                // Skip empty lines
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+                if self.check(&TokenKind::Dedent) || self.is_at_end() {
+                    break;
+                }
+
+                statements.push(self.parse_item()?);
+
+                // Consume newline after statement if present
+                if self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+            }
+
+            if self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+
+            Expr::DoBlock(statements)
+        } else {
+            // Inline form: parse as expression
+            self.parse_expression()?
+        };
+
         let else_branch = if self.check(&TokenKind::Elif) {
             self.advance();
             Some(Box::new(self.parse_if_expr()?))
@@ -111,7 +145,42 @@ impl<'a> Parser<'a> {
                 Some(Box::new(self.parse_if_expr()?))
             } else {
                 self.expect(&TokenKind::Colon)?;
-                Some(Box::new(self.parse_expression()?))
+
+                // Support both inline and block-form syntax for else branch
+                let else_expr = if self.check(&TokenKind::Newline) {
+                    // Block-form: parse as DoBlock expression
+                    self.advance(); // consume Newline
+                    self.expect(&TokenKind::Indent)?;
+
+                    let mut statements = Vec::new();
+                    while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                        // Skip empty lines
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
+                        if self.check(&TokenKind::Dedent) || self.is_at_end() {
+                            break;
+                        }
+
+                        statements.push(self.parse_item()?);
+
+                        // Consume newline after statement if present
+                        if self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
+                    }
+
+                    if self.check(&TokenKind::Dedent) {
+                        self.advance();
+                    }
+
+                    Expr::DoBlock(statements)
+                } else {
+                    // Inline form: parse as expression
+                    self.parse_expression()?
+                };
+
+                Some(Box::new(else_expr))
             }
         } else {
             None

@@ -14,16 +14,19 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use simple_compiler::web_compiler::WebCompiler;
 //! use simple_common::target::{Target, TargetArch, WasmRuntime};
 //!
-//! let compiler = WebCompiler::new()?;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut compiler = WebCompiler::new()?;
 //! let result = compiler.compile_sui_file("app.sui")?;
 //!
 //! // result.server_binary - Compiled server code (x64 native)
 //! // result.client_binary - Compiled client code (wasm32)
 //! // result.template_html - Rendered template
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::error::CompileError;

@@ -12,8 +12,19 @@
 //!     pass
 //! ```
 //!
-//! Generated wasm-bindgen:
-//! ```rust,ignore
+//! Usage:
+//! ```
+//! use simple_compiler::codegen::wasm_bindgen_gen::{BindingExtractor, BrowserBinding};
+//! use simple_parser::ast::Module;
+//!
+//! let mut extractor = BindingExtractor::new();
+//! # let module = Module::default();
+//! let bindings = extractor.extract(&module);
+//! // Process extracted browser FFI bindings
+//! ```
+//!
+//! Generated wasm-bindgen output:
+//! ```text
 //! #[wasm_bindgen]
 //! extern "C" {
 //!     #[wasm_bindgen(js_namespace = console, js_name = log)]

@@ -14,7 +14,7 @@ class LeanProp:
     fn create(name: text, params: List<(text, text)>, body: text) -> LeanProp:
         return LeanProp(name, params, body)
 
-    fn emit(builder: emit.LeanBuilder) -> emit.LeanBuilder:
+    me emit(builder: emit.LeanBuilder) -> emit.LeanBuilder:
         param_strs = ["(" + n + " : " + t + ")" for (n, t) in self.params]
         params_str = param_strs.join(" ")
         sig = "def " + self.name
@@ -37,7 +37,7 @@ class LeanTheorem:
     fn create(name: text, params: List<(text, text)>, proposition: text, proof: text = "sorry") -> LeanTheorem:
         return LeanTheorem(name, params, proposition, proof)
 
-    fn emit(builder: emit.LeanBuilder) -> emit.LeanBuilder:
+    me emit(builder: emit.LeanBuilder) -> emit.LeanBuilder:
         # Split proof by newlines and use multiline emitter if multiple lines
         proof_lines = self.proof.split("\n")
         if len(proof_lines) > 1:
@@ -55,49 +55,141 @@ class LeanTheoremImplicit:
     fn create(name: text, implicit_params: List<(text, text)>, explicit_params: List<(text, text)>, proposition: text, proof_lines: List<text>) -> LeanTheoremImplicit:
         return LeanTheoremImplicit(name, implicit_params, explicit_params, proposition, proof_lines)
 
-    fn emit(builder: emit.LeanBuilder) -> emit.LeanBuilder:
+    me emit(builder: emit.LeanBuilder) -> emit.LeanBuilder:
         return emit.emit_theorem_implicit(builder, self.name, self.implicit_params, self.explicit_params, self.proposition, self.proof_lines)
 
 # Translate contract expression to Lean
 fn translate_contract_expr(expr: c.ContractExpr) -> text:
-    match expr:
-        case ValExpr(v):
-            return translate_val(v)
-        case VarExpr(name):
-            return name
-        case OldExpr(e):
-            return "old_" + translate_contract_expr(e)
-        case RetExpr:
+    match expr.kind:
+        case c.ContractExprKind.True_:
+            return "true"
+        case c.ContractExprKind.False_:
+            return "false"
+        case c.ContractExprKind.ValExpr:
+            # Extract val_value from Some
+            match expr.value_data:
+                case Some(v): return translate_val(v)
+                case _: return "invalid_val"
+        case c.ContractExprKind.VarRef:
+            # Extract name from Some
+            match expr.name:
+                case Some(n): return n
+                case _: return "unknown_var"
+        case c.ContractExprKind.OldValue:
+            if expr.children.len() > 0:
+                return "old_" + translate_contract_expr(expr.children[0])
+            return "old_unknown"
+        case c.ContractExprKind.Result:
             return "result"
-        case ErrExpr:
-            return "err"
-        case BinOpExpr(op, left, right):
-            l = translate_contract_expr(left)
-            r = translate_contract_expr(right)
-            lean_op = translate_binop(op)
-            return "(" + l + " " + lean_op + " " + r + ")"
-        case UnOpExpr(op, e):
-            inner = translate_contract_expr(e)
-            lean_op = translate_unop(op)
-            return lean_op + inner
-        case FieldExpr(e, field):
-            inner = translate_contract_expr(e)
-            return inner + "." + field
-        case CallExpr(fn_name, args):
-            arg_strs = [translate_contract_expr(a) for a in args]
-            return fn_name + " " + arg_strs.join(" ")
+        case c.ContractExprKind.And:
+            if expr.children.len() >= 2:
+                l = translate_contract_expr(expr.children[0])
+                r = translate_contract_expr(expr.children[1])
+                return "(" + l + " ∧ " + r + ")"
+            return "invalid_and"
+        case c.ContractExprKind.Or:
+            if expr.children.len() >= 2:
+                l = translate_contract_expr(expr.children[0])
+                r = translate_contract_expr(expr.children[1])
+                return "(" + l + " ∨ " + r + ")"
+            return "invalid_or"
+        case c.ContractExprKind.Not:
+            if expr.children.len() > 0:
+                inner = translate_contract_expr(expr.children[0])
+                return "¬" + inner
+            return "invalid_not"
+        case c.ContractExprKind.Implies:
+            if expr.children.len() >= 2:
+                l = translate_contract_expr(expr.children[0])
+                r = translate_contract_expr(expr.children[1])
+                return "(" + l + " → " + r + ")"
+            return "invalid_implies"
+        case c.ContractExprKind.Eq:
+            if expr.children.len() >= 2:
+                l = translate_contract_expr(expr.children[0])
+                r = translate_contract_expr(expr.children[1])
+                return "(" + l + " = " + r + ")"
+            return "invalid_eq"
+        case c.ContractExprKind.Lt:
+            if expr.children.len() >= 2:
+                l = translate_contract_expr(expr.children[0])
+                r = translate_contract_expr(expr.children[1])
+                return "(" + l + " < " + r + ")"
+            return "invalid_lt"
+        case c.ContractExprKind.Le:
+            if expr.children.len() >= 2:
+                l = translate_contract_expr(expr.children[0])
+                r = translate_contract_expr(expr.children[1])
+                return "(" + l + " ≤ " + r + ")"
+            return "invalid_le"
+        case c.ContractExprKind.Gt:
+            if expr.children.len() >= 2:
+                l = translate_contract_expr(expr.children[0])
+                r = translate_contract_expr(expr.children[1])
+                return "(" + l + " > " + r + ")"
+            return "invalid_gt"
+        case c.ContractExprKind.Ge:
+            if expr.children.len() >= 2:
+                l = translate_contract_expr(expr.children[0])
+                r = translate_contract_expr(expr.children[1])
+                return "(" + l + " ≥ " + r + ")"
+            return "invalid_ge"
+        case c.ContractExprKind.Add:
+            if expr.children.len() >= 2:
+                l = translate_contract_expr(expr.children[0])
+                r = translate_contract_expr(expr.children[1])
+                return "(" + l + " + " + r + ")"
+            return "invalid_add"
+        case c.ContractExprKind.Sub:
+            if expr.children.len() >= 2:
+                l = translate_contract_expr(expr.children[0])
+                r = translate_contract_expr(expr.children[1])
+                return "(" + l + " - " + r + ")"
+            return "invalid_sub"
+        case c.ContractExprKind.Mul:
+            if expr.children.len() >= 2:
+                l = translate_contract_expr(expr.children[0])
+                r = translate_contract_expr(expr.children[1])
+                return "(" + l + " * " + r + ")"
+            return "invalid_mul"
+        case c.ContractExprKind.Div:
+            if expr.children.len() >= 2:
+                l = translate_contract_expr(expr.children[0])
+                r = translate_contract_expr(expr.children[1])
+                return "(" + l + " / " + r + ")"
+            return "invalid_div"
+        case c.ContractExprKind.Len:
+            if expr.children.len() > 0:
+                inner = translate_contract_expr(expr.children[0])
+                return "List.length " + inner
+            return "invalid_len"
+        case c.ContractExprKind.Index:
+            if expr.children.len() >= 2:
+                l = translate_contract_expr(expr.children[0])
+                r = translate_contract_expr(expr.children[1])
+                return "(" + l + "[" + r + "])"
+            return "invalid_index"
+        case c.ContractExprKind.Call:
+            match expr.name:
+                case Some(fn_name):
+                    arg_strs = [translate_contract_expr(a) for a in expr.children]
+                    return fn_name + " " + arg_strs.join(" ")
+                case _:
+                    return "unknown_call"
+        case _:
+            return "unsupported_expr"
 
-fn translate_val(v: c.Val) -> text:
+fn translate_val(v: c.ContractValue) -> text:
     match v:
-        case IntVal(n): return str(n)
-        case BoolVal(b):
+        case c.ContractValue.IntVal(n): return str(n)
+        case c.ContractValue.BoolVal(b):
             if b:
                 return "true"
             else:
                 return "false"
-        case StrVal(s): return "\"" + s + "\""
-        case NilVal: return "none"
-        case ErrorVal(tag, _): return "error \"" + tag + "\""
+        case c.ContractValue.StrVal(s): return "\"" + s + "\""
+        case c.ContractValue.NilVal: return "none"
+        case c.ContractValue.ErrorVal(tag, _): return "error \"" + tag + "\""
 
 fn translate_binop(op: text) -> text:
     match op:
@@ -127,40 +219,40 @@ fn generate_invariant_prop(type_name: text, clauses: List<c.ContractClause>) -> 
     if len(clauses) == 0:
         body = "True"
     elif len(clauses) == 1:
-        body = translate_contract_expr(clauses[0].condition)
+        body = translate_contract_expr(clauses[0].expr)
     else:
-        parts = [translate_contract_expr(cl.condition) for cl in clauses]
+        parts = [translate_contract_expr(cl.expr) for cl in clauses]
         body = parts.join(" ∧ ")
 
     return LeanProp.create("inv_" + type_name, [("self", type_name)], body)
 
 # Generate precondition theorem
-fn generate_precondition_theorem(fn_name: text, contract: c.FunctionContract, params: List<(text, text)>) -> LeanTheorem | None:
+fn generate_precondition_theorem(fn_name: text, contract: c.FunctionContract, params: List<(text, text)>) -> Option<LeanTheorem>:
     if len(contract.preconditions) == 0:
         return None
 
-    parts = [translate_contract_expr(cl.condition) for cl in contract.preconditions]
+    parts = [translate_contract_expr(cl.expr) for cl in contract.preconditions]
     prop = parts.join(" ∧ ")
 
-    return LeanTheorem.create(fn_name + "_pre", params, prop)
+    return Some(LeanTheorem.create(fn_name + "_pre", params, prop))
 
 # Generate postcondition theorem
-fn generate_postcondition_theorem(fn_name: text, contract: c.FunctionContract, params: List<(text, text)>, ret_type: text) -> LeanTheorem | None:
+fn generate_postcondition_theorem(fn_name: text, contract: c.FunctionContract, params: List<(text, text)>, ret_type: text) -> Option<LeanTheorem>:
     if len(contract.postconditions) == 0:
         return None
 
     # Add result parameter
     full_params = params.append(("result", ret_type))
 
-    parts = [translate_contract_expr(cl.condition) for cl in contract.postconditions]
+    parts = [translate_contract_expr(cl.expr) for cl in contract.postconditions]
     prop = parts.join(" ∧ ")
 
-    return LeanTheorem.create(fn_name + "_post", full_params, prop)
+    return Some(LeanTheorem.create(fn_name + "_post", full_params, prop))
 
 # Generate full contract verification theorem
 fn generate_contract_theorem(fn_name: text, contract: c.FunctionContract, params: List<(text, text)>, ret_type: text) -> LeanTheorem:
-    pre_parts = [translate_contract_expr(cl.condition) for cl in contract.preconditions]
-    post_parts = [translate_contract_expr(cl.condition) for cl in contract.postconditions]
+    pre_parts = [translate_contract_expr(cl.expr) for cl in contract.preconditions]
+    post_parts = [translate_contract_expr(cl.expr) for cl in contract.postconditions]
 
     pre = "True"
     if len(pre_parts) > 0:
@@ -172,3 +264,6 @@ fn generate_contract_theorem(fn_name: text, contract: c.FunctionContract, params
     prop = pre + " → ∃ result : " + ret_type + ", " + post
 
     return LeanTheorem.create(fn_name + "_contract", params, prop)
+
+# Export public API
+export LeanProp, LeanTheorem, LeanTheoremImplicit
