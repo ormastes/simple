@@ -102,6 +102,10 @@ impl LintChecker {
             // Check for print in test spec files
             if source_file.to_string_lossy().ends_with("_spec.spl") {
                 self.check_print_in_test_spec(items);
+                // SSpec-specific lints
+                self.check_sspec_print_based_tests(items);
+                self.check_sspec_minimal_docstrings(&source_file);
+                self.check_sspec_manual_assertions(items);
             }
 
             // Check TODO format
@@ -576,6 +580,173 @@ impl LintChecker {
             }
 
             byte_offset += line.len() + 1;
+        }
+    }
+
+    /// Check for print-based BDD tests (sspec_no_print_based_tests)
+    fn check_sspec_print_based_tests(&mut self, items: &[Node]) {
+        use simple_parser::ast::Expr;
+
+        const BDD_KEYWORDS: &[&str] = &["describe", "context", "it ", "[PASS]", "[FAIL]"];
+
+        fn check_expr(checker: &mut LintChecker, expr: &Expr) {
+            match expr {
+                Expr::Call { callee, args, .. } => {
+                    if let Expr::Identifier(name) = &**callee {
+                        if name == "print" {
+                            for arg in args {
+                                if let Expr::String(s) = &arg.value {
+                                    for keyword in BDD_KEYWORDS {
+                                        if s.contains(keyword) {
+                                            checker.emit(
+                                                LintName::SSpecNoPrintBasedTests,
+                                                Span::new(0, 0, 0, 0),
+                                                format!("print-based BDD test detected: contains '{}'", keyword.trim()),
+                                                Some("use proper SSpec syntax: describe/context/it blocks".to_string()),
+                                            );
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    check_expr(checker, callee);
+                    for arg in args {
+                        check_expr(checker, &arg.value);
+                    }
+                }
+                Expr::Binary { left, right, .. } => {
+                    check_expr(checker, left);
+                    check_expr(checker, right);
+                }
+                Expr::DoBlock(stmts) => {
+                    for stmt in stmts {
+                        check_stmt(checker, stmt);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn check_stmt(checker: &mut LintChecker, node: &Node) {
+            use simple_parser::ast::LetStmt;
+            match node {
+                Node::Expression(expr) => check_expr(checker, expr),
+                Node::Let(LetStmt { value, .. }) => {
+                    if let Some(v) = value {
+                        check_expr(checker, v);
+                    }
+                }
+                Node::If(if_stmt) => {
+                    for stmt in &if_stmt.then_block.statements {
+                        check_stmt(checker, stmt);
+                    }
+                    if let Some(else_block) = &if_stmt.else_block {
+                        for stmt in &else_block.statements {
+                            check_stmt(checker, stmt);
+                        }
+                    }
+                }
+                Node::Function(func) => {
+                    for stmt in &func.body.statements {
+                        check_stmt(checker, stmt);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for item in items {
+            check_stmt(self, item);
+        }
+    }
+
+    /// Check for minimal docstring usage in SSpec files
+    fn check_sspec_minimal_docstrings(&mut self, source_file: &std::path::Path) {
+        let source = match std::fs::read_to_string(source_file) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let docstring_count = source.matches("\"\"\"").count() / 2;
+        const MIN_DOCSTRINGS: usize = 2;
+
+        if docstring_count < MIN_DOCSTRINGS {
+            self.emit(
+                LintName::SSpecMinimalDocstrings,
+                Span::new(0, 0, 1, 1),
+                format!("file has only {} docstring(s) (minimum: {})", docstring_count, MIN_DOCSTRINGS),
+                Some("add docstrings to describe/context/it blocks".to_string()),
+            );
+        }
+    }
+
+    /// Check for manual assertion tracking patterns
+    fn check_sspec_manual_assertions(&mut self, items: &[Node]) {
+        use simple_parser::ast::{BinOp, Expr, LetStmt, Pattern};
+
+        fn get_pattern_name(pattern: &Pattern) -> Option<&str> {
+            match pattern {
+                Pattern::Identifier(name) => Some(name),
+                Pattern::MutIdentifier(name) => Some(name),
+                _ => None,
+            }
+        }
+
+        fn check_node(checker: &mut LintChecker, node: &Node) {
+            match node {
+                Node::Let(LetStmt { pattern, value, .. }) => {
+                    if let Some(name) = get_pattern_name(pattern) {
+                        if name == "passed" || name == "failed" {
+                            if let Some(Expr::Integer(0)) = value {
+                                checker.emit(
+                                    LintName::SSpecManualAssertions,
+                                    Span::new(0, 0, 0, 0),
+                                    format!("manual assertion tracking: '{}' counter", name),
+                                    Some("use expect() assertions instead".to_string()),
+                                );
+                            }
+                        }
+                    }
+                }
+                Node::Assignment(assign) => {
+                    if let Expr::Identifier(name) = &assign.target {
+                        if name == "passed" || name == "failed" {
+                            if let Expr::Binary { op, .. } = &assign.value {
+                                if matches!(op, BinOp::Add) {
+                                    checker.emit(
+                                        LintName::SSpecManualAssertions,
+                                        Span::new(0, 0, 0, 0),
+                                        format!("manual assertion tracking: incrementing '{}'", name),
+                                        Some("use expect() assertions instead".to_string()),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                Node::If(if_stmt) => {
+                    for stmt in &if_stmt.then_block.statements {
+                        check_node(checker, stmt);
+                    }
+                    if let Some(else_block) = &if_stmt.else_block {
+                        for stmt in &else_block.statements {
+                            check_node(checker, stmt);
+                        }
+                    }
+                }
+                Node::Function(func) => {
+                    for stmt in &func.body.statements {
+                        check_node(checker, stmt);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for item in items {
+            check_node(self, item);
         }
     }
 }
