@@ -26,9 +26,9 @@ use simple_runtime::value::{rt_is_stderr_capturing, rt_is_stdout_capturing};
 // Import Vulkan FFI functions
 #[cfg(feature = "vulkan")]
 use simple_runtime::value::gpu_vulkan::{
-    rt_vk_buffer_alloc, rt_vk_buffer_download, rt_vk_buffer_free, rt_vk_buffer_upload, rt_vk_device_create,
-    rt_vk_device_free, rt_vk_device_sync, rt_vk_kernel_compile, rt_vk_kernel_free, rt_vk_kernel_launch,
-    rt_vk_kernel_launch_1d,
+    rt_vk_available, rt_vk_buffer_alloc, rt_vk_buffer_download, rt_vk_buffer_free, rt_vk_buffer_upload,
+    rt_vk_device_create, rt_vk_device_free, rt_vk_device_sync, rt_vk_kernel_compile, rt_vk_kernel_free,
+    rt_vk_kernel_launch, rt_vk_kernel_launch_1d,
 };
 
 // TuiEvent struct matches the C ABI struct in ratatui_tui.rs
@@ -1005,6 +1005,15 @@ pub(crate) fn call_extern_function(
         // =====================================================================
         // Vulkan FFI Functions (simple/std_lib/src/ui/gui/vulkan_ffi.spl)
         // =====================================================================
+        #[cfg(feature = "vulkan")]
+        "rt_vk_available" => {
+            let available = rt_vk_available();
+            Ok(Value::Int(available as i64))
+        }
+        #[cfg(not(feature = "vulkan"))]
+        "rt_vk_available" => {
+            Ok(Value::Int(0))
+        }
         #[cfg(feature = "vulkan")]
         "rt_vk_device_create" => {
             let handle = rt_vk_device_create();

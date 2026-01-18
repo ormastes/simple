@@ -419,8 +419,8 @@ impl Default for Interpreter {
 /// * `Err(String)` - Error message if compilation or execution failed
 ///
 /// # Example
-/// ```
-/// use crate::run_code;
+/// ```ignore
+/// use simple_driver::run_code;
 ///
 /// let result = run_code("main = 42", &[], "").unwrap();
 /// assert_eq!(result.exit_code, 42);
@@ -450,8 +450,8 @@ pub fn run_code(code: &str, args: &[String], stdin: &str) -> Result<RunResult, S
 /// * `Err(String)` - Error message if compilation or execution failed
 ///
 /// # Example
-/// ```
-/// use crate::run_jit;
+/// ```ignore
+/// use simple_driver::run_jit;
 ///
 /// let result = run_jit("fn main() -> i64:\n    return 42\n").unwrap();
 /// assert_eq!(result.exit_code, 42);

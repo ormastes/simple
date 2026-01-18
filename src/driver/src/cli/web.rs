@@ -100,7 +100,7 @@ impl Default for WebServeOptions {
 /// Serves built assets and optionally watches for changes
 ///
 /// # Example
-/// ```
+/// ```text
 /// simple web serve app.sui --port 3000 --watch
 /// ```
 pub fn web_serve(source: &PathBuf, build_options: WebBuildOptions, serve_options: WebServeOptions) -> i32 {
@@ -300,7 +300,7 @@ fn open_browser(url: &str) -> Result<(), String> {
 /// - Manifest JSON (hydration metadata)
 ///
 /// # Example
-/// ```
+/// ```text
 /// simple web build app.sui -o public/
 /// ```
 pub fn web_build(source: &PathBuf, options: WebBuildOptions) -> i32 {
