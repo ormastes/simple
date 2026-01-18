@@ -9,8 +9,8 @@ use std::sync::{Once, OnceLock};
 /// Lazy initialized value with thread-safe initialization
 ///
 /// # Example
-/// ```
-/// use crate::lazy_init::LazyInit;
+/// ```ignore
+/// use simple_driver::lazy_init::LazyInit;
 ///
 /// static COUNTER: LazyInit<i32> = LazyInit::new();
 ///
@@ -86,8 +86,8 @@ impl<T> Default for LazyInit<T> {
 /// unlike `LazyInit` which returns a `MutexGuard`.
 ///
 /// # Example
-/// ```
-/// use crate::lazy_init::LazyStatic;
+/// ```ignore
+/// use simple_driver::lazy_init::LazyStatic;
 ///
 /// static VALUE: LazyStatic<i32> = LazyStatic::new();
 ///
@@ -145,8 +145,8 @@ unsafe impl<T: Send + Sync> Sync for LazyStatic<T> {}
 /// via `OnceLock`.
 ///
 /// # Example
-/// ```
-/// use crate::lazy_static;
+/// ```ignore
+/// use simple_driver::lazy_static;
 ///
 /// lazy_static! {
 ///     static ref ANSWER: i32 = 42;

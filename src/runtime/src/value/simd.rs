@@ -64,12 +64,12 @@ where
 pub extern "C" fn rt_vec_sum(vec: RuntimeValue) -> RuntimeValue {
     let arr = match get_array(vec) {
         Some(a) => a,
-        None => return RuntimeValue::int(0),
+        None => return RuntimeValue::from_int(0),
     };
 
     let len = array_len(arr);
     if len == 0 {
-        return RuntimeValue::int(0);
+        return RuntimeValue::from_int(0);
     }
 
     let mut int_sum: i64 = 0;
@@ -94,9 +94,9 @@ pub extern "C" fn rt_vec_sum(vec: RuntimeValue) -> RuntimeValue {
     }
 
     if is_float {
-        RuntimeValue::float(float_sum)
+        RuntimeValue::from_float(float_sum)
     } else {
-        RuntimeValue::int(int_sum)
+        RuntimeValue::from_int(int_sum)
     }
 }
 
@@ -111,12 +111,12 @@ pub extern "C" fn rt_vec_sum(vec: RuntimeValue) -> RuntimeValue {
 pub extern "C" fn rt_vec_product(vec: RuntimeValue) -> RuntimeValue {
     let arr = match get_array(vec) {
         Some(a) => a,
-        None => return RuntimeValue::int(1),
+        None => return RuntimeValue::from_int(1),
     };
 
     let len = array_len(arr);
     if len == 0 {
-        return RuntimeValue::int(1);
+        return RuntimeValue::from_int(1);
     }
 
     let mut int_product: i64 = 1;
@@ -141,9 +141,9 @@ pub extern "C" fn rt_vec_product(vec: RuntimeValue) -> RuntimeValue {
     }
 
     if is_float {
-        RuntimeValue::float(float_product)
+        RuntimeValue::from_float(float_product)
     } else {
-        RuntimeValue::int(int_product)
+        RuntimeValue::from_int(int_product)
     }
 }
 
@@ -226,7 +226,7 @@ pub extern "C" fn rt_vec_all(vec: RuntimeValue) -> bool {
     let len = array_len(arr);
     for i in 0..len {
         let elem = array_get_element(arr, i);
-        if !elem.is_truthy() {
+        if !elem.truthy() {
             return false;
         }
     }
@@ -250,7 +250,7 @@ pub extern "C" fn rt_vec_any(vec: RuntimeValue) -> bool {
     let len = array_len(arr);
     for i in 0..len {
         let elem = array_get_element(arr, i);
-        if elem.is_truthy() {
+        if elem.truthy() {
             return true;
         }
     }
@@ -298,13 +298,7 @@ pub extern "C" fn rt_vec_with(vec: RuntimeValue, index: u64, value: RuntimeValue
     let len = array_len(arr);
     let idx = index as usize;
 
-    create_array_from_fn(len, |i| {
-        if i == idx {
-            value
-        } else {
-            array_get_element(arr, i)
-        }
-    })
+    create_array_from_fn(len, |i| if i == idx { value } else { array_get_element(arr, i) })
 }
 
 // =============================================================================
@@ -316,9 +310,9 @@ pub extern "C" fn rt_vec_with(vec: RuntimeValue, index: u64, value: RuntimeValue
 pub extern "C" fn rt_vec_sqrt(vec: RuntimeValue) -> RuntimeValue {
     apply_unary_op(vec, |v| {
         if v.is_int() {
-            RuntimeValue::float((v.as_int() as f64).sqrt())
+            RuntimeValue::from_float((v.as_int() as f64).sqrt())
         } else if v.is_float() {
-            RuntimeValue::float(v.as_float().sqrt())
+            RuntimeValue::from_float(v.as_float().sqrt())
         } else {
             v
         }
@@ -330,9 +324,9 @@ pub extern "C" fn rt_vec_sqrt(vec: RuntimeValue) -> RuntimeValue {
 pub extern "C" fn rt_vec_abs(vec: RuntimeValue) -> RuntimeValue {
     apply_unary_op(vec, |v| {
         if v.is_int() {
-            RuntimeValue::int(v.as_int().abs())
+            RuntimeValue::from_int(v.as_int().abs())
         } else if v.is_float() {
-            RuntimeValue::float(v.as_float().abs())
+            RuntimeValue::from_float(v.as_float().abs())
         } else {
             v
         }
@@ -346,7 +340,7 @@ pub extern "C" fn rt_vec_floor(vec: RuntimeValue) -> RuntimeValue {
         if v.is_int() {
             v
         } else if v.is_float() {
-            RuntimeValue::float(v.as_float().floor())
+            RuntimeValue::from_float(v.as_float().floor())
         } else {
             v
         }
@@ -360,7 +354,7 @@ pub extern "C" fn rt_vec_ceil(vec: RuntimeValue) -> RuntimeValue {
         if v.is_int() {
             v
         } else if v.is_float() {
-            RuntimeValue::float(v.as_float().ceil())
+            RuntimeValue::from_float(v.as_float().ceil())
         } else {
             v
         }
@@ -374,7 +368,7 @@ pub extern "C" fn rt_vec_round(vec: RuntimeValue) -> RuntimeValue {
         if v.is_int() {
             v
         } else if v.is_float() {
-            RuntimeValue::float(v.as_float().round())
+            RuntimeValue::from_float(v.as_float().round())
         } else {
             v
         }
@@ -449,7 +443,7 @@ pub extern "C" fn rt_vec_blend(v1: RuntimeValue, v2: RuntimeValue, mask: Runtime
     let len = array_len(arr1).min(array_len(arr2)).min(array_len(mask_arr));
 
     create_array_from_fn(len, |i| {
-        let use_first = array_get_element(mask_arr, i).is_truthy();
+        let use_first = array_get_element(mask_arr, i).truthy();
         if use_first {
             array_get_element(arr1, i)
         } else {
@@ -553,9 +547,9 @@ mod tests {
     #[test]
     fn test_vec_sum_ints() {
         let arr = rt_array_new(3);
-        rt_array_push(arr, RuntimeValue::int(1));
-        rt_array_push(arr, RuntimeValue::int(2));
-        rt_array_push(arr, RuntimeValue::int(3));
+        rt_array_push(arr, RuntimeValue::from_int(1));
+        rt_array_push(arr, RuntimeValue::from_int(2));
+        rt_array_push(arr, RuntimeValue::from_int(3));
         let result = rt_vec_sum(arr);
         assert!(result.is_int());
         assert_eq!(result.as_int(), 6);
@@ -564,9 +558,9 @@ mod tests {
     #[test]
     fn test_vec_product_ints() {
         let arr = rt_array_new(3);
-        rt_array_push(arr, RuntimeValue::int(2));
-        rt_array_push(arr, RuntimeValue::int(3));
-        rt_array_push(arr, RuntimeValue::int(4));
+        rt_array_push(arr, RuntimeValue::from_int(2));
+        rt_array_push(arr, RuntimeValue::from_int(3));
+        rt_array_push(arr, RuntimeValue::from_int(4));
         let result = rt_vec_product(arr);
         assert!(result.is_int());
         assert_eq!(result.as_int(), 24);
@@ -575,10 +569,10 @@ mod tests {
     #[test]
     fn test_vec_min() {
         let arr = rt_array_new(4);
-        rt_array_push(arr, RuntimeValue::int(5));
-        rt_array_push(arr, RuntimeValue::int(2));
-        rt_array_push(arr, RuntimeValue::int(8));
-        rt_array_push(arr, RuntimeValue::int(1));
+        rt_array_push(arr, RuntimeValue::from_int(5));
+        rt_array_push(arr, RuntimeValue::from_int(2));
+        rt_array_push(arr, RuntimeValue::from_int(8));
+        rt_array_push(arr, RuntimeValue::from_int(1));
         let result = rt_vec_min(arr);
         assert!(result.is_int());
         assert_eq!(result.as_int(), 1);
@@ -587,10 +581,10 @@ mod tests {
     #[test]
     fn test_vec_max() {
         let arr = rt_array_new(4);
-        rt_array_push(arr, RuntimeValue::int(5));
-        rt_array_push(arr, RuntimeValue::int(2));
-        rt_array_push(arr, RuntimeValue::int(8));
-        rt_array_push(arr, RuntimeValue::int(1));
+        rt_array_push(arr, RuntimeValue::from_int(5));
+        rt_array_push(arr, RuntimeValue::from_int(2));
+        rt_array_push(arr, RuntimeValue::from_int(8));
+        rt_array_push(arr, RuntimeValue::from_int(1));
         let result = rt_vec_max(arr);
         assert!(result.is_int());
         assert_eq!(result.as_int(), 8);
@@ -599,35 +593,35 @@ mod tests {
     #[test]
     fn test_vec_all_true() {
         let arr = rt_array_new(3);
-        rt_array_push(arr, RuntimeValue::bool(true));
-        rt_array_push(arr, RuntimeValue::int(1));
-        rt_array_push(arr, RuntimeValue::int(42));
+        rt_array_push(arr, RuntimeValue::from_bool(true));
+        rt_array_push(arr, RuntimeValue::from_int(1));
+        rt_array_push(arr, RuntimeValue::from_int(42));
         assert!(rt_vec_all(arr));
     }
 
     #[test]
     fn test_vec_all_false() {
         let arr = rt_array_new(3);
-        rt_array_push(arr, RuntimeValue::bool(true));
-        rt_array_push(arr, RuntimeValue::int(0));
-        rt_array_push(arr, RuntimeValue::int(42));
+        rt_array_push(arr, RuntimeValue::from_bool(true));
+        rt_array_push(arr, RuntimeValue::from_int(0));
+        rt_array_push(arr, RuntimeValue::from_int(42));
         assert!(!rt_vec_all(arr));
     }
 
     #[test]
     fn test_vec_any_true() {
         let arr = rt_array_new(3);
-        rt_array_push(arr, RuntimeValue::bool(false));
-        rt_array_push(arr, RuntimeValue::int(0));
-        rt_array_push(arr, RuntimeValue::int(1));
+        rt_array_push(arr, RuntimeValue::from_bool(false));
+        rt_array_push(arr, RuntimeValue::from_int(0));
+        rt_array_push(arr, RuntimeValue::from_int(1));
         assert!(rt_vec_any(arr));
     }
 
     #[test]
     fn test_vec_any_false() {
         let arr = rt_array_new(3);
-        rt_array_push(arr, RuntimeValue::bool(false));
-        rt_array_push(arr, RuntimeValue::int(0));
+        rt_array_push(arr, RuntimeValue::from_bool(false));
+        rt_array_push(arr, RuntimeValue::from_int(0));
         rt_array_push(arr, RuntimeValue::NIL);
         assert!(!rt_vec_any(arr));
     }
@@ -635,9 +629,9 @@ mod tests {
     #[test]
     fn test_vec_extract() {
         let arr = rt_array_new(3);
-        rt_array_push(arr, RuntimeValue::int(10));
-        rt_array_push(arr, RuntimeValue::int(20));
-        rt_array_push(arr, RuntimeValue::int(30));
+        rt_array_push(arr, RuntimeValue::from_int(10));
+        rt_array_push(arr, RuntimeValue::from_int(20));
+        rt_array_push(arr, RuntimeValue::from_int(30));
 
         assert_eq!(rt_vec_extract(arr, 0).as_int(), 10);
         assert_eq!(rt_vec_extract(arr, 1).as_int(), 20);

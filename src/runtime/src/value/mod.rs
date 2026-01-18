@@ -43,8 +43,7 @@ mod pty;
 #[cfg(feature = "ratatui-tui")]
 pub mod ratatui_tui;
 pub mod screenshot_ffi;
-// TODO: simd module needs API fixes - uses non-existent as_array(), Option-returning as_int(), etc.
-// pub mod simd;
+pub mod simd;
 mod sync;
 pub mod tags;
 #[cfg(feature = "pytorch")]
@@ -609,11 +608,11 @@ pub use file_io::{
     sys_open,
 };
 
-// TODO: Re-export SIMD vector operations (disabled pending API fixes)
-// pub use simd::{
-//     rt_vec_abs, rt_vec_all, rt_vec_any, rt_vec_blend, rt_vec_ceil, rt_vec_extract, rt_vec_floor, rt_vec_max,
-//     rt_vec_min, rt_vec_product, rt_vec_round, rt_vec_select, rt_vec_shuffle, rt_vec_sqrt, rt_vec_sum, rt_vec_with,
-// };
+// Re-export SIMD vector operations
+pub use simd::{
+    rt_vec_abs, rt_vec_all, rt_vec_any, rt_vec_blend, rt_vec_ceil, rt_vec_extract, rt_vec_floor, rt_vec_max,
+    rt_vec_min, rt_vec_product, rt_vec_round, rt_vec_select, rt_vec_shuffle, rt_vec_sqrt, rt_vec_sum, rt_vec_with,
+};
 
 // Re-export diagram FFI functions (for spec framework)
 pub use diagram_ffi::{

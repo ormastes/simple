@@ -2324,6 +2324,34 @@ pub unsafe extern "C" fn rt_path_absolute(path_ptr: *const u8, path_len: u64) ->
     super::rt_string_new(absolute.as_ptr(), absolute.len() as u64)
 }
 
+/// Get platform-specific path separator
+/// Returns "/" on Unix, "\\" on Windows
+#[no_mangle]
+pub extern "C" fn rt_path_separator() -> RuntimeValue {
+    #[cfg(target_os = "windows")]
+    const SEPARATOR: &[u8] = b"\\";
+    #[cfg(not(target_os = "windows"))]
+    const SEPARATOR: &[u8] = b"/";
+
+    unsafe { super::rt_string_new(SEPARATOR.as_ptr(), SEPARATOR.len() as u64) }
+}
+
+/// Get platform name
+/// Returns "windows", "macos", "linux", etc.
+#[no_mangle]
+pub extern "C" fn rt_platform_name() -> RuntimeValue {
+    #[cfg(target_os = "windows")]
+    const PLATFORM: &[u8] = b"windows";
+    #[cfg(target_os = "macos")]
+    const PLATFORM: &[u8] = b"macos";
+    #[cfg(target_os = "linux")]
+    const PLATFORM: &[u8] = b"linux";
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    const PLATFORM: &[u8] = b"unix";
+
+    unsafe { super::rt_string_new(PLATFORM.as_ptr(), PLATFORM.len() as u64) }
+}
+
 // ============================================================================
 // Atomic Operations FFI
 // ============================================================================
