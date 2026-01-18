@@ -119,7 +119,6 @@ pub extern "C" fn native_process_terminate(pid: i64) -> RuntimeValue {
 }
 
 /// Helper to extract string from RuntimeValue
-#[cfg(unix)]
 unsafe fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
     if !val.is_heap() {
         return None;
@@ -136,7 +135,6 @@ unsafe fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
 }
 
 /// Helper to convert RuntimeValue array to Vec<String>
-#[cfg(unix)]
 unsafe fn runtime_value_to_string_array(val: RuntimeValue) -> Option<Vec<String>> {
     if !val.is_heap() {
         return None;
@@ -160,4 +158,172 @@ unsafe fn runtime_value_to_string_array(val: RuntimeValue) -> Option<Vec<String>
     }
 
     Some(result)
+}
+
+// =============================================================================
+// Command Execution API
+// =============================================================================
+
+/// Execute a command and wait for completion.
+///
+/// # Arguments
+/// * `command` - Command to execute (e.g., "ls", "/usr/bin/simple")
+/// * `args` - Array of string arguments
+///
+/// # Returns
+/// Exit code of the process (0 for success, non-zero for failure, -1 for spawn error)
+#[no_mangle]
+pub extern "C" fn native_command_run(command: RuntimeValue, args: RuntimeValue) -> RuntimeValue {
+    let cmd = unsafe {
+        match runtime_value_to_string(command) {
+            Some(s) => s,
+            None => return RuntimeValue::from_int(-1),
+        }
+    };
+
+    let args_vec = unsafe {
+        match runtime_value_to_string_array(args) {
+            Some(v) => v,
+            None => Vec::new(),
+        }
+    };
+
+    match std::process::Command::new(&cmd).args(&args_vec).status() {
+        Ok(status) => RuntimeValue::from_int(status.code().unwrap_or(-1) as i64),
+        Err(e) => {
+            tracing::warn!("Failed to execute command '{}': {}", cmd, e);
+            RuntimeValue::from_int(-1)
+        }
+    }
+}
+
+/// Execute a command and capture its stdout output.
+///
+/// # Arguments
+/// * `command` - Command to execute
+/// * `args` - Array of string arguments
+///
+/// # Returns
+/// Tuple of (exit_code, stdout_string), or (-1, "") on error
+#[no_mangle]
+pub extern "C" fn native_command_output(command: RuntimeValue, args: RuntimeValue) -> RuntimeValue {
+    let cmd = unsafe {
+        match runtime_value_to_string(command) {
+            Some(s) => s,
+            None => return create_command_result(-1, ""),
+        }
+    };
+
+    let args_vec = unsafe {
+        match runtime_value_to_string_array(args) {
+            Some(v) => v,
+            None => Vec::new(),
+        }
+    };
+
+    match std::process::Command::new(&cmd).args(&args_vec).output() {
+        Ok(output) => {
+            let exit_code = output.status.code().unwrap_or(-1) as i64;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            create_command_result(exit_code, &stdout)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to execute command '{}': {}", cmd, e);
+            create_command_result(-1, &format!("Error: {}", e))
+        }
+    }
+}
+
+/// Execute a command with a timeout (in milliseconds).
+///
+/// # Arguments
+/// * `command` - Command to execute
+/// * `args` - Array of string arguments
+/// * `timeout_ms` - Timeout in milliseconds
+///
+/// # Returns
+/// Exit code, or -2 if timed out, -1 on error
+#[no_mangle]
+pub extern "C" fn native_command_run_timeout(
+    command: RuntimeValue,
+    args: RuntimeValue,
+    timeout_ms: i64,
+) -> RuntimeValue {
+    let cmd = unsafe {
+        match runtime_value_to_string(command) {
+            Some(s) => s,
+            None => return RuntimeValue::from_int(-1),
+        }
+    };
+
+    let args_vec = unsafe {
+        match runtime_value_to_string_array(args) {
+            Some(v) => v,
+            None => Vec::new(),
+        }
+    };
+
+    let mut child = match std::process::Command::new(&cmd).args(&args_vec).spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Failed to spawn command '{}': {}", cmd, e);
+            return RuntimeValue::from_int(-1);
+        }
+    };
+
+    let timeout = std::time::Duration::from_millis(timeout_ms as u64);
+
+    match child.wait_timeout(timeout) {
+        Ok(Some(status)) => RuntimeValue::from_int(status.code().unwrap_or(-1) as i64),
+        Ok(None) => {
+            // Timed out - kill the process
+            let _ = child.kill();
+            let _ = child.wait();
+            RuntimeValue::from_int(-2) // Timeout indicator
+        }
+        Err(e) => {
+            tracing::warn!("Failed to wait for command '{}': {}", cmd, e);
+            RuntimeValue::from_int(-1)
+        }
+    }
+}
+
+/// Helper to create command result tuple (exit_code, output_string)
+fn create_command_result(exit_code: i64, output: &str) -> RuntimeValue {
+    // Create a tuple/array with [exit_code, output_string]
+    let exit_val = RuntimeValue::from_int(exit_code);
+    let output_val = super::collections::rt_string_new(output.as_ptr(), output.len() as u64);
+
+    // Create array with two elements using rt_array_new and rt_array_push
+    let arr = super::collections::rt_array_new(2);
+    super::collections::rt_array_push(arr, exit_val);
+    super::collections::rt_array_push(arr, output_val);
+    arr
+}
+
+/// Trait extension for wait_timeout on Child
+trait ChildExt {
+    fn wait_timeout(&mut self, timeout: std::time::Duration) -> std::io::Result<Option<std::process::ExitStatus>>;
+}
+
+impl ChildExt for std::process::Child {
+    fn wait_timeout(&mut self, timeout: std::time::Duration) -> std::io::Result<Option<std::process::ExitStatus>> {
+        use std::thread;
+        use std::time::Instant;
+
+        let start = Instant::now();
+        let poll_interval = std::time::Duration::from_millis(10);
+
+        loop {
+            match self.try_wait()? {
+                Some(status) => return Ok(Some(status)),
+                None => {
+                    if start.elapsed() >= timeout {
+                        return Ok(None);
+                    }
+                    thread::sleep(poll_interval);
+                }
+            }
+        }
+    }
 }

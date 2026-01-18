@@ -228,13 +228,19 @@ pub enum SandboxError {
 
 // Re-export platform-specific functions
 #[cfg(target_os = "linux")]
-pub use linux::apply_sandbox;
+pub use linux::{apply_sandbox, cleanup_network_rules};
 
 #[cfg(target_os = "macos")]
 pub use macos::apply_sandbox;
 
 #[cfg(target_os = "windows")]
 pub use windows::apply_sandbox;
+
+// Cleanup function for non-Linux platforms (no-op)
+#[cfg(not(target_os = "linux"))]
+pub fn cleanup_network_rules() {
+    // No-op on non-Linux platforms
+}
 
 // Fallback for unsupported platforms
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]

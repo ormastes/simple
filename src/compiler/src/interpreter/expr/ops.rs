@@ -365,7 +365,14 @@ pub(super) fn eval_op_expr(
             }
 
             let result = match op {
-                UnaryOp::Neg => Value::Int(-val.as_int()?),
+                UnaryOp::Neg => {
+                    // Preserve float type for negation
+                    if matches!(val, Value::Float(_)) {
+                        Value::Float(-val.as_float()?)
+                    } else {
+                        Value::Int(-val.as_int()?)
+                    }
+                }
                 UnaryOp::Not => Value::Bool(!val.truthy()),
                 UnaryOp::BitNot => Value::Int(!val.as_int()?),
                 UnaryOp::Ref => Value::Borrow(BorrowValue::new(val)),

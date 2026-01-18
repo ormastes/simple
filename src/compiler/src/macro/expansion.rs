@@ -53,9 +53,26 @@ fn expand_user_macro_inner(
     let const_bindings = build_macro_const_bindings(macro_def, args, env, functions, classes, enums, impl_methods)?;
     let mut hygiene_ctx = MacroHygieneContext::new();
 
-    // Process macro contracts to determine introduced symbols (#1303)
-    // Also performs shadowing validation (#1304)
-    let mut contract_result = process_macro_contract(macro_def, &const_bindings, env, functions, classes)?;
+    // Try to use cached contract result for parameterless macros (definition-time optimization)
+    // If the macro was pre-processed at definition time, we can skip contract processing here.
+    let mut contract_result = if !macro_has_const_params(macro_def) {
+        if let Some(cached) = super::state::get_cached_macro_contract(&macro_def.name) {
+            if is_macro_trace_enabled() {
+                macro_trace(&format!(
+                    "  using cached contract for '{}' (skipped re-processing)",
+                    macro_def.name
+                ));
+            }
+            cached
+        } else {
+            // Fallback: process contract now (may happen if definition-time processing failed)
+            process_macro_contract(macro_def, &const_bindings, env, functions, classes)?
+        }
+    } else {
+        // Macros with const params must be processed at invocation time
+        // because const bindings are only available now
+        process_macro_contract(macro_def, &const_bindings, env, functions, classes)?
+    };
 
     // Find if there's a variadic parameter (must be last if present)
     if let Some(variadic_idx) = macro_def.params.iter().position(|p| p.is_variadic) {
@@ -264,4 +281,62 @@ fn strip_gensym_suffix(name: &str) -> String {
     } else {
         name.to_string()
     }
+}
+
+/// Check if a macro has const parameters
+/// Macros with const parameters cannot have their contracts processed at definition time
+/// because the const values are only known at invocation time.
+pub fn macro_has_const_params(macro_def: &MacroDef) -> bool {
+    macro_def.params.iter().any(|p| p.is_const)
+}
+
+/// Pre-process and cache a macro contract at definition time (optimization)
+///
+/// This function can be called when a macro is defined. For macros without const
+/// parameters, the contract can be processed once and cached, avoiding redundant
+/// processing on each invocation.
+///
+/// # Arguments
+/// * `macro_def` - The macro definition
+/// * `env` - The current environment
+/// * `functions` - Currently defined functions
+/// * `classes` - Currently defined classes
+///
+/// # Returns
+/// * `Ok(true)` if the contract was cached successfully
+/// * `Ok(false)` if the macro has const parameters (cannot be cached)
+/// * `Err` if contract processing failed
+pub fn preprocess_macro_contract_at_definition(
+    macro_def: &MacroDef,
+    env: &mut Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+) -> Result<bool, CompileError> {
+    // Cannot pre-process macros with const parameters
+    if macro_has_const_params(macro_def) {
+        return Ok(false);
+    }
+
+    // Skip if already cached
+    if super::state::has_cached_macro_contract(&macro_def.name) {
+        return Ok(true);
+    }
+
+    // For parameterless macros, const_bindings is empty
+    let const_bindings = HashMap::new();
+
+    // Process the contract
+    let contract_result = process_macro_contract(macro_def, &const_bindings, env, functions, classes)?;
+
+    // Cache the result
+    super::state::cache_macro_contract(&macro_def.name, contract_result);
+
+    if super::state::is_macro_trace_enabled() {
+        super::state::macro_trace(&format!(
+            "  pre-processed contract for '{}' at definition time",
+            macro_def.name
+        ));
+    }
+
+    Ok(true)
 }

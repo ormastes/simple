@@ -1,0 +1,411 @@
+# ML Configuration System
+#
+# Hierarchical, type-safe configuration management for ML experiments.
+# Built on SDN (Simple Data Notation) for native Simple syntax.
+#
+# Usage:
+#     import ml.config.Conf
+#
+#     # Load configuration from file
+#     val cfg = Conf.load("config.sdn")
+#
+#     # Access values with dot notation
+#     val lr = cfg.get("training.lr")
+#
+#     # Merge configurations
+#     val merged = Conf.merge(base_cfg, override_cfg)
+#
+#     # Parse CLI dotlist overrides
+#     val cli_cfg = Conf.parse_dotlist(["train.epochs=20", "model.size=512"])
+
+export Conf, ConfValue
+
+
+class ConfValue:
+    """A configuration value with hierarchical access."""
+    _data: any  # Dict or primitive value
+
+    fn __init__(data: any):
+        self._data = data
+
+    fn get(key: str) -> ConfValue:
+        """Get a nested value by key.
+
+        Args:
+            key: Key to look up (supports dot notation like "model.hidden_size")
+
+        Returns:
+            ConfValue wrapping the found value, or empty ConfValue if not found
+        """
+        val parts = key.split(".")
+        var current = self._data
+
+        for part in parts:
+            if current is dict:
+                if part in current:
+                    current = current[part]
+                else:
+                    return ConfValue({})
+            else:
+                return ConfValue({})
+
+        return ConfValue(current)
+
+    fn as_str() -> str:
+        """Get value as string."""
+        if self._data is str:
+            return self._data
+        return ""
+
+    fn as_int() -> i64:
+        """Get value as integer."""
+        if self._data is i64:
+            return self._data
+        if self._data is i32:
+            return self._data as i64
+        return 0
+
+    fn as_float() -> f64:
+        """Get value as float."""
+        if self._data is f64:
+            return self._data
+        if self._data is f32:
+            return self._data as f64
+        if self._data is i64:
+            return self._data as f64
+        return 0.0
+
+    fn as_bool() -> bool:
+        """Get value as boolean."""
+        if self._data is bool:
+            return self._data
+        return false
+
+    fn as_list() -> any:
+        """Get value as list."""
+        if self._data is list:
+            return self._data
+        return []
+
+    fn as_dict() -> any:
+        """Get value as dictionary."""
+        if self._data is dict:
+            return self._data
+        return {}
+
+    fn is_empty() -> bool:
+        """Check if value is empty or missing."""
+        if self._data is dict:
+            return self._data.len() == 0
+        return self._data == nil
+
+    fn raw() -> any:
+        """Get the raw underlying data."""
+        return self._data
+
+
+class Conf:
+    """Configuration management class.
+
+    Provides static methods for loading, merging, and validating configurations.
+    """
+    _data: any
+    _frozen: bool
+
+    fn __init__(data: any = {}):
+        self._data = data
+        self._frozen = false
+
+    static fn load(path: str) -> Conf:
+        """Load configuration from an SDN file.
+
+        Args:
+            path: Path to the SDN configuration file
+
+        Returns:
+            Conf instance with loaded configuration
+
+        Example:
+            val cfg = Conf.load("config.sdn")
+            val lr = cfg.get("training.lr").as_float()
+        """
+        # Read file content
+        val content = _read_file(path)
+        if content == "":
+            return Conf({})
+
+        # Parse SDN content
+        val data = _parse_sdn(content)
+        return Conf(data)
+
+    static fn from_dict(data: any) -> Conf:
+        """Create configuration from a dictionary.
+
+        Args:
+            data: Dictionary with configuration values
+
+        Returns:
+            Conf instance
+        """
+        return Conf(data)
+
+    static fn merge(base: Conf, override: Conf) -> Conf:
+        """Deep merge two configurations.
+
+        Values from override take precedence over base.
+
+        Args:
+            base: Base configuration
+            override: Override configuration
+
+        Returns:
+            New Conf with merged values
+
+        Example:
+            val base = Conf.load("base.sdn")
+            val override = Conf.load("large.sdn")
+            val merged = Conf.merge(base, override)
+        """
+        val merged = _deep_merge(base._data, override._data)
+        return Conf(merged)
+
+    static fn parse_dotlist(args: any) -> Conf:
+        """Parse dotlist-style command-line arguments.
+
+        Dotlist syntax: key.subkey.field=value
+
+        Args:
+            args: List of dotlist strings like ["train.lr=0.01", "model.size=512"]
+
+        Returns:
+            Conf with parsed values
+
+        Example:
+            val cfg = Conf.parse_dotlist(["train.epochs=20", "model.size=512"])
+            # Result: {train: {epochs: 20}, model: {size: 512}}
+        """
+        var result = {}
+
+        for arg in args:
+            if "=" in arg:
+                val parts = arg.split("=")
+                if parts.len() >= 2:
+                    val key = parts[0]
+                    val value = parts[1]
+                    _set_nested(result, key, _parse_value(value))
+
+        return Conf(result)
+
+    fn get(key: str) -> ConfValue:
+        """Get a configuration value by key.
+
+        Supports dot notation for nested access.
+
+        Args:
+            key: Key to look up (e.g., "model.hidden_size")
+
+        Returns:
+            ConfValue wrapping the found value
+        """
+        return ConfValue(self._data).get(key)
+
+    fn get_str(key: str, default_val: str = "") -> str:
+        """Get string value with default."""
+        val v = self.get(key)
+        if v.is_empty():
+            return default_val
+        return v.as_str()
+
+    fn get_int(key: str, default_val: i64 = 0) -> i64:
+        """Get integer value with default."""
+        val v = self.get(key)
+        if v.is_empty():
+            return default_val
+        return v.as_int()
+
+    fn get_float(key: str, default_val: f64 = 0.0) -> f64:
+        """Get float value with default."""
+        val v = self.get(key)
+        if v.is_empty():
+            return default_val
+        return v.as_float()
+
+    fn get_bool(key: str, default_val: bool = false) -> bool:
+        """Get boolean value with default."""
+        val v = self.get(key)
+        if v.is_empty():
+            return default_val
+        return v.as_bool()
+
+    me set(key: str, value: any):
+        """Set a configuration value.
+
+        Args:
+            key: Key to set (supports dot notation)
+            value: Value to set
+        """
+        if self._frozen:
+            print("Error: Cannot modify frozen configuration")
+            return
+
+        _set_nested(self._data, key, value)
+
+    fn freeze() -> Conf:
+        """Create a frozen (immutable) copy of this configuration.
+
+        Returns:
+            New Conf that cannot be modified
+        """
+        var frozen = Conf(self._data)
+        frozen._frozen = true
+        return frozen
+
+    fn is_frozen() -> bool:
+        """Check if configuration is frozen."""
+        return self._frozen
+
+    fn to_dict() -> any:
+        """Convert configuration to dictionary."""
+        return self._data
+
+    fn keys() -> any:
+        """Get all top-level keys."""
+        if self._data is dict:
+            return self._data.keys()
+        return []
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn _read_file(path: str) -> str:
+    """Read file contents. Returns empty string on error."""
+    # Placeholder - in real implementation, use io.fs module
+    print("Conf: Would read file: {path}")
+    return ""
+
+fn _parse_sdn(content: str) -> any:
+    """Parse SDN content to dictionary."""
+    # Use the SDN parser from std_lib
+    # For now, return empty dict as placeholder
+    return {}
+
+fn _deep_merge(base: any, override: any) -> any:
+    """Deep merge two dictionaries."""
+    if not (base is dict) or not (override is dict):
+        return override
+
+    var result = {}
+
+    # Copy base values
+    for key in base.keys():
+        result[key] = base[key]
+
+    # Merge override values
+    for key in override.keys():
+        if key in result and result[key] is dict and override[key] is dict:
+            result[key] = _deep_merge(result[key], override[key])
+        else:
+            result[key] = override[key]
+
+    return result
+
+fn _set_nested(data: any, key: str, value: any):
+    """Set a nested value using dot notation."""
+    val parts = key.split(".")
+
+    if parts.len() == 1:
+        data[key] = value
+        return
+
+    var current = data
+    for i in 0..(parts.len() - 1):
+        val part = parts[i]
+        if not (part in current):
+            current[part] = {}
+        current = current[part]
+
+    current[parts[parts.len() - 1]] = value
+
+fn _parse_value(value: str) -> any:
+    """Parse a string value to appropriate type."""
+    # Try boolean
+    if value == "true":
+        return true
+    if value == "false":
+        return false
+
+    # Try integer
+    var is_int = true
+    var has_dot = false
+    for ch in value:
+        if ch == ".":
+            has_dot = true
+            is_int = false
+        elif ch < "0" or ch > "9":
+            if ch != "-" or value.len() == 0:
+                is_int = false
+
+    if is_int and not has_dot:
+        return _parse_int(value)
+
+    # Try float
+    if has_dot:
+        return _parse_float(value)
+
+    # Return as string
+    return value
+
+fn _parse_int(s: str) -> i64:
+    """Parse string to integer."""
+    var result: i64 = 0
+    var negative = false
+    var start = 0
+
+    if s.len() > 0 and s.char_at(0) == "-":
+        negative = true
+        start = 1
+
+    for i in start..s.len():
+        val ch = s.char_at(i)
+        if ch >= "0" and ch <= "9":
+            result = result * 10 + (ch.ord() - 48)
+
+    if negative:
+        return 0 - result
+    return result
+
+fn _parse_float(s: str) -> f64:
+    """Parse string to float."""
+    var int_part: f64 = 0.0
+    var dec_part: f64 = 0.0
+    var negative = false
+    var pos = 0
+
+    if s.len() > 0 and s.char_at(0) == "-":
+        negative = true
+        pos = 1
+
+    # Parse integer part
+    while pos < s.len() and s.char_at(pos) != ".":
+        val ch = s.char_at(pos)
+        if ch >= "0" and ch <= "9":
+            int_part = int_part * 10.0 + (ch.ord() - 48) as f64
+        pos = pos + 1
+
+    # Parse decimal part
+    if pos < s.len() and s.char_at(pos) == ".":
+        pos = pos + 1
+        var decimal_place = 0.1
+        while pos < s.len():
+            val ch = s.char_at(pos)
+            if ch >= "0" and ch <= "9":
+                dec_part = dec_part + (ch.ord() - 48) as f64 * decimal_place
+                decimal_place = decimal_place * 0.1
+            pos = pos + 1
+
+    val result = int_part + dec_part
+    if negative:
+        return result * (0.0 - 1.0)
+    return result

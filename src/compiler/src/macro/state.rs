@@ -26,6 +26,11 @@ thread_local! {
 
     /// Current block nesting depth for tail injection tracking
     static BLOCK_DEPTH: RefCell<usize> = RefCell::new(0);
+
+    /// Cache for pre-processed macro contracts (definition-time optimization)
+    /// For macros without const parameters, contracts can be processed once at definition
+    /// time and reused for all invocations, avoiding redundant processing.
+    static MACRO_CONTRACT_CACHE: RefCell<std::collections::HashMap<String, MacroContractResult>> = RefCell::new(std::collections::HashMap::new());
 }
 
 /// Enable or disable macro expansion tracing
@@ -146,4 +151,29 @@ pub(crate) fn queue_tail_injection(block: Block) {
     PENDING_TAIL_INJECTIONS.with(|cell| {
         cell.borrow_mut().push((current_depth, block));
     });
+}
+
+/// Cache a pre-processed contract result for a macro (definition-time optimization)
+/// Only call this for macros without const parameters.
+pub(crate) fn cache_macro_contract(macro_name: &str, contract_result: MacroContractResult) {
+    if is_macro_trace_enabled() {
+        macro_trace(&format!(
+            "  caching contract for macro '{}' (definition-time processing)",
+            macro_name
+        ));
+    }
+    MACRO_CONTRACT_CACHE.with(|cell| {
+        cell.borrow_mut().insert(macro_name.to_string(), contract_result);
+    });
+}
+
+/// Get a cached contract result for a macro, if available
+/// Returns None if the macro has const parameters or hasn't been cached.
+pub(crate) fn get_cached_macro_contract(macro_name: &str) -> Option<MacroContractResult> {
+    MACRO_CONTRACT_CACHE.with(|cell| cell.borrow().get(macro_name).cloned())
+}
+
+/// Check if a cached contract exists for a macro
+pub(crate) fn has_cached_macro_contract(macro_name: &str) -> bool {
+    MACRO_CONTRACT_CACHE.with(|cell| cell.borrow().contains_key(macro_name))
 }

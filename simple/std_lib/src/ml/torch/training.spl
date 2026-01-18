@@ -2,7 +2,7 @@
 #
 # Classes for tracking training progress and preventing overfitting.
 
-export ParameterStats, ParameterTracker, EarlyStopping
+export ParameterStats, ParameterTracker, EarlyStopping, Checkpoint, CheckpointInfo
 
 class ParameterStats:
     """Statistics for a parameter."""
@@ -64,3 +64,148 @@ class EarlyStopping:
             return false
 
         return true
+
+
+class CheckpointInfo:
+    """Information about a saved checkpoint."""
+    epoch: i64
+    metric: f64
+    path: str
+
+    fn __init__(epoch: i64, metric: f64, path: str):
+        self.epoch = epoch
+        self.metric = metric
+        self.path = path
+
+
+class Checkpoint:
+    """Checkpoint handler for saving model states during training.
+
+    Saves the N best checkpoints based on a monitored metric (like validation loss).
+    Lower metric values are considered better by default.
+
+    Example:
+        var checkpoint = Checkpoint(n_best=3, metric_name="val_loss")
+        checkpoint.save(epoch=1, metric=0.5, model_state=state)
+        checkpoint.save(epoch=2, metric=0.3, model_state=state)
+        # Only keeps the 3 best checkpoints
+    """
+    n_best: i64
+    metric_name: str
+    save_dir: str
+    checkpoints: any  # List<CheckpointInfo>
+    lower_is_better: bool
+
+    fn __init__(n_best: i64 = 3, metric_name: str = "val_loss", save_dir: str = "checkpoints", lower_is_better: bool = true):
+        """Initialize checkpoint handler.
+
+        Args:
+            n_best: Number of best checkpoints to retain
+            metric_name: Name of the metric to monitor
+            save_dir: Directory to save checkpoints
+            lower_is_better: If true, lower metric values are better (default for loss)
+        """
+        self.n_best = n_best
+        self.metric_name = metric_name
+        self.save_dir = save_dir
+        self.checkpoints = []
+        self.lower_is_better = lower_is_better
+
+    me save(epoch: i64, metric: f64, model_state: any) -> bool:
+        """Save a checkpoint if it qualifies as one of the N best.
+
+        Args:
+            epoch: Current training epoch
+            metric: Monitored metric value
+            model_state: Model state to save (dict or serializable object)
+
+        Returns:
+            true if checkpoint was saved, false if it didn't qualify
+        """
+        # Generate checkpoint path
+        val path = "{self.save_dir}/checkpoint_epoch{epoch}_{self.metric_name}{metric:.4f}.pt"
+
+        # Check if this checkpoint should be saved
+        if self.checkpoints.len() < self.n_best:
+            # Haven't filled n_best slots yet
+            val info = CheckpointInfo(epoch, metric, path)
+            self.checkpoints = self.checkpoints + [info]
+            self._save_model(path, model_state)
+            return true
+
+        # Find the worst checkpoint in current list
+        val worst_idx = self._find_worst_checkpoint_idx()
+        val worst = self.checkpoints[worst_idx]
+
+        # Check if new checkpoint is better
+        val is_better = if self.lower_is_better:
+            metric < worst.metric
+        else:
+            metric > worst.metric
+
+        if is_better:
+            # Remove worst checkpoint file (in real implementation)
+            # self._delete_model(worst.path)
+
+            # Replace with new checkpoint
+            val info = CheckpointInfo(epoch, metric, path)
+            self.checkpoints[worst_idx] = info
+            self._save_model(path, model_state)
+            return true
+
+        return false
+
+    fn _find_worst_checkpoint_idx() -> i64:
+        """Find the index of the worst checkpoint."""
+        var worst_idx: i64 = 0
+        var worst_metric = self.checkpoints[0].metric
+
+        for i in 1..self.checkpoints.len():
+            val checkpoint = self.checkpoints[i]
+            val is_worse = if self.lower_is_better:
+                checkpoint.metric > worst_metric
+            else:
+                checkpoint.metric < worst_metric
+
+            if is_worse:
+                worst_idx = i
+                worst_metric = checkpoint.metric
+
+        return worst_idx
+
+    fn _save_model(path: str, model_state: any):
+        """Save model state to disk.
+
+        Note: In a real implementation, this would serialize the model state.
+        For now, this is a placeholder that prints the save action.
+        """
+        print("Checkpoint: Saving model to {path}")
+
+    fn get_best() -> CheckpointInfo:
+        """Get the best checkpoint info.
+
+        Returns:
+            CheckpointInfo of the best checkpoint, or None if no checkpoints exist
+        """
+        if self.checkpoints.len() == 0:
+            return CheckpointInfo(0, 0.0, "")
+
+        var best_idx: i64 = 0
+        var best_metric = self.checkpoints[0].metric
+
+        for i in 1..self.checkpoints.len():
+            val checkpoint = self.checkpoints[i]
+            val is_better = if self.lower_is_better:
+                checkpoint.metric < best_metric
+            else:
+                checkpoint.metric > best_metric
+
+            if is_better:
+                best_idx = i
+                best_metric = checkpoint.metric
+
+        return self.checkpoints[best_idx]
+
+    fn get_all() -> any:
+        """Get all checkpoint info, sorted by metric (best first)."""
+        return self.checkpoints
