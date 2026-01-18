@@ -269,6 +269,155 @@ main = 0
     let _ = result;
 }
 
+// Export use * re-export syntax
+#[test]
+fn test_parser_export_use_glob() {
+    use simple_parser::Parser;
+
+    // export use * (re-export everything)
+    let mut parser = Parser::new("export use *");
+    let result = parser.parse();
+    assert!(result.is_ok(), "'export use *' should parse: {:?}", result.err());
+
+    // export use module.* (re-export from specific module)
+    let mut parser = Parser::new("export use test.*");
+    let result = parser.parse();
+    assert!(result.is_ok(), "'export use test.*' should parse: {:?}", result.err());
+
+    // export use module.{A, B} (re-export specific items)
+    let mut parser = Parser::new("export use test.{Foo, Bar}");
+    let result = parser.parse();
+    assert!(
+        result.is_ok(),
+        "'export use test.{{Foo, Bar}}' should parse: {:?}",
+        result.err()
+    );
+}
+
+// From/Into keywords as trait names
+#[test]
+fn test_parser_from_into_trait_names() {
+    use simple_parser::Parser;
+
+    // From trait definition
+    let mut parser = Parser::new(
+        r#"
+trait From<T>:
+    fn from(value: T) -> Self
+"#,
+    );
+    let result = parser.parse();
+    assert!(result.is_ok(), "Trait named 'From' should parse: {:?}", result.err());
+
+    // Into trait definition
+    let mut parser = Parser::new(
+        r#"
+trait Into<T>:
+    fn into() -> T
+"#,
+    );
+    let result = parser.parse();
+    assert!(result.is_ok(), "Trait named 'Into' should parse: {:?}", result.err());
+
+    // Method named 'from'
+    let mut parser = Parser::new(
+        r#"
+impl MyType:
+    fn from(s: str) -> MyType:
+        return MyType()
+"#,
+    );
+    let result = parser.parse();
+    assert!(result.is_ok(), "Method named 'from' should parse: {:?}", result.err());
+}
+
+// Default type parameters in generic definitions (e.g., trait Add<Rhs = Self>)
+#[test]
+fn test_parser_default_type_parameters() {
+    use simple_parser::Parser;
+
+    // Trait with default type parameter
+    let mut parser = Parser::new(
+        r#"
+trait Add<Rhs = Self>:
+    type Output
+    fn add(rhs: Rhs) -> Self::Output
+"#,
+    );
+    let result = parser.parse();
+    assert!(
+        result.is_ok(),
+        "Trait with default type parameter should parse: {:?}",
+        result.err()
+    );
+
+    // Multiple type parameters with defaults
+    let mut parser = Parser::new(
+        r#"
+trait Combine<A = i32, B = str>:
+    fn combine(a: A, b: B) -> str
+"#,
+    );
+    let result = parser.parse();
+    assert!(
+        result.is_ok(),
+        "Trait with multiple default type params should parse: {:?}",
+        result.err()
+    );
+
+    // Type param with bounds and default
+    let mut parser = Parser::new(
+        r#"
+trait Container<T: Clone = Vec<i32>>:
+    fn get() -> T
+"#,
+    );
+    let result = parser.parse();
+    assert!(
+        result.is_ok(),
+        "Type param with bounds and default should parse: {:?}",
+        result.err()
+    );
+}
+
+// Half-open range expressions (offset.., 0..n, 0..=n)
+#[test]
+fn test_parser_half_open_range_expression() {
+    use simple_parser::Parser;
+
+    // Half-open range: offset.. (no end) - this is the key new feature
+    let mut parser = Parser::new("val x = arr[offset..]");
+    let result = parser.parse();
+    assert!(
+        result.is_ok(),
+        "Half-open range 'arr[offset..]' should parse: {:?}",
+        result.err()
+    );
+
+    // Full range: 0..n
+    let mut parser = Parser::new("val x = arr[0..n]");
+    let result = parser.parse();
+    assert!(
+        result.is_ok(),
+        "Full range 'arr[0..n]' should parse: {:?}",
+        result.err()
+    );
+
+    // Inclusive range: 0..=n
+    let mut parser = Parser::new("val x = arr[0..=n]");
+    let result = parser.parse();
+    assert!(
+        result.is_ok(),
+        "Inclusive range 'arr[0..=n]' should parse: {:?}",
+        result.err()
+    );
+
+    // Range in for loop (already worked, but verify)
+    let mut parser = Parser::new("for i in 0..10:\n    pass");
+    let result = parser.parse();
+    assert!(result.is_ok(), "Range in for loop should parse: {:?}", result.err());
+}
+
 // Feature #84: Channel Types (compile-time check)
 #[test]
 fn test_parser_generic_type_annotation() {

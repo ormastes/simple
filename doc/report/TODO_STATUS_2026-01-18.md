@@ -30,7 +30,7 @@
 | **stdlib** | 159 | Standard library implementation |
 | **ui** | 123 | UI/TUI components |
 | **test** | 56 | Test framework & specs |
-| **parser** | 46 | Parser limitations & features |
+| **parser** | ~32 | Parser limitations & features (14 resolved) |
 | **doc** | 28 | Documentation placeholders |
 | **runtime** | 9 | Runtime implementation |
 | **gpu** | 2 | GPU/Vulkan integration |
@@ -104,9 +104,25 @@ TODO: [area][priority] description
 
 1. **P0 TODOs (2):** Review and address critical blockers
 2. **P1 TODOs (6):** Plan high-priority work
-3. **P2 Parser TODOs (46):** Slice syntax, tuple types, etc.
+3. **P2 Parser TODOs (~32):** Tuple types, associated type constraints, etc.
 4. **Documentation (28):** Fill in placeholder docs
 
 ---
 
+## ✅ Parser TODOs Resolved (2026-01-18)
+
+4 parser P2 TODOs were implemented in this session:
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Half-open range slice (`buf[offset..]`) | ✅ Implemented | New `is_range_terminator()` helper |
+| Default type parameters (`Add<Rhs = Self>`) | ✅ Already worked | Updated stdlib traits |
+| From/Into trait names | ✅ Already worked | Uncommented stdlib traits |
+| `export use *` syntax | ✅ Implemented | Updated 14 `__init__.spl` files |
+
+See: `doc/report/PARSER_TODO_IMPL_2026-01-18.md` for details.
+
+---
+
 *Generated: 2026-01-18*
+*Updated: 2026-01-18 (Parser TODO implementation)*

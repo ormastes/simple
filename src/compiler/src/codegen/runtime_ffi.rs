@@ -386,6 +386,63 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     ), // pipeline, buffers_ptr, count, gx,gy,gz, lx,ly,lz -> status
     RuntimeFuncSpec::new("rt_vk_kernel_launch_1d", &[I64, I64, I64, I32], &[I32]), // pipeline, buffers_ptr, count, global_size -> status
     // =========================================================================
+    // Vulkan Graphics Pipeline operations
+    // =========================================================================
+    // Render Pass
+    RuntimeFuncSpec::new("rt_vk_render_pass_create_simple", &[I64, I32], &[I64]), // device, color_format -> handle
+    RuntimeFuncSpec::new("rt_vk_render_pass_create_with_depth", &[I64, I32, I32], &[I64]), // device, color_format, depth_format -> handle
+    RuntimeFuncSpec::new("rt_vk_render_pass_free", &[I64], &[I32]),                        // handle -> status
+    RuntimeFuncSpec::new("rt_vk_render_pass_get_color_format", &[I64], &[I32]),            // handle -> format
+    // Shader Module
+    RuntimeFuncSpec::new("rt_vk_shader_module_create", &[I64, I64, I64], &[I64]), // device, spirv_ptr, spirv_len -> handle
+    RuntimeFuncSpec::new("rt_vk_shader_module_free", &[I64], &[I32]),             // handle -> status
+    // Graphics Pipeline
+    RuntimeFuncSpec::new(
+        "rt_vk_graphics_pipeline_create",
+        &[I64, I64, I64, I64, I32, I32],
+        &[I64],
+    ), // device, rp, vert, frag, w, h -> handle
+    RuntimeFuncSpec::new("rt_vk_graphics_pipeline_free", &[I64], &[I32]), // handle -> status
+    // Framebuffer
+    RuntimeFuncSpec::new("rt_vk_framebuffer_create", &[I64, I64, I64, I32, I32], &[I64]), // device, rp, view, w, h -> handle
+    RuntimeFuncSpec::new(
+        "rt_vk_framebuffer_create_for_swapchain",
+        &[I64, I64, I64, I64, I32],
+        &[I32],
+    ), // device, rp, sc, out, max -> count
+    RuntimeFuncSpec::new("rt_vk_framebuffer_free", &[I64], &[I32]),                       // handle -> status
+    RuntimeFuncSpec::new("rt_vk_framebuffer_get_dimensions", &[I64, I64, I64], &[I32]), // handle, w_ptr, h_ptr -> status
+    // =========================================================================
+    // Vulkan Image operations
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_vk_image_create_2d", &[I64, I32, I32, I32, I32], &[I64]), // device, w, h, fmt, usage -> handle
+    RuntimeFuncSpec::new("rt_vk_image_free", &[I64], &[I32]),                          // handle -> status
+    RuntimeFuncSpec::new("rt_vk_image_upload", &[I64, I64, I64], &[I32]),              // handle, data, len -> status
+    RuntimeFuncSpec::new("rt_vk_image_download", &[I64, I64, I64], &[I32]),            // handle, data, len -> status
+    RuntimeFuncSpec::new("rt_vk_image_get_view", &[I64], &[I64]),                      // handle -> view
+    RuntimeFuncSpec::new("rt_vk_sampler_create", &[I64, I32, I32], &[I64]), // device, filter, addr_mode -> handle
+    RuntimeFuncSpec::new("rt_vk_sampler_free", &[I64], &[I32]),             // handle -> status
+    // =========================================================================
+    // Vulkan Command Buffer operations
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_vk_command_buffer_begin", &[I64], &[I64]), // device -> handle
+    RuntimeFuncSpec::new("rt_vk_command_buffer_end", &[I64], &[I32]),   // cmd -> status
+    RuntimeFuncSpec::new("rt_vk_command_buffer_submit", &[I64], &[I32]), // cmd -> status
+    RuntimeFuncSpec::new("rt_vk_command_buffer_free", &[I64], &[I32]),  // cmd -> status
+    RuntimeFuncSpec::new(
+        "rt_vk_cmd_begin_render_pass",
+        &[I64, I64, I64, F64, F64, F64, F64],
+        &[I32],
+    ), // cmd, rp, fb, r, g, b, a -> status
+    RuntimeFuncSpec::new("rt_vk_cmd_end_render_pass", &[I64], &[I32]),  // cmd -> status
+    RuntimeFuncSpec::new("rt_vk_cmd_bind_pipeline", &[I64, I64], &[I32]), // cmd, pipeline -> status
+    RuntimeFuncSpec::new("rt_vk_cmd_bind_vertex_buffer", &[I64, I64, I32], &[I32]), // cmd, buffer, binding -> status
+    RuntimeFuncSpec::new("rt_vk_cmd_bind_index_buffer", &[I64, I64, I32], &[I32]), // cmd, buffer, index_type -> status
+    RuntimeFuncSpec::new("rt_vk_cmd_draw", &[I64, I32, I32, I32, I32], &[I32]), // cmd, vert, inst, first_vert, first_inst -> status
+    RuntimeFuncSpec::new("rt_vk_cmd_draw_indexed", &[I64, I32, I32, I32, I32, I32], &[I32]), // cmd, idx, inst, first_idx, vert_off, first_inst -> status
+    RuntimeFuncSpec::new("rt_vk_cmd_set_viewport", &[I64, F64, F64, F64, F64], &[I32]), // cmd, x, y, w, h -> status
+    RuntimeFuncSpec::new("rt_vk_cmd_set_scissor", &[I64, I32, I32, I32, I32], &[I32]),  // cmd, x, y, w, h -> status
+    // =========================================================================
     // Parallel iterator operations (#415)
     // =========================================================================
     // rt_par_map(input_ptr, input_len, closure_ptr, backend) -> result_ptr

@@ -64,6 +64,9 @@ pub enum VulkanError {
 
     /// Shader module compilation failed
     ShaderError(String),
+
+    /// Image operation failed
+    ImageError(String),
 }
 
 impl fmt::Display for VulkanError {
@@ -89,6 +92,7 @@ impl fmt::Display for VulkanError {
             Self::SurfaceError(msg) => write!(f, "Surface error: {}", msg),
             Self::SwapchainOutOfDate => write!(f, "Swapchain is out of date and needs recreation"),
             Self::ShaderError(msg) => write!(f, "Shader error: {}", msg),
+            Self::ImageError(msg) => write!(f, "Image error: {}", msg),
         }
     }
 }

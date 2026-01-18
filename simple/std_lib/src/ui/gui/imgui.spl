@@ -28,6 +28,57 @@ use ui.attrs.*
 use ui.renderer.*
 
 # =============================================================================
+# Draw Commands - Render primitives for ImGui
+# =============================================================================
+
+pub enum DrawCommand:
+    Rect(x: f32, y: f32, w: f32, h: f32, color: Color)
+    RectOutline(x: f32, y: f32, w: f32, h: f32, color: Color, thickness: f32)
+    RoundedRect(x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color)
+    Text(x: f32, y: f32, content: text, color: Color, size: f32)
+    Line(x1: f32, y1: f32, x2: f32, y2: f32, color: Color, thickness: f32)
+    Circle(cx: f32, cy: f32, radius: f32, color: Color)
+    SetClipRect(x: f32, y: f32, w: f32, h: f32)
+    ResetClipRect
+
+pub struct DrawList:
+    commands: Array<DrawCommand>
+
+impl DrawList:
+    pub static fn new() -> DrawList:
+        DrawList { commands: [] }
+
+    pub fn add(&mut self, cmd: DrawCommand):
+        self.commands.push(cmd)
+
+    pub fn add_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color):
+        self.add(DrawCommand::Rect(x, y, w, h, color))
+
+    pub fn add_rect_outline(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color, thickness: f32):
+        self.add(DrawCommand::RectOutline(x, y, w, h, color, thickness))
+
+    pub fn add_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color):
+        self.add(DrawCommand::RoundedRect(x, y, w, h, radius, color))
+
+    pub fn add_text(&mut self, x: f32, y: f32, content: text, color: Color, size: f32):
+        self.add(DrawCommand::Text(x, y, content, color, size))
+
+    pub fn add_line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, color: Color, thickness: f32):
+        self.add(DrawCommand::Line(x1, y1, x2, y2, color, thickness))
+
+    pub fn add_circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color):
+        self.add(DrawCommand::Circle(cx, cy, radius, color))
+
+    pub fn clear(&mut self):
+        self.commands.clear()
+
+    pub fn len(&self) -> usize:
+        self.commands.len()
+
+    pub fn is_empty(&self) -> bool:
+        self.commands.is_empty()
+
+# =============================================================================
 # Immediate Mode GUI Context
 # =============================================================================
 
@@ -55,6 +106,9 @@ pub struct ImGui:
     # ID generation
     id_stack: Array<u64>
     next_id: u64
+
+    # Draw commands for rendering
+    draw_list: DrawList
 
 impl ImGui:
     # =========================================================================
@@ -523,8 +577,17 @@ impl ImGui:
             mouse_clicked: false,
             keys_down: Set::new(),
             id_stack: [],
-            next_id: 0
+            next_id: 0,
+            draw_list: DrawList::new()
         }
+
+    # Get the draw list for rendering
+    pub fn get_draw_list(&self) -> &DrawList:
+        &self.draw_list
+
+    # Clear draw list for new frame
+    pub fn clear_draw_list(&mut self):
+        self.draw_list.clear()
 
     # Begin new frame
     pub fn begin_frame(self):
@@ -603,14 +666,21 @@ impl WindowScope:
 
 impl ImGui:
     # Label widget (non-interactive text)
-    pub fn label(self, text: &str) -> Response:
+    pub fn label(self, label_text: &str) -> Response:
         val id = self.generate_id()
         val layout = self.current_layout()
 
         val size = Size2D::new(layout.available_width, 20.0)
         val rect = Rect::new(self.cursor.x, self.cursor.y, size.width, size.height)
 
-        # TODO: [ui][P3] Emit render command for text
+        # Emit render command for text
+        self.draw_list.add_text(
+            rect.x + 4.0,
+            rect.y + 2.0,
+            label_text.to_string(),
+            Color::White,
+            14.0
+        )
 
         self.advance_cursor(size.height + layout.spacing)
 
@@ -642,7 +712,28 @@ impl ImGui:
         if clicked:
             self.active_id = Some(id)
 
-        # TODO: [ui][P3] Emit render command for button
+        # Emit render command for button background
+        val bg_color = if clicked:
+            Color::Ansi256(240)
+        else if hovered:
+            Color::Ansi256(245)
+        else:
+            Color::Ansi256(242)
+
+        self.draw_list.add_rounded_rect(
+            rect.x, rect.y, rect.width, rect.height,
+            4.0,
+            bg_color
+        )
+
+        # Emit render command for button text
+        self.draw_list.add_text(
+            rect.x + rect.width / 2.0 - 20.0,
+            rect.y + 8.0,
+            label.to_string(),
+            Color::White,
+            14.0
+        )
 
         self.advance_cursor(size.height + layout.spacing)
 
@@ -662,7 +753,39 @@ impl ImGui:
         if clicked:
             *checked = not *checked
 
-        # TODO: [ui][P3] Emit render command for checkbox
+        # Emit render command for checkbox box
+        val box_color = if hovered:
+            Color::Ansi256(245)
+        else:
+            Color::Ansi256(240)
+
+        self.draw_list.add_rect_outline(
+            rect.x, rect.y, rect.width, rect.height,
+            box_color,
+            2.0
+        )
+
+        # Draw checkmark if checked
+        if *checked:
+            self.draw_list.add_line(
+                rect.x + 4.0, rect.y + 10.0,
+                rect.x + 8.0, rect.y + 14.0,
+                Color::Green, 2.0
+            )
+            self.draw_list.add_line(
+                rect.x + 8.0, rect.y + 14.0,
+                rect.x + 16.0, rect.y + 4.0,
+                Color::Green, 2.0
+            )
+
+        # Draw label text
+        self.draw_list.add_text(
+            rect.x + rect.width + 8.0,
+            rect.y + 2.0,
+            label.to_string(),
+            Color::White,
+            14.0
+        )
 
         self.advance_cursor(size.height + layout.spacing)
 
@@ -698,7 +821,43 @@ impl ImGui:
             *value = min + (max - min) * clamped
             changed = true
 
-        # TODO: [ui][P3] Emit render command for slider
+        # Emit render command for slider track
+        val track_height = 4.0
+        val track_y = rect.y + (rect.height - track_height) / 2.0
+        self.draw_list.add_rounded_rect(
+            rect.x, track_y, rect.width, track_height,
+            2.0,
+            Color::Ansi256(238)
+        )
+
+        # Calculate handle position
+        val normalized_value = (*value - min) / (max - min)
+        val handle_x = rect.x + normalized_value * (rect.width - 12.0)
+        val handle_size = 12.0
+
+        # Emit render command for slider handle
+        val handle_color = if self.active_id == Some(id):
+            Color::Blue
+        else if hovered:
+            Color::Cyan
+        else:
+            Color::White
+
+        self.draw_list.add_circle(
+            handle_x + handle_size / 2.0,
+            rect.y + rect.height / 2.0,
+            handle_size / 2.0,
+            handle_color
+        )
+
+        # Draw label and value
+        self.draw_list.add_text(
+            rect.x + rect.width + 8.0,
+            rect.y + 2.0,
+            "{label}: {*value:.2}",
+            Color::White,
+            12.0
+        )
 
         self.advance_cursor(size.height + layout.spacing)
 
@@ -744,7 +903,57 @@ impl ImGui:
                     case _:
                         pass
 
-        # TODO: [ui][P3] Emit render command for text input
+        # Emit render command for text input background
+        val bg_color = if has_focus:
+            Color::Ansi256(238)
+        else if hovered:
+            Color::Ansi256(240)
+        else:
+            Color::Ansi256(236)
+
+        self.draw_list.add_rect(
+            rect.x, rect.y, rect.width, rect.height,
+            bg_color
+        )
+
+        # Emit render command for text input border
+        val border_color = if has_focus:
+            Color::Blue
+        else:
+            Color::Ansi256(245)
+
+        self.draw_list.add_rect_outline(
+            rect.x, rect.y, rect.width, rect.height,
+            border_color,
+            1.0
+        )
+
+        # Emit render command for text content
+        self.draw_list.add_text(
+            rect.x + 8.0,
+            rect.y + 8.0,
+            text.to_string(),
+            Color::White,
+            14.0
+        )
+
+        # Draw cursor if focused
+        if has_focus:
+            val cursor_x = rect.x + 8.0 + (text.len() as f32) * 8.0
+            self.draw_list.add_line(
+                cursor_x, rect.y + 4.0,
+                cursor_x, rect.y + rect.height - 4.0,
+                Color::White, 1.0
+            )
+
+        # Draw label
+        self.draw_list.add_text(
+            rect.x + rect.width + 8.0,
+            rect.y + 8.0,
+            label.to_string(),
+            Color::Ansi256(250),
+            12.0
+        )
 
         self.advance_cursor(size.height + layout.spacing)
 
@@ -762,7 +971,16 @@ impl ImGui:
     # Horizontal separator
     pub fn separator(self):
         val layout = self.current_layout()
-        # TODO: [ui][P3] Emit render command for separator line
+
+        # Emit render command for separator line
+        val y = self.cursor.y + 5.0
+        self.draw_list.add_line(
+            self.cursor.x, y,
+            self.cursor.x + layout.available_width, y,
+            Color::Ansi256(240),
+            1.0
+        )
+
         self.advance_cursor(10.0)
 
     # Collapsing header
@@ -789,7 +1007,55 @@ impl ImGui:
                 last_interaction: self.ctx.last_frame_time
             })
 
-        # TODO: [ui][P3] Emit render command for header
+        # Emit render command for header background
+        val bg_color = if clicked:
+            Color::Ansi256(238)
+        else if hovered:
+            Color::Ansi256(242)
+        else:
+            Color::Ansi256(240)
+
+        self.draw_list.add_rect(
+            rect.x, rect.y, rect.width, rect.height,
+            bg_color
+        )
+
+        # Emit render command for arrow indicator
+        val arrow_x = rect.x + 8.0
+        val arrow_y = rect.y + rect.height / 2.0
+        if is_open:
+            # Down arrow (V shape)
+            self.draw_list.add_line(
+                arrow_x, arrow_y - 3.0,
+                arrow_x + 5.0, arrow_y + 3.0,
+                Color::White, 2.0
+            )
+            self.draw_list.add_line(
+                arrow_x + 5.0, arrow_y + 3.0,
+                arrow_x + 10.0, arrow_y - 3.0,
+                Color::White, 2.0
+            )
+        else:
+            # Right arrow (> shape)
+            self.draw_list.add_line(
+                arrow_x, arrow_y - 5.0,
+                arrow_x + 6.0, arrow_y,
+                Color::White, 2.0
+            )
+            self.draw_list.add_line(
+                arrow_x + 6.0, arrow_y,
+                arrow_x, arrow_y + 5.0,
+                Color::White, 2.0
+            )
+
+        # Emit render command for header label
+        self.draw_list.add_text(
+            rect.x + 24.0,
+            rect.y + 5.0,
+            label.to_string(),
+            Color::White,
+            14.0
+        )
 
         self.advance_cursor(size.height + layout.spacing)
 

@@ -111,7 +111,7 @@ fn test_feature_loops_for() {
     let result = runner
         .run_source(
             r#"
-sum = 0
+var sum = 0
 for i in [1, 2, 3, 4, 5]:
     sum = sum + i
 main = sum
@@ -128,8 +128,8 @@ fn test_feature_loops_while() {
     let result = runner
         .run_source(
             r#"
-i = 0
-sum = 0
+var i = 0
+var sum = 0
 while i < 5:
     i = i + 1
     sum = sum + i
@@ -147,7 +147,7 @@ fn test_feature_loops_break() {
     let result = runner
         .run_source(
             r#"
-i = 0
+var i = 0
 while true:
     i = i + 1
     if i >= 5:
@@ -166,7 +166,7 @@ fn test_feature_loops_continue() {
     let result = runner
         .run_source(
             r#"
-sum = 0
+var sum = 0
 for i in [1, 2, 3, 4, 5]:
     if i == 3:
         continue
@@ -628,8 +628,8 @@ class Resource:
     fn __exit__(self, exc):
         pass
 
-r = Resource(5)
-res = 0
+val r = Resource { value: 5 }
+var res = 0
 with r as v:
     res = v
 

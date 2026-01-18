@@ -544,7 +544,7 @@ mod runner_extended_tests {
 
     #[test]
     fn test_run_code_while_loop() {
-        let code = "x = 0\nwhile x < 5:\n    x = x + 1\nmain = x";
+        let code = "var x = 0\nwhile x < 5:\n    x = x + 1\nmain = x";
         let result = run_code(code, &[], "");
         assert!(result.is_ok());
         assert_eq!(result.unwrap().exit_code, 5);

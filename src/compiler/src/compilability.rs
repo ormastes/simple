@@ -583,6 +583,13 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             analyze_expr(body, reasons);
             // Go expressions are now fully implemented via HIR lowering
         }
+
+        // Array repeat: [value; count]
+        Expr::ArrayRepeat { value, count } => {
+            analyze_expr(value, reasons);
+            analyze_expr(count, reasons);
+            add_reason(reasons, FallbackReason::CollectionLiteral);
+        }
     }
 }
 

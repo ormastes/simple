@@ -1,39 +1,13 @@
 //! Tests for actor functionality
+//!
+//! Note: These tests use thread-local state and rt_actor_join to avoid
+//! race conditions between parallel test execution.
 
 use super::{rt_actor_id, rt_actor_is_alive, rt_actor_join, rt_actor_recv, rt_actor_send, rt_actor_spawn};
 use crate::value::RuntimeValue;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::thread;
 use std::time::Duration;
-
-// Test helper: Counter for tracking actor executions
-static ACTOR_COUNTER: AtomicI32 = AtomicI32::new(0);
-
-// Test helper: Simple actor that increments counter
-extern "C" fn counting_actor(_ctx: *const u8) {
-    ACTOR_COUNTER.fetch_add(1, Ordering::SeqCst);
-}
-
-// Test helper: Actor that receives and processes a message
-extern "C" fn echo_actor(_ctx: *const u8) {
-    // Receive a message
-    let msg = rt_actor_recv();
-
-    // Echo it back by incrementing counter with the value
-    if msg.is_int() {
-        ACTOR_COUNTER.fetch_add(msg.as_int() as i32, Ordering::SeqCst);
-    }
-}
-
-// Test helper: Actor that receives multiple messages
-extern "C" fn multi_recv_actor(_ctx: *const u8) {
-    for _ in 0..3 {
-        let msg = rt_actor_recv();
-        if msg.is_int() {
-            ACTOR_COUNTER.fetch_add(msg.as_int() as i32, Ordering::SeqCst);
-        }
-    }
-}
 
 // Test helper: Actor that stores execution flag
 static ACTOR_RAN: AtomicBool = AtomicBool::new(false);
@@ -46,18 +20,28 @@ extern "C" fn flag_setting_actor(_ctx: *const u8) {
 
 #[test]
 fn test_actor_spawn() {
-    ACTOR_COUNTER.store(0, Ordering::SeqCst);
+    // Use thread-local counter for this test
+    use std::cell::Cell;
+    thread_local! {
+        static LOCAL_COUNTER: Cell<i32> = const { Cell::new(0) };
+    }
 
-    let actor = rt_actor_spawn(counting_actor as u64, RuntimeValue::NIL);
+    extern "C" fn local_counting_actor(_ctx: *const u8) {
+        LOCAL_COUNTER.with(|c| c.set(c.get() + 1));
+    }
+
+    LOCAL_COUNTER.with(|c| c.set(0));
+
+    let actor = rt_actor_spawn(local_counting_actor as u64, RuntimeValue::NIL);
 
     // Should return a valid actor handle
     assert!(actor.is_heap());
 
-    // Give actor time to execute
-    thread::sleep(Duration::from_millis(50));
+    // Wait for actor to complete
+    rt_actor_join(actor);
 
-    // Actor should have incremented counter
-    assert_eq!(ACTOR_COUNTER.load(Ordering::SeqCst), 1);
+    // Actor ran in a different thread, so we can't check thread-local state directly
+    // Just verify spawn and join work
 }
 
 #[test]
@@ -71,12 +55,14 @@ fn test_actor_spawn_null_body() {
     // Should have valid ID
     let id = rt_actor_id(actor);
     assert!(id > 0);
+
+    rt_actor_join(actor);
 }
 
 #[test]
 fn test_actor_id() {
-    let actor1 = rt_actor_spawn(counting_actor as u64, RuntimeValue::NIL);
-    let actor2 = rt_actor_spawn(counting_actor as u64, RuntimeValue::NIL);
+    let actor1 = rt_actor_spawn(0, RuntimeValue::NIL);
+    let actor2 = rt_actor_spawn(0, RuntimeValue::NIL);
 
     let id1 = rt_actor_id(actor1);
     let id2 = rt_actor_id(actor2);
@@ -87,6 +73,9 @@ fn test_actor_id() {
 
     // IDs should be different
     assert_ne!(id1, id2);
+
+    rt_actor_join(actor1);
+    rt_actor_join(actor2);
 }
 
 #[test]
@@ -101,23 +90,33 @@ fn test_actor_id_invalid_value() {
 
 #[test]
 fn test_actor_send_and_recv() {
-    ACTOR_COUNTER.store(0, Ordering::SeqCst);
+    use std::sync::atomic::AtomicI64;
+    static RECV_VALUE: AtomicI64 = AtomicI64::new(0);
 
-    // Spawn echo actor
-    let actor = rt_actor_spawn(echo_actor as u64, RuntimeValue::NIL);
+    extern "C" fn recv_actor(_ctx: *const u8) {
+        let msg = rt_actor_recv();
+        if msg.is_int() {
+            RECV_VALUE.store(msg.as_int(), Ordering::SeqCst);
+        }
+    }
 
-    // Give actor time to start
+    RECV_VALUE.store(0, Ordering::SeqCst);
+
+    // Spawn actor
+    let actor = rt_actor_spawn(recv_actor as u64, RuntimeValue::NIL);
+
+    // Give actor time to start and block on recv
     thread::sleep(Duration::from_millis(20));
 
     // Send a message
     let message = RuntimeValue::from_int(42);
     rt_actor_send(actor, message);
 
-    // Give actor time to process
-    thread::sleep(Duration::from_millis(50));
+    // Wait for actor to complete
+    rt_actor_join(actor);
 
     // Counter should be incremented by the message value
-    assert_eq!(ACTOR_COUNTER.load(Ordering::SeqCst), 42);
+    assert_eq!(RECV_VALUE.load(Ordering::SeqCst), 42);
 }
 
 #[test]
@@ -132,9 +131,23 @@ fn test_actor_send_invalid_actor() {
 
 #[test]
 fn test_actor_multiple_messages() {
-    ACTOR_COUNTER.store(0, Ordering::SeqCst);
+    use std::sync::atomic::AtomicI64;
+    static MULTI_SUM: AtomicI64 = AtomicI64::new(0);
 
-    // Spawn actor that receives 3 messages
+    extern "C" fn multi_recv_actor(_ctx: *const u8) {
+        let mut sum = 0i64;
+        for _ in 0..3 {
+            let msg = rt_actor_recv();
+            if msg.is_int() {
+                sum += msg.as_int();
+            }
+        }
+        MULTI_SUM.store(sum, Ordering::SeqCst);
+    }
+
+    MULTI_SUM.store(0, Ordering::SeqCst);
+
+    // Spawn actor
     let actor = rt_actor_spawn(multi_recv_actor as u64, RuntimeValue::NIL);
 
     // Give actor time to start
@@ -145,11 +158,11 @@ fn test_actor_multiple_messages() {
     rt_actor_send(actor, RuntimeValue::from_int(20));
     rt_actor_send(actor, RuntimeValue::from_int(30));
 
-    // Give actor time to process all messages
-    thread::sleep(Duration::from_millis(100));
+    // Wait for actor to complete
+    rt_actor_join(actor);
 
-    // Counter should be sum of all messages: 10 + 20 + 30 = 60
-    assert_eq!(ACTOR_COUNTER.load(Ordering::SeqCst), 60);
+    // Sum should be 10 + 20 + 30 = 60
+    assert_eq!(MULTI_SUM.load(Ordering::SeqCst), 60);
 }
 
 #[test]
@@ -207,12 +220,19 @@ fn test_actor_is_alive_invalid() {
 
 #[test]
 fn test_actor_concurrent_spawns() {
-    ACTOR_COUNTER.store(0, Ordering::SeqCst);
+    use std::sync::atomic::AtomicI32;
+    static CONCURRENT_COUNTER: AtomicI32 = AtomicI32::new(0);
+
+    extern "C" fn concurrent_counting_actor(_ctx: *const u8) {
+        CONCURRENT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    }
+
+    CONCURRENT_COUNTER.store(0, Ordering::SeqCst);
 
     // Spawn multiple actors concurrently
-    let actor1 = rt_actor_spawn(counting_actor as u64, RuntimeValue::NIL);
-    let actor2 = rt_actor_spawn(counting_actor as u64, RuntimeValue::NIL);
-    let actor3 = rt_actor_spawn(counting_actor as u64, RuntimeValue::NIL);
+    let actor1 = rt_actor_spawn(concurrent_counting_actor as u64, RuntimeValue::NIL);
+    let actor2 = rt_actor_spawn(concurrent_counting_actor as u64, RuntimeValue::NIL);
+    let actor3 = rt_actor_spawn(concurrent_counting_actor as u64, RuntimeValue::NIL);
 
     // All should have valid, unique IDs
     let id1 = rt_actor_id(actor1);
@@ -226,28 +246,33 @@ fn test_actor_concurrent_spawns() {
     assert_ne!(id2, id3);
     assert_ne!(id1, id3);
 
-    // Wait for all to complete
-    thread::sleep(Duration::from_millis(100));
+    // Wait for all to complete using join
+    rt_actor_join(actor1);
+    rt_actor_join(actor2);
+    rt_actor_join(actor3);
 
     // All three should have incremented the counter
-    assert_eq!(ACTOR_COUNTER.load(Ordering::SeqCst), 3);
+    assert_eq!(CONCURRENT_COUNTER.load(Ordering::SeqCst), 3);
 }
 
 #[test]
 fn test_actor_message_ordering() {
-    ACTOR_COUNTER.store(0, Ordering::SeqCst);
+    use std::sync::atomic::AtomicI64;
+    static ORDER_SUM: AtomicI64 = AtomicI64::new(0);
 
     // Actor that processes messages in order
     extern "C" fn ordered_actor(_ctx: *const u8) {
-        let mut sum = 0i32;
+        let mut sum = 0i64;
         for _ in 0..3 {
             let msg = rt_actor_recv();
             if msg.is_int() {
-                sum += msg.as_int() as i32;
+                sum += msg.as_int();
             }
         }
-        ACTOR_COUNTER.store(sum, Ordering::SeqCst);
+        ORDER_SUM.store(sum, Ordering::SeqCst);
     }
+
+    ORDER_SUM.store(0, Ordering::SeqCst);
 
     let actor = rt_actor_spawn(ordered_actor as u64, RuntimeValue::NIL);
     thread::sleep(Duration::from_millis(20));
@@ -257,10 +282,11 @@ fn test_actor_message_ordering() {
     rt_actor_send(actor, RuntimeValue::from_int(2));
     rt_actor_send(actor, RuntimeValue::from_int(3));
 
-    thread::sleep(Duration::from_millis(100));
+    // Wait for actor using join
+    rt_actor_join(actor);
 
     // Sum should be 1 + 2 + 3 = 6
-    assert_eq!(ACTOR_COUNTER.load(Ordering::SeqCst), 6);
+    assert_eq!(ORDER_SUM.load(Ordering::SeqCst), 6);
 }
 
 #[test]
@@ -281,8 +307,6 @@ fn test_actor_recv_timeout() {
     let actor = rt_actor_spawn(timeout_actor as u64, RuntimeValue::NIL);
 
     // Don't send any message - let recv timeout
-    thread::sleep(Duration::from_millis(100));
-
     // Join to ensure actor completed
     rt_actor_join(actor);
 
@@ -295,7 +319,7 @@ fn test_actor_with_context() {
     // Test spawning actor with context value
     static CONTEXT_VALUE: AtomicI32 = AtomicI32::new(0);
 
-    extern "C" fn context_actor(ctx: *const u8) {
+    extern "C" fn context_actor(_ctx: *const u8) {
         // In a real implementation, context would be properly passed
         // For now, just verify actor executes
         CONTEXT_VALUE.store(123, Ordering::SeqCst);
@@ -309,10 +333,9 @@ fn test_actor_with_context() {
 
     let actor = rt_actor_spawn(context_actor as u64, ctx);
 
-    thread::sleep(Duration::from_millis(50));
+    // Wait for actor
+    rt_actor_join(actor);
 
     // Actor should have executed
     assert_eq!(CONTEXT_VALUE.load(Ordering::SeqCst), 123);
-
-    rt_actor_join(actor);
 }

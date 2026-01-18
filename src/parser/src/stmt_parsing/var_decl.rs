@@ -196,7 +196,15 @@ impl Parser<'_> {
 
     /// Parse use path and target (shared by use, common use, export use)
     /// Supports both Python-style (module.{A, B}) and Rust-style (module::{A, B})
+    /// Also supports bare glob (use *, export use *)
     pub(crate) fn parse_use_path_and_target(&mut self) -> Result<(ModulePath, ImportTarget), ParseError> {
+        // Handle bare * or {A, B} without module path
+        // This supports: export use *, use *, export use {A, B}
+        if self.check(&TokenKind::Star) || self.check(&TokenKind::LBrace) {
+            let target = self.parse_import_target(None)?;
+            return Ok((ModulePath::new(Vec::new()), target));
+        }
+
         let path = self.parse_module_path()?;
 
         // Check for Rust-style :: before { or *

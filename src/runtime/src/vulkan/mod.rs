@@ -65,6 +65,9 @@ pub mod descriptor;
 #[cfg(feature = "vulkan")]
 pub mod graphics_pipeline;
 
+#[cfg(feature = "vulkan")]
+pub mod image;
+
 // Re-export main types
 pub use buffer::{BufferUsage, StagingBuffer, VulkanBuffer};
 pub use device::VulkanDevice;
@@ -93,6 +96,9 @@ pub use descriptor::{DescriptorPool, DescriptorSet, DescriptorSetLayout};
 
 #[cfg(feature = "vulkan")]
 pub use graphics_pipeline::{GraphicsPipeline, ShaderModule};
+
+#[cfg(feature = "vulkan")]
+pub use image::{AddressMode, FilterMode, ImageUsage, Sampler, VulkanImage};
 
 /// Check if Vulkan is available on this system
 pub fn is_available() -> bool {

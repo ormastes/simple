@@ -374,6 +374,10 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
         },
         Expr::Tuple(items) => Expr::Tuple(items.iter().map(|item| apply_macro_hygiene_expr(item, ctx)).collect()),
         Expr::Array(items) => Expr::Array(items.iter().map(|item| apply_macro_hygiene_expr(item, ctx)).collect()),
+        Expr::ArrayRepeat { value, count } => Expr::ArrayRepeat {
+            value: Box::new(apply_macro_hygiene_expr(value, ctx)),
+            count: Box::new(apply_macro_hygiene_expr(count, ctx)),
+        },
         Expr::VecLiteral(items) => {
             Expr::VecLiteral(items.iter().map(|item| apply_macro_hygiene_expr(item, ctx)).collect())
         }

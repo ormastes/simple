@@ -1,4 +1,4 @@
-use crate::aop::{rt_aop_invoke_around, rt_aop_proceed, ProceedContext};
+use crate::aop::{rt_aop_invoke_around, rt_aop_invoke_around_test, rt_aop_proceed, ProceedContext};
 use crate::value::RuntimeValue;
 
 extern "C" fn target_sum(argc: u64, argv: *const RuntimeValue) -> RuntimeValue {
@@ -55,7 +55,8 @@ fn around_chain_applies_outermost_first() {
 fn around_requires_proceed() {
     let args = vec![RuntimeValue::from_int(5)];
     let advices = vec![advice_no_proceed as _];
-    let _ = rt_aop_invoke_around(
+    // Use test version that allows panic propagation
+    let _ = rt_aop_invoke_around_test(
         target_sum,
         advices.as_ptr(),
         advices.len() as u64,
@@ -69,7 +70,8 @@ fn around_requires_proceed() {
 fn around_rejects_double_proceed() {
     let args = vec![RuntimeValue::from_int(5)];
     let advices = vec![advice_double_proceed as _];
-    let _ = rt_aop_invoke_around(
+    // Use test version that allows panic propagation
+    let _ = rt_aop_invoke_around_test(
         target_sum,
         advices.as_ptr(),
         advices.len() as u64,

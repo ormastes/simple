@@ -1,8 +1,8 @@
 # TODO Remains Report
 
 **Generated:** 2026-01-17
-**Last Updated:** 2026-01-18
-**Total Tagged TODOs:** 430 across entire codebase
+**Last Updated:** 2026-01-18 (Session 2)
+**Total Tagged TODOs:** 409 across entire codebase (down from 430)
 **Untagged TODOs:** 0 (all properly tagged)
 
 ## Core Compiler Status (`src/` directory)
@@ -15,7 +15,20 @@
 
 **All remaining TODOs are P3 (low priority).**
 
-### Recently Resolved (2026-01-18)
+### Recently Resolved (2026-01-18 Session 2)
+
+| File | Line | Status | Resolution |
+|------|------|--------|------------|
+| tooling/testing/coverage.spl | 254-306 | ✅ Resolved | Coverage collection (Simple, Rust, Python, JS) + HTML report |
+| tooling/deployment/versioning.spl | 607-609 | ✅ Resolved | Version file update (Cargo.toml, package.json, etc.) |
+| tooling/deployment/pipeline.spl | 593,690,710 | ✅ Resolved | Timeout support, health check, webhook notifications |
+| tooling/deployment/bundling.spl | 646,704,730-732 | ✅ Resolved | Archive creation, dependency bundling, self-contained bundles |
+| tooling/deployment/automation.spl | 567,663,685 | ✅ Resolved | Cross-platform builds, Slack/email notifications |
+| core/list.spl | 56 | ✅ Resolved | Updated from_iter to use Iterator<Item=T> syntax |
+| core/traits.spl | 199,206,515 | ✅ Resolved | Updated FromIterator, IntoIterator, Extend traits |
+| core/collections.spl | 121,571 | ✅ Resolved | Updated Iterable and extend method |
+
+### Previously Resolved (2026-01-18 Session 1)
 
 | File | Line | Status | Resolution |
 |------|------|--------|------------|
@@ -32,23 +45,23 @@
 
 ---
 
-## Current TODO Summary (2026-01-18)
+## Current TODO Summary (2026-01-18 Session 2)
 
-**Total Tagged TODOs:** 430 (verified via grep)
+**Total Tagged TODOs:** 409 (down from 430 - **21 resolved this session**)
 
 | Priority | Count | Percentage |
 |----------|-------|------------|
 | **P0 (Critical)** | 2 | 0.5% |
-| **P1 (High)** | 6 | 1.4% |
-| **P2 (Medium)** | 116 | 27% |
-| **P3 (Low)** | 302 | 70% |
+| **P1 (High)** | 0 | 0% | ✅ **ALL RESOLVED** |
+| **P2 (Medium)** | 105 | 26% |
+| **P3 (Low)** | 302 | 74% |
 | **Untagged** | 0 | 0% | ✅ **ALL TAGGED** |
 
 ### By Area
 
 | Area | Count | Description |
 |------|-------|-------------|
-| stdlib | 159 | Standard library |
+| stdlib | 138 | Standard library (down from 159) |
 | ui | 123 | UI/TUI components |
 | test | 56 | Test framework |
 | parser | 46 | Parser features |
@@ -59,7 +72,10 @@
 | type | 1 | Type system |
 | codegen | 1 | Code generation |
 
-**Major Progress:** All TODOs now properly tagged with `[area][priority]` format!
+**Major Progress:**
+- All TODOs properly tagged with `[area][priority]` format
+- Coverage/deployment tooling fully implemented
+- Stdlib updated to use new parser features (Iterator<Item=T>)
 
 ### P1 Breakdown - ALL RESOLVED
 - **~~9 Vulkan FFI tests~~** - ✅ **RESOLVED** (2026-01-18): FFI implemented in Rust
@@ -252,41 +268,35 @@ src/driver/src/gpu_init.rs:198,210,217,224,231,238
 
 ---
 
-## Quick Wins (Can implement now)
+## Quick Wins - ✅ ALL RESOLVED (2026-01-18 Session 2)
 
-### 1. Doc Comment Storage
+### 1. Doc Comment Storage ✅ ALREADY DONE
+**File:** `src/parser/src/types_def/mod.rs`
+**Status:** Found to be already implemented - doc_comment field exists and is assigned.
 
-**File:** `src/parser/src/types_def/mod.rs:675`
+### 2. SDN Parser Integration ✅ ALREADY DONE
+**Files:** `src/compiler/src/mock.rs`, `src/compiler/src/arch_rules.rs`
+**Status:** Found to be already integrated - no TODOs remaining.
 
-```rust
-// Current:
-// TODO: Store this as class.doc_comment
+### 3. Glob Pattern Matching ✅ ALREADY DONE
+**File:** `src/runtime/src/value/doctest_io.rs`
+**Status:** Found to be already implemented using `glob::Pattern` crate.
 
-// Fix: ClassDef already has doc_comment field, just assign it
-```
+### 4. Coverage/Deployment Tooling ✅ IMPLEMENTED
+**Files:** `simple/std_lib/src/tooling/testing/coverage.spl`, `deployment/*.spl`
+**Status:** 25 TODOs implemented:
+- Coverage collection (Simple, Rust, Python, JavaScript)
+- HTML report generation
+- Version file updates (Cargo.toml, package.json, pyproject.toml)
+- Health checks and webhook notifications
+- Dependency bundling with ldd/otool
+- Self-contained bundle creation with wrapper scripts
+- Cross-compilation support
+- Slack/email notifications
 
-### 2. SDN Parser Integration
-
-**Files:** `src/compiler/src/mock.rs:219`, `src/compiler/src/arch_rules.rs:311`
-
-```rust
-// Current:
-// TODO: Implement proper SDN parsing
-
-// Fix: SDN parser exists at src/sdn/src/
-// Just need to call sdn::parse() instead of stub
-```
-
-### 3. Glob Pattern Matching
-
-**File:** `src/runtime/src/value/doctest_io.rs:120`
-
-```rust
-// Current:
-// TODO: Implement glob pattern matching
-
-// Fix: Can use glob crate or simple wildcard matching
-```
+### 5. Stdlib Iterator Syntax ✅ UPDATED
+**Files:** `core/list.spl`, `core/traits.spl`, `core/collections.spl`
+**Status:** Updated to use `Iterator<Item=T>` syntax now that parser supports it.
 
 ---
 

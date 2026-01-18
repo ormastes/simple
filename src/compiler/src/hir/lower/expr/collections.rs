@@ -60,6 +60,49 @@ impl Lowerer {
         })
     }
 
+    /// Lower an array repeat expression to HIR: [value; count]
+    ///
+    /// Creates an array by repeating a value `count` times.
+    /// The count must be a compile-time constant for static size inference.
+    pub(super) fn lower_array_repeat(
+        &mut self,
+        value: &Expr,
+        count: &Expr,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        // Infer element type from the value
+        let elem_ty = self.infer_type(value, ctx)?;
+        let hir_value = self.lower_expr(value, ctx)?;
+
+        // Try to evaluate count as a compile-time constant
+        let size = match count {
+            Expr::Integer(n) => Some(*n as usize),
+            _ => None, // Dynamic size - will be runtime evaluated
+        };
+
+        let arr_ty = self.module.types.register(HirType::Array { element: elem_ty, size });
+
+        // Generate array elements by repeating the value
+        // For compile-time known sizes, expand to explicit array
+        if let Some(n) = size {
+            let hir_exprs: Vec<_> = std::iter::repeat(hir_value).take(n).collect();
+            Ok(HirExpr {
+                kind: HirExprKind::Array(hir_exprs),
+                ty: arr_ty,
+            })
+        } else {
+            // For dynamic sizes, lower count and use ArrayRepeat HIR node
+            let hir_count = self.lower_expr(count, ctx)?;
+            Ok(HirExpr {
+                kind: HirExprKind::ArrayRepeat {
+                    value: Box::new(hir_value),
+                    count: Box::new(hir_count),
+                },
+                ty: arr_ty,
+            })
+        }
+    }
+
     /// Lower a vector literal to HIR
     ///
     /// Creates a SIMD vector type with the number of lanes equal to the number of elements.
