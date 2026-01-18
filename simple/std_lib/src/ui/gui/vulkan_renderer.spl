@@ -841,26 +841,184 @@ impl PipelineBuilder:
 # Attribute Helpers
 # =============================================================================
 
+# Attributes wrapper for parsing element attributes and styles
+pub struct Attributes:
+    attrs: Dict<text, text>
+    styles: Dict<text, text>
+
 impl Attributes:
+    # Create Attributes from an Element
+    pub fn from_element(elem: &Element) -> Attributes:
+        return Attributes {
+            attrs: elem.attrs.clone(),
+            styles: elem.styles.clone()
+        }
+
+    # Get attribute value by name
+    pub fn get(&self, name: &str) -> Option<text>:
+        match self.attrs.get(&name.to_string()):
+            case Some(v): return Some(v.clone())
+            case None:
+                match self.styles.get(&name.to_string()):
+                    case Some(v): return Some(v.clone())
+                    case None: return None
+
     pub fn get_width(&self) -> Option<u16>:
-        # TODO: [ui][P2] Parse width attribute
-        None
+        match self.get("width"):
+            case Some(val): return parse_dimension(&val)
+            case None: return None
 
     pub fn get_height(&self) -> Option<u16>:
-        # TODO: [ui][P2] Parse height attribute
-        None
+        match self.get("height"):
+            case Some(val): return parse_dimension(&val)
+            case None: return None
 
     pub fn get_padding(&self) -> Option<(u16, u16, u16, u16)>:
-        # TODO: [ui][P2] Parse padding attribute
-        None
+        match self.get("padding"):
+            case Some(val): return parse_padding(&val)
+            case None: return None
 
-    pub fn get_background_color(&self) -> Option<[f32; 4>]:
-        # TODO: [ui][P2] Parse background-color attribute
-        None
+    pub fn get_background_color(&self) -> Option<[f32; 4]>:
+        match self.get("background-color"):
+            case Some(val): return parse_color(&val)
+            case None:
+                match self.get("background"):
+                    case Some(val): return parse_color(&val)
+                    case None: return None
 
-    pub fn get_color(&self) -> Option<[f32; 4>]:
-        # TODO: [ui][P2] Parse color attribute
-        None
+    pub fn get_color(&self) -> Option<[f32; 4]>:
+        match self.get("color"):
+            case Some(val): return parse_color(&val)
+            case None: return None
+
+# Parse dimension value (e.g., "100", "100px", "50%")
+fn parse_dimension(val: &str) -> Option<u16>:
+    val trimmed = val.trim()
+    # Remove 'px' suffix if present
+    val numeric = if trimmed.ends_with("px"):
+        trimmed[0..trimmed.len() - 2]
+    else if trimmed.ends_with("%"):
+        # Percentage not supported yet, return None
+        return None
+    else:
+        trimmed
+
+    match numeric.parse::<u16>():
+        case Ok(n): return Some(n)
+        case Err(_): return None
+
+# Parse padding value (e.g., "10", "10 20", "10 20 30 40")
+fn parse_padding(val: &str) -> Option<(u16, u16, u16, u16)>:
+    val parts = val.trim().split_whitespace().collect::<Array<&str>>()
+
+    match parts.len():
+        case 1:
+            # All sides same
+            match parts[0].parse::<u16>():
+                case Ok(n): return Some((n, n, n, n))
+                case Err(_): return None
+        case 2:
+            # Vertical, Horizontal
+            match (parts[0].parse::<u16>(), parts[1].parse::<u16>()):
+                case (Ok(v), Ok(h)): return Some((v, h, v, h))
+                case _: return None
+        case 4:
+            # Top, Right, Bottom, Left
+            match (parts[0].parse::<u16>(), parts[1].parse::<u16>(),
+                   parts[2].parse::<u16>(), parts[3].parse::<u16>()):
+                case (Ok(t), Ok(r), Ok(b), Ok(l)): return Some((t, r, b, l))
+                case _: return None
+        case _:
+            return None
+
+# Parse color value (e.g., "#FF0000", "rgb(255,0,0)", "red")
+fn parse_color(val: &str) -> Option<[f32; 4]>:
+    val trimmed = val.trim().to_lowercase()
+
+    # Named colors
+    match trimmed.as_str():
+        case "red": return Some([1.0, 0.0, 0.0, 1.0])
+        case "green": return Some([0.0, 1.0, 0.0, 1.0])
+        case "blue": return Some([0.0, 0.0, 1.0, 1.0])
+        case "white": return Some([1.0, 1.0, 1.0, 1.0])
+        case "black": return Some([0.0, 0.0, 0.0, 1.0])
+        case "yellow": return Some([1.0, 1.0, 0.0, 1.0])
+        case "cyan": return Some([0.0, 1.0, 1.0, 1.0])
+        case "magenta": return Some([1.0, 0.0, 1.0, 1.0])
+        case "gray" | "grey": return Some([0.5, 0.5, 0.5, 1.0])
+        case "transparent": return Some([0.0, 0.0, 0.0, 0.0])
+        case _: pass
+
+    # Hex color (#RGB, #RRGGBB, #RRGGBBAA)
+    if trimmed.starts_with("#"):
+        val hex = &trimmed[1..]
+        match hex.len():
+            case 3:
+                # #RGB -> #RRGGBB
+                val r = parse_hex_digit(hex[0..1]) * 17
+                val g = parse_hex_digit(hex[1..2]) * 17
+                val b = parse_hex_digit(hex[2..3]) * 17
+                return Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0])
+            case 6:
+                # #RRGGBB
+                val r = parse_hex_byte(&hex[0..2])
+                val g = parse_hex_byte(&hex[2..4])
+                val b = parse_hex_byte(&hex[4..6])
+                return Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0])
+            case 8:
+                # #RRGGBBAA
+                val r = parse_hex_byte(&hex[0..2])
+                val g = parse_hex_byte(&hex[2..4])
+                val b = parse_hex_byte(&hex[4..6])
+                val a = parse_hex_byte(&hex[6..8])
+                return Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0])
+            case _:
+                return None
+
+    # rgb(r, g, b) or rgba(r, g, b, a)
+    if trimmed.starts_with("rgb"):
+        val inner = if trimmed.starts_with("rgba("):
+            &trimmed[5..trimmed.len()-1]
+        else if trimmed.starts_with("rgb("):
+            &trimmed[4..trimmed.len()-1]
+        else:
+            return None
+
+        val parts = inner.split(",").map(|s| s.trim()).collect::<Array<&str>>()
+        match parts.len():
+            case 3:
+                match (parts[0].parse::<u8>(), parts[1].parse::<u8>(), parts[2].parse::<u8>()):
+                    case (Ok(r), Ok(g), Ok(b)):
+                        return Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0])
+                    case _: return None
+            case 4:
+                match (parts[0].parse::<u8>(), parts[1].parse::<u8>(),
+                       parts[2].parse::<u8>(), parts[3].parse::<f32>()):
+                    case (Ok(r), Ok(g), Ok(b), Ok(a)):
+                        return Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a])
+                    case _: return None
+            case _: return None
+
+    return None
+
+# Parse single hex digit (0-15)
+fn parse_hex_digit(s: &str) -> u8:
+    match s.chars().next():
+        case Some(c):
+            if c >= '0' and c <= '9':
+                return (c as u8) - ('0' as u8)
+            if c >= 'a' and c <= 'f':
+                return (c as u8) - ('a' as u8) + 10
+            if c >= 'A' and c <= 'F':
+                return (c as u8) - ('A' as u8) + 10
+            return 0
+        case None: return 0
+
+# Parse two hex digits (00-FF)
+fn parse_hex_byte(s: &str) -> u8:
+    val high = parse_hex_digit(&s[0..1])
+    val low = parse_hex_digit(&s[1..2])
+    return high * 16 + low
 
 # =============================================================================
 # Type Aliases for Vulkan Integration
