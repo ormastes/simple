@@ -1,12 +1,164 @@
 # Unit tests for doctest runner
-# Note: Full doctest runner requires stdlib features not yet fully implemented
+# Tests DoctestRunner and ExampleResult classes
+
+use doctest.runner.*
+use doctest.matcher.MatchResult
+use doctest.parser.{DoctestExample, Expected}
+
+describe "ExampleResult":
+    context "passed result":
+        it "reports as passed":
+            val example = DoctestExample(
+                code: ["print(1)"],
+                expected: Expected::Output("1"),
+                setup: [],
+                teardown: [],
+                line_number: 1
+            )
+            val result = ExampleResult(
+                example: example,
+                result: MatchResult::Pass,
+                execution_time_ms: 10
+            )
+            expect result.passed() to_be true
+            expect result.failed() to_be false
+
+        it "provides execution time":
+            val example = DoctestExample(
+                code: ["x = 1"],
+                expected: Expected::Empty,
+                setup: [],
+                teardown: [],
+                line_number: 1
+            )
+            val result = ExampleResult(
+                example: example,
+                result: MatchResult::Pass,
+                execution_time_ms: 42
+            )
+            expect result.get_execution_time() to_be 42
+
+    context "failed result":
+        it "reports as failed":
+            val example = DoctestExample(
+                code: ["print(1)"],
+                expected: Expected::Output("2"),
+                setup: [],
+                teardown: [],
+                line_number: 1
+            )
+            val result = ExampleResult(
+                example: example,
+                result: MatchResult::Fail("mismatch"),
+                execution_time_ms: 5
+            )
+            expect result.passed() to_be false
+            expect result.failed() to_be true
+
+    context "timing checks":
+        it "detects fast execution":
+            val example = DoctestExample(
+                code: ["x = 1"],
+                expected: Expected::Empty,
+                setup: [],
+                teardown: [],
+                line_number: 1
+            )
+            val result = ExampleResult(
+                example: example,
+                result: MatchResult::Pass,
+                execution_time_ms: 50
+            )
+            expect result.is_fast() to_be true
+            expect result.is_fast(threshold_ms: 30) to_be false
+
+        it "detects slow execution":
+            val example = DoctestExample(
+                code: ["heavy_computation()"],
+                expected: Expected::Empty,
+                setup: [],
+                teardown: [],
+                line_number: 1
+            )
+            val result = ExampleResult(
+                example: example,
+                result: MatchResult::Pass,
+                execution_time_ms: 1500
+            )
+            expect result.is_slow() to_be true
+            expect result.is_slow(threshold_ms: 2000) to_be false
+
+    context "summary":
+        it "provides human-readable summary":
+            val example = DoctestExample(
+                code: ["x = 1"],
+                expected: Expected::Empty,
+                setup: [],
+                teardown: [],
+                line_number: 1
+            )
+            val result = ExampleResult(
+                example: example,
+                result: MatchResult::Pass,
+                execution_time_ms: 42
+            )
+            expect result.summary().contains("PASS") to_be true
+            expect result.summary().contains("42ms") to_be true
 
 describe "DoctestRunner":
-    context "execution":
-        it "is a planned feature":
-            # Doctest runner requires stdlib features not yet complete
-            expect true
+    context "creation":
+        it "creates with default timeout":
+            val runner = DoctestRunner.new()
+            expect runner.get_timeout() to_be 5000
 
-    skip "executes examples":
-        # TODO: [stdlib][P3] Requires full doctest framework
-        expect true
+        it "creates with custom timeout":
+            val runner = DoctestRunner.new(timeout_ms: 3000)
+            expect runner.get_timeout() to_be 3000
+
+        it "creates via with_timeout":
+            val runner = DoctestRunner.with_timeout(2000)
+            expect runner.get_timeout() to_be 2000
+
+    context "result counting":
+        it "counts passed and failed":
+            val example1 = DoctestExample(
+                code: ["x = 1"],
+                expected: Expected::Empty,
+                setup: [],
+                teardown: [],
+                line_number: 1
+            )
+            val results = [
+                ExampleResult(example: example1, result: MatchResult::Pass, execution_time_ms: 10),
+                ExampleResult(example: example1, result: MatchResult::Pass, execution_time_ms: 10),
+                ExampleResult(example: example1, result: MatchResult::Fail("error"), execution_time_ms: 10)
+            ]
+            val runner = DoctestRunner.new()
+            val (passed, failed) = runner.count_results(results)
+            expect passed to_be 2
+            expect failed to_be 1
+
+        it "checks all passed":
+            val example = DoctestExample(
+                code: ["x = 1"],
+                expected: Expected::Empty,
+                setup: [],
+                teardown: [],
+                line_number: 1
+            )
+            val all_pass = [
+                ExampleResult(example: example, result: MatchResult::Pass, execution_time_ms: 10),
+                ExampleResult(example: example, result: MatchResult::Pass, execution_time_ms: 10)
+            ]
+            val some_fail = [
+                ExampleResult(example: example, result: MatchResult::Pass, execution_time_ms: 10),
+                ExampleResult(example: example, result: MatchResult::Fail("error"), execution_time_ms: 10)
+            ]
+            val runner = DoctestRunner.new()
+            expect runner.all_passed(all_pass) to_be true
+            expect runner.all_passed(some_fail) to_be false
+
+    context "summary":
+        it "provides human-readable summary":
+            val runner = DoctestRunner.new(timeout_ms: 5000)
+            expect runner.summary().contains("5000ms") to_be true

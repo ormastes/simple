@@ -25,7 +25,8 @@
 #     run.log_artifact(artifact)
 # ```
 
-export Run, Artifact, TrackMode, run, set_mode, set_dir, get_mode, get_dir
+export Run, Artifact, ArtifactVersion, TrackMode, Table, Sweep, SweepConfig
+export run, set_mode, set_dir, get_mode, get_dir
 
 # ============================================================================
 # FFI Declarations (optional - may not be available in all contexts)
@@ -323,6 +324,43 @@ class Run:
         val _ = artifact
         val _ = aliases
 
+    fn log_table(name: str, table: Table, step: i64):
+        """Log a table of data.
+
+        Args:
+            name: Table name
+            table: Table object
+            step: Step number
+
+        Example:
+            val table = Table(columns=["id", "pred", "label"])
+            table.add_row([1, 0.9, "cat"])
+            run.log_table("predictions", table, step=epoch)
+        """
+        self._step = step
+
+        # Log table metadata
+        self.log({
+            f"{name}/rows": table.row_count(),
+            f"{name}/columns": table.column_count()
+        }, step=step)
+
+    fn watch(model: any, log_type: str, log_freq: i64):
+        """Watch a model for automatic gradient/parameter logging.
+
+        Args:
+            model: Model to watch
+            log_type: What to log ("gradients", "parameters", "all")
+            log_freq: Logging frequency in steps
+
+        Example:
+            run.watch(model, log="gradients", log_freq=100)
+        """
+        # Store watch config - actual logging happens during training
+        val _ = model
+        val _ = log_type
+        val _ = log_freq
+
     # ========================================================================
     # Helper Methods
     # ========================================================================
@@ -427,6 +465,335 @@ class Artifact:
             val full_path = f"{path}/{entry}"
             self._files.append(full_path)
         val _ = name  # Name used for aliasing in artifact
+
+    fn files() -> any:
+        """Get list of files in artifact."""
+        return self._files
+
+
+# ============================================================================
+# Artifact Versioning
+# ============================================================================
+
+class ArtifactVersion:
+    """Versioned artifact with lineage tracking.
+
+    Automatically assigns version numbers and tracks input/output lineage.
+
+    Attributes:
+        artifact: Base artifact
+        version: Version number (v0, v1, ...)
+        aliases: List of aliases (e.g., "latest", "production")
+        source_run: Run that created this version
+        input_artifacts: Artifacts used as input
+    """
+    artifact: Artifact
+    version: i64
+    aliases: any
+    source_run: str
+    input_artifacts: any
+
+    fn __init__(artifact: Artifact, version: i64):
+        self.artifact = artifact
+        self.version = version
+        self.aliases = []
+        self.source_run = ""
+        self.input_artifacts = []
+
+    fn add_alias(alias: str):
+        """Add an alias to this version.
+
+        Args:
+            alias: Alias name (e.g., "latest", "production")
+        """
+        self.aliases = self.aliases.push(alias)
+
+    fn set_source(run_id: str):
+        """Set the source run that created this artifact.
+
+        Args:
+            run_id: Run ID
+        """
+        self.source_run = run_id
+
+    fn add_input(artifact_ref: str):
+        """Add an input artifact for lineage tracking.
+
+        Args:
+            artifact_ref: Artifact reference (e.g., "dataset:v1")
+        """
+        self.input_artifacts = self.input_artifacts.push(artifact_ref)
+
+    fn full_name() -> str:
+        """Get full versioned name."""
+        return f"{self.artifact.name}:v{self.version}"
+
+    fn lineage_str() -> str:
+        """Get lineage as string."""
+        if self.input_artifacts.len() == 0:
+            return self.full_name()
+        var inputs = ""
+        for i in 0..self.input_artifacts.len():
+            if i > 0:
+                inputs = inputs + ", "
+            inputs = inputs + self.input_artifacts[i]
+        return f"{inputs} -> {self.source_run} -> {self.full_name()}"
+
+
+# ============================================================================
+# Table Logging
+# ============================================================================
+
+class Table:
+    """Table for logging structured data.
+
+    Supports typed columns for predictions, labels, etc.
+
+    Example:
+        val table = Table(columns=["id", "prediction", "label"])
+        table.add_row([1, 0.9, "cat"])
+        table.add_row([2, 0.1, "dog"])
+        run.log_table("predictions", table)
+    """
+    columns: any
+    rows: any
+    _types: any
+
+    fn __init__(columns: any):
+        """Initialize table with column names.
+
+        Args:
+            columns: List of column names
+        """
+        self.columns = columns
+        self.rows = []
+        self._types = {}
+
+    me add_row(values: any):
+        """Add a row to the table.
+
+        Args:
+            values: List of values (must match column count)
+        """
+        if values.len() == self.columns.len():
+            self.rows = self.rows.push(values)
+
+    me set_column_type(name: str, type_name: str):
+        """Set expected type for a column.
+
+        Args:
+            name: Column name
+            type_name: Type name ("int", "float", "str", "image", "audio")
+        """
+        self._types[name] = type_name
+
+    fn row_count() -> i64:
+        """Get number of rows."""
+        return self.rows.len()
+
+    fn column_count() -> i64:
+        """Get number of columns."""
+        return self.columns.len()
+
+    fn get_column(name: str) -> any:
+        """Get all values for a column.
+
+        Args:
+            name: Column name
+
+        Returns:
+            List of values
+        """
+        # Find column index
+        var col_idx = -1
+        for i in 0..self.columns.len():
+            if self.columns[i] == name:
+                col_idx = i
+                break
+
+        if col_idx < 0:
+            return []
+
+        var values = []
+        for row in self.rows:
+            values = values.push(row[col_idx])
+        return values
+
+    fn to_dict() -> any:
+        """Convert table to dictionary format.
+
+        Returns:
+            Dict with columns and data
+        """
+        return {
+            "columns": self.columns,
+            "data": self.rows
+        }
+
+
+# ============================================================================
+# Hyperparameter Sweeps
+# ============================================================================
+
+enum SweepMethod:
+    """Sweep search method."""
+    Grid      # Exhaustive grid search
+    Random    # Random sampling
+    Bayes     # Bayesian optimization
+
+impl SweepMethod:
+    fn to_string() -> str:
+        match self:
+            case Grid: "grid"
+            case Random: "random"
+            case Bayes: "bayes"
+
+
+class SweepConfig:
+    """Configuration for hyperparameter sweep.
+
+    Example:
+        val config = SweepConfig.new()
+            .method(SweepMethod::Bayes)
+            .metric("val_loss", "minimize")
+            .parameter("lr", SweepConfig.log_uniform(1e-5, 1e-2))
+            .parameter("batch_size", SweepConfig.categorical([16, 32, 64]))
+    """
+    _method: SweepMethod
+    _metric_name: str
+    _metric_goal: str
+    _parameters: any
+    _early_terminate: any
+
+    fn __init__():
+        self._method = SweepMethod::Random
+        self._metric_name = "loss"
+        self._metric_goal = "minimize"
+        self._parameters = {}
+        self._early_terminate = nil
+
+    static fn new() -> SweepConfig:
+        """Create new sweep config."""
+        return SweepConfig()
+
+    me method(m: SweepMethod) -> SweepConfig:
+        """Set search method."""
+        self._method = m
+        return self
+
+    me metric(name: str, goal: str) -> SweepConfig:
+        """Set optimization metric.
+
+        Args:
+            name: Metric name to optimize
+            goal: "minimize" or "maximize"
+        """
+        self._metric_name = name
+        self._metric_goal = goal
+        return self
+
+    me parameter(name: str, spec: any) -> SweepConfig:
+        """Add parameter to sweep.
+
+        Args:
+            name: Parameter name
+            spec: Parameter specification
+        """
+        self._parameters[name] = spec
+        return self
+
+    me early_terminate(config: any) -> SweepConfig:
+        """Enable early termination.
+
+        Args:
+            config: Early termination config (e.g., {"type": "hyperband", "s": 2, "eta": 3})
+        """
+        self._early_terminate = config
+        return self
+
+    # Parameter specification helpers
+    static fn uniform(min_val: f64, max_val: f64) -> any:
+        """Uniform distribution."""
+        return {"distribution": "uniform", "min": min_val, "max": max_val}
+
+    static fn log_uniform(min_val: f64, max_val: f64) -> any:
+        """Log-uniform distribution (good for learning rates)."""
+        return {"distribution": "log_uniform", "min": min_val, "max": max_val}
+
+    static fn categorical(values: any) -> any:
+        """Categorical choice."""
+        return {"distribution": "categorical", "values": values}
+
+    static fn int_uniform(min_val: i64, max_val: i64) -> any:
+        """Integer uniform distribution."""
+        return {"distribution": "int_uniform", "min": min_val, "max": max_val}
+
+
+class Sweep:
+    """Hyperparameter sweep runner.
+
+    Example:
+        val sweep = Sweep.create(config)
+        Sweep.agent(sweep.id, train_fn, count=20)
+    """
+    id: str
+    config: SweepConfig
+    runs: any
+    best_run: str
+    best_metric: f64
+
+    fn __init__(id: str, config: SweepConfig):
+        self.id = id
+        self.config = config
+        self.runs = []
+        self.best_run = ""
+        self.best_metric = 0.0
+
+    static fn create(config: SweepConfig) -> Sweep:
+        """Create a new sweep.
+
+        Args:
+            config: Sweep configuration
+
+        Returns:
+            Sweep object
+        """
+        val sweep_id = f"sweep-{_get_timestamp_ms()}"
+        return Sweep(sweep_id, config)
+
+    static fn agent(sweep_id: str, train_fn: fn(any), count: i64):
+        """Run sweep agent.
+
+        Args:
+            sweep_id: Sweep ID
+            train_fn: Training function that takes config dict
+            count: Number of runs to execute
+        """
+        # Placeholder - would sample params and run train_fn
+        for i in 0..count:
+            val params = _sample_params(sweep_id)
+            train_fn(params)
+
+    fn add_run(run_id: str, metric: f64):
+        """Record a completed run.
+
+        Args:
+            run_id: Run ID
+            metric: Final metric value
+        """
+        self.runs = self.runs.push({"id": run_id, "metric": metric})
+
+        # Update best
+        if self.best_run == "" or metric < self.best_metric:
+            self.best_run = run_id
+            self.best_metric = metric
+
+
+fn _sample_params(sweep_id: str) -> any:
+    """Sample parameters for next run."""
+    # Placeholder - would use sweep config to sample
+    val _ = sweep_id
+    return {}
 
 
 # ============================================================================

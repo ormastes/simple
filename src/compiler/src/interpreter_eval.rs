@@ -312,6 +312,11 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     methods.push(method.clone());
                 }
 
+                // Also add impl methods to class/struct definition for Constructor method dispatch
+                if let Some(class_def) = classes.get_mut(&type_name) {
+                    class_def.methods.extend(impl_block.methods.clone());
+                }
+
                 // If this is a trait implementation, verify and register it
                 if let Some(ref trait_name) = impl_block.trait_name {
                     // Verify trait exists
