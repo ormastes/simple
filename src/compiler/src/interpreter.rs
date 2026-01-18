@@ -947,7 +947,8 @@ use interpreter_method::{evaluate_method_call, evaluate_method_call_with_self_up
 mod macros;
 pub use macros::set_macro_trace;
 pub(crate) use macros::{
-    enter_block_scope, evaluate_macro_invocation, exit_block_scope, queue_tail_injection, take_macro_introduced_symbols,
+    enter_block_scope, evaluate_macro_invocation, exit_block_scope, preprocess_macro_contract_at_definition,
+    queue_tail_injection, take_macro_introduced_symbols,
 };
 // Native I/O helper utilities
 #[path = "interpreter_native_io.rs"]

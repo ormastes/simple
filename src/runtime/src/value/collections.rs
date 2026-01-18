@@ -253,6 +253,28 @@ pub extern "C" fn rt_array_clear(array: RuntimeValue) -> bool {
     }
 }
 
+/// Create an array from a slice of RuntimeValues
+///
+/// This is a convenience function for creating arrays with initial values.
+/// The array will have capacity equal to the slice length.
+pub fn rt_array_create_from_slice(values: &[RuntimeValue]) -> RuntimeValue {
+    let capacity = values.len() as u64;
+    let array = rt_array_new(capacity);
+
+    if array.is_nil() {
+        return RuntimeValue::NIL;
+    }
+
+    // Push all values into the array
+    for value in values {
+        if !rt_array_push(array, *value) {
+            return RuntimeValue::NIL;
+        }
+    }
+
+    array
+}
+
 // ============================================================================
 // Tuple FFI functions
 // ============================================================================

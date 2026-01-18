@@ -21,14 +21,15 @@ use super::{
     exec_block, exec_context, exec_for, exec_function, exec_if, exec_loop, exec_match, exec_node, exec_while,
     exec_with, find_and_exec_method, get_di_config, get_import_alias, get_pattern_name, get_type_name,
     handle_functional_update, handle_method_call_with_self_update, is_unit_type, iter_to_vec, load_and_merge_module,
-    message_to_value, normalize_index, pattern_matches, register_trait_impl, slice_collection, spawn_actor_with_expr,
-    spawn_future_with_callable, spawn_future_with_callable_and_env, spawn_future_with_expr,
-    take_macro_introduced_symbols, try_method_missing, type_to_family_name, validate_unit_constraints,
-    validate_unit_type, with_effect_context, Dimension, ExternFunctions, ImplMethods, Macros, TraitImplRegistry,
-    TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
-    BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
-    COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, SI_BASE_UNITS,
-    UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
+    message_to_value, normalize_index, pattern_matches, preprocess_macro_contract_at_definition,
+    register_trait_impl, slice_collection, spawn_actor_with_expr, spawn_future_with_callable,
+    spawn_future_with_callable_and_env, spawn_future_with_expr, take_macro_introduced_symbols, try_method_missing,
+    type_to_family_name, validate_unit_constraints, validate_unit_type, with_effect_context, Dimension,
+    ExternFunctions, ImplMethods, Macros, TraitImplRegistry, TraitImpls, Traits, UnitArithmeticRules, UnitFamilies,
+    UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS,
+    BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS,
+    MACRO_DEFINITION_ORDER, MODULE_GLOBALS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
+    UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 
 type Enums = HashMap<String, EnumDef>;
@@ -358,10 +359,18 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Track macro definition order for one-pass LL(1) validation (#1304)
                 MACRO_DEFINITION_ORDER.with(|cell| cell.borrow_mut().push(m.name.clone()));
 
-                // Process macro contracts to register introduced symbols (#1303)
-                // Note: For now, contracts with const params need invocation-time processing
-                // But we can process non-parameterized contracts at definition time
-                // TODO: [compiler][P3] Full integration requires invocation-time symbol registration
+                // Process macro contracts at definition time for parameterless macros (#1303)
+                // For macros without const parameters, we can process the contract once
+                // and cache it, avoiding redundant processing on each invocation.
+                // Macros with const params still require invocation-time processing.
+                if let Err(e) = preprocess_macro_contract_at_definition(m, &mut env, &functions, &classes) {
+                    // Log the error but don't fail - contract will be processed at invocation time
+                    // This can happen if the contract references types not yet defined
+                    eprintln!(
+                        "Warning: Could not pre-process contract for macro '{}': {}",
+                        m.name, e
+                    );
+                }
             }
             Node::Trait(t) => {
                 // Register trait definition for use in impl checking
