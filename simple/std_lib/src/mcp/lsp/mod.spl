@@ -1,0 +1,447 @@
+# LSP MCP Tools Module
+#
+# Provides Language Server Protocol functionality via MCP (Model Context Protocol).
+# These tools enable code intelligence features like:
+# - Go to definition
+# - Find references
+# - Hover information
+# - Document symbols
+# - Diagnostics
+#
+# Usage in MCP server:
+#   server.register_simple_tool("lsp_definition", "Find symbol definition", lsp_def_handler)
+
+use core.*
+use core.json.*
+use host.async_nogc_mut.io.fs.*
+use mcp.core.protocol.*
+
+# Position in a text document (0-based)
+pub struct Position:
+    pub line: i64
+    pub character: i64
+
+impl Position:
+    pub fn new(line: i64, character: i64) -> Position:
+        return Position { line: line, character: character }
+
+    pub fn to_dict(self) -> Dict<text, Any>:
+        return {
+            "line": self.line,
+            "character": self.character
+        }
+
+# Range in a text document
+pub struct Range:
+    pub start: Position
+    pub end: Position
+
+impl Range:
+    pub fn new(start: Position, end: Position) -> Range:
+        return Range { start: start, end: end }
+
+    pub fn single_line(line: i64, start_char: i64, end_char: i64) -> Range:
+        return Range {
+            start: Position.new(line, start_char),
+            end: Position.new(line, end_char)
+        }
+
+    pub fn to_dict(self) -> Dict<text, Any>:
+        return {
+            "start": self.start.to_dict(),
+            "end": self.end.to_dict()
+        }
+
+# Location in a document
+pub struct Location:
+    pub uri: text
+    pub range: Range
+
+impl Location:
+    pub fn new(uri: text, range: Range) -> Location:
+        return Location { uri: uri, range: range }
+
+    pub fn to_dict(self) -> Dict<text, Any>:
+        return {
+            "uri": self.uri,
+            "range": self.range.to_dict()
+        }
+
+# Symbol kinds
+pub enum LspSymbolKind:
+    File
+    Module
+    Class
+    Method
+    Property
+    Field
+    Constructor
+    Enum
+    Interface
+    Function
+    Variable
+    Constant
+    Struct
+    EnumMember
+    Trait
+
+impl LspSymbolKind:
+    pub fn to_string(self) -> text:
+        match self:
+            case File: "file"
+            case Module: "module"
+            case Class: "class"
+            case Method: "method"
+            case Property: "property"
+            case Field: "field"
+            case Constructor: "constructor"
+            case Enum: "enum"
+            case Interface: "interface"
+            case Function: "function"
+            case Variable: "variable"
+            case Constant: "constant"
+            case Struct: "struct"
+            case EnumMember: "enumMember"
+            case Trait: "trait"
+
+    pub fn to_lsp_number(self) -> i64:
+        match self:
+            case File: 1
+            case Module: 2
+            case Class: 5
+            case Method: 6
+            case Property: 7
+            case Field: 8
+            case Constructor: 9
+            case Enum: 10
+            case Interface: 11
+            case Function: 12
+            case Variable: 13
+            case Constant: 14
+            case Struct: 23
+            case EnumMember: 22
+            case Trait: 11
+
+# Symbol information
+pub struct SymbolInfo:
+    pub name: text
+    pub kind: LspSymbolKind
+    pub range: Range
+    pub selection_range: Range
+    pub container_name: Option<text>
+    pub children: List<SymbolInfo>
+
+impl SymbolInfo:
+    pub fn new(name: text, kind: LspSymbolKind, range: Range) -> SymbolInfo:
+        return SymbolInfo {
+            name: name,
+            kind: kind,
+            range: range,
+            selection_range: range,
+            container_name: None,
+            children: []
+        }
+
+    pub fn with_container(self, container: text) -> SymbolInfo:
+        return SymbolInfo {
+            name: self.name,
+            kind: self.kind,
+            range: self.range,
+            selection_range: self.selection_range,
+            container_name: Some(container),
+            children: self.children
+        }
+
+    pub fn to_dict(self) -> Dict<text, Any>:
+        result = {
+            "name": self.name,
+            "kind": self.kind.to_string(),
+            "kindNumber": self.kind.to_lsp_number(),
+            "range": self.range.to_dict(),
+            "selectionRange": self.selection_range.to_dict()
+        }
+        match self.container_name:
+            case Some(c):
+                result.set("containerName", c)
+            case None:
+                pass
+        if self.children.len() > 0:
+            child_dicts = []
+            for child in self.children:
+                child_dicts.append(child.to_dict())
+            result.set("children", child_dicts)
+        return result
+
+# Hover contents
+pub struct HoverContents:
+    pub kind: text
+    pub value: text
+
+impl HoverContents:
+    pub fn markdown(value: text) -> HoverContents:
+        return HoverContents { kind: "markdown", value: value }
+
+    pub fn plaintext(value: text) -> HoverContents:
+        return HoverContents { kind: "plaintext", value: value }
+
+    pub fn to_dict(self) -> Dict<text, Any>:
+        return {
+            "kind": self.kind,
+            "value": self.value
+        }
+
+# Hover information
+pub struct HoverInfo:
+    pub contents: HoverContents
+    pub range: Option<Range>
+
+impl HoverInfo:
+    pub fn new(contents: HoverContents) -> HoverInfo:
+        return HoverInfo { contents: contents, range: None }
+
+    pub fn with_range(self, range: Range) -> HoverInfo:
+        return HoverInfo { contents: self.contents, range: Some(range) }
+
+    pub fn to_dict(self) -> Dict<text, Any>:
+        result = {
+            "contents": self.contents.to_dict()
+        }
+        match self.range:
+            case Some(r):
+                result.set("range", r.to_dict())
+            case None:
+                pass
+        return result
+
+# Diagnostic severity
+pub enum DiagnosticSeverity:
+    Error
+    Warning
+    Information
+    Hint
+
+impl DiagnosticSeverity:
+    pub fn to_string(self) -> text:
+        match self:
+            case Error: "error"
+            case Warning: "warning"
+            case Information: "information"
+            case Hint: "hint"
+
+    pub fn to_lsp_number(self) -> i64:
+        match self:
+            case Error: 1
+            case Warning: 2
+            case Information: 3
+            case Hint: 4
+
+# Diagnostic information
+pub struct Diagnostic:
+    pub range: Range
+    pub severity: DiagnosticSeverity
+    pub code: Option<text>
+    pub source: Option<text>
+    pub message: text
+
+impl Diagnostic:
+    pub fn error(range: Range, message: text) -> Diagnostic:
+        return Diagnostic {
+            range: range,
+            severity: DiagnosticSeverity.Error,
+            code: None,
+            source: Some("simple-compiler"),
+            message: message
+        }
+
+    pub fn warning(range: Range, message: text) -> Diagnostic:
+        return Diagnostic {
+            range: range,
+            severity: DiagnosticSeverity.Warning,
+            code: None,
+            source: Some("simple-compiler"),
+            message: message
+        }
+
+    pub fn with_code(self, code: text) -> Diagnostic:
+        return Diagnostic {
+            range: self.range,
+            severity: self.severity,
+            code: Some(code),
+            source: self.source,
+            message: self.message
+        }
+
+    pub fn to_dict(self) -> Dict<text, Any>:
+        result = {
+            "range": self.range.to_dict(),
+            "severity": self.severity.to_string(),
+            "severityNumber": self.severity.to_lsp_number(),
+            "message": self.message
+        }
+        match self.code:
+            case Some(c):
+                result.set("code", c)
+            case None:
+                pass
+        match self.source:
+            case Some(s):
+                result.set("source", s)
+            case None:
+                pass
+        return result
+
+# Reference context
+pub enum ReferenceContext:
+    Definition
+    Reference
+    Read
+    Write
+
+impl ReferenceContext:
+    pub fn to_string(self) -> text:
+        match self:
+            case Definition: "definition"
+            case Reference: "reference"
+            case Read: "read"
+            case Write: "write"
+
+# Reference location with context
+pub struct ReferenceLocation:
+    pub location: Location
+    pub context: ReferenceContext
+
+impl ReferenceLocation:
+    pub fn new(location: Location, context: ReferenceContext) -> ReferenceLocation:
+        return ReferenceLocation { location: location, context: context }
+
+    pub fn definition(uri: text, range: Range) -> ReferenceLocation:
+        return ReferenceLocation {
+            location: Location.new(uri, range),
+            context: ReferenceContext.Definition
+        }
+
+    pub fn reference(uri: text, range: Range) -> ReferenceLocation:
+        return ReferenceLocation {
+            location: Location.new(uri, range),
+            context: ReferenceContext.Reference
+        }
+
+    pub fn to_dict(self) -> Dict<text, Any>:
+        return {
+            "uri": self.location.uri,
+            "range": self.location.range.to_dict(),
+            "context": self.context.to_string()
+        }
+
+# LSP Definition Handler
+pub class LspDefinitionHandler:
+    pub fn new() -> LspDefinitionHandler:
+        return LspDefinitionHandler:
+
+    pub fn handle(self, args: Dict<text, Any>) -> text:
+        path = args.get("file", "") as text
+        line = args.get("line", 0) as i64
+        character = args.get("character", 0) as i64
+
+        match fs_read_text(path):
+            case Ok(source):
+                # Call FFI to Rust lsp_mcp module
+                result = lsp_go_to_definition(path, source, line, character)
+                return result
+            case Err(e):
+                return json_encode({ "error": "Error reading file: " + e })
+
+# LSP References Handler
+pub class LspReferencesHandler:
+    pub fn new() -> LspReferencesHandler:
+        return LspReferencesHandler:
+
+    pub fn handle(self, args: Dict<text, Any>) -> text:
+        path = args.get("file", "") as text
+        line = args.get("line", 0) as i64
+        character = args.get("character", 0) as i64
+        include_decl = args.get("include_declaration", true) as bool
+
+        match fs_read_text(path):
+            case Ok(source):
+                result = lsp_find_references(path, source, line, character, include_decl)
+                return result
+            case Err(e):
+                return json_encode({ "error": "Error reading file: " + e })
+
+# LSP Hover Handler
+pub class LspHoverHandler:
+    pub fn new() -> LspHoverHandler:
+        return LspHoverHandler:
+
+    pub fn handle(self, args: Dict<text, Any>) -> text:
+        path = args.get("file", "") as text
+        line = args.get("line", 0) as i64
+        character = args.get("character", 0) as i64
+
+        match fs_read_text(path):
+            case Ok(source):
+                result = lsp_hover(path, source, line, character)
+                return result
+            case Err(e):
+                return json_encode({ "error": "Error reading file: " + e })
+
+# LSP Symbols Handler
+pub class LspSymbolsHandler:
+    pub fn new() -> LspSymbolsHandler:
+        return LspSymbolsHandler:
+
+    pub fn handle(self, args: Dict<text, Any>) -> text:
+        path = args.get("file", "") as text
+
+        match fs_read_text(path):
+            case Ok(source):
+                result = lsp_document_symbols(path, source)
+                return result
+            case Err(e):
+                return json_encode({ "error": "Error reading file: " + e })
+
+# LSP Diagnostics Handler
+pub class LspDiagnosticsHandler:
+    pub fn new() -> LspDiagnosticsHandler:
+        return LspDiagnosticsHandler:
+
+    pub fn handle(self, args: Dict<text, Any>) -> text:
+        path = args.get("file", "") as text
+        include_warnings = args.get("include_warnings", false) as bool
+
+        match fs_read_text(path):
+            case Ok(source):
+                result = lsp_diagnostics(path, source, include_warnings)
+                return result
+            case Err(e):
+                return json_encode({ "error": "Error reading file: " + e })
+
+# FFI declarations for Rust lsp_mcp module
+extern fn lsp_go_to_definition(path: text, source: text, line: i64, character: i64) -> text
+extern fn lsp_find_references(path: text, source: text, line: i64, character: i64, include_decl: bool) -> text
+extern fn lsp_hover(path: text, source: text, line: i64, character: i64) -> text
+extern fn lsp_document_symbols(path: text, source: text) -> text
+extern fn lsp_diagnostics(path: text, source: text, include_warnings: bool) -> text
+
+# Helper to encode JSON (wrapper for core.json)
+fn json_encode(value: Dict<text, Any>) -> text:
+    return to_json(value)
+
+# Exports
+export Position
+export Range
+export Location
+export LspSymbolKind
+export SymbolInfo
+export HoverContents
+export HoverInfo
+export DiagnosticSeverity
+export Diagnostic
+export ReferenceContext
+export ReferenceLocation
+export LspDefinitionHandler
+export LspReferencesHandler
+export LspHoverHandler
+export LspSymbolsHandler
+export LspDiagnosticsHandler

@@ -8,10 +8,13 @@
 //! simple install --locked        # Install exact versions from lock
 //! ```
 
+use simple_pkg::cache::Cache;
+use simple_pkg::linker::Linker;
 use simple_pkg::lock::{LockFile, LockedPackage, PackageSource};
 use simple_pkg::manifest::{Dependency, Manifest};
 use std::collections::HashSet;
 use std::path::Path;
+use std::process::Command;
 
 /// Generate or update the lock file
 pub fn generate_lock(project_dir: &Path) -> i32 {
@@ -196,6 +199,134 @@ pub fn check_lock(project_dir: &Path) -> i32 {
     1
 }
 
+/// Clone a git repository to the cache and checkout a specific revision
+fn git_clone_checkout(cache: &Cache, url: &str, rev: Option<&str>) -> Result<std::path::PathBuf, String> {
+    let repo_path = cache.git_repo_path(url);
+
+    // Check if already cloned
+    if !repo_path.exists() {
+        // Clone the repository
+        let output = Command::new("git")
+            .args(["clone", "--recurse-submodules", url])
+            .arg(&repo_path)
+            .output()
+            .map_err(|e| format!("failed to execute git clone: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git clone failed: {}", stderr));
+        }
+    } else {
+        // Fetch latest changes
+        let output = Command::new("git")
+            .args(["fetch", "--all"])
+            .current_dir(&repo_path)
+            .output()
+            .map_err(|e| format!("failed to execute git fetch: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("warning: git fetch failed: {}", stderr);
+        }
+    }
+
+    // Checkout the specific revision
+    if let Some(rev) = rev {
+        let output = Command::new("git")
+            .args(["checkout", rev])
+            .current_dir(&repo_path)
+            .output()
+            .map_err(|e| format!("failed to execute git checkout: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git checkout '{}' failed: {}", rev, stderr));
+        }
+    }
+
+    Ok(repo_path)
+}
+
+/// Download a package from the registry
+fn registry_download(
+    cache: &Cache,
+    name: &str,
+    version: &str,
+    registry: &str,
+) -> Result<std::path::PathBuf, String> {
+    let pkg_path = cache.package_path(name, version);
+
+    // Check if already downloaded
+    if pkg_path.exists() {
+        return Ok(pkg_path);
+    }
+
+    // Create parent directory
+    if let Some(parent) = pkg_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create cache directory: {}", e))?;
+    }
+
+    // Construct download URL
+    let download_url = format!("{}/packages/{}/{}.tar.gz", registry, name, version);
+
+    // Create a temporary file for the download
+    let tmp_file = pkg_path.with_extension("tar.gz.tmp");
+
+    // Try curl first, then wget as fallback
+    let download_result = Command::new("curl")
+        .args(["-fsSL", "-o"])
+        .arg(&tmp_file)
+        .arg(&download_url)
+        .output();
+
+    let success = match download_result {
+        Ok(output) if output.status.success() => true,
+        _ => {
+            // Try wget as fallback
+            let wget_result = Command::new("wget")
+                .args(["-q", "-O"])
+                .arg(&tmp_file)
+                .arg(&download_url)
+                .output();
+
+            matches!(wget_result, Ok(output) if output.status.success())
+        }
+    };
+
+    if !success {
+        let _ = std::fs::remove_file(&tmp_file);
+        return Err(format!(
+            "failed to download package from {}: ensure curl or wget is installed",
+            download_url
+        ));
+    }
+
+    // Extract the tarball
+    std::fs::create_dir_all(&pkg_path)
+        .map_err(|e| format!("failed to create package directory: {}", e))?;
+
+    let output = Command::new("tar")
+        .args(["-xzf"])
+        .arg(&tmp_file)
+        .args(["-C"])
+        .arg(&pkg_path)
+        .args(["--strip-components=1"])
+        .output()
+        .map_err(|e| format!("failed to execute tar: {}", e))?;
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&tmp_file);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = std::fs::remove_dir_all(&pkg_path);
+        return Err(format!("failed to extract package: {}", stderr));
+    }
+
+    Ok(pkg_path)
+}
+
 /// Install dependencies from lock file (exact versions)
 pub fn install_locked(project_dir: &Path) -> i32 {
     let lock_path = project_dir.join("simple.lock");
@@ -220,36 +351,98 @@ pub fn install_locked(project_dir: &Path) -> i32 {
         return 0;
     }
 
+    // Initialize cache
+    let cache = match Cache::new() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: failed to initialize cache: {}", e);
+            return 1;
+        }
+    };
+
+    if let Err(e) = cache.init() {
+        eprintln!("error: failed to create cache directories: {}", e);
+        return 1;
+    }
+
+    // Initialize linker for deps/ directory
+    let linker = Linker::new(project_dir);
+    if let Err(e) = linker.init() {
+        eprintln!("error: failed to initialize deps directory: {}", e);
+        return 1;
+    }
+
     println!("Installing {} packages from lock file...", lock.packages.len());
+
+    let mut installed = 0;
+    let mut failed = 0;
 
     for pkg in &lock.packages {
         match &pkg.source {
             PackageSource::Path { path } => {
-                // Path dependencies - just verify they exist
+                // Path dependencies - verify and link
                 let dep_path = project_dir.join(path);
                 if !dep_path.exists() {
-                    eprintln!("warning: path dependency '{}' not found at {}", pkg.name, path);
+                    eprintln!("  error: path dependency '{}' not found at {}", pkg.name, path);
+                    failed += 1;
                 } else {
-                    println!("  {} {} (path: {})", pkg.name, pkg.version, path);
+                    if let Err(e) = linker.link_path(&pkg.name, &dep_path) {
+                        eprintln!("  error: failed to link '{}': {}", pkg.name, e);
+                        failed += 1;
+                    } else {
+                        println!("  {} {} (path: {})", pkg.name, pkg.version, path);
+                        installed += 1;
+                    }
                 }
             }
             PackageSource::Git { url, rev } => {
-                // Git dependencies - would clone/checkout
+                // Git dependencies - clone/checkout and link
                 let rev_str = rev.as_deref().unwrap_or("HEAD");
-                println!("  {} {} (git: {}@{})", pkg.name, pkg.version, url, rev_str);
-                // TODO: [env][P2] Implement git clone/checkout
+                match git_clone_checkout(&cache, url, rev.as_deref()) {
+                    Ok(repo_path) => {
+                        if let Err(e) = linker.link_cached(&pkg.name, &repo_path) {
+                            eprintln!("  error: failed to link '{}': {}", pkg.name, e);
+                            failed += 1;
+                        } else {
+                            println!("  {} {} (git: {}@{})", pkg.name, pkg.version, url, rev_str);
+                            installed += 1;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  error: failed to clone '{}': {}", pkg.name, e);
+                        failed += 1;
+                    }
+                }
             }
             PackageSource::Registry { registry } => {
-                // Registry dependencies - would download
-                println!("  {} {} ({})", pkg.name, pkg.version, registry);
-                // TODO: [env][P2] Implement registry download
+                // Registry dependencies - download and link
+                match registry_download(&cache, &pkg.name, &pkg.version, registry) {
+                    Ok(pkg_path) => {
+                        if let Err(e) = linker.link_cached(&pkg.name, &pkg_path) {
+                            eprintln!("  error: failed to link '{}': {}", pkg.name, e);
+                            failed += 1;
+                        } else {
+                            println!("  {} {} ({})", pkg.name, pkg.version, registry);
+                            installed += 1;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  error: failed to download '{}': {}", pkg.name, e);
+                        failed += 1;
+                    }
+                }
             }
         }
     }
 
     println!();
-    println!("Installed {} packages", lock.packages.len());
-    0
+    if failed > 0 {
+        eprintln!("Installed {} packages, {} failed", installed, failed);
+        1
+    } else {
+        println!("Installed {} packages", installed);
+        0
+    }
 }
 
 /// Print lock file info
