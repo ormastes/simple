@@ -41,7 +41,6 @@ pub(crate) fn evaluate_method_call(
 
     let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
 
-
     // Handle module (Dict) method calls - look up function in module and use its captured_env
     if let Value::Dict(module_dict) = &recv_val {
         if let Some(func_val) = module_dict.get(method) {
@@ -181,7 +180,6 @@ pub(crate) fn evaluate_method_call(
             )? {
                 return Ok(result);
             }
-
 
             // User-defined methods on enums via impl blocks
             if let Some(methods) = impl_methods.get(enum_name) {
