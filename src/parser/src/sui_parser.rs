@@ -138,6 +138,12 @@ impl SuiParser {
     }
 
     /// Parse shared state declaration: `{$ let users: List[User] $}`
+    ///
+    /// Supports these forms:
+    /// - `let name: Type = value`
+    /// - `let name: Type`
+    /// - `let name = value`
+    /// - `let name`
     fn parse_shared_state(&mut self) -> Result<SharedStateDecl, ParseError> {
         self.expect_str("{$")?;
         self.skip_whitespace();
@@ -146,20 +152,35 @@ impl SuiParser {
         let content = self.extract_until("$}")?;
         self.expect_str("$}")?;
 
-        // Currently stores raw declaration string; full parsing not yet implemented
-        // Proper implementation would parse "let name: Type = value" into components:
-        // 1. Extract variable name after "let" keyword
-        // 2. Parse optional type annotation after ":" (if present)
-        // 3. Parse optional initializer after "=" (if present)
-        // 4. Handle edge cases: no type, no initializer, complex types, etc.
-        // This would enable type checking and validation of shared state declarations
         let trimmed = content.trim();
 
-        // For now, store raw declaration until AST parsing is needed
+        // Parse "let name: Type = value" into components
+        let declaration = if let Some(rest) = trimmed.strip_prefix("let").or_else(|| trimmed.strip_prefix("val")) {
+            rest.trim()
+        } else {
+            trimmed
+        };
+
+        // Split by '=' to separate name:type from initializer
+        let (name_type_part, initializer) = if let Some(eq_pos) = declaration.find('=') {
+            let (left, right) = declaration.split_at(eq_pos);
+            (left.trim(), Some(right[1..].trim().to_string()))
+        } else {
+            (declaration, None)
+        };
+
+        // Split name:type part by ':' to separate name from type annotation
+        let (name, type_annotation) = if let Some(colon_pos) = name_type_part.find(':') {
+            let (left, right) = name_type_part.split_at(colon_pos);
+            (left.trim().to_string(), Some(right[1..].trim().to_string()))
+        } else {
+            (name_type_part.to_string(), None)
+        };
+
         Ok(SharedStateDecl {
-            name: trimmed.to_string(),
-            type_annotation: None,
-            initializer: None,
+            name,
+            type_annotation,
+            initializer,
         })
     }
 
@@ -551,5 +572,76 @@ process_data()
         assert_eq!(result.server_blocks.len(), 2);
         assert_eq!(result.client_blocks.len(), 1);
         assert_eq!(result.template_blocks.len(), 2);
+    }
+
+    // Shared state parsing tests
+    #[test]
+    fn test_parse_shared_state_full() {
+        let source = r#"
+{$ let count: i32 = 0 $}
+"#;
+        let mut parser = SuiParser::new(source.to_string());
+        let result = parser.parse().unwrap();
+
+        assert_eq!(result.shared_state.len(), 1);
+        assert_eq!(result.shared_state[0].name, "count");
+        assert_eq!(result.shared_state[0].type_annotation, Some("i32".to_string()));
+        assert_eq!(result.shared_state[0].initializer, Some("0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_shared_state_with_type_only() {
+        let source = r#"
+{$ let users: List<User> $}
+"#;
+        let mut parser = SuiParser::new(source.to_string());
+        let result = parser.parse().unwrap();
+
+        assert_eq!(result.shared_state.len(), 1);
+        assert_eq!(result.shared_state[0].name, "users");
+        assert_eq!(result.shared_state[0].type_annotation, Some("List<User>".to_string()));
+        assert_eq!(result.shared_state[0].initializer, None);
+    }
+
+    #[test]
+    fn test_parse_shared_state_with_initializer_only() {
+        let source = r#"
+{$ let data = [] $}
+"#;
+        let mut parser = SuiParser::new(source.to_string());
+        let result = parser.parse().unwrap();
+
+        assert_eq!(result.shared_state.len(), 1);
+        assert_eq!(result.shared_state[0].name, "data");
+        assert_eq!(result.shared_state[0].type_annotation, None);
+        assert_eq!(result.shared_state[0].initializer, Some("[]".to_string()));
+    }
+
+    #[test]
+    fn test_parse_shared_state_name_only() {
+        let source = r#"
+{$ let value $}
+"#;
+        let mut parser = SuiParser::new(source.to_string());
+        let result = parser.parse().unwrap();
+
+        assert_eq!(result.shared_state.len(), 1);
+        assert_eq!(result.shared_state[0].name, "value");
+        assert_eq!(result.shared_state[0].type_annotation, None);
+        assert_eq!(result.shared_state[0].initializer, None);
+    }
+
+    #[test]
+    fn test_parse_shared_state_val_keyword() {
+        let source = r#"
+{$ val config: Config = Config::default() $}
+"#;
+        let mut parser = SuiParser::new(source.to_string());
+        let result = parser.parse().unwrap();
+
+        assert_eq!(result.shared_state.len(), 1);
+        assert_eq!(result.shared_state[0].name, "config");
+        assert_eq!(result.shared_state[0].type_annotation, Some("Config".to_string()));
+        assert_eq!(result.shared_state[0].initializer, Some("Config::default()".to_string()));
     }
 }

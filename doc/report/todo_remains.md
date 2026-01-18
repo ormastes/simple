@@ -1,7 +1,7 @@
 # TODO Remains Report
 
 **Generated:** 2026-01-17
-**Last Updated:** 2026-01-17
+**Last Updated:** 2026-01-18
 **Total TODOs:** 1 (core compiler `src/`), 746 (stdlib/apps `simple/`)
 
 ## Core Compiler Status (`src/` directory)
@@ -14,7 +14,15 @@
 
 **All remaining TODOs are P3 (low priority).**
 
-### Recently Resolved (2026-01-17)
+### Recently Resolved (2026-01-18)
+
+| File | Line | Status | Resolution |
+|------|------|--------|------------|
+| src/parser/src/parser_types.rs | - | ✅ Resolved | Associated type constraints (Iterator<Item=T>) |
+| src/parser/src/types_def/trait_impl_parsing.rs | - | ✅ Resolved | Trait inheritance with generics (trait A<T>: B<T>) |
+| src/parser/src/ast/nodes/core.rs | - | ✅ Resolved | Type::TypeBinding variant for associated types |
+
+### Previously Resolved (2026-01-17)
 
 | File | Line | Status | Resolution |
 |------|------|--------|------------|
@@ -108,22 +116,26 @@ Missing attribute parsers:
 
 ### MEDIUM PRIORITY - Nice to Have
 
-#### 4. Parser Improvements (5 items)
+#### 4. Parser Improvements (0 remaining - ALL RESOLVED)
 
-```
-src/parser/src/statements/aop.rs:381     - Inline predicate parser
-src/parser/src/statements/contract.rs:194 - Optional error message
-src/parser/src/types_def/mod.rs:675       - Doc comment storage
-src/parser/src/parser_impl/functions.rs:153 - !Trait syntax (#1151)
-src/parser/src/sui_parser.rs:156          - Proper AST parsing
-```
+~~Previously listed:~~
+- ~~Inline predicate parser~~ → Intentionally simplified (full parsing in compiler)
+- ~~Optional error message~~ → Already implemented (`out_err(e):`)
+- ~~Doc comment storage~~ → Already implemented
+- ~~!Trait syntax~~ → Already implemented (`where T: !Clone`)
+- ~~SUI AST parsing~~ → ✅ **Implemented 2026-01-18**
 
-**Status:**
-- AOP predicate: AOP system exists, needs inline parsing
-- Contract message: Parser exists, feature addition
-- Doc comment: Field exists in AST, just needs storage
-- !Trait: Requires parser extension
-- SUI parser: External format, low priority
+**Recently Implemented (2026-01-18):**
+- ✅ Trait inheritance with generics: `trait Sequence<T>: Collection<T>:`
+- ✅ Multiple trait bounds: `trait Debug: Display + Clone:`
+- ✅ Associated type constraints: `Iterator<Item=T>`, `Map<Key=K, Value=V>`
+- ✅ SUI shared state AST parsing: `{$ let name: Type = value $}`
+
+**Already Implemented (verified 2026-01-18):**
+- ✅ !Trait negative bounds syntax: `where T: Clone + !Send`
+- ✅ Doc comment storage in structs/classes
+- ✅ Contract error bindings: `out_err(e):`
+- ✅ AOP predicate parsing (simplified by design, full parsing in compiler)
 
 ---
 
