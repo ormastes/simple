@@ -149,7 +149,7 @@ describe "Simple Compiler CLI":
             run_compiler(source_file, "--output", "test.smf")
 
         it "creates SMF file":
-            expect File.exists?("test.smf")
+            expect File.exists("test.smf")
 
         it "exits with code 0":
             expect compiled_output.exit_code == 0
@@ -230,7 +230,7 @@ describe "CLI Tool":
     context "with valid input":
         it "succeeds":
             result = run_cli("run", "examples/hello.spl")
-            expect result.success?
+            expect result.is_success()
             expect result.stdout == "Hello, World!\n"
 
     context "with invalid flags":
@@ -344,13 +344,13 @@ describe "User Authentication":
         it "grants access":
             user = create_user(email: "test@example.com", password: "secret123")
             result = authenticate(user.email, "secret123")
-            expect result.success?
+            expect result.is_success()
 
     context "when user has invalid credentials":
         it "denies access":
             user = create_user(email: "test@example.com", password: "secret123")
             result = authenticate(user.email, "wrong_password")
-            expect result.failure?
+            expect result.is_failure()
 ```
 
 Generates this documentation:

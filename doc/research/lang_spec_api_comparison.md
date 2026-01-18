@@ -74,10 +74,11 @@ abstract class Number
 └── class Float : Number  (or abstract with F32, F64 concrete)
 
 Number methods: abs(), clamp()
-Int methods: even?(), odd?(), times(), upto(), downto()
-Float methods: round(), floor(), ceil(), nan?(), inf?()
+Int methods: is_even(), is_odd(), times(), upto(), downto()
+Float methods: round(), floor(), ceil(), is_nan(), is_inf()
 Checked arithmetic: checked_add(), etc.
 ```
+> **Note:** Original proposals used Ruby-style `even?()`, `odd?()`, `nan?()`, `inf?()` but `?` is not allowed in method names per design decision. Use `is_*` prefix instead.
 
 ### Current Implementation: ⚠️ **PARTIAL**
 
@@ -146,19 +147,20 @@ impl f64:
 ### Proposed Specification
 ```
 Str methods:
-  len(), empty?(), trim(), upper(), lower()
+  len(), is_empty(), trim(), upper(), lower()
   split(), replace(old, new)
   each(fn) - iterate characters
   sub in s - containment via `in` operator
   NO regex methods
 ```
+> **Note:** `empty?()` was originally proposed but `?` is not allowed in method names per design decision. Use `is_empty()` instead.
 
 ### Current Implementation: ✅ **MOSTLY COMPLETE**
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | `len()` | ✅ Implemented | Byte length |
-| `empty?` | ❌ Missing | Use `.len() == 0` |
+| `empty?` | ❌ Not Allowed | Use `.is_empty()` - `?` not allowed in method names per design decision |
 | `trim()` | ✅ Implemented | Also `trim_start()`, `trim_end()` |
 | `upper()` / `lower()` | ✅ Implemented | Also `uppercased()`, `lowercased()` |
 | `split(delimiter)` | ✅ Implemented | Returns `List<text>` |
@@ -211,25 +213,26 @@ str.each(|c| process(c))
 ```simple
 class Seq[T] : Ordered[T]:
   len() -> Int
-  empty?() -> Bool
+  is_empty() -> Bool
   push(x: T)
   pop() -> T?
   map[U](fn) -> Seq[U]
   filter(fn) -> Seq[T]
   fold[U](init, fn) -> U
-  sort(algorithm=DEFAULT_DATASET_ALGORITHM, stable=false, cmp?)
+  sort(algorithm=DEFAULT_DATASET_ALGORITHM, stable=false)
   sort_by[K](key, algorithm=DEFAULT_DATASET_ALGORITHM, stable=false)
 
 # Containment via `in` operator
 x in xs
 ```
+> **Note:** `empty?()` was originally proposed but `?` is not allowed in method names per design decision. Use `is_empty()` instead.
 
 ### Current Implementation: ⚠️ **MOSTLY COMPLETE**
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | `len()` | ✅ Implemented | |
-| `empty?` | ❌ Missing | Use `.len() == 0` |
+| `empty?` | ❌ Not Allowed | Use `.is_empty()` - `?` not allowed in method names per design decision |
 | `push()` / `pop()` | ✅ Implemented | Also `push_front()`, `pop_front()` |
 | `map()` / `filter()` | ✅ Implemented | |
 | `fold()` | ✅ Implemented | Called `reduce()` |

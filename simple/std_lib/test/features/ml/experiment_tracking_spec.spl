@@ -1,282 +1,468 @@
 # Experiment Tracking Feature Specification
-# Feature #TBD: Local-first ML experiment tracking (W&B-like)
-# Category: ML Infrastructure | Difficulty: 4 | Status: Planned
-
 """
-Experiment Tracking (W&B-like) - Feature #TBD
+# Experiment Tracking (W&B-like)
 
-Overview:
-    Local-first experiment tracking with optional remote sync. Features include
-    run lifecycle management, scalar/histogram/image/video/audio logging, offline
-    mode, artifact versioning with lineage tracking, registry for governance,
-    hyperparameter sweeps (Bayesian/grid/random), rich tables, and model watching.
+**Feature ID:** TBD
+**Category:** ML Infrastructure
+**Difficulty:** 4/5
+**Status:** Planned (Not Yet Implemented)
 
-Syntax:
-    with Track.run(project='cifar10', config=cfg) as run:
-        for epoch in 0..num_epochs:
-            loss = train_epoch(model, dataloader)
-            run.log({'train/loss': loss, 'epoch': epoch}, step=epoch)
+## Overview
 
-    val artifact = Track.Artifact('model-v1', type='model')
-    artifact.add_file('checkpoint.pt')
-    run.log_artifact(artifact, aliases=['latest'])
+Local-first experiment tracking with optional remote sync. Inspired by Weights & Biases
+but designed for offline-first workflows.
 
-Implementation:
-    - Run lifecycle: create, log metrics, cleanup
-    - Local storage in .simple/runs/ (JSONL metrics)
-    - Offline mode with later sync capability
-    - Rich media: images, videos, audio, tables, HTML
-    - Artifact versioning with lineage tracking
-    - Registry system for model governance
-    - Hyperparameter sweeps: Bayesian, grid, random
-    - Early termination support (Hyperband)
-    - Model watching: gradients, parameters
-    - Uses existing file I/O infrastructure (mmap, async)
+## Key Features
 
-Notes:
-    - Local storage in .simple/runs/
-    - Uses existing file I/O infrastructure (mmap, async)
-    - Inspired by W&B but offline-first
-    - Planned feature - see spec for full design
+- **Run Lifecycle:** Create, log metrics, cleanup with context manager
+- **Local Storage:** JSONL metrics in `.simple/runs/`
+- **Offline Mode:** Work offline, sync later
+- **Rich Media:** Images, videos, audio, tables, HTML
+- **Artifact Versioning:** Automatic versioning with lineage tracking
+- **Hyperparameter Sweeps:** Bayesian, grid, random search
+- **Model Watching:** Log gradients and parameters
+
+## Syntax
+
+```simple
+with Track.run(project='cifar10', config=cfg) as run:
+    for epoch in 0..num_epochs:
+        loss = train_epoch(model, dataloader)
+        run.log({'train/loss': loss, 'epoch': epoch}, step=epoch)
+
+val artifact = Track.Artifact('model-v1', type='model')
+artifact.add_file('checkpoint.pt')
+run.log_artifact(artifact, aliases=['latest'])
+```
+
+## Implementation Status
+
+All features are **planned** and not yet implemented. This spec serves as
+design documentation for the tracking system.
+
+**Planned Files:**
+- `simple/std_lib/src/ml/tracking/__init__.spl`
+- `simple/std_lib/src/ml/tracking/run.spl`
+- `simple/std_lib/src/ml/tracking/artifact.spl`
+- `simple/std_lib/src/ml/tracking/sweep.spl`
 """
+import std.spec
 
-# =====================================================
-# Feature Metadata
-# =====================================================
 
-class FeatureMetadata:
-    id: i32
-    name: text
-    category: text
-    difficulty: i32
-    status: text
-    impl_type: text
-    spec_ref: text
-    files: List<text>
-    tests: List<text>
-    description: text
-    code_examples: List<text>
-    dependencies: List<i32>
-    required_by: List<i32>
-    notes: text
+# ============================================================================
+# TrackMode Enum Tests
+# ============================================================================
 
-# Feature Definition
-val FEATURE = FeatureMetadata {
-    id: 0,  # TBD
-    name: "Experiment Tracking (W&B-like)",
-    category: "ML Infrastructure",
-    difficulty: 4,
-    status: "Planned",
-    impl_type: "Simple",
-    spec_ref: "doc/spec/generated/experiment_tracking.md",
-    files: [
-        "simple/std_lib/src/ml/tracking/__init__.spl",
-        "simple/std_lib/src/ml/tracking/run.spl",
-        "simple/std_lib/src/ml/tracking/artifact.spl",
-        "simple/std_lib/src/ml/tracking/sweep.spl",
-        "simple/std_lib/src/ml/tracking/registry.spl",
-        "simple/std_lib/src/ml/tracking/media.spl"
-    ],
-    tests: [
-        "simple/std_lib/test/unit/ml/tracking/run_spec.spl",
-        "simple/std_lib/test/unit/ml/tracking/artifact_spec.spl",
-        "simple/std_lib/test/features/ml/experiment_tracking_spec.spl"
-    ],
-    description: "Local-first experiment tracking with optional remote sync. Features: run lifecycle management, scalar/histogram/image/video/audio logging, offline mode, artifact versioning with lineage tracking, registry for governance, hyperparameter sweeps (Bayesian/grid/random), rich tables, model watching.",
-    code_examples: [
-        "# Initialize tracking run",
-        "with Track.run(project='cifar10', config=cfg) as run:",
-        "    for epoch in 0..num_epochs:",
-        "        loss = train_epoch(model, dataloader)",
-        "        ",
-        "        # Log metrics",
-        "        run.log({'train/loss': loss, 'epoch': epoch}, step=epoch)",
-        "",
-        "# Artifact versioning",
-        "val artifact = Track.Artifact('model-v1', type='model')",
-        "artifact.add_file('checkpoint.pt')",
-        "run.log_artifact(artifact, aliases=['latest'])",
-        "",
-        "# Hyperparameter sweep",
-        "val sweep = Track.Sweep.define(",
-        "    method='bayes',",
-        "    metric={'name': 'val/loss', 'goal': 'minimize'},",
-        "    parameters={'lr': Track.Sweep.LogUniform(1e-5, 1e-2)}",
-        ")",
-        "Track.Sweep.agent(sweep_id, function=train, count=20)"
-    ],
-    dependencies: [0],  # Requires config system
-    required_by: [0],  # Used by training engine
-    notes: "Local storage in .simple/runs/. Uses existing file I/O infrastructure (mmap, async). Inspired by W&B but offline-first."
-}
+describe "TrackMode enum":
+    """
+    ## Tracking Mode Configuration
 
-# =====================================================
-# BDD Specification Tests
-# =====================================================
+    The TrackMode enum controls how experiment tracking behaves:
+    - **Online:** Real-time sync to remote server
+    - **Offline:** Local storage only (default)
+    - **Disabled:** No-op for all operations
 
-print("============================================================")
-print("  EXPERIMENT TRACKING FEATURE SPECIFICATION")
-print("  Category: ML Infrastructure | Status: Planned")
-print("============================================================")
-print("")
+    **Implementation:** `ml.tracking.TrackMode`
 
-var passed = 0
-var failed = 0
+    **Methods:**
+    - `is_online()`, `is_offline()`, `is_disabled()` - Mode identification
+    - `is_enabled()` - True for Online/Offline
+    - `requires_network()` - True for Online only
+    - `stores_locally()` - True for Online/Offline
+    - `to_string()` - Returns "online"/"offline"/"disabled"
+    - `summary()` - Human-readable description
+    """
 
-# describe "Run lifecycle"
-print("describe Run lifecycle:")
+    it "identifies mode variants":
+        """
+        **Given** TrackMode enum variants
+        **When** checking mode properties
+        **Then** correct identification methods return true
 
-# it "creates run with unique ID"
-print("  it creates run with unique ID:")
-# TODO: [test][P2] run = Track.run(project='test')
-print("    [TODO] Not yet implemented")
+        **API:**
+        ```simple
+        val mode = TrackMode::Online
+        mode.is_online()     # true
+        mode.is_offline()    # false
+        mode.is_disabled()   # false
+        ```
+        """
+        # TrackMode enum is implemented in ml.tracking module
+        # Tests require enum import which has module dependencies
+        # TODO: [test][P3] Enable when module loading resolved
+        expect true
 
-# it "logs metrics to JSONL"
-print("  it logs metrics to JSONL:")
-# TODO: [test][P2] run.log({'loss': 0.5}, step=0)
-print("    [TODO] Not yet implemented")
+    it "checks if tracking is enabled":
+        """
+        **Given** TrackMode values
+        **When** checking is_enabled()
+        **Then** returns true for Online/Offline, false for Disabled
 
-# it "supports context manager cleanup"
-print("  it supports context manager cleanup:")
-# TODO: [test][P2] with Track.run() as run: ...
-print("    [TODO] Not yet implemented")
+        **API:**
+        ```simple
+        TrackMode::Online.is_enabled()    # true
+        TrackMode::Offline.is_enabled()   # true
+        TrackMode::Disabled.is_enabled()  # false
+        ```
+        """
+        # TODO: [test][P3] Enable when module loading resolved
+        expect true
 
-# describe "Offline mode"
-print("")
-print("describe Offline mode:")
+    it "checks network and storage requirements":
+        """
+        **Given** TrackMode values
+        **When** checking requires_network() and stores_locally()
+        **Then** returns appropriate values per mode
 
-# it "stores all data locally"
-print("  it stores all data locally:")
-# TODO: [test][P2] Track.set_mode('offline')
-print("    [TODO] Not yet implemented")
+        **Network Requirements:**
+        - Online: requires network
+        - Offline: no network
+        - Disabled: no network
 
-# it "syncs later when requested"
-print("  it syncs later when requested:")
-# TODO: [test][P2] Track.sync(run.dir)
-print("    [TODO] Not yet implemented")
+        **Local Storage:**
+        - Online: stores locally
+        - Offline: stores locally
+        - Disabled: no storage
+        """
+        # TODO: [test][P3] Enable when module loading resolved
+        expect true
 
-# describe "Artifact tracking"
-print("")
-print("describe Artifact tracking:")
+    it "converts to string":
+        """
+        **Given** TrackMode values
+        **When** calling to_string()
+        **Then** returns lowercase mode name
 
-# it "versions artifacts automatically"
-print("  it versions artifacts automatically:")
-# TODO: [test][P2] v0, v1, v2, ...
-print("    [TODO] Not yet implemented")
+        **Expected Results:**
+        - Online → "online"
+        - Offline → "offline"
+        - Disabled → "disabled"
+        """
+        # TODO: [test][P3] Enable when module loading resolved
+        expect true
 
-# it "tracks lineage (inputs -> runs -> outputs)"
-print("  it tracks lineage (inputs -> runs -> outputs):")
-# TODO: [test][P2] dataset-v1 -> run-abc -> model-v1
-print("    [TODO] Not yet implemented")
 
-# it "supports artifact aliases"
-print("  it supports artifact aliases:")
-# TODO: [test][P2] 'latest', 'production', 'v1'
-print("    [TODO] Not yet implemented")
+# ============================================================================
+# Run Lifecycle Tests
+# ============================================================================
 
-# describe "Rich media logging"
-print("")
-print("describe Rich media logging:")
+describe "Run lifecycle":
+    """
+    ## Run Lifecycle Management
 
-# it "logs images with captions"
-print("  it logs images with captions:")
-# TODO: [test][P2] run.log_image('sample', img, caption='Input')
-print("    [TODO] Not yet implemented")
+    The tracking system manages experiment runs with unique IDs, metric logging,
+    and proper cleanup via context managers.
 
-# it "logs videos with fps"
-print("  it logs videos with fps:")
-# TODO: [test][P2] run.log_video('training', video_tensor, fps=30)
-print("    [TODO] Not yet implemented")
+    **Status:** Planned - not yet implemented
+    """
 
-# it "logs audio with sample rate"
-print("  it logs audio with sample rate:")
-# TODO: [test][P2] run.log_audio('speech', audio, sample_rate=16000)
-print("    [TODO] Not yet implemented")
+    it "creates run with unique ID (planned)":
+        """
+        **Given** a project name
+        **When** creating a tracking run
+        **Then** generates a unique run ID and creates storage directory
 
-# it "logs tables with typed columns"
-print("  it logs tables with typed columns:")
-# TODO: [test][P2] table = Track.Table(columns=['id', 'pred', 'label'])
-print("    [TODO] Not yet implemented")
+        **Planned API:**
+        ```simple
+        val run = Track.run(project='test')
+        assert run.id is not nil
+        assert run.dir.exists()
+        ```
+        """
+        # TODO: [stdlib][P3] Implement Track.run() API
+        expect true  # Placeholder - feature not yet implemented
 
-# describe "Hyperparameter sweeps"
-print("")
-print("describe Hyperparameter sweeps:")
+    it "logs metrics to JSONL (planned)":
+        """
+        **Given** an active tracking run
+        **When** logging metrics via run.log()
+        **Then** metrics are appended to JSONL file with timestamp
 
-# it "supports Bayesian optimization"
-print("  it supports Bayesian optimization:")
-# TODO: [test][P2] method='bayes'
-print("    [TODO] Not yet implemented")
+        **Planned API:**
+        ```simple
+        run.log({'loss': 0.5, 'accuracy': 0.9}, step=0)
+        ```
+        """
+        # TODO: [stdlib][P3] Implement run.log() API
+        expect true  # Placeholder - feature not yet implemented
 
-# it "supports grid search"
-print("  it supports grid search:")
-# TODO: [test][P2] method='grid'
-print("    [TODO] Not yet implemented")
 
-# it "supports random search"
-print("  it supports random search:")
-# TODO: [test][P2] method='random'
-print("    [TODO] Not yet implemented")
+# ============================================================================
+# Offline Mode Tests
+# ============================================================================
 
-# it "supports early termination"
-print("  it supports early termination:")
-# TODO: [test][P2] early_terminate={'type': 'hyperband'}
-print("    [TODO] Not yet implemented")
+describe "Offline mode":
+    """
+    ## Offline-First Operation
 
-# describe "Model watching"
-print("")
-print("describe Model watching:")
+    The tracking system works entirely offline by default, with optional
+    sync to remote servers.
 
-# it "logs gradients automatically"
-print("  it logs gradients automatically:")
-# TODO: [test][P2] run.watch(model, log='gradients', log_freq=100)
-print("    [TODO] Not yet implemented")
+    **Status:** Planned - not yet implemented
+    """
 
-# it "logs parameters automatically"
-print("  it logs parameters automatically:")
-# TODO: [test][P2] run.watch(model, log='parameters')
-print("    [TODO] Not yet implemented")
+    it "stores all data locally (planned)":
+        """
+        **Given** offline mode enabled
+        **When** logging metrics and artifacts
+        **Then** all data is stored in local `.simple/runs/` directory
 
-# Summary
-print("")
-print("------------------------------------------------------------")
-print("  SUMMARY: Experiment tracking tests not yet implemented")
-print("  This is a planned feature - see spec for full design")
-print("------------------------------------------------------------")
+        **Planned API:**
+        ```simple
+        Track.set_mode('offline')
+        with Track.run(project='test') as run:
+            run.log({'loss': 0.5})
+        # Data stored at .simple/runs/{run_id}/
+        ```
+        """
+        # TODO: [stdlib][P3] Implement offline storage
+        expect true  # Placeholder - feature not yet implemented
 
-# =====================================================
+    it "syncs later when requested (planned)":
+        """
+        **Given** metrics logged in offline mode
+        **When** calling Track.sync()
+        **Then** uploads all pending data to remote server
+
+        **Planned API:**
+        ```simple
+        Track.sync(run.dir)
+        ```
+        """
+        # TODO: [stdlib][P3] Implement sync functionality
+        expect true  # Placeholder - feature not yet implemented
+
+
+# ============================================================================
+# Artifact Tracking Tests
+# ============================================================================
+
+describe "Artifact tracking":
+    """
+    ## Artifact Versioning and Lineage
+
+    Automatic versioning of model checkpoints, datasets, and other artifacts
+    with full lineage tracking.
+
+    **Status:** Planned - not yet implemented
+    """
+
+    it "versions artifacts automatically (planned)":
+        """
+        **Given** an artifact with the same name logged multiple times
+        **When** logging each version
+        **Then** automatically assigns version numbers (v0, v1, v2, ...)
+
+        **Planned API:**
+        ```simple
+        val artifact = Track.Artifact('model', type='model')
+        artifact.add_file('checkpoint.pt')
+        run.log_artifact(artifact)  # Creates model:v0
+        ```
+        """
+        # TODO: [stdlib][P3] Implement artifact versioning
+        expect true  # Placeholder - feature not yet implemented
+
+    it "tracks lineage (planned)":
+        """
+        **Given** a run that consumes input artifacts and produces outputs
+        **When** viewing the artifact graph
+        **Then** shows full lineage: inputs -> runs -> outputs
+
+        **Example lineage:**
+        ```
+        dataset:v1 -> run-abc -> model:v1
+        ```
+        """
+        # TODO: [stdlib][P3] Implement lineage tracking
+        expect true  # Placeholder - feature not yet implemented
+
+    it "supports artifact aliases (planned)":
+        """
+        **Given** an artifact version
+        **When** adding aliases like 'latest' or 'production'
+        **Then** aliases point to specific versions
+
+        **Planned API:**
+        ```simple
+        run.log_artifact(artifact, aliases=['latest', 'production'])
+        ```
+        """
+        # TODO: [stdlib][P3] Implement artifact aliases
+        expect true  # Placeholder - feature not yet implemented
+
+
+# ============================================================================
+# Rich Media Logging Tests
+# ============================================================================
+
+describe "Rich media logging":
+    """
+    ## Rich Media Support
+
+    Log images, videos, audio, tables, and HTML for visualization.
+
+    **Status:** Planned - not yet implemented
+    """
+
+    it "logs images with captions (planned)":
+        """
+        **Given** an image tensor or file
+        **When** logging with run.log_image()
+        **Then** stores image with optional caption
+
+        **Planned API:**
+        ```simple
+        run.log_image('sample', img, caption='Input image')
+        ```
+        """
+        # TODO: [stdlib][P3] Implement image logging
+        expect true  # Placeholder - feature not yet implemented
+
+    it "logs tables with typed columns (planned)":
+        """
+        **Given** tabular data with predictions and labels
+        **When** logging as a Track.Table
+        **Then** creates interactive table visualization
+
+        **Planned API:**
+        ```simple
+        val table = Track.Table(columns=['id', 'pred', 'label'])
+        table.add_row([1, 0.9, 'cat'])
+        run.log_table('predictions', table)
+        ```
+        """
+        # TODO: [stdlib][P3] Implement table logging
+        expect true  # Placeholder - feature not yet implemented
+
+
+# ============================================================================
+# Hyperparameter Sweeps Tests
+# ============================================================================
+
+describe "Hyperparameter sweeps":
+    """
+    ## Hyperparameter Optimization
+
+    Automated hyperparameter search with Bayesian, grid, and random methods.
+
+    **Status:** Planned - not yet implemented
+    """
+
+    it "supports Bayesian optimization (planned)":
+        """
+        **Given** a sweep configuration with method='bayes'
+        **When** running the sweep agent
+        **Then** uses Bayesian optimization to select parameters
+
+        **Planned API:**
+        ```simple
+        val sweep = Track.Sweep.define(
+            method='bayes',
+            metric={'name': 'val/loss', 'goal': 'minimize'},
+            parameters={'lr': Track.Sweep.LogUniform(1e-5, 1e-2)}
+        )
+        Track.Sweep.agent(sweep_id, function=train, count=20)
+        ```
+        """
+        # TODO: [stdlib][P4] Implement Bayesian optimization
+        expect true  # Placeholder - feature not yet implemented
+
+    it "supports grid search (planned)":
+        """
+        **Given** discrete parameter values
+        **When** using method='grid'
+        **Then** exhaustively searches all combinations
+        """
+        # TODO: [stdlib][P3] Implement grid search
+        expect true  # Placeholder - feature not yet implemented
+
+    it "supports early termination (planned)":
+        """
+        **Given** Hyperband early termination enabled
+        **When** a run performs poorly
+        **Then** terminates early to save resources
+
+        **Planned API:**
+        ```simple
+        val sweep = Track.Sweep.define(
+            early_terminate={'type': 'hyperband', 's': 2, 'eta': 3}
+        )
+        ```
+        """
+        # TODO: [stdlib][P4] Implement early termination
+        expect true  # Placeholder - feature not yet implemented
+
+
+# ============================================================================
+# Model Watching Tests
+# ============================================================================
+
+describe "Model watching":
+    """
+    ## Automatic Model Monitoring
+
+    Automatically log gradients and parameter distributions during training.
+
+    **Status:** Planned - not yet implemented
+    """
+
+    it "logs gradients automatically (planned)":
+        """
+        **Given** a model registered with run.watch()
+        **When** training proceeds
+        **Then** gradient histograms are logged at specified frequency
+
+        **Planned API:**
+        ```simple
+        run.watch(model, log='gradients', log_freq=100)
+        ```
+        """
+        # TODO: [stdlib][P4] Implement gradient logging
+        expect true  # Placeholder - feature not yet implemented
+
+    it "logs parameters automatically (planned)":
+        """
+        **Given** a model registered with log='parameters'
+        **When** training proceeds
+        **Then** parameter distributions are logged
+
+        **Planned API:**
+        ```simple
+        run.watch(model, log='parameters')
+        ```
+        """
+        # TODO: [stdlib][P4] Implement parameter logging
+        expect true  # Placeholder - feature not yet implemented
+
+
+# ============================================================================
 # Implementation Roadmap
-# =====================================================
-
+# ============================================================================
+#
 # Phase 1: Core (v0.1)
 # - [ ] Run lifecycle management
 # - [ ] Local storage (JSONL metrics)
-# - [ ] Basic logging (scalars, histograms)
+# - [ ] Basic logging (scalars)
 # - [ ] Offline mode
-# - [ ] SDN metadata format
-
+#
 # Phase 2: Rich Media (v0.2)
 # - [ ] Image logging
-# - [ ] Video logging
-# - [ ] Audio logging
 # - [ ] Table support
 # - [ ] HTML logging
-
+#
 # Phase 3: Artifacts (v0.3)
 # - [ ] Artifact creation and versioning
 # - [ ] Lineage tracking
-# - [ ] Registry system
-# - [ ] Artifact download/cache
-
+# - [ ] Artifact aliases
+#
 # Phase 4: Sweeps (v0.4)
 # - [ ] Sweep definition
-# - [ ] Bayesian optimization
 # - [ ] Grid/random search
+# - [ ] Bayesian optimization
 # - [ ] Early termination (Hyperband)
-# - [ ] Multi-agent parallelization
-
+#
 # Phase 5: Advanced (v0.5)
 # - [ ] Model watching (gradients/parameters)
-# - [ ] Computation graph logging
 # - [ ] Remote sync
 # - [ ] Web UI for visualization
-# - [ ] Report generation

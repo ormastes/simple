@@ -556,9 +556,9 @@ class BrowserEventBridge impl EventHandler:
     fn handle(self, event: PlatformEvent):
         match event:
             PlatformEvent.Click(id) =>
-                self.element_handlers[id].on_click?()
+                self.element_handlers.get(id)?.on_click()
             PlatformEvent.Input(id, value) =>
-                self.element_handlers[id].on_change?(value)
+                self.element_handlers.get(id)?.on_change(value)
 
 # VSCode: Message passing
 class VscodeEventBridge impl EventHandler:
@@ -566,9 +566,9 @@ class VscodeEventBridge impl EventHandler:
         # Events come from webview postMessage
         match event:
             PlatformEvent.Click(id) =>
-                self.element_handlers[id].on_click?()
+                self.element_handlers.get(id)?.on_click()
             PlatformEvent.Custom(type, data) =>
-                self.custom_handlers[type]?(data)
+                self.custom_handlers.get(type)?.call(data)
 ```
 
 ---

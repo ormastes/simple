@@ -174,13 +174,72 @@ pub class TestDiscovery:
         """Discover tests matching pattern.
 
         Args:
-            pattern: Test name pattern
+            pattern: Test name pattern (supports * wildcard)
 
         Returns:
             Filtered test suites
+
+        Examples:
+            discovery.discover_by_pattern("*_spec")  # All spec files
+            discovery.discover_by_pattern("user*")   # Tests starting with 'user'
+            discovery.discover_by_pattern("*integration*")  # Integration tests
         """
-        # TODO: [stdlib][P3] Filter test suites by pattern
-        self.discover_all()
+        val all_suites = self.discover_all()
+        val filtered: List<TestSuite> = []
+
+        for suite in all_suites:
+            # Filter test files within each suite by pattern
+            val matching_files: List<text> = []
+            for file in suite.test_files:
+                if self.matches_test_pattern(file, pattern):
+                    matching_files.append(file)
+
+            # Only include suite if it has matching files
+            if matching_files.len() > 0:
+                val filtered_suite = TestSuite.new(suite.language, suite.path)
+                filtered_suite.test_files = matching_files
+                filtered_suite.test_count = matching_files.len()
+                filtered.append(filtered_suite)
+
+        filtered
+
+    fn matches_test_pattern(file_path: text, pattern: text): bool =
+        """Check if file path matches test pattern.
+
+        Args:
+            file_path: Full file path
+            pattern: Pattern to match (supports * wildcard)
+
+        Returns:
+            True if matches
+        """
+        # Extract filename from path
+        val filename = self.get_filename_from_path(file_path)
+
+        # Handle wildcard patterns
+        if pattern.starts_with("*") and pattern.ends_with("*"):
+            # *substring* - matches anywhere
+            val substr = pattern[1:pattern.len()-1]
+            return filename.contains(substr) or file_path.contains(substr)
+        elif pattern.starts_with("*"):
+            # *suffix
+            val suffix = pattern[1:]
+            return filename.ends_with(suffix)
+        elif pattern.ends_with("*"):
+            # prefix*
+            val prefix = pattern[0:pattern.len()-1]
+            return filename.starts_with(prefix)
+        else:
+            # Exact match or substring
+            return filename.contains(pattern) or file_path.contains(pattern)
+
+    fn get_filename_from_path(path: text): text =
+        """Extract filename from a file path."""
+        val last_slash = path.rfind("/")
+        if last_slash >= 0:
+            path[last_slash+1:]
+        else:
+            path
 
     fn discover_simple_tests(): List<TestSuite> =
         """Discover Simple language tests.
@@ -219,12 +278,118 @@ pub class TestDiscovery:
         val suites: List<TestSuite> = []
 
         for cargo_file in cargo_files:
+            val project_dir = self.get_parent_directory(cargo_file)
             val suite = TestSuite.new(Language::Rust, cargo_file)
-            # TODO: [stdlib][P3] Count tests in project
-            suite.test_count = 0
+
+            # Count tests by scanning for #[test] attributes in .rs files
+            val test_count = self.count_rust_tests_in_directory(project_dir)
+            suite.test_count = test_count
+
+            # Find test files
+            val test_files = self.find_rust_test_files(project_dir)
+            suite.test_files = test_files
+
             suites.append(suite)
 
         suites
+
+    fn get_parent_directory(file_path: text): text =
+        """Get parent directory of a file path."""
+        val last_slash = file_path.rfind("/")
+        if last_slash >= 0:
+            file_path[0:last_slash]
+        else:
+            "."
+
+    fn count_rust_tests_in_directory(dir: text): i32 =
+        """Count #[test] attributes in Rust files.
+
+        Args:
+            dir: Directory to scan
+
+        Returns:
+            Number of tests found
+        """
+        @extern("runtime", "rt_file_read")
+        fn _rt_file_read(path_ptr: &u8, path_len: u64) -> text
+
+        var count: i32 = 0
+
+        # Find all .rs files
+        val rs_files = self.find_files_with_extension(dir, ".rs")
+
+        for file in rs_files:
+            val content = _rt_file_read(file.ptr(), file.len())
+            # Count #[test] occurrences
+            count += self.count_substring(content, "#[test]")
+
+        count
+
+    fn count_substring(text: text, substring: text): i32 =
+        """Count occurrences of substring in text."""
+        var count: i32 = 0
+        var pos: i32 = 0
+
+        while pos < text.len():
+            val found = text[pos:].find(substring)
+            if found >= 0:
+                count += 1
+                pos += found + substring.len()
+            else:
+                break
+
+        count
+
+    fn find_rust_test_files(dir: text): List<text> =
+        """Find Rust files containing tests.
+
+        Args:
+            dir: Directory to scan
+
+        Returns:
+            List of file paths with tests
+        """
+        @extern("runtime", "rt_file_read")
+        fn _rt_file_read(path_ptr: &u8, path_len: u64) -> text
+
+        val test_files: List<text> = []
+
+        # Find all .rs files
+        val rs_files = self.find_files_with_extension(dir, ".rs")
+
+        for file in rs_files:
+            val content = _rt_file_read(file.ptr(), file.len())
+            # Check if file contains #[test] or #[cfg(test)]
+            if content.contains("#[test]") or content.contains("#[cfg(test)]"):
+                test_files.append(file)
+
+        test_files
+
+    fn find_files_with_extension(dir: text, extension: text): List<text> =
+        """Find files with given extension recursively."""
+        val results: List<text> = []
+        self.find_files_with_extension_recursive(dir, extension, results)
+        results
+
+    fn find_files_with_extension_recursive(dir: text, extension: text, results: List<text>):
+        """Recursively find files with given extension."""
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    val name = entry.name() as text
+                    val path = entry.path() as text
+
+                    match entry.file_type():
+                        FileType::File:
+                            if name.ends_with(extension):
+                                results.append(path)
+                        FileType::Directory:
+                            if not self.should_skip_dir(name):
+                                self.find_files_with_extension_recursive(path, extension, results)
+                        _:
+                            pass
+            Err(_):
+                pass
 
     fn discover_python_tests(): List<TestSuite> =
         """Discover Python tests.

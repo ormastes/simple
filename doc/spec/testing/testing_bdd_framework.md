@@ -264,11 +264,11 @@ context_def :with_database:
 describe "AdminDashboard":
     context :as_admin:
         it "shows admin panel":
-            expect page.has_selector?(".admin-panel")
+            expect page.has_selector(".admin-panel")
 
     context_compose :as_admin, :with_database:
         it "loads from database":
-            expect user.data.persisted?
+            expect user.data.is_persisted()
 ```
 
 **Keywords:**

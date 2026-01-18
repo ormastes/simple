@@ -11,6 +11,7 @@ pub class TestFilter:
     pub file_patterns: List<text>
     pub tag_filters: List<text>
     pub changed_files_only: bool
+    pub changed_files: List<text>
 
     pub fn new(): TestFilter =
         """Create empty test filter.
@@ -32,7 +33,8 @@ pub class TestFilter:
             language: none,
             file_patterns: [],
             tag_filters: [],
-            changed_files_only: false
+            changed_files_only: false,
+            changed_files: []
         }
 
     pub fn has_filters(self): bool =
@@ -162,7 +164,7 @@ pub class TestFilter:
             # Only run tests covering changed code
         """
         self.changed_files_only = true
-        # TODO: [stdlib][P3] Use dependency graph to find affected tests
+        self.changed_files = changed_files
 
     pub fn apply(self, suites: List<TestSuite>): List<TestSuite> =
         """Apply filter to test suites.
@@ -391,7 +393,10 @@ pub class TestFilter:
 # Smart test selection - select tests based on code changes
 pub class SmartTestSelector:
     pub dependency_graph: Dict<text, List<text>>
+    pub reverse_deps: Dict<text, List<text>>
     pub test_coverage: Dict<text, List<text>>
+    pub test_files: List<text>
+    pub verbose: bool
 
     pub fn new(): SmartTestSelector =
         """Create smart test selector.
@@ -411,18 +416,238 @@ pub class SmartTestSelector:
         """
         SmartTestSelector {
             dependency_graph: {},
-            test_coverage: {}
+            reverse_deps: {},
+            test_coverage: {},
+            test_files: [],
+            verbose: false
         }
+
+    pub fn set_verbose(self, enabled: bool):
+        """Enable verbose logging."""
+        self.verbose = enabled
 
     pub fn analyze_project(self, root: text):
         """Analyze project to build dependency graph and coverage.
 
         Args:
             root: Project root
+
+        This builds:
+        1. dependency_graph: file -> [files it imports]
+        2. reverse_deps: file -> [files that import it]
+        3. test_coverage: file -> [tests that cover it]
         """
-        # TODO: [stdlib][P3] Build dependency graph
-        # TODO: [stdlib][P3] Analyze test coverage (which tests cover which files)
-        pass
+        @extern("runtime", "rt_file_read")
+        fn _rt_file_read(path_ptr: &u8, path_len: u64) -> text
+
+        if self.verbose:
+            print("Analyzing project at {root}...")
+
+        # Find all source files
+        val source_files = self.find_source_files(root)
+
+        if self.verbose:
+            print("Found {source_files.len()} source files")
+
+        # Build dependency graph by parsing imports
+        for file in source_files:
+            val content = _rt_file_read(file.ptr(), file.len())
+            val imports = self.parse_imports(content, root)
+            self.dependency_graph[file] = imports
+
+            # Build reverse dependency graph
+            for imported in imports:
+                if not self.reverse_deps.contains_key(imported):
+                    self.reverse_deps[imported] = []
+                self.reverse_deps[imported].append(file)
+
+        # Identify test files and build coverage mapping
+        self.test_files = self.identify_test_files(source_files)
+
+        if self.verbose:
+            print("Found {self.test_files.len()} test files")
+
+        # Build test coverage: map each source file to tests that cover it
+        for test_file in self.test_files:
+            # A test covers: itself + its direct imports + transitive imports
+            val covered_files = self.get_transitive_deps(test_file)
+            covered_files.append(test_file)
+
+            for covered in covered_files:
+                if not self.test_coverage.contains_key(covered):
+                    self.test_coverage[covered] = []
+                self.test_coverage[covered].append(test_file)
+
+        if self.verbose:
+            print("Dependency analysis complete")
+
+    fn find_source_files(root: text): List<text> =
+        """Find all source files in project."""
+        import host.async_nogc_mut.io.fs
+        import host.common.io.types.{FileType, DirPath}
+
+        val files: List<text> = []
+        self.find_source_files_recursive(root, files)
+        files
+
+    fn find_source_files_recursive(dir: text, results: List<text>):
+        """Recursively find source files."""
+        import host.async_nogc_mut.io.fs
+        import host.common.io.types.{FileType, DirPath}
+
+        match fs.read_dir(dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    val name = entry.name() as text
+                    val path = entry.path() as text
+
+                    match entry.file_type():
+                        FileType::File:
+                            # Include source files by extension
+                            if name.ends_with(".spl") or name.ends_with(".rs") or
+                               name.ends_with(".py") or name.ends_with(".ts") or
+                               name.ends_with(".js"):
+                                results.append(path)
+                        FileType::Directory:
+                            # Skip common non-source directories
+                            if not self.should_skip_directory(name):
+                                self.find_source_files_recursive(path, results)
+                        _:
+                            pass
+            Err(_):
+                pass
+
+    fn should_skip_directory(name: text): bool =
+        """Check if directory should be skipped."""
+        name == "node_modules" or
+        name == "target" or
+        name == "__pycache__" or
+        name == ".git" or
+        name == ".venv" or
+        name == "venv" or
+        name == "build" or
+        name == "dist" or
+        name.starts_with(".")
+
+    fn parse_imports(content: text, root: text): List<text> =
+        """Parse import statements from source code.
+
+        Supports:
+        - Simple: use module.submodule, import module
+        - Rust: use crate::module, mod module
+        - Python: import module, from module import
+        - TypeScript/JS: import { } from 'module'
+        """
+        val imports: List<text> = []
+
+        for line in content.lines():
+            val trimmed = line.trim()
+
+            # Simple language imports
+            if trimmed.starts_with("use ") or trimmed.starts_with("import "):
+                val module = self.extract_module_name(trimmed)
+                if not module.is_empty():
+                    val resolved = self.resolve_module_path(module, root)
+                    if not resolved.is_empty():
+                        imports.append(resolved)
+
+            # Python from imports
+            elif trimmed.starts_with("from "):
+                val module = self.extract_from_import(trimmed)
+                if not module.is_empty():
+                    val resolved = self.resolve_module_path(module, root)
+                    if not resolved.is_empty():
+                        imports.append(resolved)
+
+        imports
+
+    fn extract_module_name(line: text): text =
+        """Extract module name from import line."""
+        # Handle: use module.path, import module.path
+        val parts = line.split(" ")
+        if parts.len() >= 2:
+            val module_part = parts[1]
+            # Remove trailing punctuation
+            val cleaned = module_part.trim_end_matches(";").trim_end_matches(":")
+            # Convert dots to path separator
+            return cleaned.replace(".", "/")
+        ""
+
+    fn extract_from_import(line: text): text =
+        """Extract module from 'from X import Y' statement."""
+        # Handle: from module import something
+        val parts = line.split(" ")
+        if parts.len() >= 2:
+            return parts[1].replace(".", "/")
+        ""
+
+    fn resolve_module_path(module: text, root: text): text =
+        """Resolve module name to file path."""
+        @extern("runtime", "rt_file_exists")
+        fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
+
+        # Try different extensions
+        val extensions = [".spl", ".rs", ".py", ".ts", ".js"]
+
+        for ext in extensions:
+            val path = "{root}/{module}{ext}"
+            if _rt_file_exists(path.ptr(), path.len()):
+                return path
+
+            # Also try with /mod or __init__ for directories
+            val dir_path = "{root}/{module}"
+            val mod_path = "{dir_path}/mod{ext}"
+            if _rt_file_exists(mod_path.ptr(), mod_path.len()):
+                return mod_path
+
+        ""
+
+    fn identify_test_files(files: List<text>): List<text> =
+        """Identify which files are test files."""
+        val test_files: List<text> = []
+
+        for file in files:
+            val filename = self.get_filename(file)
+            # Common test file patterns
+            if filename.ends_with("_test.spl") or filename.ends_with("_spec.spl") or
+               filename.starts_with("test_") or filename.ends_with("_test.rs") or
+               filename.ends_with("_test.py") or filename.ends_with(".test.ts") or
+               filename.ends_with(".spec.ts") or filename.ends_with(".test.js") or
+               filename.ends_with(".spec.js"):
+                test_files.append(file)
+
+        test_files
+
+    fn get_filename(path: text): text =
+        """Extract filename from path."""
+        val last_slash = path.rfind("/")
+        if last_slash >= 0:
+            path[last_slash+1:]
+        else:
+            path
+
+    fn get_transitive_deps(file: text): List<text> =
+        """Get all transitive dependencies of a file."""
+        val visited: Dict<text, bool> = {}
+        val result: List<text> = []
+        self.collect_transitive_deps(file, visited, result)
+        result
+
+    fn collect_transitive_deps(file: text, visited: Dict<text, bool>, result: List<text>):
+        """Recursively collect transitive dependencies."""
+        if visited.contains_key(file):
+            return
+
+        visited[file] = true
+
+        match self.dependency_graph.get(file):
+            some(deps):
+                for dep in deps:
+                    if not visited.contains_key(dep):
+                        result.append(dep)
+                        self.collect_transitive_deps(dep, visited, result)
+            none:
+                pass
 
     pub fn select_tests(self, changed_files: List<text>): List<text> =
         """Select tests affected by changed files.
@@ -441,18 +666,58 @@ pub class SmartTestSelector:
         """
         val affected: List<text> = []
 
-        # Find tests covering changed files directly
-        for file in changed_files:
+        # Find all affected files (changed + dependents)
+        val all_affected_files = self.get_affected_files(changed_files)
+
+        if self.verbose:
+            print("Changed files affect {all_affected_files.len()} files total")
+
+        # Find tests covering affected files
+        for file in all_affected_files:
             match self.test_coverage.get(file):
                 some(tests):
                     affected.extend(tests)
                 none:
                     pass
 
-        # TODO: [stdlib][P3] Find tests covering transitive dependencies
+        # Also include changed test files directly
+        for file in changed_files:
+            if self.test_files.contains(file):
+                affected.append(file)
 
         # Deduplicate
         self.deduplicate(affected)
+
+    fn get_affected_files(changed_files: List<text>): List<text> =
+        """Get all files affected by changes (including transitive dependents)."""
+        val affected: List<text> = []
+        val visited: Dict<text, bool> = {}
+
+        for file in changed_files:
+            self.collect_reverse_transitive_deps(file, visited, affected)
+
+        # Include the changed files themselves
+        for file in changed_files:
+            if not visited.contains_key(file):
+                affected.append(file)
+
+        affected
+
+    fn collect_reverse_transitive_deps(file: text, visited: Dict<text, bool>, result: List<text>):
+        """Collect files that depend on this file (transitively)."""
+        if visited.contains_key(file):
+            return
+
+        visited[file] = true
+        result.append(file)
+
+        # Find files that import this file
+        match self.reverse_deps.get(file):
+            some(dependents):
+                for dependent in dependents:
+                    self.collect_reverse_transitive_deps(dependent, visited, result)
+            none:
+                pass
 
     fn deduplicate(list: List<text>): List<text> =
         """Remove duplicates from list.

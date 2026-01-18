@@ -266,47 +266,224 @@ impl McpTooling:
     # #1264: Task progress monitoring
     pub fn get_task_progress(self, task_id: &str) -> Result<TaskProgress, ToolingError>:
         if val Some(task) = self.task_manager.running_tasks.get(task_id):
+            val elapsed = current_timestamp() - task.start_time
+
+            # Calculate progress percentage based on task type and elapsed time
+            val percentage = self.calculate_task_progress(task, elapsed)
+
             return Ok(TaskProgress {
                 task_id: task_id.to_string(),
                 status: task.status,
-                elapsed: current_timestamp() - task.start_time,
-                percentage: 0  # TODO: [stdlib][P3] Calculate actual progress
+                elapsed: elapsed,
+                percentage: percentage
             })
         return Err(ToolingError::TaskNotFound(task_id.to_string()))
 
+    fn calculate_task_progress(task: &Task, elapsed: u64) -> u8:
+        # Calculate progress based on task type
+        match task.task_type:
+            TaskType::Build:
+                # Build progress: estimate based on typical build time (30s)
+                val estimated_duration: u64 = 30000  # 30 seconds
+                val progress = (elapsed * 100 / estimated_duration).min(95) as u8
+                return progress
+            TaskType::Test:
+                # Test progress: if we have test count, calculate actual progress
+                if task.total_items > 0 and task.completed_items > 0:
+                    return ((task.completed_items * 100) / task.total_items) as u8
+                # Otherwise estimate based on time
+                val estimated_duration: u64 = 60000  # 60 seconds
+                return (elapsed * 100 / estimated_duration).min(95) as u8
+            TaskType::Deploy:
+                # Deploy progress: stage-based (5 stages)
+                val stages = ["Preparing", "Building", "Pushing", "Deploying", "Verifying"]
+                for (i, stage) in stages.iter().enumerate():
+                    if task.current_stage == stage:
+                        return ((i + 1) * 20) as u8
+                return 10
+            _:
+                # Unknown task type: estimate based on time
+                val estimated_duration: u64 = 30000
+                return (elapsed * 100 / estimated_duration).min(95) as u8
+
     # #1265: Build artifact inspection
     pub fn inspect_artifacts(self, build_id: &str) -> Result<Array<Artifact>, ToolingError>:
-        # TODO: [stdlib][P3] List build artifacts
-        return Ok([])
+        # Find build artifacts in the build output directory
+        import host.async_nogc_mut.io.fs
+        import host.common.io.types.{FileType, DirPath}
+
+        val artifacts: Array<Artifact> = []
+
+        # Check build output directory
+        val build_dir = "target/{build_id}"
+
+        match fs.read_dir(build_dir as DirPath):
+            Ok(entries):
+                for entry in entries:
+                    val name = entry.name() as text
+                    val path = entry.path() as text
+
+                    match entry.file_type():
+                        FileType::File:
+                            # Determine artifact type from extension
+                            val artifact_type = self.infer_artifact_type(name)
+                            val size = fs.file_size(path).unwrap_or(0)
+
+                            artifacts.push(Artifact {
+                                name: name,
+                                path: path,
+                                artifact_type: artifact_type,
+                                size: size as u64,
+                                created_at: current_timestamp()
+                            })
+                        _:
+                            pass
+            Err(_):
+                # Build directory doesn't exist or can't be read
+                pass
+
+        return Ok(artifacts)
+
+    fn infer_artifact_type(filename: text) -> text:
+        # Infer artifact type from file extension
+        if filename.ends_with(".exe") or filename.ends_with(""):
+            return "executable"
+        elif filename.ends_with(".so") or filename.ends_with(".dll") or filename.ends_with(".dylib"):
+            return "library"
+        elif filename.ends_with(".a") or filename.ends_with(".lib"):
+            return "static_library"
+        elif filename.ends_with(".wasm"):
+            return "wasm"
+        elif filename.ends_with(".js"):
+            return "javascript"
+        elif filename.ends_with(".map"):
+            return "sourcemap"
+        elif filename.ends_with(".d.ts"):
+            return "types"
+        else:
+            return "other"
 
     # #1266: Test result visualization
     pub fn visualize_test_results(self, test_run_id: &str) -> Result<TestVisualization, ToolingError>:
-        # TODO: [stdlib][P3] Generate test result visualization
-        return Ok(TestVisualization {
-            total: 0,
-            passed: 0,
-            failed: 0,
-            skipped: 0,
-            duration_ms: 0
-        })
+        # Load test results from test run data
+        if val Some(test_run) = self.task_manager.test_runs.get(test_run_id):
+            var passed = 0
+            var failed = 0
+            var skipped = 0
+            var total_duration: u64 = 0
+
+            for result in test_run.results:
+                match result.status:
+                    TestStatus::Passed:
+                        passed += 1
+                    TestStatus::Failed:
+                        failed += 1
+                    TestStatus::Skipped:
+                        skipped += 1
+                total_duration += result.duration_ms
+
+            return Ok(TestVisualization {
+                total: passed + failed + skipped,
+                passed: passed,
+                failed: failed,
+                skipped: skipped,
+                duration_ms: total_duration,
+                slowest_tests: test_run.get_slowest_tests(5),
+                failure_summary: test_run.get_failure_summary()
+            })
+
+        return Err(ToolingError::TaskNotFound(test_run_id.to_string()))
 
     # #1267: Deployment status tracking
     pub fn get_deployment_status(self, deployment_id: &str) -> Result<DeploymentStatus, ToolingError>:
-        # TODO: [stdlib][P3] Get deployment status
-        return Ok(DeploymentStatus {
-            id: deployment_id.to_string(),
-            stage: "Deployed".to_string(),
-            health: "Healthy".to_string()
-        })
+        # Check deployment status from task manager
+        if val Some(deployment) = self.task_manager.deployments.get(deployment_id):
+            val health = self.check_deployment_health(deployment)
+            return Ok(DeploymentStatus {
+                id: deployment_id.to_string(),
+                stage: deployment.current_stage.to_string(),
+                health: health,
+                started_at: deployment.started_at,
+                completed_at: deployment.completed_at,
+                version: deployment.version,
+                environment: deployment.environment
+            })
+
+        # Fallback: check if it's a completed deployment
+        if val Some(history) = self.task_manager.deployment_history.get(deployment_id):
+            return Ok(DeploymentStatus {
+                id: deployment_id.to_string(),
+                stage: "Completed".to_string(),
+                health: history.final_health,
+                started_at: history.started_at,
+                completed_at: history.completed_at,
+                version: history.version,
+                environment: history.environment
+            })
+
+        return Err(ToolingError::TaskNotFound(deployment_id.to_string()))
+
+    fn check_deployment_health(deployment: &Deployment) -> text:
+        # Check health based on deployment metrics
+        if deployment.error_count > 0:
+            return "Unhealthy"
+        elif deployment.warning_count > 0:
+            return "Degraded"
+        else:
+            return "Healthy"
 
     # #1268: Error recovery & retry
     pub fn retry_task(self, task_id: &str) -> Result<TaskId, ToolingError>:
-        # TODO: [stdlib][P3] Retry failed task
-        return self.generate_task_id_result()
+        # Find the failed task
+        if val Some(task) = self.task_manager.failed_tasks.get(task_id):
+            # Create a new task with same configuration
+            val new_task_id = self.generate_task_id()
+
+            val retry_task = Task {
+                id: new_task_id.clone(),
+                task_type: task.task_type.clone(),
+                config: task.config.clone(),
+                status: TaskStatus::Pending,
+                start_time: 0,
+                retry_count: task.retry_count + 1,
+                original_task_id: Some(task_id.to_string()),
+                total_items: task.total_items,
+                completed_items: 0,
+                current_stage: "".to_string()
+            }
+
+            # Queue the retry task
+            self.task_manager.running_tasks.insert(new_task_id.clone(), retry_task)
+
+            # Start the task
+            self.task_manager.start_task(new_task_id.clone())
+
+            return Ok(new_task_id)
+
+        return Err(ToolingError::TaskNotFound(task_id.to_string()))
 
     # #1269: Pipeline configuration
     pub fn configure_pipeline(self, config: PipelineConfig) -> Result<(), ToolingError>:
-        # TODO: [stdlib][P3] Configure CI/CD pipeline
+        # Validate pipeline configuration
+        if config.stages.is_empty():
+            return Err(ToolingError::InvalidConfig("Pipeline must have at least one stage".to_string()))
+
+        # Store pipeline configuration
+        self.task_manager.pipeline_config = Some(config.clone())
+
+        # Create pipeline stage tasks
+        for (i, stage) in config.stages.iter().enumerate():
+            val stage_task = PipelineStage {
+                name: stage.name.clone(),
+                order: i as u32,
+                depends_on: stage.depends_on.clone(),
+                commands: stage.commands.clone(),
+                timeout_ms: stage.timeout_ms.unwrap_or(300000),  # 5 min default
+                retry_count: stage.retry_count.unwrap_or(0),
+                continue_on_error: stage.continue_on_error.unwrap_or(false)
+            }
+            self.task_manager.pipeline_stages.push(stage_task)
+
         return Ok(())
 
     # #1270-1279: Additional tooling features

@@ -1049,6 +1049,34 @@ impl ElementProcessor:
         return "ElementProcessor: {self.vertex_count()} vertices, {self.triangle_count()} triangles"
 
     # =========================================================================
+    # Style Helpers
+    # =========================================================================
+
+    fn has_background(elem: &Element) -> bool:
+        """Check if element has a background color style."""
+        return elem.styles.contains_key("background-color")
+
+    fn get_bg_color(elem: &Element) -> Color:
+        """Get background color from element styles."""
+        if val Some(color_str) = elem.styles.get("background-color"):
+            # Try to parse as hex color
+            if color_str.starts_with("#"):
+                match Color::hex(color_str):
+                    case Ok(c): return c
+                    case Err(_): pass
+            # Named colors
+            match color_str.to_lowercase().as_str():
+                case "black": return Color::rgb(0, 0, 0)
+                case "white": return Color::rgb(255, 255, 255)
+                case "red": return Color::rgb(255, 0, 0)
+                case "green": return Color::rgb(0, 255, 0)
+                case "blue": return Color::rgb(0, 0, 255)
+                case "gray" | "grey": return Color::rgb(128, 128, 128)
+                case _: pass
+        # Default: white background
+        return Color::rgb(255, 255, 255)
+
+    # =========================================================================
     # Constructor
     # =========================================================================
 
@@ -1094,36 +1122,297 @@ impl ElementProcessor:
             self.process_element(child, layout)
 
     fn emit_rect(bounds: Rect, color: Color):
-        # TODO: [ui][P3] Generate quad vertices (2 triangles)
-        # - Add 4 vertices with positions and color
-        # - Add 6 indices (0,1,2, 2,3,0)
-        # - Add draw call with SolidColorPipeline
-        pass
+        # Get base vertex index for indices
+        val base_vertex = self.vertex_builder.vertices.len() as u32
+        val base_index = self.vertex_builder.indices.len() as u32
+        val color_packed = color.rgba
+
+        # Add 4 vertices: top-left, top-right, bottom-right, bottom-left
+        # Vertex positions
+        val x0 = bounds.x
+        val y0 = bounds.y
+        val x1 = bounds.x + bounds.width
+        val y1 = bounds.y + bounds.height
+
+        # Top-left vertex
+        self.vertex_builder.vertices.push(Vertex {
+            position: (x0, y0),
+            uv: (0.0, 0.0),
+            color: color_packed
+        })
+        # Top-right vertex
+        self.vertex_builder.vertices.push(Vertex {
+            position: (x1, y0),
+            uv: (1.0, 0.0),
+            color: color_packed
+        })
+        # Bottom-right vertex
+        self.vertex_builder.vertices.push(Vertex {
+            position: (x1, y1),
+            uv: (1.0, 1.0),
+            color: color_packed
+        })
+        # Bottom-left vertex
+        self.vertex_builder.vertices.push(Vertex {
+            position: (x0, y1),
+            uv: (0.0, 1.0),
+            color: color_packed
+        })
+
+        # Add 6 indices for 2 triangles (CCW winding)
+        # Triangle 1: top-left, top-right, bottom-right
+        self.vertex_builder.indices.push(base_vertex + 0)
+        self.vertex_builder.indices.push(base_vertex + 1)
+        self.vertex_builder.indices.push(base_vertex + 2)
+        # Triangle 2: bottom-right, bottom-left, top-left
+        self.vertex_builder.indices.push(base_vertex + 2)
+        self.vertex_builder.indices.push(base_vertex + 3)
+        self.vertex_builder.indices.push(base_vertex + 0)
+
+        # Add draw call
+        self.draw_list.draw_calls.push(DrawCall {
+            pipeline_type: PipelineType::SolidColor,
+            vertex_offset: base_vertex,
+            vertex_count: 4,
+            index_offset: base_index,
+            index_count: 6,
+            texture_id: None,
+            scissor: None
+        })
 
     fn emit_rounded_rect(bounds: Rect, radius: f32, elem: &Element):
-        # TODO: [ui][P3] Generate quad with UVs for SDF shader
-        # - Add vertices with UVs (0,0) to (1,1)
-        # - Add draw call with RoundedRectPipeline
-        # - Store radius in push constants
-        pass
+        # Get base vertex/index offsets
+        val base_vertex = self.vertex_builder.vertices.len() as u32
+        val base_index = self.vertex_builder.indices.len() as u32
+        val color = self.get_bg_color(elem)
+        val color_packed = color.rgba
+
+        # For SDF rounded rect, we need normalized coordinates
+        # UVs will be used by the shader to compute distance from edges
+        val x0 = bounds.x
+        val y0 = bounds.y
+        val x1 = bounds.x + bounds.width
+        val y1 = bounds.y + bounds.height
+
+        # Compute normalized radius for shader (as fraction of smaller dimension)
+        val min_dim = if bounds.width < bounds.height: bounds.width else: bounds.height
+        val norm_radius = if min_dim > 0.0: radius / min_dim else: 0.0
+
+        # Top-left vertex - UVs encode normalized position for SDF
+        self.vertex_builder.vertices.push(Vertex {
+            position: (x0, y0),
+            uv: (0.0, 0.0),
+            color: color_packed
+        })
+        # Top-right vertex
+        self.vertex_builder.vertices.push(Vertex {
+            position: (x1, y0),
+            uv: (1.0, 0.0),
+            color: color_packed
+        })
+        # Bottom-right vertex
+        self.vertex_builder.vertices.push(Vertex {
+            position: (x1, y1),
+            uv: (1.0, 1.0),
+            color: color_packed
+        })
+        # Bottom-left vertex
+        self.vertex_builder.vertices.push(Vertex {
+            position: (x0, y1),
+            uv: (0.0, 1.0),
+            color: color_packed
+        })
+
+        # Add 6 indices for 2 triangles (CCW winding)
+        self.vertex_builder.indices.push(base_vertex + 0)
+        self.vertex_builder.indices.push(base_vertex + 1)
+        self.vertex_builder.indices.push(base_vertex + 2)
+        self.vertex_builder.indices.push(base_vertex + 2)
+        self.vertex_builder.indices.push(base_vertex + 3)
+        self.vertex_builder.indices.push(base_vertex + 0)
+
+        # Add draw call with RoundedRect pipeline
+        # Note: radius and dimensions should be passed via push constants
+        # when recording commands (see record_commands)
+        self.draw_list.draw_calls.push(DrawCall {
+            pipeline_type: PipelineType::RoundedRect,
+            vertex_offset: base_vertex,
+            vertex_count: 4,
+            index_offset: base_index,
+            index_count: 6,
+            texture_id: None,
+            scissor: Some(Rect {
+                x: bounds.x,
+                y: bounds.y,
+                width: bounds.width,
+                height: bounds.height
+            })
+        })
 
     fn emit_text(bounds: Rect, elem: &Element):
-        # TODO: [ui][P3] Generate quads for each glyph
-        # - Shape text using font metrics
-        # - For each glyph:
-        #   - Get glyph rect from font atlas
-        #   - Generate quad with UVs pointing to atlas
-        # - Add draw call with TextPipeline
-        pass
+        # Get text content from element
+        val text_content = match &elem.text:
+            case Some(t): t
+            case None: return  # No text to render
+
+        if text_content.is_empty():
+            return
+
+        # Get text color from styles (default: black)
+        val text_color = self.get_text_color(elem)
+        val color_packed = text_color.rgba
+
+        # Font metrics (monospace: 8x16 pixels per glyph)
+        val glyph_width: f32 = 8.0
+        val glyph_height: f32 = 16.0
+
+        # Font atlas layout: 16x16 grid (256 ASCII characters)
+        val atlas_cols: f32 = 16.0
+        val atlas_rows: f32 = 16.0
+        val uv_width = 1.0 / atlas_cols
+        val uv_height = 1.0 / atlas_rows
+
+        # Current position (start at top-left of bounds)
+        var x = bounds.x
+        var y = bounds.y
+
+        # Get base indices for batch
+        val base_vertex = self.vertex_builder.vertices.len() as u32
+        val base_index = self.vertex_builder.indices.len() as u32
+        var vertex_count: u32 = 0
+        var index_count: u32 = 0
+
+        # Generate quad for each character
+        for ch in text_content.chars():
+            # Check if we're still within bounds
+            if x + glyph_width > bounds.x + bounds.width:
+                # Line wrap
+                x = bounds.x
+                y = y + glyph_height
+                if y + glyph_height > bounds.y + bounds.height:
+                    break  # No more space
+
+            # Skip newlines and handle them
+            if ch == '\n':
+                x = bounds.x
+                y = y + glyph_height
+                continue
+
+            # Compute UV coordinates from character code
+            # ASCII layout in 16x16 grid
+            val char_code = ch as u32
+            val atlas_col = (char_code % 16) as f32
+            val atlas_row = (char_code / 16) as f32
+            val u0 = atlas_col * uv_width
+            val v0 = atlas_row * uv_height
+            val u1 = u0 + uv_width
+            val v1 = v0 + uv_height
+
+            # Glyph quad positions
+            val x0 = x
+            val y0 = y
+            val x1 = x + glyph_width
+            val y1 = y + glyph_height
+
+            # Current vertex index for this quad
+            val quad_base = base_vertex + vertex_count
+
+            # Add 4 vertices for glyph quad
+            self.vertex_builder.vertices.push(Vertex {
+                position: (x0, y0),
+                uv: (u0, v0),
+                color: color_packed
+            })
+            self.vertex_builder.vertices.push(Vertex {
+                position: (x1, y0),
+                uv: (u1, v0),
+                color: color_packed
+            })
+            self.vertex_builder.vertices.push(Vertex {
+                position: (x1, y1),
+                uv: (u1, v1),
+                color: color_packed
+            })
+            self.vertex_builder.vertices.push(Vertex {
+                position: (x0, y1),
+                uv: (u0, v1),
+                color: color_packed
+            })
+
+            # Add 6 indices for 2 triangles
+            self.vertex_builder.indices.push(quad_base + 0)
+            self.vertex_builder.indices.push(quad_base + 1)
+            self.vertex_builder.indices.push(quad_base + 2)
+            self.vertex_builder.indices.push(quad_base + 2)
+            self.vertex_builder.indices.push(quad_base + 3)
+            self.vertex_builder.indices.push(quad_base + 0)
+
+            vertex_count = vertex_count + 4
+            index_count = index_count + 6
+
+            # Advance cursor
+            x = x + glyph_width
+
+        # Add draw call for all text glyphs (batched)
+        if vertex_count > 0:
+            self.draw_list.draw_calls.push(DrawCall {
+                pipeline_type: PipelineType::Text,
+                vertex_offset: base_vertex,
+                vertex_count: vertex_count,
+                index_offset: base_index,
+                index_count: index_count,
+                texture_id: None,  # Font atlas texture ID would go here
+                scissor: None
+            })
+
+    fn get_text_color(elem: &Element) -> Color:
+        """Get text color from element styles."""
+        if val Some(color_str) = elem.styles.get("color"):
+            # Try to parse as hex color
+            if color_str.starts_with("#"):
+                match Color::hex(color_str):
+                    case Ok(c): return c
+                    case Err(_): pass
+            # Named colors
+            match color_str.to_lowercase().as_str():
+                case "black": return Color::rgb(0, 0, 0)
+                case "white": return Color::rgb(255, 255, 255)
+                case "red": return Color::rgb(255, 0, 0)
+                case "green": return Color::rgb(0, 255, 0)
+                case "blue": return Color::rgb(0, 0, 255)
+                case "gray" | "grey": return Color::rgb(128, 128, 128)
+                case _: pass
+        # Default: black text
+        return Color::rgb(0, 0, 0)
 
     fn emit_button(bounds: Rect, elem: &Element):
         # Emit background
         self.emit_rounded_rect(bounds, 4.0, elem)
 
         # Emit label text if present
-        if val Some(text) = &elem.text:
-            # TODO: [ui][P3] Center text in button
-            self.emit_text(bounds, elem)
+        if val Some(text_content) = &elem.text:
+            # Center text in button
+            # Font metrics (must match emit_text)
+            val glyph_width: f32 = 8.0
+            val glyph_height: f32 = 16.0
+
+            # Calculate text dimensions
+            val text_width = text_content.len() as f32 * glyph_width
+            val text_height = glyph_height
+
+            # Calculate centered position
+            val text_x = bounds.x + (bounds.width - text_width) / 2.0
+            val text_y = bounds.y + (bounds.height - text_height) / 2.0
+
+            # Create centered text bounds
+            val text_bounds = Rect {
+                x: text_x,
+                y: text_y,
+                width: text_width,
+                height: text_height
+            }
+
+            self.emit_text(text_bounds, elem)
 
 # =============================================================================
 # Supporting Types
@@ -1297,9 +1586,14 @@ impl ResourceManager:
         }
 
 struct BufferManager:
+    device_handle: u64
     vertex_buffers: Array<Buffer>
     index_buffers: Array<Buffer>
     uniform_buffers: Array<Buffer>
+    # Cached GPU buffer handles for per-frame uploads (triple buffering)
+    gpu_vertex_buffers: Array<u64>
+    gpu_index_buffers: Array<u64>
+    gpu_uniform_buffers: Array<u64>
 
 impl BufferManager:
     # =========================================================================
@@ -1347,17 +1641,130 @@ impl BufferManager:
     # =========================================================================
 
     fn new(device: &VulkanDevice) -> BufferManager:
+        # Pre-allocate GPU buffers for triple buffering (3 frames)
+        var gpu_vertex = Array::with_capacity(3)
+        var gpu_index = Array::with_capacity(3)
+        var gpu_uniform = Array::with_capacity(3)
+
+        # Allocate initial buffers for each frame
+        for i in 0..3:
+            # Vertex buffer: 64KB initial size (enough for ~2600 vertices)
+            val vb = rt_vk_buffer_alloc(device.handle, 65536)
+            gpu_vertex.push(vb)
+
+            # Index buffer: 16KB initial size (enough for ~4000 indices)
+            val ib = rt_vk_buffer_alloc(device.handle, 16384)
+            gpu_index.push(ib)
+
+            # Uniform buffer: 256 bytes (4x4 matrix + extras)
+            val ub = rt_vk_buffer_alloc(device.handle, 256)
+            gpu_uniform.push(ub)
+
         return BufferManager {
+            device_handle: device.handle,
             vertex_buffers: [],
             index_buffers: [],
-            uniform_buffers: []
+            uniform_buffers: [],
+            gpu_vertex_buffers: gpu_vertex,
+            gpu_index_buffers: gpu_index,
+            gpu_uniform_buffers: gpu_uniform
         }
 
     fn upload_draw_list(draw_list: &DrawList, frame_index: usize):
-        # TODO: [ui][P3] Upload vertex data to GPU buffer
-        # TODO: [ui][P3] Upload index data to GPU buffer
-        # TODO: [ui][P3] Upload uniform data (projection matrix)
-        pass
+        # Ensure frame_index is valid (0-2 for triple buffering)
+        val idx = frame_index % 3
+
+        # Upload vertex data
+        if draw_list.vertices.len() > 0:
+            val vertex_buffer = self.gpu_vertex_buffers[idx]
+            if vertex_buffer != 0:
+                # Convert vertices to raw bytes
+                val vertex_data = self.vertices_to_bytes(&draw_list.vertices)
+                rt_vk_buffer_upload(vertex_buffer, vertex_data.as_ptr(), vertex_data.len() as u64)
+
+        # Upload index data
+        if draw_list.indices.len() > 0:
+            val index_buffer = self.gpu_index_buffers[idx]
+            if index_buffer != 0:
+                # Convert indices to raw bytes (u32 array)
+                val index_data = self.indices_to_bytes(&draw_list.indices)
+                rt_vk_buffer_upload(index_buffer, index_data.as_ptr(), index_data.len() as u64)
+
+        # Upload uniform data (projection matrix)
+        val uniform_buffer = self.gpu_uniform_buffers[idx]
+        if uniform_buffer != 0:
+            # Create orthographic projection matrix
+            # For now, use identity - real implementation would compute based on viewport
+            val uniform_data = self.create_projection_uniform()
+            rt_vk_buffer_upload(uniform_buffer, uniform_data.as_ptr(), uniform_data.len() as u64)
+
+    fn vertices_to_bytes(vertices: &Array<Vertex>) -> Array<u8>:
+        # Vertex layout: position (2 x f32), uv (2 x f32), color (u32)
+        # Total: 20 bytes per vertex
+        val bytes_per_vertex: usize = 20
+        val total_size = vertices.len() * bytes_per_vertex
+        var data = Array::with_capacity(total_size)
+
+        for vertex in vertices:
+            # Position x (f32 - 4 bytes)
+            val px_bytes = f32_to_bytes(vertex.position.0)
+            data.extend(&px_bytes)
+
+            # Position y (f32 - 4 bytes)
+            val py_bytes = f32_to_bytes(vertex.position.1)
+            data.extend(&py_bytes)
+
+            # UV u (f32 - 4 bytes)
+            val u_bytes = f32_to_bytes(vertex.uv.0)
+            data.extend(&u_bytes)
+
+            # UV v (f32 - 4 bytes)
+            val v_bytes = f32_to_bytes(vertex.uv.1)
+            data.extend(&v_bytes)
+
+            # Color (u32 - 4 bytes)
+            val color_bytes = u32_to_bytes(vertex.color)
+            data.extend(&color_bytes)
+
+        return data
+
+    fn indices_to_bytes(indices: &Array<u32>) -> Array<u8>:
+        # Each index is u32 (4 bytes)
+        val total_size = indices.len() * 4
+        var data = Array::with_capacity(total_size)
+
+        for index in indices:
+            val index_bytes = u32_to_bytes(*index)
+            data.extend(&index_bytes)
+
+        return data
+
+    fn create_projection_uniform() -> Array<u8>:
+        # Create identity matrix for now (16 floats = 64 bytes)
+        # In a real implementation, this would be an orthographic projection
+        var data = Array::with_capacity(64)
+
+        # Identity 4x4 matrix in column-major order
+        # [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
+        for row in 0..4:
+            for col in 0..4:
+                val value: f32 = if row == col: 1.0 else: 0.0
+                val bytes = f32_to_bytes(value)
+                data.extend(&bytes)
+
+        return data
+
+    fn get_vertex_buffer(frame_index: usize) -> u64:
+        """Get GPU vertex buffer handle for specified frame."""
+        return self.gpu_vertex_buffers[frame_index % 3]
+
+    fn get_index_buffer(frame_index: usize) -> u64:
+        """Get GPU index buffer handle for specified frame."""
+        return self.gpu_index_buffers[frame_index % 3]
+
+    fn get_uniform_buffer(frame_index: usize) -> u64:
+        """Get GPU uniform buffer handle for specified frame."""
+        return self.gpu_uniform_buffers[frame_index % 3]
 
 struct TextRenderer:
     font_atlas: Option<Image>
@@ -1427,6 +1834,25 @@ impl Pipeline:
         """Get summary of pipeline state."""
         val status = if self.is_valid(): "valid" else: "invalid"
         return "Pipeline: type={self.type}, {status}"
+
+# =============================================================================
+# Byte Conversion Utilities
+# =============================================================================
+
+fn f32_to_bytes(value: f32) -> Array<u8>:
+    """Convert f32 to little-endian bytes."""
+    # Use bit representation of f32
+    val bits = value.to_bits()
+    return u32_to_bytes(bits)
+
+fn u32_to_bytes(value: u32) -> Array<u8>:
+    """Convert u32 to little-endian bytes."""
+    var bytes = Array::with_capacity(4)
+    bytes.push((value & 0xFF) as u8)
+    bytes.push(((value >> 8) & 0xFF) as u8)
+    bytes.push(((value >> 16) & 0xFF) as u8)
+    bytes.push(((value >> 24) & 0xFF) as u8)
+    return bytes
 
 # =============================================================================
 # FFI Notes
