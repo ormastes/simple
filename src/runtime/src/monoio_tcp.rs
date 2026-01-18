@@ -199,6 +199,13 @@ pub extern "C" fn monoio_tcp_accept(listener_handle: RuntimeValue) -> RuntimeVal
 /// # Returns
 /// RuntimeValue containing stream handle (index), or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
+pub extern "C" fn monoio_tcp_connect(addr: RuntimeValue) -> RuntimeValue {
+    crate::monoio_direct::rt_monoio_tcp_connect(addr)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
 pub extern "C" fn monoio_tcp_connect(addr: RuntimeValue) -> RuntimeValue {
     // Extract string from RuntimeValue
     let addr_str = match runtime_value_to_string(addr) {
@@ -259,10 +266,6 @@ pub extern "C" fn monoio_tcp_connect(addr: RuntimeValue) -> RuntimeValue {
 /// Read data from a TCP stream into buffer
 /// Feature #1747: Zero-copy TCP read
 ///
-/// NOTE: This function is not fully implemented due to architecture limitations.
-/// Monoio streams are not Send/Sync and cannot be stored across FFI boundaries.
-/// A proper implementation would require a dedicated runtime thread with message passing.
-///
 /// # Arguments
 /// * `stream_handle` - RuntimeValue containing stream handle
 /// * `buffer` - RuntimeValue containing buffer (RuntimeArray)
@@ -271,21 +274,26 @@ pub extern "C" fn monoio_tcp_connect(addr: RuntimeValue) -> RuntimeValue {
 /// # Returns
 /// RuntimeValue containing number of bytes read, or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
+pub extern "C" fn monoio_tcp_read(
+    stream_handle: RuntimeValue,
+    buffer: RuntimeValue,
+    max_len: i64,
+) -> RuntimeValue {
+    crate::monoio_direct::rt_monoio_tcp_read(stream_handle, buffer, max_len)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
 pub extern "C" fn monoio_tcp_read(
     _stream_handle: RuntimeValue,
     _buffer: RuntimeValue,
     _max_len: i64,
 ) -> RuntimeValue {
-    // NOT SUPPORTED: Monoio streams are not Send/Sync and cannot persist across FFI boundary.
-    // See doc/runtime/monoio_limitations.md for architecture explanation and alternatives.
-    //
-    // Recommended alternatives:
-    // 1. Use Simple async/await with monoio types directly (no FFI)
-    // 2. Use std::net::TcpStream for synchronous I/O
-    //
-    // This limitation is architectural and intentional, not a bug to be fixed.
-    tracing::error!("monoio_tcp_read: Not supported - use Simple async/await or std::net");
-    RuntimeValue::from_int(-1) // Error: not supported
+    // NOT SUPPORTED without monoio-direct feature.
+    // Enable monoio-direct feature or use rt_monoio_tcp_read directly.
+    tracing::error!("monoio_tcp_read: Enable monoio-direct feature or use rt_monoio_tcp_read");
+    RuntimeValue::from_int(-1)
 }
 
 /// Write data to a TCP stream from buffer
@@ -294,21 +302,28 @@ pub extern "C" fn monoio_tcp_read(
 /// # Arguments
 /// * `stream_handle` - RuntimeValue containing stream handle
 /// * `buffer` - RuntimeValue containing buffer (RuntimeArray or RuntimeString)
+/// * `len` - Number of bytes to write
 ///
 /// # Returns
 /// RuntimeValue containing number of bytes written, or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
 pub extern "C" fn monoio_tcp_write(
     stream_handle: RuntimeValue,
     buffer: RuntimeValue,
+    len: i64,
 ) -> RuntimeValue {
-    // NOTE: This function is deprecated due to monoio architecture limitations.
-    // Use rt_monoio_tcp_write from monoio_direct.rs instead, which uses
-    // thread-local registry to properly manage stream lifetimes.
-    //
-    // See rt_monoio_tcp_write for the working implementation.
+    crate::monoio_direct::rt_monoio_tcp_write(stream_handle, buffer, len)
+}
 
-    tracing::warn!("monoio_tcp_write: deprecated - use rt_monoio_tcp_write instead");
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
+pub extern "C" fn monoio_tcp_write(
+    _stream_handle: RuntimeValue,
+    _buffer: RuntimeValue,
+    _len: i64,
+) -> RuntimeValue {
+    tracing::error!("monoio_tcp_write: Enable monoio-direct feature or use rt_monoio_tcp_write");
     RuntimeValue::from_int(-1)
 }
 
@@ -321,11 +336,15 @@ pub extern "C" fn monoio_tcp_write(
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
 pub extern "C" fn monoio_tcp_flush(stream_handle: RuntimeValue) -> RuntimeValue {
-    // NOTE: This function is deprecated due to monoio architecture limitations.
-    // Use rt_monoio_tcp_flush from monoio_direct.rs instead.
+    crate::monoio_direct::rt_monoio_tcp_flush(stream_handle)
+}
 
-    tracing::warn!("monoio_tcp_flush: deprecated - use rt_monoio_tcp_flush instead");
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
+pub extern "C" fn monoio_tcp_flush(_stream_handle: RuntimeValue) -> RuntimeValue {
+    tracing::error!("monoio_tcp_flush: Enable monoio-direct feature or use rt_monoio_tcp_flush");
     RuntimeValue::from_int(-1)
 }
 
@@ -339,15 +358,21 @@ pub extern "C" fn monoio_tcp_flush(stream_handle: RuntimeValue) -> RuntimeValue 
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
 pub extern "C" fn monoio_tcp_shutdown(
     stream_handle: RuntimeValue,
     how: i64,
 ) -> RuntimeValue {
-    // NOTE: This function is deprecated due to monoio architecture limitations.
-    // Use rt_monoio_tcp_shutdown from monoio_direct.rs instead.
-    // how: 0=Read, 1=Write, 2=Both
+    crate::monoio_direct::rt_monoio_tcp_shutdown(stream_handle, how)
+}
 
-    tracing::warn!("monoio_tcp_shutdown: deprecated - use rt_monoio_tcp_shutdown instead");
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
+pub extern "C" fn monoio_tcp_shutdown(
+    _stream_handle: RuntimeValue,
+    _how: i64,
+) -> RuntimeValue {
+    tracing::error!("monoio_tcp_shutdown: Enable monoio-direct feature or use rt_monoio_tcp_shutdown");
     RuntimeValue::from_int(-1)
 }
 
@@ -359,12 +384,14 @@ pub extern "C" fn monoio_tcp_shutdown(
 ///
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
-///
-/// # Notes
-/// Due to FFI limitations (streams not Send/Sync), this only removes the
-/// metadata entry. The actual TCP connection was already closed when
-/// the stream was dropped after connect/accept.
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
+pub extern "C" fn monoio_tcp_close(stream_handle: RuntimeValue) -> RuntimeValue {
+    crate::monoio_direct::rt_monoio_tcp_close(stream_handle)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
 pub extern "C" fn monoio_tcp_close(stream_handle: RuntimeValue) -> RuntimeValue {
     let handle = stream_handle.as_int();
 
@@ -394,11 +421,14 @@ pub extern "C" fn monoio_tcp_close(stream_handle: RuntimeValue) -> RuntimeValue 
 ///
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
-///
-/// # Notes
-/// Due to FFI limitations, this only removes the metadata entry.
-/// The actual listener socket is recreated on each accept operation.
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
+pub extern "C" fn monoio_tcp_listener_close(listener_handle: RuntimeValue) -> RuntimeValue {
+    crate::monoio_direct::rt_monoio_tcp_listener_close(listener_handle)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
 pub extern "C" fn monoio_tcp_listener_close(listener_handle: RuntimeValue) -> RuntimeValue {
     let handle = listener_handle.as_int();
 
@@ -429,6 +459,13 @@ pub extern "C" fn monoio_tcp_listener_close(listener_handle: RuntimeValue) -> Ru
 /// # Returns
 /// RuntimeValue containing address string, or nil on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
+pub extern "C" fn monoio_tcp_local_addr(stream_handle: RuntimeValue) -> RuntimeValue {
+    crate::monoio_direct::rt_monoio_tcp_local_addr(stream_handle)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
 pub extern "C" fn monoio_tcp_local_addr(stream_handle: RuntimeValue) -> RuntimeValue {
     let handle = stream_handle.as_int();
 
@@ -464,6 +501,13 @@ pub extern "C" fn monoio_tcp_local_addr(stream_handle: RuntimeValue) -> RuntimeV
 /// # Returns
 /// RuntimeValue containing address string, or nil on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
+pub extern "C" fn monoio_tcp_peer_addr(stream_handle: RuntimeValue) -> RuntimeValue {
+    crate::monoio_direct::rt_monoio_tcp_peer_addr(stream_handle)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
 pub extern "C" fn monoio_tcp_peer_addr(stream_handle: RuntimeValue) -> RuntimeValue {
     let handle = stream_handle.as_int();
 
@@ -500,14 +544,21 @@ pub extern "C" fn monoio_tcp_peer_addr(stream_handle: RuntimeValue) -> RuntimeVa
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
 pub extern "C" fn monoio_tcp_set_nodelay(
     stream_handle: RuntimeValue,
     nodelay: i64,
 ) -> RuntimeValue {
-    // NOTE: This function is deprecated due to monoio architecture limitations.
-    // Use rt_monoio_tcp_set_nodelay from monoio_direct.rs instead.
+    crate::monoio_direct::rt_monoio_tcp_set_nodelay(stream_handle, nodelay)
+}
 
-    tracing::warn!("monoio_tcp_set_nodelay: deprecated - use rt_monoio_tcp_set_nodelay instead");
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
+pub extern "C" fn monoio_tcp_set_nodelay(
+    _stream_handle: RuntimeValue,
+    _nodelay: i64,
+) -> RuntimeValue {
+    tracing::error!("monoio_tcp_set_nodelay: Enable monoio-direct feature or use rt_monoio_tcp_set_nodelay");
     RuntimeValue::from_int(-1)
 }
 
@@ -521,14 +572,21 @@ pub extern "C" fn monoio_tcp_set_nodelay(
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
 pub extern "C" fn monoio_tcp_set_keepalive(
     stream_handle: RuntimeValue,
     keepalive_secs: i64,
 ) -> RuntimeValue {
-    // NOTE: This function is deprecated due to monoio architecture limitations.
-    // Use rt_monoio_tcp_set_keepalive from monoio_direct.rs instead.
+    crate::monoio_direct::rt_monoio_tcp_set_keepalive(stream_handle, keepalive_secs)
+}
 
-    tracing::warn!("monoio_tcp_set_keepalive: deprecated - use rt_monoio_tcp_set_keepalive instead");
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
+pub extern "C" fn monoio_tcp_set_keepalive(
+    _stream_handle: RuntimeValue,
+    _keepalive_secs: i64,
+) -> RuntimeValue {
+    tracing::error!("monoio_tcp_set_keepalive: Enable monoio-direct feature or use rt_monoio_tcp_set_keepalive");
     RuntimeValue::from_int(-1)
 }
 
@@ -536,9 +594,10 @@ pub extern "C" fn monoio_tcp_set_keepalive(
 mod tests {
     use super::*;
 
+    #[cfg(not(feature = "monoio-direct"))]
     #[test]
     fn test_tcp_structs() {
-        use std::net::{IpAddr, Ipv4Addr};
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
 
@@ -551,14 +610,14 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_listen_stub() {
+    fn test_tcp_listen_invalid_arg() {
         let result = monoio_tcp_listen(RuntimeValue::NIL);
-        assert_eq!(result.as_int(), -1);
+        assert!(result.as_int() < 0); // Should return error for invalid arg
     }
 
     #[test]
-    fn test_tcp_connect_stub() {
+    fn test_tcp_connect_invalid_arg() {
         let result = monoio_tcp_connect(RuntimeValue::NIL);
-        assert_eq!(result.as_int(), -1);
+        assert!(result.as_int() < 0); // Should return error for invalid arg
     }
 }
