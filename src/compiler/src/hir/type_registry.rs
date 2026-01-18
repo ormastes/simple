@@ -217,6 +217,10 @@ impl TypeRegistry {
                 matches!(kind, PointerKind::Borrow) && self.is_snapshot_safe(*inner)
             }
 
+            // Promise types are snapshot-safe if their inner type is
+            // (snapshotting a promise captures its eventual value)
+            Some(HirType::Promise { inner }) => self.is_snapshot_safe(*inner),
+
             // Functions and unknown types are not snapshot-safe
             Some(HirType::Function { .. }) => false,
             Some(HirType::Unknown) => false,

@@ -583,7 +583,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore] // Requires display server
     fn test_window_manager_creation() {
         let instance = VulkanInstance::get_or_init().unwrap();
         let manager = WindowManager::new(instance);

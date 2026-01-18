@@ -205,6 +205,10 @@ impl Lowerer {
         // Fifth pass: validate sync→async calls (async validation design decision #3)
         self.validate_sync_async_calls()?;
 
+        // Sixth pass: apply Promise auto-wrapping for async functions (design decision #2)
+        let mut type_checker = crate::type_check::TypeChecker::new();
+        type_checker.apply_promise_wrapping(&mut self.module)?;
+
         Ok(self.module)
     }
 

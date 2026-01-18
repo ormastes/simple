@@ -39,7 +39,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_device_create_free() {
         let handle = rt_vk_device_create();
         if handle != 0 {
@@ -48,7 +47,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_buffer_lifecycle() {
         let device = rt_vk_device_create();
         if device == 0 {
@@ -63,7 +61,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_buffer_upload_download() {
         let device = rt_vk_device_create();
         if device == 0 {
@@ -179,7 +176,6 @@ mod tests {
     // =============================================================================
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_multiple_devices() {
         let dev1 = rt_vk_device_create();
         let dev2 = rt_vk_device_create();
@@ -200,7 +196,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_multiple_buffers() {
         let device = rt_vk_device_create();
         if device == 0 {
@@ -234,7 +229,6 @@ mod tests {
     // =============================================================================
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_device_sync_success() {
         let device = rt_vk_device_create();
         if device == 0 {
@@ -248,7 +242,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_sync_after_buffer_operations() {
         let device = rt_vk_device_create();
         if device == 0 {
@@ -286,7 +279,6 @@ mod tests {
     // =============================================================================
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_small_buffer_allocation() {
         let device = rt_vk_device_create();
         if device == 0 {
@@ -302,7 +294,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_large_buffer_allocation() {
         let device = rt_vk_device_create();
         if device == 0 {
@@ -319,7 +310,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_buffer_alignment() {
         let device = rt_vk_device_create();
         if device == 0 {

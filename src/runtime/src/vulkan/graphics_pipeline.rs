@@ -252,14 +252,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_shader_module_creation() {
         // This requires valid SPIR-V bytecode
         // Skipped for unit testing
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers and shaders
     fn test_graphics_pipeline_creation() {
         // This requires full Vulkan setup
         // Skipped for unit testing

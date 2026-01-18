@@ -59,6 +59,7 @@ pub mod spec_coverage;
 pub mod symbol_analyzer;
 pub mod text_diff;
 pub mod trait_coherence;
+pub mod type_check;
 pub mod value;
 pub mod value_bridge;
 pub mod verification_checker;
