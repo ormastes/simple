@@ -36,7 +36,7 @@ pub mod ir_export;
 pub mod layout_recorder;
 pub mod linker;
 pub mod lint;
-pub mod lsp_mcp;
+// pub mod lsp_mcp; // TODO: [lsp][P2] Re-enable when lsp_mcp module is complete
 pub mod r#macro;
 pub mod macro_contracts;
 pub mod macro_validation;
@@ -145,9 +145,10 @@ pub use verification_checker::{
 };
 pub use web_compiler::{SuiCompilationResult, WebCompiler};
 
-// LSP MCP exports
-pub use lsp_mcp::{
-    get_tool_definitions as lsp_mcp_tool_definitions, Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity,
-    HoverContents, HoverInfo, Location as LspLocation, LspMcpHandler, LspMcpTools, Position as LspPosition, Range as LspRange,
-    ReferenceContext, ReferenceLocation, SymbolInfo as LspSymbolInfo, SymbolKind as LspSymbolKind,
-};
+// LSP MCP exports - disabled while module is in development
+// TODO: [lsp][P2] Re-enable when lsp_mcp module is complete
+// pub use lsp_mcp::{
+//     get_tool_definitions as lsp_mcp_tool_definitions, Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity,
+//     HoverContents, HoverInfo, Location as LspLocation, LspMcpHandler, LspMcpTools, Position as LspPosition, Range as LspRange,
+//     ReferenceContext, ReferenceLocation, SymbolInfo as LspSymbolInfo, SymbolKind as LspSymbolKind,
+// };

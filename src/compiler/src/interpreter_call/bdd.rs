@@ -623,6 +623,17 @@ pub(super) fn eval_bdd_builtin(
 
             Ok(Some(Value::Bool(exists)))
         }
+        // BDD Matchers
+        "be_true" => {
+            Ok(Some(Value::Matcher(crate::value_mock::MatcherValue::BeTrue)))
+        }
+        "be_false" => {
+            Ok(Some(Value::Matcher(crate::value_mock::MatcherValue::BeFalse)))
+        }
+        "eq" => {
+            let expected = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            Ok(Some(Value::Matcher(crate::value_mock::MatcherValue::Exact(Box::new(expected)))))
+        }
         _ => Ok(None),
     }
 }

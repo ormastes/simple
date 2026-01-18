@@ -212,6 +212,10 @@ pub enum MatcherValue {
     OfType(String),
     /// Match using custom predicate (stored as lambda)
     Custom(Box<super::Value>),
+    /// BDD matcher: expect value to be true
+    BeTrue,
+    /// BDD matcher: expect value to be false
+    BeFalse,
 }
 
 impl MatcherValue {
@@ -287,6 +291,8 @@ impl MatcherValue {
                 // For now, just return true
                 true
             }
+            MatcherValue::BeTrue => matches!(value, super::Value::Bool(true)),
+            MatcherValue::BeFalse => matches!(value, super::Value::Bool(false)),
         }
     }
 }
