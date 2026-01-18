@@ -8,8 +8,8 @@ mod mock;
 
 // Re-export public items
 pub(crate) use bdd::{
-    exec_block_value, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES,
-    BDD_SHARED_EXAMPLES,
+    exec_block_value, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_EXPECT_FAILED, BDD_FAILURE_MSG,
+    BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
 };
 pub(crate) use core::{
     bind_args, bind_args_with_injected, exec_function, exec_function_with_captured_env, exec_function_with_values,

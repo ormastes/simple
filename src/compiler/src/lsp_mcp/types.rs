@@ -373,8 +373,9 @@ mod tests {
 
     #[test]
     fn test_symbol_info_builder() {
-        let symbol = SymbolInfo::new("test_function", SymbolKind::Function, Range::single_line(0, 0, 10))
-            .with_container("TestClass");
+        let symbol =
+            SymbolInfo::new("test_function", SymbolKind::Function, Range::single_line(0, 0, 10))
+                .with_container("TestClass");
 
         assert_eq!(symbol.name, "test_function");
         assert_eq!(symbol.kind, SymbolKind::Function);
@@ -383,7 +384,8 @@ mod tests {
 
     #[test]
     fn test_diagnostic_builder() {
-        let diag = Diagnostic::error(Range::single_line(0, 0, 5), "Test error").with_code("E001");
+        let diag =
+            Diagnostic::error(Range::single_line(0, 0, 5), "Test error").with_code("E001");
 
         assert_eq!(diag.severity, DiagnosticSeverity::Error);
         assert_eq!(diag.message, "Test error");
