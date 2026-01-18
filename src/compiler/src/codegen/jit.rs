@@ -17,8 +17,6 @@ pub use super::common_backend::BackendError as JitError;
 pub type JitResult<T> = BackendResult<T>;
 
 // Re-export provider types for convenience
-// Note: Conditionally hidden from doctests due to rustdoc linking limitations
-#[cfg(not(doctest))]
 pub use simple_native_loader::{default_runtime_provider, static_provider, RuntimeLoadMode, RuntimeSymbolProvider};
 
 /// JIT compiler for Simple functions.
