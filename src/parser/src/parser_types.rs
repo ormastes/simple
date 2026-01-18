@@ -273,7 +273,27 @@ impl<'a> Parser<'a> {
                     break; // Will be handled below
                 }
 
-                args.push(self.parse_type()?);
+                // Check for associated type binding: Name=Type (e.g., Iterator<Item=T>)
+                // An identifier followed by = is an associated type binding
+                if let TokenKind::Identifier { name: assoc_name, .. } = &self.current.kind {
+                    let assoc_name = assoc_name.clone();
+                    // Peek ahead to check if next token is '='
+                    if self.peek_is(&TokenKind::Assign) {
+                        self.advance(); // consume identifier
+                        self.advance(); // consume '='
+                        let value_type = self.parse_type()?;
+                        args.push(Type::TypeBinding {
+                            name: assoc_name,
+                            value: Box::new(value_type),
+                        });
+                    } else {
+                        // Regular type argument
+                        args.push(self.parse_type()?);
+                    }
+                } else {
+                    // Regular type argument
+                    args.push(self.parse_type()?);
+                }
 
                 if !self.check(&closing_token) {
                     // Again check for >> before expecting comma

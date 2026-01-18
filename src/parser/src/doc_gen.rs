@@ -607,6 +607,7 @@ fn format_type(ty: &Type) -> String {
             result
         }
         Type::SelfType => "self".to_string(),
+        Type::TypeBinding { name, value } => format!("{}={}", name, format_type(value)),
     }
 }
 

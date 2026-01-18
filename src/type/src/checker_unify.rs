@@ -203,6 +203,11 @@ impl TypeChecker {
                 // Self return type - treat as Self (will be resolved during type checking)
                 Type::Named("Self".to_string())
             }
+            AstType::TypeBinding { name, value } => {
+                // Associated type binding (e.g., Item=T) - return the bound value type
+                // The binding name is used for constraint checking elsewhere
+                self.ast_type_to_type(value)
+            }
         }
     }
 
