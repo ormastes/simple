@@ -56,12 +56,12 @@ pub struct AssignmentStmt {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignOp {
-    Assign,        // =
-    AddAssign,     // +=
-    SubAssign,     // -=
-    MulAssign,     // *=
-    DivAssign,     // /=
-    SuspendAssign, // ~= (suspension assignment for async-by-default)
+    Assign,           // =
+    AddAssign,        // +=
+    SubAssign,        // -=
+    MulAssign,        // *=
+    DivAssign,        // /=
+    SuspendAssign,    // ~= (suspension assignment for async-by-default)
     SuspendAddAssign, // ~+= (suspension compound add)
     SuspendSubAssign, // ~-= (suspension compound subtract)
     SuspendMulAssign, // ~*= (suspension compound multiply)

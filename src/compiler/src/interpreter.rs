@@ -125,12 +125,10 @@ pub(crate) enum Control {
 pub(crate) fn await_value(value: Value) -> Result<Value, CompileError> {
     match value {
         // Handle FutureValue - await the result
-        Value::Future(ref future) => {
-            match future.await_result() {
-                Ok(result) => Ok(result),
-                Err(e) => Err(CompileError::Runtime(format!("await failed: {}", e))),
-            }
-        }
+        Value::Future(ref future) => match future.await_result() {
+            Ok(result) => Ok(result),
+            Err(e) => Err(CompileError::Runtime(format!("await failed: {}", e))),
+        },
         // Handle Promise objects (Simple-level Promise type)
         Value::Object { ref class, ref fields } if class == "Promise" => {
             // Check the state field
@@ -157,7 +155,9 @@ pub(crate) fn await_value(value: Value) -> Result<Value, CompileError> {
                             "Pending" => {
                                 // For pending promises, we can't block in the interpreter
                                 // Return a pending indicator or error
-                                Err(CompileError::Runtime("Cannot await pending Promise in synchronous context".to_string()))
+                                Err(CompileError::Runtime(
+                                    "Cannot await pending Promise in synchronous context".to_string(),
+                                ))
                             }
                             _ => Ok(value),
                         }
@@ -476,9 +476,7 @@ pub(crate) fn exec_node(
             if let Expr::Identifier(name) = &assign.target {
                 let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(name));
                 if is_const {
-                    return Err(CompileError::Semantic(format!(
-                        "cannot assign to const '{name}'"
-                    )));
+                    return Err(CompileError::Semantic(format!("cannot assign to const '{name}'")));
                 }
 
                 // Evaluate the RHS
@@ -492,9 +490,10 @@ pub(crate) fn exec_node(
                 // If compound assignment, combine with current value
                 let new_value = if let Some(op) = bin_op {
                     // Create a binary expression and evaluate it
-                    let current = env.get(name).cloned().ok_or_else(|| {
-                        CompileError::Semantic(format!("undefined variable '{name}'"))
-                    })?;
+                    let current = env
+                        .get(name)
+                        .cloned()
+                        .ok_or_else(|| CompileError::Semantic(format!("undefined variable '{name}'")))?;
                     // Insert rhs as temp var, create binary expr, evaluate
                     let temp_name = "__rhs_temp__".to_string();
                     env.insert(temp_name.clone(), rhs_value);
@@ -521,7 +520,8 @@ pub(crate) fn exec_node(
                         match obj_val {
                             Value::Object { class, mut fields } => {
                                 // Evaluate the RHS
-                                let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+                                let mut rhs_value =
+                                    evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
 
                                 // If suspension, await the value
                                 if is_suspend {
@@ -531,9 +531,10 @@ pub(crate) fn exec_node(
                                 // If compound assignment, combine with current value
                                 let new_value = if let Some(op) = bin_op {
                                     // Create a binary expression and evaluate it
-                                    let current = fields.get(field).cloned().ok_or_else(|| {
-                                        CompileError::Semantic(format!("undefined field '{field}'"))
-                                    })?;
+                                    let current = fields
+                                        .get(field)
+                                        .cloned()
+                                        .ok_or_else(|| CompileError::Semantic(format!("undefined field '{field}'")))?;
                                     // Insert temps and evaluate
                                     let temp_lhs = "__lhs_temp__".to_string();
                                     let temp_rhs = "__rhs_temp__".to_string();
@@ -544,7 +545,8 @@ pub(crate) fn exec_node(
                                         left: Box::new(Expr::Identifier(temp_lhs.clone())),
                                         right: Box::new(Expr::Identifier(temp_rhs.clone())),
                                     };
-                                    let result = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
+                                    let result =
+                                        evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
                                     env.remove(&temp_lhs);
                                     env.remove(&temp_rhs);
                                     result
@@ -561,9 +563,7 @@ pub(crate) fn exec_node(
                             )),
                         }
                     } else {
-                        Err(CompileError::Semantic(format!(
-                            "undefined variable '{obj_name}'"
-                        )))
+                        Err(CompileError::Semantic(format!("undefined variable '{obj_name}'")))
                     }
                 } else {
                     Err(CompileError::Semantic(
@@ -571,9 +571,7 @@ pub(crate) fn exec_node(
                     ))
                 }
             } else {
-                Err(CompileError::Semantic(
-                    "unsupported augmented assignment target".into(),
-                ))
+                Err(CompileError::Semantic("unsupported augmented assignment target".into()))
             }
         }
         Node::If(if_stmt) => exec_if(if_stmt, env, functions, classes, enums, impl_methods),

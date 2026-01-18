@@ -179,3 +179,84 @@ fn parse_interface_binding_generic_type() {
         panic!("Expected interface binding");
     }
 }
+
+// Trait inheritance tests
+#[test]
+fn parse_trait_simple_inheritance() {
+    // Simple trait inheritance: trait Copy: Clone
+    use simple_parser::ast::Type;
+    let items = parse("trait Copy: Clone:\n    fn copy(self) -> Self");
+    if let Node::Trait(t) = &items[0] {
+        assert_eq!(t.name, "Copy");
+        assert_eq!(t.super_traits.len(), 1);
+        assert_eq!(t.super_traits[0], Type::Simple("Clone".to_string()));
+    } else {
+        panic!("Expected trait");
+    }
+}
+
+#[test]
+fn parse_trait_generic_inheritance() {
+    // Generic trait inheritance: trait Sequence<T>: Collection<T>
+    use simple_parser::ast::Type;
+    let items = parse("trait Sequence<T>: Collection<T>:\n    fn len(self) -> usize");
+    if let Node::Trait(t) = &items[0] {
+        assert_eq!(t.name, "Sequence");
+        assert_eq!(t.generic_params, vec!["T"]);
+        assert_eq!(t.super_traits.len(), 1);
+        // Check it's a generic type Collection<T>
+        match &t.super_traits[0] {
+            Type::Generic { name, args } => {
+                assert_eq!(name, "Collection");
+                assert_eq!(args.len(), 1);
+            }
+            _ => panic!("Expected generic super trait, got {:?}", t.super_traits[0]),
+        }
+    } else {
+        panic!("Expected trait");
+    }
+}
+
+#[test]
+fn parse_trait_multiple_inheritance() {
+    // Multiple trait inheritance: trait Debug: Display + Clone
+    use simple_parser::ast::Type;
+    let items = parse("trait Debug: Display + Clone:\n    fn debug(self)");
+    if let Node::Trait(t) = &items[0] {
+        assert_eq!(t.name, "Debug");
+        assert_eq!(t.super_traits.len(), 2);
+        assert_eq!(t.super_traits[0], Type::Simple("Display".to_string()));
+        assert_eq!(t.super_traits[1], Type::Simple("Clone".to_string()));
+    } else {
+        panic!("Expected trait");
+    }
+}
+
+#[test]
+fn parse_trait_multiple_generic_inheritance() {
+    // Multiple generic trait inheritance: trait IndexedSeq<T>: Seq<T> + Index<usize, T>
+    use simple_parser::ast::Type;
+    let items = parse("trait IndexedSeq<T>: Seq<T> + Index<usize, T>:\n    fn at(self, i: usize) -> T");
+    if let Node::Trait(t) = &items[0] {
+        assert_eq!(t.name, "IndexedSeq");
+        assert_eq!(t.super_traits.len(), 2);
+        // First super trait: Seq<T>
+        match &t.super_traits[0] {
+            Type::Generic { name, args } => {
+                assert_eq!(name, "Seq");
+                assert_eq!(args.len(), 1);
+            }
+            _ => panic!("Expected Seq<T>"),
+        }
+        // Second super trait: Index<usize, T>
+        match &t.super_traits[1] {
+            Type::Generic { name, args } => {
+                assert_eq!(name, "Index");
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected Index<usize, T>"),
+        }
+    } else {
+        panic!("Expected trait");
+    }
+}

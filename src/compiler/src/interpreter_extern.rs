@@ -26,9 +26,9 @@ use simple_runtime::value::{rt_is_stderr_capturing, rt_is_stdout_capturing};
 // Import Vulkan FFI functions
 #[cfg(feature = "vulkan")]
 use simple_runtime::value::gpu_vulkan::{
-    rt_vk_buffer_alloc, rt_vk_buffer_download, rt_vk_buffer_free, rt_vk_buffer_upload,
-    rt_vk_device_create, rt_vk_device_free, rt_vk_device_sync,
-    rt_vk_kernel_compile, rt_vk_kernel_free, rt_vk_kernel_launch, rt_vk_kernel_launch_1d,
+    rt_vk_buffer_alloc, rt_vk_buffer_download, rt_vk_buffer_free, rt_vk_buffer_upload, rt_vk_device_create,
+    rt_vk_device_free, rt_vk_device_sync, rt_vk_kernel_compile, rt_vk_kernel_free, rt_vk_kernel_launch,
+    rt_vk_kernel_launch_1d,
 };
 
 // TuiEvent struct matches the C ABI struct in ratatui_tui.rs
@@ -1112,21 +1112,51 @@ pub(crate) fn call_extern_function(
         }
         #[cfg(feature = "vulkan")]
         "rt_vk_kernel_launch" => {
-            let device = evaluated.get(0).ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?.as_int()? as u64;
-            let pipeline = evaluated.get(1).ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?.as_int()? as u64;
-            let buffer = evaluated.get(2).ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?.as_int()? as u64;
-            let groups_x = evaluated.get(3).ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?.as_int()? as u32;
-            let groups_y = evaluated.get(4).ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?.as_int()? as u32;
-            let groups_z = evaluated.get(5).ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?.as_int()? as u32;
+            let device = evaluated
+                .get(0)
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?
+                .as_int()? as u64;
+            let pipeline = evaluated
+                .get(1)
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?
+                .as_int()? as u64;
+            let buffer = evaluated
+                .get(2)
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?
+                .as_int()? as u64;
+            let groups_x = evaluated
+                .get(3)
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?
+                .as_int()? as u32;
+            let groups_y = evaluated
+                .get(4)
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?
+                .as_int()? as u32;
+            let groups_z = evaluated
+                .get(5)
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?
+                .as_int()? as u32;
             let result = rt_vk_kernel_launch(device, pipeline, buffer, groups_x, groups_y, groups_z);
             Ok(Value::Int(result as i64))
         }
         #[cfg(feature = "vulkan")]
         "rt_vk_kernel_launch_1d" => {
-            let device = evaluated.get(0).ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?.as_int()? as u64;
-            let pipeline = evaluated.get(1).ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?.as_int()? as u64;
-            let buffer = evaluated.get(2).ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?.as_int()? as u64;
-            let num_elements = evaluated.get(3).ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?.as_int()? as u32;
+            let device = evaluated
+                .get(0)
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?
+                .as_int()? as u64;
+            let pipeline = evaluated
+                .get(1)
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?
+                .as_int()? as u64;
+            let buffer = evaluated
+                .get(2)
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?
+                .as_int()? as u64;
+            let num_elements = evaluated
+                .get(3)
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?
+                .as_int()? as u32;
             let result = rt_vk_kernel_launch_1d(device, pipeline, buffer, num_elements);
             Ok(Value::Int(result as i64))
         }

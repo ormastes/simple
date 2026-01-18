@@ -131,10 +131,7 @@ impl SpirvTypeInfo {
 
     /// Check if this is a numeric type (int or float)
     pub fn is_numeric(&self) -> bool {
-        matches!(
-            self.category,
-            SpirvTypeCategory::Int | SpirvTypeCategory::Float
-        )
+        matches!(self.category, SpirvTypeCategory::Int | SpirvTypeCategory::Float)
     }
 
     /// Check if this is an integer type
@@ -188,12 +185,8 @@ impl TypeMapper {
             TypeId::F64 => Ok(SpirvTypeInfo::float(64)),
 
             // String and nil are not supported in SPIR-V
-            TypeId::STRING => Err(CompileError::Codegen(
-                "String type not supported in SPIR-V".to_string(),
-            )),
-            TypeId::NIL => Err(CompileError::Codegen(
-                "Nil type not supported in SPIR-V".to_string(),
-            )),
+            TypeId::STRING => Err(CompileError::Codegen("String type not supported in SPIR-V".to_string())),
+            TypeId::NIL => Err(CompileError::Codegen("Nil type not supported in SPIR-V".to_string())),
 
             // Custom types need lookup in type registry
             _ => Err(CompileError::Codegen(format!(
@@ -234,14 +227,7 @@ impl TypeMapper {
     pub fn is_integer(&self, type_id: TypeId) -> bool {
         matches!(
             type_id,
-            TypeId::I8
-                | TypeId::I16
-                | TypeId::I32
-                | TypeId::I64
-                | TypeId::U8
-                | TypeId::U16
-                | TypeId::U32
-                | TypeId::U64
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
         )
     }
 
@@ -261,8 +247,7 @@ impl TypeMapper {
 
     /// Check if type is supported in SPIR-V
     pub fn is_supported(&self, type_id: TypeId) -> bool {
-        !matches!(type_id, TypeId::STRING | TypeId::NIL)
-            && type_id.0 <= TypeId::F64.0
+        !matches!(type_id, TypeId::STRING | TypeId::NIL) && type_id.0 <= TypeId::F64.0
     }
 }
 

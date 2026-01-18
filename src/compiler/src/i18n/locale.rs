@@ -251,18 +251,9 @@ mod tests {
 
     #[test]
     fn test_extract_locale_from_path() {
-        assert_eq!(
-            extract_locale_from_path(Path::new("i18n/__init__.spl")),
-            "default"
-        );
-        assert_eq!(
-            extract_locale_from_path(Path::new("i18n/__init__.ko-KR.spl")),
-            "ko-KR"
-        );
-        assert_eq!(
-            extract_locale_from_path(Path::new("i18n/__init__.en-US.spl")),
-            "en-US"
-        );
+        assert_eq!(extract_locale_from_path(Path::new("i18n/__init__.spl")), "default");
+        assert_eq!(extract_locale_from_path(Path::new("i18n/__init__.ko-KR.spl")), "ko-KR");
+        assert_eq!(extract_locale_from_path(Path::new("i18n/__init__.en-US.spl")), "en-US");
     }
 
     #[test]

@@ -63,7 +63,12 @@ impl Lowerer {
     ///
     /// Note: Template arguments are not substituted at compile time in native
     /// compilation. For full template support, use the interpreter mode.
-    pub(super) fn lower_i18n_template(&self, name: &str, parts: &[ast::FStringPart], _args: &[(String, Expr)]) -> LowerResult<HirExpr> {
+    pub(super) fn lower_i18n_template(
+        &self,
+        name: &str,
+        parts: &[ast::FStringPart],
+        _args: &[(String, Expr)],
+    ) -> LowerResult<HirExpr> {
         // Try to look up the template in the locale registry
         let template = if let Some(localized) = crate::i18n::lookup(name) {
             localized

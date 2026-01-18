@@ -34,7 +34,8 @@ fn test_json_spec() {
 #[test]
 fn test_json_no_spec_framework() {
     // Use the simple_fn test as a basic test without complex dependencies
-    let path = Path::new("/home/ormastes/dev/pub/simple/simple/std_lib/test/examples/language_features/test_simple_fn.spl");
+    let path =
+        Path::new("/home/ormastes/dev/pub/simple/simple/std_lib/test/examples/language_features/test_simple_fn.spl");
     let result = run_test_file(path);
     println!("Result (simple fn test): {:?}", result);
     assert!(result.is_success(), "Test should pass: {:?}", result);

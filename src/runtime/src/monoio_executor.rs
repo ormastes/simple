@@ -137,7 +137,10 @@ impl PendingOp {
 
     /// Check if the async operation has completed
     pub fn is_async_complete(&self) -> bool {
-        self.completed.as_ref().map(|c| c.load(Ordering::SeqCst)).unwrap_or(false)
+        self.completed
+            .as_ref()
+            .map(|c| c.load(Ordering::SeqCst))
+            .unwrap_or(false)
     }
 
     /// Take the async result if available
@@ -542,16 +545,17 @@ impl AsyncExecutor {
         }
 
         // Collect operations that need execution
-        let ops_to_run: Vec<(u64, OpType)> = self.pending.iter()
+        let ops_to_run: Vec<(u64, OpType)> = self
+            .pending
+            .iter()
             .filter(|(_, op)| matches!(op.state, OpState::NotStarted | OpState::InProgress))
             .map(|(id, op)| (*id, op.op_type))
             .collect();
 
         if ops_to_run.is_empty() {
             // Remove completed operations
-            self.pending.retain(|_, op| {
-                !matches!(op.state, OpState::Completed(_) | OpState::Failed(_))
-            });
+            self.pending
+                .retain(|_, op| !matches!(op.state, OpState::Completed(_) | OpState::Failed(_)));
             return 0;
         }
 
@@ -559,9 +563,8 @@ impl AsyncExecutor {
         let completed = self.run_concurrent(ops_to_run);
 
         // Remove completed operations
-        self.pending.retain(|_, op| {
-            !matches!(op.state, OpState::Completed(_) | OpState::Failed(_))
-        });
+        self.pending
+            .retain(|_, op| !matches!(op.state, OpState::Completed(_) | OpState::Failed(_)));
 
         completed
     }
@@ -581,11 +584,18 @@ impl AsyncExecutor {
         };
 
         // Prepare results storage
-        let results: Rc<RefCell<Vec<(u64, Result<OpResult, String>)>>> =
-            Rc::new(RefCell::new(Vec::new()));
+        let results: Rc<RefCell<Vec<(u64, Result<OpResult, String>)>>> = Rc::new(RefCell::new(Vec::new()));
 
         // Prepare operation data
-        let mut op_data: Vec<(u64, OpType, i64, Option<String>, Option<Vec<u8>>, usize, Option<RuntimeValue>)> = Vec::new();
+        let mut op_data: Vec<(
+            u64,
+            OpType,
+            i64,
+            Option<String>,
+            Option<Vec<u8>>,
+            usize,
+            Option<RuntimeValue>,
+        )> = Vec::new();
 
         for (op_id, op_type) in &ops {
             if let Some(op) = self.pending.get(op_id) {
@@ -730,22 +740,20 @@ impl AsyncExecutor {
                             let send_data = data.unwrap_or_default();
                             let addr_str = addr.unwrap_or_default();
                             match socket {
-                                Some(s) => {
-                                    match addr_str.parse::<SocketAddr>() {
-                                        Ok(socket_addr) => {
-                                            let (res, _) = s.send_to(send_data, socket_addr).await;
-                                            sockets_clone.borrow_mut().insert(handle_id, s);
-                                            match res {
-                                                Ok(n) => Ok(OpResult::Bytes(n)),
-                                                Err(e) => Err(format!("SendTo failed: {}", e)),
-                                            }
-                                        }
-                                        Err(e) => {
-                                            sockets_clone.borrow_mut().insert(handle_id, s);
-                                            Err(format!("Invalid address: {}", e))
+                                Some(s) => match addr_str.parse::<SocketAddr>() {
+                                    Ok(socket_addr) => {
+                                        let (res, _) = s.send_to(send_data, socket_addr).await;
+                                        sockets_clone.borrow_mut().insert(handle_id, s);
+                                        match res {
+                                            Ok(n) => Ok(OpResult::Bytes(n)),
+                                            Err(e) => Err(format!("SendTo failed: {}", e)),
                                         }
                                     }
-                                }
+                                    Err(e) => {
+                                        sockets_clone.borrow_mut().insert(handle_id, s);
+                                        Err(format!("Invalid address: {}", e))
+                                    }
+                                },
                                 None => Err("Socket not available".to_string()),
                             }
                         }

@@ -692,17 +692,18 @@ mod tests {
         ];
 
         let result = SpirvModule::validate_spirv(&valid_words);
-        assert!(result.is_ok(), "Valid module should pass validation: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Valid module should pass validation: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_validation_invalid_magic() {
         let invalid_magic: Vec<u32> = vec![
             0xDEADBEEF, // Wrong magic
-            0x00010300,
-            0x00000000,
-            0x00000002,
-            0x00000000,
+            0x00010300, 0x00000000, 0x00000002, 0x00000000,
         ];
 
         let result = SpirvModule::validate_spirv(&invalid_magic);
@@ -713,11 +714,8 @@ mod tests {
     #[test]
     fn test_validation_unsupported_version() {
         let bad_version: Vec<u32> = vec![
-            0x07230203,
-            0x00020000, // Version 2.0 (unsupported)
-            0x00000000,
-            0x00000002,
-            0x00000000,
+            0x07230203, 0x00020000, // Version 2.0 (unsupported)
+            0x00000000, 0x00000002, 0x00000000,
         ];
 
         let result = SpirvModule::validate_spirv(&bad_version);
@@ -728,10 +726,7 @@ mod tests {
     #[test]
     fn test_validation_zero_bound() {
         let zero_bound: Vec<u32> = vec![
-            0x07230203,
-            0x00010300,
-            0x00000000,
-            0x00000000, // Bound: 0 (invalid)
+            0x07230203, 0x00010300, 0x00000000, 0x00000000, // Bound: 0 (invalid)
             0x00000000,
         ];
 
@@ -743,11 +738,7 @@ mod tests {
     #[test]
     fn test_validation_invalid_schema() {
         let bad_schema: Vec<u32> = vec![
-            0x07230203,
-            0x00010300,
-            0x00000000,
-            0x00000002,
-            0x00000001, // Schema: 1 (must be 0)
+            0x07230203, 0x00010300, 0x00000000, 0x00000002, 0x00000001, // Schema: 1 (must be 0)
         ];
 
         let result = SpirvModule::validate_spirv(&bad_schema);
@@ -784,12 +775,7 @@ mod tests {
     #[test]
     fn test_validation_zero_word_count() {
         let zero_count: Vec<u32> = vec![
-            0x07230203,
-            0x00010300,
-            0x00000000,
-            0x00000002,
-            0x00000000,
-            // Word count 0 (invalid)
+            0x07230203, 0x00010300, 0x00000000, 0x00000002, 0x00000000, // Word count 0 (invalid)
             17,
         ];
 

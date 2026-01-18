@@ -152,7 +152,11 @@ fn extract_i18n_strings(path: &Path, output: &Path) -> i32 {
     match generator.generate(&result) {
         Ok(files) => {
             println!();
-            println!("Extracted {} i18n strings from {} files", result.strings.len(), file_count);
+            println!(
+                "Extracted {} i18n strings from {} files",
+                result.strings.len(),
+                file_count
+            );
 
             for file in &files {
                 println!("  Generated: {}", file.display());

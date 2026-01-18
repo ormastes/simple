@@ -359,20 +359,17 @@ impl ProfileData {
 
     /// Load profile data from a JSON file
     pub fn load_from_file(path: &std::path::Path) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read profile file: {}", e))?;
+        let content = std::fs::read_to_string(path).map_err(|e| format!("Failed to read profile file: {}", e))?;
 
-        serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse profile JSON: {}", e))
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse profile JSON: {}", e))
     }
 
     /// Save profile data to a JSON file
     pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), String> {
-        let content = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("Failed to serialize profile data: {}", e))?;
+        let content =
+            serde_json::to_string_pretty(self).map_err(|e| format!("Failed to serialize profile data: {}", e))?;
 
-        std::fs::write(path, content)
-            .map_err(|e| format!("Failed to write profile file: {}", e))
+        std::fs::write(path, content).map_err(|e| format!("Failed to write profile file: {}", e))
     }
 
     /// Get events as a slice (for diagram generation)

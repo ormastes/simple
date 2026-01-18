@@ -34,14 +34,16 @@ impl<'a> Parser<'a> {
             self.advance(); // consume ':' to peek at next token
 
             if matches!(self.current.kind, TokenKind::Identifier { .. }) {
-                // This is super trait syntax - parse super traits
-                // Parse first super trait
-                super_traits.push(self.expect_identifier()?);
+                // This is super trait syntax - parse super traits as full types
+                // Supports both simple traits and generic traits:
+                //   trait Copy: Clone:             (simple)
+                //   trait Sequence<T>: Collection<T>:  (generic)
+                super_traits.push(self.parse_type()?);
 
-                // Parse additional super traits with + separator: trait T: A + B
+                // Parse additional super traits with + separator: trait T: A + B<T>
                 while self.check(&TokenKind::Plus) {
                     self.advance(); // consume '+'
-                    super_traits.push(self.expect_identifier()?);
+                    super_traits.push(self.parse_type()?);
                 }
                 // After super traits, expect another : for the body
                 // (which will be consumed by parse_indented_trait_body)

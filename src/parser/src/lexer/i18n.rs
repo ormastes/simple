@@ -256,8 +256,10 @@ mod tests {
 
     #[test]
     fn test_i18n_triple_quoted() {
-        let mut lexer = Lexer::new(r#"Desc_"""This is a
-multiline description.""""#);
+        let mut lexer = Lexer::new(
+            r#"Desc_"""This is a
+multiline description.""""#,
+        );
         let tokens = lexer.tokenize();
         assert!(matches!(
             &tokens[0].kind,

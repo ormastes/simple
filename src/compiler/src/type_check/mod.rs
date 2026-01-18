@@ -77,11 +77,7 @@ impl TypeChecker {
     /// Wrap a function's return type in Promise<T>
     ///
     /// Transforms: fn() -> T  to  fn() -> Promise<T>
-    pub fn wrap_return_in_promise(
-        &self,
-        func: &mut HirFunction,
-        types: &mut TypeRegistry,
-    ) -> LowerResult<()> {
+    pub fn wrap_return_in_promise(&self, func: &mut HirFunction, types: &mut TypeRegistry) -> LowerResult<()> {
         let inner_type = func.return_type;
         let promise_type = types.register(HirType::promise(inner_type));
         func.return_type = promise_type;
@@ -92,10 +88,7 @@ impl TypeChecker {
     ///
     /// This is the main entry point for the type checker.
     /// Called after HIR lowering to auto-wrap async function returns.
-    pub fn apply_promise_wrapping(
-        &mut self,
-        module: &mut HirModule,
-    ) -> LowerResult<()> {
+    pub fn apply_promise_wrapping(&mut self, module: &mut HirModule) -> LowerResult<()> {
         // Collect all function signatures first
         for func in &module.functions {
             self.register_function(func.name.clone(), func.return_type);

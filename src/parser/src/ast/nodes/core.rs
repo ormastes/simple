@@ -339,6 +339,14 @@ pub enum Type {
     /// Resolved to the enclosing type during semantic analysis
     /// Enables fluent APIs: fn increment() -> self
     SelfType,
+    /// Associated type binding in trait bounds: Iterator<Item=T>, Ord<Output=Bool>
+    /// Used in where clauses and trait bounds to constrain associated types
+    TypeBinding {
+        /// The associated type name (e.g., "Item")
+        name: String,
+        /// The type it's bound to (e.g., T or String)
+        value: Box<Type>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

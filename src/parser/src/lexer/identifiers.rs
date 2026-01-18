@@ -54,7 +54,7 @@ impl<'a> super::Lexer<'a> {
         // The identifier must end with _ and be immediately followed by "
         if name.ends_with('_') && self.check('"') {
             self.advance(); // consume opening "
-            // Check for triple-quoted i18n string: Name_"""..."""
+                            // Check for triple-quoted i18n string: Name_"""..."""
             if self.check('"') && self.check_ahead(1, '"') {
                 return self.scan_i18n_triple_string(name);
             }

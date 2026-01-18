@@ -2,7 +2,7 @@
 // Phase 2: Tests enabled with Lean4 verification theorems
 
 use simple_parser::Parser;
-use simple_type::check;
+use crate::check;
 
 fn parse_items(src: &str) -> Vec<simple_parser::ast::Node> {
     let mut parser = Parser::new(src);

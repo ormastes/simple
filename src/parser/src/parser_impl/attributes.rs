@@ -88,7 +88,10 @@ impl<'a> Parser<'a> {
         // If the expression is a Call, extract the callee as name and arguments
         // This handles both @decorator(args) and @obj.method(args)
         let (name, args) = match expr {
-            Expr::Call { callee, args: call_args } => {
+            Expr::Call {
+                callee,
+                args: call_args,
+            } => {
                 // Convert Argument to the decorator's args format
                 (*callee, Some(call_args))
             }

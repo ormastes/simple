@@ -703,7 +703,12 @@ mod tests {
             pressed: true,
         };
 
-        if let WindowEvent::MouseButton { window, button, pressed } = event {
+        if let WindowEvent::MouseButton {
+            window,
+            button,
+            pressed,
+        } = event
+        {
             assert_eq!(window, 1);
             assert_eq!(button, 0);
             assert!(pressed);
@@ -720,7 +725,12 @@ mod tests {
             pressed: true,
         };
 
-        if let WindowEvent::KeyEvent { window, key_code, pressed } = event {
+        if let WindowEvent::KeyEvent {
+            window,
+            key_code,
+            pressed,
+        } = event
+        {
             assert_eq!(window, 1);
             assert_eq!(key_code, 27);
             assert!(pressed);

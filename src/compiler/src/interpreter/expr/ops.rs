@@ -374,9 +374,7 @@ pub(super) fn eval_op_expr(
                 UnaryOp::ChannelRecv => {
                     // Channel receive: block until value is available
                     match val {
-                        Value::Channel(channel) => {
-                            channel.recv().map_err(|e| CompileError::Semantic(e))?
-                        }
+                        Value::Channel(channel) => channel.recv().map_err(|e| CompileError::Semantic(e))?,
                         _ => {
                             return Err(CompileError::Semantic(format!(
                                 "channel receive operator (<-) requires a channel, got {:?}",

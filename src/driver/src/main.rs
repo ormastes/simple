@@ -572,15 +572,15 @@ fn main() {
                 // Load profile data from file
                 match simple_compiler::runtime_profile::ProfileData::load_from_file(profile_path) {
                     Ok(profile_data) => {
-                        println!("Loaded profile: {} ({} events)", profile_data.name, profile_data.events.len());
+                        println!(
+                            "Loaded profile: {} ({} events)",
+                            profile_data.name,
+                            profile_data.events.len()
+                        );
 
                         // Generate diagrams from the loaded profile data
                         let architectural = profile_data.get_architectural_entities();
-                        match generate_diagrams_from_events(
-                            profile_data.get_events(),
-                            &architectural,
-                            &options,
-                        ) {
+                        match generate_diagrams_from_events(profile_data.get_events(), &architectural, &options) {
                             Ok(result) => {
                                 if let Some(path) = result.sequence_path {
                                     println!("  Sequence diagram: {}", path.display());

@@ -382,10 +382,7 @@ mod tests {
 
         unsafe {
             // Initialize the header
-            std::ptr::write(
-                ptr,
-                HeapHeader::new(HeapObjectType::Object, layout.size() as u32),
-            );
+            std::ptr::write(ptr, HeapHeader::new(HeapObjectType::Object, layout.size() as u32));
 
             // Verify initial state is white
             assert!((*ptr).is_white());
