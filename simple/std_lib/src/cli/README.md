@@ -335,13 +335,41 @@ Get an option value with a default fallback.
 let format = args.get_option_or("format", "json")
 ```
 
-##### `.get_option_int(name: String) -> Option[i32]`
+##### `.get_option_int(name: String) -> Option[i64]`
 
-Get an option value as an integer (TODO: requires String::parse_int()).
+Get an option value as an integer. Parses the string value to i64.
+
+**Example:**
+```simple
+val port = args.get_option_int("port")  # Returns Some(8080) for --port=8080
+```
 
 ##### `.get_option_float(name: String) -> Option[f64]`
 
-Get an option value as a float (TODO: requires String::parse_float()).
+Get an option value as a float. Parses the string value to f64.
+
+**Example:**
+```simple
+val rate = args.get_option_float("rate")  # Returns Some(0.01) for --rate=0.01
+```
+
+##### `.get_option_int_or(name: String, default_val: i64) -> i64`
+
+Get an option value as an integer with a default fallback.
+
+**Example:**
+```simple
+val port = args.get_option_int_or("port", 8080)  # Returns 8080 if --port not provided
+```
+
+##### `.get_option_float_or(name: String, default_val: f64) -> f64`
+
+Get an option value as a float with a default fallback.
+
+**Example:**
+```simple
+val rate = args.get_option_float_or("rate", 0.001)  # Returns 0.001 if --rate not provided
+```
 
 ##### `.get_positional_at(index: i32) -> Option[String]`
 
@@ -458,16 +486,15 @@ Tests are located in `test/unit/cli_spec.spl`:
 
 ## Limitations
 
-1. **Integer/Float Parsing** - `get_option_int()` and `get_option_float()` are TODO (need String parsing methods)
-2. **Positional Names** - `get_positional(name)` currently returns first positional (needs positional tracking)
-3. **Short Flag Bundling** - `-vd` not supported yet (must use `-v -d`)
-4. **Subcommands** - Not implemented (planned for future version)
+1. **Positional Names** - `get_positional(name)` currently returns first positional (needs positional tracking)
+2. **Short Flag Bundling** - `-vd` not supported yet (must use `-v -d`)
+3. **Subcommands** - Not implemented (planned for future version)
 
 ## Future Enhancements
 
+- [x] Integer/float type conversion (implemented)
 - [ ] Subcommand support (`git commit`, `cargo build`)
 - [ ] Short flag bundling (`-vd` → `-v -d`)
-- [ ] Integer/float type conversion
 - [ ] Custom validators
 - [ ] Environment variable fallbacks
 - [ ] Configuration file integration
