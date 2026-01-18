@@ -35,6 +35,14 @@ pub enum LintName {
     PrintInTestSpec,
     /// Improperly formatted TODO/FIXME comments
     TodoFormat,
+    /// Print-based BDD tests (use proper SSpec syntax)
+    SSpecNoPrintBasedTests,
+    /// Missing docstrings in describe/context/it blocks
+    SSpecMissingDocstrings,
+    /// Files with minimal docstring usage
+    SSpecMinimalDocstrings,
+    /// Manual pass/fail tracking instead of expect()
+    SSpecManualAssertions,
 }
 
 impl LintName {
@@ -45,6 +53,10 @@ impl LintName {
             LintName::BareBool => "bare_bool",
             LintName::PrintInTestSpec => "print_in_test_spec",
             LintName::TodoFormat => "todo_format",
+            LintName::SSpecNoPrintBasedTests => "sspec_no_print_based_tests",
+            LintName::SSpecMissingDocstrings => "sspec_missing_docstrings",
+            LintName::SSpecMinimalDocstrings => "sspec_minimal_docstrings",
+            LintName::SSpecManualAssertions => "sspec_manual_assertions",
         }
     }
 
@@ -55,6 +67,10 @@ impl LintName {
             "bare_bool" => Some(LintName::BareBool),
             "print_in_test_spec" => Some(LintName::PrintInTestSpec),
             "todo_format" => Some(LintName::TodoFormat),
+            "sspec_no_print_based_tests" => Some(LintName::SSpecNoPrintBasedTests),
+            "sspec_missing_docstrings" => Some(LintName::SSpecMissingDocstrings),
+            "sspec_minimal_docstrings" => Some(LintName::SSpecMinimalDocstrings),
+            "sspec_manual_assertions" => Some(LintName::SSpecManualAssertions),
             _ => None,
         }
     }
@@ -66,6 +82,11 @@ impl LintName {
             LintName::BareBool => LintLevel::Warn,
             LintName::PrintInTestSpec => LintLevel::Warn,
             LintName::TodoFormat => LintLevel::Warn,
+            // SSpec lints: no_print_based_tests is Deny (error), others are Warn
+            LintName::SSpecNoPrintBasedTests => LintLevel::Deny,
+            LintName::SSpecMissingDocstrings => LintLevel::Warn,
+            LintName::SSpecMinimalDocstrings => LintLevel::Warn, // Info level not supported, use Warn
+            LintName::SSpecManualAssertions => LintLevel::Warn,
         }
     }
 
