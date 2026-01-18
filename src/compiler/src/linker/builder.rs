@@ -5,7 +5,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use simple_compiler::linker::{LinkerBuilder, NativeLinker};
 //!
 //! let result = LinkerBuilder::new()

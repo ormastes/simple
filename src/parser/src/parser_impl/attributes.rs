@@ -80,6 +80,9 @@ impl<'a> Parser<'a> {
         } else if self.check(&TokenKind::Bounds) {
             self.advance();
             Expr::Identifier("bounds".to_string())
+        } else if self.check(&TokenKind::Extern) {
+            self.advance();
+            Expr::Identifier("extern".to_string())
         } else {
             // Parse the decorator expression (can be dotted/called: @module.decorator or @trainer.on(Events.X))
             self.parse_postfix()?

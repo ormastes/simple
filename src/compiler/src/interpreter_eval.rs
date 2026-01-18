@@ -173,6 +173,14 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     // Apply decorators in reverse order (bottom-to-top, outermost last)
                     let mut decorated = func_value;
                     for decorator in f.decorators.iter().rev() {
+                        // Skip compiler-directive decorators that aren't evaluated at runtime
+                        // @extern is a codegen directive, not a runtime decorator
+                        if let Expr::Identifier(name) = &decorator.name {
+                            if name == "extern" {
+                                continue;
+                            }
+                        }
+
                         // Evaluate the decorator expression
                         let decorator_fn = evaluate_expr(
                             &decorator.name,

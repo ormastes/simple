@@ -717,6 +717,15 @@ pub struct Module {
     pub items: Vec<Node>,
 }
 
+impl Default for Module {
+    fn default() -> Self {
+        Self {
+            name: None,
+            items: Vec::new(),
+        }
+    }
+}
+
 /// An argument to a macro invocation
 #[derive(Debug, Clone, PartialEq)]
 pub enum MacroArg {

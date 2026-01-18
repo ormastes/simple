@@ -13,11 +13,16 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
+//! ```no_run
 //! use simple_compiler::codegen::lean::LeanCodegen;
+//! use simple_compiler::hir::HirModule;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let hir_module = HirModule::default();
 //! let codegen = LeanCodegen::new();
 //! let lean_code = codegen.generate_module(&hir_module)?;
+//! # Ok(())
+//! # }
 //! ```
 
 mod contracts;

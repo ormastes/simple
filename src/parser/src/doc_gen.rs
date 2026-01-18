@@ -4,19 +4,23 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```
 //! use simple_parser::{Parser, doc_gen};
 //!
 //! let source = r#"
 //! /** Adds two numbers */
-//! fn add(x: Int, y: Int) -> Int:
+//! fn add(x: i32, y: i32) -> i32:
 //!     return x + y
 //! "#;
 //!
 //! let mut parser = Parser::new(source);
 //! let module = parser.parse().unwrap();
 //! let docs = doc_gen::generate(&module);
-//! println!("{}", docs.to_markdown());
+//! let markdown = docs.to_markdown();
+//!
+//! // Verify doc was extracted
+//! assert!(markdown.contains("Adds two numbers"));
+//! assert!(markdown.contains("add"));
 //! ```
 
 use crate::ast::*;

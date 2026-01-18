@@ -138,11 +138,26 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
             let test_name = sanitize_test_name(&relative);
             let path_str = path.display().to_string().replace('\\', "/");
 
+            // Check if this test contains slow_it() calls
+            let is_slow_test = if let Ok(content) = fs::read_to_string(path) {
+                content.contains("slow_it")
+            } else {
+                false
+            };
+
+            // Add #[ignore] for slow tests so they're skipped by default
+            // Run with: cargo test -- --ignored
+            let ignore_attr = if is_slow_test {
+                "#[ignore]\n"
+            } else {
+                ""
+            };
+
             // Use a larger stack size (8MB) for Simple interpreter tests
             // The interpreter uses recursive evaluation which can overflow the default 2MB stack
             generated.push_str(&format!(
                 r#"
-#[test]
+{ignore}#[test]
 fn {prefix}_{test_name}() {{
     // Run in a thread with larger stack to handle deep recursion in interpreter
     let result = std::thread::Builder::new()
@@ -178,6 +193,7 @@ fn {prefix}_{test_name}() {{
     }}
 }}
 "#,
+                ignore = ignore_attr,
                 prefix = prefix,
                 test_name = test_name,
                 path_str = path_str

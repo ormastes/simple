@@ -2966,3 +2966,76 @@ val result2 = pattern2.search("hello world")
 
 ---
 
+
+## Parser: Block-form if-else not supported as expression in val assignment
+
+**Date:** 2026-01-19
+**Severity:** Medium
+**Status:** Confirmed
+
+### Issue
+
+The parser does not support block-form if-else expressions on the right side of `val` assignments:
+
+```simple
+# Does NOT work:
+val result = if condition:
+    "value1"
+else:
+    "value2"
+```
+
+Error: `parse error: Unexpected token: expected expression, found Newline`
+
+### Workaround
+
+Use `var` with separate assignment:
+
+```simple
+# Works:
+var result = ""
+if condition:
+    result = "value1"
+else:
+    result = "value2"
+```
+
+### Expected Behavior
+
+Block-form if-else should work as an expression, similar to inline if-else:
+```simple
+val result = if condition then "value1" else "value2"  # This works
+```
+
+### Note
+
+During debugging, UTF-8 characters (like `→`) in docstrings were incorrectly suspected as the cause. Docstrings handle UTF-8 correctly - the issue is purely with if-else expression syntax.
+
+
+## Module io.fs: @extern syntax not supported by parser
+
+**Date:** 2026-01-19
+**Severity:** High (blocks dependent modules)
+**Status:** Pre-existing issue
+**Related:** Blocks verification.lean.codegen module
+
+### Issue
+
+The `io.fs` module uses `@extern` decorator syntax which is not supported by the current parser:
+
+```simple
+@extern("runtime", "rt_file_exists")
+fn _rt_file_exists(path_ptr: &u8, path_len: u64) -> bool
+```
+
+Error: `parse error: Unexpected token: expected expression, found Extern`
+
+### Impact
+
+Any module that imports `io.fs` will fail to parse, including:
+- `verification.lean.codegen` (uses `fs.makedirs()` and `fs.write_string()`)
+
+### Note
+
+This is separate from the "expected expression, found Colon" errors that were fixed in verification modules. The @extern syntax is a feature that needs parser support.
+

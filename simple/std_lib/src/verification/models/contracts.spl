@@ -8,14 +8,24 @@
 # - `decreases:` - Termination arguments
 # - `modifies:` - Frame conditions
 
+# Value types for contract expressions
+enum ContractValue:
+    IntVal(i32)
+    BoolVal(bool)
+    StrVal(text)
+    NilVal
+    ErrorVal(text, ContractValue)
+
 # Contract expression kinds
 # Matches Lean: inductive ContractExpr
 enum ContractExprKind:
     # Boolean literals
     True_
     False_
-    # Variables
-    Var           # Variable reference
+    # Value literals
+    ValExpr          # Value expression (Int, Bool, String, Nil, Error)
+    # VarRefiables
+    VarRef           # VarRefiable reference
     OldValue      # old(expr) - value at function entry
     Result        # result - return value in ensures
     # Logical operators
@@ -70,12 +80,12 @@ impl ContractExprKind:
 
     # Type checking methods for variables
     fn is_var() -> bool:
-        """Check if this is Var reference.
-        Returns: true for Var
-        Example: ContractExprKind.Var.is_var()  # → true
+        """Check if this is VarRef reference.
+        Returns: true for VarRef
+        Example: ContractExprKind.VarRef.is_var()  # → true
         """
         match self:
-            case Var: true
+            case VarRef: true
             case _: false
 
     fn is_old_value() -> bool:
@@ -208,11 +218,11 @@ impl ContractExprKind:
 
     fn is_variable_reference() -> bool:
         """Check if this references a variable or value.
-        Returns: true for Var, OldValue, or Result
-        Example: ContractExprKind.Var.is_variable_reference()  # → true
+        Returns: true for VarRef, OldValue, or Result
+        Example: ContractExprKind.VarRef.is_variable_reference()  # → true
         """
         match self:
-            case Var: true
+            case VarRef: true
             case OldValue: true
             case Result: true
             case _: false
@@ -226,7 +236,7 @@ impl ContractExprKind:
         match self:
             case True_: "true"
             case False_: "false"
-            case Var: "var"
+            case VarRef: "var"
             case OldValue: "old"
             case Result: "result"
             case And: "&&"
@@ -261,7 +271,7 @@ impl ContractExprKind:
         match self:
             case True_: "Boolean true literal"
             case False_: "Boolean false literal"
-            case Var: "Variable reference"
+            case VarRef: "VarRefiable reference"
             case OldValue: "Value at function entry"
             case Result: "Return value in postcondition"
             case And: "Logical conjunction"
@@ -328,29 +338,35 @@ impl ContractExprKind:
 class ContractExpr:
     kind: ContractExprKind
     children: List<ContractExpr>
-    name: Option<text>       # For Var, Call
+    name: Option<text>       # For VarRef, Call
     type_name: Option<text>  # For Forall, Exists
-    int_value: Option<i32>     # For integer literals
+    int_value: Option<i32>     # For integer literals (deprecated, use value_data)
+    value_data: Option<ContractValue>   # For ValExpr
     
     fn new(kind: ContractExprKind) -> ContractExpr:
         ContractExpr(
             kind: kind,
             children: [],
-            name: None,
-            type_name: None,
-            int_value: None
+            name: nil,
+            type_name: nil,
+            int_value: nil,
+            value_data: nil
         )
 
-    var fn with_children(children: List<ContractExpr>) -> ContractExpr:
+    me with_children(children: List<ContractExpr>) -> ContractExpr:
         self.children = children
         self
 
-    var fn with_name(name: text) -> ContractExpr:
+    me with_name(name: text) -> ContractExpr:
         self.name = Some(name)
         self
 
-    var fn with_type(type_name: text) -> ContractExpr:
+    me with_type(type_name: text) -> ContractExpr:
         self.type_name = Some(type_name)
+        self
+
+    me with_val(value: ContractValue) -> ContractExpr:
+        self.value_data = Some(value)
         self
 
     # Factory methods for common expressions
@@ -360,8 +376,23 @@ class ContractExpr:
     fn false_() -> ContractExpr:
         ContractExpr.new(ContractExprKind.False_)
 
-    fn var(name: text) -> ContractExpr:
-        ContractExpr.new(ContractExprKind.Var).with_name(name)
+    fn int_val(n: i32) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.ValExpr).with_val(ContractValue.IntVal(n))
+
+    fn bool_val(b: bool) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.ValExpr).with_val(ContractValue.BoolVal(b))
+
+    fn str_val(s: text) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.ValExpr).with_val(ContractValue.StrVal(s))
+
+    fn nil_val() -> ContractExpr:
+        ContractExpr.new(ContractExprKind.ValExpr).with_val(ContractValue.NilVal)
+
+    fn error_val(tag: text, payload: ContractValue) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.ValExpr).with_val(ContractValue.ErrorVal(tag, payload))
+
+    fn variable(name: text) -> ContractExpr:
+        ContractExpr.new(ContractExprKind.VarRef).with_name(name)
 
     fn old_expr(expr: ContractExpr) -> ContractExpr:
         ContractExpr.new(ContractExprKind.OldValue).with_children([expr])
@@ -420,13 +451,13 @@ class ContractClause:
     message: Option<text> # Optional message for violations
 
     fn new(expr: ContractExpr) -> ContractClause:
-        ContractClause(expr: expr, label: None, message: None)
+        ContractClause(expr: expr, label: nil, message: nil)
 
-    var fn with_label(label: text) -> ContractClause:
+    me with_label(label: text) -> ContractClause:
         self.label = Some(label)
         self
 
-    var fn with_message(message: text) -> ContractClause:
+    me with_message(message: text) -> ContractClause:
         self.message = Some(message)
         self
 
@@ -468,31 +499,31 @@ class FunctionContract:
             postconditions: [],
             postconditions_err: [],
             invariants: [],
-            termination: None,
-            modifies: None
+            termination: nil,
+            modifies: nil
         )
 
-    var fn add_precondition(clause: ContractClause) -> FunctionContract:
+    me add_precondition(clause: ContractClause) -> FunctionContract:
         self.preconditions.push(clause)
         self
 
-    var fn add_postcondition(clause: ContractClause) -> FunctionContract:
+    me add_postcondition(clause: ContractClause) -> FunctionContract:
         self.postconditions.push(clause)
         self
 
-    var fn add_postcondition_err(clause: ContractClause) -> FunctionContract:
+    me add_postcondition_err(clause: ContractClause) -> FunctionContract:
         self.postconditions_err.push(clause)
         self
 
-    var fn add_invariant(clause: ContractClause) -> FunctionContract:
+    me add_invariant(clause: ContractClause) -> FunctionContract:
         self.invariants.push(clause)
         self
 
-    var fn with_termination(termination: TerminationClause) -> FunctionContract:
+    me with_termination(termination: TerminationClause) -> FunctionContract:
         self.termination = Some(termination)
         self
 
-    var fn with_modifies(modifies: ModifiesClause) -> FunctionContract:
+    me with_modifies(modifies: ModifiesClause) -> FunctionContract:
         self.modifies = Some(modifies)
         self
 
@@ -521,7 +552,7 @@ class ClassInvariant:
             is_public: false
         )
 
-    var fn public() -> ClassInvariant:
+    me public() -> ClassInvariant:
         self.is_public = true
         self
 
@@ -540,16 +571,16 @@ class ContractContext:
             in_ensures: false
         )
 
-    var fn enter_requires():
+    me enter_requires() :
         self.in_requires = true
         self.in_ensures = false
 
-    var fn enter_ensures():
+    me enter_ensures() :
         self.in_requires = false
         self.in_ensures = true
         self.result_available = true
 
-    var fn capture_old(name: text, value: ContractExpr):
+    me capture_old(name: text, value: ContractExpr) :
         self.captured_values[name] = value
 
     fn get_old(name: text) -> Option<ContractExpr>:
@@ -560,7 +591,7 @@ fn is_pure_expr(expr: ContractExpr) -> bool:
     match expr.kind:
         case ContractExprKind.True_: true
         case ContractExprKind.False_: true
-        case ContractExprKind.Var: true
+        case ContractExprKind.VarRef: true
         case ContractExprKind.OldValue:
             expr.children.len() == 1 and is_pure_expr(expr.children[0])
         case ContractExprKind.Result: true

@@ -19,11 +19,11 @@ thread_local! {
     // (passed, failed) counts for current describe block
     pub(crate) static BDD_COUNTS: RefCell<(usize, usize)> = RefCell::new((0, 0));
     // Whether current "it" block has a failed expectation
-    static BDD_EXPECT_FAILED: RefCell<bool> = RefCell::new(false);
+    pub(crate) static BDD_EXPECT_FAILED: RefCell<bool> = RefCell::new(false);
     // Whether we're currently inside an "it" block (expect should be silent)
-    static BDD_INSIDE_IT: RefCell<bool> = RefCell::new(false);
+    pub(crate) static BDD_INSIDE_IT: RefCell<bool> = RefCell::new(false);
     // Failure message from expect (for display in it block)
-    static BDD_FAILURE_MSG: RefCell<Option<String>> = RefCell::new(None);
+    pub(crate) static BDD_FAILURE_MSG: RefCell<Option<String>> = RefCell::new(None);
 
     // TEST-010: Shared examples registry - maps name to block
     pub(crate) static BDD_SHARED_EXAMPLES: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
