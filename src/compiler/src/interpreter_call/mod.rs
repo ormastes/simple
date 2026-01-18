@@ -146,6 +146,20 @@ pub(crate) fn evaluate_call(
                     }
                 }
             }
+            // Check for static method call on a type: Type.method()
+            // This handles calls like Set.new() or Set.from_array()
+            if let Some(methods) = impl_methods.get(module_name) {
+                if let Some(func) = methods.iter().find(|m| &m.name == field) {
+                    return core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                }
+            }
+            // Check for class static methods
+            if let Some(class_def) = classes.get(module_name).cloned() {
+                if let Some(func) = class_def.methods.iter().find(|m| &m.name == field) {
+                    return core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                }
+            }
+
             // Fall back to global functions if module lookup failed
             if let Some(func) = functions.get(field).cloned() {
                 return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);

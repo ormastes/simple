@@ -876,6 +876,85 @@ fn main() {
                 }
             }
         }
+        "env" => {
+            use simple_driver::cli::env;
+
+            let subcommand = args.get(1).map(|s| s.as_str());
+
+            match subcommand {
+                Some("create") => {
+                    if args.len() < 3 {
+                        eprintln!("error: env create requires a name");
+                        eprintln!("Usage: simple env create <name>");
+                        std::process::exit(1);
+                    }
+                    std::process::exit(env::create_env(&args[2]));
+                }
+                Some("activate") => {
+                    if args.len() < 3 {
+                        eprintln!("error: env activate requires a name");
+                        eprintln!("Usage: simple env activate <name>");
+                        std::process::exit(1);
+                    }
+                    let shell = args.get(3).map(|s| s.as_str());
+                    std::process::exit(env::activate_env(&args[2], shell));
+                }
+                Some("list") => {
+                    std::process::exit(env::list_envs());
+                }
+                Some("remove") => {
+                    if args.len() < 3 {
+                        eprintln!("error: env remove requires a name");
+                        eprintln!("Usage: simple env remove <name> [--force]");
+                        std::process::exit(1);
+                    }
+                    let force = args.iter().any(|a| a == "--force");
+                    std::process::exit(env::remove_env(&args[2], force));
+                }
+                Some("info") => {
+                    if args.len() < 3 {
+                        eprintln!("error: env info requires a name");
+                        eprintln!("Usage: simple env info <name>");
+                        std::process::exit(1);
+                    }
+                    std::process::exit(env::env_info(&args[2]));
+                }
+                Some(cmd) => {
+                    eprintln!("error: unknown env subcommand: {}", cmd);
+                    eprintln!("Usage: simple env [create|activate|list|remove|info] <name>");
+                    std::process::exit(1);
+                }
+                None => {
+                    eprintln!("Simple Environment Management");
+                    eprintln!();
+                    eprintln!("Usage:");
+                    eprintln!("  simple env create <name>     Create new environment");
+                    eprintln!("  simple env activate <name>   Print activation script");
+                    eprintln!("  simple env list              List all environments");
+                    eprintln!("  simple env remove <name>     Remove environment");
+                    eprintln!("  simple env info <name>       Show environment info");
+                    eprintln!();
+                    eprintln!("To activate an environment:");
+                    eprintln!("  source $(simple env activate <name>)");
+                    std::process::exit(0);
+                }
+            }
+        }
+        "lock" => {
+            use simple_driver::cli::lock;
+
+            let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let check_only = args.iter().any(|a| a == "--check");
+            let info_only = args.iter().any(|a| a == "--info");
+
+            if info_only {
+                std::process::exit(lock::lock_info(&dir));
+            } else if check_only {
+                std::process::exit(lock::check_lock(&dir));
+            } else {
+                std::process::exit(lock::generate_lock(&dir));
+            }
+        }
         "run" => {
             // Explicit run command (for compatibility)
             if args.len() < 2 {
