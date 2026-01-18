@@ -4,6 +4,7 @@ pub mod common_backend;
 mod cranelift;
 pub mod instr;
 pub mod instr_gpu;
+#[cfg(not(doctest))]
 mod jit;
 pub mod lean;
 pub mod llvm;
@@ -25,6 +26,7 @@ pub use buffer_pool::{
 };
 pub use common_backend::{BackendError, BackendResult, BackendSettings, CodegenBackend};
 pub use cranelift::*;
+#[cfg(not(doctest))]
 pub use jit::*;
 pub use parallel::{
     compile_modules_parallel, compile_modules_parallel_with_config, BatchCodegen, CodegenStats, CompiledModule,

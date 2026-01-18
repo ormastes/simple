@@ -154,11 +154,33 @@ impl<'a> Parser<'a> {
 
     /// Parse methods in an indented block (impl only - all methods must have bodies)
     /// Parse impl body: associated type implementations and methods
+    /// Supports empty impl blocks: `impl Trait for Type:` with no body
     pub(crate) fn parse_indented_impl_body(
         &mut self,
     ) -> Result<(Vec<AssociatedTypeImpl>, Vec<FunctionDef>), ParseError> {
         self.debug_enter("parse_indented_impl_body");
-        self.expect_block_start()?;
+
+        // Expect colon
+        self.expect(&TokenKind::Colon)?;
+
+        // Check for newline (required)
+        if !self.check(&TokenKind::Newline) {
+            return Err(ParseError::UnexpectedToken {
+                expected: "Newline after impl block colon".to_string(),
+                found: format!("{:?}", self.current.kind),
+                span: self.current.span,
+            });
+        }
+        self.advance(); // consume newline
+
+        // Check for indent - if no indent, this is an empty impl block
+        if !self.check(&TokenKind::Indent) {
+            // Empty impl block is valid (for marker traits or traits with default impls)
+            self.debug_exit("parse_indented_impl_body (empty)");
+            return Ok((Vec::new(), Vec::new()));
+        }
+        self.advance(); // consume indent
+
         let mut associated_types = Vec::new();
         let mut methods = Vec::new();
         let mut iterations = 0usize;

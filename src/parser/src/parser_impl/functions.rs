@@ -183,6 +183,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse optional where clause: `where T: Trait1 + Trait2, U: Other`
+    /// Supports associated type constraints: `where T: Add<Output=T>`
     pub(crate) fn parse_where_clause(&mut self) -> Result<WhereClause, ParseError> {
         if !self.check(&TokenKind::Where) {
             return Ok(vec![]);
@@ -197,7 +198,8 @@ impl<'a> Parser<'a> {
 
             self.expect(&TokenKind::Colon)?;
 
-            // Parse trait bounds: Trait1 + Trait2 + !Trait3 + ...
+            // Parse trait bounds: Trait1 + Trait2<Output=T> + !Trait3 + ...
+            // Each bound is parsed as a full type expression to support generics
             let mut trait_bounds = Vec::new();
             let mut negative_trait_bounds = Vec::new();
             loop {
@@ -209,12 +211,14 @@ impl<'a> Parser<'a> {
                     false
                 };
 
-                let bound_name = self.expect_identifier()?;
+                // Parse the bound as a full type expression
+                // This handles: Clone, Iterator<Item=T>, Add<Output=Self>, etc.
+                let bound_type = self.parse_type()?;
 
                 if is_negative {
-                    negative_trait_bounds.push(bound_name);
+                    negative_trait_bounds.push(bound_type);
                 } else {
-                    trait_bounds.push(bound_name);
+                    trait_bounds.push(bound_type);
                 }
 
                 // Check for + to continue parsing bounds

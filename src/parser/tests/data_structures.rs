@@ -37,7 +37,7 @@ fn parse_struct_where_clause() {
         assert_eq!(s.name, "Container");
         assert_eq!(s.where_clause.len(), 1);
         assert_eq!(s.where_clause[0].type_param, "T");
-        assert_eq!(s.where_clause[0].bounds, vec!["Clone"]);
+        assert_eq!(s.where_clause[0].bounds, vec![Type::Simple("Clone".to_string())]);
     } else {
         panic!("Expected struct");
     }
