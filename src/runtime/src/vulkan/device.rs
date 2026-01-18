@@ -5,6 +5,7 @@ use super::instance::{VulkanInstance, VulkanPhysicalDevice};
 use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use parking_lot::Mutex;
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 /// Vulkan logical device with queues and allocator
@@ -29,8 +30,8 @@ pub struct VulkanDevice {
     #[cfg(feature = "vulkan")]
     present_queue: Option<Mutex<vk::Queue>>,
 
-    // Memory allocator
-    allocator: Mutex<Allocator>,
+    // Memory allocator (ManuallyDrop to ensure it's dropped before device destruction)
+    allocator: Mutex<ManuallyDrop<Allocator>>,
 
     // Pipeline cache
     pipeline_cache: vk::PipelineCache,
@@ -212,7 +213,7 @@ impl VulkanDevice {
             graphics_queue: graphics_queue.map(Mutex::new),
             #[cfg(feature = "vulkan")]
             present_queue: present_queue.map(Mutex::new),
-            allocator: Mutex::new(allocator),
+            allocator: Mutex::new(ManuallyDrop::new(allocator)),
             pipeline_cache,
             compute_pool: Mutex::new(compute_pool),
             transfer_pool: Mutex::new(transfer_pool),
@@ -257,7 +258,7 @@ impl VulkanDevice {
     }
 
     /// Get allocator (requires lock)
-    pub fn allocator(&self) -> &Mutex<Allocator> {
+    pub fn allocator(&self) -> &Mutex<ManuallyDrop<Allocator>> {
         &self.allocator
     }
 
@@ -438,11 +439,22 @@ impl Drop for VulkanDevice {
         unsafe {
             let _ = self.device.device_wait_idle();
 
+            // Destroy command pools
             self.device.destroy_command_pool(*self.transfer_pool.lock(), None);
             self.device.destroy_command_pool(*self.compute_pool.lock(), None);
+
+            // Destroy graphics pool if it exists
+            #[cfg(feature = "vulkan")]
+            if let Some(ref pool) = self.graphics_pool {
+                self.device.destroy_command_pool(*pool.lock(), None);
+            }
+
             self.device.destroy_pipeline_cache(self.pipeline_cache, None);
 
-            // Allocator drop happens automatically
+            // IMPORTANT: Drop allocator BEFORE destroying the device
+            // The allocator holds internal references to the device and must be
+            // cleaned up while the device is still valid
+            ManuallyDrop::drop(&mut *self.allocator.lock());
 
             self.device.destroy_device(None);
         }

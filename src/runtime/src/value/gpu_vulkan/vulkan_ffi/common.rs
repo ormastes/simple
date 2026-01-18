@@ -17,13 +17,13 @@ use std::sync::Arc;
 #[cfg(feature = "vulkan")]
 lazy_static::lazy_static! {
     /// Global device handle registry
-    pub(super) static ref DEVICE_REGISTRY: Mutex<HashMap<u64, Arc<VulkanDevice>>> = Mutex::new(HashMap::new());
+    pub static ref DEVICE_REGISTRY: Mutex<HashMap<u64, Arc<VulkanDevice>>> = Mutex::new(HashMap::new());
 
     /// Global buffer handle registry
-    pub(super) static ref BUFFER_REGISTRY: Mutex<HashMap<u64, Arc<VulkanBuffer>>> = Mutex::new(HashMap::new());
+    pub static ref BUFFER_REGISTRY: Mutex<HashMap<u64, Arc<VulkanBuffer>>> = Mutex::new(HashMap::new());
 
     /// Global pipeline handle registry
-    pub(super) static ref PIPELINE_REGISTRY: Mutex<HashMap<u64, Arc<ComputePipeline>>> = Mutex::new(HashMap::new());
+    pub static ref PIPELINE_REGISTRY: Mutex<HashMap<u64, Arc<ComputePipeline>>> = Mutex::new(HashMap::new());
 
     /// Global window manager (singleton)
     pub(super) static ref WINDOW_MANAGER: Mutex<Option<Arc<Mutex<WindowManager>>>> = Mutex::new(None);
@@ -98,15 +98,12 @@ pub extern "C" fn rt_vk_available() -> i32 {
     {
         use crate::vulkan::VulkanInstance;
 
-        match VulkanInstance::new() {
-            Ok(_) => {
-                tracing::debug!("Vulkan is available");
-                1
-            }
-            Err(e) => {
-                tracing::warn!("Vulkan not available: {:?}", e);
-                0
-            }
+        if VulkanInstance::is_available() {
+            tracing::debug!("Vulkan is available");
+            1
+        } else {
+            tracing::warn!("Vulkan not available");
+            0
         }
     }
 
