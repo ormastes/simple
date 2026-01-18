@@ -1,14 +1,24 @@
 // Monoio UDP networking implementation for Simple language
 // Provides async UDP socket capabilities using io_uring
 // Feature: #1745-#1749 (Network I/O - UDP)
+//
+// MIGRATION NOTE: This module provides backward-compatible wrappers.
+// When the `monoio-direct` feature is enabled, all functions delegate to
+// the more efficient `rt_monoio_*` implementations in monoio_direct.rs.
+// New code should use the `rt_monoio_*` functions directly.
 
 #![cfg(feature = "monoio-net")]
 
 use crate::value::RuntimeValue;
+#[cfg(not(feature = "monoio-direct"))]
 use crate::monoio_runtime::{execute_async, get_entries, runtime_value_to_string, string_to_runtime_value, extract_buffer_bytes, copy_to_buffer};
+#[cfg(not(feature = "monoio-direct"))]
 use std::net::SocketAddr;
+#[cfg(not(feature = "monoio-direct"))]
 use std::sync::Arc;
+#[cfg(not(feature = "monoio-direct"))]
 use parking_lot::Mutex;
+#[cfg(not(feature = "monoio-direct"))]
 use monoio::net::UdpSocket;
 
 /// UDP socket handle stored in RuntimeValue
@@ -16,6 +26,10 @@ use monoio::net::UdpSocket;
 ///
 /// For connected sockets (after monoio_udp_connect), peer_addr is set
 /// and send()/recv() can be used instead of send_to()/recv_from()
+///
+/// RECOMMENDED: Use the `rt_monoio_*` functions from monoio_direct.rs instead,
+/// which properly store and reuse sockets via a thread-local IoRegistry.
+#[cfg(not(feature = "monoio-direct"))]
 #[derive(Debug, Clone)]
 pub struct MonoioUdpSocket {
     /// Local address the socket is bound to
@@ -24,6 +38,7 @@ pub struct MonoioUdpSocket {
     peer_addr: Option<SocketAddr>,
 }
 
+#[cfg(not(feature = "monoio-direct"))]
 // Global storage for UDP sockets
 // In full implementation, these would be managed by the runtime
 lazy_static::lazy_static! {
@@ -39,6 +54,13 @@ lazy_static::lazy_static! {
 /// # Returns
 /// RuntimeValue containing socket handle (index), or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
+pub extern "C" fn monoio_udp_bind(addr: RuntimeValue) -> RuntimeValue {
+    crate::monoio_direct::rt_monoio_udp_bind(addr)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
 pub extern "C" fn monoio_udp_bind(addr: RuntimeValue) -> RuntimeValue {
     // Extract string from RuntimeValue
     let addr_str = match runtime_value_to_string(addr) {
@@ -101,14 +123,28 @@ pub extern "C" fn monoio_udp_bind(addr: RuntimeValue) -> RuntimeValue {
 /// # Arguments
 /// * `socket_handle` - RuntimeValue containing socket handle
 /// * `buffer` - RuntimeValue containing data to send (RuntimeArray or RuntimeString)
+/// * `len` - Number of bytes to send
 /// * `addr` - RuntimeValue containing destination address string
 ///
 /// # Returns
 /// RuntimeValue containing number of bytes sent, or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
 pub extern "C" fn monoio_udp_send_to(
     socket_handle: RuntimeValue,
     buffer: RuntimeValue,
+    len: i64,
+    addr: RuntimeValue,
+) -> RuntimeValue {
+    crate::monoio_direct::rt_monoio_udp_send_to(socket_handle, buffer, len, addr)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
+pub extern "C" fn monoio_udp_send_to(
+    socket_handle: RuntimeValue,
+    buffer: RuntimeValue,
+    _len: i64,
     addr: RuntimeValue,
 ) -> RuntimeValue {
     let handle = socket_handle.as_int();
@@ -184,12 +220,18 @@ pub extern "C" fn monoio_udp_send_to(
 ///
 /// # Returns
 /// RuntimeValue containing bytes_received, or negative value on error
-///
-/// # Notes
-/// Currently returns only bytes_received. Sender address is not returned.
-/// In future, this could return a tuple (bytes, sender_addr).
-/// The received data is written to the provided buffer.
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
+pub extern "C" fn monoio_udp_recv_from(
+    socket_handle: RuntimeValue,
+    buffer: RuntimeValue,
+    max_len: i64,
+) -> RuntimeValue {
+    crate::monoio_direct::rt_monoio_udp_recv_from(socket_handle, buffer, max_len)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
 pub extern "C" fn monoio_udp_recv_from(
     socket_handle: RuntimeValue,
     buffer: RuntimeValue,
@@ -260,18 +302,22 @@ pub extern "C" fn monoio_udp_recv_from(
 ///
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
-///
-/// # Notes
-/// After connecting, send() and recv() can be used instead of send_to() and recv_from()
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
 pub extern "C" fn monoio_udp_connect(
     socket_handle: RuntimeValue,
     addr: RuntimeValue,
 ) -> RuntimeValue {
-    // NOTE: This function is deprecated due to monoio architecture limitations.
-    // Use rt_monoio_udp_connect from monoio_direct.rs instead.
+    crate::monoio_direct::rt_monoio_udp_connect(socket_handle, addr)
+}
 
-    tracing::warn!("monoio_udp_connect: deprecated - use rt_monoio_udp_connect instead");
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
+pub extern "C" fn monoio_udp_connect(
+    _socket_handle: RuntimeValue,
+    _addr: RuntimeValue,
+) -> RuntimeValue {
+    tracing::error!("monoio_udp_connect: Enable monoio-direct feature or use rt_monoio_udp_connect");
     RuntimeValue::from_int(-1)
 }
 
@@ -281,18 +327,28 @@ pub extern "C" fn monoio_udp_connect(
 /// # Arguments
 /// * `socket_handle` - RuntimeValue containing socket handle (must be connected)
 /// * `buffer` - RuntimeValue containing data to send
+/// * `len` - Number of bytes to send
 ///
 /// # Returns
 /// RuntimeValue containing number of bytes sent, or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
 pub extern "C" fn monoio_udp_send(
     socket_handle: RuntimeValue,
     buffer: RuntimeValue,
+    len: i64,
 ) -> RuntimeValue {
-    // NOTE: This function is deprecated due to monoio architecture limitations.
-    // Use rt_monoio_udp_send from monoio_direct.rs instead.
+    crate::monoio_direct::rt_monoio_udp_send(socket_handle, buffer, len)
+}
 
-    tracing::warn!("monoio_udp_send: deprecated - use rt_monoio_udp_send instead");
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
+pub extern "C" fn monoio_udp_send(
+    _socket_handle: RuntimeValue,
+    _buffer: RuntimeValue,
+    _len: i64,
+) -> RuntimeValue {
+    tracing::error!("monoio_udp_send: Enable monoio-direct feature or use rt_monoio_udp_send");
     RuntimeValue::from_int(-1)
 }
 
@@ -307,15 +363,23 @@ pub extern "C" fn monoio_udp_send(
 /// # Returns
 /// RuntimeValue containing number of bytes received, or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
 pub extern "C" fn monoio_udp_recv(
     socket_handle: RuntimeValue,
     buffer: RuntimeValue,
     max_len: i64,
 ) -> RuntimeValue {
-    // NOTE: This function is deprecated due to monoio architecture limitations.
-    // Use rt_monoio_udp_recv from monoio_direct.rs instead.
+    crate::monoio_direct::rt_monoio_udp_recv(socket_handle, buffer, max_len)
+}
 
-    tracing::warn!("monoio_udp_recv: deprecated - use rt_monoio_udp_recv instead");
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
+pub extern "C" fn monoio_udp_recv(
+    _socket_handle: RuntimeValue,
+    _buffer: RuntimeValue,
+    _max_len: i64,
+) -> RuntimeValue {
+    tracing::error!("monoio_udp_recv: Enable monoio-direct feature or use rt_monoio_udp_recv");
     RuntimeValue::from_int(-1)
 }
 
@@ -327,11 +391,14 @@ pub extern "C" fn monoio_udp_recv(
 ///
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
-///
-/// # Notes
-/// Due to FFI limitations, this only removes the metadata entry.
-/// The actual socket is recreated for each operation.
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
+pub extern "C" fn monoio_udp_close(socket_handle: RuntimeValue) -> RuntimeValue {
+    crate::monoio_direct::rt_monoio_udp_close(socket_handle)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
 pub extern "C" fn monoio_udp_close(socket_handle: RuntimeValue) -> RuntimeValue {
     let handle = socket_handle.as_int();
 
@@ -363,6 +430,13 @@ pub extern "C" fn monoio_udp_close(socket_handle: RuntimeValue) -> RuntimeValue 
 /// # Returns
 /// RuntimeValue containing address string, or nil on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
+pub extern "C" fn monoio_udp_local_addr(socket_handle: RuntimeValue) -> RuntimeValue {
+    crate::monoio_direct::rt_monoio_udp_local_addr(socket_handle)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
 pub extern "C" fn monoio_udp_local_addr(socket_handle: RuntimeValue) -> RuntimeValue {
     let handle = socket_handle.as_int();
 
@@ -391,14 +465,21 @@ pub extern "C" fn monoio_udp_local_addr(socket_handle: RuntimeValue) -> RuntimeV
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
 pub extern "C" fn monoio_udp_set_broadcast(
     socket_handle: RuntimeValue,
     broadcast: i64,
 ) -> RuntimeValue {
-    // NOTE: This function is deprecated due to monoio architecture limitations.
-    // Use rt_monoio_udp_set_broadcast from monoio_direct.rs instead.
+    crate::monoio_direct::rt_monoio_udp_set_broadcast(socket_handle, broadcast)
+}
 
-    tracing::warn!("monoio_udp_set_broadcast: deprecated - use rt_monoio_udp_set_broadcast instead");
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
+pub extern "C" fn monoio_udp_set_broadcast(
+    _socket_handle: RuntimeValue,
+    _broadcast: i64,
+) -> RuntimeValue {
+    tracing::error!("monoio_udp_set_broadcast: Enable monoio-direct feature or use rt_monoio_udp_set_broadcast");
     RuntimeValue::from_int(-1)
 }
 
@@ -412,14 +493,21 @@ pub extern "C" fn monoio_udp_set_broadcast(
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
 pub extern "C" fn monoio_udp_set_multicast_ttl(
     socket_handle: RuntimeValue,
     ttl: i64,
 ) -> RuntimeValue {
-    // NOTE: This function is deprecated due to monoio architecture limitations.
-    // Use rt_monoio_udp_set_multicast_ttl from monoio_direct.rs instead.
+    crate::monoio_direct::rt_monoio_udp_set_multicast_ttl(socket_handle, ttl)
+}
 
-    tracing::warn!("monoio_udp_set_multicast_ttl: deprecated - use rt_monoio_udp_set_multicast_ttl instead");
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
+pub extern "C" fn monoio_udp_set_multicast_ttl(
+    _socket_handle: RuntimeValue,
+    _ttl: i64,
+) -> RuntimeValue {
+    tracing::error!("monoio_udp_set_multicast_ttl: Enable monoio-direct feature or use rt_monoio_udp_set_multicast_ttl");
     RuntimeValue::from_int(-1)
 }
 
@@ -434,15 +522,23 @@ pub extern "C" fn monoio_udp_set_multicast_ttl(
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
 pub extern "C" fn monoio_udp_join_multicast(
     socket_handle: RuntimeValue,
     multicast_addr: RuntimeValue,
     interface_addr: RuntimeValue,
 ) -> RuntimeValue {
-    // NOTE: This function is deprecated due to monoio architecture limitations.
-    // Use rt_monoio_udp_join_multicast from monoio_direct.rs instead.
+    crate::monoio_direct::rt_monoio_udp_join_multicast(socket_handle, multicast_addr, interface_addr)
+}
 
-    tracing::warn!("monoio_udp_join_multicast: deprecated - use rt_monoio_udp_join_multicast instead");
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
+pub extern "C" fn monoio_udp_join_multicast(
+    _socket_handle: RuntimeValue,
+    _multicast_addr: RuntimeValue,
+    _interface_addr: RuntimeValue,
+) -> RuntimeValue {
+    tracing::error!("monoio_udp_join_multicast: Enable monoio-direct feature or use rt_monoio_udp_join_multicast");
     RuntimeValue::from_int(-1)
 }
 
@@ -457,15 +553,23 @@ pub extern "C" fn monoio_udp_join_multicast(
 /// # Returns
 /// RuntimeValue containing 1 on success, or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
 pub extern "C" fn monoio_udp_leave_multicast(
     socket_handle: RuntimeValue,
     multicast_addr: RuntimeValue,
     interface_addr: RuntimeValue,
 ) -> RuntimeValue {
-    // NOTE: This function is deprecated due to monoio architecture limitations.
-    // Use rt_monoio_udp_leave_multicast from monoio_direct.rs instead.
+    crate::monoio_direct::rt_monoio_udp_leave_multicast(socket_handle, multicast_addr, interface_addr)
+}
 
-    tracing::warn!("monoio_udp_leave_multicast: deprecated - use rt_monoio_udp_leave_multicast instead");
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
+pub extern "C" fn monoio_udp_leave_multicast(
+    _socket_handle: RuntimeValue,
+    _multicast_addr: RuntimeValue,
+    _interface_addr: RuntimeValue,
+) -> RuntimeValue {
+    tracing::error!("monoio_udp_leave_multicast: Enable monoio-direct feature or use rt_monoio_udp_leave_multicast");
     RuntimeValue::from_int(-1)
 }
 
@@ -473,28 +577,33 @@ pub extern "C" fn monoio_udp_leave_multicast(
 mod tests {
     use super::*;
 
+    #[cfg(not(feature = "monoio-direct"))]
     #[test]
     fn test_udp_structs() {
-        use std::net::{IpAddr, Ipv4Addr};
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
 
-        let _socket = MonoioUdpSocket { local_addr: addr };
+        let _socket = MonoioUdpSocket {
+            local_addr: addr,
+            peer_addr: None,
+        };
     }
 
     #[test]
-    fn test_udp_bind_stub() {
+    fn test_udp_bind_invalid_arg() {
         let result = monoio_udp_bind(RuntimeValue::NIL);
-        assert_eq!(result.as_int(), -1);
+        assert!(result.as_int() < 0); // Should return error for invalid arg
     }
 
     #[test]
-    fn test_udp_send_to_stub() {
+    fn test_udp_send_to_invalid_arg() {
         let result = monoio_udp_send_to(
             RuntimeValue::NIL,
             RuntimeValue::NIL,
+            0,
             RuntimeValue::NIL,
         );
-        assert_eq!(result.as_int(), -1);
+        assert!(result.as_int() < 0); // Should return error for invalid arg
     }
 }

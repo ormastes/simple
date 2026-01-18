@@ -1056,10 +1056,11 @@ pub(crate) fn call_extern_function(
                 .get(0)
                 .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_upload expects 3 arguments".into()))?
                 .as_int()? as u64;
+            // The second argument is a raw pointer passed as integer
             let data_ptr = evaluated
                 .get(1)
                 .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_upload expects 3 arguments".into()))?
-                .as_ptr()? as *const u8;
+                .as_int()? as *const u8;
             let size = evaluated
                 .get(2)
                 .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_upload expects 3 arguments".into()))?
@@ -1073,10 +1074,11 @@ pub(crate) fn call_extern_function(
                 .get(0)
                 .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_download expects 3 arguments".into()))?
                 .as_int()? as u64;
+            // The second argument is a raw pointer passed as integer
             let data_ptr = evaluated
                 .get(1)
                 .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_download expects 3 arguments".into()))?
-                .as_ptr()? as *mut u8;
+                .as_int()? as *mut u8;
             let size = evaluated
                 .get(2)
                 .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_download expects 3 arguments".into()))?
@@ -1090,10 +1092,11 @@ pub(crate) fn call_extern_function(
                 .get(0)
                 .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_compile expects 3 arguments".into()))?
                 .as_int()? as u64;
+            // The second argument is a raw pointer passed as integer
             let spirv_ptr = evaluated
                 .get(1)
                 .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_compile expects 3 arguments".into()))?
-                .as_ptr()? as *const u8;
+                .as_int()? as *const u8;
             let spirv_size = evaluated
                 .get(2)
                 .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_compile expects 3 arguments".into()))?
@@ -1112,44 +1115,70 @@ pub(crate) fn call_extern_function(
         }
         #[cfg(feature = "vulkan")]
         "rt_vk_kernel_launch" => {
-            let device = evaluated
-                .get(0)
-                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?
-                .as_int()? as u64;
+            // rt_vk_kernel_launch(pipeline, buffer_handles, buffer_count, grid_x, grid_y, grid_z, block_x, block_y, block_z)
             let pipeline = evaluated
+                .get(0)
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
+                .as_int()? as u64;
+            // Buffer handles pointer passed as integer
+            let buffer_handles = evaluated
                 .get(1)
-                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?
-                .as_int()? as u64;
-            let buffer = evaluated
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
+                .as_int()? as *const u64;
+            let buffer_count = evaluated
                 .get(2)
-                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
                 .as_int()? as u64;
-            let groups_x = evaluated
+            let grid_x = evaluated
                 .get(3)
-                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
                 .as_int()? as u32;
-            let groups_y = evaluated
+            let grid_y = evaluated
                 .get(4)
-                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
                 .as_int()? as u32;
-            let groups_z = evaluated
+            let grid_z = evaluated
                 .get(5)
-                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 6 arguments".into()))?
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
                 .as_int()? as u32;
-            let result = rt_vk_kernel_launch(device, pipeline, buffer, groups_x, groups_y, groups_z);
+            let block_x = evaluated
+                .get(6)
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
+                .as_int()? as u32;
+            let block_y = evaluated
+                .get(7)
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
+                .as_int()? as u32;
+            let block_z = evaluated
+                .get(8)
+                .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
+                .as_int()? as u32;
+            let result = rt_vk_kernel_launch(
+                pipeline,
+                buffer_handles,
+                buffer_count,
+                grid_x,
+                grid_y,
+                grid_z,
+                block_x,
+                block_y,
+                block_z,
+            );
             Ok(Value::Int(result as i64))
         }
         #[cfg(feature = "vulkan")]
         "rt_vk_kernel_launch_1d" => {
-            let device = evaluated
+            // rt_vk_kernel_launch_1d(pipeline, buffer_handles, buffer_count, num_elements)
+            let pipeline = evaluated
                 .get(0)
                 .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?
                 .as_int()? as u64;
-            let pipeline = evaluated
+            // Buffer handles pointer passed as integer
+            let buffer_handles = evaluated
                 .get(1)
                 .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?
-                .as_int()? as u64;
-            let buffer = evaluated
+                .as_int()? as *const u64;
+            let buffer_count = evaluated
                 .get(2)
                 .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?
                 .as_int()? as u64;
@@ -1157,7 +1186,7 @@ pub(crate) fn call_extern_function(
                 .get(3)
                 .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?
                 .as_int()? as u32;
-            let result = rt_vk_kernel_launch_1d(device, pipeline, buffer, num_elements);
+            let result = rt_vk_kernel_launch_1d(pipeline, buffer_handles, buffer_count, num_elements);
             Ok(Value::Int(result as i64))
         }
 
