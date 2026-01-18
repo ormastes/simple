@@ -205,11 +205,7 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
                         line: use_stmt.span.line,
                         column: use_stmt.span.column,
                         severity: ErrorSeverity::Warning,
-                        message: format!(
-                            "unresolved import '{}': {}",
-                            use_stmt.path.segments.join("."),
-                            e
-                        ),
+                        message: format!("unresolved import '{}': {}", use_stmt.path.segments.join("."), e),
                         expected: None,
                         found: None,
                     });

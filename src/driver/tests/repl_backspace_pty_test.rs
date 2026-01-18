@@ -289,8 +289,7 @@ fn test_repl_backspace_deletes_indent() {
 
     let spaces = parser.count_spaces_in_buffer();
     assert_eq!(
-        spaces,
-        3,
+        spaces, 3,
         "Buffer should contain 3 spaces after backspace (empty buffer prevention), got {}",
         spaces
     );

@@ -99,10 +99,7 @@ fn main() {
     };
 
     // Create API surface from the parsed module
-    let module_name = source_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("module");
+    let module_name = source_path.file_stem().and_then(|s| s.to_str()).unwrap_or("module");
     let api_surface = ApiSurface::from_nodes(module_name, &module.items);
 
     // Generate context pack

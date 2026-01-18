@@ -195,12 +195,7 @@ impl I18nExtractor {
         match expr {
             Expr::I18nString { name, default_text } => {
                 let scope = self.scope_string();
-                self.add_i18n_string(
-                    name.clone(),
-                    default_text.clone(),
-                    Vec::new(),
-                    scope,
-                );
+                self.add_i18n_string(name.clone(), default_text.clone(), Vec::new(), scope);
             }
             Expr::I18nTemplate { name, parts, args: _ } => {
                 let scope = self.scope_string();

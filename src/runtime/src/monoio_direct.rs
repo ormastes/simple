@@ -392,11 +392,14 @@ pub extern "C" fn rt_monoio_tcp_shutdown(stream_handle: RuntimeValue, how: i64) 
     use std::os::unix::io::AsRawFd;
     let fd = stream.as_raw_fd();
     let result = unsafe {
-        libc::shutdown(fd, match shutdown {
-            std::net::Shutdown::Read => libc::SHUT_RD,
-            std::net::Shutdown::Write => libc::SHUT_WR,
-            std::net::Shutdown::Both => libc::SHUT_RDWR,
-        })
+        libc::shutdown(
+            fd,
+            match shutdown {
+                std::net::Shutdown::Read => libc::SHUT_RD,
+                std::net::Shutdown::Write => libc::SHUT_WR,
+                std::net::Shutdown::Both => libc::SHUT_RDWR,
+            },
+        )
     };
 
     // Put stream back
@@ -415,9 +418,7 @@ pub extern "C" fn rt_monoio_tcp_shutdown(stream_handle: RuntimeValue, how: i64) 
 pub extern "C" fn rt_monoio_tcp_local_addr(stream_handle: RuntimeValue) -> RuntimeValue {
     let stream_id = stream_handle.as_int();
 
-    let addr = with_registry(|reg| {
-        reg.get_tcp_stream(stream_id).and_then(|s| s.local_addr().ok())
-    });
+    let addr = with_registry(|reg| reg.get_tcp_stream(stream_id).and_then(|s| s.local_addr().ok()));
 
     match addr {
         Some(addr) => crate::monoio_runtime::string_to_runtime_value(&addr.to_string()),
@@ -430,9 +431,7 @@ pub extern "C" fn rt_monoio_tcp_local_addr(stream_handle: RuntimeValue) -> Runti
 pub extern "C" fn rt_monoio_tcp_peer_addr(stream_handle: RuntimeValue) -> RuntimeValue {
     let stream_id = stream_handle.as_int();
 
-    let addr = with_registry(|reg| {
-        reg.get_tcp_stream(stream_id).and_then(|s| s.peer_addr().ok())
-    });
+    let addr = with_registry(|reg| reg.get_tcp_stream(stream_id).and_then(|s| s.peer_addr().ok()));
 
     match addr {
         Some(addr) => crate::monoio_runtime::string_to_runtime_value(&addr.to_string()),
@@ -700,9 +699,7 @@ pub extern "C" fn rt_monoio_udp_close(socket_handle: RuntimeValue) -> RuntimeVal
 pub extern "C" fn rt_monoio_udp_local_addr(socket_handle: RuntimeValue) -> RuntimeValue {
     let socket_id = socket_handle.as_int();
 
-    let addr = with_registry(|reg| {
-        reg.get_udp_socket(socket_id).and_then(|s| s.local_addr().ok())
-    });
+    let addr = with_registry(|reg| reg.get_udp_socket(socket_id).and_then(|s| s.local_addr().ok()));
 
     match addr {
         Some(addr) => crate::monoio_runtime::string_to_runtime_value(&addr.to_string()),
@@ -829,9 +826,7 @@ pub extern "C" fn rt_monoio_udp_send(socket_handle: RuntimeValue, buffer: Runtim
             use std::os::unix::io::AsRawFd;
             let fd = s.as_raw_fd();
 
-            unsafe {
-                libc::send(fd, data.as_ptr() as *const libc::c_void, data.len(), 0)
-            }
+            unsafe { libc::send(fd, data.as_ptr() as *const libc::c_void, data.len(), 0) }
         })
     });
 
@@ -864,9 +859,7 @@ pub extern "C" fn rt_monoio_udp_recv(socket_handle: RuntimeValue, buffer: Runtim
             use std::os::unix::io::AsRawFd;
             let fd = s.as_raw_fd();
 
-            unsafe {
-                libc::recv(fd, recv_buf.as_mut_ptr() as *mut libc::c_void, recv_buf.len(), 0)
-            }
+            unsafe { libc::recv(fd, recv_buf.as_mut_ptr() as *mut libc::c_void, recv_buf.len(), 0) }
         })
     });
 

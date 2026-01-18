@@ -57,8 +57,8 @@ use crate::aop_config::AopConfig;
 use crate::di::DiScope;
 use crate::error::CompileError;
 use crate::interpreter::{
-    await_value, evaluate_expr, exec_block, exec_block_fn, get_aop_config, get_di_config, with_effect_context,
-    Control, DI_SINGLETONS,
+    await_value, evaluate_expr, exec_block, exec_block_fn, get_aop_config, get_di_config, with_effect_context, Control,
+    DI_SINGLETONS,
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;

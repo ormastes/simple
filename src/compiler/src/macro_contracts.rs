@@ -322,10 +322,7 @@ fn eval_const_condition(
             // Check const bindings for boolean parameter
             if let Some(value_str) = const_bindings.get(name) {
                 value_str.parse::<bool>().map_err(|_| {
-                    CompileError::Semantic(format!(
-                        "Const binding '{}' is not a boolean: {}",
-                        name, value_str
-                    ))
+                    CompileError::Semantic(format!("Const binding '{}' is not a boolean: {}", name, value_str))
                 })
             } else {
                 Err(CompileError::Semantic(format!(

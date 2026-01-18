@@ -409,9 +409,9 @@ pub struct TraitDef {
     pub name: String,
     /// Generic type parameters: trait Foo<T>
     pub generic_params: Vec<String>,
-    /// Super traits (trait inheritance): trait Copy: Clone
-    /// Contains trait names that this trait extends
-    pub super_traits: Vec<String>,
+    /// Super traits (trait inheritance): trait Copy: Clone, trait Seq<T>: Collection<T>
+    /// Contains trait types that this trait extends (supports generics)
+    pub super_traits: Vec<Type>,
     /// Where clause for trait bounds: where T: Clone + Default
     pub where_clause: WhereClause,
     /// Associated types: `type Item`, `type Item: Clone`

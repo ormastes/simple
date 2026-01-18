@@ -3619,7 +3619,7 @@ fn remove_tensor(handle: i64) -> Option<Tensor> {
 #[cfg(feature = "pytorch")]
 #[derive(Clone)]
 struct AutogradContext {
-    saved_tensors: Vec<i64>,  // Tensor handles
+    saved_tensors: Vec<i64>, // Tensor handles
     saved_values: HashMap<String, RuntimeValue>,
 }
 
@@ -4190,10 +4190,7 @@ pub extern "C" fn rt_torch_stack(tensors: RuntimeValue, dim: i64) -> RuntimeValu
     };
 
     // Collect actual tensors from handles
-    let tensors_vec: Vec<Tensor> = tensor_handles
-        .iter()
-        .filter_map(|&h| get_tensor(h))
-        .collect();
+    let tensors_vec: Vec<Tensor> = tensor_handles.iter().filter_map(|&h| get_tensor(h)).collect();
 
     if tensors_vec.is_empty() {
         return RuntimeValue::NIL;
@@ -4246,8 +4243,7 @@ pub extern "C" fn rt_torch_autograd_context_save_tensor(ctx: RuntimeValue, tenso
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_autograd_context_save_tensor(_ctx: RuntimeValue, _tensor: RuntimeValue) {
-}
+pub extern "C" fn rt_torch_autograd_context_save_tensor(_ctx: RuntimeValue, _tensor: RuntimeValue) {}
 
 #[cfg(feature = "pytorch")]
 #[no_mangle]
@@ -4268,8 +4264,7 @@ pub extern "C" fn rt_torch_autograd_context_save_value(ctx: RuntimeValue, key: R
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_autograd_context_save_value(_ctx: RuntimeValue, _key: RuntimeValue, _value: RuntimeValue) {
-}
+pub extern "C" fn rt_torch_autograd_context_save_value(_ctx: RuntimeValue, _key: RuntimeValue, _value: RuntimeValue) {}
 
 #[cfg(feature = "pytorch")]
 #[no_mangle]
@@ -4405,10 +4400,7 @@ pub extern "C" fn rt_torch_autograd_function_apply(func: RuntimeValue, inputs: R
     };
 
     // Collect input tensors
-    let input_tensors: Vec<Tensor> = input_handles
-        .iter()
-        .filter_map(|&h| get_tensor(h))
-        .collect();
+    let input_tensors: Vec<Tensor> = input_handles.iter().filter_map(|&h| get_tensor(h)).collect();
 
     if input_tensors.is_empty() {
         return RuntimeValue::NIL;
@@ -4471,10 +4463,7 @@ pub extern "C" fn rt_torch_checkpoint(func: RuntimeValue, inputs: RuntimeValue) 
         None => vec![inputs_handle],
     };
 
-    let input_tensors: Vec<Tensor> = input_handles
-        .iter()
-        .filter_map(|&h| get_tensor(h))
-        .collect();
+    let input_tensors: Vec<Tensor> = input_handles.iter().filter_map(|&h| get_tensor(h)).collect();
 
     if input_tensors.is_empty() {
         return RuntimeValue::NIL;
@@ -4584,7 +4573,7 @@ pub extern "C" fn rt_torch_cross_entropy_loss(_pred: RuntimeValue, _target: Runt
 #[cfg(feature = "pytorch")]
 #[derive(Clone)]
 struct Conv3dLayer {
-    weight: i64,      // Tensor handle for weight [out_channels, in_channels, kD, kH, kW]
+    weight: i64,       // Tensor handle for weight [out_channels, in_channels, kD, kH, kW]
     bias: Option<i64>, // Tensor handle for bias [out_channels]
     stride: i64,
     padding: i64,
@@ -4603,8 +4592,8 @@ static mut CONV3D_COUNTER: i64 = 1;
 #[cfg(feature = "pytorch")]
 #[derive(Clone)]
 struct RnnLayer {
-    weight_ih: i64,   // Tensor handle [hidden_size, input_size]
-    weight_hh: i64,   // Tensor handle [hidden_size, hidden_size]
+    weight_ih: i64, // Tensor handle [hidden_size, input_size]
+    weight_hh: i64, // Tensor handle [hidden_size, hidden_size]
     bias_ih: Option<i64>,
     bias_hh: Option<i64>,
     hidden_size: i64,
@@ -4624,7 +4613,7 @@ static mut RNN_COUNTER: i64 = 1;
 #[cfg(feature = "pytorch")]
 #[derive(Clone)]
 struct MultiheadAttentionLayer {
-    in_proj_weight: i64,  // [3 * embed_dim, embed_dim]
+    in_proj_weight: i64, // [3 * embed_dim, embed_dim]
     in_proj_bias: Option<i64>,
     out_proj_weight: i64, // [embed_dim, embed_dim]
     out_proj_bias: Option<i64>,
@@ -4653,7 +4642,7 @@ static mut POSITIONAL_ENCODING_COUNTER: i64 = 1;
 #[cfg(feature = "pytorch")]
 #[derive(Clone)]
 struct TransformerEncoderLayer {
-    self_attn: i64,    // MultiheadAttention handle
+    self_attn: i64, // MultiheadAttention handle
     linear1_weight: i64,
     linear1_bias: i64,
     linear2_weight: i64,
@@ -4679,8 +4668,8 @@ static mut TRANSFORMER_ENCODER_LAYER_COUNTER: i64 = 1;
 #[cfg(feature = "pytorch")]
 #[derive(Clone)]
 struct TransformerDecoderLayer {
-    self_attn: i64,    // MultiheadAttention handle
-    cross_attn: i64,   // MultiheadAttention handle
+    self_attn: i64,  // MultiheadAttention handle
+    cross_attn: i64, // MultiheadAttention handle
     linear1_weight: i64,
     linear1_bias: i64,
     linear2_weight: i64,
@@ -4848,11 +4837,7 @@ pub extern "C" fn rt_torch_rnn_new(_input_size: i64, _hidden_size: i64) -> Runti
 
 #[cfg(feature = "pytorch")]
 #[no_mangle]
-pub extern "C" fn rt_torch_rnn_forward(
-    layer: RuntimeValue,
-    input: RuntimeValue,
-    hidden: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_torch_rnn_forward(layer: RuntimeValue, input: RuntimeValue, hidden: RuntimeValue) -> RuntimeValue {
     let layer_handle = match layer.as_int() {
         Ok(h) => h,
         Err(_) => return RuntimeValue::NIL,
@@ -4922,7 +4907,7 @@ pub extern "C" fn rt_torch_rnn_forward(
         &params,
         rnn_layer.bias_ih.is_some(),
         rnn_layer.num_layers,
-        0.0,  // dropout
+        0.0,   // dropout
         false, // training
         false, // bidirectional
         rnn_layer.batch_first,
@@ -5058,10 +5043,20 @@ pub extern "C" fn rt_torch_multihead_attention_forward(
     let batch_size = q.size()[0];
     let seq_len = q.size()[1];
 
-    let q = q.view([batch_size, seq_len, mha_layer.num_heads, head_dim]).transpose(1, 2);
-    let k = key_tensor.matmul(&in_proj_weight.narrow(0, mha_layer.embed_dim, mha_layer.embed_dim).transpose(-2, -1));
+    let q = q
+        .view([batch_size, seq_len, mha_layer.num_heads, head_dim])
+        .transpose(1, 2);
+    let k = key_tensor.matmul(
+        &in_proj_weight
+            .narrow(0, mha_layer.embed_dim, mha_layer.embed_dim)
+            .transpose(-2, -1),
+    );
     let k = k.view([batch_size, -1, mha_layer.num_heads, head_dim]).transpose(1, 2);
-    let v = value_tensor.matmul(&in_proj_weight.narrow(0, 2 * mha_layer.embed_dim, mha_layer.embed_dim).transpose(-2, -1));
+    let v = value_tensor.matmul(
+        &in_proj_weight
+            .narrow(0, 2 * mha_layer.embed_dim, mha_layer.embed_dim)
+            .transpose(-2, -1),
+    );
     let v = v.view([batch_size, -1, mha_layer.num_heads, head_dim]).transpose(1, 2);
 
     // Scaled dot-product attention
@@ -5071,7 +5066,10 @@ pub extern "C" fn rt_torch_multihead_attention_forward(
     let attn_output = attn_weights.matmul(&v);
 
     // Reshape back: [batch, seq, embed_dim]
-    let attn_output = attn_output.transpose(1, 2).contiguous().view([batch_size, seq_len, mha_layer.embed_dim]);
+    let attn_output = attn_output
+        .transpose(1, 2)
+        .contiguous()
+        .view([batch_size, seq_len, mha_layer.embed_dim]);
 
     // Output projection
     let output = attn_output.matmul(&out_proj_weight.transpose(-2, -1));
@@ -5228,7 +5226,12 @@ pub extern "C" fn rt_torch_transformer_encoder_layer_forward(layer: RuntimeValue
         Err(_) => return RuntimeValue::NIL,
     };
 
-    let enc_layer = match TRANSFORMER_ENCODER_LAYER_MAP.lock().unwrap().get(&layer_handle).cloned() {
+    let enc_layer = match TRANSFORMER_ENCODER_LAYER_MAP
+        .lock()
+        .unwrap()
+        .get(&layer_handle)
+        .cloned()
+    {
         Some(l) => l,
         None => return RuntimeValue::NIL,
     };
@@ -5407,7 +5410,12 @@ pub extern "C" fn rt_torch_transformer_decoder_layer_forward(
         Err(_) => return RuntimeValue::NIL,
     };
 
-    let dec_layer = match TRANSFORMER_DECODER_LAYER_MAP.lock().unwrap().get(&layer_handle).cloned() {
+    let dec_layer = match TRANSFORMER_DECODER_LAYER_MAP
+        .lock()
+        .unwrap()
+        .get(&layer_handle)
+        .cloned()
+    {
         Some(l) => l,
         None => return RuntimeValue::NIL,
     };
@@ -5530,13 +5538,13 @@ pub extern "C" fn rt_torch_transformer_decoder_layer_forward(
 #[cfg(feature = "pytorch")]
 #[derive(Clone)]
 struct RmsPropOptimizer {
-    params: Vec<i64>,           // Tensor handles for parameters
-    square_avg: Vec<i64>,       // Running average of squared gradients
+    params: Vec<i64>,     // Tensor handles for parameters
+    square_avg: Vec<i64>, // Running average of squared gradients
     lr: f64,
-    alpha: f64,                 // Smoothing constant (default 0.99)
-    eps: f64,                   // Term added for numerical stability
+    alpha: f64, // Smoothing constant (default 0.99)
+    eps: f64,   // Term added for numerical stability
     momentum: f64,
-    momentum_buffer: Vec<i64>,  // Momentum buffer tensors
+    momentum_buffer: Vec<i64>, // Momentum buffer tensors
 }
 
 #[cfg(feature = "pytorch")]
@@ -5660,14 +5668,12 @@ pub extern "C" fn rt_torch_jit_load(path_ptr: *const u8, path_len: u64) -> Runti
     };
 
     match tch::CModule::load(path_str) {
-        Ok(module) => {
-            unsafe {
-                let handle = JIT_MODULE_COUNTER;
-                JIT_MODULE_COUNTER += 1;
-                JIT_MODULE_MAP.lock().unwrap().insert(handle, module);
-                RuntimeValue::from_int(handle)
-            }
-        }
+        Ok(module) => unsafe {
+            let handle = JIT_MODULE_COUNTER;
+            JIT_MODULE_COUNTER += 1;
+            JIT_MODULE_MAP.lock().unwrap().insert(handle, module);
+            RuntimeValue::from_int(handle)
+        },
         Err(_) => RuntimeValue::NIL,
     }
 }
@@ -5703,8 +5709,7 @@ pub extern "C" fn rt_torch_jit_save(module: RuntimeValue, path_ptr: *const u8, p
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_jit_save(_module: RuntimeValue, _path_ptr: *const u8, _path_len: u64) {
-}
+pub extern "C" fn rt_torch_jit_save(_module: RuntimeValue, _path_ptr: *const u8, _path_len: u64) {}
 
 #[cfg(feature = "pytorch")]
 #[no_mangle]
@@ -5773,8 +5778,7 @@ pub extern "C" fn rt_torch_jit_eval(module: RuntimeValue) {
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_jit_eval(_module: RuntimeValue) {
-}
+pub extern "C" fn rt_torch_jit_eval(_module: RuntimeValue) {}
 
 #[cfg(feature = "pytorch")]
 #[no_mangle]
@@ -5791,8 +5795,7 @@ pub extern "C" fn rt_torch_jit_train(module: RuntimeValue) {
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_jit_train(_module: RuntimeValue) {
-}
+pub extern "C" fn rt_torch_jit_train(_module: RuntimeValue) {}
 
 #[cfg(feature = "pytorch")]
 #[no_mangle]
@@ -5807,8 +5810,7 @@ pub extern "C" fn rt_torch_jit_free(module: RuntimeValue) {
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_jit_free(_module: RuntimeValue) {
-}
+pub extern "C" fn rt_torch_jit_free(_module: RuntimeValue) {}
 
 // ============================================================================
 // Model Serialization (Tensor Save/Load)
@@ -5870,8 +5872,7 @@ pub extern "C" fn rt_torch_save(tensor: RuntimeValue, path_ptr: *const u8, path_
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_save(_tensor: RuntimeValue, _path_ptr: *const u8, _path_len: u64) {
-}
+pub extern "C" fn rt_torch_save(_tensor: RuntimeValue, _path_ptr: *const u8, _path_len: u64) {}
 
 // ============================================================================
 // ONNX Operations
@@ -5929,14 +5930,12 @@ pub extern "C" fn rt_torch_onnx_load(path_ptr: *const u8, path_len: u64) -> Runt
 
     // Read ONNX file into memory
     match std::fs::read(path_str) {
-        Ok(data) => {
-            unsafe {
-                let handle = ONNX_SESSION_COUNTER;
-                ONNX_SESSION_COUNTER += 1;
-                ONNX_SESSION_MAP.lock().unwrap().insert(handle, data);
-                RuntimeValue::from_int(handle)
-            }
-        }
+        Ok(data) => unsafe {
+            let handle = ONNX_SESSION_COUNTER;
+            ONNX_SESSION_COUNTER += 1;
+            ONNX_SESSION_MAP.lock().unwrap().insert(handle, data);
+            RuntimeValue::from_int(handle)
+        },
         Err(_) => RuntimeValue::NIL,
     }
 }
@@ -6004,8 +6003,7 @@ pub extern "C" fn rt_torch_onnx_free(session: RuntimeValue) {
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_onnx_free(_session: RuntimeValue) {
-}
+pub extern "C" fn rt_torch_onnx_free(_session: RuntimeValue) {}
 
 // ============================================================================
 // Dataset Operations
@@ -6014,9 +6012,9 @@ pub extern "C" fn rt_torch_onnx_free(_session: RuntimeValue) {
 #[cfg(feature = "pytorch")]
 #[derive(Clone)]
 struct DatasetHandle {
-    images: i64,  // Tensor handle for images
-    labels: i64,  // Tensor handle for labels
-    size: i64,    // Number of samples
+    images: i64, // Tensor handle for images
+    labels: i64, // Tensor handle for labels
+    size: i64,   // Number of samples
 }
 
 #[cfg(feature = "pytorch")]
@@ -6233,8 +6231,7 @@ pub extern "C" fn rt_torch_dist_destroy_process_group() {
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_dist_destroy_process_group() {
-}
+pub extern "C" fn rt_torch_dist_destroy_process_group() {}
 
 #[cfg(feature = "pytorch")]
 #[no_mangle]
@@ -6249,8 +6246,7 @@ pub extern "C" fn rt_torch_dist_barrier() {
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_dist_barrier() {
-}
+pub extern "C" fn rt_torch_dist_barrier() {}
 
 #[cfg(feature = "pytorch")]
 #[no_mangle]
@@ -6273,8 +6269,7 @@ pub extern "C" fn rt_torch_dist_all_reduce(tensor: RuntimeValue, op: i64) {
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_dist_all_reduce(_tensor: RuntimeValue, _op: i64) {
-}
+pub extern "C" fn rt_torch_dist_all_reduce(_tensor: RuntimeValue, _op: i64) {}
 
 #[cfg(feature = "pytorch")]
 #[no_mangle]
@@ -6307,8 +6302,7 @@ pub extern "C" fn rt_torch_dist_all_gather(tensor_list: RuntimeValue, tensor: Ru
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_dist_all_gather(_tensor_list: RuntimeValue, _tensor: RuntimeValue) {
-}
+pub extern "C" fn rt_torch_dist_all_gather(_tensor_list: RuntimeValue, _tensor: RuntimeValue) {}
 
 #[cfg(feature = "pytorch")]
 #[no_mangle]
@@ -6324,8 +6318,7 @@ pub extern "C" fn rt_torch_dist_broadcast(tensor: RuntimeValue, src: i64) {
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_dist_broadcast(_tensor: RuntimeValue, _src: i64) {
-}
+pub extern "C" fn rt_torch_dist_broadcast(_tensor: RuntimeValue, _src: i64) {}
 
 #[cfg(feature = "pytorch")]
 #[no_mangle]
@@ -6364,14 +6357,13 @@ pub extern "C" fn rt_torch_dist_reduce_scatter(output: RuntimeValue, input_list:
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_dist_reduce_scatter(_output: RuntimeValue, _input_list: RuntimeValue) {
-}
+pub extern "C" fn rt_torch_dist_reduce_scatter(_output: RuntimeValue, _input_list: RuntimeValue) {}
 
 // DDP (DistributedDataParallel) wrapper storage
 #[cfg(feature = "pytorch")]
 #[derive(Clone)]
 struct DDPWrapper {
-    module_handle: i64,  // Underlying module/tensor list
+    module_handle: i64, // Underlying module/tensor list
     sync_gradients: bool,
 }
 
@@ -6427,8 +6419,7 @@ pub extern "C" fn rt_torch_dist_ddp_free(ddp: RuntimeValue) {
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_dist_ddp_free(_ddp: RuntimeValue) {
-}
+pub extern "C" fn rt_torch_dist_ddp_free(_ddp: RuntimeValue) {}
 
 #[cfg(feature = "pytorch")]
 #[no_mangle]
@@ -6445,5 +6436,4 @@ pub extern "C" fn rt_torch_dist_ddp_set_sync(ddp: RuntimeValue, sync: i64) {
 
 #[cfg(not(feature = "pytorch"))]
 #[no_mangle]
-pub extern "C" fn rt_torch_dist_ddp_set_sync(_ddp: RuntimeValue, _sync: i64) {
-}
+pub extern "C" fn rt_torch_dist_ddp_set_sync(_ddp: RuntimeValue, _sync: i64) {}

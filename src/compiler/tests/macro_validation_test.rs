@@ -195,7 +195,7 @@ main = 0
 "#;
 
     match check_compiles(source) {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
             eprintln!("Compilation failed: {}", e);
             panic!("Expected compilation to succeed but got error");
@@ -290,7 +290,7 @@ main = 0
 "#;
 
     match check_compiles(source) {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
             eprintln!("Compilation failed: {}", e);
             panic!("Expected compilation to succeed but got error");
@@ -318,7 +318,7 @@ main = 0
 "#;
 
     match check_compiles(source) {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
             eprintln!("Compilation failed: {}", e);
             panic!("Expected compilation to succeed but got error");

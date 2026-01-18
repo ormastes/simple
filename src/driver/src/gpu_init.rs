@@ -310,21 +310,26 @@ fn init_gpu_context(config: WindowConfig, state: GpuInitState) -> Result<GpuCont
     let swapchain_handle = {
         if let Some(surface) = &surface {
             let caps = surface.get_capabilities(&adapter);
-            let format = caps.formats.iter()
+            let format = caps
+                .formats
+                .iter()
                 .find(|f| f.is_srgb())
                 .copied()
                 .unwrap_or(caps.formats[0]);
 
-            surface.configure(&device, &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format,
-                width: config.width,
-                height: config.height,
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
-                view_formats: vec![],
-                desired_maximum_frame_latency: 2,
-            });
+            surface.configure(
+                &device,
+                &wgpu::SurfaceConfiguration {
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    format,
+                    width: config.width,
+                    height: config.height,
+                    present_mode: wgpu::PresentMode::Fifo,
+                    alpha_mode: caps.alpha_modes[0],
+                    view_formats: vec![],
+                    desired_maximum_frame_latency: 2,
+                },
+            );
         }
         0x9ABC_usize
     };

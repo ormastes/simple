@@ -749,7 +749,11 @@ impl Lowerer {
             HirStmt::Assign { value, .. } => {
                 self.check_expr_for_async_calls(value, caller_name, function_suspension)?;
             }
-            HirStmt::If { condition, then_block, else_block } => {
+            HirStmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
                 self.check_expr_for_async_calls(condition, caller_name, function_suspension)?;
                 for s in then_block {
                     self.check_stmt_for_async_calls(s, caller_name, function_suspension)?;
@@ -813,7 +817,11 @@ impl Lowerer {
             HirExprKind::Unary { operand, .. } => {
                 self.check_expr_for_async_calls(operand, caller_name, function_suspension)?;
             }
-            HirExprKind::If { condition, then_branch, else_branch } => {
+            HirExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 self.check_expr_for_async_calls(condition, caller_name, function_suspension)?;
                 self.check_expr_for_async_calls(then_branch, caller_name, function_suspension)?;
                 if let Some(else_expr) = else_branch {

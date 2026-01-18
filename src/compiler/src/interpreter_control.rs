@@ -422,11 +422,7 @@ pub(super) fn exec_for(
         check_interrupt!();
 
         // For for~ (is_suspend), await each item if it's a Promise
-        let item = if for_stmt.is_suspend {
-            await_value(item)?
-        } else {
-            item
-        };
+        let item = if for_stmt.is_suspend { await_value(item)? } else { item };
 
         // Create the value to bind - either (index, item) tuple or just item
         let bind_value = if for_stmt.auto_enumerate {

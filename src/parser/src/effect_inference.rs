@@ -187,9 +187,7 @@ fn has_suspension_in_expr(expr: &Expr) -> bool {
         }
 
         // Index/subscript
-        Expr::Index { receiver, index } => {
-            has_suspension_in_expr(receiver) || has_suspension_in_expr(index)
-        }
+        Expr::Index { receiver, index } => has_suspension_in_expr(receiver) || has_suspension_in_expr(index),
 
         // Field access
         Expr::FieldAccess { receiver, .. } => has_suspension_in_expr(receiver),

@@ -95,11 +95,7 @@ pub(super) fn eval_literal_expr(
         }
 
         // i18n template strings
-        Expr::I18nTemplate {
-            name,
-            parts,
-            args,
-        } => {
+        Expr::I18nTemplate { name, parts, args } => {
             // Try to look up the template in the locale registry first
             let template = if let Some(localized) = crate::i18n::lookup(name) {
                 // Use the localized template

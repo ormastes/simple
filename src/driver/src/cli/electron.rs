@@ -188,8 +188,7 @@ fn compile_to_wasm(source: &Path, output: &Path, optimize: bool) -> Result<usize
     use simple_common::target::{Target, TargetArch, WasmRuntime};
 
     // Read source file
-    let source_code = fs::read_to_string(source)
-        .map_err(|e| format!("Failed to read source file: {}", e))?;
+    let source_code = fs::read_to_string(source).map_err(|e| format!("Failed to read source file: {}", e))?;
 
     // Compile to WASM using existing compiler infrastructure
     let target = Target::new_wasm(TargetArch::Wasm32, WasmRuntime::Browser);
