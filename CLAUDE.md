@@ -96,6 +96,12 @@ See `/coding` skill for full details.
 - 🔧 **Auto-migrate**: Run `simple migrate --fix-generics src/` (Note: tool needs refinement)
 - 📅 **Timeline**: Deprecation warnings active, `[]` will be removed in v1.0.0
 
+### Question Mark (`?`) Usage
+- ❌ **NEVER use `?` in method/function/variable names** - unlike Ruby
+- ✅ **`?` is an operator only**: try operator (`result?`), optional type (`T?`)
+- ✅ **Use `is_*` prefix for predicates**: `is_empty()`, `is_valid()`, `is_some()`
+- 📖 **Design Decision**: See `doc/design/question_mark_design_decision.md`
+
 ### TODO Comments
 - ❌ **NEVER remove TODO markers** unless the feature is fully implemented and working
 - ✅ Can add documentation/implementation notes to existing TODOs
