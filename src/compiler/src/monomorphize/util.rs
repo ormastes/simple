@@ -144,6 +144,10 @@ pub fn ast_type_to_concrete(ty: &AstType, bindings: &HashMap<String, ConcreteTyp
             // self return type - treat as Self (enclosing type)
             ConcreteType::Named("Self".to_string())
         }
+        AstType::TypeBinding { value, .. } => {
+            // Type binding - extract the bound value type
+            ast_type_to_concrete(value, bindings)
+        }
     }
 }
 

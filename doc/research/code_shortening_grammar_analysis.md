@@ -46,7 +46,7 @@ This document analyzes "code shortening" grammars from mainstream languages and 
 | 12 | Optional chaining | ❌ **MISSING** | No `?.` | HIGH | Major ergonomics win |
 | 13 | Nullish coalescing | ❌ **MISSING** | No `??`, `??=` | HIGH | Pairs with #12 |
 | **E. Error Propagation** |||||
-| 14 | Propagate operator | ❌ **MISSING** | No `?` postfix | HIGH | Huge LOC savings |
+| 14 | Propagate operator | ✅ **DONE** | `result?` postfix | - | Try operator for Result/Option |
 | **F. Function/Lambda Brevity** |||||
 | 15 | Arrow lambdas | ✅ **DONE** | `\x: x * 2` | - | Backslash syntax |
 | 16 | Expression-bodied fn | ❌ **MISSING** | Block required | MED | `fn f(x) => x * 2` |
@@ -654,11 +654,11 @@ let display_name = user?.profile?.display_name
 
 ## Category E: Error Propagation
 
-### 14. Propagate Operator ❌ **MISSING**
+### 14. Propagate Operator ✅ **DONE**
 
-**Status:** Not implemented
+**Status:** Implemented - Try operator (`?`) works for both `Result` and `Option` types.
 
-**Current Verbose Approach:**
+**Before (verbose approach):**
 ```simple
 # Current: explicit error handling
 fn read_config(path: String) -> Result[Config, Error]:
@@ -677,16 +677,16 @@ fn read_config(path: String) -> Result[Config, Error]:
     return Ok(transform(validated))
 ```
 
-**Proposed Syntax (Rust-style):**
+**After (with try operator):**
 ```simple
-fn read_config(path: String) -> Result[Config, Error]:
+fn read_config(path: String) -> Result<Config, Error>:
     let contents = read_file(path)?      # Returns Err early if error
     let parsed = parse_json(contents)?   # Returns Err early if error
     let validated = validate(parsed)?     # Returns Err early if error
     return Ok(transform(validated))
 ```
 
-**Operator:** `?` postfix
+**Operator:** `?` postfix (implemented)
 - Unwraps `Ok` value
 - Propagates `Err` by early return
 - Only works in functions returning `Result`
@@ -717,9 +717,9 @@ fn find_nested(id: i64) -> Option[Value]:
     return Some(value.get_key("x"))
 ```
 
-**Recommendation:** 🎯 **HIGHEST PRIORITY**
+**Status:** ✅ **IMPLEMENTED**
 
-This is **the single highest LOC-reduction feature** for error handling.
+This is **the single highest LOC-reduction feature** for error handling, and is now fully available.
 
 **Impact Example:**
 ```simple

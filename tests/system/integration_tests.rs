@@ -358,6 +358,8 @@ fn test_hir_function_integration() {
         layout_hint: None,
         verification_mode: VerificationMode::Unverified,
         is_ghost: false,
+        has_suspension: false,
+        is_sync: false,
     };
 
     assert_eq!(func.name, "add");

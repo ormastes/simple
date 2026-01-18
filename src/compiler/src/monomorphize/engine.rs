@@ -373,6 +373,11 @@ impl<'a> Monomorphizer<'a> {
             },
             // Self type doesn't have type parameters to substitute
             AstType::SelfType => AstType::SelfType,
+            // Type binding - substitute in the value type
+            AstType::TypeBinding { name, value } => AstType::TypeBinding {
+                name: name.clone(),
+                value: Box::new(self.substitute_ast_type(value, bindings)),
+            },
         }
     }
 

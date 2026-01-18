@@ -78,11 +78,7 @@ impl AnsiParser {
         if let Some(col) = final_column {
             // Prompt is ">>> " (4 chars), so column 9 means 5 chars were inserted (4 spaces)
             // Return the difference from prompt position
-            if col > 5 {
-                col - 5
-            } else {
-                0
-            }
+            col.saturating_sub(5)
         } else {
             total
         }

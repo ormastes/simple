@@ -638,25 +638,9 @@ pub fn check(items: &[Node]) -> Result<(), TypeError> {
 // Tests
 //==============================================================================
 
-#[cfg(test)]
-mod class_inference_spec {
-    include!("../tests/class_inference_spec.rs");
-}
-
-#[cfg(test)]
-mod trait_inference_spec {
-    include!("../tests/trait_inference_spec.rs");
-}
-
-#[cfg(test)]
-mod impl_block_spec {
-    include!("../tests/impl_block_spec.rs");
-}
-
-#[cfg(test)]
-mod trait_bounds_spec {
-    include!("../tests/trait_bounds_spec.rs");
-}
+// Note: class_inference_spec, trait_inference_spec, impl_block_spec, and
+// trait_bounds_spec are in the tests/ directory and auto-discovered as
+// integration tests.
 
 #[cfg(test)]
 mod mixin_type_tests {

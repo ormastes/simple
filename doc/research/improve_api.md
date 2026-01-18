@@ -141,8 +141,16 @@ let req = HttpRequest.builder()
 ✅ **Adopt:**
 - Block syntax for iteration
 - `each`, `map`, `select` naming
-- `?` suffix for predicates
+- `is_*` prefix for predicates (NOT `?` suffix - see note below)
 - Symbol/keyword arguments
+
+> **Design Decision:** Simple does NOT support `?` in method names (unlike Ruby).
+> The `?` character is reserved for:
+> - Try operator: `result?` (error propagation, like Rust)
+> - Optional types: `T?` (sugar for `Option<T>`)
+> - Future: Optional chaining `?.` and nullish coalescing `??`
+>
+> Use `is_*` prefix instead: `is_empty()`, `is_valid()`, `is_some()`
 
 ❌ **Avoid:**
 - Too much magic (method_missing)

@@ -260,3 +260,101 @@ fn parse_trait_multiple_generic_inheritance() {
         panic!("Expected trait");
     }
 }
+
+// Associated type constraint tests
+#[test]
+fn parse_type_with_associated_type_binding() {
+    // Type with associated type constraint: Iterator<Item=String>
+    use simple_parser::ast::{Type, Pattern};
+    let items = parse("val x: Iterator<Item=String>");
+    if let Node::Let(let_stmt) = &items[0] {
+        // Type annotation is parsed into the Pattern::Typed variant
+        match &let_stmt.pattern {
+            Pattern::Typed {
+                ty: Type::Generic { name, args },
+                ..
+            } => {
+                assert_eq!(name, "Iterator");
+                assert_eq!(args.len(), 1);
+                match &args[0] {
+                    Type::TypeBinding { name, value } => {
+                        assert_eq!(name, "Item");
+                        assert_eq!(**value, Type::Simple("String".to_string()));
+                    }
+                    _ => panic!("Expected TypeBinding, got {:?}", args[0]),
+                }
+            }
+            _ => panic!("Expected Typed pattern with Generic type, got {:?}", let_stmt.pattern),
+        }
+    } else {
+        panic!("Expected Let statement");
+    }
+}
+
+#[test]
+fn parse_type_with_multiple_associated_bindings() {
+    // Type with multiple associated type bindings: Map<Key=String, Value=i64>
+    use simple_parser::ast::{Type, Pattern};
+    let items = parse("val m: Map<Key=String, Value=i64>");
+    if let Node::Let(let_stmt) = &items[0] {
+        match &let_stmt.pattern {
+            Pattern::Typed {
+                ty: Type::Generic { name, args },
+                ..
+            } => {
+                assert_eq!(name, "Map");
+                assert_eq!(args.len(), 2);
+                // Check first binding: Key=String
+                match &args[0] {
+                    Type::TypeBinding { name, value } => {
+                        assert_eq!(name, "Key");
+                        assert_eq!(**value, Type::Simple("String".to_string()));
+                    }
+                    _ => panic!("Expected TypeBinding for Key"),
+                }
+                // Check second binding: Value=i64
+                match &args[1] {
+                    Type::TypeBinding { name, value } => {
+                        assert_eq!(name, "Value");
+                        assert_eq!(**value, Type::Simple("i64".to_string()));
+                    }
+                    _ => panic!("Expected TypeBinding for Value"),
+                }
+            }
+            _ => panic!("Expected Typed pattern with Generic type"),
+        }
+    } else {
+        panic!("Expected Let statement");
+    }
+}
+
+#[test]
+fn parse_type_mixed_generic_and_binding() {
+    // Mixed regular type args and bindings: Result<T, Error=IoError>
+    use simple_parser::ast::{Type, Pattern};
+    let items = parse("val r: Result<String, Error=IoError>");
+    if let Node::Let(let_stmt) = &items[0] {
+        match &let_stmt.pattern {
+            Pattern::Typed {
+                ty: Type::Generic { name, args },
+                ..
+            } => {
+                assert_eq!(name, "Result");
+                assert_eq!(args.len(), 2);
+                // First arg is regular type: String
+                assert_eq!(args[0], Type::Simple("String".to_string()));
+                // Second arg is binding: Error=IoError
+                match &args[1] {
+                    Type::TypeBinding { name, value } => {
+                        assert_eq!(name, "Error");
+                        assert_eq!(**value, Type::Simple("IoError".to_string()));
+                    }
+                    _ => panic!("Expected TypeBinding"),
+                }
+            }
+            _ => panic!("Expected Typed pattern with Generic type"),
+        }
+    } else {
+        panic!("Expected Let statement");
+    }
+}

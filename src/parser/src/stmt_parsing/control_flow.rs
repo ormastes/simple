@@ -20,6 +20,51 @@ impl<'a> Parser<'a> {
 
         let (let_pattern, condition) = self.parse_optional_let_pattern()?;
         self.expect(&TokenKind::Colon)?;
+
+        // Check if this is inline-style (no newline after colon) or block-style
+        if !self.check(&TokenKind::Newline) {
+            // Inline-style: parse as expression (e.g., `if x < 0: -x else: x`)
+            // This returns Node::Expression(Expr::If { ... }) for proper implicit return handling
+            let then_expr = self.parse_expression()?;
+
+            // For inline if, we must have an else clause
+            if !self.check(&TokenKind::Else) && !self.check(&TokenKind::Elif) {
+                return Err(crate::error::ParseError::syntax_error_with_span(
+                    "Inline if expression requires an else clause".to_string(),
+                    start_span,
+                ));
+            }
+
+            // Parse elif/else branches as expressions
+            let else_branch = if self.check(&TokenKind::Elif) {
+                self.advance();
+                // Recursively parse as inline if expression
+                let elif_expr = self.parse_if_expr_after_condition()?;
+                Some(Box::new(elif_expr))
+            } else if self.check(&TokenKind::Else) {
+                self.advance();
+                if self.check(&TokenKind::If) {
+                    // else if -> treat as elif
+                    self.advance();
+                    let elif_expr = self.parse_if_expr_after_condition()?;
+                    Some(Box::new(elif_expr))
+                } else {
+                    self.expect(&TokenKind::Colon)?;
+                    Some(Box::new(self.parse_expression()?))
+                }
+            } else {
+                None
+            };
+
+            return Ok(Node::Expression(Expr::If {
+                let_pattern,
+                condition: Box::new(condition),
+                then_branch: Box::new(then_expr),
+                else_branch,
+            }));
+        }
+
+        // Block-style: original behavior
         let then_block = self.parse_block()?;
 
         let mut elif_branches = Vec::new();
@@ -77,6 +122,36 @@ impl<'a> Parser<'a> {
             else_block,
             is_suspend: false,
         }))
+    }
+
+    /// Helper for parsing inline if expression after the condition has been parsed
+    fn parse_if_expr_after_condition(&mut self) -> Result<Expr, ParseError> {
+        let (let_pattern, condition) = self.parse_optional_let_pattern()?;
+        self.expect(&TokenKind::Colon)?;
+        let then_expr = self.parse_expression()?;
+
+        let else_branch = if self.check(&TokenKind::Elif) {
+            self.advance();
+            Some(Box::new(self.parse_if_expr_after_condition()?))
+        } else if self.check(&TokenKind::Else) {
+            self.advance();
+            if self.check(&TokenKind::If) {
+                self.advance();
+                Some(Box::new(self.parse_if_expr_after_condition()?))
+            } else {
+                self.expect(&TokenKind::Colon)?;
+                Some(Box::new(self.parse_expression()?))
+            }
+        } else {
+            None
+        };
+
+        Ok(Expr::If {
+            let_pattern,
+            condition: Box::new(condition),
+            then_branch: Box::new(then_expr),
+            else_branch,
+        })
     }
 
     pub(crate) fn parse_for(&mut self) -> Result<Node, ParseError> {
