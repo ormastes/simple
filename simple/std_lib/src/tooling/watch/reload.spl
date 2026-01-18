@@ -145,6 +145,8 @@ pub class ReloadEvent:
 pub class HMRClient:
     pub on_reload_callback: (ReloadEvent) -> ()
     pub connected: bool
+    pub ws_connection_id: i64
+    pub server_url: text
 
     pub fn new(): HMRClient =
         """Create HMR client.
@@ -164,8 +166,14 @@ pub class HMRClient:
         """
         HMRClient {
             on_reload_callback: fn(event): pass,
-            connected: false
+            connected: false,
+            ws_connection_id: 0,
+            server_url: "localhost:3000"
         }
+
+    pub fn set_server_url(self, url: text):
+        """Set HMR server URL."""
+        self.server_url = url
 
     pub fn on_reload(self, callback: (ReloadEvent) -> ()):
         """Set reload callback.
@@ -369,9 +377,57 @@ pub class HMRServer:
         Args:
             client: HMR client
             event: Reload event
+
+        Uses WebSocket if available, falls back to direct callback.
         """
-        # TODO: [stdlib][P3] Send via WebSocket
-        client.on_reload_callback(event)
+        @extern("runtime", "rt_websocket_send")
+        fn _rt_websocket_send(conn_id: i64, msg_ptr: &u8, msg_len: u64) -> bool
+
+        # Build JSON message for WebSocket
+        val json_msg = self.serialize_reload_event(event)
+
+        # Try WebSocket first if client has connection
+        if client.ws_connection_id > 0:
+            val success = _rt_websocket_send(
+                client.ws_connection_id,
+                json_msg.ptr(),
+                json_msg.len()
+            )
+
+            if not success:
+                # WebSocket failed, fall back to direct callback
+                client.on_reload_callback(event)
+        else:
+            # No WebSocket connection, use direct callback
+            client.on_reload_callback(event)
+
+    fn serialize_reload_event(event: ReloadEvent): text =
+        """Serialize reload event to JSON for WebSocket transmission.
+
+        Args:
+            event: Reload event
+
+        Returns:
+            JSON string
+
+        Format:
+        {
+            "type": "reload",
+            "modules": ["mod1.spl", "mod2.spl"],
+            "strategy": "incremental",
+            "timestamp": 1234567890
+        }
+        """
+        var modules_json = "["
+        var first = true
+        for module in event.modules:
+            if not first:
+                modules_json += ","
+            modules_json += "\"{module}\""
+            first = false
+        modules_json += "]"
+
+        "{\"type\":\"reload\",\"modules\":{modules_json},\"strategy\":\"{event.strategy.to_string()}\",\"timestamp\":{event.timestamp}}"
 
 # Module reloader - handles actual module reloading
 pub class ModuleReloader:
@@ -546,9 +602,175 @@ pub class ModuleReloader:
         - Stateful code: Requires state preservation
         - Type definitions: May require full restart
         """
-        # TODO: [stdlib][P3] Analyze module for hot-reload safety
-        # For now, assume all modules are reloadable
-        true
+        val analysis = self.analyze_hot_reload_safety(module_path)
+        analysis.is_safe
+
+    pub fn analyze_hot_reload_safety(self, module_path: text): HotReloadAnalysis =
+        """Analyze module for hot-reload safety.
+
+        Args:
+            module_path: Module to analyze
+
+        Returns:
+            Analysis result with safety info and warnings
+
+        Checks for:
+        - Global mutable state (unsafe)
+        - Type definitions that may change layout (unsafe)
+        - Pure functions (safe)
+        - Side effects (needs care)
+        """
+        @extern("runtime", "rt_file_read")
+        fn _rt_file_read(path_ptr: &u8, path_len: u64) -> text
+
+        val analysis = HotReloadAnalysis.new(module_path)
+
+        val content = _rt_file_read(module_path.ptr(), module_path.len())
+        if content.is_empty():
+            analysis.is_safe = false
+            analysis.warnings.append("Could not read module file")
+            return analysis
+
+        # Check for global mutable state
+        if self.has_global_mutable_state(content):
+            analysis.is_safe = false
+            analysis.has_global_state = true
+            analysis.warnings.append("Module has global mutable state - hot reload may lose state")
+
+        # Check for type definitions (struct, class, enum changes)
+        if self.has_type_definitions(content):
+            analysis.has_type_definitions = true
+            analysis.warnings.append("Module defines types - layout changes require full restart")
+
+        # Check for FFI declarations (external dependencies)
+        if self.has_ffi_declarations(content):
+            analysis.has_ffi = true
+            analysis.warnings.append("Module uses FFI - external library state may not be preserved")
+
+        # Check for initialization code
+        if self.has_init_code(content):
+            analysis.has_init_code = true
+            analysis.warnings.append("Module has initialization code - will re-run on reload")
+
+        # Safe if no blocking issues found
+        if not analysis.has_global_state:
+            analysis.is_safe = true
+
+        analysis
+
+    fn has_global_mutable_state(content: text): bool =
+        """Check if module has global mutable variables."""
+        # Look for: var name = ... at module level (not indented)
+        for line in content.lines():
+            val trimmed = line.trim()
+            # Global var declarations (not indented, not in function)
+            if trimmed.starts_with("var ") and not line.starts_with(" ") and not line.starts_with("\t"):
+                return true
+            # Also check for: pub var
+            if trimmed.starts_with("pub var "):
+                return true
+        false
+
+    fn has_type_definitions(content: text): bool =
+        """Check if module defines types."""
+        for line in content.lines():
+            val trimmed = line.trim()
+            if trimmed.starts_with("class ") or trimmed.starts_with("pub class "):
+                return true
+            if trimmed.starts_with("struct ") or trimmed.starts_with("pub struct "):
+                return true
+            if trimmed.starts_with("enum ") or trimmed.starts_with("pub enum "):
+                return true
+        false
+
+    fn has_ffi_declarations(content: text): bool =
+        """Check if module uses FFI."""
+        for line in content.lines():
+            val trimmed = line.trim()
+            if trimmed.starts_with("@extern(") or trimmed.contains("extern fn"):
+                return true
+        false
+
+    fn has_init_code(content: text): bool =
+        """Check if module has top-level initialization code."""
+        # Look for function calls at module level (not in function bodies)
+        var in_function = false
+        var brace_depth = 0
+
+        for line in content.lines():
+            val trimmed = line.trim()
+
+            # Track function/class bodies
+            if trimmed.starts_with("fn ") or trimmed.starts_with("pub fn ") or
+               trimmed.starts_with("class ") or trimmed.starts_with("pub class "):
+                in_function = true
+
+            # Track brace depth
+            for ch in trimmed.chars():
+                if ch == '{':
+                    brace_depth += 1
+                elif ch == '}':
+                    brace_depth -= 1
+                    if brace_depth <= 0:
+                        in_function = false
+                        brace_depth = 0
+
+            # Check for function calls at module level
+            if not in_function and brace_depth == 0:
+                # Look for function calls: name(...)
+                if trimmed.contains("(") and not trimmed.starts_with("fn ") and
+                   not trimmed.starts_with("pub fn ") and not trimmed.starts_with("#"):
+                    return true
+
+        false
+
+# Hot reload safety analysis result
+pub class HotReloadAnalysis:
+    pub module_path: text
+    pub is_safe: bool
+    pub has_global_state: bool
+    pub has_type_definitions: bool
+    pub has_ffi: bool
+    pub has_init_code: bool
+    pub warnings: List<text>
+
+    pub fn new(module_path: text): HotReloadAnalysis =
+        """Create hot reload analysis."""
+        HotReloadAnalysis {
+            module_path: module_path,
+            is_safe: true,
+            has_global_state: false,
+            has_type_definitions: false,
+            has_ffi: false,
+            has_init_code: false,
+            warnings: []
+        }
+
+    pub fn summary(self): text =
+        """Get analysis summary."""
+        val status = if self.is_safe: "safe" else: "unsafe"
+        var details: List<text> = []
+
+        if self.has_global_state:
+            details.append("global state")
+        if self.has_type_definitions:
+            details.append("type definitions")
+        if self.has_ffi:
+            details.append("FFI")
+        if self.has_init_code:
+            details.append("init code")
+
+        val detail_str = if details.len() > 0: " ({details.join(', ')})" else: ""
+        "Hot reload {status} for {self.module_path}{detail_str}"
+
+    pub fn has_warnings(self): bool =
+        """Check if analysis has warnings."""
+        self.warnings.len() > 0
+
+    pub fn print_warnings(self):
+        """Print all warnings."""
+        for warning in self.warnings:
+            print("Warning: {warning}")
 
     pub fn get_loaded_count(self): i32 =
         """Get number of loaded modules.

@@ -535,8 +535,8 @@ let tag = Tag.find_or_create(name: "rust")
 let first = User.first()
 let last = User.order(created_at: desc).first()
 
-# Exists?
-if User.exists?(email: "alice@example.com"):
+# Exists check
+if User.exists(email: "alice@example.com"):
     print("User exists")
 ```
 
@@ -648,7 +648,7 @@ for table in schema.tables:
         print(f"  {col.name}: {col.type} {col.constraints}")
 
 # Check if table exists
-if schema.table_exists?("users"):
+if schema.table_exists("users"):
     print("Users table exists")
 
 # Get column info

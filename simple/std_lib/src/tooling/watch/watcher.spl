@@ -272,21 +272,204 @@ pub class Watcher:
             for dir in self.config.directories:
                 print("  Watching: {dir}")
 
+        # Try to use platform-specific watching, fall back to polling
+        @extern("runtime", "rt_platform_name")
+        fn _rt_platform_name() -> text
+
+        val platform = _rt_platform_name()
+
+        if platform == "linux":
+            self.start_inotify_watch()
+        elif platform == "macos":
+            self.start_fsevents_watch()
+        else:
+            # Fall back to polling on Windows and other platforms
+            self.start_polling_watch()
+
+    fn start_polling_watch(self):
+        """Start polling-based file watching (portable fallback)."""
+        if self.config.verbose:
+            print("Using polling-based file watching")
+
+        while self.running:
+            self.poll_for_changes()
+            self.sleep(100)  # 100ms
+            self.check_and_trigger()
+
+    fn start_inotify_watch(self):
+        """Start inotify-based file watching (Linux).
+
+        Uses the Linux inotify API for efficient file system event notification.
+        Much more efficient than polling for large directory trees.
+        """
+        @extern("runtime", "rt_inotify_init")
+        fn _rt_inotify_init() -> i64
+
+        @extern("runtime", "rt_inotify_add_watch")
+        fn _rt_inotify_add_watch(fd: i64, path_ptr: &u8, path_len: u64, mask: i32) -> i32
+
+        @extern("runtime", "rt_inotify_read")
+        fn _rt_inotify_read(fd: i64, timeout_ms: i32) -> text
+
+        @extern("runtime", "rt_inotify_close")
+        fn _rt_inotify_close(fd: i64)
+
+        if self.config.verbose:
+            print("Using inotify-based file watching (Linux)")
+
+        # Initialize inotify
+        val inotify_fd = _rt_inotify_init()
+        if inotify_fd < 0:
+            # Fallback to polling if inotify init fails
+            if self.config.verbose:
+                print("Warning: inotify init failed, falling back to polling")
+            self.start_polling_watch()
+            return
+
+        # IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVE
+        val watch_mask: i32 = 2 | 256 | 512 | 64 | 128  # IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO
+
+        # Add watches for all directories
+        for dir in self.config.directories:
+            self.add_inotify_watches_recursive(inotify_fd, dir, watch_mask)
+
         # Main event loop
         while self.running:
-            # TODO: [stdlib][P3] Platform-specific file watching
-            # - Linux: inotify
-            # - macOS: FSEvents
-            # - Windows: ReadDirectoryChangesW
+            # Read events with timeout
+            val events_raw = _rt_inotify_read(inotify_fd, 100)  # 100ms timeout
 
-            # For now, use polling (not efficient but portable)
-            self.poll_for_changes()
-
-            # Sleep briefly
-            self.sleep(100)  # 100ms
+            if not events_raw.is_empty():
+                # Parse events (format: "path:event_type\n...")
+                self.process_inotify_events(events_raw)
 
             # Check if we should trigger callback (debouncing)
             self.check_and_trigger()
+
+        # Clean up
+        _rt_inotify_close(inotify_fd)
+
+    fn add_inotify_watches_recursive(inotify_fd: i64, dir: text, mask: i32):
+        """Recursively add inotify watches to directory tree."""
+        @extern("runtime", "rt_inotify_add_watch")
+        fn _rt_inotify_add_watch(fd: i64, path_ptr: &u8, path_len: u64, mask: i32) -> i32
+
+        import host.async_nogc_mut.io.fs
+        import host.common.io.types.{FileType, DirPath}
+
+        # Add watch for this directory
+        val wd = _rt_inotify_add_watch(inotify_fd, dir.ptr(), dir.len(), mask)
+        if wd < 0 and self.config.verbose:
+            print("Warning: Failed to add watch for {dir}")
+
+        # Recursively add watches for subdirectories
+        if self.config.recursive:
+            match fs.read_dir(dir as DirPath):
+                Ok(entries):
+                    for entry in entries:
+                        val name = entry.name() as text
+                        val path = entry.path() as text
+
+                        if entry.file_type() == FileType::Directory:
+                            if not self.should_ignore(name):
+                                self.add_inotify_watches_recursive(inotify_fd, path, mask)
+                Err(_):
+                    pass
+
+    fn process_inotify_events(events_raw: text):
+        """Process raw inotify events."""
+        for line in events_raw.split("\n"):
+            if line.is_empty():
+                continue
+
+            # Parse event (format: "path:event_type")
+            val parts = line.split(":")
+            if parts.len() >= 2:
+                val path = parts[0]
+                val event_type = parts[1]
+
+                # Skip ignored files
+                if self.should_ignore(path):
+                    continue
+
+                # Map event type to WatchEvent
+                val event = match event_type:
+                    "create": WatchEvent::Created
+                    "modify": WatchEvent::Modified
+                    "delete": WatchEvent::Deleted
+                    "move": WatchEvent::Renamed
+                    _: WatchEvent::Modified
+
+                self.handle_file_change(path, event)
+
+    fn start_fsevents_watch(self):
+        """Start FSEvents-based file watching (macOS).
+
+        Uses the macOS FSEvents API for efficient file system event notification.
+        """
+        @extern("runtime", "rt_fsevents_create")
+        fn _rt_fsevents_create(path_ptr: &u8, path_len: u64) -> i64
+
+        @extern("runtime", "rt_fsevents_read")
+        fn _rt_fsevents_read(handle: i64, timeout_ms: i32) -> text
+
+        @extern("runtime", "rt_fsevents_close")
+        fn _rt_fsevents_close(handle: i64)
+
+        if self.config.verbose:
+            print("Using FSEvents-based file watching (macOS)")
+
+        # Create FSEvents stream for all directories
+        # Note: FSEvents handles recursive watching automatically
+        val paths = self.config.directories.join(":")
+        val fsevents_handle = _rt_fsevents_create(paths.ptr(), paths.len())
+
+        if fsevents_handle < 0:
+            # Fallback to polling if FSEvents init fails
+            if self.config.verbose:
+                print("Warning: FSEvents init failed, falling back to polling")
+            self.start_polling_watch()
+            return
+
+        # Main event loop
+        while self.running:
+            # Read events with timeout
+            val events_raw = _rt_fsevents_read(fsevents_handle, 100)  # 100ms timeout
+
+            if not events_raw.is_empty():
+                # Parse events (format: "path:event_type\n...")
+                self.process_fsevents_events(events_raw)
+
+            # Check if we should trigger callback (debouncing)
+            self.check_and_trigger()
+
+        # Clean up
+        _rt_fsevents_close(fsevents_handle)
+
+    fn process_fsevents_events(events_raw: text):
+        """Process raw FSEvents events."""
+        for line in events_raw.split("\n"):
+            if line.is_empty():
+                continue
+
+            # Parse event (format: "path:event_type")
+            val parts = line.split(":")
+            if parts.len() >= 2:
+                val path = parts[0]
+                val event_type = parts[1]
+
+                # Skip ignored files
+                if self.should_ignore(path):
+                    continue
+
+                # Map event type to WatchEvent
+                val event = match event_type:
+                    "created": WatchEvent::Created
+                    "modified": WatchEvent::Modified
+                    "removed": WatchEvent::Deleted
+                    "renamed": WatchEvent::Renamed
+                    _: WatchEvent::Modified
+
+                self.handle_file_change(path, event)
 
     pub fn stop(self):
         """Stop watching."""

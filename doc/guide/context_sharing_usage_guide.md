@@ -73,10 +73,10 @@ context_def :user_fixtures:
 describe "User Permissions":
     context :user_fixtures:
         it "admin has delete permission":
-            expect admin_user.permissions.includes?("delete")
+            expect admin_user.permissions.contains("delete")
 
         it "regular user has no delete":
-            expect not regular_user.permissions.includes?("delete")
+            expect not regular_user.permissions.contains("delete")
 ```
 
 ### Pattern 2: Database/External Service Setup
