@@ -2,6 +2,7 @@
 # Bundle multiple artifacts into single deployable
 
 use core.result.{Result, Ok, Err}
+use shell.{shell, file, dir, path, env}
 
 # Bundle type
 pub enum BundleType:
@@ -643,9 +644,60 @@ pub class Bundler:
         for entry in self.entries:
             bundle.add_entry(entry)
 
-        # TODO: [stdlib][P3] Create archive
+        # Create archive based on output file extension
+        if output_path.ends_with(".tar.gz") or output_path.ends_with(".tgz"):
+            self.create_tar_gz(output_path)
+        elif output_path.ends_with(".tar"):
+            self.create_tar(output_path)
+        elif output_path.ends_with(".zip"):
+            self.create_zip(output_path)
+        else:
+            # Default to tar.gz
+            self.create_tar_gz(output_path + ".tar.gz")
 
         bundle
+
+    fn create_tar_gz(output_path: text):
+        """Create tar.gz archive.
+
+        Args:
+            output_path: Output archive path
+        """
+        var args = ["-czf", output_path]
+        for entry in self.entries:
+            args.append(entry.path)
+
+        val result = shell.run("tar", args)
+        if result.exit_code != 0 and self.verbose:
+            print("Warning: tar failed: {result.stderr}")
+
+    fn create_tar(output_path: text):
+        """Create tar archive.
+
+        Args:
+            output_path: Output archive path
+        """
+        var args = ["-cf", output_path]
+        for entry in self.entries:
+            args.append(entry.path)
+
+        val result = shell.run("tar", args)
+        if result.exit_code != 0 and self.verbose:
+            print("Warning: tar failed: {result.stderr}")
+
+    fn create_zip(output_path: text):
+        """Create zip archive.
+
+        Args:
+            output_path: Output archive path
+        """
+        var args = ["-r", output_path]
+        for entry in self.entries:
+            args.append(entry.path)
+
+        val result = shell.run("zip", args)
+        if result.exit_code != 0 and self.verbose:
+            print("Warning: zip failed: {result.stderr}")
 
     pub fn get_entry_count(self): i32 =
         """Get count of entries to be bundled.
@@ -701,9 +753,74 @@ pub class Bundler:
             val deps = bundler.bundle_dependencies("app")
             # → ["/usr/lib/libc.so.6", "/lib/libm.so.6", ...]
         """
-        # TODO: [stdlib][P3] Run ldd (Linux) or otool -L (macOS)
-        # Parse output to get dependency paths
-        []
+        var deps: List<text> = []
+
+        # Detect platform and use appropriate tool
+        val uname_result = shell.run("uname", ["-s"])
+        val platform = uname_result.stdout.trim()
+
+        if platform == "Darwin":
+            # macOS: use otool -L
+            val result = shell.run("otool", ["-L", binary_path])
+            if result.exit_code == 0:
+                for line in result.stdout.lines():
+                    val trimmed = line.trim()
+                    # Skip header line and extract library path
+                    if trimmed.contains("/") and not trimmed.starts_with(binary_path):
+                        val lib_path = self.extract_otool_path(trimmed)
+                        if not lib_path.is_empty() and not lib_path.starts_with("/System") and not lib_path.starts_with("/usr/lib"):
+                            deps.append(lib_path)
+        else:
+            # Linux: use ldd
+            val result = shell.run("ldd", [binary_path])
+            if result.exit_code == 0:
+                for line in result.stdout.lines():
+                    val trimmed = line.trim()
+                    # Parse ldd output: libname.so => /path/to/lib.so (address)
+                    if trimmed.contains("=>"):
+                        val lib_path = self.extract_ldd_path(trimmed)
+                        if not lib_path.is_empty() and not lib_path.starts_with("/lib") and not lib_path.starts_with("/usr/lib"):
+                            deps.append(lib_path)
+
+        if self.verbose:
+            print("Found {deps.len()} dependencies for {binary_path}")
+
+        deps
+
+    fn extract_otool_path(line: text): text =
+        """Extract library path from otool output.
+
+        Args:
+            line: otool output line
+
+        Returns:
+            Library path
+        """
+        # Format: /path/to/lib.dylib (compatibility version...)
+        val paren_idx = line.find(" (")
+        if paren_idx > 0:
+            return line[0:paren_idx].trim()
+        line.trim()
+
+    fn extract_ldd_path(line: text): text =
+        """Extract library path from ldd output.
+
+        Args:
+            line: ldd output line
+
+        Returns:
+            Library path
+        """
+        # Format: libname.so => /path/to/lib.so (0x...)
+        val arrow_idx = line.find("=>")
+        if arrow_idx < 0:
+            return ""
+
+        val after_arrow = line[arrow_idx + 2:].trim()
+        val paren_idx = after_arrow.find(" (")
+        if paren_idx > 0:
+            return after_arrow[0:paren_idx].trim()
+        after_arrow
 
     pub fn create_self_contained_bundle(
         self,
@@ -727,7 +844,65 @@ pub class Bundler:
         │   └── libdep2.so
         └── run.sh  # Wrapper script that sets LD_LIBRARY_PATH
         """
-        # TODO: [stdlib][P3] Copy binary to bin/
-        # TODO: [stdlib][P3] Copy dependencies to lib/
-        # TODO: [stdlib][P3] Generate wrapper script
+        if self.verbose:
+            print("Creating self-contained bundle in {output_dir}")
+
+        # Create directory structure
+        val bin_dir = "{output_dir}/bin"
+        val lib_dir = "{output_dir}/lib"
+
+        dir.create(output_dir, true)
+        dir.create(bin_dir, true)
+        dir.create(lib_dir, true)
+
+        # Copy binary to bin/
+        val binary_name = path.basename(binary_path)
+        val target_binary = "{bin_dir}/{binary_name}"
+        file.copy(binary_path, target_binary)
+
+        # Make binary executable
+        shell.run("chmod", ["+x", target_binary])
+
+        if self.verbose:
+            print("  ✓ Copied binary to {target_binary}")
+
+        # Find and copy dependencies to lib/
+        val deps = self.bundle_dependencies(binary_path)
+        for dep in deps:
+            val dep_name = path.basename(dep)
+            val target_dep = "{lib_dir}/{dep_name}"
+            file.copy(dep, target_dep)
+
+            if self.verbose:
+                print("  ✓ Copied dependency {dep_name}")
+
+        # Generate wrapper script
+        val wrapper_path = "{output_dir}/run.sh"
+        val wrapper_content = self.generate_wrapper_script(binary_name)
+        file.write_text(wrapper_path, wrapper_content)
+
+        # Make wrapper executable
+        shell.run("chmod", ["+x", wrapper_path])
+
+        if self.verbose:
+            print("  ✓ Generated wrapper script {wrapper_path}")
+
         Ok(())
+
+    fn generate_wrapper_script(binary_name: text): text =
+        """Generate wrapper script for self-contained bundle.
+
+        Args:
+            binary_name: Name of the binary
+
+        Returns:
+            Wrapper script content
+        """
+        var script = "#!/bin/bash\n"
+        script += "# Auto-generated wrapper script\n\n"
+        script += "SCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+        script += "export LD_LIBRARY_PATH=\"$SCRIPT_DIR/lib:$LD_LIBRARY_PATH\"\n"
+        script += "export DYLD_LIBRARY_PATH=\"$SCRIPT_DIR/lib:$DYLD_LIBRARY_PATH\"\n"
+        script += "\n"
+        script += "exec \"$SCRIPT_DIR/bin/{binary_name}\" \"$@\"\n"
+        script

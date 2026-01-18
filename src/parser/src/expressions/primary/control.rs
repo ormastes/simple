@@ -175,6 +175,10 @@ impl<'a> Parser<'a> {
     fn parse_match_arm_expr(&mut self) -> Result<MatchArm, ParseError> {
         use crate::token::Span;
         let start_span = self.current.span;
+        // Optionally consume 'case' keyword (consistent with statement-level match)
+        if self.check(&TokenKind::Case) {
+            self.advance();
+        }
         let pattern = self.parse_pattern()?;
         let guard = if self.check(&TokenKind::If) {
             self.advance();
@@ -182,10 +186,13 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        // Accept both -> and => for match arms
-        if !self.check(&TokenKind::Arrow) && !self.check(&TokenKind::FatArrow) {
+        // Accept ->, =>, or : for match arms (consistent with statement-level match)
+        if !self.check(&TokenKind::Arrow)
+            && !self.check(&TokenKind::FatArrow)
+            && !self.check(&TokenKind::Colon)
+        {
             return Err(ParseError::unexpected_token(
-                "-> or =>",
+                "-> or => or :",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             ));

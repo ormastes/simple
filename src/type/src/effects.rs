@@ -29,8 +29,8 @@
 //! - `validate_suspension_context()` - Ensures suspension is only used in async contexts
 //! - `AwaitMode` - Marks await as None/Implicit/Explicit
 
-use simple_parser::ast::{Block, Expr, FunctionDef, Node};
-use std::collections::HashMap;
+use simple_parser::ast::{Block, Expr, FunctionDef, Node, Type};
+use std::collections::{HashMap, HashSet};
 
 /// Effect annotation for functions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -374,6 +374,443 @@ pub fn validate_suspension_context(func: &FunctionDef, env: &EffectEnv) -> Resul
     Ok(())
 }
 
+// =============================================================================
+// Task 2: Tarjan SCC for Mutual Recursion
+// =============================================================================
+
+/// Build a call graph from a list of function definitions
+/// Maps each function name to the set of functions it calls
+pub fn build_call_graph(functions: &[FunctionDef]) -> HashMap<String, HashSet<String>> {
+    let func_names: HashSet<_> = functions.iter().map(|f| f.name.clone()).collect();
+    let mut call_graph = HashMap::new();
+
+    for func in functions {
+        let mut called = HashSet::new();
+        collect_calls_from_block(&func.body, &func_names, &mut called);
+        call_graph.insert(func.name.clone(), called);
+    }
+
+    call_graph
+}
+
+/// Collect function calls from a block
+fn collect_calls_from_block(block: &Block, valid_funcs: &HashSet<String>, called: &mut HashSet<String>) {
+    for node in &block.statements {
+        collect_calls_from_node(node, valid_funcs, called);
+    }
+}
+
+/// Collect function calls from a node
+fn collect_calls_from_node(node: &Node, valid_funcs: &HashSet<String>, called: &mut HashSet<String>) {
+    match node {
+        Node::Expression(expr) => collect_calls_from_expr(expr, valid_funcs, called),
+        Node::Assignment(stmt) => collect_calls_from_expr(&stmt.value, valid_funcs, called),
+        Node::If(if_stmt) => {
+            collect_calls_from_expr(&if_stmt.condition, valid_funcs, called);
+            collect_calls_from_block(&if_stmt.then_block, valid_funcs, called);
+            if let Some(ref else_block) = if_stmt.else_block {
+                collect_calls_from_block(else_block, valid_funcs, called);
+            }
+            for elif in &if_stmt.elif_branches {
+                collect_calls_from_expr(&elif.0, valid_funcs, called);
+                collect_calls_from_block(&elif.1, valid_funcs, called);
+            }
+        }
+        Node::While(stmt) => {
+            collect_calls_from_expr(&stmt.condition, valid_funcs, called);
+            collect_calls_from_block(&stmt.body, valid_funcs, called);
+        }
+        Node::For(stmt) => {
+            collect_calls_from_block(&stmt.body, valid_funcs, called);
+        }
+        Node::Match(match_stmt) => {
+            collect_calls_from_expr(&match_stmt.subject, valid_funcs, called);
+            for arm in &match_stmt.arms {
+                collect_calls_from_block(&arm.body, valid_funcs, called);
+            }
+        }
+        Node::Return(stmt) => {
+            if let Some(ref value) = stmt.value {
+                collect_calls_from_expr(value, valid_funcs, called);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect function calls from an expression
+fn collect_calls_from_expr(expr: &Expr, valid_funcs: &HashSet<String>, called: &mut HashSet<String>) {
+    match expr {
+        Expr::Call { callee, args, .. } => {
+            if let Expr::Identifier(name) = &**callee {
+                if valid_funcs.contains(name) {
+                    called.insert(name.clone());
+                }
+            }
+            // Also check callee expression for higher-order cases
+            collect_calls_from_expr(callee, valid_funcs, called);
+            for arg in args {
+                collect_calls_from_expr(&arg.value, valid_funcs, called);
+            }
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            collect_calls_from_expr(receiver, valid_funcs, called);
+            for arg in args {
+                collect_calls_from_expr(&arg.value, valid_funcs, called);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_calls_from_expr(left, valid_funcs, called);
+            collect_calls_from_expr(right, valid_funcs, called);
+        }
+        Expr::Unary { operand, .. } => {
+            collect_calls_from_expr(operand, valid_funcs, called);
+        }
+        Expr::Index { receiver, index } => {
+            collect_calls_from_expr(receiver, valid_funcs, called);
+            collect_calls_from_expr(index, valid_funcs, called);
+        }
+        Expr::Lambda { body, .. } => {
+            collect_calls_from_expr(body, valid_funcs, called);
+        }
+        Expr::Await(inner) => {
+            collect_calls_from_expr(inner, valid_funcs, called);
+        }
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_calls_from_expr(condition, valid_funcs, called);
+            collect_calls_from_expr(then_branch, valid_funcs, called);
+            if let Some(ref else_expr) = else_branch {
+                collect_calls_from_expr(else_expr, valid_funcs, called);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Tarjan's algorithm state for SCC detection
+struct TarjanState {
+    index: usize,
+    indices: HashMap<String, usize>,
+    lowlinks: HashMap<String, usize>,
+    on_stack: HashSet<String>,
+    stack: Vec<String>,
+    sccs: Vec<Vec<String>>,
+}
+
+impl TarjanState {
+    fn new() -> Self {
+        TarjanState {
+            index: 0,
+            indices: HashMap::new(),
+            lowlinks: HashMap::new(),
+            on_stack: HashSet::new(),
+            stack: Vec::new(),
+            sccs: Vec::new(),
+        }
+    }
+}
+
+/// Find strongly connected components using Tarjan's algorithm
+/// Returns SCCs in reverse topological order (dependencies come after dependents)
+pub fn tarjan_scc(call_graph: &HashMap<String, HashSet<String>>) -> Vec<Vec<String>> {
+    let mut state = TarjanState::new();
+
+    for node in call_graph.keys() {
+        if !state.indices.contains_key(node) {
+            tarjan_strongconnect(node, call_graph, &mut state);
+        }
+    }
+
+    // SCCs are already in reverse topological order from Tarjan's algorithm
+    state.sccs
+}
+
+fn tarjan_strongconnect(v: &str, graph: &HashMap<String, HashSet<String>>, state: &mut TarjanState) {
+    // Set the depth index for v to the smallest unused index
+    state.indices.insert(v.to_string(), state.index);
+    state.lowlinks.insert(v.to_string(), state.index);
+    state.index += 1;
+    state.stack.push(v.to_string());
+    state.on_stack.insert(v.to_string());
+
+    // Consider successors of v
+    if let Some(successors) = graph.get(v) {
+        for w in successors {
+            if !state.indices.contains_key(w) {
+                // Successor w has not yet been visited; recurse on it
+                tarjan_strongconnect(w, graph, state);
+                let v_lowlink = state.lowlinks[v];
+                let w_lowlink = state.lowlinks[w];
+                state.lowlinks.insert(v.to_string(), v_lowlink.min(w_lowlink));
+            } else if state.on_stack.contains(w) {
+                // Successor w is in stack and hence in the current SCC
+                let v_lowlink = state.lowlinks[v];
+                let w_index = state.indices[w];
+                state.lowlinks.insert(v.to_string(), v_lowlink.min(w_index));
+            }
+        }
+    }
+
+    // If v is a root node, pop the stack and generate an SCC
+    if state.lowlinks[v] == state.indices[v] {
+        let mut scc = Vec::new();
+        loop {
+            let w = state.stack.pop().unwrap();
+            state.on_stack.remove(&w);
+            scc.push(w.clone());
+            if w == v {
+                break;
+            }
+        }
+        state.sccs.push(scc);
+    }
+}
+
+// =============================================================================
+// Task 1: Enhanced Call Graph Effect Propagation
+// =============================================================================
+
+/// Build effect environment with transitive effect propagation using SCC analysis
+/// This handles mutual recursion correctly by:
+/// 1. Finding strongly connected components (mutual recursion groups)
+/// 2. Processing SCCs in reverse topological order
+/// 3. All functions in an SCC share the same effect (conservatively async if any is async)
+pub fn propagate_effects_transitive(functions: &[FunctionDef]) -> EffectEnv {
+    let mut env = EffectEnv::new();
+
+    // First pass: add explicitly annotated functions
+    for func in functions {
+        if func.is_sync {
+            env.insert(func.name.clone(), Effect::Sync);
+        } else if func
+            .effects
+            .iter()
+            .any(|e| matches!(e, simple_parser::ast::Effect::Async))
+        {
+            env.insert(func.name.clone(), Effect::Async);
+        }
+    }
+
+    // Build call graph
+    let call_graph = build_call_graph(functions);
+
+    // Find SCCs - returns in reverse topological order
+    let sccs = tarjan_scc(&call_graph);
+
+    // Create function lookup map
+    let func_map: HashMap<_, _> = functions.iter().map(|f| (f.name.clone(), f)).collect();
+
+    // Process SCCs in topological order (from Tarjan's output)
+    // Tarjan returns SCCs in reverse topological order, meaning leaves/dependencies
+    // come first in the result. So we iterate directly (not reversed).
+    for scc in sccs.iter() {
+        // First, check if any function in the SCC is already marked async
+        let any_explicit_async = scc.iter().any(|name| env.get(name) == Some(&Effect::Async));
+
+        // Check if any function in the SCC contains suspension operators
+        let any_suspension = scc.iter().any(|name| {
+            if let Some(func) = func_map.get(name) {
+                !func.is_sync && contains_suspension(&func.body)
+            } else {
+                false
+            }
+        });
+
+        // Check if any function in the SCC calls an async function outside the SCC
+        let any_calls_async = scc.iter().any(|name| {
+            if let Some(callees) = call_graph.get(name) {
+                callees.iter().any(|callee| {
+                    // Only check functions outside this SCC
+                    !scc.contains(callee) && env.get(callee) == Some(&Effect::Async)
+                })
+            } else {
+                false
+            }
+        });
+
+        // Determine effect for all functions in this SCC
+        let scc_effect = if any_explicit_async || any_suspension || any_calls_async {
+            Effect::Async
+        } else {
+            Effect::Sync
+        };
+
+        // Apply the effect to all non-explicitly-annotated functions in the SCC
+        for name in scc {
+            if !env.contains_key(name) {
+                env.insert(name.clone(), scc_effect);
+            }
+        }
+    }
+
+    env
+}
+
+// =============================================================================
+// Task 4: Promise Type Preservation
+// =============================================================================
+
+/// Information about Promise type wrapping for a function
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromiseTypeInfo {
+    /// The inner type T in Promise<T>, if determinable
+    pub inner_type: Option<Type>,
+    /// Whether the function's return type should be wrapped in Promise
+    pub is_wrapped: bool,
+    /// The original return type before any transformation
+    pub original_type: Option<Type>,
+}
+
+impl PromiseTypeInfo {
+    /// Create info for a sync function (no wrapping)
+    pub fn sync_function(return_type: Option<Type>) -> Self {
+        PromiseTypeInfo {
+            inner_type: return_type.clone(),
+            is_wrapped: false,
+            original_type: return_type,
+        }
+    }
+
+    /// Create info for an async function (Promise wrapping)
+    pub fn async_function(return_type: Option<Type>) -> Self {
+        PromiseTypeInfo {
+            inner_type: return_type.clone(),
+            is_wrapped: true,
+            original_type: return_type,
+        }
+    }
+}
+
+/// Infer Promise type information for a function
+/// This preserves type information through Promise wrapping transformations
+pub fn infer_promise_type_info(func: &FunctionDef, env: &EffectEnv) -> PromiseTypeInfo {
+    let effect = infer_function_effect(func, env);
+
+    match effect {
+        Effect::Sync => PromiseTypeInfo::sync_function(func.return_type.clone()),
+        Effect::Async => PromiseTypeInfo::async_function(func.return_type.clone()),
+    }
+}
+
+/// Check if a type is already a Promise type
+pub fn is_promise_type(ty: &Type) -> bool {
+    match ty {
+        Type::Generic { name, .. } => name == "Promise",
+        _ => false,
+    }
+}
+
+/// Extract the inner type from a Promise<T> type
+pub fn unwrap_promise_type(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Generic { name, args } if name == "Promise" && !args.is_empty() => Some(&args[0]),
+        _ => None,
+    }
+}
+
+/// Wrap a type in Promise<T> if not already wrapped
+pub fn wrap_in_promise(ty: Type) -> Type {
+    if is_promise_type(&ty) {
+        ty
+    } else {
+        Type::Generic {
+            name: "Promise".to_string(),
+            args: vec![ty],
+        }
+    }
+}
+
+// =============================================================================
+// Task 3: Type-Driven Await Inference
+// =============================================================================
+
+/// Extended await mode with type information
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypedAwaitMode {
+    /// No await needed (sync expression or types match)
+    None,
+    /// Implicit await needed (async call, target expects unwrapped type)
+    ImplicitAwait,
+    /// No await needed, keep Promise wrapper (target expects Promise)
+    KeepPromise,
+    /// Explicit await (~= operator used)
+    ExplicitAwait,
+}
+
+/// Check if an expression needs await based on target type
+/// This enables type-driven await inference:
+/// - If expression returns Promise<T> and target expects T, insert implicit await
+/// - If target expects Promise<T>, keep the Promise wrapper
+pub fn needs_await_typed(expr: &Expr, env: &EffectEnv, expected_type: Option<&Type>) -> TypedAwaitMode {
+    // Check for explicit await first
+    if let Expr::Await(_) = expr {
+        return TypedAwaitMode::ExplicitAwait;
+    }
+
+    // Determine if expression is an async call
+    let is_async_call = match expr {
+        Expr::Call { callee, .. } => {
+            if let Expr::Identifier(name) = &**callee {
+                env.get(name) == Some(&Effect::Async)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    };
+
+    if !is_async_call {
+        return TypedAwaitMode::None;
+    }
+
+    // Expression is async call - check expected type
+    match expected_type {
+        Some(expected) => {
+            if is_promise_type(expected) {
+                // Target expects Promise<T>, keep the Promise wrapper
+                TypedAwaitMode::KeepPromise
+            } else {
+                // Target expects unwrapped type T, insert implicit await
+                TypedAwaitMode::ImplicitAwait
+            }
+        }
+        None => {
+            // No expected type information, default to implicit await
+            // (async-by-default semantics)
+            TypedAwaitMode::ImplicitAwait
+        }
+    }
+}
+
+/// Get the result type of an expression after await inference
+pub fn get_awaited_type<'a>(
+    expr: &Expr,
+    env: &EffectEnv,
+    func_return_types: &'a HashMap<String, Type>,
+) -> Option<&'a Type> {
+    match expr {
+        Expr::Call { callee, .. } => {
+            if let Expr::Identifier(name) = &**callee {
+                if env.get(name) == Some(&Effect::Async) {
+                    // Async call - return type is the inner type of Promise
+                    if let Some(return_type) = func_return_types.get(name) {
+                        return unwrap_promise_type(return_type).or(Some(return_type));
+                    }
+                }
+                func_return_types.get(name)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,5 +1072,369 @@ mod tests {
 
         let env = HashMap::new();
         assert!(validate_suspension_context(&func, &env).is_err());
+    }
+
+    // =============================================================================
+    // Task 2 Tests: Tarjan SCC for Mutual Recursion
+    // =============================================================================
+
+    #[test]
+    fn test_tarjan_scc_single_node() {
+        let mut graph = HashMap::new();
+        graph.insert("a".to_string(), HashSet::new());
+
+        let sccs = tarjan_scc(&graph);
+        assert_eq!(sccs.len(), 1);
+        assert!(sccs[0].contains(&"a".to_string()));
+    }
+
+    #[test]
+    fn test_tarjan_scc_linear_chain() {
+        // a -> b -> c (no cycles)
+        let mut graph = HashMap::new();
+        graph.insert("a".to_string(), ["b".to_string()].into_iter().collect());
+        graph.insert("b".to_string(), ["c".to_string()].into_iter().collect());
+        graph.insert("c".to_string(), HashSet::new());
+
+        let sccs = tarjan_scc(&graph);
+        // Each node is its own SCC
+        assert_eq!(sccs.len(), 3);
+    }
+
+    #[test]
+    fn test_tarjan_scc_simple_cycle() {
+        // a -> b -> a (cycle)
+        let mut graph = HashMap::new();
+        graph.insert("a".to_string(), ["b".to_string()].into_iter().collect());
+        graph.insert("b".to_string(), ["a".to_string()].into_iter().collect());
+
+        let sccs = tarjan_scc(&graph);
+        // Both nodes are in the same SCC
+        assert_eq!(sccs.len(), 1);
+        assert!(sccs[0].contains(&"a".to_string()));
+        assert!(sccs[0].contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_tarjan_scc_mutual_recursion_three() {
+        // a -> b -> c -> a (3-way cycle)
+        let mut graph = HashMap::new();
+        graph.insert("a".to_string(), ["b".to_string()].into_iter().collect());
+        graph.insert("b".to_string(), ["c".to_string()].into_iter().collect());
+        graph.insert("c".to_string(), ["a".to_string()].into_iter().collect());
+
+        let sccs = tarjan_scc(&graph);
+        assert_eq!(sccs.len(), 1);
+        assert_eq!(sccs[0].len(), 3);
+    }
+
+    // =============================================================================
+    // Task 1 Tests: Enhanced Call Graph Effect Propagation
+    // =============================================================================
+
+    fn make_empty_func(name: &str) -> FunctionDef {
+        FunctionDef {
+            span: Span::new(0, 0, 0, 0),
+            name: name.to_string(),
+            generic_params: vec![],
+            params: vec![],
+            return_type: None,
+            where_clause: vec![],
+            body: Block {
+                span: Span::new(0, 0, 0, 0),
+                statements: vec![],
+            },
+            visibility: simple_parser::ast::Visibility::Private,
+            effects: vec![],
+            decorators: vec![],
+            attributes: vec![],
+            doc_comment: None,
+            contract: None,
+            is_abstract: false,
+            is_sync: false,
+            is_me_method: false,
+            bounds_block: None,
+        }
+    }
+
+    fn make_func_calling(name: &str, callee: &str) -> FunctionDef {
+        FunctionDef {
+            span: Span::new(0, 0, 0, 0),
+            name: name.to_string(),
+            generic_params: vec![],
+            params: vec![],
+            return_type: None,
+            where_clause: vec![],
+            body: Block {
+                span: Span::new(0, 0, 0, 0),
+                statements: vec![Node::Expression(Expr::Call {
+                    callee: Box::new(Expr::Identifier(callee.to_string())),
+                    args: vec![],
+                })],
+            },
+            visibility: simple_parser::ast::Visibility::Private,
+            effects: vec![],
+            decorators: vec![],
+            attributes: vec![],
+            doc_comment: None,
+            contract: None,
+            is_abstract: false,
+            is_sync: false,
+            is_me_method: false,
+            bounds_block: None,
+        }
+    }
+
+    fn make_async_func(name: &str) -> FunctionDef {
+        FunctionDef {
+            span: Span::new(0, 0, 0, 0),
+            name: name.to_string(),
+            generic_params: vec![],
+            params: vec![],
+            return_type: None,
+            where_clause: vec![],
+            body: Block {
+                span: Span::new(0, 0, 0, 0),
+                statements: vec![],
+            },
+            visibility: simple_parser::ast::Visibility::Private,
+            effects: vec![simple_parser::ast::Effect::Async],
+            decorators: vec![],
+            attributes: vec![],
+            doc_comment: None,
+            contract: None,
+            is_abstract: false,
+            is_sync: false,
+            is_me_method: false,
+            bounds_block: None,
+        }
+    }
+
+    #[test]
+    fn test_build_call_graph() {
+        let a = make_func_calling("a", "b");
+        let b = make_empty_func("b");
+
+        let funcs = vec![a, b];
+        let graph = build_call_graph(&funcs);
+
+        assert!(graph.get("a").unwrap().contains("b"));
+        assert!(graph.get("b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_transitive_effect_propagation() {
+        // a calls b, b is async -> a becomes async
+        let a = make_func_calling("a", "b");
+        let b = make_async_func("b");
+
+        let funcs = vec![a, b];
+        let env = propagate_effects_transitive(&funcs);
+
+        assert_eq!(env.get("b"), Some(&Effect::Async));
+        assert_eq!(env.get("a"), Some(&Effect::Async));
+    }
+
+    #[test]
+    fn test_transitive_effect_chain() {
+        // a calls b, b calls c, c is async -> all become async
+        let a = make_func_calling("a", "b");
+        let b = make_func_calling("b", "c");
+        let c = make_async_func("c");
+
+        let funcs = vec![a, b, c];
+        let env = propagate_effects_transitive(&funcs);
+
+        assert_eq!(env.get("c"), Some(&Effect::Async));
+        assert_eq!(env.get("b"), Some(&Effect::Async));
+        assert_eq!(env.get("a"), Some(&Effect::Async));
+    }
+
+    #[test]
+    fn test_mutual_recursion_sync() {
+        // ping calls pong, pong calls ping (both pure)
+        let ping = make_func_calling("ping", "pong");
+        let pong = make_func_calling("pong", "ping");
+
+        let funcs = vec![ping, pong];
+        let env = propagate_effects_transitive(&funcs);
+
+        // Both should be sync since neither has suspension
+        assert_eq!(env.get("ping"), Some(&Effect::Sync));
+        assert_eq!(env.get("pong"), Some(&Effect::Sync));
+    }
+
+    // =============================================================================
+    // Task 4 Tests: Promise Type Preservation
+    // =============================================================================
+
+    #[test]
+    fn test_promise_type_info_sync() {
+        let func = FunctionDef {
+            span: Span::new(0, 0, 0, 0),
+            name: "sync_func".to_string(),
+            generic_params: vec![],
+            params: vec![],
+            return_type: Some(Type::Simple("Int".to_string())),
+            where_clause: vec![],
+            body: Block {
+                span: Span::new(0, 0, 0, 0),
+                statements: vec![],
+            },
+            visibility: simple_parser::ast::Visibility::Private,
+            effects: vec![],
+            decorators: vec![],
+            attributes: vec![],
+            doc_comment: None,
+            contract: None,
+            is_abstract: false,
+            is_sync: true,
+            is_me_method: false,
+            bounds_block: None,
+        };
+
+        let env = HashMap::new();
+        let info = infer_promise_type_info(&func, &env);
+
+        assert!(!info.is_wrapped);
+        assert_eq!(info.inner_type, Some(Type::Simple("Int".to_string())));
+    }
+
+    #[test]
+    fn test_promise_type_info_async() {
+        let func = make_async_func("async_func");
+        let mut func = func;
+        func.return_type = Some(Type::Simple("String".to_string()));
+
+        let env = HashMap::new();
+        let info = infer_promise_type_info(&func, &env);
+
+        assert!(info.is_wrapped);
+        assert_eq!(info.inner_type, Some(Type::Simple("String".to_string())));
+    }
+
+    #[test]
+    fn test_is_promise_type() {
+        let promise_type = Type::Generic {
+            name: "Promise".to_string(),
+            args: vec![Type::Simple("Int".to_string())],
+        };
+        let simple_type = Type::Simple("Int".to_string());
+
+        assert!(is_promise_type(&promise_type));
+        assert!(!is_promise_type(&simple_type));
+    }
+
+    #[test]
+    fn test_unwrap_promise_type() {
+        let promise_type = Type::Generic {
+            name: "Promise".to_string(),
+            args: vec![Type::Simple("Int".to_string())],
+        };
+
+        let inner = unwrap_promise_type(&promise_type);
+        assert_eq!(inner, Some(&Type::Simple("Int".to_string())));
+    }
+
+    #[test]
+    fn test_wrap_in_promise() {
+        let simple_type = Type::Simple("Int".to_string());
+        let wrapped = wrap_in_promise(simple_type);
+
+        assert!(is_promise_type(&wrapped));
+        assert_eq!(unwrap_promise_type(&wrapped), Some(&Type::Simple("Int".to_string())));
+    }
+
+    #[test]
+    fn test_wrap_in_promise_idempotent() {
+        let promise_type = Type::Generic {
+            name: "Promise".to_string(),
+            args: vec![Type::Simple("Int".to_string())],
+        };
+        let wrapped = wrap_in_promise(promise_type.clone());
+
+        // Should not double-wrap
+        assert_eq!(wrapped, promise_type);
+    }
+
+    // =============================================================================
+    // Task 3 Tests: Type-Driven Await Inference
+    // =============================================================================
+
+    #[test]
+    fn test_typed_await_sync_call() {
+        let mut env = HashMap::new();
+        env.insert("sync_func".to_string(), Effect::Sync);
+
+        let call_expr = Expr::Call {
+            callee: Box::new(Expr::Identifier("sync_func".to_string())),
+            args: vec![],
+        };
+
+        assert_eq!(needs_await_typed(&call_expr, &env, None), TypedAwaitMode::None);
+    }
+
+    #[test]
+    fn test_typed_await_async_call_expects_value() {
+        let mut env = HashMap::new();
+        env.insert("async_func".to_string(), Effect::Async);
+
+        let call_expr = Expr::Call {
+            callee: Box::new(Expr::Identifier("async_func".to_string())),
+            args: vec![],
+        };
+
+        // Target expects unwrapped type
+        let expected = Type::Simple("Int".to_string());
+        assert_eq!(
+            needs_await_typed(&call_expr, &env, Some(&expected)),
+            TypedAwaitMode::ImplicitAwait
+        );
+    }
+
+    #[test]
+    fn test_typed_await_async_call_expects_promise() {
+        let mut env = HashMap::new();
+        env.insert("async_func".to_string(), Effect::Async);
+
+        let call_expr = Expr::Call {
+            callee: Box::new(Expr::Identifier("async_func".to_string())),
+            args: vec![],
+        };
+
+        // Target expects Promise<T>
+        let expected = Type::Generic {
+            name: "Promise".to_string(),
+            args: vec![Type::Simple("Int".to_string())],
+        };
+        assert_eq!(
+            needs_await_typed(&call_expr, &env, Some(&expected)),
+            TypedAwaitMode::KeepPromise
+        );
+    }
+
+    #[test]
+    fn test_typed_await_explicit() {
+        let env = HashMap::new();
+        let await_expr = Expr::Await(Box::new(Expr::Identifier("promise".to_string())));
+
+        assert_eq!(
+            needs_await_typed(&await_expr, &env, None),
+            TypedAwaitMode::ExplicitAwait
+        );
+    }
+
+    #[test]
+    fn test_typed_await_no_expected_type() {
+        let mut env = HashMap::new();
+        env.insert("async_func".to_string(), Effect::Async);
+
+        let call_expr = Expr::Call {
+            callee: Box::new(Expr::Identifier("async_func".to_string())),
+            args: vec![],
+        };
+
+        // No expected type - defaults to implicit await (async-by-default)
+        assert_eq!(needs_await_typed(&call_expr, &env, None), TypedAwaitMode::ImplicitAwait);
     }
 }

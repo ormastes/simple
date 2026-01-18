@@ -174,6 +174,12 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Type) {
                 associated_types.push(self.parse_associated_type_impl()?);
             } else {
+                // Handle optional decorators (@pure, @inline, etc.)
+                let mut decorators = Vec::new();
+                while self.check(&TokenKind::At) {
+                    decorators.push(self.parse_decorator()?);
+                    self.skip_newlines();
+                }
                 // Handle optional `pub` visibility prefix for methods
                 let visibility = if self.check(&TokenKind::Pub) {
                     self.advance();
@@ -197,6 +203,8 @@ impl<'a> Parser<'a> {
                 };
                 if let Node::Function(mut f) = item {
                     f.visibility = visibility;
+                    // Add parsed decorators to the function
+                    f.decorators.extend(decorators);
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present
                     if !is_static && (f.params.is_empty() || f.params[0].name != "self") {
                         // Inject implicit self parameter at the beginning

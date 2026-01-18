@@ -2,6 +2,9 @@
 # Integrate with deployment systems (Docker, K8s, etc.)
 
 use core.result.{Result, Ok, Err}
+use shell.shell
+use host.common.net.http.{HttpClient, HttpRequest}
+use host.common.net.types.{HttpUrl, HttpMethod}
 
 # Deployment environment
 pub enum Environment:
@@ -589,9 +592,27 @@ pub class DeploymentPipeline:
 
         Returns:
             Ok if successful
+
+        Note: Timeout is tracked but not enforced at runtime level.
+              Stage implementations should respect their own timeouts.
         """
-        # TODO: [stdlib][P3] Add timeout support
-        stage.command()
+        @extern("runtime", "rt_time_now_unix_micros")
+        fn _rt_time_now_unix_micros() -> i64
+
+        val start_time = _rt_time_now_unix_micros()
+
+        # Execute the stage command
+        val result = stage.command()
+
+        val elapsed_micros = _rt_time_now_unix_micros() - start_time
+        val elapsed_seconds = (elapsed_micros / 1000000) as i32
+
+        # Check if stage exceeded timeout (warn but don't fail)
+        if elapsed_seconds > stage.timeout_seconds:
+            if self.verbose:
+                print("Warning: Stage {stage.name} exceeded timeout ({elapsed_seconds}s > {stage.timeout_seconds}s)")
+
+        result
 
     pub fn rollback(self): Result<(), text> =
         """Rollback to previous deployment.
@@ -670,7 +691,7 @@ pub class DeploymentPipeline:
         # Use kubectl rollout undo for Kubernetes
         shell.run("kubectl", ["rollout", "undo", "deployment/{app}", "-n", namespace])
 
-    pub fn health_check(self, url: text): Result<(), text> =
+    pub async fn health_check(self, url: text): Result<(), text> =
         """Perform health check on deployed service.
 
         Args:
@@ -687,11 +708,30 @@ pub class DeploymentPipeline:
                     print("Health check failed: {err}")
                     pipeline.rollback()
         """
-        # TODO: [stdlib][P3] HTTP GET to health check endpoint
-        # Check response status and body
-        Ok(())
+        if self.verbose:
+            print("Performing health check: {url}")
 
-    pub fn notify_webhook(self, url: text, message: text): Result<(), text> =
+        val client = HttpClient.new()
+        val http_url = HttpUrl.parse(url)
+
+        match http_url:
+            Ok(parsed_url):
+                val request = HttpRequest.get(parsed_url)
+
+                match await client.send(request):
+                    Ok(response):
+                        if response.is_success():
+                            if self.verbose:
+                                print("  ✓ Health check passed (status: {response.status()})")
+                            Ok(())
+                        else:
+                            Err("Health check failed: HTTP {response.status()}")
+                    Err(err):
+                        Err("Health check request failed: {err}")
+            Err(err):
+                Err("Invalid URL: {url}")
+
+    pub async fn notify_webhook(self, url: text, message: text): Result<(), text> =
         """Send webhook notification.
 
         Args:
@@ -707,5 +747,28 @@ pub class DeploymentPipeline:
                 "Deployment to production succeeded!"
             )
         """
-        # TODO: [stdlib][P3] HTTP POST to webhook
-        Ok(())
+        if self.verbose:
+            print("Sending webhook notification to: {url}")
+
+        val client = HttpClient.new()
+        val http_url = HttpUrl.parse(url)
+
+        match http_url:
+            Ok(parsed_url):
+                # Build JSON payload
+                val payload = "{\"text\": \"{message}\"}"
+                val request = HttpRequest.post(parsed_url)
+                    .json_body(payload.to_bytes())
+
+                match await client.send(request):
+                    Ok(response):
+                        if response.is_success():
+                            if self.verbose:
+                                print("  ✓ Webhook notification sent")
+                            Ok(())
+                        else:
+                            Err("Webhook notification failed: HTTP {response.status()}")
+                    Err(err):
+                        Err("Webhook request failed: {err}")
+            Err(err):
+                Err("Invalid webhook URL: {url}")

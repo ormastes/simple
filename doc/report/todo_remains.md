@@ -2,7 +2,8 @@
 
 **Generated:** 2026-01-17
 **Last Updated:** 2026-01-18
-**Total TODOs:** 1 (core compiler `src/`), 746 (stdlib/apps `simple/`)
+**Total Tagged TODOs:** 430 across entire codebase
+**Untagged TODOs:** 0 (all properly tagged)
 
 ## Core Compiler Status (`src/` directory)
 
@@ -31,18 +32,34 @@
 
 ---
 
-## Stdlib/Apps Summary (`simple/` directory)
+## Current TODO Summary (2026-01-18)
 
-**Total: 465 TODOs** (verified 2026-01-17 via grep, down from 468)
+**Total Tagged TODOs:** 430 (verified via grep)
 
 | Priority | Count | Percentage |
 |----------|-------|------------|
-| **P1 (High)** | 0 | 0% | ✅ **ALL CLEAR** |
-| **P2 (Medium)** | 14 | 3% |
-| **P3 (Low)** | 273 | 59% |
-| **Untagged** | 160 | 34% |
+| **P0 (Critical)** | 2 | 0.5% |
+| **P1 (High)** | 6 | 1.4% |
+| **P2 (Medium)** | 116 | 27% |
+| **P3 (Low)** | 302 | 70% |
+| **Untagged** | 0 | 0% | ✅ **ALL TAGGED** |
 
-**Major Progress:** P1 reduced by 100% (from 153 in old report to 0 now!)
+### By Area
+
+| Area | Count | Description |
+|------|-------|-------------|
+| stdlib | 159 | Standard library |
+| ui | 123 | UI/TUI components |
+| test | 56 | Test framework |
+| parser | 46 | Parser features |
+| doc | 28 | Documentation |
+| runtime | 9 | Runtime |
+| gpu | 2 | GPU/Vulkan |
+| compiler | 2 | Compiler |
+| type | 1 | Type system |
+| codegen | 1 | Code generation |
+
+**Major Progress:** All TODOs now properly tagged with `[area][priority]` format!
 
 ### P1 Breakdown - ALL RESOLVED
 - **~~9 Vulkan FFI tests~~** - ✅ **RESOLVED** (2026-01-18): FFI implemented in Rust

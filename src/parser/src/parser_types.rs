@@ -213,13 +213,27 @@ impl<'a> Parser<'a> {
             return Ok(Type::DynTrait(trait_name));
         }
 
-        // Handle self return type: fn method() -> self
+        // Handle Self type - could be just `Self` or `Self::Item` (associated type)
         if self.check(&TokenKind::Self_) {
             self.advance();
-            return Ok(Type::SelfType);
+            // Check if it's Self::Item (associated type path)
+            if !self.check(&TokenKind::DoubleColon) {
+                return Ok(Type::SelfType);
+            }
+            // It's Self::Something - start with "Self" and parse the qualified path
+            let mut name = "Self".to_string();
+            while self.check(&TokenKind::DoubleColon) {
+                self.advance(); // consume '::'
+                let segment = self.expect_identifier()?;
+                name.push_str("::");
+                name.push_str(&segment);
+            }
+            // Now handle potential generic arguments on the associated type (e.g., Self::Item<T>)
+            // For simplicity, just return as Simple type - generics on associated types are rare
+            return Ok(Type::Simple(name));
         }
 
-        // Simple or generic type (possibly qualified: module.Type or Self::Item)
+        // Simple or generic type (possibly qualified: module.Type or Iterator::Item)
         let mut name = self.expect_identifier()?;
 
         // Check for qualified type name: module.Type, module.submodule.Type, or Self::Item
