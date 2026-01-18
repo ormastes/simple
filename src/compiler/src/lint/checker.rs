@@ -104,8 +104,8 @@ impl LintChecker {
                 self.check_print_in_test_spec(items);
             }
 
-            // Check TODO format - DISABLED: needs fixing
-            // self.check_todo_format(&source_file);
+            // Check TODO format
+            self.check_todo_format(&source_file);
         }
 
         // Run AST-based lints
@@ -504,6 +504,18 @@ impl LintChecker {
             if !trimmed.contains("TODO") && !trimmed.contains("FIXME") {
                 byte_offset += line.len() + 1;
                 continue;
+            }
+
+            // Skip if TODO/FIXME is inside a string literal (quoted)
+            // Count quotes before the TODO - if odd, we're inside a string
+            if let Some(todo_pos) = trimmed.find("TODO").or_else(|| trimmed.find("FIXME")) {
+                let before_todo = &trimmed[..todo_pos];
+                let double_quote_count = before_todo.matches('"').count();
+                let single_quote_count = before_todo.matches('\'').count();
+                if double_quote_count % 2 == 1 || single_quote_count % 2 == 1 {
+                    byte_offset += line.len() + 1;
+                    continue;
+                }
             }
 
             // Find the column where TODO/FIXME starts
