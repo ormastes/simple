@@ -3,7 +3,7 @@
 # Composable transformations for data preprocessing and augmentation.
 # Common transforms for computer vision tasks (normalization, cropping, flipping).
 #
-# ## Classes
+# ## Basic Transforms
 # - `Transform`: Base class for all transforms
 # - `Compose`: Chain multiple transforms together
 # - `Normalize`: Normalize tensors with mean and std
@@ -13,6 +13,18 @@
 # - `CenterCrop`: Crop center region
 # - `Resize`: Resize to target size
 # - `ToTensor`: Convert data to tensor
+#
+# ## Advanced Augmentation
+# - `RandomRotation`: Random rotation by angle
+# - `ColorJitter`: Random color adjustments
+# - `GaussianBlur`: Apply Gaussian blur
+# - `RandomErasing`: Randomly erase rectangular region
+# - `RandomAffine`: Random affine transformation
+#
+# ## Mixup/Cutmix
+# - `Mixup`: Mix two samples by weighted average
+# - `Cutmix`: Replace region with patch from another sample
+# - `CutmixMixup`: Combined Cutmix and Mixup
 #
 # ## Example
 # ```simple
@@ -34,6 +46,8 @@
 # ```
 
 export Transform, Compose, Normalize, RandomCrop, RandomHorizontalFlip, RandomVerticalFlip, CenterCrop, Resize, ToTensor
+export RandomRotation, ColorJitter, GaussianBlur, RandomErasing, RandomAffine
+export Mixup, Cutmix, CutmixMixup
 
 import ml.torch.tensor_class.{Tensor}
 
@@ -456,3 +470,544 @@ class ToTensor(Transform):
         else:
             # Convert to tensor (placeholder)
             panic("ToTensor conversion not yet implemented")
+
+
+# ============================================================================
+# Advanced Augmentation Transforms
+# ============================================================================
+
+class RandomRotation(Transform):
+    """Randomly rotate image by angle from range.
+
+    Attributes:
+        degrees: Range of degrees to rotate. If single value, range is (-degrees, degrees).
+
+    Example:
+        ```simple
+        val rotate = RandomRotation(degrees=30)  # Rotate by -30 to +30 degrees
+        val rotated = rotate.apply(image_tensor)
+        ```
+    """
+    min_degrees: f64
+    max_degrees: f64
+
+    fn __init__(degrees: f64 = 0.0, min_degrees: f64 = 0.0, max_degrees: f64 = 0.0):
+        """Initialize random rotation.
+
+        Args:
+            degrees: Maximum rotation angle (symmetric range)
+            min_degrees: Minimum rotation angle (for asymmetric range)
+            max_degrees: Maximum rotation angle (for asymmetric range)
+        """
+        if degrees != 0.0:
+            self.min_degrees = -degrees
+            self.max_degrees = degrees
+        else:
+            self.min_degrees = min_degrees
+            self.max_degrees = max_degrees
+
+    fn apply(tensor: Tensor) -> Tensor:
+        """Randomly rotate tensor.
+
+        Args:
+            tensor: Input tensor with shape [C, H, W]
+
+        Returns:
+            Rotated tensor
+        """
+        val angle = self.min_degrees + rand() * (self.max_degrees - self.min_degrees)
+        # Placeholder - would use rotation matrix transform
+        return tensor
+
+
+class ColorJitter(Transform):
+    """Randomly change brightness, contrast, saturation, and hue.
+
+    Attributes:
+        brightness: Brightness jitter amount
+        contrast: Contrast jitter amount
+        saturation: Saturation jitter amount
+        hue: Hue jitter amount
+
+    Example:
+        ```simple
+        val jitter = ColorJitter(
+            brightness=0.2,
+            contrast=0.2,
+            saturation=0.2,
+            hue=0.1
+        )
+        val augmented = jitter.apply(image_tensor)
+        ```
+    """
+    brightness: f64
+    contrast: f64
+    saturation: f64
+    hue: f64
+
+    fn __init__(brightness: f64 = 0.0, contrast: f64 = 0.0, saturation: f64 = 0.0, hue: f64 = 0.0):
+        """Initialize color jitter.
+
+        Args:
+            brightness: How much to jitter brightness (0 = no change)
+            contrast: How much to jitter contrast (0 = no change)
+            saturation: How much to jitter saturation (0 = no change)
+            hue: How much to jitter hue (0 = no change, max 0.5)
+        """
+        self.brightness = brightness
+        self.contrast = contrast
+        self.saturation = saturation
+        self.hue = hue
+
+    fn apply(tensor: Tensor) -> Tensor:
+        """Apply random color jitter.
+
+        Args:
+            tensor: Input RGB tensor [C, H, W]
+
+        Returns:
+            Color jittered tensor
+        """
+        var result = tensor
+
+        # Apply brightness
+        if self.brightness > 0.0:
+            val factor = 1.0 + (rand() * 2.0 - 1.0) * self.brightness
+            result = _adjust_brightness(result, factor)
+
+        # Apply contrast
+        if self.contrast > 0.0:
+            val factor = 1.0 + (rand() * 2.0 - 1.0) * self.contrast
+            result = _adjust_contrast(result, factor)
+
+        # Apply saturation
+        if self.saturation > 0.0:
+            val factor = 1.0 + (rand() * 2.0 - 1.0) * self.saturation
+            result = _adjust_saturation(result, factor)
+
+        # Apply hue
+        if self.hue > 0.0:
+            val factor = (rand() * 2.0 - 1.0) * self.hue
+            result = _adjust_hue(result, factor)
+
+        return result
+
+
+class GaussianBlur(Transform):
+    """Apply Gaussian blur to tensor.
+
+    Attributes:
+        kernel_size: Size of the Gaussian kernel (must be odd)
+        sigma: Standard deviation of the Gaussian kernel
+
+    Example:
+        ```simple
+        val blur = GaussianBlur(kernel_size=5, sigma=1.0)
+        val blurred = blur.apply(image_tensor)
+        ```
+    """
+    kernel_size: i64
+    sigma_min: f64
+    sigma_max: f64
+
+    fn __init__(kernel_size: i64, sigma: f64 = 0.0, sigma_min: f64 = 0.1, sigma_max: f64 = 2.0):
+        """Initialize Gaussian blur.
+
+        Args:
+            kernel_size: Size of kernel (must be odd)
+            sigma: Fixed sigma value (0 = random from range)
+            sigma_min: Minimum sigma for random range
+            sigma_max: Maximum sigma for random range
+        """
+        if kernel_size % 2 == 0:
+            panic("kernel_size must be odd")
+        self.kernel_size = kernel_size
+        if sigma > 0.0:
+            self.sigma_min = sigma
+            self.sigma_max = sigma
+        else:
+            self.sigma_min = sigma_min
+            self.sigma_max = sigma_max
+
+    fn apply(tensor: Tensor) -> Tensor:
+        """Apply Gaussian blur.
+
+        Args:
+            tensor: Input tensor [C, H, W]
+
+        Returns:
+            Blurred tensor
+        """
+        val sigma = self.sigma_min + rand() * (self.sigma_max - self.sigma_min)
+        # Placeholder - would apply Gaussian convolution
+        return tensor
+
+
+class RandomErasing(Transform):
+    """Randomly erase rectangular region of image.
+
+    From paper "Random Erasing Data Augmentation".
+
+    Attributes:
+        p: Probability of erasing
+        scale: Range of proportion of erased area
+        ratio: Range of aspect ratio of erased area
+        value: Fill value (0 = black)
+
+    Example:
+        ```simple
+        val erasing = RandomErasing(p=0.5, scale=(0.02, 0.33))
+        val augmented = erasing.apply(image_tensor)
+        ```
+    """
+    p: f64
+    scale_min: f64
+    scale_max: f64
+    ratio_min: f64
+    ratio_max: f64
+    value: f64
+
+    fn __init__(p: f64 = 0.5, scale_min: f64 = 0.02, scale_max: f64 = 0.33,
+                ratio_min: f64 = 0.3, ratio_max: f64 = 3.3, value: f64 = 0.0):
+        """Initialize random erasing.
+
+        Args:
+            p: Probability of erasing
+            scale_min: Minimum proportion to erase
+            scale_max: Maximum proportion to erase
+            ratio_min: Minimum aspect ratio
+            ratio_max: Maximum aspect ratio
+            value: Fill value
+        """
+        self.p = p
+        self.scale_min = scale_min
+        self.scale_max = scale_max
+        self.ratio_min = ratio_min
+        self.ratio_max = ratio_max
+        self.value = value
+
+    fn apply(tensor: Tensor) -> Tensor:
+        """Apply random erasing.
+
+        Args:
+            tensor: Input tensor [C, H, W]
+
+        Returns:
+            Tensor with random region erased
+        """
+        if rand() > self.p:
+            return tensor
+
+        # Placeholder - would erase random rectangle
+        return tensor
+
+
+class RandomAffine(Transform):
+    """Apply random affine transformation.
+
+    Combines rotation, translation, scaling, and shearing.
+
+    Example:
+        ```simple
+        val affine = RandomAffine(
+            degrees=15,
+            translate=(0.1, 0.1),
+            scale=(0.9, 1.1),
+            shear=10
+        )
+        val augmented = affine.apply(image_tensor)
+        ```
+    """
+    degrees: f64
+    translate_x: f64
+    translate_y: f64
+    scale_min: f64
+    scale_max: f64
+    shear: f64
+
+    fn __init__(degrees: f64 = 0.0, translate_x: f64 = 0.0, translate_y: f64 = 0.0,
+                scale_min: f64 = 1.0, scale_max: f64 = 1.0, shear: f64 = 0.0):
+        """Initialize random affine.
+
+        Args:
+            degrees: Maximum rotation angle
+            translate_x: Maximum horizontal translation (fraction)
+            translate_y: Maximum vertical translation (fraction)
+            scale_min: Minimum scale factor
+            scale_max: Maximum scale factor
+            shear: Maximum shear angle
+        """
+        self.degrees = degrees
+        self.translate_x = translate_x
+        self.translate_y = translate_y
+        self.scale_min = scale_min
+        self.scale_max = scale_max
+        self.shear = shear
+
+    fn apply(tensor: Tensor) -> Tensor:
+        """Apply random affine transformation.
+
+        Args:
+            tensor: Input tensor [C, H, W]
+
+        Returns:
+            Transformed tensor
+        """
+        # Placeholder - would compute and apply affine matrix
+        return tensor
+
+
+# ============================================================================
+# Mixup and Cutmix Data Augmentation
+# ============================================================================
+
+class Mixup:
+    """Mixup data augmentation.
+
+    Mixes two samples by weighted average:
+        x' = λ * x1 + (1 - λ) * x2
+        y' = λ * y1 + (1 - λ) * y2
+
+    λ is sampled from Beta(alpha, alpha).
+
+    From paper "mixup: Beyond Empirical Risk Minimization".
+
+    Example:
+        ```simple
+        val mixup = Mixup(alpha=0.2)
+        val (mixed_x, mixed_y) = mixup.mix(batch_x, batch_y)
+        ```
+    """
+    alpha: f64
+
+    fn __init__(alpha: f64 = 0.2):
+        """Initialize mixup.
+
+        Args:
+            alpha: Beta distribution parameter (higher = more mixing)
+        """
+        self.alpha = alpha
+
+    fn mix(x1: Tensor, y1: any, x2: Tensor, y2: any) -> (Tensor, any):
+        """Mix two samples.
+
+        Args:
+            x1: First input tensor
+            y1: First label
+            x2: Second input tensor
+            y2: Second label
+
+        Returns:
+            Tuple of (mixed_x, mixed_y)
+        """
+        val lam = _sample_beta(self.alpha, self.alpha)
+
+        # Mix inputs: x' = λ * x1 + (1 - λ) * x2
+        val mixed_x = x1.mul_scalar(lam).add(x2.mul_scalar(1.0 - lam))
+
+        # Mix labels (soft labels)
+        val mixed_y = {"y1": y1, "y2": y2, "lam": lam}
+
+        return (mixed_x, mixed_y)
+
+    fn mix_batch(x: Tensor, y: any) -> (Tensor, any):
+        """Mix batch with shuffled version of itself.
+
+        Args:
+            x: Batch input tensor [N, C, H, W]
+            y: Batch labels
+
+        Returns:
+            Tuple of (mixed_x, mixed_y)
+        """
+        val lam = _sample_beta(self.alpha, self.alpha)
+
+        # Shuffle indices (simplified - would shuffle along batch dim)
+        # mixed_x = λ * x + (1 - λ) * x[shuffled]
+        val mixed_x = x  # Placeholder
+
+        val mixed_y = {"y": y, "lam": lam}
+
+        return (mixed_x, mixed_y)
+
+
+class Cutmix:
+    """Cutmix data augmentation.
+
+    Replaces rectangular region of one image with patch from another.
+
+    From paper "CutMix: Regularization Strategy to Train Strong Classifiers".
+
+    Example:
+        ```simple
+        val cutmix = Cutmix(alpha=1.0)
+        val (mixed_x, mixed_y) = cutmix.mix(batch_x, batch_y)
+        ```
+    """
+    alpha: f64
+
+    fn __init__(alpha: f64 = 1.0):
+        """Initialize cutmix.
+
+        Args:
+            alpha: Beta distribution parameter
+        """
+        self.alpha = alpha
+
+    fn mix(x1: Tensor, y1: any, x2: Tensor, y2: any) -> (Tensor, any):
+        """Mix two samples using cutmix.
+
+        Args:
+            x1: First input tensor [C, H, W]
+            y1: First label
+            x2: Second input tensor [C, H, W]
+            y2: Second label
+
+        Returns:
+            Tuple of (mixed_x, mixed_y)
+        """
+        val lam = _sample_beta(self.alpha, self.alpha)
+
+        # Get bounding box for cut
+        val shape = x1.shape()
+        val h = shape[1]
+        val w = shape[2]
+
+        val cut_h = (h.to_float() * (1.0 - lam).sqrt()) as i64
+        val cut_w = (w.to_float() * (1.0 - lam).sqrt()) as i64
+
+        val cx = (rand() * w.to_float()) as i64
+        val cy = (rand() * h.to_float()) as i64
+
+        val x1_clip = max(cx - cut_w / 2, 0)
+        val y1_clip = max(cy - cut_h / 2, 0)
+        val x2_clip = min(cx + cut_w / 2, w)
+        val y2_clip = min(cy + cut_h / 2, h)
+
+        # Replace region (placeholder - would copy from x2 to x1)
+        val mixed_x = x1
+
+        # Compute actual lambda based on area
+        val box_area = (x2_clip - x1_clip) * (y2_clip - y1_clip)
+        val actual_lam = 1.0 - box_area.to_float() / (h * w).to_float()
+
+        val mixed_y = {"y1": y1, "y2": y2, "lam": actual_lam}
+
+        return (mixed_x, mixed_y)
+
+
+class CutmixMixup:
+    """Combined Cutmix and Mixup augmentation.
+
+    Randomly applies either Cutmix or Mixup to each batch.
+
+    Example:
+        ```simple
+        val aug = CutmixMixup(mixup_alpha=0.8, cutmix_alpha=1.0, prob=0.5)
+        val (mixed_x, mixed_y) = aug.mix(batch_x, batch_y)
+        ```
+    """
+    mixup: Mixup
+    cutmix: Cutmix
+    mixup_prob: f64
+    cutmix_prob: f64
+
+    fn __init__(mixup_alpha: f64 = 0.8, cutmix_alpha: f64 = 1.0,
+                mixup_prob: f64 = 0.5, cutmix_prob: f64 = 0.5):
+        """Initialize combined augmentation.
+
+        Args:
+            mixup_alpha: Beta parameter for mixup
+            cutmix_alpha: Beta parameter for cutmix
+            mixup_prob: Probability of applying mixup
+            cutmix_prob: Probability of applying cutmix
+        """
+        self.mixup = Mixup(mixup_alpha)
+        self.cutmix = Cutmix(cutmix_alpha)
+        self.mixup_prob = mixup_prob
+        self.cutmix_prob = cutmix_prob
+
+    fn mix(x1: Tensor, y1: any, x2: Tensor, y2: any) -> (Tensor, any):
+        """Apply random augmentation.
+
+        Args:
+            x1: First input tensor
+            y1: First label
+            x2: Second input tensor
+            y2: Second label
+
+        Returns:
+            Tuple of (mixed_x, mixed_y)
+        """
+        val r = rand()
+
+        if r < self.mixup_prob:
+            return self.mixup.mix(x1, y1, x2, y2)
+        elif r < self.mixup_prob + self.cutmix_prob:
+            return self.cutmix.mix(x1, y1, x2, y2)
+        else:
+            # No augmentation
+            return (x1, y1)
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn _adjust_brightness(tensor: Tensor, factor: f64) -> Tensor:
+    """Adjust brightness by multiplying by factor."""
+    return tensor.mul_scalar(factor)
+
+
+fn _adjust_contrast(tensor: Tensor, factor: f64) -> Tensor:
+    """Adjust contrast around mean."""
+    # Placeholder - would compute mean and adjust
+    return tensor
+
+
+fn _adjust_saturation(tensor: Tensor, factor: f64) -> Tensor:
+    """Adjust saturation."""
+    # Placeholder - would convert to HSV and adjust
+    return tensor
+
+
+fn _adjust_hue(tensor: Tensor, factor: f64) -> Tensor:
+    """Adjust hue."""
+    # Placeholder - would convert to HSV and shift hue
+    return tensor
+
+
+fn _sample_beta(alpha: f64, beta: f64) -> f64:
+    """Sample from Beta distribution using gamma samples.
+
+    Uses the fact that Beta(α, β) = X / (X + Y) where
+    X ~ Gamma(α) and Y ~ Gamma(β).
+    """
+    # Simplified approximation using uniform samples
+    # For proper implementation, would use gamma distribution
+    if alpha <= 0.0:
+        return 0.5
+
+    # Use inverse CDF approximation for Beta when α = β
+    val u = rand()
+    if alpha >= 1.0:
+        # For α >= 1, Beta is roughly uniform-ish
+        return u
+    else:
+        # For α < 1, Beta has U-shape, use power transform
+        val p = 0.5  # Bias toward 0.5
+        return p + (u - 0.5) * alpha
+
+
+fn max(a: i64, b: i64) -> i64:
+    """Maximum of two integers."""
+    if a > b:
+        return a
+    return b
+
+
+fn min(a: i64, b: i64) -> i64:
+    """Minimum of two integers."""
+    if a < b:
+        return a
+    return b

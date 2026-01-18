@@ -37,7 +37,9 @@
 #     scheduler.step()
 # ```
 
-export Optimizer, SGD, Adam, AdamW, RMSprop, LRScheduler, StepLR, ExponentialLR, CosineAnnealingLR
+export Optimizer, SGD, Adam, AdamW, RMSprop
+export LRScheduler, StepLR, ExponentialLR, CosineAnnealingLR
+export ReduceLROnPlateau, OneCycleLR, WarmupCosineAnnealingLR, LinearWarmupLR
 
 import .. as torch
 
@@ -479,6 +481,290 @@ class CosineAnnealingLR(LRScheduler):
         val cosine_value = @rt_torch_cos(pi * progress)
         val cosine_factor = (1.0 + cosine_value) / 2.0
         return self.eta_min + (self.base_lr - self.eta_min) * cosine_factor
+
+
+class ReduceLROnPlateau:
+    """Reduce learning rate when a metric has stopped improving.
+
+    Models often benefit from reducing the learning rate by a factor
+    of 2-10 once learning stagnates. This scheduler reads a metric
+    quantity and if no improvement is seen for a 'patience' number
+    of epochs, the learning rate is reduced.
+
+    Attributes:
+        optimizer: Wrapped optimizer
+        mode: 'min' or 'max' - minimize or maximize metric
+        factor: Factor by which learning rate is reduced
+        patience: Number of epochs with no improvement
+        threshold: Threshold for measuring improvement
+        cooldown: Epochs to wait after LR reduction before resuming
+
+    Example:
+        ```simple
+        val scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=10)
+
+        for epoch in range(100):
+            train(...)
+            val loss = validate(...)
+            scheduler.step(loss)  # Pass metric value
+        ```
+    """
+    optimizer: Optimizer
+    mode: str
+    factor: f64
+    patience: i32
+    threshold: f64
+    cooldown: i32
+    min_lr: f64
+    _best: f64
+    _num_bad_epochs: i32
+    _cooldown_counter: i32
+
+    fn __init__(optimizer: Optimizer,
+        mode: str = "min",
+        factor: f64 = 0.1,
+        patience: i32 = 10,
+        threshold: f64 = 1e-4,
+        cooldown: i32 = 0,
+        min_lr: f64 = 0.0
+    ):
+        """Initialize ReduceLROnPlateau scheduler.
+
+        Args:
+            optimizer: Wrapped optimizer
+            mode: 'min' or 'max' (default: 'min')
+            factor: LR reduction factor (default: 0.1)
+            patience: Epochs to wait (default: 10)
+            threshold: Improvement threshold (default: 1e-4)
+            cooldown: Cooldown epochs (default: 0)
+            min_lr: Minimum LR (default: 0.0)
+        """
+        self.optimizer = optimizer
+        self.mode = mode
+        self.factor = factor
+        self.patience = patience
+        self.threshold = threshold
+        self.cooldown = cooldown
+        self.min_lr = min_lr
+        self._num_bad_epochs = 0
+        self._cooldown_counter = 0
+
+        # Initialize best value based on mode
+        if mode == "min":
+            self._best = 1e30  # Large value
+        else:
+            self._best = -1e30  # Small value
+
+    fn step(metric: f64):
+        """Update scheduler with current metric value.
+
+        Args:
+            metric: Current metric value to monitor
+        """
+        if self._cooldown_counter > 0:
+            self._cooldown_counter -= 1
+            return
+
+        val improved = self._is_better(metric)
+
+        if improved:
+            self._best = metric
+            self._num_bad_epochs = 0
+        else:
+            self._num_bad_epochs += 1
+
+        if self._num_bad_epochs > self.patience:
+            self._reduce_lr()
+            self._cooldown_counter = self.cooldown
+            self._num_bad_epochs = 0
+
+    fn _is_better(metric: f64) -> bool:
+        """Check if metric improved."""
+        if self.mode == "min":
+            return metric < self._best - self.threshold
+        else:
+            return metric > self._best + self.threshold
+
+    fn _reduce_lr():
+        """Reduce learning rate."""
+        val old_lr = self.optimizer.lr
+        val new_lr = old_lr * self.factor
+        if new_lr < self.min_lr:
+            new_lr = self.min_lr
+        self.optimizer.lr = new_lr
+        if self.optimizer.optimizer_handle != 0:
+            @rt_torch_optimizer_set_lr(self.optimizer.optimizer_handle, new_lr)
+
+
+class LinearWarmupLR(LRScheduler):
+    """Linear warmup scheduler.
+
+    Linearly increases learning rate from 0 to base_lr over warmup_steps.
+
+    Example:
+        ```simple
+        val scheduler = LinearWarmupLR(optimizer, warmup_steps=1000)
+        ```
+    """
+    warmup_steps: i32
+    base_lr: f64
+
+    fn __init__(optimizer: Optimizer, warmup_steps: i32):
+        """Initialize linear warmup scheduler.
+
+        Args:
+            optimizer: Wrapped optimizer
+            warmup_steps: Number of warmup steps
+        """
+        super().__init__(optimizer)
+        self.warmup_steps = warmup_steps
+        self.base_lr = optimizer.lr
+
+    fn get_lr() -> f64:
+        """Calculate current learning rate."""
+        if self.last_epoch < self.warmup_steps:
+            return self.base_lr * (self.last_epoch + 1) as f64 / self.warmup_steps as f64
+        return self.base_lr
+
+
+class WarmupCosineAnnealingLR(LRScheduler):
+    """Cosine annealing with linear warmup.
+
+    Combines linear warmup with cosine decay. Common in transformer training.
+
+    Attributes:
+        warmup_steps: Steps for linear warmup
+        T_max: Total steps for cosine decay (after warmup)
+        eta_min: Minimum learning rate
+
+    Example:
+        ```simple
+        val scheduler = WarmupCosineAnnealingLR(
+            optimizer,
+            warmup_steps=1000,
+            T_max=100000,
+            eta_min=1e-6
+        )
+        ```
+    """
+    warmup_steps: i32
+    T_max: i32
+    eta_min: f64
+    base_lr: f64
+
+    fn __init__(optimizer: Optimizer, warmup_steps: i32, T_max: i32, eta_min: f64 = 0.0):
+        """Initialize warmup cosine scheduler.
+
+        Args:
+            optimizer: Wrapped optimizer
+            warmup_steps: Number of warmup steps
+            T_max: Total training steps (including warmup)
+            eta_min: Minimum learning rate (default: 0.0)
+        """
+        super().__init__(optimizer)
+        self.warmup_steps = warmup_steps
+        self.T_max = T_max
+        self.eta_min = eta_min
+        self.base_lr = optimizer.lr
+
+    fn get_lr() -> f64:
+        """Calculate current learning rate with warmup."""
+        if self.last_epoch < self.warmup_steps:
+            # Linear warmup phase
+            return self.base_lr * (self.last_epoch + 1) as f64 / self.warmup_steps as f64
+
+        # Cosine decay phase
+        val decay_steps = self.T_max - self.warmup_steps
+        val current_step = self.last_epoch - self.warmup_steps
+        val progress = current_step as f64 / decay_steps as f64
+        val pi = 3.141592653589793
+        val cosine_value = @rt_torch_cos(pi * progress)
+        val cosine_factor = (1.0 + cosine_value) / 2.0
+        return self.eta_min + (self.base_lr - self.eta_min) * cosine_factor
+
+
+class OneCycleLR(LRScheduler):
+    """1Cycle learning rate policy.
+
+    The 1Cycle policy anneals the learning rate from an initial learning
+    rate to some maximum learning rate and then from that maximum learning
+    rate to some minimum learning rate much lower than the initial learning rate.
+
+    This policy was initially described in the paper "Super-Convergence".
+
+    Attributes:
+        max_lr: Maximum learning rate in the cycle
+        total_steps: Total training steps
+        pct_start: Percentage of cycle spent increasing LR
+        div_factor: Initial LR = max_lr / div_factor
+        final_div_factor: Final LR = max_lr / final_div_factor
+
+    Example:
+        ```simple
+        val scheduler = OneCycleLR(
+            optimizer,
+            max_lr=0.1,
+            total_steps=10000,
+            pct_start=0.3
+        )
+        ```
+    """
+    max_lr: f64
+    total_steps: i32
+    pct_start: f64
+    div_factor: f64
+    final_div_factor: f64
+    initial_lr: f64
+    final_lr: f64
+    up_steps: i32
+
+    fn __init__(optimizer: Optimizer,
+        max_lr: f64,
+        total_steps: i32,
+        pct_start: f64 = 0.3,
+        div_factor: f64 = 25.0,
+        final_div_factor: f64 = 10000.0
+    ):
+        """Initialize OneCycleLR scheduler.
+
+        Args:
+            optimizer: Wrapped optimizer
+            max_lr: Maximum learning rate
+            total_steps: Total training steps
+            pct_start: Fraction for warmup (default: 0.3)
+            div_factor: Initial LR divisor (default: 25.0)
+            final_div_factor: Final LR divisor (default: 10000.0)
+        """
+        super().__init__(optimizer)
+        self.max_lr = max_lr
+        self.total_steps = total_steps
+        self.pct_start = pct_start
+        self.div_factor = div_factor
+        self.final_div_factor = final_div_factor
+
+        # Calculate LR bounds
+        self.initial_lr = max_lr / div_factor
+        self.final_lr = max_lr / final_div_factor
+        self.up_steps = (total_steps as f64 * pct_start) as i32
+
+        # Set initial LR
+        optimizer.lr = self.initial_lr
+
+    fn get_lr() -> f64:
+        """Calculate current learning rate."""
+        if self.last_epoch < self.up_steps:
+            # Warmup phase: linear from initial_lr to max_lr
+            val progress = self.last_epoch as f64 / self.up_steps as f64
+            return self.initial_lr + (self.max_lr - self.initial_lr) * progress
+        else:
+            # Annealing phase: cosine from max_lr to final_lr
+            val down_steps = self.total_steps - self.up_steps
+            val current = self.last_epoch - self.up_steps
+            val progress = current as f64 / down_steps as f64
+            val pi = 3.141592653589793
+            val cosine_value = @rt_torch_cos(pi * progress)
+            val cosine_factor = (1.0 + cosine_value) / 2.0
+            return self.final_lr + (self.max_lr - self.final_lr) * cosine_factor
 
 
 # ============================================================================

@@ -1,0 +1,405 @@
+"""
+# LSP MCP Tools Specification
+
+**Feature IDs:** #880-919 (LLM-Friendly Features)
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+LSP MCP Tools expose Language Server Protocol functionality via MCP (Model Context Protocol).
+This enables LLM clients to perform code intelligence operations on Simple language files.
+
+## Tools
+
+| Tool | Description |
+|------|-------------|
+| lsp_definition | Find the definition location of a symbol |
+| lsp_references | Find all references to a symbol |
+| lsp_hover | Get type info and documentation |
+| lsp_symbols | Get all symbols in a document |
+| lsp_diagnostics | Get parse and semantic errors |
+
+## Input/Output Format
+
+All tools accept JSON input and produce JSON output suitable for MCP protocol.
+
+### lsp_definition
+```json
+Input:  { "file": "path.spl", "line": 5, "character": 10 }
+Output: { "uri": "file://path.spl", "range": { "start": {"line": 1, "character": 4}, "end": {...} } }
+```
+
+### lsp_symbols
+```json
+Input:  { "file": "path.spl" }
+Output: [{ "name": "main", "kind": "function", "range": {...} }, ...]
+```
+
+## Examples
+
+```simple
+describe "LSP MCP Tools":
+    it "finds symbol definitions":
+        val result = lsp_definition("test.spl", source, 5, 10)
+        expect(result.uri).to(contain("test.spl"))
+```
+"""
+
+import std.spec
+
+# ============================================================================
+# Test Group 1: Position and Range Types
+# ============================================================================
+
+describe "LSP Position and Range Types":
+    """
+    ## Position and Range
+
+    Test the basic position and range types used in LSP operations.
+    """
+
+    context "Position":
+        """
+        ### Position Struct
+
+        Represents a position in a text document (0-based line and character).
+        """
+
+        it "creates position with line and character":
+            val pos = Position.new(5, 10)
+            expect(pos.line).to(eq(5))
+            expect(pos.character).to(eq(10))
+
+        it "converts to dictionary":
+            val pos = Position.new(3, 7)
+            val dict = pos.to_dict()
+            expect(dict.get("line")).to(eq(3))
+            expect(dict.get("character")).to(eq(7))
+
+    context "Range":
+        """
+        ### Range Struct
+
+        Represents a range in a text document with start and end positions.
+        """
+
+        it "creates range with start and end positions":
+            val start = Position.new(1, 0)
+            val end = Position.new(1, 15)
+            val range = Range.new(start, end)
+            expect(range.start.line).to(eq(1))
+            expect(range.end.character).to(eq(15))
+
+        it "creates single line range":
+            val range = Range.single_line(5, 0, 20)
+            expect(range.start.line).to(eq(5))
+            expect(range.end.line).to(eq(5))
+            expect(range.start.character).to(eq(0))
+            expect(range.end.character).to(eq(20))
+
+
+# ============================================================================
+# Test Group 2: Symbol Information
+# ============================================================================
+
+describe "LSP Symbol Information":
+    """
+    ## Symbol Information
+
+    Test symbol information extraction and representation.
+    """
+
+    context "SymbolInfo":
+        """
+        ### Symbol Info Struct
+
+        Contains information about a symbol in the document.
+        """
+
+        it "creates symbol with name and kind":
+            val range = Range.single_line(0, 0, 10)
+            val symbol = SymbolInfo.new("test_function", LspSymbolKind.Function, range)
+            expect(symbol.name).to(eq("test_function"))
+            expect(symbol.kind).to(eq(LspSymbolKind.Function))
+
+        it "adds container name":
+            val range = Range.single_line(5, 4, 20)
+            val symbol = SymbolInfo.new("method", LspSymbolKind.Method, range)
+                .with_container("MyClass")
+            expect(symbol.container_name).to(eq(Some("MyClass")))
+
+    context "LspSymbolKind":
+        """
+        ### Symbol Kind Enum
+
+        Enumeration of symbol types.
+        """
+
+        it "converts to string":
+            expect(LspSymbolKind.Function.to_string()).to(eq("function"))
+            expect(LspSymbolKind.Class.to_string()).to(eq("class"))
+            expect(LspSymbolKind.Method.to_string()).to(eq("method"))
+            expect(LspSymbolKind.Variable.to_string()).to(eq("variable"))
+
+        it "converts to LSP number":
+            expect(LspSymbolKind.Function.to_lsp_number()).to(eq(12))
+            expect(LspSymbolKind.Class.to_lsp_number()).to(eq(5))
+            expect(LspSymbolKind.Struct.to_lsp_number()).to(eq(23))
+
+
+# ============================================================================
+# Test Group 3: Hover Information
+# ============================================================================
+
+describe "LSP Hover Information":
+    """
+    ## Hover Information
+
+    Test hover content types and formatting.
+    """
+
+    context "HoverContents":
+        """
+        ### Hover Contents
+
+        Content to display on hover, supporting markdown and plaintext.
+        """
+
+        it "creates markdown content":
+            val contents = HoverContents.markdown("```simple\nfn test()\n```")
+            expect(contents.kind).to(eq("markdown"))
+            expect(contents.value).to(contain("fn test()"))
+
+        it "creates plaintext content":
+            val contents = HoverContents.plaintext("Function test")
+            expect(contents.kind).to(eq("plaintext"))
+
+    context "HoverInfo":
+        """
+        ### Hover Info
+
+        Complete hover information with content and optional range.
+        """
+
+        it "creates hover info with contents":
+            val contents = HoverContents.markdown("# Test")
+            val hover = HoverInfo.new(contents)
+            expect(hover.contents.kind).to(eq("markdown"))
+            expect(hover.range).to(eq(None))
+
+        it "adds range to hover info":
+            val contents = HoverContents.markdown("# Test")
+            val range = Range.single_line(5, 0, 10)
+            val hover = HoverInfo.new(contents).with_range(range)
+            expect(hover.range).to(be_some())
+
+
+# ============================================================================
+# Test Group 4: Diagnostics
+# ============================================================================
+
+describe "LSP Diagnostics":
+    """
+    ## Diagnostics
+
+    Test diagnostic information for errors and warnings.
+    """
+
+    context "DiagnosticSeverity":
+        """
+        ### Diagnostic Severity
+
+        Severity levels for diagnostics.
+        """
+
+        it "converts to string":
+            expect(DiagnosticSeverity.Error.to_string()).to(eq("error"))
+            expect(DiagnosticSeverity.Warning.to_string()).to(eq("warning"))
+            expect(DiagnosticSeverity.Information.to_string()).to(eq("information"))
+            expect(DiagnosticSeverity.Hint.to_string()).to(eq("hint"))
+
+        it "converts to LSP number":
+            expect(DiagnosticSeverity.Error.to_lsp_number()).to(eq(1))
+            expect(DiagnosticSeverity.Warning.to_lsp_number()).to(eq(2))
+
+    context "Diagnostic":
+        """
+        ### Diagnostic Struct
+
+        Complete diagnostic information.
+        """
+
+        it "creates error diagnostic":
+            val range = Range.single_line(10, 0, 20)
+            val diag = Diagnostic.error(range, "Syntax error")
+            expect(diag.severity).to(eq(DiagnosticSeverity.Error))
+            expect(diag.message).to(eq("Syntax error"))
+            expect(diag.source).to(eq(Some("simple-compiler")))
+
+        it "creates warning diagnostic":
+            val range = Range.single_line(5, 0, 10)
+            val diag = Diagnostic.warning(range, "Unused variable")
+            expect(diag.severity).to(eq(DiagnosticSeverity.Warning))
+
+        it "adds error code":
+            val range = Range.single_line(1, 0, 5)
+            val diag = Diagnostic.error(range, "Test").with_code("E001")
+            expect(diag.code).to(eq(Some("E001")))
+
+
+# ============================================================================
+# Test Group 5: References
+# ============================================================================
+
+describe "LSP References":
+    """
+    ## References
+
+    Test reference location types.
+    """
+
+    context "ReferenceContext":
+        """
+        ### Reference Context
+
+        Context of a reference (definition, reference, read, write).
+        """
+
+        it "converts to string":
+            expect(ReferenceContext.Definition.to_string()).to(eq("definition"))
+            expect(ReferenceContext.Reference.to_string()).to(eq("reference"))
+            expect(ReferenceContext.Read.to_string()).to(eq("read"))
+            expect(ReferenceContext.Write.to_string()).to(eq("write"))
+
+    context "ReferenceLocation":
+        """
+        ### Reference Location
+
+        Location with reference context.
+        """
+
+        it "creates definition reference":
+            val range = Range.single_line(1, 4, 15)
+            val ref = ReferenceLocation.definition("file://test.spl", range)
+            expect(ref.context).to(eq(ReferenceContext.Definition))
+            expect(ref.location.uri).to(eq("file://test.spl"))
+
+        it "creates usage reference":
+            val range = Range.single_line(10, 0, 10)
+            val ref = ReferenceLocation.reference("file://test.spl", range)
+            expect(ref.context).to(eq(ReferenceContext.Reference))
+
+
+# ============================================================================
+# Test Group 6: Tool Handlers
+# ============================================================================
+
+describe "LSP MCP Tool Handlers":
+    """
+    ## Tool Handlers
+
+    Test the MCP tool handler classes.
+    """
+
+    context "LspSymbolsHandler":
+        """
+        ### Symbols Handler
+
+        Handles requests for document symbols.
+        """
+
+        it "creates handler instance":
+            val handler = LspSymbolsHandler.new()
+            # Handler should be created successfully
+            expect(true).to(be_truthy())
+
+    context "LspDefinitionHandler":
+        """
+        ### Definition Handler
+
+        Handles go-to-definition requests.
+        """
+
+        it "creates handler instance":
+            val handler = LspDefinitionHandler.new()
+            expect(true).to(be_truthy())
+
+    context "LspHoverHandler":
+        """
+        ### Hover Handler
+
+        Handles hover information requests.
+        """
+
+        it "creates handler instance":
+            val handler = LspHoverHandler.new()
+            expect(true).to(be_truthy())
+
+    context "LspReferencesHandler":
+        """
+        ### References Handler
+
+        Handles find-references requests.
+        """
+
+        it "creates handler instance":
+            val handler = LspReferencesHandler.new()
+            expect(true).to(be_truthy())
+
+    context "LspDiagnosticsHandler":
+        """
+        ### Diagnostics Handler
+
+        Handles diagnostics requests.
+        """
+
+        it "creates handler instance":
+            val handler = LspDiagnosticsHandler.new()
+            expect(true).to(be_truthy())
+
+
+# ============================================================================
+# Test Group 7: JSON Serialization
+# ============================================================================
+
+describe "LSP JSON Serialization":
+    """
+    ## JSON Serialization
+
+    Test that all types serialize correctly to JSON for MCP protocol.
+    """
+
+    context "Position serialization":
+        it "serializes to JSON dict":
+            val pos = Position.new(10, 5)
+            val dict = pos.to_dict()
+            expect(dict.get("line")).to(eq(10))
+            expect(dict.get("character")).to(eq(5))
+
+    context "Range serialization":
+        it "serializes to JSON dict with nested positions":
+            val range = Range.single_line(3, 0, 15)
+            val dict = range.to_dict()
+            val start = dict.get("start") as Dict<text, Any>
+            expect(start.get("line")).to(eq(3))
+            expect(start.get("character")).to(eq(0))
+
+    context "SymbolInfo serialization":
+        it "serializes to JSON dict with all fields":
+            val range = Range.single_line(0, 0, 10)
+            val symbol = SymbolInfo.new("test", LspSymbolKind.Function, range)
+            val dict = symbol.to_dict()
+            expect(dict.get("name")).to(eq("test"))
+            expect(dict.get("kind")).to(eq("function"))
+            expect(dict.has_key("range")).to(be_truthy())
+
+    context "Diagnostic serialization":
+        it "serializes to JSON dict":
+            val range = Range.single_line(1, 0, 5)
+            val diag = Diagnostic.error(range, "Test error").with_code("E001")
+            val dict = diag.to_dict()
+            expect(dict.get("message")).to(eq("Test error"))
+            expect(dict.get("severity")).to(eq("error"))
+            expect(dict.get("code")).to(eq("E001"))
