@@ -463,6 +463,12 @@ pub enum Expr {
     },
     Tuple(Vec<Expr>),
     Array(Vec<Expr>),
+    /// Array repetition: [value; count] creates array with `count` copies of `value`
+    /// Example: [0; 10] creates [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    ArrayRepeat {
+        value: Box<Expr>,
+        count: Box<Expr>,
+    },
     /// SIMD vector literal: vec[1.0, 2.0, 3.0, 4.0]
     VecLiteral(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),

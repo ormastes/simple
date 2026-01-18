@@ -120,6 +120,25 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // Check for array repetition: [value; count]
+        if self.check(&TokenKind::Semicolon) {
+            self.advance();
+            // Skip whitespace after semicolon
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+            let count = self.parse_expression()?;
+            // Skip whitespace before closing bracket
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) || self.check(&TokenKind::Dedent) {
+                self.advance();
+            }
+            self.expect(&TokenKind::RBracket)?;
+            return Ok(Expr::ArrayRepeat {
+                value: Box::new(first),
+                count: Box::new(count),
+            });
+        }
+
         // Regular array
         let mut elements = vec![first];
         while self.check(&TokenKind::Comma) {

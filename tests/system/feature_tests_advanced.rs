@@ -248,8 +248,8 @@ fn test_feature_72_result_is_ok() {
     let result = runner
         .run_source(
             r#"
-res = Ok(10)
-x = 0
+val res = Ok(10)
+var x = 0
 if res.is_ok():
     x = 1
 main = x
@@ -266,8 +266,8 @@ fn test_feature_72_result_is_err() {
     let result = runner
         .run_source(
             r#"
-res = Err("oops")
-x = 0
+val res = Err("oops")
+var x = 0
 if res.is_err():
     x = 1
 main = x
@@ -304,16 +304,16 @@ fn test_feature_73_question_operator() {
     let result = runner
         .run_source(
             r#"
-fn may_fail(x) -> Res[int, str]:
+fn may_fail(x) -> Res<int, str>:
     if x < 0:
         return Err("negative")
     return Ok(x * 2)
 
 fn caller(x):
-    val = may_fail(x)?
-    return Ok(val + 1)
+    val v = may_fail(x)?
+    return Ok(v + 1)
 
-res = caller(5)
+val res = caller(5)
 main = res.unwrap()
 "#,
         )
@@ -376,8 +376,8 @@ fn test_feature_75_if_let_some() {
     let result = runner
         .run_source(
             r#"
-opt = Some(42)
-res = 0
+val opt = Some(42)
+var res = 0
 if let Some(x) = opt:
     res = x
 main = res
@@ -394,8 +394,8 @@ fn test_feature_75_if_let_none_else() {
     let result = runner
         .run_source(
             r#"
-opt = None
-res = 0
+val opt = None
+var res = 0
 if let Some(x) = opt:
     res = x
 else:
@@ -419,10 +419,10 @@ fn next_item(n):
         return Some(n)
     return None
 
-counter = 3
-sum = 0
-while let Some(val) = next_item(counter):
-    sum = sum + val
+var counter = 3
+var sum = 0
+while let Some(v) = next_item(counter):
+    sum = sum + v
     counter = counter - 1
 main = sum
 "#,

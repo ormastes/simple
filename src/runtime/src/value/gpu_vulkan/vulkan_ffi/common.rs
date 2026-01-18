@@ -2,8 +2,8 @@
 
 #[cfg(feature = "vulkan")]
 use crate::vulkan::{
-    ComputePipeline, DescriptorPool, DescriptorSet, DescriptorSetLayout, Surface, VulkanBuffer, VulkanDevice,
-    VulkanError, VulkanSwapchain, WindowManager,
+    ComputePipeline, DescriptorPool, DescriptorSet, DescriptorSetLayout, Framebuffer, GraphicsPipeline, RenderPass,
+    ShaderModule, Surface, VulkanBuffer, VulkanDevice, VulkanError, VulkanSwapchain, WindowManager,
 };
 #[cfg(feature = "vulkan")]
 use parking_lot::Mutex;
@@ -13,6 +13,17 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "vulkan")]
 use std::sync::Arc;
+
+#[cfg(feature = "vulkan")]
+use ash::vk;
+
+/// Command buffer state wrapper for graphics FFI
+#[cfg(feature = "vulkan")]
+pub struct CommandBufferState {
+    pub device: Arc<VulkanDevice>,
+    pub command_buffer: vk::CommandBuffer,
+    pub is_recording: bool,
+}
 
 #[cfg(feature = "vulkan")]
 lazy_static::lazy_static! {
@@ -42,6 +53,27 @@ lazy_static::lazy_static! {
 
     /// Global descriptor set handle registry
     pub(super) static ref DESCRIPTOR_SET_REGISTRY: Mutex<HashMap<u64, Arc<DescriptorSet>>> = Mutex::new(HashMap::new());
+
+    /// Global render pass handle registry
+    pub(super) static ref RENDER_PASS_REGISTRY: Mutex<HashMap<u64, Arc<RenderPass>>> = Mutex::new(HashMap::new());
+
+    /// Global shader module handle registry
+    pub(super) static ref SHADER_MODULE_REGISTRY: Mutex<HashMap<u64, Arc<ShaderModule>>> = Mutex::new(HashMap::new());
+
+    /// Global graphics pipeline handle registry
+    pub(super) static ref GRAPHICS_PIPELINE_REGISTRY: Mutex<HashMap<u64, Arc<GraphicsPipeline>>> = Mutex::new(HashMap::new());
+
+    /// Global framebuffer handle registry
+    pub(super) static ref FRAMEBUFFER_REGISTRY: Mutex<HashMap<u64, Arc<Framebuffer>>> = Mutex::new(HashMap::new());
+
+    /// Global image handle registry
+    pub(super) static ref IMAGE_REGISTRY: Mutex<HashMap<u64, Arc<crate::vulkan::image::VulkanImage>>> = Mutex::new(HashMap::new());
+
+    /// Global sampler handle registry
+    pub(super) static ref SAMPLER_REGISTRY: Mutex<HashMap<u64, Arc<crate::vulkan::image::Sampler>>> = Mutex::new(HashMap::new());
+
+    /// Global command buffer handle registry
+    pub(super) static ref COMMAND_BUFFER_REGISTRY: Mutex<HashMap<u64, Arc<Mutex<CommandBufferState>>>> = Mutex::new(HashMap::new());
 
     /// Atomic counter for handle generation
     static ref NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);

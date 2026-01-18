@@ -836,6 +836,10 @@ impl Lowerer {
                     self.check_expr_for_async_calls(e, caller_name, function_suspension)?;
                 }
             }
+            HirExprKind::ArrayRepeat { value, count } => {
+                self.check_expr_for_async_calls(value, caller_name, function_suspension)?;
+                self.check_expr_for_async_calls(count, caller_name, function_suspension)?;
+            }
             HirExprKind::FieldAccess { receiver, .. } => {
                 self.check_expr_for_async_calls(receiver, caller_name, function_suspension)?;
             }

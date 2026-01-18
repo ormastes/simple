@@ -133,7 +133,7 @@ impl<'a> Parser<'a> {
         Ok(result)
     }
 
-    /// Parse range expressions: a..b (exclusive) or a..=b (inclusive)
+    /// Parse range expressions: a..b (exclusive), a..=b (inclusive), or a.. (half-open, no end)
     pub(crate) fn parse_range(&mut self) -> Result<Expr, ParseError> {
         use crate::ast::RangeBound;
         let start = self.parse_bitwise_or()?;
@@ -149,15 +149,39 @@ impl<'a> Parser<'a> {
 
         if let Some(bound) = bound {
             self.advance(); // consume '..' or '..='
-            let end = self.parse_bitwise_or()?;
+
+            // Check if there's an end expression or if this is a half-open range (e.g., `offset..`)
+            // Tokens that can't start an expression indicate a half-open range
+            let end = if self.is_range_terminator() {
+                None
+            } else {
+                Some(Box::new(self.parse_bitwise_or()?))
+            };
+
             Ok(Expr::Range {
                 start: Some(Box::new(start)),
-                end: Some(Box::new(end)),
+                end,
                 bound,
             })
         } else {
             Ok(start)
         }
+    }
+
+    /// Check if current token terminates a range expression (can't start an expression)
+    fn is_range_terminator(&self) -> bool {
+        matches!(
+            self.current.kind,
+            TokenKind::RBracket
+                | TokenKind::RParen
+                | TokenKind::RBrace
+                | TokenKind::Comma
+                | TokenKind::Colon
+                | TokenKind::Semicolon
+                | TokenKind::Newline
+                | TokenKind::Dedent
+                | TokenKind::Eof
+        )
     }
 
     parse_binary_multi!(parse_shift, parse_matmul,

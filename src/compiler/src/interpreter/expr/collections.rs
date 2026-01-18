@@ -129,6 +129,21 @@ pub(super) fn eval_collection_expr(
             }
             Ok(Some(Value::Array(arr)))
         }
+        Expr::ArrayRepeat { value, count } => {
+            // Evaluate the count first
+            let count_val = evaluate_expr(count, env, functions, classes, enums, impl_methods)?;
+            let count_int = match count_val {
+                Value::Int(n) => n,
+                _ => return Err(CompileError::Semantic("array repeat count must be an integer".into())),
+            };
+            if count_int < 0 {
+                return Err(CompileError::Semantic("array repeat count cannot be negative".into()));
+            }
+            // Evaluate the value once and clone it
+            let val = evaluate_expr(value, env, functions, classes, enums, impl_methods)?;
+            let arr: Vec<Value> = std::iter::repeat(val).take(count_int as usize).collect();
+            Ok(Some(Value::Array(arr)))
+        }
         Expr::Tuple(items) => {
             let mut tup = Vec::new();
             for item in items {

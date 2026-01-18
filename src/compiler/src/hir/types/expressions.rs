@@ -86,6 +86,11 @@ pub enum HirExprKind {
     // Compound literals
     Tuple(Vec<HirExpr>),
     Array(Vec<HirExpr>),
+    /// Array repeat: [value; count] - creates array with count copies of value
+    ArrayRepeat {
+        value: Box<HirExpr>,
+        count: Box<HirExpr>,
+    },
     /// SIMD vector literal: vec[1.0, 2.0, 3.0, 4.0]
     VecLiteral(Vec<HirExpr>),
     StructInit {

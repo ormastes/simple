@@ -204,7 +204,7 @@ fn infers_optional_chaining() {
 #[test]
 fn infers_match_with_multiple_patterns() {
     let items = parse_items(
-        "enum Result:\n    Ok(i64)\n    Err(str)\nlet r = Result::Ok(42)\nmatch r:\n    Result::Ok(val) =>\n        val\n    Result::Err(msg) =>\n        0\nmain = 0"
+        "enum Result:\n    Ok(i64)\n    Err(str)\nlet r = Result::Ok(42)\nmatch r:\n    Result::Ok(v) =>\n        v\n    Result::Err(msg) =>\n        0\nmain = 0"
     );
     check(&items).expect("type check ok");
 }

@@ -174,3 +174,35 @@ fn parse_class_without_doc_comment() {
         panic!("expected class");
     }
 }
+
+// Array repeat syntax: [value; count]
+#[test]
+fn parse_array_repeat_basic() {
+    use simple_parser::ast::Expr;
+    let items = parse("val zeros = [0; 5]");
+    if let Node::Let(stmt) = &items[0] {
+        if let Some(Expr::ArrayRepeat { value, count }) = &stmt.value {
+            assert!(matches!(value.as_ref(), Expr::Integer(0)));
+            assert!(matches!(count.as_ref(), Expr::Integer(5)));
+        } else {
+            panic!("expected ArrayRepeat, got {:?}", stmt.value);
+        }
+    } else {
+        panic!("expected let statement");
+    }
+}
+
+#[test]
+fn parse_array_repeat_with_expression() {
+    parse_ok("val arr = [1 + 2; 10]");
+    parse_ok("val arr = [0; n]");
+    parse_ok("val arr = [0; n * 2]");
+}
+
+#[test]
+fn parse_array_repeat_vs_regular_array() {
+    // Array repeat: single value repeated
+    parse_ok("val a = [0; 3]");
+    // Regular array: multiple elements
+    parse_ok("val b = [0, 0, 0]");
+}

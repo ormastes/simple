@@ -187,10 +187,7 @@ impl<'a> Parser<'a> {
             None
         };
         // Accept ->, =>, or : for match arms (consistent with statement-level match)
-        if !self.check(&TokenKind::Arrow)
-            && !self.check(&TokenKind::FatArrow)
-            && !self.check(&TokenKind::Colon)
-        {
+        if !self.check(&TokenKind::Arrow) && !self.check(&TokenKind::FatArrow) && !self.check(&TokenKind::Colon) {
             return Err(ParseError::unexpected_token(
                 "-> or => or :",
                 format!("{:?}", self.current.kind),

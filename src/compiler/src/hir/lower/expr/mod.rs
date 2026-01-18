@@ -39,6 +39,7 @@ impl Lowerer {
             Expr::Index { receiver, index } => self.lower_index(receiver, index, ctx),
             Expr::Tuple(exprs) => self.lower_tuple(exprs, ctx),
             Expr::Array(exprs) => self.lower_array(exprs, ctx),
+            Expr::ArrayRepeat { value, count } => self.lower_array_repeat(value, count, ctx),
             Expr::VecLiteral(exprs) => self.lower_vec_literal(exprs, ctx),
             Expr::If {
                 condition,

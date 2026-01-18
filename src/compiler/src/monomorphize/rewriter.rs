@@ -212,6 +212,10 @@ impl<'a> CallSiteRewriter<'a> {
                 index: Box::new(self.rewrite_expr(index)),
             },
             Expr::Array(elems) => Expr::Array(elems.iter().map(|e| self.rewrite_expr(e)).collect()),
+            Expr::ArrayRepeat { value, count } => Expr::ArrayRepeat {
+                value: Box::new(self.rewrite_expr(value)),
+                count: Box::new(self.rewrite_expr(count)),
+            },
             Expr::Tuple(elems) => Expr::Tuple(elems.iter().map(|e| self.rewrite_expr(e)).collect()),
             Expr::Dict(pairs) => Expr::Dict(
                 pairs

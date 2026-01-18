@@ -1,16 +1,28 @@
 // Monoio TCP networking implementation for Simple language
 // Provides async TCP server and client capabilities using io_uring
 // Feature: #1745-#1749 (Network I/O - TCP)
+//
+// MIGRATION NOTE: This module provides backward-compatible wrappers.
+// When the `monoio-direct` feature is enabled, all functions delegate to
+// the more efficient `rt_monoio_*` implementations in monoio_direct.rs.
+// New code should use the `rt_monoio_*` functions directly.
 
 #![cfg(feature = "monoio-net")]
 
 use crate::value::RuntimeValue;
+#[cfg(not(feature = "monoio-direct"))]
 use crate::monoio_runtime::{execute_async, get_entries, runtime_value_to_string, string_to_runtime_value};
+#[cfg(not(feature = "monoio-direct"))]
 use std::net::SocketAddr;
+#[cfg(not(feature = "monoio-direct"))]
 use std::sync::Arc;
+#[cfg(not(feature = "monoio-direct"))]
 use parking_lot::Mutex;
+#[cfg(not(feature = "monoio-direct"))]
 use monoio::net::{TcpListener, TcpStream};
+#[cfg(not(feature = "monoio-direct"))]
 use monoio::io::{AsyncReadRent, AsyncWriteRent};
+#[cfg(not(feature = "monoio-direct"))]
 use std::time::Duration;
 
 /// NOTE: Monoio wrapper architecture limitation
@@ -25,14 +37,17 @@ use std::time::Duration;
 /// applications should be written in Simple language directly and use the monoio
 /// runtime properly (spawn tasks on the runtime, keep streams alive).
 ///
-/// Future improvement: Use message passing to a dedicated monoio runtime thread
+/// RECOMMENDED: Use the `rt_monoio_*` functions from monoio_direct.rs instead,
+/// which properly store and reuse connections via a thread-local IoRegistry.
 
+#[cfg(not(feature = "monoio-direct"))]
 /// TCP listener metadata
 #[derive(Debug, Clone)]
 pub struct MonoioTcpListener {
     addr: SocketAddr,
 }
 
+#[cfg(not(feature = "monoio-direct"))]
 /// TCP stream metadata
 /// Stores connection info; actual I/O reconnects each time
 #[derive(Debug, Clone)]
@@ -41,6 +56,7 @@ pub struct MonoioTcpStream {
     local_addr: Option<SocketAddr>,
 }
 
+#[cfg(not(feature = "monoio-direct"))]
 // Global storage for connection metadata
 lazy_static::lazy_static! {
     static ref TCP_LISTENERS: Mutex<Vec<Arc<MonoioTcpListener>>> = Mutex::new(Vec::new());
@@ -56,6 +72,14 @@ lazy_static::lazy_static! {
 /// # Returns
 /// RuntimeValue containing listener handle (index), or negative value on error
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
+pub extern "C" fn monoio_tcp_listen(addr: RuntimeValue) -> RuntimeValue {
+    // Delegate to the efficient direct implementation
+    crate::monoio_direct::rt_monoio_tcp_listen(addr)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
 pub extern "C" fn monoio_tcp_listen(addr: RuntimeValue) -> RuntimeValue {
     // Extract string from RuntimeValue
     let addr_str = match runtime_value_to_string(addr) {
@@ -111,6 +135,13 @@ pub extern "C" fn monoio_tcp_listen(addr: RuntimeValue) -> RuntimeValue {
 /// # Returns
 /// RuntimeValue containing stream handle (index), or negative value on error/would-block
 #[no_mangle]
+#[cfg(feature = "monoio-direct")]
+pub extern "C" fn monoio_tcp_accept(listener_handle: RuntimeValue) -> RuntimeValue {
+    crate::monoio_direct::rt_monoio_tcp_accept(listener_handle)
+}
+
+#[no_mangle]
+#[cfg(not(feature = "monoio-direct"))]
 pub extern "C" fn monoio_tcp_accept(listener_handle: RuntimeValue) -> RuntimeValue {
     let handle = listener_handle.as_int();
 

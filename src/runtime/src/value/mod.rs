@@ -43,6 +43,8 @@ mod pty;
 #[cfg(feature = "ratatui-tui")]
 pub mod ratatui_tui;
 pub mod screenshot_ffi;
+// TODO: simd module needs API fixes - uses non-existent as_array(), Option-returning as_int(), etc.
+// pub mod simd;
 mod sync;
 pub mod tags;
 #[cfg(feature = "pytorch")]
@@ -263,6 +265,41 @@ pub use gpu_vulkan::{
     rt_vk_kernel_free,
     rt_vk_kernel_launch,
     rt_vk_kernel_launch_1d,
+    // Graphics pipeline management
+    rt_vk_framebuffer_create,
+    rt_vk_framebuffer_create_for_swapchain,
+    rt_vk_framebuffer_free,
+    rt_vk_framebuffer_get_dimensions,
+    rt_vk_graphics_pipeline_create,
+    rt_vk_graphics_pipeline_free,
+    rt_vk_render_pass_create_simple,
+    rt_vk_render_pass_create_with_depth,
+    rt_vk_render_pass_free,
+    rt_vk_render_pass_get_color_format,
+    rt_vk_shader_module_create,
+    rt_vk_shader_module_free,
+    // Image management
+    rt_vk_image_create_2d,
+    rt_vk_image_download,
+    rt_vk_image_free,
+    rt_vk_image_get_view,
+    rt_vk_image_upload,
+    rt_vk_sampler_create,
+    rt_vk_sampler_free,
+    // Command buffer management
+    rt_vk_cmd_begin_render_pass,
+    rt_vk_cmd_bind_index_buffer,
+    rt_vk_cmd_bind_pipeline,
+    rt_vk_cmd_bind_vertex_buffer,
+    rt_vk_cmd_draw,
+    rt_vk_cmd_draw_indexed,
+    rt_vk_cmd_end_render_pass,
+    rt_vk_cmd_set_scissor,
+    rt_vk_cmd_set_viewport,
+    rt_vk_command_buffer_begin,
+    rt_vk_command_buffer_end,
+    rt_vk_command_buffer_free,
+    rt_vk_command_buffer_submit,
     // Error codes
     VulkanFfiError,
 };
@@ -571,6 +608,12 @@ pub use file_io::{
     sys_munmap,
     sys_open,
 };
+
+// TODO: Re-export SIMD vector operations (disabled pending API fixes)
+// pub use simd::{
+//     rt_vec_abs, rt_vec_all, rt_vec_any, rt_vec_blend, rt_vec_ceil, rt_vec_extract, rt_vec_floor, rt_vec_max,
+//     rt_vec_min, rt_vec_product, rt_vec_round, rt_vec_select, rt_vec_shuffle, rt_vec_sqrt, rt_vec_sum, rt_vec_with,
+// };
 
 // Re-export diagram FFI functions (for spec framework)
 pub use diagram_ffi::{

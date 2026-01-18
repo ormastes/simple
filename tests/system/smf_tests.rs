@@ -304,8 +304,8 @@ fn test_run_file_still_compiles_spl() {
     let result = runner.run_file(&spl_path).expect("run file ok");
 
     assert_eq!(result, 77);
-    // Verify SMF was created as side effect
-    assert!(spl_path.with_extension("smf").exists());
+    // Note: `simple run` uses interpreter mode and doesn't create .smf files
+    // Only `simple compile` creates .smf files (see runner_tests.rs)
 }
 
 /// Test error handling for non-existent SMF file
