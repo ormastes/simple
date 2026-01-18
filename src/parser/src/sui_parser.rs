@@ -154,8 +154,13 @@ impl SuiParser {
 
         let trimmed = content.trim();
 
-        // Parse "let name: Type = value" into components
-        let declaration = if let Some(rest) = trimmed.strip_prefix("let").or_else(|| trimmed.strip_prefix("val")) {
+        // Parse "val/var/let name: Type = value" into components
+        // Note: `let` is deprecated, prefer `val` (immutable) or `var` (mutable)
+        let declaration = if let Some(rest) = trimmed
+            .strip_prefix("val")
+            .or_else(|| trimmed.strip_prefix("var"))
+            .or_else(|| trimmed.strip_prefix("let"))
+        {
             rest.trim()
         } else {
             trimmed
@@ -643,5 +648,19 @@ process_data()
         assert_eq!(result.shared_state[0].name, "config");
         assert_eq!(result.shared_state[0].type_annotation, Some("Config".to_string()));
         assert_eq!(result.shared_state[0].initializer, Some("Config::default()".to_string()));
+    }
+
+    #[test]
+    fn test_parse_shared_state_var_keyword() {
+        let source = r#"
+{$ var counter: i32 = 0 $}
+"#;
+        let mut parser = SuiParser::new(source.to_string());
+        let result = parser.parse().unwrap();
+
+        assert_eq!(result.shared_state.len(), 1);
+        assert_eq!(result.shared_state[0].name, "counter");
+        assert_eq!(result.shared_state[0].type_annotation, Some("i32".to_string()));
+        assert_eq!(result.shared_state[0].initializer, Some("0".to_string()));
     }
 }
