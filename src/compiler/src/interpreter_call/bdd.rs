@@ -342,7 +342,9 @@ pub(super) fn eval_bdd_builtin(
             Ok(Some(Value::Nil))
         }
         "expect" => {
-            let condition = eval_arg(
+            // Return the value as-is so .to(matcher) can match against it
+            // The .to() method in interpreter_method/mod.rs handles the assertion result
+            let value = eval_arg(
                 args,
                 0,
                 Value::Bool(false),
@@ -352,40 +354,8 @@ pub(super) fn eval_bdd_builtin(
                 enums,
                 impl_methods,
             )?;
-            let passed = condition.truthy();
-
-            let inside_it = BDD_INSIDE_IT.with(|cell| *cell.borrow());
-
-            if !passed {
-                BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-
-                let failure_msg = if !args.is_empty() {
-                    build_expect_failure_message(&args[0].value, env, functions, classes, enums, impl_methods)
-                } else {
-                    "expected true, got false".to_string()
-                };
-
-                if !inside_it {
-                    let indent = BDD_INDENT.with(|cell| *cell.borrow());
-                    if indent > 0 {
-                        let indent_str = "  ".repeat(indent);
-                        println!("{}\x1b[31m✗ expectation failed\x1b[0m", indent_str);
-                        println!("{}  \x1b[31m{}\x1b[0m", indent_str, failure_msg);
-                        BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
-                    }
-                } else {
-                    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(failure_msg));
-                }
-            } else if !inside_it {
-                let indent = BDD_INDENT.with(|cell| *cell.borrow());
-                if indent > 0 {
-                    let indent_str = "  ".repeat(indent);
-                    println!("{}\x1b[32m✓ expectation passed\x1b[0m", indent_str);
-                    BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
-                }
-            }
-
-            Ok(Some(Value::Bool(passed)))
+            // Return the value for .to(matcher) to match against
+            Ok(Some(value))
         }
         "shared_examples" => {
             let name = eval_arg(
@@ -625,14 +595,14 @@ pub(super) fn eval_bdd_builtin(
         }
         // BDD Matchers
         "be_true" => {
-            Ok(Some(Value::Matcher(crate::value_mock::MatcherValue::BeTrue)))
+            Ok(Some(Value::Matcher(MatcherValue::BeTrue)))
         }
         "be_false" => {
-            Ok(Some(Value::Matcher(crate::value_mock::MatcherValue::BeFalse)))
+            Ok(Some(Value::Matcher(MatcherValue::BeFalse)))
         }
         "eq" => {
             let expected = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            Ok(Some(Value::Matcher(crate::value_mock::MatcherValue::Exact(Box::new(expected)))))
+            Ok(Some(Value::Matcher(MatcherValue::Exact(Box::new(expected)))))
         }
         _ => Ok(None),
     }

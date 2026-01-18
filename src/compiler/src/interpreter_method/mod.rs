@@ -74,6 +74,20 @@ pub(crate) fn evaluate_method_call(
                 other => recv_val == *other,
             };
             let passed = if method == "not_to" { !matched } else { matched };
+
+            // Report to BDD framework
+            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+            if !passed {
+                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
+                let failure_msg = format!(
+                    "expected {:?} {} {:?}",
+                    recv_val,
+                    if method == "not_to" { "not to match" } else { "to match" },
+                    matcher
+                );
+                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+            }
+
             return Ok(Value::Bool(passed));
         }
         _ => {}

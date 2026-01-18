@@ -210,30 +210,60 @@ impl LspMcpHandler {
         }
     }
 
-    /// Handle lsp_definition tool call
-    pub fn handle_definition(&mut self, params: DefinitionParams) -> Result<Option<Location>, String> {
-        self.tools.go_to_definition(&params.file, params.line, params.character)
+    /// Handle lsp_definition tool call (requires source to be passed)
+    pub fn handle_definition_with_source(
+        &mut self,
+        params: DefinitionParams,
+        source: &str,
+    ) -> Result<Option<Location>, String> {
+        Ok(self.tools.go_to_definition(&params.file, source, params.line, params.character))
     }
 
-    /// Handle lsp_references tool call
-    pub fn handle_references(&mut self, params: ReferencesParams) -> Result<Vec<ReferenceLocation>, String> {
-        self.tools
-            .find_references(&params.file, params.line, params.character, params.include_declaration)
+    /// Handle lsp_references tool call (requires source to be passed)
+    pub fn handle_references_with_source(
+        &mut self,
+        params: ReferencesParams,
+        source: &str,
+    ) -> Result<Vec<ReferenceLocation>, String> {
+        Ok(self.tools.find_references(
+            &params.file,
+            source,
+            params.line,
+            params.character,
+            params.include_declaration,
+        ))
     }
 
-    /// Handle lsp_hover tool call
-    pub fn handle_hover(&mut self, params: HoverParams) -> Result<Option<HoverInfo>, String> {
-        self.tools.hover(&params.file, params.line, params.character)
+    /// Handle lsp_hover tool call (requires source to be passed)
+    pub fn handle_hover_with_source(
+        &mut self,
+        params: HoverParams,
+        source: &str,
+    ) -> Result<Option<HoverInfo>, String> {
+        Ok(self.tools.hover(&params.file, source, params.line, params.character))
     }
 
-    /// Handle lsp_symbols tool call
-    pub fn handle_symbols(&mut self, params: SymbolsParams) -> Result<Vec<SymbolInfo>, String> {
-        self.tools.document_symbols(&params.file)
+    /// Handle lsp_symbols tool call (requires source to be passed)
+    pub fn handle_symbols_with_source(
+        &mut self,
+        params: SymbolsParams,
+        source: &str,
+    ) -> Result<Vec<SymbolInfo>, String> {
+        Ok(self.tools.document_symbols(&params.file, source))
     }
 
-    /// Handle lsp_diagnostics tool call
-    pub fn handle_diagnostics(&mut self, params: DiagnosticsParams) -> Result<Vec<Diagnostic>, String> {
-        self.tools.diagnostics(&params.file, params.include_warnings)
+    /// Handle lsp_diagnostics tool call (requires source to be passed)
+    pub fn handle_diagnostics_with_source(
+        &mut self,
+        params: DiagnosticsParams,
+        source: &str,
+    ) -> Result<Vec<Diagnostic>, String> {
+        Ok(self.tools.diagnostics(&params.file, source, params.include_warnings))
+    }
+
+    /// Invalidate the cache for a file
+    pub fn invalidate(&mut self, path: &str) {
+        self.tools.invalidate(path);
     }
 }
 

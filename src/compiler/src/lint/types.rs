@@ -336,6 +336,10 @@ Or in simple.sdn:
 See also: .claude/skills/todo.md for full format specification
 "#
             .to_string(),
+            LintName::SSpecNoPrintBasedTests => "Lint: sspec_no_print_based_tests\nLevel: deny\n\nDetects print-based assertions in SSpec tests. Use expect() matchers instead.".to_string(),
+            LintName::SSpecMissingDocstrings => "Lint: sspec_missing_docstrings\nLevel: warn\n\nWarns when describe/context/it blocks lack docstrings.".to_string(),
+            LintName::SSpecMinimalDocstrings => "Lint: sspec_minimal_docstrings\nLevel: warn\n\nWarns when test files have minimal documentation.".to_string(),
+            LintName::SSpecManualAssertions => "Lint: sspec_manual_assertions\nLevel: warn\n\nDetects manual pass/fail tracking instead of expect() assertions.".to_string(),
         }
     }
 
@@ -346,6 +350,10 @@ See also: .claude/skills/todo.md for full format specification
             LintName::BareBool,
             LintName::PrintInTestSpec,
             LintName::TodoFormat,
+            LintName::SSpecNoPrintBasedTests,
+            LintName::SSpecMissingDocstrings,
+            LintName::SSpecMinimalDocstrings,
+            LintName::SSpecManualAssertions,
         ]
     }
 }
