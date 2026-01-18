@@ -50,9 +50,6 @@ struct TreeSitterParser:
         old_tree: Tree,
         edits: <InputEdit>
     ) -> Result<Tree, str>:
-        # Phase 2.1: Simple full reparse (same as parse())
-        # Phase 2.2: Efficient incremental with structural sharing (TODO)
-
         if edits.len() == 0:
             # No changes: return old tree with updated source
             return Ok(Tree(
@@ -62,34 +59,135 @@ struct TreeSitterParser:
                 version: old_tree.version + 1
             ))
 
-        # For Phase 2.1: Full reparse
-        # Phase 2.2 will:
-        # 1. Find affected nodes
-        # 2. Find reparse boundary (minimal stable parent)
-        # 3. Reparse only affected subtree
-        # 4. Splice into old tree with structural sharing
+        # Find nodes affected by edits
+        val affected_nodes = find_affected_nodes(old_tree, edits)
+
+        if affected_nodes.len() == 0:
+            # No nodes affected (shouldn't happen with edits, but handle gracefully)
+            return Ok(Tree(
+                root_node: old_tree.root_node,
+                arena: old_tree.arena,
+                source: source,
+                version: old_tree.version + 1
+            ))
+
+        # Find the minimal stable parent (reparse boundary)
+        val reparse_boundary = find_reparse_boundary(old_tree, affected_nodes)
+
+        # Clone old arena for structural sharing
+        self.arena = old_tree.arena.clone()
 
         # Tokenize new source
         var lexer = Lexer.new(source)
         self.tokens = lexer.tokenize()?
         self.pos = 0
 
-        # Full reparse from root
-        val root_rule = self.grammar.rules.get("module").ok_or("Missing module rule")?
+        match reparse_boundary:
+            case Some(boundary_id):
+                # Get the boundary node to find its position in token stream
+                match old_tree.arena.get(boundary_id):
+                    case Some(boundary_node):
+                        # Adjust token position to start of boundary node
+                        self.pos = self.find_token_at_byte(boundary_node.span.start_byte)
 
-        # Clone old arena for structural sharing (Phase 2.2)
-        # For Phase 2.1: Create fresh arena
+                        # Reparse from the boundary
+                        val reparsed_id = self.reparse_subtree(boundary_node, edits)?
+
+                        # If boundary was root, update root
+                        if boundary_id == old_tree.root_node:
+                            return Ok(Tree(
+                                root_node: reparsed_id,
+                                arena: self.arena,
+                                source: source,
+                                version: old_tree.version + 1
+                            ))
+                        else:
+                            # Splice reparsed subtree into parent
+                            self.splice_subtree(old_tree.root_node, boundary_id, reparsed_id)
+                            return Ok(Tree(
+                                root_node: old_tree.root_node,
+                                arena: self.arena,
+                                source: source,
+                                version: old_tree.version + 1
+                            ))
+
+                    case None:
+                        # Boundary node not found, fall back to full reparse
+                        pass
+
+            case None:
+                pass
+
+        # Fall back to full reparse
+        self.pos = 0
         self.arena = NodeArena.new()
-
+        val root_rule = self.grammar.rules.get("module").ok_or("Missing module rule")?
         val root_id = self.parse_rule(root_rule)?
 
-        # Create new tree
         return Ok(Tree(
             root_node: root_id,
             arena: self.arena,
             source: source,
             version: old_tree.version + 1
         ))
+
+    # Find token index at a given byte offset
+    fn find_token_at_byte(byte_offset: i64) -> i64:
+        for i in 0..self.tokens.len():
+            if self.tokens[i].span.start_byte >= byte_offset:
+                return i
+        return self.tokens.len()
+
+    # Reparse a subtree starting from a node
+    var fn reparse_subtree(old_node: Node, edits: <InputEdit>) -> Result<NodeId, str>:
+        # Determine what grammar rule to use based on node kind
+        val rule_name = self.node_kind_to_rule(old_node.kind)
+
+        match self.grammar.rules.get(rule_name):
+            case Some(rule):
+                return self.parse_rule(rule)
+            case None:
+                # Unknown rule, try to parse as expression
+                match self.grammar.rules.get("expression"):
+                    case Some(expr_rule):
+                        return self.parse_rule(expr_rule)
+                    case None:
+                        return Err("Cannot find rule for node kind: " + old_node.kind)
+
+    # Map node kind back to grammar rule name
+    fn node_kind_to_rule(kind: str) -> str:
+        match kind:
+            case "module": return "module"
+            case "function_definition": return "function_def"
+            case "struct_definition": return "struct_def"
+            case "class_definition": return "class_def"
+            case "enum_definition": return "enum_def"
+            case "statement": return "statement"
+            case "expression": return "expression"
+            case "block": return "block"
+            case _: return kind  # Try the kind name directly
+
+    # Splice a reparsed subtree into the tree, replacing old subtree
+    var fn splice_subtree(root_id: NodeId, old_subtree_id: NodeId, new_subtree_id: NodeId):
+        # Find parent of old subtree and replace child
+        self.splice_recursive(root_id, old_subtree_id, new_subtree_id)
+
+    var fn splice_recursive(node_id: NodeId, target_id: NodeId, replacement_id: NodeId) -> bool:
+        match self.arena.get_mut(node_id):
+            case Some(node):
+                # Check if any child is the target
+                for i in 0..node.children.len():
+                    if node.children[i] == target_id:
+                        node.children[i] = replacement_id
+                        return true
+
+                    # Recurse into children
+                    if self.splice_recursive(node.children[i], target_id, replacement_id):
+                        return true
+
+                return false
+            case None:
+                return false
 
     # Get current token
     fn current() -> Option<Token>:
@@ -129,9 +227,79 @@ struct TreeSitterParser:
 
     # Check if token kinds match (handling parameterized variants)
     fn matches_token(actual: TokenKind, expected: TokenKind) -> bool:
-        # Simple name-based matching for Phase 1
-        # TODO: [parser][P3] Proper variant matching
-        return true  # Placeholder
+        # Match by variant type, ignoring contained values
+        # e.g., Integer(42) matches Integer(100), but not f32(3.14)
+        match (actual, expected):
+            # Keywords - exact match
+            case (TokenKind::Fn, TokenKind::Fn): true
+            case (TokenKind::Let, TokenKind::Let): true
+            case (TokenKind::Mut, TokenKind::Mut): true
+            case (TokenKind::Return, TokenKind::Return): true
+            case (TokenKind::If, TokenKind::If): true
+            case (TokenKind::Else, TokenKind::Else): true
+            case (TokenKind::Elif, TokenKind::Elif): true
+            case (TokenKind::Struct, TokenKind::Struct): true
+            case (TokenKind::Class, TokenKind::Class): true
+            case (TokenKind::Enum, TokenKind::Enum): true
+            case (TokenKind::Trait, TokenKind::Trait): true
+            case (TokenKind::Impl, TokenKind::Impl): true
+            case (TokenKind::Match, TokenKind::Match): true
+            case (TokenKind::Case, TokenKind::Case): true
+            case (TokenKind::For, TokenKind::For): true
+            case (TokenKind::While, TokenKind::While): true
+            case (TokenKind::Loop, TokenKind::Loop): true
+            case (TokenKind::Break, TokenKind::Break): true
+            case (TokenKind::Continue, TokenKind::Continue): true
+
+            # Parameterized - match variant type, ignore value
+            case (TokenKind::Integer(_), TokenKind::Integer(_)): true
+            case (TokenKind::f32(_), TokenKind::f32(_)): true
+            case (TokenKind::text(_), TokenKind::text(_)): true
+            case (TokenKind::bool(_), TokenKind::bool(_)): true
+            case (TokenKind::Nil, TokenKind::Nil): true
+            case (TokenKind::Identifier(_), TokenKind::Identifier(_)): true
+            case (TokenKind::TypeIdentifier(_), TokenKind::TypeIdentifier(_)): true
+            case (TokenKind::Error(_), TokenKind::Error(_)): true
+
+            # Operators - exact match
+            case (TokenKind::Plus, TokenKind::Plus): true
+            case (TokenKind::Minus, TokenKind::Minus): true
+            case (TokenKind::Star, TokenKind::Star): true
+            case (TokenKind::Slash, TokenKind::Slash): true
+            case (TokenKind::Percent, TokenKind::Percent): true
+            case (TokenKind::Eq, TokenKind::Eq): true
+            case (TokenKind::NotEq, TokenKind::NotEq): true
+            case (TokenKind::Lt, TokenKind::Lt): true
+            case (TokenKind::Gt, TokenKind::Gt): true
+            case (TokenKind::LtEq, TokenKind::LtEq): true
+            case (TokenKind::GtEq, TokenKind::GtEq): true
+            case (TokenKind::And, TokenKind::And): true
+            case (TokenKind::Or, TokenKind::Or): true
+            case (TokenKind::Not, TokenKind::Not): true
+            case (TokenKind::Assign, TokenKind::Assign): true
+            case (TokenKind::Arrow, TokenKind::Arrow): true
+            case (TokenKind::ChannelArrow, TokenKind::ChannelArrow): true
+
+            # Delimiters - exact match
+            case (TokenKind::LParen, TokenKind::LParen): true
+            case (TokenKind::RParen, TokenKind::RParen): true
+            case (TokenKind::LBrace, TokenKind::LBrace): true
+            case (TokenKind::RBrace, TokenKind::RBrace): true
+            case (TokenKind::LBracket, TokenKind::LBracket): true
+            case (TokenKind::RBracket, TokenKind::RBracket): true
+            case (TokenKind::Comma, TokenKind::Comma): true
+            case (TokenKind::Colon, TokenKind::Colon): true
+            case (TokenKind::Semicolon, TokenKind::Semicolon): true
+            case (TokenKind::Dot, TokenKind::Dot): true
+
+            # Special tokens
+            case (TokenKind::Indent, TokenKind::Indent): true
+            case (TokenKind::Dedent, TokenKind::Dedent): true
+            case (TokenKind::Newline, TokenKind::Newline): true
+            case (TokenKind::Eof, TokenKind::Eof): true
+
+            # No match
+            case _: false
 
     fn token_kind_name(kind: TokenKind) -> str:
         # Extract human-readable name from token kind

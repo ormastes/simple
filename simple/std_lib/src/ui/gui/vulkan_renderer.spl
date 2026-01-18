@@ -27,6 +27,7 @@ use ui.gui.vulkan_buffers.*
 use ui.gui.vulkan_commands.*
 use ui.gui.vulkan_frame.*
 use ui.gui.vulkan_font.*
+use ui.gui.vulkan_ffi.{rt_vk_window_poll_event, rt_vk_window_wait_event}
 
 # =============================================================================
 # Vulkan Renderer - Main Implementation
@@ -259,13 +260,109 @@ impl RenderBackend for VulkanRenderer:
 
     # Poll for events
     async fn poll_event(&mut self, timeout_ms: u64) -> Result<Option<Event>, RenderError>:
-        # TODO: [ui][P3] Integrate with window event system
-        Err(RenderError::UnsupportedFeature("event polling not yet implemented"))
+        if not self.is_initialized:
+            return Err(RenderError::NotInitialized)
+
+        var event_type: i32 = 0
+        var event_data: Array<u8> = Array::with_capacity(64)
+        event_data.resize(64, 0)
+
+        val result = rt_vk_window_poll_event(
+            self.window_handle as u64,
+            &mut event_type,
+            event_data.as_mut_ptr(),
+            64
+        )
+
+        if result < 0:
+            return Err(RenderError::IoError("Window event poll failed"))
+
+        # Event types: 0=none, 1=resize, 2=close, 3=key, 4=mouse
+        match event_type:
+            case 0:
+                return Ok(None)
+            case 1:
+                # Resize event: bytes 0-1 = width, 2-3 = height
+                val width = (event_data[0] as u16) | ((event_data[1] as u16) << 8)
+                val height = (event_data[2] as u16) | ((event_data[3] as u16) << 8)
+                return Ok(Some(Event::Resize { width: width, height: height }))
+            case 2:
+                # Close event - return FocusLost as close indicator
+                return Ok(Some(Event::FocusLost))
+            case 3:
+                # Key event: bytes 0-3 = key_code, byte 4 = modifiers, byte 5 = is_press
+                val key_code = (event_data[0] as u32)
+                    | ((event_data[1] as u32) << 8)
+                    | ((event_data[2] as u32) << 16)
+                    | ((event_data[3] as u32) << 24)
+                val modifiers = event_data[4]
+                val key_event = convert_key_event(key_code, modifiers)
+                return Ok(Some(Event::Key(key_event)))
+            case 4:
+                # Mouse event: bytes 0-1 = x, 2-3 = y, byte 4 = button, byte 5 = kind
+                val x = (event_data[0] as u16) | ((event_data[1] as u16) << 8)
+                val y = (event_data[2] as u16) | ((event_data[3] as u16) << 8)
+                val button = event_data[4]
+                val kind = event_data[5]
+                val mouse_event = convert_mouse_event(x, y, button, kind)
+                return Ok(Some(Event::Mouse(mouse_event)))
+            case _:
+                return Ok(None)
 
     # Read next event (blocking)
     async fn read_event(&mut self) -> Result<Event, RenderError>:
-        # TODO: [ui][P3] Integrate with window event system
-        Err(RenderError::UnsupportedFeature("event reading not yet implemented"))
+        if not self.is_initialized:
+            return Err(RenderError::NotInitialized)
+
+        # Poll with 1 second timeout in a loop until event arrives
+        loop:
+            var event_type: i32 = 0
+            var event_data: Array<u8> = Array::with_capacity(64)
+            event_data.resize(64, 0)
+
+            val result = rt_vk_window_wait_event(
+                self.window_handle as u64,
+                1000,  # 1 second timeout
+                &mut event_type,
+                event_data.as_mut_ptr(),
+                64
+            )
+
+            if result < 0:
+                return Err(RenderError::IoError("Window event wait failed"))
+
+            # Event types: 0=none, 1=resize, 2=close, 3=key, 4=mouse
+            match event_type:
+                case 0:
+                    # No event, continue waiting
+                    continue
+                case 1:
+                    # Resize event
+                    val width = (event_data[0] as u16) | ((event_data[1] as u16) << 8)
+                    val height = (event_data[2] as u16) | ((event_data[3] as u16) << 8)
+                    return Ok(Event::Resize { width: width, height: height })
+                case 2:
+                    # Close event
+                    return Ok(Event::FocusLost)
+                case 3:
+                    # Key event
+                    val key_code = (event_data[0] as u32)
+                        | ((event_data[1] as u32) << 8)
+                        | ((event_data[2] as u32) << 16)
+                        | ((event_data[3] as u32) << 24)
+                    val modifiers = event_data[4]
+                    val key_event = convert_key_event(key_code, modifiers)
+                    return Ok(Event::Key(key_event))
+                case 4:
+                    # Mouse event
+                    val x = (event_data[0] as u16) | ((event_data[1] as u16) << 8)
+                    val y = (event_data[2] as u16) | ((event_data[3] as u16) << 8)
+                    val button = event_data[4]
+                    val kind = event_data[5]
+                    val mouse_event = convert_mouse_event(x, y, button, kind)
+                    return Ok(Event::Mouse(mouse_event))
+                case _:
+                    continue
 
 # =============================================================================
 # Layout Computation
@@ -504,9 +601,15 @@ impl VulkanRenderer:
                     val text_color = button.attrs.get_color().unwrap_or([1.0, 1.0, 1.0, 1.0])
                     val font_atlas = self.font_atlas.as_ref().unwrap()
 
-                    # TODO: [ui][P3] Compute text width for centering
-                    val text_x = layout.x as f32 + 10.0
-                    val text_y = layout.y as f32 + 8.0
+                    # Compute text dimensions for centering (monospace: 8x16 pixels)
+                    val glyph_width: f32 = 8.0
+                    val glyph_height: f32 = 16.0
+                    val text_width = button.label.len() as f32 * glyph_width
+                    val text_height = glyph_height
+
+                    # Center text horizontally and vertically within button
+                    val text_x = layout.x as f32 + (layout.width as f32 - text_width) / 2.0
+                    val text_y = layout.y as f32 + (layout.height as f32 - text_height) / 2.0
 
                     match await font_atlas.add_text(
                         &mut self.vertex_cache,
@@ -1040,6 +1143,82 @@ fn parse_hex_byte(s: &str) -> u8:
     val high = parse_hex_digit(&s[0..1])
     val low = parse_hex_digit(&s[1..2])
     return high * 16 + low
+
+# =============================================================================
+# Event Conversion Helpers
+# =============================================================================
+
+# Convert raw key event data to KeyEvent
+fn convert_key_event(key_code: u32, modifiers: u8) -> KeyEvent:
+    # Parse modifier flags: ctrl=0x01, shift=0x02, alt=0x04
+    val ctrl = (modifiers & 0x01) != 0
+    val shift = (modifiers & 0x02) != 0
+    val alt = (modifiers & 0x04) != 0
+
+    val key_modifiers = KeyModifiers { shift: shift, ctrl: ctrl, alt: alt }
+
+    # Convert key_code to KeyCode enum
+    val code = match key_code:
+        case 0x0D: KeyCode::Enter          # VK_RETURN
+        case 0x1B: KeyCode::Escape         # VK_ESCAPE
+        case 0x08: KeyCode::Backspace      # VK_BACK
+        case 0x09: KeyCode::Tab            # VK_TAB
+        case 0x2E: KeyCode::Delete         # VK_DELETE
+        case 0x2D: KeyCode::Insert         # VK_INSERT
+        case 0x24: KeyCode::Home           # VK_HOME
+        case 0x23: KeyCode::End            # VK_END
+        case 0x21: KeyCode::PageUp         # VK_PRIOR
+        case 0x22: KeyCode::PageDown       # VK_NEXT
+        case 0x26: KeyCode::Up             # VK_UP
+        case 0x28: KeyCode::Down           # VK_DOWN
+        case 0x25: KeyCode::Left           # VK_LEFT
+        case 0x27: KeyCode::Right          # VK_RIGHT
+        case 0x70: KeyCode::F(1)           # VK_F1
+        case 0x71: KeyCode::F(2)           # VK_F2
+        case 0x72: KeyCode::F(3)           # VK_F3
+        case 0x73: KeyCode::F(4)           # VK_F4
+        case 0x74: KeyCode::F(5)           # VK_F5
+        case 0x75: KeyCode::F(6)           # VK_F6
+        case 0x76: KeyCode::F(7)           # VK_F7
+        case 0x77: KeyCode::F(8)           # VK_F8
+        case 0x78: KeyCode::F(9)           # VK_F9
+        case 0x79: KeyCode::F(10)          # VK_F10
+        case 0x7A: KeyCode::F(11)          # VK_F11
+        case 0x7B: KeyCode::F(12)          # VK_F12
+        case _:
+            # Printable character range
+            if key_code >= 0x20 and key_code <= 0x7E:
+                KeyCode::Char((key_code as u8) as char)
+            else:
+                KeyCode::Null
+
+    return KeyEvent::new(code, key_modifiers)
+
+# Convert raw mouse event data to MouseEvent
+fn convert_mouse_event(x: u16, y: u16, button: u8, kind: u8) -> MouseEvent:
+    val mouse_button = match button:
+        case 0: MouseButton::Left
+        case 1: MouseButton::Right
+        case 2: MouseButton::Middle
+        case _: MouseButton::Left
+
+    val event_kind = match kind:
+        case 0: MouseEventKind::Down(mouse_button)
+        case 1: MouseEventKind::Up(mouse_button)
+        case 2: MouseEventKind::Moved
+        case 3: MouseEventKind::Drag(mouse_button)
+        case 4: MouseEventKind::ScrollUp
+        case 5: MouseEventKind::ScrollDown
+        case 6: MouseEventKind::ScrollLeft
+        case 7: MouseEventKind::ScrollRight
+        case _: MouseEventKind::Moved
+
+    return MouseEvent {
+        kind: event_kind,
+        column: x,
+        row: y,
+        modifiers: KeyModifiers::none()
+    }
 
 # =============================================================================
 # Type Aliases for Vulkan Integration

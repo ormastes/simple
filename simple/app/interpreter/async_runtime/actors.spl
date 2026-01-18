@@ -52,6 +52,53 @@ impl Actor:
 # Global actor ID counter
 static mut NEXT_ACTOR_ID: u64 = 0
 
+# Global actor registry - stores all active actors
+static mut ACTOR_REGISTRY: Dict<u64, Actor> = {}
+
+# Register an actor with the runtime
+fn register_actor(actor: Actor):
+    unsafe {
+        ACTOR_REGISTRY[actor.id] = actor
+    }
+
+# Unregister an actor from the runtime
+fn unregister_actor(id: u64):
+    unsafe {
+        ACTOR_REGISTRY.remove(id)
+    }
+
+# Get an actor by ID
+fn get_actor(id: u64) -> Option<Actor>:
+    unsafe {
+        if id in ACTOR_REGISTRY:
+            return Some(ACTOR_REGISTRY[id])
+        return None
+    }
+
+# Process one message for an actor (non-blocking)
+fn process_actor_message(actor: &mut Actor) -> bool:
+    match actor.receive():
+        case Some(msg):
+            # Invoke the handler
+            match (actor.handler)(msg):
+                case Ok(_): pass
+                case Err(e):
+                    # Log error but continue processing
+                    pass
+            return true
+        case None:
+            return false
+
+# Process all pending messages for all actors
+fn process_all_actors():
+    unsafe {
+        for (id, actor) in ACTOR_REGISTRY.items():
+            # Process up to 10 messages per actor per tick
+            var count = 0
+            while count < 10 and process_actor_message(&mut actor):
+                count += 1
+    }
+
 # Spawn a new actor
 fn eval_spawn(interp: &Interpreter, handler: &Expr) -> Result<Value, InterpreterError>:
     # Get next actor ID
@@ -80,8 +127,8 @@ fn eval_spawn(interp: &Interpreter, handler: &Expr) -> Result<Value, Interpreter
 
             val actor_ref = actor.get_ref()
 
-            # TODO: [stdlib][P3] Register actor with runtime and start processing
-            # For now, just return the reference
+            # Register actor with runtime for message processing
+            register_actor(actor)
 
             return Ok(Value::actor_ref(actor_ref))
 

@@ -13,6 +13,7 @@
 use ui.*
 use ui.element.*
 use ui.gui.*
+use ui.gui.vulkan_window.{Window, WindowEvent, FullscreenMode}
 use core.*
 
 # =============================================================================
@@ -105,14 +106,14 @@ async fn main() -> Result<(), text>:
     println("Cross-Platform UI Rendering")
     println()
 
-    # Create window
+    # Create window using Window type
     println("1. Creating window...")
-    val window_handle = create_window("Vulkan GUI Demo", 800, 600)?
+    var window = Window::new(800, 600, "Vulkan GUI Demo")?
     println("   ✓ Window created")
 
     # Create Vulkan renderer
     println("2. Initializing Vulkan renderer...")
-    var renderer = VulkanRenderer::new(window_handle, 800, 600)
+    var renderer = VulkanRenderer::new(window.handle(), 800, 600)
     await renderer.init().map_err(|e| e.message().to_string())?
     println("   ✓ Vulkan renderer initialized")
 
@@ -123,15 +124,66 @@ async fn main() -> Result<(), text>:
 
     # Main event loop
     println("4. Starting render loop...")
-    println("   Press Escape to exit")
+    println("   Press Escape to exit, F11 for fullscreen")
     println()
 
     var frame_count = 0
     val start_time = get_time()
     var last_fps_time = start_time
     var fps_counter = 0
+    var running = true
+    var is_fullscreen = false
 
-    loop:
+    while running:
+        # Poll and handle all pending events
+        while val Some(event) = window.poll_event():
+            match event:
+                case WindowEvent::CloseRequested:
+                    println("   Close requested")
+                    running = false
+
+                case WindowEvent::Resized(width, height):
+                    println("   Window resized to {}x{}", width, height)
+                    window.update_size(width, height)
+                    # Notify renderer of resize
+                    await app.renderer.resize(width, height)
+                        .map_err(|e| e.message().to_string())?
+
+                case WindowEvent::KeyEvent(key_code, pressed):
+                    if pressed:
+                        # ESC key (key code 27) to exit
+                        if key_code == 27:
+                            println("   Escape pressed - exiting")
+                            running = false
+                        # F11 key (key code 122) for fullscreen toggle
+                        elif key_code == 122:
+                            is_fullscreen = not is_fullscreen
+                            val mode = if is_fullscreen:
+                                FullscreenMode::Borderless
+                            else:
+                                FullscreenMode::Windowed
+                            window.set_fullscreen(mode)?
+                            println("   Fullscreen: {}", is_fullscreen)
+
+                case WindowEvent::MouseButton(button, pressed):
+                    if pressed:
+                        # Handle button clicks on UI
+                        # In a full implementation, this would hit-test the UI tree
+                        if button == 0:  # Left click
+                            app.increment()
+                        elif button == 1:  # Right click
+                            app.decrement()
+
+                case WindowEvent::Focused(focused):
+                    if focused:
+                        println("   Window focused")
+
+                case _:
+                    pass  # Ignore other events
+
+        if not running:
+            break
+
         # Build UI tree
         val ui_tree = app.build()
 
@@ -145,14 +197,9 @@ async fn main() -> Result<(), text>:
         val current_time = get_time()
 
         if current_time - last_fps_time >= 1.0:
-            println("FPS: {} | Frame: {}", fps_counter, frame_count)
+            println("FPS: {} | Frame: {} | Count: {}", fps_counter, frame_count, app.count)
             fps_counter = 0
             last_fps_time = current_time
-
-        # Check for events (TODO: [gpu][P2] implement event system)
-        # For now, run for 600 frames (10 seconds at 60 FPS)
-        if frame_count >= 600:
-            break
 
     # Cleanup
     println()
@@ -168,14 +215,14 @@ async fn main() -> Result<(), text>:
     println("Total frames: {}", frame_count)
     println("Total time: {:.2}s", total_time)
     println("Average FPS: {:.1}", avg_fps)
+    println("Final count: {}", app.count)
 
     Ok(())
 
 # =============================================================================
-# Window Management (Placeholder FFI)
+# Time FFI (for FPS calculation)
 # =============================================================================
 
-extern fn create_window(title: &str, width: u32, height: u32) -> Result<i64, text>
 extern fn get_time() -> f64
 
 # =============================================================================
@@ -192,23 +239,21 @@ extern fn get_time() -> f64
 # 3. Creating application...
 #    ✓ Application created
 # 4. Starting render loop...
-#    Press Escape to exit
+#    Press Escape to exit, F11 for fullscreen
 #
-# FPS: 60 | Frame: 60
-# FPS: 60 | Frame: 120
-# FPS: 60 | Frame: 180
-# FPS: 60 | Frame: 240
-# FPS: 60 | Frame: 300
-# FPS: 60 | Frame: 360
-# FPS: 60 | Frame: 420
-# FPS: 60 | Frame: 480
-# FPS: 60 | Frame: 540
-# FPS: 60 | Frame: 600
+# FPS: 60 | Frame: 60 | Count: 5
+# FPS: 60 | Frame: 120 | Count: 12
+#    Window focused
+# FPS: 60 | Frame: 180 | Count: 18
+#    Window resized to 1024x768
+# FPS: 60 | Frame: 240 | Count: 25
+#    Escape pressed - exiting
 #
 # 5. Shutting down...
 #    ✓ Renderer shutdown
 #
 # === Demo Complete ===
-# Total frames: 600
-# Total time: 10.00s
+# Total frames: 250
+# Total time: 4.17s
 # Average FPS: 60.0
+# Final count: 25

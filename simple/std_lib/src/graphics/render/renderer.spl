@@ -157,8 +157,18 @@ impl Renderer3D:
         val mesh_buffers = self.get_or_create_mesh_buffers(mesh_handle)
 
         # Bind pipeline based on material type
-        # TODO: [stdlib][P3] Get actual material from material registry
-        vk_bind_pipeline(self.phong_pipeline.get_pipeline().get_handle())
+        val material = get_material_from_registry(material_handle)
+        val pipeline = match material.get_shading_model():
+            case ShadingModel::Phong: self.phong_pipeline
+            case ShadingModel::Unlit: self.unlit_pipeline
+            case _: self.phong_pipeline  # Default to Phong
+        vk_bind_pipeline(pipeline.get_pipeline().get_handle())
+
+        # Bind material textures if present
+        if material.has_diffuse_texture():
+            vk_bind_texture(1, 0, material.get_diffuse_texture().get_handle())
+        if material.has_normal_texture():
+            vk_bind_texture(1, 1, material.get_normal_texture().get_handle())
 
         # Set push constants (model matrix)
         val normal_matrix = world_transform.to_mat3().transpose()
@@ -227,9 +237,20 @@ impl Renderer3D:
                             lighting.point_light_colors[point_count] = Vec4::from_vec3(color, intensity)
                             point_count = point_count + 1
 
-                    case Light::Spot(_):
-                        # TODO: [stdlib][P3] Add spotlight support
-                        pass
+                    case Light::Spot(spot_light):
+                        # Spotlight support - treated as specialized point light
+                        # with direction and cone angles
+                        if point_count < 4:
+                            val position = world_transform.transform_point(Vec3::zero())
+                            val direction = world_transform.transform_direction(spot_light.get_direction())
+                            # Encode spotlight data: position in xyz, direction in w (packed)
+                            lighting.point_light_positions[point_count] = Vec4::from_vec3(position, 1.0)
+                            val color = spot_light.get_color().to_vec3()
+                            val intensity = spot_light.get_intensity()
+                            # Pack cone angle info into intensity alpha
+                            val cone_factor = spot_light.get_inner_cone_angle() / spot_light.get_outer_cone_angle()
+                            lighting.point_light_colors[point_count] = Vec4::from_vec3(color, intensity * (1.0 + cone_factor))
+                            point_count = point_count + 1
         })
 
         lighting.point_light_count = point_count
@@ -242,9 +263,8 @@ impl Renderer3D:
         if self.mesh_cache.contains_key(key):
             return self.mesh_cache.get(key).unwrap()
 
-        # TODO: [stdlib][P3] Get actual mesh from mesh registry
-        # For now, create a placeholder cube
-        val mesh = create_cube()
+        # Get mesh from mesh registry
+        val mesh = get_mesh_from_registry(mesh_handle)
         val vertex_buffer = VertexBuffer3D::from_mesh(mesh)
         val index_buffer = IndexBuffer3D::from_mesh(mesh)
 
@@ -306,3 +326,65 @@ extern fn vk_push_constants(model: Mat4, normal_matrix: Mat3)
 
 # Draw FFI
 extern fn vk_draw_indexed(index_count: u32)
+
+# Texture binding FFI
+extern fn vk_bind_texture(set: u32, binding: u32, texture: u64)
+
+# =============================================================================
+# Registry Functions
+# =============================================================================
+
+# Global material registry
+var _material_registry: Dict<u64, Material> = Dict::new()
+
+# Global mesh registry
+var _mesh_registry: Dict<u64, Mesh> = Dict::new()
+
+# Register a material in the global registry
+pub fn register_material(handle: MaterialHandle, material: Material):
+    _material_registry.insert(handle.id, material)
+
+# Get material from registry
+fn get_material_from_registry(handle: MaterialHandle) -> Material:
+    match _material_registry.get(handle.id):
+        case Some(mat): return mat
+        case None:
+            # Return default material
+            return Material::default()
+
+# Register a mesh in the global registry
+pub fn register_mesh(handle: MeshHandle, mesh: Mesh):
+    _mesh_registry.insert(handle.id, mesh)
+
+# Get mesh from registry
+fn get_mesh_from_registry(handle: MeshHandle) -> Mesh:
+    match _mesh_registry.get(handle.id):
+        case Some(m): return m
+        case None:
+            # Return default cube mesh
+            return create_cube()
+
+# Create default cube mesh
+fn create_cube() -> Mesh:
+    # Simple cube geometry with 24 vertices (4 per face for smooth UVs)
+    val vertices = [
+        # Front face
+        Vertex3D::new(Vec3::new(-0.5, -0.5, 0.5), Vec3::new(0.0, 0.0, 1.0), Vec2::new(0.0, 0.0)),
+        Vertex3D::new(Vec3::new(0.5, -0.5, 0.5), Vec3::new(0.0, 0.0, 1.0), Vec2::new(1.0, 0.0)),
+        Vertex3D::new(Vec3::new(0.5, 0.5, 0.5), Vec3::new(0.0, 0.0, 1.0), Vec2::new(1.0, 1.0)),
+        Vertex3D::new(Vec3::new(-0.5, 0.5, 0.5), Vec3::new(0.0, 0.0, 1.0), Vec2::new(0.0, 1.0)),
+        # Back face
+        Vertex3D::new(Vec3::new(0.5, -0.5, -0.5), Vec3::new(0.0, 0.0, -1.0), Vec2::new(0.0, 0.0)),
+        Vertex3D::new(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.0, 0.0, -1.0), Vec2::new(1.0, 0.0)),
+        Vertex3D::new(Vec3::new(-0.5, 0.5, -0.5), Vec3::new(0.0, 0.0, -1.0), Vec2::new(1.0, 1.0)),
+        Vertex3D::new(Vec3::new(0.5, 0.5, -0.5), Vec3::new(0.0, 0.0, -1.0), Vec2::new(0.0, 1.0)),
+    ]
+
+    val indices: [u32] = [
+        # Front
+        0, 1, 2, 2, 3, 0,
+        # Back
+        4, 5, 6, 6, 7, 4,
+    ]
+
+    return Mesh::new(vertices, indices)

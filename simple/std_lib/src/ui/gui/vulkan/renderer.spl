@@ -18,6 +18,7 @@ import types.{
 import layout.AsyncLayoutEngine
 import processor.AsyncElementProcessor
 import resources.{AsyncResourceManager, AsyncBufferManager, AsyncTextRenderer}
+import ui.gui.vulkan_ffi.{rt_vk_window_get_size, rt_vk_framebuffer_free, rt_vk_framebuffer_create_for_swapchain}
 
 export VulkanAsyncRenderer
 
@@ -295,7 +296,59 @@ impl VulkanAsyncRenderer:
 
     async fn recreate_swapchain_async(self) -> Future<Result<(), RenderError>>:
         await self.device.wait_idle_async()
-        # TODO: [ui][P3] Recreate swapchain
+
+        # Query new window dimensions
+        var new_width: u32 = 0
+        var new_height: u32 = 0
+        val size_result = rt_vk_window_get_size(
+            self.window_handle as u64,
+            &mut new_width,
+            &mut new_height
+        )
+
+        if size_result != 0:
+            return Future::ready(Err(RenderError::IoError("Failed to get window size")))
+
+        # Skip if dimensions are zero (minimized window)
+        if new_width == 0 or new_height == 0:
+            return Future::ready(Ok(()))
+
+        # Recreate swapchain with new dimensions
+        match self.swapchain.recreate(new_width, new_height):
+            case Err(e):
+                return Future::ready(Err(RenderError::IoError(e)))
+            case Ok(_):
+                pass
+
+        # Free old framebuffers
+        for fb_handle in self.render_pass.framebuffer_handles:
+            rt_vk_framebuffer_free(fb_handle)
+        self.render_pass.framebuffer_handles.clear()
+
+        # Recreate framebuffers for new swapchain images
+        val image_count = self.swapchain.image_count
+        var temp_handles: Array<u64> = Array::with_capacity(image_count as usize)
+        temp_handles.resize(image_count as usize, 0)
+
+        val fb_count = rt_vk_framebuffer_create_for_swapchain(
+            self.device.handle,
+            self.render_pass.handle,
+            self.swapchain.handle,
+            temp_handles.as_mut_ptr(),
+            image_count
+        )
+
+        if fb_count < 0:
+            return Future::ready(Err(RenderError::IoError("Failed to recreate framebuffers")))
+
+        # Store new framebuffer handles
+        for i in 0..(fb_count as usize):
+            self.render_pass.framebuffer_handles.push(temp_handles[i])
+
+        # Update internal dimensions
+        self.window_width = new_width
+        self.window_height = new_height
+
         return Future::ready(Ok(()))
 
     fn compute_dirty_regions(patches: &PatchSet) -> Array<DirtyRegion>:

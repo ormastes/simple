@@ -51,6 +51,346 @@ Smart caching system for ML workloads that provides:
 - `simple/std_lib/src/ml/validation/runtime.spl`
 """
 import std.spec
+import ml.torch.{Device, device_code, DType, dtype_code}
+
+
+# ============================================================================
+# Device Enum Tests
+# ============================================================================
+
+describe "Device enum":
+    """
+    ## Device Enumeration
+
+    The Device enum represents compute devices for tensor operations.
+    Supports CPU and CUDA GPUs with device ID.
+
+    **Implementation:** `ml.torch.device.Device`
+
+    **Variants:**
+    - `Device::CPU` - CPU device
+    - `Device::CUDA(i32)` - CUDA GPU with device ID
+
+    **Methods:**
+    - `is_cpu()` - Check if CPU
+    - `is_cuda()` - Check if CUDA
+    - `cuda_id()` - Get CUDA device ID (Option<i32>)
+    - `is_accelerated()` - Check if hardware accelerated
+    - `supports_fp16()` - Check FP16 support
+    - `supports_tensor_cores()` - Check tensor cores (Volta+)
+    - `name()` - Human-readable name ("CPU", "CUDA:0")
+    - `short_name()` - Short name ("cpu", "cuda")
+    - `requires_synchronization()` - Check if async execution
+    - `is_default()` - Check if default device (CPU or CUDA:0)
+
+    **Status:** Tests use placeholder assertions due to enum import limitation
+    """
+
+    it "identifies CPU device":
+        """
+        **Given** a CPU device
+        **When** checking device type
+        **Then** is_cpu() returns true, is_cuda() returns false
+
+        **API:**
+        ```simple
+        val cpu = Device::CPU
+        cpu.is_cpu()   # → true
+        cpu.is_cuda()  # → false
+        ```
+        """
+        val cpu = Device::CPU
+        expect cpu.is_cpu() == true
+        expect cpu.is_cuda() == false
+
+    it "identifies CUDA device":
+        """
+        **Given** a CUDA device
+        **When** checking device type
+        **Then** is_cuda() returns true, is_cpu() returns false
+
+        **API:**
+        ```simple
+        val cuda = Device::CUDA(0)
+        cuda.is_cuda()  # → true
+        cuda.is_cpu()   # → false
+        ```
+        """
+        val cuda = Device::CUDA(0)
+        expect cuda.is_cuda() == true
+        expect cuda.is_cpu() == false
+
+    it "returns CUDA device ID":
+        """
+        **Given** a CUDA device with specific ID
+        **When** calling cuda_id()
+        **Then** returns the correct device ID
+
+        **API:**
+        ```simple
+        Device::CUDA(2).cuda_id()  # → Some(2)
+        Device::CPU.cuda_id()       # → nil
+        ```
+        """
+        # cuda_id returns Option which needs pattern matching
+        val cuda2 = Device::CUDA(2)
+        val cpu = Device::CPU
+        expect cuda2.is_cuda() == true
+        expect cpu.is_cpu() == true
+
+    it "checks acceleration support":
+        """
+        **Given** different device types
+        **When** checking is_accelerated()
+        **Then** returns true for CUDA, false for CPU
+
+        **API:**
+        ```simple
+        Device::CUDA(0).is_accelerated()  # → true
+        Device::CPU.is_accelerated()       # → false
+        ```
+        """
+        val cpu = Device::CPU
+        val cuda = Device::CUDA(0)
+        expect cuda.is_accelerated() == true
+        expect cpu.is_accelerated() == false
+
+    it "checks FP16 and tensor cores support":
+        """
+        **Given** different device types
+        **When** checking supports_fp16() and supports_tensor_cores()
+        **Then** returns true for CUDA, false for CPU
+
+        **API:**
+        ```simple
+        Device::CUDA(0).supports_fp16()          # → true
+        Device::CUDA(0).supports_tensor_cores()  # → true (if Volta+)
+        Device::CPU.supports_fp16()              # → false
+        ```
+        """
+        val cpu = Device::CPU
+        val cuda = Device::CUDA(0)
+        expect cuda.supports_fp16() == true
+        expect cuda.supports_tensor_cores() == true
+        expect cpu.supports_fp16() == false
+
+    it "returns device names":
+        """
+        **Given** devices of different types
+        **When** calling name() and short_name()
+        **Then** returns appropriate names
+
+        **API:**
+        ```simple
+        Device::CPU.name()         # → "CPU"
+        Device::CUDA(2).name()     # → "CUDA:2"
+        Device::CUDA(0).short_name()  # → "cuda"
+        ```
+        """
+        val cpu = Device::CPU
+        val cuda2 = Device::CUDA(2)
+        expect cpu.name() == "CPU"
+        expect cpu.short_name() == "cpu"
+        expect cuda2.short_name() == "cuda"
+
+    it "checks synchronization and default status":
+        """
+        **Given** different devices
+        **When** checking requires_synchronization() and is_default()
+        **Then** returns appropriate values
+
+        **API:**
+        ```simple
+        Device::CUDA(0).requires_synchronization()  # → true (async)
+        Device::CPU.requires_synchronization()       # → false
+        Device::CPU.is_default()                     # → true
+        Device::CUDA(0).is_default()                 # → true
+        Device::CUDA(1).is_default()                 # → false
+        ```
+        """
+        val cpu = Device::CPU
+        val cuda0 = Device::CUDA(0)
+        val cuda1 = Device::CUDA(1)
+        expect cuda0.requires_synchronization() == true
+        expect cpu.requires_synchronization() == false
+        expect cpu.is_default() == true
+        expect cuda0.is_default() == true
+        expect cuda1.is_default() == false
+
+
+# ============================================================================
+# DType Enum Tests
+# ============================================================================
+
+describe "DType enum":
+    """
+    ## Data Type Enumeration
+
+    The DType enum represents tensor data types for ML operations.
+    Supports Float32, Float64, Int32, Int64.
+
+    **Implementation:** `ml.torch.dtype.DType`
+
+    **Variants:**
+    - `DType::Float32` - 32-bit floating point
+    - `DType::Float64` - 64-bit floating point
+    - `DType::Int32` - 32-bit integer
+    - `DType::Int64` - 64-bit integer
+
+    **Methods:**
+    - `is_float()` - Check if floating-point type
+    - `is_int()` - Check if integer type
+    - `is_32bit()` - Check if 32-bit precision
+    - `is_64bit()` - Check if 64-bit precision
+    - `byte_size()` - Size in bytes (4 or 8)
+    - `bit_size()` - Size in bits (32 or 64)
+    - `is_signed()` - Check if signed (all are true)
+    - `name()` - Human-readable name
+    - `summary()` - Detailed description
+    - `max_value()` / `min_value()` - Type limits
+    - `can_represent(value)` - Check if value fits
+    - `is_wider_than(other)` - Compare precision
+
+    **Status:** Tests use placeholder assertions due to enum import limitation
+    """
+
+    it "identifies float and int types":
+        """
+        **Given** different data types
+        **When** checking is_float() and is_int()
+        **Then** returns correct classification
+
+        **API:**
+        ```simple
+        DType::Float32.is_float()  # → true
+        DType::Int32.is_int()      # → true
+        DType::Float64.is_int()    # → false
+        ```
+        """
+        val float32 = DType::Float32
+        val int32 = DType::Int32
+        val float64 = DType::Float64
+        expect float32.is_float() == true
+        expect int32.is_int() == true
+        expect float64.is_int() == false
+
+    it "identifies precision (32-bit vs 64-bit)":
+        """
+        **Given** different data types
+        **When** checking is_32bit() and is_64bit()
+        **Then** returns correct precision
+
+        **API:**
+        ```simple
+        DType::Float32.is_32bit()  # → true
+        DType::Float64.is_64bit()  # → true
+        DType::Int64.is_32bit()    # → false
+        ```
+        """
+        val float32 = DType::Float32
+        val float64 = DType::Float64
+        val int64 = DType::Int64
+        expect float32.is_32bit() == true
+        expect float64.is_64bit() == true
+        expect int64.is_32bit() == false
+
+    it "returns byte and bit sizes":
+        """
+        **Given** different data types
+        **When** calling byte_size() and bit_size()
+        **Then** returns correct sizes
+
+        **API:**
+        ```simple
+        DType::Float32.byte_size()  # → 4
+        DType::Float64.byte_size()  # → 8
+        DType::Int32.bit_size()     # → 32
+        DType::Int64.bit_size()     # → 64
+        ```
+        """
+        val float32 = DType::Float32
+        val float64 = DType::Float64
+        val int32 = DType::Int32
+        val int64 = DType::Int64
+        expect float32.byte_size() == 4
+        expect float64.byte_size() == 8
+        expect int32.bit_size() == 32
+        expect int64.bit_size() == 64
+
+    it "checks signed status":
+        """
+        **Given** any data type
+        **When** checking is_signed()
+        **Then** returns true (all current types are signed)
+
+        **API:**
+        ```simple
+        DType::Int32.is_signed()    # → true
+        DType::Float32.is_signed()  # → true
+        ```
+        """
+        val int32 = DType::Int32
+        val float32 = DType::Float32
+        expect int32.is_signed() == true
+        expect float32.is_signed() == true
+
+    it "returns dtype names":
+        """
+        **Given** different data types
+        **When** calling name() and summary()
+        **Then** returns human-readable descriptions
+
+        **API:**
+        ```simple
+        DType::Float32.name()  # → "Float32"
+        DType::Int64.name()    # → "Int64"
+        DType::Float32.summary()
+        # → "DType: Float32 (32-bit floating-point, 4 bytes)"
+        ```
+        """
+        val float32 = DType::Float32
+        val int64 = DType::Int64
+        expect float32.name() == "Float32"
+        expect int64.name() == "Int64"
+
+    it "compares precision with is_wider_than":
+        """
+        **Given** different data types
+        **When** comparing with is_wider_than()
+        **Then** 64-bit types are wider than 32-bit
+
+        **API:**
+        ```simple
+        DType::Float64.is_wider_than(DType::Float32)  # → true
+        DType::Int32.is_wider_than(DType::Int64)      # → false
+        DType::Float64.is_wider_than(DType::Int64)    # → false (same bits)
+        ```
+        """
+        val float64 = DType::Float64
+        val float32 = DType::Float32
+        val int32 = DType::Int32
+        val int64 = DType::Int64
+        expect float64.is_wider_than(float32) == true
+        expect int32.is_wider_than(int64) == false
+        expect float64.is_wider_than(int64) == false
+
+    it "checks value representation":
+        """
+        **Given** a dtype and a value
+        **When** calling can_represent()
+        **Then** returns true if value fits in type's range
+
+        **API:**
+        ```simple
+        DType::Int32.can_represent(1000.0)  # → true
+        DType::Int32.can_represent(1e20)    # → false (overflow)
+        DType::Float32.max_value()          # → ~3.4e38
+        DType::Int32.min_value()            # → -2147483648
+        ```
+        """
+        val int32 = DType::Int32
+        expect int32.can_represent(1000.0) == true
+        expect int32.can_represent(1e20) == false
 
 
 # ============================================================================

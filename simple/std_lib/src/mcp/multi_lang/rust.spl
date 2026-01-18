@@ -200,7 +200,7 @@ impl RustProvider:
         return McpItem {
             kind: ItemKind::Trait,
             line: format("{}{}trait {}", marker, if visibility == "pub" { "pub " } else { "" }, name),
-            children: [],  # TODO: [stdlib][P3] Extract trait methods
+            children: self.extract_trait_methods(node, source, opts)
             metadata: McpMetadata {
                 visibility: visibility,
                 name: name,
@@ -240,20 +240,92 @@ impl RustProvider:
 
     # Helper methods for extracting information from tree-sitter nodes
     fn get_function_name(node: &TreeNode, source: &str) -> text:
-        # TODO: [stdlib][P3] Extract from tree-sitter node
-        return "function_name".to_string()
+        # Extract function name from tree-sitter node
+        # Look for 'identifier' child node that follows 'fn' keyword
+        for child in node.child_nodes:
+            if child.kind_str == "identifier":
+                return child.text_slice.clone()
+        # Fallback: try to extract from source text
+        val node_text = source[node.start_pos as usize..node.end_pos as usize]
+        if val Some(fn_idx) = node_text.find("fn "):
+            val after_fn = node_text[fn_idx + 3..]
+            if val Some(paren_idx) = after_fn.find("("):
+                return after_fn[..paren_idx].trim().to_string()
+        return "unknown".to_string()
 
     fn get_function_signature(node: &TreeNode, source: &str) -> text:
-        # TODO: [stdlib][P3] Extract full signature
-        return "fn name()".to_string()
+        # Extract full function signature from tree-sitter node
+        val node_text = source[node.start_pos as usize..node.end_pos as usize]
+
+        # Find the signature (everything before the body '{')
+        if val Some(brace_idx) = node_text.find("{"):
+            return node_text[..brace_idx].trim().to_string()
+
+        # If no brace, might be a declaration - return full text
+        # But limit to first line for cleaner output
+        if val Some(newline_idx) = node_text.find("\n"):
+            return node_text[..newline_idx].trim().to_string()
+
+        return node_text.trim().to_string()
 
     fn get_visibility(node: &TreeNode, source: &str) -> text:
-        # TODO: [stdlib][P3] Check for pub keyword
+        # Check for pub keyword in the node
+        for child in node.child_nodes:
+            if child.kind_str == "visibility_modifier":
+                val vis_text = child.text_slice.trim()
+                if vis_text.starts_with("pub"):
+                    return "pub".to_string()
+        # Also check the node text directly
+        val node_text = source[node.start_pos as usize..node.end_pos as usize]
+        if node_text.trim().starts_with("pub "):
+            return "pub".to_string()
         return "private".to_string()
 
     fn get_generics(node: &TreeNode, source: &str) -> text:
-        # TODO: [stdlib][P3] Extract generic parameters
+        # Extract generic parameters from tree-sitter node
+        for child in node.child_nodes:
+            if child.kind_str == "type_parameters" or child.kind_str == "generic_parameters":
+                return child.text_slice.clone()
+        # Try to extract from source text
+        val node_text = source[node.start_pos as usize..node.end_pos as usize]
+        if val Some(lt_idx) = node_text.find("<"):
+            var depth = 0
+            var end_idx = lt_idx
+            for (i, ch) in node_text[lt_idx..].chars().enumerate():
+                if ch == '<':
+                    depth += 1
+                elif ch == '>':
+                    depth -= 1
+                    if depth == 0:
+                        end_idx = lt_idx + i + 1
+                        break
+            if end_idx > lt_idx:
+                return node_text[lt_idx..end_idx].to_string()
         return "".to_string()
+
+    fn extract_trait_methods(node: &TreeNode, source: &str, opts: &FoldOptions) -> Array<McpItem>:
+        # Extract methods from a trait definition
+        var methods: Array<McpItem> = []
+
+        for child in node.child_nodes:
+            if child.kind_str == "declaration_list" or child.kind_str == "trait_body":
+                for item in child.child_nodes:
+                    if item.kind_str == "function_signature_item" or item.kind_str == "function_item":
+                        val method_name = self.get_function_name(&item, source)
+                        val signature = self.get_function_signature(&item, source)
+
+                        methods.push(McpItem {
+                            kind: ItemKind::Function,
+                            line: format("  fn {}", method_name),
+                            children: [],
+                            metadata: McpMetadata {
+                                visibility: "public".to_string(),
+                                name: method_name,
+                                location: self.get_location(&item)
+                            }
+                        })
+
+        return methods
 
     fn get_struct_name(node: &TreeNode, source: &str) -> text:
         return "StructName".to_string()

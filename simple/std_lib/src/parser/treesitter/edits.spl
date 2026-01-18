@@ -104,32 +104,276 @@ struct InputEdit:
                     # Different line: just adjust line
                     return Point(line: point.line + line_delta, column: point.column)
 
-# Compute edits between two texts
+# Compute edits between two texts using Myers diff algorithm
 fn compute_edits(old_text: str, new_text: str) -> <InputEdit>:
-    # Phase 2.1: Simple full-document replacement
-    # Phase 2.2: Myers diff for minimal edits (TODO)
-
     if old_text == new_text:
-        # No changes
         return []
 
-    # Count lines in old text
-    val old_lines = count_lines(old_text)
-    val old_end_point = compute_end_point(old_text)
+    # Use Myers diff to find minimal edit operations
+    val diff_ops = myers_diff(old_text, new_text)
 
-    # Count lines in new text
-    val new_lines = count_lines(new_text)
-    val new_end_point = compute_end_point(new_text)
+    # Convert diff operations to InputEdit format
+    return diff_ops_to_edits(old_text, new_text, diff_ops)
 
-    # Full document replacement
-    return <InputEdit.new(
-        start_byte: 0,
-        old_end_byte: old_text.len(),
-        new_end_byte: new_text.len(),
-        start_point: Point.new(1, 1),
-        old_end_point: old_end_point,
-        new_end_point: new_end_point
-    )>
+
+# Diff operation type
+enum DiffOp:
+    Equal { start: i64, len: i64 }      # Characters match
+    Delete { start: i64, len: i64 }     # Delete from old
+    Insert { start: i64, len: i64 }     # Insert from new
+
+
+# Myers diff algorithm - O(N*D) where D is the edit distance
+fn myers_diff(old_text: str, new_text: str) -> <DiffOp>:
+    val n = old_text.len()
+    val m = new_text.len()
+
+    # Handle edge cases
+    if n == 0 and m == 0:
+        return []
+    if n == 0:
+        return [DiffOp::Insert { start: 0, len: m }]
+    if m == 0:
+        return [DiffOp::Delete { start: 0, len: n }]
+
+    # V array: V[k] = x coordinate of furthest reaching point on diagonal k
+    # Diagonal k = x - y, so k ranges from -m to n
+    # We use offset to convert k to array index
+    val max_d = n + m
+    val v_size = 2 * max_d + 1
+    var v: <i64> = []
+    for _ in 0..v_size:
+        v.push(0)
+
+    # Store the path for backtracking
+    var trace: <<i64>> = []
+
+    # Forward pass: find shortest edit script length
+    var found = false
+    var final_d = 0
+
+    for d in 0..(max_d + 1):
+        # Save V state for backtracking
+        var v_copy: <i64> = []
+        for i in 0..v_size:
+            v_copy.push(v[i])
+        trace.push(v_copy)
+
+        # Try each diagonal k from -d to d (step 2)
+        var k = -d
+        while k <= d:
+            val k_idx = k + max_d
+
+            # Choose whether to go down (insert) or right (delete)
+            val x = if k == -d or (k != d and v[k_idx - 1] < v[k_idx + 1]):
+                v[k_idx + 1]  # Move down from k+1
+            else:
+                v[k_idx - 1] + 1  # Move right from k-1
+
+            var y = x - k
+
+            # Follow diagonal (matching characters)
+            while x < n and y < m and old_text[x] == new_text[y]:
+                x = x + 1
+                y = y + 1
+
+            v[k_idx] = x
+
+            # Check if we've reached the end
+            if x >= n and y >= m:
+                found = true
+                final_d = d
+                break
+
+            k = k + 2
+
+        if found:
+            break
+
+    # Backtrack to construct the edit script
+    return backtrack_diff(old_text, new_text, trace, final_d, n, m)
+
+
+# Backtrack through the trace to build diff operations
+fn backtrack_diff(old_text: str, new_text: str, trace: <<i64>>, d: i64, n: i64, m: i64) -> <DiffOp>:
+    var ops: <DiffOp> = []
+    var x = n
+    var y = m
+    val max_d = n + m
+
+    # Work backwards from d to 0
+    var current_d = d
+    while current_d > 0:
+        val v = trace[current_d]
+        val k = x - y
+        val k_idx = k + max_d
+
+        # Determine which direction we came from
+        val prev_k = if k == -current_d or (k != current_d and v[k_idx - 1] < v[k_idx + 1]):
+            k + 1  # Came from insertion (down)
+        else:
+            k - 1  # Came from deletion (right)
+
+        val prev_v = trace[current_d - 1]
+        val prev_x = prev_v[prev_k + max_d]
+        val prev_y = prev_x - prev_k
+
+        # Add diagonal (equal) operations
+        while x > prev_x and y > prev_y:
+            x = x - 1
+            y = y - 1
+            ops.push(DiffOp::Equal { start: x, len: 1 })
+
+        # Add the edit operation
+        if current_d > 0:
+            if x == prev_x:
+                # Insertion
+                y = y - 1
+                ops.push(DiffOp::Insert { start: y, len: 1 })
+            else:
+                # Deletion
+                x = x - 1
+                ops.push(DiffOp::Delete { start: x, len: 1 })
+
+        current_d = current_d - 1
+
+    # Handle any remaining diagonal at the start
+    while x > 0 and y > 0:
+        x = x - 1
+        y = y - 1
+        ops.push(DiffOp::Equal { start: x, len: 1 })
+
+    # Reverse to get forward order
+    var result: <DiffOp> = []
+    var i = ops.len() - 1
+    while i >= 0:
+        result.push(ops[i])
+        i = i - 1
+
+    # Merge consecutive operations of the same type
+    return merge_diff_ops(result)
+
+
+# Merge consecutive diff operations of the same type
+fn merge_diff_ops(ops: <DiffOp>) -> <DiffOp>:
+    if ops.len() == 0:
+        return []
+
+    var merged: <DiffOp> = []
+    var current = ops[0]
+
+    for i in 1..ops.len():
+        val next = ops[i]
+
+        match (current, next):
+            case (DiffOp::Equal { start: s1, len: l1 }, DiffOp::Equal { start: _, len: l2 }):
+                current = DiffOp::Equal { start: s1, len: l1 + l2 }
+
+            case (DiffOp::Delete { start: s1, len: l1 }, DiffOp::Delete { start: _, len: l2 }):
+                current = DiffOp::Delete { start: s1, len: l1 + l2 }
+
+            case (DiffOp::Insert { start: s1, len: l1 }, DiffOp::Insert { start: _, len: l2 }):
+                current = DiffOp::Insert { start: s1, len: l1 + l2 }
+
+            case _:
+                merged.push(current)
+                current = next
+
+    merged.push(current)
+    return merged
+
+
+# Convert diff operations to InputEdit format
+fn diff_ops_to_edits(old_text: str, new_text: str, ops: <DiffOp>) -> <InputEdit>:
+    var edits: <InputEdit> = []
+    var old_byte = 0
+    var new_byte = 0
+    var old_point = Point.new(1, 1)
+    var new_point = Point.new(1, 1)
+
+    var pending_delete_start = -1
+    var pending_delete_len = 0
+    var pending_insert_start = -1
+    var pending_insert_len = 0
+    var pending_start_point = Point.new(1, 1)
+
+    for op in ops:
+        match op:
+            case DiffOp::Equal { start: _, len: l }:
+                # Flush any pending edit
+                if pending_delete_len > 0 or pending_insert_len > 0:
+                    edits.push(InputEdit.new(
+                        start_byte: pending_delete_start if pending_delete_start >= 0 else old_byte,
+                        old_end_byte: old_byte,
+                        new_end_byte: new_byte,
+                        start_point: pending_start_point,
+                        old_end_point: old_point,
+                        new_end_point: new_point
+                    ))
+                    pending_delete_start = -1
+                    pending_delete_len = 0
+                    pending_insert_start = -1
+                    pending_insert_len = 0
+
+                # Advance both pointers
+                for _ in 0..l:
+                    if old_byte < old_text.len():
+                        if old_text[old_byte] == '\n':
+                            old_point = Point.new(old_point.line + 1, 1)
+                        else:
+                            old_point = Point.new(old_point.line, old_point.column + 1)
+                    if new_byte < new_text.len():
+                        if new_text[new_byte] == '\n':
+                            new_point = Point.new(new_point.line + 1, 1)
+                        else:
+                            new_point = Point.new(new_point.line, new_point.column + 1)
+                    old_byte = old_byte + 1
+                    new_byte = new_byte + 1
+
+            case DiffOp::Delete { start: _, len: l }:
+                if pending_delete_start < 0:
+                    pending_delete_start = old_byte
+                    pending_start_point = old_point
+                pending_delete_len = pending_delete_len + l
+
+                # Advance old pointer only
+                for _ in 0..l:
+                    if old_byte < old_text.len():
+                        if old_text[old_byte] == '\n':
+                            old_point = Point.new(old_point.line + 1, 1)
+                        else:
+                            old_point = Point.new(old_point.line, old_point.column + 1)
+                    old_byte = old_byte + 1
+
+            case DiffOp::Insert { start: _, len: l }:
+                if pending_insert_start < 0:
+                    pending_insert_start = new_byte
+                    if pending_delete_start < 0:
+                        pending_delete_start = old_byte
+                        pending_start_point = old_point
+                pending_insert_len = pending_insert_len + l
+
+                # Advance new pointer only
+                for _ in 0..l:
+                    if new_byte < new_text.len():
+                        if new_text[new_byte] == '\n':
+                            new_point = Point.new(new_point.line + 1, 1)
+                        else:
+                            new_point = Point.new(new_point.line, new_point.column + 1)
+                    new_byte = new_byte + 1
+
+    # Flush final pending edit
+    if pending_delete_len > 0 or pending_insert_len > 0:
+        edits.push(InputEdit.new(
+            start_byte: pending_delete_start if pending_delete_start >= 0 else old_byte,
+            old_end_byte: old_byte,
+            new_end_byte: new_byte,
+            start_point: pending_start_point,
+            old_end_point: old_point,
+            new_end_point: new_point
+        ))
+
+    return edits
 
 # Count lines in text
 fn count_lines(text: str) -> i64:

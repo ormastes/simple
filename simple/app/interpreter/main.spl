@@ -12,8 +12,11 @@
 
 import std.args
 import std.io
+import io.fs
 
-from core import {Interpreter}
+from core import {Interpreter, InterpreterError, Value}
+from parser import {SimpleParser, ParseError}
+from ast_convert import {tree_to_module, tree_to_expression}
 
 fn main() -> i32:
     val args = args.get_args()
@@ -58,19 +61,74 @@ fn print_usage():
     print("  simple_interpret --help                  Show this help")
     print("  simple_interpret --version               Show version")
 
-fn run_script(path: String, args: Array<String>) -> i32:
-    val interp = Interpreter::new()
+fn run_script(path: String, script_args: Array<String>) -> i32:
+    var interp = Interpreter::new()
 
-    # TODO: [stdlib][P2] Load and parse script
-    # TODO: [stdlib][P3] Set script arguments
-    # TODO: [stdlib][P3] Execute script
-    # TODO: [stdlib][P3] Return exit code
+    # Check if file exists
+    if not fs.exists(path):
+        io.eprintln("Error: File not found: {path}")
+        return 1
 
-    io.eprintln("Script execution not yet implemented")
-    return 1
+    # Load script source
+    val source = fs.read_text(path)
+    if source.is_empty():
+        io.eprintln("Error: Could not read file or file is empty: {path}")
+        return 1
+
+    # Parse script into AST
+    var parser = SimpleParser::new()
+    val parse_result = parser.parse(source)
+
+    match parse_result:
+        case Err(err):
+            io.eprintln("Parse error: {err}")
+            return 1
+        case Ok(tree):
+            pass
+
+    val tree = parse_result.unwrap()
+
+    # Convert parse tree to module (list of statements)
+    val module_result = tree_to_module(tree)
+
+    match module_result:
+        case Err(err):
+            io.eprintln("AST conversion error: {err}")
+            return 1
+        case Ok(module):
+            pass
+
+    val module = module_result.unwrap()
+
+    # Set script arguments in environment
+    val args_array = script_args.iter()
+        .map(|arg| Value::string(arg))
+        .collect()
+    interp.env.define_global("__args__".to_string(), Value::array(args_array))
+    interp.env.define_global("__file__".to_string(), Value::string(path))
+
+    # Execute all statements in the module
+    var exit_code: i32 = 0
+
+    for stmt in module.statements:
+        match interp.eval_stmt(&stmt):
+            case Ok(_):
+                pass
+            case Err(InterpreterError::Return(val)):
+                # Top-level return sets exit code
+                match val.as_int():
+                    case Some(code): exit_code = code as i32
+                    case None: pass
+                break
+            case Err(err):
+                io.eprintln("Runtime error: {err}")
+                return 1
+
+    return exit_code
 
 fn run_repl() -> i32:
-    val interp = Interpreter::new()
+    var interp = Interpreter::new()
+    var parser = SimpleParser::new()
 
     print("Simple REPL v0.1.0")
     print("Type 'exit' to quit, 'help' for commands")
@@ -94,10 +152,46 @@ fn run_repl() -> i32:
             case "":
                 pass  # Empty line
             case _:
-                # TODO: [stdlib][P3] Evaluate input
-                io.eprintln("Evaluation not yet implemented")
+                # Try to evaluate as expression first, then as statement
+                val result = eval_repl_input(&mut interp, &mut parser, input)
+                match result:
+                    case Ok(value):
+                        if not value.is_nil():
+                            print("{value}")
+                    case Err(err):
+                        io.eprintln("Error: {err}")
 
     return 0
+
+fn eval_repl_input(interp: &mut Interpreter, parser: &mut SimpleParser, input: String) -> Result<Value, String>:
+    # Try parsing as expression first
+    match parser.parse_expression(input):
+        case Ok(tree):
+            match tree_to_expression(tree):
+                case Ok(expr):
+                    match interp.eval_expr(&expr):
+                        case Ok(val): return Ok(val)
+                        case Err(err): return Err(err.to_string())
+                case Err(e):
+                    pass  # Fall through to try as statement
+        case Err(_):
+            pass  # Fall through to try as statement
+
+    # Try parsing as statement
+    match parser.parse_statement(input):
+        case Ok(tree):
+            match tree_to_module(tree):
+                case Ok(module):
+                    for stmt in module.statements:
+                        match interp.eval_stmt(&stmt):
+                            case Ok(val): return Ok(val)
+                            case Err(InterpreterError::Return(val)): return Ok(val)
+                            case Err(err): return Err(err.to_string())
+                    return Ok(Value::nil())
+                case Err(e):
+                    return Err(e)
+        case Err(e):
+            return Err("Parse error: {e}")
 
 fn print_repl_help():
     print("REPL Commands:")
@@ -106,11 +200,39 @@ fn print_repl_help():
     print("")
     print("Enter Simple expressions to evaluate them.")
 
-fn eval_expr(expr: String) -> i32:
-    val interp = Interpreter::new()
+fn eval_expr(input: String) -> i32:
+    var interp = Interpreter::new()
+    var parser = SimpleParser::new()
 
-    # TODO: [stdlib][P2] Parse and evaluate expression
-    # TODO: [stdlib][P3] Print result
+    # Parse the input as an expression
+    val parse_result = parser.parse_expression(input)
 
-    io.eprintln("Expression evaluation not yet implemented")
-    return 1
+    match parse_result:
+        case Err(err):
+            io.eprintln("Parse error: {err}")
+            return 1
+        case Ok(tree):
+            pass
+
+    val tree = parse_result.unwrap()
+
+    # Convert to expression AST
+    val convert_result = tree_to_expression(tree)
+
+    match convert_result:
+        case Err(err):
+            io.eprintln("AST conversion error: {err}")
+            return 1
+        case Ok(expr):
+            pass
+
+    val expr = convert_result.unwrap()
+
+    # Evaluate and print result
+    match interp.eval_expr(&expr):
+        case Ok(value):
+            print("{value}")
+            return 0
+        case Err(err):
+            io.eprintln("Runtime error: {err}")
+            return 1

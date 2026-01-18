@@ -9,6 +9,13 @@ use mcp.core.protocol.*
 @extern("runtime", "rt_process_run")
 fn _rt_process_run(cmd_ptr: &u8, cmd_len: u64, args_ptr: &u8, args_len: u64) -> (i32, text, text)
 
+# Module-level storage for metadata overlays
+# Key format: "{name}:{line}:{column}" -> Dict of overlay key-value pairs
+var _metadata_overlays: Dict<text, Dict<text, text>> = {}
+
+fn get_metadata_key(meta: &McpMetadata) -> text:
+    return "{meta.name}:{meta.location.line}:{meta.location.column}"
+
 # Advanced MCP features manager
 pub struct McpAdvanced:
     cache: McpCache
@@ -646,7 +653,40 @@ impl McpStream:
 # =============================================================================
 
 pub fn add_semantic_tokens(output: &mut McpOutput) -> Result<(), McpError>:
-    # TODO: [stdlib][P3] Add semantic token information
+    # Add semantic token information to the MCP output
+    # Semantic tokens provide syntax highlighting hints for editors
+
+    # Token types following LSP SemanticTokenTypes
+    val token_types = [
+        "namespace", "type", "class", "enum", "interface",
+        "struct", "typeParameter", "parameter", "variable",
+        "property", "enumMember", "function", "method",
+        "keyword", "modifier", "comment", "string", "number", "operator"
+    ]
+
+    # Add semantic tokens legend to output metadata
+    if output.items.len() > 0:
+        for item in output.items:
+            # Assign token type based on item kind
+            val token_type = match item.kind:
+                ItemKind::Function: "function"
+                ItemKind::Struct: "struct"
+                ItemKind::Enum: "enum"
+                ItemKind::Import: "namespace"
+                ItemKind::Marker: "comment"
+                _: "variable"
+
+            # Assign modifiers based on visibility
+            var modifiers: Array<text> = []
+            if item.metadata.visibility == "pub":
+                modifiers.push("declaration")
+            if item.metadata.visibility == "static":
+                modifiers.push("static")
+
+            # Store token info in item
+            item.semantic_token_type = token_type
+            item.semantic_token_modifiers = modifiers
+
     return Ok(())
 
 pub struct McpCache:
@@ -842,8 +882,31 @@ impl McpMetadata:
         }
 
     fn add_overlay(key: &str, value: &str):
-        # TODO: [stdlib][P3] Store overlay data
-        pass
+        # Store overlay data in module-level storage
+        val meta_key = get_metadata_key(&self)
+
+        # Get or create overlay dict for this metadata
+        if not _metadata_overlays.contains_key(meta_key):
+            _metadata_overlays.insert(meta_key, {})
+
+        # Store the overlay key-value pair
+        _metadata_overlays.get_mut(meta_key).unwrap().insert(key.to_string(), value.to_string())
+
+    fn get_overlay(key: &str) -> Option<text>:
+        # Retrieve overlay data from module-level storage
+        val meta_key = get_metadata_key(&self)
+
+        if val Some(overlays) = _metadata_overlays.get(meta_key):
+            return overlays.get(key).cloned()
+        return None
+
+    fn get_all_overlays() -> Dict<text, text>:
+        # Get all overlays for this metadata
+        val meta_key = get_metadata_key(&self)
+
+        if val Some(overlays) = _metadata_overlays.get(meta_key):
+            return overlays.clone()
+        return {}
 
 impl McpOutput:
     fn find_symbol(name: &str) -> Option<&McpItem>:

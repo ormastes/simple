@@ -41,6 +41,7 @@ pub(crate) fn evaluate_method_call(
 
     let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
 
+
     // Handle module (Dict) method calls - look up function in module and use its captured_env
     if let Value::Dict(module_dict) = &recv_val {
         if let Some(func_val) = module_dict.get(method) {
@@ -181,6 +182,7 @@ pub(crate) fn evaluate_method_call(
                 return Ok(result);
             }
 
+
             // User-defined methods on enums via impl blocks
             if let Some(methods) = impl_methods.get(enum_name) {
                 for m in methods {
@@ -189,7 +191,7 @@ pub(crate) fn evaluate_method_call(
                         // Create a fields map with just "self" for the enum value
                         let mut enum_fields = HashMap::new();
                         enum_fields.insert("self".to_string(), recv_val.clone());
-                        return exec_function(
+                        let result = exec_function(
                             m,
                             args,
                             env,
@@ -198,12 +200,13 @@ pub(crate) fn evaluate_method_call(
                             enums,
                             impl_methods,
                             Some((enum_name, &enum_fields)),
-                        );
+                        )?;
+                        return Ok(result);
                     }
                 }
             }
 
-            // Methods defined directly in the enum body
+            // Methods defined directly in the enum body (or merged from impl blocks)
             if let Some(enum_def) = enums.get(enum_name) {
                 for m in &enum_def.methods {
                     if m.name == method {
