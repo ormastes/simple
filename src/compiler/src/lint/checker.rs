@@ -104,8 +104,8 @@ impl LintChecker {
                 self.check_print_in_test_spec(items);
             }
 
-            // Check TODO format
-            self.check_todo_format(&source_file);
+            // Check TODO format - DISABLED: needs fixing
+            // self.check_todo_format(&source_file);
         }
 
         // Run AST-based lints

@@ -193,7 +193,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_fence_create() {
         let device = VulkanDevice::new_default().unwrap();
         let fence = Fence::new(device, false).unwrap();
@@ -203,7 +202,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_semaphore_pool() {
         let device = VulkanDevice::new_default().unwrap();
         let pool = SemaphorePool::new(device);

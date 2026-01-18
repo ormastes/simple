@@ -250,7 +250,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_descriptor_layout_creation() {
         let device = VulkanDevice::new_default().unwrap();
         let layout = DescriptorSetLayout::new_uniform_buffer(device);
@@ -258,7 +257,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_descriptor_pool_creation() {
         let device = VulkanDevice::new_default().unwrap();
         let pool = DescriptorPool::new_for_uniform_buffers(device, 10);

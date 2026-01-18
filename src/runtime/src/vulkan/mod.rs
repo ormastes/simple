@@ -112,14 +112,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_instance_creation() {
         let instance = VulkanInstance::get_or_init();
         assert!(instance.is_ok(), "Failed to create Vulkan instance");
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers and GPU
     fn test_device_creation() {
         let device = VulkanDevice::new_default();
         if device.is_ok() {
@@ -130,7 +128,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers and GPU
     fn test_buffer_creation() {
         let device = VulkanDevice::new_default();
         if let Ok(device) = device {

@@ -304,6 +304,11 @@ impl<'a> TypeTranslator<'a> {
                     Ok(LeanType::Primitive("Unit".to_string())) // Placeholder
                 }
             }
+            HirType::Promise { inner } => {
+                // Promise types become IO monads in Lean
+                let inner_type = self.translate(*inner)?;
+                Ok(LeanType::Named(format!("IO ({})", inner_type.to_lean())))
+            }
             HirType::Unknown => Ok(LeanType::Primitive("Unit".to_string())),
         }
     }

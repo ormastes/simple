@@ -200,6 +200,13 @@ pub enum HirType {
         /// Types that can be held in this union
         variants: Vec<TypeId>,
     },
+    /// Promise type for async functions: Promise<T>
+    /// Represents a value that will be available in the future
+    /// Created automatically when a function has suspension operators
+    Promise {
+        /// The type of value the promise will resolve to
+        inner: TypeId,
+    },
     /// Mixin type: reusable composition unit
     /// Mixins provide fields and methods that can be composed into classes
     Mixin {
@@ -233,6 +240,24 @@ impl HirType {
         HirType::Int {
             bits,
             signedness: Signedness::Unsigned,
+        }
+    }
+
+    /// Create a Promise type wrapping the given inner type
+    pub fn promise(inner: TypeId) -> Self {
+        HirType::Promise { inner }
+    }
+
+    /// Check if this type is a Promise type
+    pub fn is_promise(&self) -> bool {
+        matches!(self, HirType::Promise { .. })
+    }
+
+    /// Extract the inner type from a Promise, if this is a Promise type
+    pub fn promise_inner(&self) -> Option<TypeId> {
+        match self {
+            HirType::Promise { inner } => Some(*inner),
+            _ => None,
         }
     }
 }

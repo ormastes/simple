@@ -592,39 +592,33 @@ With Async (Parallel):
 
 ## Error Handling
 
-```simple
-# Async error handling with try/catch style
-async fn render_with_error_handling():
-    try:
-        await renderer.init()
+Simple uses Result-based error handling (no try/catch). This makes error paths explicit in the type system.
 
-        loop:
-            try:
-                await renderer.render(&tree)
-            catch RenderError::DeviceLost:
+```simple
+# Result-based async error handling
+async fn render_with_result() -> Result<void, RenderError>:
+    await renderer.init()?
+
+    loop:
+        match await renderer.render(&tree):
+            case Ok(()):
+                # Success - continue rendering
+                pass
+            case Err(RenderError::DeviceLost):
                 # GPU reset - recreate resources
-                await renderer.recreate_swapchain()
-            catch RenderError::OutOfMemory:
+                await renderer.recreate_swapchain()?
+            case Err(RenderError::SwapchainOutOfDate):
+                # Window resized - recreate swapchain
+                await renderer.recreate_swapchain()?
+                await renderer.render(&tree)?  # Retry
+            case Err(RenderError::OutOfMemory):
                 # Free some resources
                 await resource_manager.cleanup_unused()
+            case Err(e):
+                return Err(e)
 
-        await renderer.shutdown()
-    catch e:
-        log_error(f"Fatal error: {e}")
-        cleanup()
-
-# Or with Result-based error handling
-async fn render_with_result():
-    match await renderer.render(&tree):
-        case Ok(()):
-            # Success
-            pass
-        case Err(RenderError::SwapchainOutOfDate):
-            # Window resized - recreate swapchain
-            await renderer.recreate_swapchain()
-            await renderer.render(&tree)  # Retry
-        case Err(e):
-            handle_error(e)
+    await renderer.shutdown()
+    return Ok(())
 ```
 
 ## Async State Machine (Under the Hood)

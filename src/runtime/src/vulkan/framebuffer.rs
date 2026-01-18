@@ -102,7 +102,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers and swapchain
     fn test_framebuffer_creation_for_swapchain() {
         // This would require a full Vulkan setup with window/surface/swapchain
         // Skipped for unit testing

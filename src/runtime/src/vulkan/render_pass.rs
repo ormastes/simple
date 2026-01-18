@@ -199,7 +199,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_render_pass_creation() {
         let device = VulkanDevice::new_default().unwrap();
         let render_pass = RenderPass::new_simple(device, vk::Format::B8G8R8A8_SRGB);
@@ -207,7 +206,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires Vulkan drivers
     fn test_render_pass_with_depth() {
         let device = VulkanDevice::new_default().unwrap();
         let render_pass = RenderPass::new_with_depth(device, vk::Format::B8G8R8A8_SRGB, vk::Format::D32_SFLOAT);

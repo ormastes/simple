@@ -1630,7 +1630,7 @@ Task: Comprehensive bug investigation and stdlib improvements
 - **1 bug** verified as FIXED, **2 bugs** clarified with accurate root cause
 - **160+ helper methods** added across 12 batches
 - **16 FFI functions** for atomic operations
-- **BDD framework blocker** identified (try/catch not implemented)
+- **BDD framework** uses Result-based error handling (Simple design)
 
 ### Report
 
@@ -1641,12 +1641,12 @@ Task: Comprehensive bug investigation and stdlib improvements
 - 160+ helper methods added to stdlib (Batches 72-83)
 - Atomic operations FFI (16 functions for AtomicBool and AtomicInt)
 - 17 test files created for bug verification
-- BDD framework investigation (blocked by missing try/catch syntax)
+- BDD framework uses Result-based error handling
 
 **Key Findings:**
 - Bug report accuracy improved with thorough testing
 - Workarounds documented for all issues
 - Bug count: 31 fixed (↑1), 3 open (↓1)
-- Simple uses Result-based error handling (no try/catch)
+- Simple uses Result-based error handling (language design)
 
 **Status:** 62 commits, comprehensive documentation, all findings verified with test evidence

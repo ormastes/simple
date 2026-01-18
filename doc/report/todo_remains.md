@@ -103,9 +103,8 @@ Missing attribute parsers:
 
 ---
 
-#### Other P2 Items (8 items)
+#### Other P2 Items (7 items)
 - Contract blocks parser support
-- Error catching (try/catch)
 - Mode runner improvements
 
 ---
