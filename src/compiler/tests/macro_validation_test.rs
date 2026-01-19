@@ -61,8 +61,8 @@ macro greet(name: String) -> (
 main = 0
 "#;
 
-    // Should fail with "unknown macro" error
-    assert!(expect_error(source, "unknown macro"));
+    // Should fail with E1401 (MACRO_UNDEFINED) error
+    assert!(expect_error(source, "E1401"));
 }
 
 #[test]

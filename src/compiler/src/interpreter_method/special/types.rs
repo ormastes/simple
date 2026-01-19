@@ -121,10 +121,7 @@ pub fn handle_unit_methods(
                             conversions.keys().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
                         ));
                     return Err(CompileError::semantic_with_context(
-                        format!(
-                            "Target unit '{}' not found in family '{}'",
-                            target_suffix, family_name
-                        ),
+                        format!("Target unit '{}' not found in family '{}'", target_suffix, family_name),
                         ctx,
                     ));
                 };
@@ -226,10 +223,7 @@ pub fn handle_option_methods(
             let ctx = ErrorContext::new()
                 .with_code(codes::INDEX_OUT_OF_BOUNDS)
                 .with_help("check that the Option contains Some before calling expect");
-            return Err(CompileError::semantic_with_context(
-                msg.to_display_string(),
-                ctx,
-            ));
+            return Err(CompileError::semantic_with_context(msg.to_display_string(), ctx));
         }
         "unwrap_or" => {
             if opt_variant == Some(OptionVariant::Some) {
@@ -458,11 +452,7 @@ pub fn handle_result_methods(
                         .with_code(codes::INDEX_OUT_OF_BOUNDS)
                         .with_help("check that the Result is Ok before calling expect");
                     return Err(CompileError::semantic_with_context(
-                        format!(
-                            "{}: {}",
-                            msg.to_display_string(),
-                            err_val.to_display_string()
-                        ),
+                        format!("{}: {}", msg.to_display_string(), err_val.to_display_string()),
                         ctx,
                     ));
                 }
@@ -470,10 +460,7 @@ pub fn handle_result_methods(
             let ctx = ErrorContext::new()
                 .with_code(codes::INDEX_OUT_OF_BOUNDS)
                 .with_help("check that the Result is Ok before calling expect");
-            return Err(CompileError::semantic_with_context(
-                msg.to_display_string(),
-                ctx,
-            ));
+            return Err(CompileError::semantic_with_context(msg.to_display_string(), ctx));
         }
         "unwrap_or" => {
             if res_variant == Some(ResultVariant::Ok) {
@@ -556,10 +543,7 @@ pub fn handle_result_methods(
             let ctx = ErrorContext::new()
                 .with_code(codes::INDEX_OUT_OF_BOUNDS)
                 .with_help("check that the Result is Err before calling expect_err");
-            return Err(CompileError::semantic_with_context(
-                msg.to_display_string(),
-                ctx,
-            ));
+            return Err(CompileError::semantic_with_context(msg.to_display_string(), ctx));
         }
         "ok" => {
             if res_variant == Some(ResultVariant::Ok) {

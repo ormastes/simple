@@ -55,10 +55,7 @@ impl CompilerPipeline {
 
         if !errors.is_empty() {
             let error_messages: Vec<String> = errors.iter().map(|e| format!("{:?}", e)).collect();
-            return Err(CompileError::Semantic(format!(
-                "Trait coherence errors:\n{}",
-                error_messages.join("\n")
-            )));
+            return Err(crate::error::factory::trait_coherence_errors(&error_messages));
         }
 
         Ok(())
@@ -104,15 +101,12 @@ impl CompilerPipeline {
 
                     let cap = cap.unwrap();
                     if !capabilities.contains(&cap) {
-                        return Err(CompileError::Semantic(format!(
-                            "function '{}' has @{} effect but module only allows capabilities: [{}]\n\
-                             help: add '{}' to module's 'requires [...]' statement or remove @{} from function",
-                            func.name,
+                        return Err(crate::error::factory::effect_violates_capabilities(
+                            &func.name,
                             effect.decorator_name(),
-                            capabilities.iter().map(|c| c.name()).collect::<Vec<_>>().join(", "),
+                            &capabilities.iter().map(|c| c.name()).collect::<Vec<_>>().join(", "),
                             cap.name(),
-                            effect.decorator_name()
-                        )));
+                        ));
                     }
                 }
             }

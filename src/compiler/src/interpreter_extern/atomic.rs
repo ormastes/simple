@@ -3,7 +3,7 @@
 //! Provides atomic operations for concurrent programming.
 //! Operations on AtomicBool, AtomicInt, and AtomicFlag.
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 // ============================================================================
@@ -12,15 +12,22 @@ use crate::value::Value;
 
 /// Create new atomic boolean
 pub fn rt_atomic_bool_new(args: &[Value]) -> Result<Value, CompileError> {
-    let initial_val = args
-        .first()
-        .ok_or_else(|| CompileError::Semantic("rt_atomic_bool_new expects 1 argument".into()))?;
+    let initial_val = args.first().ok_or_else(|| {
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("rt_atomic_bool_new requires exactly 1 argument");
+        CompileError::semantic_with_context("rt_atomic_bool_new expects 1 argument".to_string(), ctx)
+    })?;
     let initial = match initial_val {
         Value::Bool(b) => *b,
         _ => {
-            return Err(CompileError::Semantic(
-                "rt_atomic_bool_new expects bool argument".into(),
-            ))
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("rt_atomic_bool_new expects a boolean value");
+            return Err(CompileError::semantic_with_context(
+                "rt_atomic_bool_new expects bool argument".to_string(),
+                ctx,
+            ));
         }
     };
     unsafe {
@@ -33,7 +40,12 @@ pub fn rt_atomic_bool_new(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_atomic_bool_load(args: &[Value]) -> Result<Value, CompileError> {
     let handle = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("rt_atomic_bool_load expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_atomic_bool_load requires exactly 1 argument");
+            CompileError::semantic_with_context("rt_atomic_bool_load expects 1 argument".to_string(), ctx)
+        })?
         .as_int()?;
     unsafe {
         let value = simple_runtime::value::rt_atomic_bool_load(handle);

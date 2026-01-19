@@ -83,7 +83,10 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_cast_failed("extend float", &e))?;
                     Ok(result.into())
                 } else {
-                    Err(crate::error::factory::expected_value_type("float", "float-to-float cast"))
+                    Err(crate::error::factory::expected_value_type(
+                        "float",
+                        "float-to-float cast",
+                    ))
                 }
             }
             (TypeId::F64, TypeId::F32) => {
@@ -94,7 +97,10 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_cast_failed("truncate float", &e))?;
                     Ok(result.into())
                 } else {
-                    Err(crate::error::factory::expected_value_type("float", "float-to-float cast"))
+                    Err(crate::error::factory::expected_value_type(
+                        "float",
+                        "float-to-float cast",
+                    ))
                 }
             }
             // Same type - no-op

@@ -999,10 +999,7 @@ pub mod factory {
 
     /// Error when a tensor index is out of bounds for a 1D tensor.
     pub fn tensor_1d_index_out_of_bounds(index: usize, length: usize) -> CompileError {
-        CompileError::Semantic(format!(
-            "index {} out of bounds for tensor of length {}",
-            index, length
-        ))
+        CompileError::Semantic(format!("index {} out of bounds for tensor of length {}", index, length))
     }
 
     // ============================================
@@ -1056,6 +1053,51 @@ pub mod factory {
         CompileError::Semantic(format!(
             "type `{}` does not implement required method `{}` from trait `{}`",
             type_name, method_name, trait_name
+        ))
+    }
+
+    /// Error when method not found on trait object.
+    pub fn trait_method_not_found(method: &str, trait_name: &str, type_name: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "Method '{}' not found on dyn {} (type: {})",
+            method, trait_name, type_name
+        ))
+    }
+
+    /// Error when calling method on non-object trait value.
+    pub fn trait_inner_not_object(method: &str, trait_name: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "Cannot call method '{}' on dyn {}: inner value is not an object",
+            method, trait_name
+        ))
+    }
+
+    /// Error when mock method expects symbol or string.
+    pub fn mock_expects_method_name(context: &str) -> CompileError {
+        CompileError::Semantic(format!("{} expects symbol or string method name", context))
+    }
+
+    /// Error when mock method must be chained after verify.
+    pub fn mock_requires_verify(context: &str) -> CompileError {
+        CompileError::Semantic(format!("{}() must be chained after verify(:method)", context))
+    }
+
+    /// Error for trait coherence violations.
+    pub fn trait_coherence_errors(errors: &[String]) -> CompileError {
+        CompileError::Semantic(format!("Trait coherence errors:\n{}", errors.join("\n")))
+    }
+
+    /// Error when function effect violates module capabilities.
+    pub fn effect_violates_capabilities(
+        func_name: &str,
+        effect: &str,
+        allowed_caps: &str,
+        cap_name: &str,
+    ) -> CompileError {
+        CompileError::Semantic(format!(
+            "function '{}' has @{} effect but module only allows capabilities: [{}]\n\
+             help: add '{}' to module's 'requires [...]' statement or remove @{} from function",
+            func_name, effect, allowed_caps, cap_name, effect
         ))
     }
 
