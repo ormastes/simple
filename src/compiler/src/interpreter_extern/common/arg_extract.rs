@@ -19,7 +19,7 @@ use crate::value::Value;
 #[inline]
 pub fn get_arg<'a>(args: &'a [Value], index: usize, func_name: &str) -> Result<&'a Value, CompileError> {
     args.get(index)
-        .ok_or_else(|| CompileError::Semantic(format!("{} expects at least {} argument(s)", func_name, index + 1)))
+        .ok_or_else(|| crate::error::factory::func_expects_at_least(func_name, index + 1, args.len()))
 }
 
 /// Get an integer argument by index
@@ -52,10 +52,7 @@ pub fn get_bool(args: &[Value], index: usize, func_name: &str) -> Result<bool, C
     let val = get_arg(args, index, func_name)?;
     match val {
         Value::Bool(b) => Ok(*b),
-        _ => Err(CompileError::Semantic(format!(
-            "{} expects boolean argument at position {}",
-            func_name, index
-        ))),
+        _ => Err(crate::error::factory::func_expects_type_at(func_name, "boolean", index)),
     }
 }
 
@@ -74,10 +71,7 @@ pub fn get_string<'a>(args: &'a [Value], index: usize, func_name: &str) -> Resul
     let val = get_arg(args, index, func_name)?;
     match val {
         Value::Str(s) => Ok(s),
-        _ => Err(CompileError::Semantic(format!(
-            "{} expects string argument at position {}",
-            func_name, index
-        ))),
+        _ => Err(crate::error::factory::func_expects_type_at(func_name, "string", index)),
     }
 }
 
@@ -118,12 +112,7 @@ pub fn get_first_string<'a>(args: &'a [Value], func_name: &str) -> Result<&'a St
 #[inline]
 pub fn require_args(args: &[Value], expected: usize, func_name: &str) -> Result<(), CompileError> {
     if args.len() != expected {
-        return Err(CompileError::Semantic(format!(
-            "{} expects {} argument(s), got {}",
-            func_name,
-            expected,
-            args.len()
-        )));
+        return Err(crate::error::factory::func_expects_args(func_name, expected, args.len()));
     }
     Ok(())
 }
@@ -132,12 +121,7 @@ pub fn require_args(args: &[Value], expected: usize, func_name: &str) -> Result<
 #[inline]
 pub fn require_at_least(args: &[Value], min: usize, func_name: &str) -> Result<(), CompileError> {
     if args.len() < min {
-        return Err(CompileError::Semantic(format!(
-            "{} expects at least {} argument(s), got {}",
-            func_name,
-            min,
-            args.len()
-        )));
+        return Err(crate::error::factory::func_expects_at_least(func_name, min, args.len()));
     }
     Ok(())
 }

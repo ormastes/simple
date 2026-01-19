@@ -5,6 +5,7 @@ use tracing::instrument;
 use simple_parser::ast::Expr;
 
 use crate::effects::check_effect_violations;
+use crate::error::{codes, ErrorContext};
 use crate::value::{OptionVariant, ResultVariant, SpecialEnumType};
 
 use super::{
@@ -60,12 +61,36 @@ pub(crate) fn evaluate_expr(
             check_effect_violations("await")?;
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
             match val {
-                Value::Future(f) => f.await_result().map_err(|e| CompileError::Semantic(e)),
+                Value::Future(f) => f.await_result().map_err(|e| {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::AWAIT_FAILED)
+                        .with_help("ensure the future completes successfully");
+                    CompileError::semantic_with_context(
+                        format!("await failed: {}", e),
+                        ctx,
+                    )
+                }),
                 Value::Actor(handle) => {
-                    handle.join().map_err(|e| CompileError::Semantic(e))?;
+                    handle.join().map_err(|e| {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::AWAIT_FAILED)
+                            .with_help("ensure the actor completes successfully");
+                        CompileError::semantic_with_context(
+                            format!("await failed: {}", e),
+                            ctx,
+                        )
+                    })?;
                     Ok(Value::Nil)
                 }
-                _ => Err(CompileError::Semantic("await requires a Future or Actor handle".into())),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::AWAIT_FAILED)
+                        .with_help("await can only be used on Future or Actor values");
+                    Err(CompileError::semantic_with_context(
+                        format!("await failed: requires a Future or Actor handle, got {}", val.type_name()),
+                        ctx,
+                    ))
+                }
             }
         }
         Expr::Yield(maybe_val) => {
@@ -84,7 +109,13 @@ pub(crate) fn evaluate_expr(
             });
 
             if !added {
-                return Err(CompileError::Semantic("yield called outside of generator".into()));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("yield can only be used inside a generator function");
+                return Err(CompileError::semantic_with_context(
+                    "invalid operation: yield called outside of generator",
+                    ctx,
+                ));
             }
 
             Ok(Value::Nil)
@@ -149,7 +180,15 @@ pub(crate) fn evaluate_expr(
                             // Return the Err as a TryError that should be propagated
                             Err(CompileError::TryError(val))
                         }
-                        None => Err(CompileError::Semantic(format!("invalid Result variant: {}", variant))),
+                        None => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_PATTERN)
+                                .with_help("Result variants are Ok and Err");
+                            Err(CompileError::semantic_with_context(
+                                format!("invalid pattern: invalid Result variant: {}", variant),
+                                ctx,
+                            ))
+                        },
                     }
                 }
                 Value::Enum {
@@ -169,25 +208,56 @@ pub(crate) fn evaluate_expr(
                             // Return None as a TryError
                             Err(CompileError::TryError(val))
                         }
-                        None => Err(CompileError::Semantic(format!("invalid Option variant: {}", variant))),
+                        None => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_PATTERN)
+                                .with_help("Option variants are Some and None");
+                            Err(CompileError::semantic_with_context(
+                                format!("invalid pattern: invalid Option variant: {}", variant),
+                                ctx,
+                            ))
+                        },
                     }
                 }
-                _ => Err(CompileError::Semantic(
-                    "? operator requires Result or Option type".into(),
-                )),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("try operator (?) can only be used on Result or Option types");
+                    Err(CompileError::semantic_with_context(
+                        format!("invalid operation: ? operator requires Result or Option type, got {}", val.type_name()),
+                        ctx,
+                    ))
+                },
             }
         }
         // Contract expressions - not supported in interpreter yet
-        Expr::ContractResult => Err(CompileError::Semantic(
-            "contract 'result' keyword can only be used in contract blocks".into(),
-        )),
-        Expr::ContractOld(_) => Err(CompileError::Semantic(
-            "contract old() expression can only be used in ensures blocks".into(),
-        )),
+        Expr::ContractResult => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("contract 'result' keyword can only be used in contract blocks");
+            Err(CompileError::semantic_with_context(
+                "invalid operation: contract 'result' keyword can only be used in contract blocks".to_string(),
+                ctx,
+            ))
+        },
+        Expr::ContractOld(_) => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("contract old() expression can only be used in ensures blocks");
+            Err(CompileError::semantic_with_context(
+                "invalid operation: contract old() expression can only be used in ensures blocks".to_string(),
+                ctx,
+            ))
+        },
         #[allow(unreachable_patterns)]
-        _ => Err(CompileError::Semantic(format!(
-            "unsupported expression type: {:?}",
-            expr
-        ))),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("this expression type is not supported in this context");
+            Err(CompileError::semantic_with_context(
+                format!("invalid operation: unsupported expression type: {:?}", expr),
+                ctx,
+            ))
+        },
     }
 }

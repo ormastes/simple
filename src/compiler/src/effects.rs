@@ -104,11 +104,7 @@ pub fn check_async_violation(operation: &str) -> Result<(), CompileError> {
         let effects = cell.borrow();
         if effects.contains(&Effect::Async) {
             if is_blocking_operation(operation) {
-                return Err(CompileError::Semantic(format!(
-                    "blocking operation '{}' not allowed in async function\n\
-                     help: remove @async decorator or use non-blocking alternative",
-                    operation
-                )));
+                return Err(crate::error::factory::blocking_in_async(operation));
             }
         }
         Ok(())
@@ -132,11 +128,7 @@ pub fn check_pure_violation(operation: &str) -> Result<(), CompileError> {
                     "@io" // default
                 };
 
-                return Err(CompileError::Semantic(format!(
-                    "side-effecting operation '{}' not allowed in pure function\n\
-                     help: remove @pure decorator or add {} effect to function",
-                    operation, needed_effect
-                )));
+                return Err(crate::error::factory::side_effect_in_pure(operation, needed_effect));
             }
         }
         Ok(())
@@ -197,24 +189,19 @@ pub fn check_call_compatibility(callee_name: &str, callee_effects: &[Effect]) ->
         if caller_effects.contains(&Effect::Pure) {
             // Callee must be pure (no side effects)
             if !callee_effects.contains(&Effect::Pure) && !callee_effects.is_empty() {
-                return Err(CompileError::Semantic(format!(
-                    "pure function cannot call '{}' which has effects: {}\n\
-                     help: remove @pure decorator from caller or add @pure to callee",
+                return Err(crate::error::factory::pure_calls_impure(
                     callee_name,
-                    format_effects(callee_effects)
-                )));
+                    &format_effects(callee_effects)
+                ));
             }
 
             // If callee has any side-effecting decorators, reject
             for effect in callee_effects {
                 if matches!(effect, Effect::Io | Effect::Net | Effect::Fs | Effect::Unsafe) {
-                    return Err(CompileError::Semantic(format!(
-                        "pure function cannot call '{}' with @{} effect\n\
-                         help: remove @pure decorator from caller or remove @{} from callee",
+                    return Err(crate::error::factory::pure_calls_effect(
                         callee_name,
-                        effect.decorator_name(),
                         effect.decorator_name()
-                    )));
+                    ));
                 }
             }
         }
