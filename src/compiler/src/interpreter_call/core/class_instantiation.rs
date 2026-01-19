@@ -221,7 +221,15 @@ pub(crate) fn instantiate_class(
                 fields.insert(field_name.clone(), val);
                 positional_idx += 1;
             } else {
-                bail_semantic!("too many arguments for class {}", class_name);
+                // E1023 - Invalid Struct Literal
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_STRUCT_LITERAL)
+                    .with_help(format!("class `{}` expects {} field(s)", class_name, class_def.fields.len()))
+                    .with_note(format!("provided {} positional argument(s)", args.len()));
+                return Err(CompileError::semantic_with_context(
+                    format!("too many arguments for class `{}` constructor", class_name),
+                    ctx,
+                ));
             }
         }
     }
