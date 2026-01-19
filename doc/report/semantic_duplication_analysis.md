@@ -160,8 +160,16 @@ Array(a) => !a.is_empty()
 - `circular_dependency()`, `class_not_found()`, `enum_not_found()`
 - `unknown_block_type()`
 
-Updated callsites in `blocks/mod.rs`, `interpreter_method/mod.rs`.
-~103 occurrences remain - gradual migration recommended.
+Updated callsites in:
+- `blocks/mod.rs` - unknown_block_type()
+- `interpreter_method/mod.rs` - class_not_found()
+- `interpreter_native_net.rs` - invalid_socket_address(), expected_handle()
+- `node_exec.rs` - cannot_assign_to_const() (2 occurrences)
+- `project.rs` - invalid_config() (3 occurrences)
+- `module_resolver/resolution.rs` - circular_dependency()
+- `interpreter_extern/conversion.rs` - cannot_convert()
+
+182 occurrences remain (excluding 21 in error.rs) - gradual migration recommended.
 
 ### 2.4 GPU Dimension Matching (5 identical blocks)
 
