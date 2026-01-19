@@ -9,7 +9,7 @@
 
 use super::super::tensor::Tensor;
 use super::MathValue;
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 
 // ==========================================================================
 // Helper Functions
@@ -30,7 +30,13 @@ pub fn args_to_shape(args: &[MathValue]) -> Result<Vec<usize>, CompileError> {
         .map(|a| {
             let v = a.as_f64()? as i64;
             if v < 0 {
-                Err(CompileError::Semantic("shape dimensions must be non-negative".into()))
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("tensor shape dimensions must be non-negative");
+                Err(CompileError::semantic_with_context(
+                    format!("shape dimensions must be non-negative, got {}", v),
+                    ctx,
+                ))
             } else {
                 Ok(v as usize)
             }
@@ -41,12 +47,13 @@ pub fn args_to_shape(args: &[MathValue]) -> Result<Vec<usize>, CompileError> {
 /// Require tensor arguments
 pub fn require_tensor_args(name: &str, args: &[MathValue], expected: usize) -> Result<(), CompileError> {
     if args.len() != expected {
-        return Err(CompileError::Semantic(format!(
-            "{} requires {} argument(s), got {}",
-            name,
-            expected,
-            args.len()
-        )));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help(format!("{} requires exactly {} argument(s)", name, expected));
+        return Err(CompileError::semantic_with_context(
+            format!("{} requires {} argument(s), got {}", name, expected, args.len()),
+            ctx,
+        ));
     }
     Ok(())
 }
@@ -65,7 +72,13 @@ pub fn get_tensor(val: &MathValue) -> Result<Tensor, CompileError> {
 
 pub fn eval_tensor(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::Semantic("tensor requires 1 argument".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("tensor requires exactly 1 argument");
+        return Err(CompileError::semantic_with_context(
+            format!("tensor requires 1 argument, got {}", args.len()),
+            ctx,
+        ));
     }
     match &args[0] {
         MathValue::Tensor(t) => Ok(MathValue::Tensor(t.clone())),
@@ -88,7 +101,13 @@ pub fn eval_ones(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_full(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() < 2 {
-        return Err(CompileError::Semantic("full requires shape and fill value".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("full requires shape dimensions and a fill value");
+        return Err(CompileError::semantic_with_context(
+            "full requires at least 2 arguments (shape..., fill_value)".to_string(),
+            ctx,
+        ));
     }
     let fill = args.last().unwrap().as_f64()?;
     let shape = args_to_shape(&args[..args.len() - 1])?;
@@ -97,7 +116,13 @@ pub fn eval_full(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_eye(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::Semantic("eye requires 1 argument".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("eye requires exactly 1 argument (size)");
+        return Err(CompileError::semantic_with_context(
+            format!("eye requires 1 argument, got {}", args.len()),
+            ctx,
+        ));
     }
     let n = args[0].as_f64()? as usize;
     Ok(MathValue::Tensor(Tensor::eye(n)))
@@ -108,14 +133,28 @@ pub fn eval_arange(args: &[MathValue]) -> Result<MathValue, CompileError> {
         1 => (0.0, args[0].as_f64()?, 1.0),
         2 => (args[0].as_f64()?, args[1].as_f64()?, 1.0),
         3 => (args[0].as_f64()?, args[1].as_f64()?, args[2].as_f64()?),
-        _ => return Err(CompileError::Semantic("arange takes 1-3 arguments".into())),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("arange takes 1-3 arguments (start, end, [step])");
+            return Err(CompileError::semantic_with_context(
+                format!("arange takes 1-3 arguments, got {}", args.len()),
+                ctx,
+            ));
+        }
     };
     Ok(MathValue::Tensor(Tensor::arange(start, end, step)))
 }
 
 pub fn eval_linspace(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 3 {
-        return Err(CompileError::Semantic("linspace requires 3 arguments".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("linspace requires exactly 3 arguments (start, end, steps)");
+        return Err(CompileError::semantic_with_context(
+            format!("linspace requires 3 arguments, got {}", args.len()),
+            ctx,
+        ));
     }
     let start = args[0].as_f64()?;
     let end = args[1].as_f64()?;
@@ -159,7 +198,13 @@ pub fn eval_transpose(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_reshape(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() < 2 {
-        return Err(CompileError::Semantic("reshape requires tensor and shape".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("reshape requires tensor and target shape");
+        return Err(CompileError::semantic_with_context(
+            "reshape requires at least 2 arguments (tensor, shape...)".to_string(),
+            ctx,
+        ));
     }
     let t = get_tensor(&args[0])?;
     let shape = args_to_shape(&args[1..])?;
@@ -180,7 +225,13 @@ pub fn eval_squeeze(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_unsqueeze(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 2 {
-        return Err(CompileError::Semantic("unsqueeze requires tensor and dim".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("unsqueeze requires exactly 2 arguments (tensor, dimension)");
+        return Err(CompileError::semantic_with_context(
+            format!("unsqueeze requires 2 arguments, got {}", args.len()),
+            ctx,
+        ));
     }
     let t = get_tensor(&args[0])?;
     let dim = args[1].as_f64()? as usize;
@@ -236,7 +287,13 @@ pub fn eval_mean(args: &[MathValue]) -> Result<MathValue, CompileError> {
         // Mean of arguments
         let vals: Vec<f64> = args.iter().map(|a| a.as_f64()).collect::<Result<_, _>>()?;
         if vals.is_empty() {
-            return Err(CompileError::Semantic("mean requires at least 1 argument".into()));
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("mean requires at least 1 argument");
+            return Err(CompileError::semantic_with_context(
+                "mean requires at least 1 argument".to_string(),
+                ctx,
+            ));
         }
         Ok(MathValue::Float(vals.iter().sum::<f64>() / vals.len() as f64))
     }
@@ -272,7 +329,13 @@ pub fn eval_argmax(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_relu(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::Semantic("relu requires 1 argument".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("relu requires exactly 1 argument");
+        return Err(CompileError::semantic_with_context(
+            format!("relu requires 1 argument, got {}", args.len()),
+            ctx,
+        ));
     }
     match &args[0] {
         MathValue::Tensor(t) => Ok(MathValue::Tensor(t.relu())),
@@ -285,7 +348,13 @@ pub fn eval_relu(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_sigmoid(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::Semantic("sigmoid requires 1 argument".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("sigmoid requires exactly 1 argument");
+        return Err(CompileError::semantic_with_context(
+            format!("sigmoid requires 1 argument, got {}", args.len()),
+            ctx,
+        ));
     }
     match &args[0] {
         MathValue::Tensor(t) => Ok(MathValue::Tensor(t.sigmoid())),
@@ -309,7 +378,13 @@ pub fn eval_softmax(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_tanh(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::Semantic("tanh requires 1 argument".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("tanh requires exactly 1 argument");
+        return Err(CompileError::semantic_with_context(
+            format!("tanh requires 1 argument, got {}", args.len()),
+            ctx,
+        ));
     }
     match &args[0] {
         MathValue::Tensor(t) => Ok(MathValue::Tensor(t.tanh())),

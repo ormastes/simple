@@ -50,11 +50,10 @@ impl Lowerer {
                     return Err(LowerError::CannotInferType);
                 };
 
-                let name = Self::extract_pattern_name(&let_stmt.pattern).ok_or_else(|| {
-                    LowerError::LetBindingFailed {
+                let name =
+                    Self::extract_pattern_name(&let_stmt.pattern).ok_or_else(|| LowerError::LetBindingFailed {
                         pattern: format!("{:?}", let_stmt.pattern),
-                    }
-                })?;
+                    })?;
 
                 // W1003: Check for mutable binding with shared pointer type
                 self.check_mutable_shared_binding(&name, ty, let_stmt.mutability, let_stmt.span);
@@ -93,12 +92,14 @@ impl Lowerer {
                         // Get target's lifetime (from receiver)
                         if let HirExprKind::Local(target_idx) = &receiver.kind {
                             if let Some(target_local) = ctx.get_local(*target_idx) {
-                                let target_origin = self.lifetime_context.get_variable_origin(&target_local.name).cloned();
+                                let target_origin =
+                                    self.lifetime_context.get_variable_origin(&target_local.name).cloned();
 
                                 // Get value's lifetime
                                 if let HirExprKind::Local(value_idx) = &value.kind {
                                     if let Some(value_local) = ctx.get_local(*value_idx) {
-                                        let value_origin = self.lifetime_context.get_variable_origin(&value_local.name).cloned();
+                                        let value_origin =
+                                            self.lifetime_context.get_variable_origin(&value_local.name).cloned();
 
                                         if let (Some(t_origin), Some(v_origin)) = (target_origin, value_origin) {
                                             let target_lt = t_origin.lifetime();

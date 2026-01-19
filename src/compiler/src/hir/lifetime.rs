@@ -227,15 +227,11 @@ impl LifetimeViolation {
             LifetimeViolation::DanglingReference { variable, .. } => {
                 format!("dangling reference to `{}`", variable)
             }
-            LifetimeViolation::BorrowOutlivesOwner { .. } => {
-                "borrowed reference outlives the owner".to_string()
-            }
+            LifetimeViolation::BorrowOutlivesOwner { .. } => "borrowed reference outlives the owner".to_string(),
             LifetimeViolation::ReturnLocalReference { variable, .. } => {
                 format!("cannot return reference to local variable `{}`", variable)
             }
-            LifetimeViolation::StorageEscapes { .. } => {
-                "reference stored in longer-lived location".to_string()
-            }
+            LifetimeViolation::StorageEscapes { .. } => "reference stored in longer-lived location".to_string(),
         }
     }
 
@@ -277,9 +273,7 @@ impl LifetimeViolation {
                 msg.push_str("  help: consider returning an owned value instead\n");
             }
             LifetimeViolation::UseAfterDrop {
-                dropped_at,
-                used_at,
-                ..
+                dropped_at, used_at, ..
             } => {
                 msg.push_str(&format!(
                     "  note: value was dropped at scope {} but used at scope {}\n",
@@ -417,11 +411,7 @@ impl LifetimeContext {
                 return true;
             }
             // Find parent
-            current = self
-                .scopes
-                .iter()
-                .find(|s| s.id == id)
-                .and_then(|s| s.parent);
+            current = self.scopes.iter().find(|s| s.id == id).and_then(|s| s.parent);
         }
         false
     }
@@ -439,7 +429,13 @@ impl LifetimeContext {
     }
 
     /// Check if a reference escapes its scope
-    pub fn check_escape(&mut self, ref_lifetime: LifetimeId, target_scope: LifetimeId, origin: ReferenceOrigin, span: Span) {
+    pub fn check_escape(
+        &mut self,
+        ref_lifetime: LifetimeId,
+        target_scope: LifetimeId,
+        origin: ReferenceOrigin,
+        span: Span,
+    ) {
         if !self.outlives(ref_lifetime, target_scope) {
             self.violations.push(LifetimeViolation::EscapingReference {
                 ref_lifetime,

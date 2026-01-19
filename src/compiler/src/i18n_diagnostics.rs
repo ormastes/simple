@@ -444,7 +444,14 @@ fn create_i18n_diagnostic_from_code(code: &str, message: &str, ctx: &ErrorContex
         codes::TYPE_SIZE_LIMIT_EXCEEDED => I18nDiagnostic::error_i18n("compiler", "E1063", &MessageContext::new()),
 
         codes::WRONG_INTRINSIC_TYPE => {
-            let msg_ctx = ctx3("intrinsic", extract_name_from_message(message), "expected", "?", "found", "?");
+            let msg_ctx = ctx3(
+                "intrinsic",
+                extract_name_from_message(message),
+                "expected",
+                "?",
+                "found",
+                "?",
+            );
             I18nDiagnostic::error_i18n("compiler", "E1064", &msg_ctx)
         }
 

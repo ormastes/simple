@@ -16,8 +16,7 @@ use super::super::interpreter_state::{CONST_NAMES, IMMUTABLE_VARS};
 
 /// Check if a variable name refers to an immutable binding
 fn is_variable_immutable(name: &str) -> bool {
-    CONST_NAMES.with(|cell| cell.borrow().contains(name))
-        || IMMUTABLE_VARS.with(|cell| cell.borrow().contains(name))
+    CONST_NAMES.with(|cell| cell.borrow().contains(name)) || IMMUTABLE_VARS.with(|cell| cell.borrow().contains(name))
 }
 
 /// Check if a value is a pointer type (can be dereferenced)
@@ -164,9 +163,15 @@ pub(super) fn eval_op_expr(
                     if !matches!(op, BinOp::Eq | BinOp::NotEq) {
                         let ctx = ErrorContext::new()
                             .with_code(codes::INVALID_OPERATION)
-                            .with_help(format!("unit '{}' operations require both operands to be compatible units or scalar values", ls));
+                            .with_help(format!(
+                                "unit '{}' operations require both operands to be compatible units or scalar values",
+                                ls
+                            ));
                         return Err(CompileError::semantic_with_context(
-                            format!("invalid operation: cannot apply {:?} between unit '{}' and non-unit value", op, ls),
+                            format!(
+                                "invalid operation: cannot apply {:?} between unit '{}' and non-unit value",
+                                op, ls
+                            ),
                             ctx,
                         ));
                     }
@@ -176,9 +181,15 @@ pub(super) fn eval_op_expr(
                     if !matches!(op, BinOp::Eq | BinOp::NotEq) {
                         let ctx = ErrorContext::new()
                             .with_code(codes::INVALID_OPERATION)
-                            .with_help(format!("unit '{}' operations require both operands to be compatible units or scalar values", rs));
+                            .with_help(format!(
+                                "unit '{}' operations require both operands to be compatible units or scalar values",
+                                rs
+                            ));
                         return Err(CompileError::semantic_with_context(
-                            format!("invalid operation: cannot apply {:?} between non-unit value and unit '{}'", op, rs),
+                            format!(
+                                "invalid operation: cannot apply {:?} between non-unit value and unit '{}'",
+                                op, rs
+                            ),
                             ctx,
                         ));
                     }
@@ -242,10 +253,7 @@ pub(super) fn eval_op_expr(
                                 .with_code(codes::DIVISION_BY_ZERO)
                                 .with_help("cannot divide by zero")
                                 .with_note("check that the divisor is not zero before division");
-                            Err(CompileError::semantic_with_context(
-                                "division by zero".to_string(),
-                                ctx,
-                            ))
+                            Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
                         } else {
                             Ok(Value::Float(left_val.as_float()? / r))
                         }
@@ -257,10 +265,7 @@ pub(super) fn eval_op_expr(
                                 .with_code(codes::DIVISION_BY_ZERO)
                                 .with_help("cannot divide by zero")
                                 .with_note("check that the divisor is not zero before division");
-                            Err(CompileError::semantic_with_context(
-                                "division by zero".to_string(),
-                                ctx,
-                            ))
+                            Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
                         } else {
                             Ok(Value::Int(left_val.as_int()? / r))
                         }
@@ -275,10 +280,7 @@ pub(super) fn eval_op_expr(
                                 .with_code(codes::DIVISION_BY_ZERO)
                                 .with_help("cannot perform modulo by zero")
                                 .with_note("check that the divisor is not zero before modulo operation");
-                            Err(CompileError::semantic_with_context(
-                                "modulo by zero".to_string(),
-                                ctx,
-                            ))
+                            Err(CompileError::semantic_with_context("modulo by zero".to_string(), ctx))
                         } else {
                             Ok(Value::Float(left_val.as_float()? % r))
                         }
@@ -290,10 +292,7 @@ pub(super) fn eval_op_expr(
                                 .with_code(codes::DIVISION_BY_ZERO)
                                 .with_help("cannot perform modulo by zero")
                                 .with_note("check that the divisor is not zero before modulo operation");
-                            Err(CompileError::semantic_with_context(
-                                "modulo by zero".to_string(),
-                                ctx,
-                            ))
+                            Err(CompileError::semantic_with_context("modulo by zero".to_string(), ctx))
                         } else {
                             Ok(Value::Int(left_val.as_int()? % r))
                         }
@@ -537,17 +536,17 @@ pub(super) fn eval_op_expr(
                                 .with_code(codes::CHANNEL_CLOSED)
                                 .with_help("check that the channel sender has not been dropped")
                                 .with_note(format!("channel error: {}", e));
-                            CompileError::semantic_with_context(
-                                "channel closed or disconnected".to_string(),
-                                ctx,
-                            )
+                            CompileError::semantic_with_context("channel closed or disconnected".to_string(), ctx)
                         })?,
                         _ => {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::INVALID_OPERATION)
                                 .with_help("channel receive operator (<-) can only be used on channel values");
                             return Err(CompileError::semantic_with_context(
-                                format!("invalid operation: cannot receive from non-channel value of type `{}`", val.type_name()),
+                                format!(
+                                    "invalid operation: cannot receive from non-channel value of type `{}`",
+                                    val.type_name()
+                                ),
                                 ctx,
                             ));
                         }

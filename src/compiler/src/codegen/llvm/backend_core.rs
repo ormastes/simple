@@ -55,11 +55,7 @@ impl LlvmBackend {
         #[cfg(not(feature = "llvm"))]
         {
             let _ = target; // Suppress unused warning when feature disabled
-            Err(CompileError::Semantic(
-                "LLVM backend requires 'llvm' feature flag. \
-                 Build with: cargo build --features llvm"
-                    .to_string(),
-            ))
+            Err(crate::error::factory::llvm_feature_required())
         }
 
         #[cfg(feature = "llvm")]
@@ -168,7 +164,7 @@ impl LlvmBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn create_module(&self, _name: &str) -> Result<(), CompileError> {
-        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+        Err(crate::error::factory::llvm_feature_not_enabled())
     }
 
     /// Create LLVM function signature (feature-gated)
@@ -182,7 +178,7 @@ impl LlvmBackend {
         let module = self.module.borrow();
         let module = module
             .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
 
         // Map parameter types
         let param_llvm: Result<Vec<_>, _> = param_types
@@ -199,7 +195,7 @@ impl LlvmBackend {
             BasicTypeEnum::IntType(t) => t.fn_type(&param_llvm, false),
             BasicTypeEnum::FloatType(t) => t.fn_type(&param_llvm, false),
             BasicTypeEnum::PointerType(t) => t.fn_type(&param_llvm, false),
-            _ => return Err(CompileError::Semantic("Unsupported return type".to_string())),
+            _ => return Err(crate::error::factory::unsupported_return_type()),
         };
 
         Ok(module.add_function(name, fn_type, None))
@@ -212,7 +208,7 @@ impl LlvmBackend {
         _param_types: &[TypeId],
         _return_type: &TypeId,
     ) -> Result<(), CompileError> {
-        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+        Err(crate::error::factory::llvm_feature_not_enabled())
     }
 
     /// Get LLVM IR as string (feature-gated)
@@ -221,13 +217,13 @@ impl LlvmBackend {
         let module = self.module.borrow();
         let module = module
             .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
         Ok(module.print_to_string().to_string())
     }
 
     #[cfg(not(feature = "llvm"))]
     pub fn get_ir(&self) -> Result<String, CompileError> {
-        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+        Err(crate::error::factory::llvm_feature_not_enabled())
     }
 
     /// Verify the module (feature-gated)
@@ -236,17 +232,17 @@ impl LlvmBackend {
         let module = self.module.borrow();
         let module = module
             .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
 
         module
             .verify()
-            .map_err(|e| CompileError::Semantic(format!("LLVM verification failed: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_verification_failed(&e))?;
         Ok(())
     }
 
     #[cfg(not(feature = "llvm"))]
     pub fn verify(&self) -> Result<(), CompileError> {
-        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+        Err(crate::error::factory::llvm_feature_not_enabled())
     }
 
     /// Emit object code from the module (feature-gated)
@@ -258,7 +254,7 @@ impl LlvmBackend {
         let module = self.module.borrow();
         let module = module
             .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
 
         // Get target triple
         let triple = self.get_target_triple();
@@ -266,7 +262,7 @@ impl LlvmBackend {
 
         // Get target from triple
         let target = LlvmTarget::from_triple(&target_triple)
-            .map_err(|e| CompileError::Semantic(format!("Failed to create target from triple: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_target_failed(&triple, &e))?;
 
         // Create target machine
         // For WASM targets, use static relocation mode (no PIC needed)
@@ -285,19 +281,19 @@ impl LlvmBackend {
                 reloc_mode,
                 CodeModel::Default,
             )
-            .ok_or_else(|| CompileError::Semantic("Failed to create target machine".to_string()))?;
+            .ok_or_else(crate::error::factory::llvm_target_machine_failed)?;
 
         // Emit object file to memory buffer
         let buffer = target_machine
             .write_to_memory_buffer(module, FileType::Object)
-            .map_err(|e| CompileError::Semantic(format!("Failed to emit object file: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_emit_failed("object file", &e))?;
 
         Ok(buffer.as_slice().to_vec())
     }
 
     #[cfg(not(feature = "llvm"))]
     pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
-        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+        Err(crate::error::factory::llvm_feature_not_enabled())
     }
 }
 

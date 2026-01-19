@@ -188,7 +188,7 @@ impl ModuleResolver {
         }
 
         let source = std::fs::read_to_string(&init_path)
-            .map_err(|e| CompileError::Semantic(format!("failed to read {:?}: {}", init_path, e)))?;
+            .map_err(|e| crate::error::factory::failed_to_read_file(&init_path, &e))?;
 
         let manifest = self.parse_manifest(&source, dir_path)?;
         self.manifests.insert(init_path, manifest.clone());
@@ -219,12 +219,11 @@ impl ModuleResolver {
         if !manifest.capabilities_are_subset_of(parent_capabilities) {
             let child_caps: Vec<&str> = manifest.capabilities.iter().map(|c| c.name()).collect();
             let parent_caps: Vec<&str> = parent_capabilities.iter().map(|c| c.name()).collect();
-            return Err(CompileError::Semantic(format!(
-                "module '{}' declares capabilities [{}] which are not a subset of parent capabilities [{}]",
-                manifest.name,
-                child_caps.join(", "),
-                parent_caps.join(", ")
-            )));
+            return Err(crate::error::factory::capability_violation(
+                &manifest.name,
+                &child_caps.join(", "),
+                &parent_caps.join(", "),
+            ));
         }
 
         Ok(manifest)
@@ -235,7 +234,7 @@ impl ModuleResolver {
         let mut parser = Parser::new(source);
         let module = parser
             .parse()
-            .map_err(|e| CompileError::Semantic(format!("failed to parse __init__.spl: {:?}", e)))?;
+            .map_err(|e| crate::error::factory::failed_to_parse_file("__init__.spl", &e))?;
 
         self.extract_manifest(&module, dir_path)
     }

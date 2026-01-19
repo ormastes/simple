@@ -288,9 +288,7 @@ impl MemoryWarningCollector {
     pub fn by_code(&self) -> std::collections::HashMap<MemoryWarningCode, Vec<&MemoryWarning>> {
         let mut map = std::collections::HashMap::new();
         for warning in &self.warnings {
-            map.entry(warning.code.clone())
-                .or_insert_with(Vec::new)
-                .push(warning);
+            map.entry(warning.code.clone()).or_insert_with(Vec::new).push(warning);
         }
         map
     }
@@ -300,12 +298,24 @@ impl MemoryWarningCollector {
         let by_code = self.by_code();
         WarningSummary {
             total: self.warnings.len(),
-            w1001: by_code.get(&MemoryWarningCode::W1001).map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
-            w1002: by_code.get(&MemoryWarningCode::W1002).map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
-            w1003: by_code.get(&MemoryWarningCode::W1003).map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
-            w1004: by_code.get(&MemoryWarningCode::W1004).map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
-            w1005: by_code.get(&MemoryWarningCode::W1005).map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
-            w1006: by_code.get(&MemoryWarningCode::W1006).map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
+            w1001: by_code
+                .get(&MemoryWarningCode::W1001)
+                .map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
+            w1002: by_code
+                .get(&MemoryWarningCode::W1002)
+                .map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
+            w1003: by_code
+                .get(&MemoryWarningCode::W1003)
+                .map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
+            w1004: by_code
+                .get(&MemoryWarningCode::W1004)
+                .map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
+            w1005: by_code
+                .get(&MemoryWarningCode::W1005)
+                .map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
+            w1006: by_code
+                .get(&MemoryWarningCode::W1006)
+                .map_or(0, |v: &Vec<&MemoryWarning>| v.len()),
         }
     }
 }

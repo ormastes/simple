@@ -150,11 +150,8 @@ pub(super) fn eval_call_expr(
                             })
                         } else {
                             // E1013 - Unknown Method (static method on class)
-                            let available_methods: Vec<&str> = class_def
-                                .methods
-                                .iter()
-                                .map(|m| m.name.as_str())
-                                .collect();
+                            let available_methods: Vec<&str> =
+                                class_def.methods.iter().map(|m| m.name.as_str()).collect();
                             let suggestion = if !available_methods.is_empty() {
                                 typo::suggest_name(field, available_methods.clone())
                             } else {
@@ -238,10 +235,7 @@ pub(super) fn eval_call_expr(
                                     .with_code(codes::METHOD_NOT_FOUND)
                                     .with_help("check that this variant or method is defined on this enum");
                                 Err(CompileError::semantic_with_context(
-                                    format!(
-                                        "unknown variant or method '{}' on enum {}",
-                                        field, enum_name
-                                    ),
+                                    format!("unknown variant or method '{}' on enum {}", field, enum_name),
                                     ctx,
                                 ))
                             }
@@ -283,7 +277,7 @@ pub(super) fn eval_call_expr(
                             format!("undefined field: unknown property '{field}' on String"),
                             ctx,
                         ))
-                    },
+                    }
                 },
                 // Array property access (e.g., arr.len, arr.is_empty)
                 Value::Array(ref arr) => match field.as_str() {
@@ -297,7 +291,7 @@ pub(super) fn eval_call_expr(
                             format!("undefined field: unknown property '{field}' on Array"),
                             ctx,
                         ))
-                    },
+                    }
                 },
                 // Tuple property access (e.g., tup.len)
                 Value::Tuple(ref tup) => match field.as_str() {
@@ -310,7 +304,7 @@ pub(super) fn eval_call_expr(
                             format!("undefined field: unknown property '{field}' on Tuple"),
                             ctx,
                         ))
-                    },
+                    }
                 },
                 // Dict property access (e.g., dict.len, dict.is_empty)
                 // Also supports module namespace access (e.g., physics.World)
@@ -350,7 +344,7 @@ pub(super) fn eval_call_expr(
                                     format!("undefined field: unknown property '{field}' on Option"),
                                     ctx,
                                 ))
-                            },
+                            }
                         }
                     } else if enum_name == "Result" {
                         match field.as_str() {
@@ -364,7 +358,7 @@ pub(super) fn eval_call_expr(
                                     format!("undefined field: unknown property '{field}' on Result"),
                                     ctx,
                                 ))
-                            },
+                            }
                         }
                     } else {
                         let ctx = ErrorContext::new()
@@ -384,7 +378,7 @@ pub(super) fn eval_call_expr(
                         "undefined field: cannot access field on this value type",
                         ctx,
                     ))
-                },
+                }
             };
             Ok(Some(result?))
         }

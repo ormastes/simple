@@ -109,9 +109,7 @@ impl LlvmBackend {
                     UnaryOp::Not => builder
                         .build_not(val, "not")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_not", &e))?,
-                    _ => {
-                        return Err(crate::error::factory::unsupported_operation("integer unary op", &op))
-                    }
+                    _ => return Err(crate::error::factory::unsupported_operation("integer unary op", &op)),
                 };
                 Ok(result.into())
             }

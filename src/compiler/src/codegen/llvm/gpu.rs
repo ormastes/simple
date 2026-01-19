@@ -376,7 +376,9 @@ impl LlvmGpuBackend {
         dim: u8,
     ) -> Result<IntValue<'static>, CompileError> {
         if dim > 2 {
-            return Err(CompileError::Semantic("Invalid dimension (must be 0, 1, or 2)".to_string()));
+            return Err(CompileError::Semantic(
+                "Invalid dimension (must be 0, 1, or 2)".to_string(),
+            ));
         }
 
         let module = self.module.borrow();
@@ -559,8 +561,8 @@ impl LlvmGpuBackend {
         let triple = TargetTriple::create(&self.get_target_triple());
 
         // Get target
-        let target = LlvmTarget::from_triple(&triple)
-            .map_err(|e| crate::error::factory::llvm_target_failed("NVPTX", &e))?;
+        let target =
+            LlvmTarget::from_triple(&triple).map_err(|e| crate::error::factory::llvm_target_failed("NVPTX", &e))?;
 
         // Create target machine
         let target_machine = target

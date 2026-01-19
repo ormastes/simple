@@ -107,12 +107,15 @@ pub(crate) fn exec_node(
         }
         Node::Const(const_stmt) => {
             // E1024 - Const Eval Failed
-            let value = evaluate_expr(&const_stmt.value, env, functions, classes, enums, impl_methods)
-                .map_err(|e| {
+            let value =
+                evaluate_expr(&const_stmt.value, env, functions, classes, enums, impl_methods).map_err(|e| {
                     let ctx = ErrorContext::new()
                         .with_code(codes::CONST_EVAL_FAILED)
                         .with_help("constant expressions must be evaluable at compile time")
-                        .with_note(format!("error occurred while evaluating constant `{}`", const_stmt.name));
+                        .with_note(format!(
+                            "error occurred while evaluating constant `{}`",
+                            const_stmt.name
+                        ));
                     CompileError::semantic_with_context(
                         format!("failed to evaluate constant `{}`: {}", const_stmt.name, e),
                         ctx,
@@ -222,7 +225,9 @@ fn exec_assignment(
             if is_immutable && !name.ends_with('_') {
                 let ctx = ErrorContext::new()
                     .with_code(codes::INVALID_ASSIGNMENT)
-                    .with_help(format!("consider using '{name}_' for a mutable variable, or use '{name}->method()' for functional updates"));
+                    .with_help(format!(
+                    "consider using '{name}_' for a mutable variable, or use '{name}->method()' for functional updates"
+                ));
                 return Err(CompileError::semantic_with_context(
                     format!("invalid assignment: cannot reassign to immutable variable '{}'", name),
                     ctx,
@@ -299,7 +304,7 @@ fn exec_assignment(
                         return Err(CompileError::semantic_with_context(
                             "invalid assignment: cannot assign field on non-object value",
                             ctx,
-                        ))
+                        ));
                     }
                 }
                 Ok(Control::Next)
@@ -373,7 +378,11 @@ fn exec_assignment(
                                 .with_help(format!("tuple has {} element(s)", tup.len()))
                                 .with_note(format!("index {} is out of bounds", idx));
                             return Err(CompileError::semantic_with_context(
-                                format!("index out of bounds: tuple index {} out of bounds (len={})", idx, tup.len()),
+                                format!(
+                                    "index out of bounds: tuple index {} out of bounds (len={})",
+                                    idx,
+                                    tup.len()
+                                ),
                                 ctx,
                             ));
                         }
@@ -383,9 +392,12 @@ fn exec_assignment(
                             .with_code(codes::INVALID_ASSIGNMENT)
                             .with_help("index assignment requires an array, dict, or tuple");
                         return Err(CompileError::semantic_with_context(
-                            format!("invalid assignment: cannot index assign value of type {}", container.type_name()),
+                            format!(
+                                "invalid assignment: cannot index assign value of type {}",
+                                container.type_name()
+                            ),
                             ctx,
-                        ))
+                        ));
                     }
                 };
                 env.insert(container_name.clone(), new_container);
@@ -420,9 +432,12 @@ fn exec_assignment(
                     .with_code(codes::TYPE_MISMATCH)
                     .with_help("tuple unpacking requires a tuple or array on the right side");
                 return Err(CompileError::semantic_with_context(
-                    format!("type mismatch: tuple unpacking requires tuple or array, got {}", value.type_name()),
+                    format!(
+                        "type mismatch: tuple unpacking requires tuple or array, got {}",
+                        value.type_name()
+                    ),
                     ctx,
-                ))
+                ));
             }
         };
         if targets.len() != values.len() {
@@ -430,7 +445,11 @@ fn exec_assignment(
                 .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                 .with_help("ensure the right side has the same number of elements as the left side");
             return Err(CompileError::semantic_with_context(
-                format!("argument count mismatch: tuple unpacking expected {}, got {}", targets.len(), values.len()),
+                format!(
+                    "argument count mismatch: tuple unpacking expected {}, got {}",
+                    targets.len(),
+                    values.len()
+                ),
                 ctx,
             ));
         }
@@ -492,7 +511,7 @@ fn exec_augmented_assignment(
             return Err(CompileError::semantic_with_context(
                 "invalid operation: plain assignment should be handled elsewhere",
                 ctx,
-            ))
+            ));
         }
     };
 
@@ -514,19 +533,13 @@ fn exec_augmented_assignment(
         // If compound assignment, combine with current value
         let new_value = if let Some(op) = bin_op {
             // Create a binary expression and evaluate it
-            let current = env
-                .get(name)
-                .cloned()
-                .ok_or_else(|| {
-                    // E1001 - Undefined Variable
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::UNDEFINED_VARIABLE)
-                        .with_help("check that the variable is defined and in scope");
-                    CompileError::semantic_with_context(
-                        format!("variable `{}` not found", name),
-                        ctx,
-                    )
-                })?;
+            let current = env.get(name).cloned().ok_or_else(|| {
+                // E1001 - Undefined Variable
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNDEFINED_VARIABLE)
+                    .with_help("check that the variable is defined and in scope");
+                CompileError::semantic_with_context(format!("variable `{}` not found", name), ctx)
+            })?;
             // Insert rhs as temp var, create binary expr, evaluate
             let temp_name = "__rhs_temp__".to_string();
             env.insert(temp_name.clone(), rhs_value);
@@ -597,7 +610,7 @@ fn exec_augmented_assignment(
                             "invalid assignment: cannot use augmented assignment on non-object value",
                             ctx,
                         ))
-                    },
+                    }
                 }
             } else {
                 // E1001 - Undefined Variable

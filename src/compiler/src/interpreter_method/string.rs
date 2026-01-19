@@ -390,7 +390,7 @@ if let Value::Str(ref s) = recv_val {
                 ("", s.as_str())
             };
 
-            let padding: String = std::iter::repeat('0').take(width - current_len).collect();
+            let padding: String = "0".repeat(width - current_len);
             return Ok(Value::Str(format!("{}{}{}", sign, padding, rest)));
         }
         "is_numeric" => {

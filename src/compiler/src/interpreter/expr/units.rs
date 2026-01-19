@@ -45,11 +45,14 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
                     .with_code(codes::INVALID_OPERATION)
                     .with_help("addition is only supported for int, float, or string unit values");
                 Err(CompileError::semantic_with_context(
-                    format!("invalid operation: cannot add unit values of types {} and {}",
-                        left.type_name(), right.type_name()),
+                    format!(
+                        "invalid operation: cannot add unit values of types {} and {}",
+                        left.type_name(),
+                        right.type_name()
+                    ),
                     ctx,
                 ))
-            },
+            }
         },
         BinOp::Sub => match (left, right) {
             (Value::Int(l), Value::Int(r)) => Ok(Value::Int(l - r)),
@@ -61,11 +64,14 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
                     .with_code(codes::INVALID_OPERATION)
                     .with_help("subtraction is only supported for int or float unit values");
                 Err(CompileError::semantic_with_context(
-                    format!("invalid operation: cannot subtract unit values of types {} and {}",
-                        left.type_name(), right.type_name()),
+                    format!(
+                        "invalid operation: cannot subtract unit values of types {} and {}",
+                        left.type_name(),
+                        right.type_name()
+                    ),
                     ctx,
                 ))
-            },
+            }
         },
         BinOp::Mul => match (left, right) {
             (Value::Int(l), Value::Int(r)) => Ok(Value::Int(l * r)),
@@ -93,11 +99,14 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
                     .with_code(codes::INVALID_OPERATION)
                     .with_help("multiplication is supported for numeric types or string repetition");
                 Err(CompileError::semantic_with_context(
-                    format!("invalid operation: cannot multiply values of types {} and {}",
-                        left.type_name(), right.type_name()),
+                    format!(
+                        "invalid operation: cannot multiply values of types {} and {}",
+                        left.type_name(),
+                        right.type_name()
+                    ),
                     ctx,
                 ))
-            },
+            }
         },
         BinOp::Div => match (left, right) {
             (Value::Int(l), Value::Int(r)) => {
@@ -107,10 +116,7 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
                         .with_code(codes::DIVISION_BY_ZERO)
                         .with_help("cannot divide by zero")
                         .with_note("check that the divisor is not zero before division");
-                    Err(CompileError::semantic_with_context(
-                        "division by zero".to_string(),
-                        ctx,
-                    ))
+                    Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
                 } else {
                     Ok(Value::Int(l / r))
                 }
@@ -122,10 +128,7 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
                         .with_code(codes::DIVISION_BY_ZERO)
                         .with_help("cannot divide by zero")
                         .with_note("check that the divisor is not zero before division");
-                    Err(CompileError::semantic_with_context(
-                        "division by zero".to_string(),
-                        ctx,
-                    ))
+                    Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
                 } else {
                     Ok(Value::Float(l / r))
                 }
@@ -137,10 +140,7 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
                         .with_code(codes::DIVISION_BY_ZERO)
                         .with_help("cannot divide by zero")
                         .with_note("check that the divisor is not zero before division");
-                    Err(CompileError::semantic_with_context(
-                        "division by zero".to_string(),
-                        ctx,
-                    ))
+                    Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
                 } else {
                     Ok(Value::Float(*l as f64 / r))
                 }
@@ -152,10 +152,7 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
                         .with_code(codes::DIVISION_BY_ZERO)
                         .with_help("cannot divide by zero")
                         .with_note("check that the divisor is not zero before division");
-                    Err(CompileError::semantic_with_context(
-                        "division by zero".to_string(),
-                        ctx,
-                    ))
+                    Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
                 } else {
                     Ok(Value::Float(l / *r as f64))
                 }
@@ -165,11 +162,14 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
                     .with_code(codes::INVALID_OPERATION)
                     .with_help("division is only supported for int or float unit values");
                 Err(CompileError::semantic_with_context(
-                    format!("invalid operation: cannot divide unit values of types {} and {}",
-                        left.type_name(), right.type_name()),
+                    format!(
+                        "invalid operation: cannot divide unit values of types {} and {}",
+                        left.type_name(),
+                        right.type_name()
+                    ),
                     ctx,
                 ))
-            },
+            }
         },
         BinOp::Mod => match (left, right) {
             (Value::Int(l), Value::Int(r)) => {
@@ -179,10 +179,7 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
                         .with_code(codes::DIVISION_BY_ZERO)
                         .with_help("cannot perform modulo by zero")
                         .with_note("check that the divisor is not zero before modulo operation");
-                    Err(CompileError::semantic_with_context(
-                        "modulo by zero".to_string(),
-                        ctx,
-                    ))
+                    Err(CompileError::semantic_with_context("modulo by zero".to_string(), ctx))
                 } else {
                     Ok(Value::Int(l % r))
                 }
@@ -192,11 +189,14 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
                     .with_code(codes::INVALID_OPERATION)
                     .with_help("modulo is only supported for integer unit values");
                 Err(CompileError::semantic_with_context(
-                    format!("invalid operation: modulo only supported for integer unit values, got {} and {}",
-                        left.type_name(), right.type_name()),
+                    format!(
+                        "invalid operation: modulo only supported for integer unit values, got {} and {}",
+                        left.type_name(),
+                        right.type_name()
+                    ),
                     ctx,
                 ))
-            },
+            }
         },
         // Comparison operations return bool, not unit
         BinOp::Eq => Ok(Value::Bool(left == right)),
@@ -211,11 +211,14 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
                     .with_code(codes::INVALID_OPERATION)
                     .with_help("comparison is only supported for numeric unit values");
                 Err(CompileError::semantic_with_context(
-                    format!("invalid operation: cannot compare unit values of types {} and {}",
-                        left.type_name(), right.type_name()),
+                    format!(
+                        "invalid operation: cannot compare unit values of types {} and {}",
+                        left.type_name(),
+                        right.type_name()
+                    ),
                     ctx,
                 ))
-            },
+            }
         },
         BinOp::Gt => match (left, right) {
             (Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l > r)),
@@ -227,11 +230,14 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
                     .with_code(codes::INVALID_OPERATION)
                     .with_help("comparison is only supported for numeric unit values");
                 Err(CompileError::semantic_with_context(
-                    format!("invalid operation: cannot compare unit values of types {} and {}",
-                        left.type_name(), right.type_name()),
+                    format!(
+                        "invalid operation: cannot compare unit values of types {} and {}",
+                        left.type_name(),
+                        right.type_name()
+                    ),
                     ctx,
                 ))
-            },
+            }
         },
         BinOp::LtEq => match (left, right) {
             (Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l <= r)),
@@ -243,11 +249,14 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
                     .with_code(codes::INVALID_OPERATION)
                     .with_help("comparison is only supported for numeric unit values");
                 Err(CompileError::semantic_with_context(
-                    format!("invalid operation: cannot compare unit values of types {} and {}",
-                        left.type_name(), right.type_name()),
+                    format!(
+                        "invalid operation: cannot compare unit values of types {} and {}",
+                        left.type_name(),
+                        right.type_name()
+                    ),
                     ctx,
                 ))
-            },
+            }
         },
         BinOp::GtEq => match (left, right) {
             (Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l >= r)),
@@ -259,21 +268,27 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
                     .with_code(codes::INVALID_OPERATION)
                     .with_help("comparison is only supported for numeric unit values");
                 Err(CompileError::semantic_with_context(
-                    format!("invalid operation: cannot compare unit values of types {} and {}",
-                        left.type_name(), right.type_name()),
+                    format!(
+                        "invalid operation: cannot compare unit values of types {} and {}",
+                        left.type_name(),
+                        right.type_name()
+                    ),
                     ctx,
                 ))
-            },
+            }
         },
         _ => {
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_OPERATION)
                 .with_help("check that the operation is supported on unit values");
             Err(CompileError::semantic_with_context(
-                format!("invalid operation: unsupported binary operation {:?} on unit values", op),
+                format!(
+                    "invalid operation: unsupported binary operation {:?} on unit values",
+                    op
+                ),
                 ctx,
             ))
-        },
+        }
     }
 }
 
@@ -288,10 +303,13 @@ pub(super) fn evaluate_unit_unary_inner(value: &Value, op: UnaryOp) -> Result<Va
                     .with_code(codes::INVALID_OPERATION)
                     .with_help("negation is only supported for numeric unit values");
                 Err(CompileError::semantic_with_context(
-                    format!("invalid operation: cannot negate unit value of type {}", value.type_name()),
+                    format!(
+                        "invalid operation: cannot negate unit value of type {}",
+                        value.type_name()
+                    ),
                     ctx,
                 ))
-            },
+            }
         },
         UnaryOp::Not => {
             // E1041 - Invalid Unary Op

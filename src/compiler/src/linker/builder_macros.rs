@@ -55,7 +55,9 @@ macro_rules! impl_linker_builder_methods {
             I: IntoIterator<Item = P>,
             P: Into<std::path::PathBuf>,
         {
-            self.options.library_paths.extend(paths.into_iter().map(|p| p.into()));
+            self.options
+                .library_paths
+                .extend(paths.into_iter().map(|p| p.into()));
             self
         }
     };

@@ -396,32 +396,41 @@ pub mod factory {
         ))
     }
 
+    /// Error when a file cannot be read.
+    pub fn failed_to_read_file(path: &impl std::fmt::Debug, error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("failed to read {:?}: {}", path, error))
+    }
+
+    /// Error when a file fails to parse.
+    pub fn failed_to_parse_file(filename: &str, error: &impl std::fmt::Debug) -> CompileError {
+        CompileError::Semantic(format!("failed to parse {}: {:?}", filename, error))
+    }
+
+    /// Error when module capabilities are not a subset of parent capabilities.
+    pub fn capability_violation(module_name: &str, child_caps: &str, parent_caps: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "module '{}' declares capabilities [{}] which are not a subset of parent capabilities [{}]",
+            module_name, child_caps, parent_caps
+        ))
+    }
+
     // ============================================
     // Argument/Type Errors
     // ============================================
 
     /// Error when a function argument has an unexpected type.
     pub fn argument_type_mismatch(index: usize, expected: &str, found: &str) -> CompileError {
-        CompileError::Semantic(format!(
-            "argument {} must be {}, found {}",
-            index, expected, found
-        ))
+        CompileError::Semantic(format!("argument {} must be {}, found {}", index, expected, found))
     }
 
     /// Error when a function receives the wrong number of arguments.
     pub fn argument_count_mismatch(expected: usize, found: usize) -> CompileError {
-        CompileError::Semantic(format!(
-            "expected {} argument(s), found {}",
-            expected, found
-        ))
+        CompileError::Semantic(format!("expected {} argument(s), found {}", expected, found))
     }
 
     /// Error when a function expects a minimum number of arguments.
     pub fn func_expects_args(func_name: &str, expected: usize, found: usize) -> CompileError {
-        CompileError::Semantic(format!(
-            "{} expects {} argument(s), got {}",
-            func_name, expected, found
-        ))
+        CompileError::Semantic(format!("{} expects {} argument(s), got {}", func_name, expected, found))
     }
 
     /// Error when a function expects at least N arguments.
@@ -457,10 +466,7 @@ pub mod factory {
 
     /// Error when a const binding has wrong type.
     pub fn const_binding_wrong_type(name: &str, expected: &str, found: &str) -> CompileError {
-        CompileError::Semantic(format!(
-            "Const binding '{}' is not {}: {}",
-            name, expected, found
-        ))
+        CompileError::Semantic(format!("Const binding '{}' is not {}: {}", name, expected, found))
     }
 
     /// Error when a const binding is not found.
@@ -539,10 +545,7 @@ pub mod factory {
 
     /// Error when a field is not found on a struct/class.
     pub fn field_not_found(field_name: &str, type_name: &str) -> CompileError {
-        CompileError::Semantic(format!(
-            "no field named '{}' found on type '{}'",
-            field_name, type_name
-        ))
+        CompileError::Semantic(format!("no field named '{}' found on type '{}'", field_name, type_name))
     }
 
     // ============================================
@@ -564,10 +567,7 @@ pub mod factory {
 
     /// Error when overlapping impls are found.
     pub fn overlapping_impls(trait_name: &str, context: &str) -> CompileError {
-        CompileError::Semantic(format!(
-            "overlapping impls for trait `{}`: {}",
-            trait_name, context
-        ))
+        CompileError::Semantic(format!("overlapping impls for trait `{}`: {}", trait_name, context))
     }
 
     /// Error when a duplicate impl is found for a specific type.
@@ -765,6 +765,65 @@ pub mod factory {
         CompileError::Semantic(format!("LLVM verification failed: {}", error))
     }
 
+    /// Error when LLVM module is not created.
+    pub fn llvm_module_not_created() -> CompileError {
+        CompileError::Semantic("Module not created".to_string())
+    }
+
+    /// Error when LLVM builder is not created.
+    pub fn llvm_builder_not_created() -> CompileError {
+        CompileError::Semantic("Builder not created".to_string())
+    }
+
+    /// Error when LLVM feature is not enabled.
+    pub fn llvm_feature_not_enabled() -> CompileError {
+        CompileError::Semantic("LLVM feature not enabled".to_string())
+    }
+
+    /// Error when LLVM feature is required with instructions.
+    pub fn llvm_feature_required() -> CompileError {
+        CompileError::Semantic(
+            "LLVM backend requires 'llvm' feature flag. \
+             Build with: cargo build --features llvm"
+                .to_string(),
+        )
+    }
+
+    /// Error when unknown local index is accessed.
+    pub fn llvm_unknown_local(index: usize) -> CompileError {
+        CompileError::Semantic(format!("Unknown local index: {}", index))
+    }
+
+    /// Error when undefined virtual register is used.
+    pub fn llvm_undefined_vreg(vreg: &impl std::fmt::Debug) -> CompileError {
+        CompileError::Semantic(format!("Undefined vreg: {:?}", vreg))
+    }
+
+    /// Error when a type is unsupported in LLVM backend.
+    pub fn unsupported_llvm_type(ty: &impl std::fmt::Debug) -> CompileError {
+        CompileError::Semantic(format!("Unsupported LLVM type: {:?}", ty))
+    }
+
+    /// Error when a type cast is unsupported.
+    pub fn unsupported_cast(from: &impl std::fmt::Debug, to: &impl std::fmt::Debug) -> CompileError {
+        CompileError::Semantic(format!("Unsupported cast from {:?} to {:?}", from, to))
+    }
+
+    /// Error when an expected value type is not found.
+    pub fn expected_value_type(expected: &str, context: &str) -> CompileError {
+        CompileError::Semantic(format!("Expected {} value for {}", expected, context))
+    }
+
+    /// Error when LLVM return type is unsupported.
+    pub fn unsupported_return_type() -> CompileError {
+        CompileError::Semantic("Unsupported return type".to_string())
+    }
+
+    /// Error when failed to create LLVM target machine.
+    pub fn llvm_target_machine_failed() -> CompileError {
+        CompileError::Semantic("Failed to create target machine".to_string())
+    }
+
     /// Error when data has invalid encoding.
     pub fn invalid_encoding(context: &str, error: &impl std::fmt::Display) -> CompileError {
         CompileError::Semantic(format!("Invalid encoding in {}: {}", context, error))
@@ -803,10 +862,7 @@ pub mod factory {
 
     /// Error when tensor dimension is out of range.
     pub fn tensor_dim_out_of_range(dim: usize, ndims: usize) -> CompileError {
-        CompileError::Semantic(format!(
-            "dimension {} out of range for tensor with {} dims",
-            dim, ndims
-        ))
+        CompileError::Semantic(format!("dimension {} out of range for tensor with {} dims", dim, ndims))
     }
 
     /// Error when tensor index is out of bounds.
@@ -820,6 +876,95 @@ pub mod factory {
     /// Error when wrong number of indices are provided.
     pub fn tensor_index_count_mismatch(expected: usize, found: usize) -> CompileError {
         CompileError::Semantic(format!("expected {} indices, got {}", expected, found))
+    }
+
+    // ============================================
+    // Unit Conversion Errors
+    // ============================================
+
+    /// Error when a unit does not belong to a family.
+    pub fn unit_no_family(unit_suffix: &str, target_suffix: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "Unit '{}' does not belong to a unit family, cannot convert to '{}'",
+            unit_suffix, target_suffix
+        ))
+    }
+
+    /// Error when a unit family is not found.
+    pub fn unit_family_not_found(family: &str) -> CompileError {
+        CompileError::Semantic(format!("Unit family '{}' not found", family))
+    }
+
+    /// Error when a unit is not found in a family.
+    pub fn unit_not_in_family(unit_suffix: &str, family: &str) -> CompileError {
+        CompileError::Semantic(format!("Unit '{}' not found in family '{}'", unit_suffix, family))
+    }
+
+    /// Error when a target unit is not found for conversion.
+    pub fn target_unit_not_found(target: &str, family: &str, available: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "Target unit '{}' not found in family '{}'. Available: {}",
+            target, family, available
+        ))
+    }
+
+    /// Error when converting a non-numeric unit value.
+    pub fn unit_non_numeric_conversion(value: &impl std::fmt::Debug) -> CompileError {
+        CompileError::Semantic(format!("Cannot convert non-numeric unit value: {:?}", value))
+    }
+
+    // ============================================
+    // Parser Errors
+    // ============================================
+
+    /// Error when an expected token is not found.
+    pub fn expected_token(expected: &impl std::fmt::Debug, found: &impl std::fmt::Debug) -> CompileError {
+        CompileError::Semantic(format!("expected {:?}, found {:?}", expected, found))
+    }
+
+    /// Error when an unexpected token is encountered.
+    pub fn unexpected_token(context: &str, token: &impl std::fmt::Debug) -> CompileError {
+        CompileError::Semantic(format!("unexpected token in {}: {:?}", context, token))
+    }
+
+    /// Error when a variable name is expected in a binder.
+    pub fn expected_variable_in_binder() -> CompileError {
+        CompileError::Semantic("expected variable name in binder".to_string())
+    }
+
+    /// Error when a LaTeX operator should be replaced.
+    pub fn latex_operator_deprecated(cmd: &str) -> CompileError {
+        CompileError::Semantic(format!("LaTeX operator \\{} should be replaced with *", cmd))
+    }
+
+    // ============================================
+    // Result/Option Errors
+    // ============================================
+
+    /// Error when unwrap is called on None.
+    pub fn unwrap_on_none() -> CompileError {
+        CompileError::Semantic("called unwrap on None".to_string())
+    }
+
+    /// Error when unwrap is called on Err.
+    pub fn unwrap_on_err(payload: Option<&str>) -> CompileError {
+        match payload {
+            Some(msg) => CompileError::Semantic(format!("called unwrap on Err: {}", msg)),
+            None => CompileError::Semantic("called unwrap on Err".to_string()),
+        }
+    }
+
+    /// Error when unwrap_err is called on Ok.
+    pub fn unwrap_err_on_ok() -> CompileError {
+        CompileError::Semantic("called unwrap_err on Ok".to_string())
+    }
+
+    /// Error for expect with a custom message.
+    pub fn expect_failed(message: &str, payload: Option<&str>) -> CompileError {
+        match payload {
+            Some(p) => CompileError::Semantic(format!("{}: {}", message, p)),
+            None => CompileError::Semantic(message.to_string()),
+        }
     }
 
     // ============================================

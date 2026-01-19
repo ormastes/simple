@@ -43,9 +43,10 @@ pub(super) fn eval_collection_expr(
                             payload: None,
                         })
                     } else {
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::INVALID_PATTERN)
-                            .with_help(format!("check that '{}' is a valid variant of enum '{}'", variant, enum_name));
+                        let ctx = ErrorContext::new().with_code(codes::INVALID_PATTERN).with_help(format!(
+                            "check that '{}' is a valid variant of enum '{}'",
+                            variant, enum_name
+                        ));
                         Err(CompileError::semantic_with_context(
                             format!("invalid pattern: unknown variant {} for enum {}", variant, enum_name),
                             ctx,
@@ -96,7 +97,10 @@ pub(super) fn eval_collection_expr(
                             .with_code(codes::TYPE_MISMATCH)
                             .with_help("dict spread operator (**) can only be used with dict values");
                         return Err(CompileError::semantic_with_context(
-                            format!("type mismatch: dict spread requires dict value, got {}", spread_val.type_name()),
+                            format!(
+                                "type mismatch: dict spread requires dict value, got {}",
+                                spread_val.type_name()
+                            ),
                             ctx,
                         ));
                     }
@@ -145,10 +149,13 @@ pub(super) fn eval_collection_expr(
                                 .with_code(codes::INVALID_OPERATION)
                                 .with_help("spread operator (*) can only be used with array or tuple values");
                             return Err(CompileError::semantic_with_context(
-                                format!("invalid operation: spread operator requires array or tuple, got {}", spread_val.type_name()),
+                                format!(
+                                    "invalid operation: spread operator requires array or tuple, got {}",
+                                    spread_val.type_name()
+                                ),
                                 ctx,
                             ));
-                        },
+                        }
                     }
                 } else {
                     arr.push(evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
@@ -166,7 +173,10 @@ pub(super) fn eval_collection_expr(
                         .with_code(codes::TYPE_MISMATCH)
                         .with_help("array repeat count must be an integer");
                     return Err(CompileError::semantic_with_context(
-                        format!("type mismatch: array repeat count must be an integer, got {}", count_val.type_name()),
+                        format!(
+                            "type mismatch: array repeat count must be an integer, got {}",
+                            count_val.type_name()
+                        ),
                         ctx,
                     ));
                 }
@@ -176,7 +186,10 @@ pub(super) fn eval_collection_expr(
                     .with_code(codes::INVALID_OPERATION)
                     .with_help("array repeat count must be non-negative");
                 return Err(CompileError::semantic_with_context(
-                    format!("invalid operation: array repeat count cannot be negative (got {})", count_int),
+                    format!(
+                        "invalid operation: array repeat count cannot be negative (got {})",
+                        count_int
+                    ),
                     ctx,
                 ));
             }
@@ -265,7 +278,7 @@ pub(super) fn eval_collection_expr(
                                 format!("invalid operation: cannot slice value of type {}", recv_val.type_name()),
                                 ctx,
                             ))
-                        },
+                        }
                     }?));
                 }
             }
@@ -289,19 +302,17 @@ pub(super) fn eval_collection_expr(
                     } else {
                         raw_idx as usize
                     };
-                    arr.get(idx)
-                        .cloned()
-                        .ok_or_else(|| {
-                            // E3002 - Index Out Of Bounds
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                                .with_help(format!("array has {} element(s)", len))
-                                .with_note("ensure the index is within bounds");
-                            CompileError::semantic_with_context(
-                                format!("array index out of bounds: index is {} but length is {}", raw_idx, len),
-                                ctx,
-                            )
-                        })
+                    arr.get(idx).cloned().ok_or_else(|| {
+                        // E3002 - Index Out Of Bounds
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                            .with_help(format!("array has {} element(s)", len))
+                            .with_note("ensure the index is within bounds");
+                        CompileError::semantic_with_context(
+                            format!("array index out of bounds: index is {} but length is {}", raw_idx, len),
+                            ctx,
+                        )
+                    })
                 }
                 Value::Tuple(tup) => {
                     // E1043 - Invalid Index Type
@@ -321,33 +332,29 @@ pub(super) fn eval_collection_expr(
                     } else {
                         raw_idx as usize
                     };
-                    tup.get(idx)
-                        .cloned()
-                        .ok_or_else(|| {
-                            // E3002 - Index Out Of Bounds
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                                .with_help(format!("tuple has {} element(s)", len))
-                                .with_note("ensure the index is within bounds");
-                            CompileError::semantic_with_context(
-                                format!("tuple index out of bounds: index is {} but length is {}", raw_idx, len),
-                                ctx,
-                            )
-                        })
+                    tup.get(idx).cloned().ok_or_else(|| {
+                        // E3002 - Index Out Of Bounds
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                            .with_help(format!("tuple has {} element(s)", len))
+                            .with_note("ensure the index is within bounds");
+                        CompileError::semantic_with_context(
+                            format!("tuple index out of bounds: index is {} but length is {}", raw_idx, len),
+                            ctx,
+                        )
+                    })
                 }
                 Value::Dict(map) => {
                     let key = idx_val.to_key_string();
-                    map.get(&key)
-                        .cloned()
-                        .ok_or_else(|| {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                                .with_help("ensure the key exists in the dictionary before accessing it");
-                            CompileError::semantic_with_context(
-                                format!("index out of bounds: dict key not found: {}", key),
-                                ctx,
-                            )
-                        })
+                    map.get(&key).cloned().ok_or_else(|| {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                            .with_help("ensure the key exists in the dictionary before accessing it");
+                        CompileError::semantic_with_context(
+                            format!("index out of bounds: dict key not found: {}", key),
+                            ctx,
+                        )
+                    })
                 }
                 Value::Str(s) => {
                     // E1043 - Invalid Index Type
@@ -367,35 +374,29 @@ pub(super) fn eval_collection_expr(
                     } else {
                         raw_idx as usize
                     };
-                    s.chars()
-                        .nth(idx)
-                        .map(|c| Value::Str(c.to_string()))
-                        .ok_or_else(|| {
-                            // E3002 - Index Out Of Bounds
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                                .with_help(format!("string has {} character(s)", len))
-                                .with_note("ensure the index is within bounds");
-                            CompileError::semantic_with_context(
-                                format!("string index out of bounds: index is {} but length is {}", raw_idx, len),
-                                ctx,
-                            )
-                        })
+                    s.chars().nth(idx).map(|c| Value::Str(c.to_string())).ok_or_else(|| {
+                        // E3002 - Index Out Of Bounds
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                            .with_help(format!("string has {} character(s)", len))
+                            .with_note("ensure the index is within bounds");
+                        CompileError::semantic_with_context(
+                            format!("string index out of bounds: index is {} but length is {}", raw_idx, len),
+                            ctx,
+                        )
+                    })
                 }
                 Value::Object { fields, .. } => {
                     let key = idx_val.to_key_string();
-                    fields
-                        .get(&key)
-                        .cloned()
-                        .ok_or_else(|| {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                                .with_help("ensure the field exists in the object before accessing it");
-                            CompileError::semantic_with_context(
-                                format!("index out of bounds: field not found: {}", key),
-                                ctx,
-                            )
-                        })
+                    fields.get(&key).cloned().ok_or_else(|| {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                            .with_help("ensure the field exists in the object before accessing it");
+                        CompileError::semantic_with_context(
+                            format!("index out of bounds: field not found: {}", key),
+                            ctx,
+                        )
+                    })
                 }
                 _ => {
                     let ctx = ErrorContext::new()
@@ -405,36 +406,40 @@ pub(super) fn eval_collection_expr(
                         format!("invalid operation: cannot index value of type {}", recv_val.type_name()),
                         ctx,
                     ))
-                },
+                }
             };
             Ok(Some(result?))
         }
         Expr::TupleIndex { receiver, index } => {
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
             let result = match recv_val {
-                Value::Tuple(tup) => tup
-                    .get(*index)
-                    .cloned()
-                    .ok_or_else(|| {
-                        // E1044 - Tuple Index OOB
-                        let ctx = ErrorContext::new()
-                            .with_code(codes::TUPLE_INDEX_OOB)
-                            .with_note(format!("tuple has {} element(s)", tup.len()))
-                            .with_help("ensure the index is within bounds");
-                        CompileError::semantic_with_context(
-                            format!("tuple index out of bounds: index is {} but length is {}", index, tup.len()),
-                            ctx,
-                        )
-                    }),
+                Value::Tuple(tup) => tup.get(*index).cloned().ok_or_else(|| {
+                    // E1044 - Tuple Index OOB
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TUPLE_INDEX_OOB)
+                        .with_note(format!("tuple has {} element(s)", tup.len()))
+                        .with_help("ensure the index is within bounds");
+                    CompileError::semantic_with_context(
+                        format!(
+                            "tuple index out of bounds: index is {} but length is {}",
+                            index,
+                            tup.len()
+                        ),
+                        ctx,
+                    )
+                }),
                 _ => {
                     let ctx = ErrorContext::new()
                         .with_code(codes::INVALID_OPERATION)
                         .with_help("tuple indexing is only supported on tuple values");
                     Err(CompileError::semantic_with_context(
-                        format!("invalid operation: tuple index access on non-tuple type {}", recv_val.type_name()),
+                        format!(
+                            "invalid operation: tuple index access on non-tuple type {}",
+                            recv_val.type_name()
+                        ),
                         ctx,
                     ))
-                },
+                }
             };
             Ok(Some(result?))
         }
@@ -506,7 +511,10 @@ pub(super) fn eval_collection_expr(
                         .with_code(codes::INVALID_OPERATION)
                         .with_help("slicing with step is only supported on arrays, tuples, and strings");
                     return Err(CompileError::semantic_with_context(
-                        format!("invalid operation: cannot slice value of type {} with step", recv_val.type_name()),
+                        format!(
+                            "invalid operation: cannot slice value of type {} with step",
+                            recv_val.type_name()
+                        ),
                         ctx,
                     ));
                 }
@@ -556,10 +564,13 @@ pub(super) fn eval_collection_expr(
                         .with_code(codes::INVALID_OPERATION)
                         .with_help("slicing with step is only supported on arrays, tuples, and strings");
                     Err(CompileError::semantic_with_context(
-                        format!("invalid operation: cannot slice value of type {} with step", recv_val.type_name()),
+                        format!(
+                            "invalid operation: cannot slice value of type {} with step",
+                            recv_val.type_name()
+                        ),
                         ctx,
                     ))
-                },
+                }
             };
             Ok(Some(result?))
         }

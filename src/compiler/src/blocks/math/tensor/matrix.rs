@@ -16,7 +16,7 @@ impl Tensor {
         if k1 != k2 {
             return Err(crate::error::factory::tensor_shape_mismatch(
                 "matmul",
-                &format!("({}, {}) @ ({}, {})", m, k1, k2, n)
+                &format!("({}, {}) @ ({}, {})", m, k1, k2, n),
             ));
         }
 
@@ -42,7 +42,7 @@ impl Tensor {
         if self.shape[0] != other.shape[0] {
             return Err(crate::error::factory::tensor_shape_mismatch(
                 "dot",
-                &format!("{} vs {}", self.shape[0], other.shape[0])
+                &format!("{} vs {}", self.shape[0], other.shape[0]),
             ));
         }
         Ok(self.data.iter().zip(other.data.iter()).map(|(a, b)| a * b).sum())
@@ -94,7 +94,10 @@ impl Tensor {
     pub fn reshape(&self, new_shape: Vec<usize>) -> Result<Tensor, CompileError> {
         let new_size: usize = new_shape.iter().product();
         if new_size != self.data.len() {
-            return Err(crate::error::factory::tensor_reshape_failed(self.data.len(), &new_shape));
+            return Err(crate::error::factory::tensor_reshape_failed(
+                self.data.len(),
+                &new_shape,
+            ));
         }
         Tensor::new(self.data.clone(), new_shape)
     }

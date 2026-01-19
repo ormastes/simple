@@ -7,7 +7,10 @@ impl Tensor {
     /// Get element at index
     pub fn get(&self, indices: &[usize]) -> Result<f64, CompileError> {
         if indices.len() != self.shape.len() {
-            return Err(crate::error::factory::tensor_index_count_mismatch(self.shape.len(), indices.len()));
+            return Err(crate::error::factory::tensor_index_count_mismatch(
+                self.shape.len(),
+                indices.len(),
+            ));
         }
         let mut flat_idx = 0;
         for (i, &idx) in indices.iter().enumerate() {
@@ -22,7 +25,10 @@ impl Tensor {
     /// Set element at index
     pub fn set(&mut self, indices: &[usize], value: f64) -> Result<(), CompileError> {
         if indices.len() != self.shape.len() {
-            return Err(crate::error::factory::tensor_index_count_mismatch(self.shape.len(), indices.len()));
+            return Err(crate::error::factory::tensor_index_count_mismatch(
+                self.shape.len(),
+                indices.len(),
+            ));
         }
         let mut flat_idx = 0;
         for (i, &idx) in indices.iter().enumerate() {

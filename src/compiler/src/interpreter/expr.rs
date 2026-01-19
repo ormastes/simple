@@ -65,20 +65,14 @@ pub(crate) fn evaluate_expr(
                     let ctx = ErrorContext::new()
                         .with_code(codes::AWAIT_FAILED)
                         .with_help("ensure the future completes successfully");
-                    CompileError::semantic_with_context(
-                        format!("await failed: {}", e),
-                        ctx,
-                    )
+                    CompileError::semantic_with_context(format!("await failed: {}", e), ctx)
                 }),
                 Value::Actor(handle) => {
                     handle.join().map_err(|e| {
                         let ctx = ErrorContext::new()
                             .with_code(codes::AWAIT_FAILED)
                             .with_help("ensure the actor completes successfully");
-                        CompileError::semantic_with_context(
-                            format!("await failed: {}", e),
-                            ctx,
-                        )
+                        CompileError::semantic_with_context(format!("await failed: {}", e), ctx)
                     })?;
                     Ok(Value::Nil)
                 }
@@ -87,7 +81,10 @@ pub(crate) fn evaluate_expr(
                         .with_code(codes::AWAIT_FAILED)
                         .with_help("await can only be used on Future or Actor values");
                     Err(CompileError::semantic_with_context(
-                        format!("await failed: requires a Future or Actor handle, got {}", val.type_name()),
+                        format!(
+                            "await failed: requires a Future or Actor handle, got {}",
+                            val.type_name()
+                        ),
                         ctx,
                     ))
                 }
@@ -188,7 +185,7 @@ pub(crate) fn evaluate_expr(
                                 format!("invalid pattern: invalid Result variant: {}", variant),
                                 ctx,
                             ))
-                        },
+                        }
                     }
                 }
                 Value::Enum {
@@ -216,7 +213,7 @@ pub(crate) fn evaluate_expr(
                                 format!("invalid pattern: invalid Option variant: {}", variant),
                                 ctx,
                             ))
-                        },
+                        }
                     }
                 }
                 _ => {
@@ -224,10 +221,13 @@ pub(crate) fn evaluate_expr(
                         .with_code(codes::INVALID_OPERATION)
                         .with_help("try operator (?) can only be used on Result or Option types");
                     Err(CompileError::semantic_with_context(
-                        format!("invalid operation: ? operator requires Result or Option type, got {}", val.type_name()),
+                        format!(
+                            "invalid operation: ? operator requires Result or Option type, got {}",
+                            val.type_name()
+                        ),
                         ctx,
                     ))
-                },
+                }
             }
         }
         // Contract expressions - not supported in interpreter yet
@@ -239,7 +239,7 @@ pub(crate) fn evaluate_expr(
                 "invalid operation: contract 'result' keyword can only be used in contract blocks".to_string(),
                 ctx,
             ))
-        },
+        }
         Expr::ContractOld(_) => {
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_OPERATION)
@@ -248,7 +248,7 @@ pub(crate) fn evaluate_expr(
                 "invalid operation: contract old() expression can only be used in ensures blocks".to_string(),
                 ctx,
             ))
-        },
+        }
         #[allow(unreachable_patterns)]
         _ => {
             let ctx = ErrorContext::new()
@@ -258,6 +258,6 @@ pub(crate) fn evaluate_expr(
                 format!("invalid operation: unsupported expression type: {:?}", expr),
                 ctx,
             ))
-        },
+        }
     }
 }

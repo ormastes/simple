@@ -98,6 +98,12 @@ module.exports = grammar({
       $.common_use_statement,
       $.export_use_statement,
       $.auto_import_statement,
+      // AOP and testing
+      $.bitfield_definition,
+      $.aop_advice,
+      $.mock_declaration,
+      $.di_binding,
+      $.architecture_rule,
     ),
 
     //=========================================================================
@@ -174,9 +180,9 @@ module.exports = grammar({
 
     generic_type: $ => prec('type_args', seq(
       $.type_identifier,
-      '[',
+      '<',
       commaSep1($.type),
-      ']',
+      '>',
     )),
 
     // Pointer types: &T (unique), *T (shared), -T (weak), +T (handle)
@@ -227,19 +233,19 @@ module.exports = grammar({
       '?',
     ),
 
-    // Constructor type for factory patterns: Constructor[T]
+    // Constructor type for factory patterns: Constructor<T>
     // Represents a callable that creates instances of T
     constructor_type: $ => seq(
       'Constructor',
-      '[',
+      '<',
       $.type,
-      ']',
+      '>',
     ),
 
     type_parameters: $ => seq(
-      '[',
+      '<',
       commaSep1($.type_parameter),
-      ']',
+      '>',
     ),
 
     type_parameter: $ => seq(
@@ -297,9 +303,16 @@ module.exports = grammar({
       ')',
     ),
 
+    // Method definition with optional 'me' for mutable methods
+    // - 'fn name()' = immutable method (implicit self)
+    // - 'me name()' = mutable method (implicit mutable self)
+    // - 'static fn name()' = static method (no self)
     method_definition: $ => seq(
       optional('pub'),
-      'fn',
+      choice(
+        seq(optional('static'), 'fn'),  // Immutable or static method
+        'me',                            // Mutable method
+      ),
       $.identifier,
       $.parameters,
       optional($.effect_modifier),

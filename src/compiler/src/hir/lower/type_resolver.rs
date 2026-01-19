@@ -20,17 +20,14 @@ impl Lowerer {
                         });
                     }
                 }
-                self.module
-                    .types
-                    .lookup(name)
-                    .ok_or_else(|| {
-                        // Gather available type names for suggestions
-                        let available_types = self.module.types.all_type_names();
-                        LowerError::UnknownType {
-                            type_name: name.clone(),
-                            available_types,
-                        }
-                    })
+                self.module.types.lookup(name).ok_or_else(|| {
+                    // Gather available type names for suggestions
+                    let available_types = self.module.types.all_type_names();
+                    LowerError::UnknownType {
+                        type_name: name.clone(),
+                        available_types,
+                    }
+                })
             }
             Type::Pointer { kind, inner } => {
                 let inner_id = self.resolve_type(inner)?;

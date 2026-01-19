@@ -2,7 +2,7 @@
 
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::interpreter_helpers::{
     eval_option_and_then, eval_option_filter, eval_option_map, eval_option_or_else, eval_result_and_then,
     eval_result_map, eval_result_map_err, eval_result_or_else,
@@ -62,20 +62,29 @@ pub fn handle_unit_methods(
             });
 
             let Some(family_name) = family_name else {
-                return Err(CompileError::Semantic(format!(
-                    "Unit '{}' does not belong to a unit family, cannot convert to '{}'",
-                    suffix, target_suffix
-                )));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("unit conversion requires a recognized unit family");
+                return Err(CompileError::semantic_with_context(
+                    format!(
+                        "Unit '{}' does not belong to a unit family, cannot convert to '{}'",
+                        suffix, target_suffix
+                    ),
+                    ctx,
+                ));
             };
 
             // Look up conversions for this family, with SI prefix support
             let conversion_result = UNIT_FAMILY_CONVERSIONS.with(|cell| {
                 let families = cell.borrow();
                 let Some(conversions) = families.get(&family_name) else {
-                    return Err(CompileError::Semantic(format!(
-                        "Unit family '{}' not found",
-                        family_name
-                    )));
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("check that the unit family is defined");
+                    return Err(CompileError::semantic_with_context(
+                        format!("Unit family '{}' not found", family_name),
+                        ctx,
+                    ));
                 };
 
                 // Get source conversion factor (check SI prefix if not directly defined)
@@ -87,10 +96,13 @@ pub fn handle_unit_methods(
                     // SI prefixed: value is already in base units, so source factor is 1.0
                     1.0
                 } else {
-                    return Err(CompileError::Semantic(format!(
-                        "Unit '{}' not found in family '{}'",
-                        suffix, family_name
-                    )));
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("check that the source unit exists in this family");
+                    return Err(CompileError::semantic_with_context(
+                        format!("Unit '{}' not found in family '{}'", suffix, family_name),
+                        ctx,
+                    ));
                 };
 
                 // Get target conversion factor (check SI prefix if not directly defined)
@@ -101,12 +113,20 @@ pub fn handle_unit_methods(
                     let base_factor = conversions.get(&base).copied().unwrap_or(1.0);
                     si_mult * base_factor
                 } else {
-                    return Err(CompileError::Semantic(format!(
-                        "Target unit '{}' not found in family '{}'. Available: {:?}",
-                        target_suffix,
-                        family_name,
-                        conversions.keys().collect::<Vec<_>>()
-                    )));
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help(format!(
+                            "available units in family '{}': {}",
+                            family_name,
+                            conversions.keys().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
+                        ));
+                    return Err(CompileError::semantic_with_context(
+                        format!(
+                            "Target unit '{}' not found in family '{}'",
+                            target_suffix, family_name
+                        ),
+                        ctx,
+                    ));
                 };
 
                 Ok((source_factor, target_factor))
@@ -128,10 +148,13 @@ pub fn handle_unit_methods(
                 }
                 Value::Float(f) => Value::Float(f * (source_factor / target_factor)),
                 _ => {
-                    return Err(CompileError::Semantic(format!(
-                        "Cannot convert non-numeric unit value: {:?}",
-                        value
-                    )));
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help("unit conversion requires a numeric value (Int or Float)");
+                    return Err(CompileError::semantic_with_context(
+                        format!("Cannot convert non-numeric unit value: {}", value.type_name()),
+                        ctx,
+                    ));
                 }
             };
 
@@ -176,7 +199,13 @@ pub fn handle_option_methods(
                     return Ok(Some(val.as_ref().clone()));
                 }
             }
-            return Err(CompileError::Semantic("called unwrap on None".into()));
+            let ctx = ErrorContext::new()
+                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                .with_help("check that the Option contains Some before calling unwrap");
+            return Err(CompileError::semantic_with_context(
+                "called unwrap on None".to_string(),
+                ctx,
+            ));
         }
         "expect" => {
             if opt_variant == Some(OptionVariant::Some) {
@@ -194,7 +223,13 @@ pub fn handle_option_methods(
                 enums,
                 impl_methods,
             )?;
-            return Err(CompileError::Semantic(msg.to_display_string()));
+            let ctx = ErrorContext::new()
+                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                .with_help("check that the Option contains Some before calling expect");
+            return Err(CompileError::semantic_with_context(
+                msg.to_display_string(),
+                ctx,
+            ));
         }
         "unwrap_or" => {
             if opt_variant == Some(OptionVariant::Some) {
