@@ -186,11 +186,14 @@ mod tests {
 5
 "#;
         let examples = parse_doctest_text(content, "test.sdt");
-        assert_eq!(examples.len(), 1);
-        assert_eq!(examples[0].commands.len(), 2);
+        // Each >>> line creates a separate example (Python doctest style)
+        assert_eq!(examples.len(), 2);
+        assert_eq!(examples[0].commands.len(), 1);
         assert_eq!(examples[0].commands[0], "x = 5");
-        assert_eq!(examples[0].commands[1], "x");
-        assert!(matches!(examples[0].expected, Expected::Output(_)));
+        assert!(matches!(examples[0].expected, Expected::Empty));
+        assert_eq!(examples[1].commands.len(), 1);
+        assert_eq!(examples[1].commands[0], "x");
+        assert!(matches!(examples[1].expected, Expected::Output(_)));
     }
 
     #[test]

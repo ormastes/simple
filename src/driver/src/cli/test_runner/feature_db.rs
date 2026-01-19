@@ -7,11 +7,7 @@ use std::path::PathBuf;
 use super::types::TestFileResult;
 
 /// Update feature database from test results
-pub fn update_feature_database(
-    test_files: &[PathBuf],
-    results: &mut Vec<TestFileResult>,
-    total_failed: &mut usize,
-) {
+pub fn update_feature_database(test_files: &[PathBuf], results: &mut Vec<TestFileResult>, total_failed: &mut usize) {
     let feature_db_path = PathBuf::from("doc/features/feature_db.sdn");
     let sspec_files: Vec<PathBuf> = test_files
         .iter()
@@ -30,11 +26,7 @@ pub fn update_feature_database(
         .map(|result| result.path.clone())
         .collect();
 
-    if let Err(e) = crate::feature_db::update_feature_db_from_sspec(
-        &feature_db_path,
-        &sspec_files,
-        &failed_specs,
-    ) {
+    if let Err(e) = crate::feature_db::update_feature_db_from_sspec(&feature_db_path, &sspec_files, &failed_specs) {
         *total_failed += 1;
         results.push(TestFileResult {
             path: feature_db_path,

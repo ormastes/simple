@@ -358,8 +358,8 @@ mod tests {
     fn test_time_now_unix_micros() {
         let now = rt_time_now_unix_micros();
         // Should be a reasonable timestamp (after 2020, before 2100)
-        assert!(now > 1577836800_000_000); // 2020-01-01
-        assert!(now < 4102444800_000_000); // 2100-01-01
+        assert!(now > 1_577_836_800_000_000); // 2020-01-01
+        assert!(now < 4_102_444_800_000_000); // 2100-01-01
     }
 
     #[test]

@@ -7,7 +7,7 @@
 use crate::error::{codes, CompileError, ErrorContext};
 use simple_diagnostics::{
     Diagnostic as I18nDiagnostic, Severity as I18nSeverity, Span as I18nSpan,
-    i18n::{ctx1, ctx2, ctx3, ContextBuilder}
+    i18n::{ctx1, ctx2, ctx3, ContextBuilder},
 };
 use simple_i18n::MessageContext;
 
@@ -122,17 +122,11 @@ fn create_i18n_diagnostic_from_code(code: &str, message: &str, ctx: &ErrorContex
         }
 
         // Control flow errors (E11xx)
-        codes::BREAK_OUTSIDE_LOOP => {
-            I18nDiagnostic::error_i18n("compiler", "E1101", &MessageContext::new())
-        }
+        codes::BREAK_OUTSIDE_LOOP => I18nDiagnostic::error_i18n("compiler", "E1101", &MessageContext::new()),
 
-        codes::CONTINUE_OUTSIDE_LOOP => {
-            I18nDiagnostic::error_i18n("compiler", "E1102", &MessageContext::new())
-        }
+        codes::CONTINUE_OUTSIDE_LOOP => I18nDiagnostic::error_i18n("compiler", "E1102", &MessageContext::new()),
 
-        codes::RETURN_OUTSIDE_FUNCTION => {
-            I18nDiagnostic::error_i18n("compiler", "E1103", &MessageContext::new())
-        }
+        codes::RETURN_OUTSIDE_FUNCTION => I18nDiagnostic::error_i18n("compiler", "E1103", &MessageContext::new()),
 
         // Macro errors (E14xx)
         codes::MACRO_UNDEFINED => {
@@ -160,9 +154,7 @@ fn create_i18n_diagnostic_from_code(code: &str, message: &str, ctx: &ErrorContex
         }
 
         // Runtime errors (E30xx)
-        codes::DIVISION_BY_ZERO => {
-            I18nDiagnostic::error_i18n("compiler", "E3001", &MessageContext::new())
-        }
+        codes::DIVISION_BY_ZERO => I18nDiagnostic::error_i18n("compiler", "E3001", &MessageContext::new()),
 
         codes::INDEX_OUT_OF_BOUNDS => {
             let (index, length) = extract_index_bounds(message);
@@ -170,9 +162,7 @@ fn create_i18n_diagnostic_from_code(code: &str, message: &str, ctx: &ErrorContex
             I18nDiagnostic::error_i18n("compiler", "E3002", &msg_ctx)
         }
 
-        codes::STACK_OVERFLOW => {
-            I18nDiagnostic::error_i18n("compiler", "E3003", &MessageContext::new())
-        }
+        codes::STACK_OVERFLOW => I18nDiagnostic::error_i18n("compiler", "E3003", &MessageContext::new()),
 
         codes::ASSERTION_FAILED => {
             let condition = extract_condition(message);
@@ -187,10 +177,389 @@ fn create_i18n_diagnostic_from_code(code: &str, message: &str, ctx: &ErrorContex
             I18nDiagnostic::error_i18n("compiler", "E3005", &msg_ctx)
         }
 
-        // Unknown error code - fall back to plain diagnostic
-        _ => {
-            create_plain_diagnostic_with_code(message, code, None)
+        codes::AWAIT_FAILED => {
+            let msg_ctx = ctx1("error", message);
+            I18nDiagnostic::error_i18n("compiler", "E3006", &msg_ctx)
         }
+
+        codes::PROMISE_REJECTED => {
+            let msg_ctx = ctx1("reason", message);
+            I18nDiagnostic::error_i18n("compiler", "E3007", &msg_ctx)
+        }
+
+        codes::FUNCTION_NOT_FOUND => {
+            let name = extract_name_from_message(message);
+            let msg_ctx = ctx1("name", name);
+            I18nDiagnostic::error_i18n("compiler", "E3008", &msg_ctx)
+        }
+
+        codes::METHOD_NOT_FOUND => {
+            let (method, type_name) = extract_method_info(message);
+            let msg_ctx = ctx2("method", method, "type", type_name);
+            I18nDiagnostic::error_i18n("compiler", "E3009", &msg_ctx)
+        }
+
+        // Extended semantic errors (E1011-E1080)
+        codes::UNDEFINED_TYPE => {
+            let name = extract_name_from_message(message);
+            let msg_ctx = ctx1("name", name);
+            I18nDiagnostic::error_i18n("compiler", "E1011", &msg_ctx)
+        }
+
+        codes::UNDEFINED_FIELD => {
+            let field = extract_name_from_message(message);
+            let msg_ctx = ctx1("field", field);
+            I18nDiagnostic::error_i18n("compiler", "E1012", &msg_ctx)
+        }
+
+        codes::UNKNOWN_METHOD => {
+            let (method, type_name) = extract_method_info(message);
+            let msg_ctx = ctx2("method", method, "type", type_name);
+            I18nDiagnostic::error_i18n("compiler", "E1013", &msg_ctx)
+        }
+
+        codes::UNKNOWN_CLASS => {
+            let name = extract_name_from_message(message);
+            let msg_ctx = ctx1("name", name);
+            I18nDiagnostic::error_i18n("compiler", "E1014", &msg_ctx)
+        }
+
+        codes::UNKNOWN_ENUM => {
+            let name = extract_name_from_message(message);
+            let msg_ctx = ctx1("name", name);
+            I18nDiagnostic::error_i18n("compiler", "E1015", &msg_ctx)
+        }
+
+        codes::LET_BINDING_FAILED => {
+            let msg_ctx = ctx2("name", extract_name_from_message(message), "error", message);
+            I18nDiagnostic::error_i18n("compiler", "E1016", &msg_ctx)
+        }
+
+        codes::IMPURE_FUNCTION_IN_CONTRACT => {
+            let name = extract_name_from_message(message);
+            let msg_ctx = ctx1("name", name);
+            I18nDiagnostic::error_i18n("compiler", "E1017", &msg_ctx)
+        }
+
+        codes::EFFECT_DECLARATION_FAILED => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1018", &msg_ctx)
+        }
+
+        codes::DUPLICATE_BINDING => {
+            let name = extract_name_from_message(message);
+            let msg_ctx = ctx1("name", name);
+            I18nDiagnostic::error_i18n("compiler", "E1019", &msg_ctx)
+        }
+
+        codes::ARGUMENT_COUNT_MISMATCH => {
+            let (expected, found) = extract_count_mismatch(message);
+            let msg_ctx = ctx2("expected", expected, "found", found);
+            I18nDiagnostic::error_i18n("compiler", "E1020", &msg_ctx)
+        }
+
+        codes::MISSING_STRUCT_FIELDS => {
+            let msg_ctx = ctx1("fields", message);
+            I18nDiagnostic::error_i18n("compiler", "E1021", &msg_ctx)
+        }
+
+        codes::INVALID_LHS_ASSIGNMENT => {
+            let msg_ctx = ctx1("lhs", message);
+            I18nDiagnostic::error_i18n("compiler", "E1022", &msg_ctx)
+        }
+
+        codes::INVALID_STRUCT_LITERAL => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1023", &msg_ctx)
+        }
+
+        codes::CONST_EVAL_FAILED => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1024", &msg_ctx)
+        }
+
+        codes::DUPLICATE_METHOD => {
+            let name = extract_name_from_message(message);
+            let msg_ctx = ctx1("name", name);
+            I18nDiagnostic::error_i18n("compiler", "E1025", &msg_ctx)
+        }
+
+        codes::UNKNOWN_ASSOC_TYPE => {
+            let name = extract_name_from_message(message);
+            let msg_ctx = ctx1("name", name);
+            I18nDiagnostic::error_i18n("compiler", "E1026", &msg_ctx)
+        }
+
+        codes::UNCONSTRAINED_TYPE_PARAM => {
+            let name = extract_name_from_message(message);
+            let msg_ctx = ctx1("name", name);
+            I18nDiagnostic::error_i18n("compiler", "E1027", &msg_ctx)
+        }
+
+        codes::UNKNOWN_ASSOC_TYPE_NAME => {
+            let name = extract_name_from_message(message);
+            let msg_ctx = ctx1("name", name);
+            I18nDiagnostic::error_i18n("compiler", "E1028", &msg_ctx)
+        }
+
+        codes::CONFLICTING_TRAIT_BOUNDS => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1029", &msg_ctx)
+        }
+
+        codes::INVALID_LIFETIME_ON_TRAIT => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1030", &msg_ctx)
+        }
+
+        codes::MISSING_TRAIT_METHOD => {
+            let name = extract_name_from_message(message);
+            let msg_ctx = ctx1("name", name);
+            I18nDiagnostic::error_i18n("compiler", "E1031", &msg_ctx)
+        }
+
+        codes::SELF_IN_STATIC => I18nDiagnostic::error_i18n("compiler", "E1032", &MessageContext::new()),
+
+        codes::INVALID_SELF_IMPORT => I18nDiagnostic::error_i18n("compiler", "E1033", &MessageContext::new()),
+
+        codes::UNRESOLVED_IMPORT => {
+            let msg_ctx = ctx1("path", message);
+            I18nDiagnostic::error_i18n("compiler", "E1034", &msg_ctx)
+        }
+
+        codes::INVALID_SELF_CONTEXT => I18nDiagnostic::error_i18n("compiler", "E1035", &MessageContext::new()),
+
+        codes::CLOSURE_CAPTURE_FAILED => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1036", &msg_ctx)
+        }
+
+        codes::INVALID_SELF_PARAM => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1037", &msg_ctx)
+        }
+
+        codes::PRIVATE_IN_PUBLIC => {
+            let msg_ctx = ctx1("item", message);
+            I18nDiagnostic::error_i18n("compiler", "E1038", &msg_ctx)
+        }
+
+        codes::INVALID_VISIBILITY => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1039", &msg_ctx)
+        }
+
+        codes::PRIVATE_FIELD_ACCESS => {
+            let field = extract_name_from_message(message);
+            let msg_ctx = ctx1("field", field);
+            I18nDiagnostic::error_i18n("compiler", "E1040", &msg_ctx)
+        }
+
+        codes::INVALID_UNARY_OP => {
+            let (operator, type_name) = extract_operation_info(message);
+            let msg_ctx = ctx2("operator", operator, "type", type_name);
+            I18nDiagnostic::error_i18n("compiler", "E1041", &msg_ctx)
+        }
+
+        codes::INVALID_SELF_TYPE => I18nDiagnostic::error_i18n("compiler", "E1042", &MessageContext::new()),
+
+        codes::INVALID_INDEX_TYPE => {
+            let msg_ctx = ctx1("found", message);
+            I18nDiagnostic::error_i18n("compiler", "E1043", &msg_ctx)
+        }
+
+        codes::TUPLE_INDEX_OOB => {
+            let (index, size) = extract_index_bounds(message);
+            let msg_ctx = ctx2("index", index, "size", size);
+            I18nDiagnostic::error_i18n("compiler", "E1044", &msg_ctx)
+        }
+
+        codes::INVALID_FIELD_ASSIGN => I18nDiagnostic::error_i18n("compiler", "E1045", &MessageContext::new()),
+
+        codes::PRIVATE_FIELD => {
+            let field = extract_name_from_message(message);
+            let msg_ctx = ctx1("field", field);
+            I18nDiagnostic::error_i18n("compiler", "E1046", &msg_ctx)
+        }
+
+        codes::CANNOT_BORROW_MUT_FIELD => {
+            let field = extract_name_from_message(message);
+            let msg_ctx = ctx1("field", field);
+            I18nDiagnostic::error_i18n("compiler", "E1047", &msg_ctx)
+        }
+
+        codes::NOT_CALLABLE => {
+            let type_name = extract_type_from_message(message);
+            let msg_ctx = ctx1("type", type_name);
+            I18nDiagnostic::error_i18n("compiler", "E1048", &msg_ctx)
+        }
+
+        codes::CANNOT_CALL_NON_FUNCTION => {
+            let type_name = extract_type_from_message(message);
+            let msg_ctx = ctx1("type", type_name);
+            I18nDiagnostic::error_i18n("compiler", "E1049", &msg_ctx)
+        }
+
+        codes::DISALLOWED_COERCION => {
+            let (from, to) = extract_type_mismatch(message);
+            let msg_ctx = ctx2("from", from, "to", to);
+            I18nDiagnostic::error_i18n("compiler", "E1050", &msg_ctx)
+        }
+
+        codes::CLOSURE_SIGNATURE_MISMATCH => I18nDiagnostic::error_i18n("compiler", "E1051", &MessageContext::new()),
+
+        codes::INVALID_LET_ELSE_PATTERN => I18nDiagnostic::error_i18n("compiler", "E1052", &MessageContext::new()),
+
+        codes::CANNOT_BORROW_IMMUTABLE => I18nDiagnostic::error_i18n("compiler", "E1053", &MessageContext::new()),
+
+        codes::INVALID_DEREFERENCE => {
+            let type_name = extract_type_from_message(message);
+            let msg_ctx = ctx1("type", type_name);
+            I18nDiagnostic::error_i18n("compiler", "E1054", &msg_ctx)
+        }
+
+        codes::TYPE_ALIAS_BOUNDS => I18nDiagnostic::error_i18n("compiler", "E1055", &MessageContext::new()),
+
+        codes::INVALID_RANGE => I18nDiagnostic::error_i18n("compiler", "E1056", &MessageContext::new()),
+
+        codes::YIELD_OUTSIDE_GENERATOR => I18nDiagnostic::error_i18n("compiler", "E1057", &MessageContext::new()),
+
+        codes::INVALID_DOC_COMMENT => I18nDiagnostic::error_i18n("compiler", "E1058", &MessageContext::new()),
+
+        codes::INVALID_IMPLICIT_DEREFERENCE => {
+            let type_name = extract_type_from_message(message);
+            let msg_ctx = ctx1("type", type_name);
+            I18nDiagnostic::error_i18n("compiler", "E1059", &msg_ctx)
+        }
+
+        codes::INVALID_CONST_EXPRESSION => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1060", &msg_ctx)
+        }
+
+        codes::EMPTY_ENUM => I18nDiagnostic::error_i18n("compiler", "E1061", &MessageContext::new()),
+
+        codes::RECURSION_LIMIT_EXCEEDED => I18nDiagnostic::error_i18n("compiler", "E1062", &MessageContext::new()),
+
+        codes::TYPE_SIZE_LIMIT_EXCEEDED => I18nDiagnostic::error_i18n("compiler", "E1063", &MessageContext::new()),
+
+        codes::WRONG_INTRINSIC_TYPE => {
+            let msg_ctx = ctx3("intrinsic", extract_name_from_message(message), "expected", "?", "found", "?");
+            I18nDiagnostic::error_i18n("compiler", "E1064", &msg_ctx)
+        }
+
+        codes::INVALID_RETURN_TYPE => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1065", &msg_ctx)
+        }
+
+        codes::INVALID_MAIN_SIGNATURE => I18nDiagnostic::error_i18n("compiler", "E1066", &MessageContext::new()),
+
+        codes::INVALID_BUILTIN_ATTRIBUTE => {
+            let attr = extract_name_from_message(message);
+            let msg_ctx = ctx1("attr", attr);
+            I18nDiagnostic::error_i18n("compiler", "E1067", &msg_ctx)
+        }
+
+        codes::INCONSISTENT_BINDINGS => I18nDiagnostic::error_i18n("compiler", "E1068", &MessageContext::new()),
+
+        codes::MISMATCHED_BINDING => I18nDiagnostic::error_i18n("compiler", "E1069", &MessageContext::new()),
+
+        codes::INVALID_DEFAULT_VARIANT => I18nDiagnostic::error_i18n("compiler", "E1070", &MessageContext::new()),
+
+        codes::INVALID_ATTRIBUTE_POSITION => {
+            let attr = extract_name_from_message(message);
+            let msg_ctx = ctx1("attr", attr);
+            I18nDiagnostic::error_i18n("compiler", "E1071", &msg_ctx)
+        }
+
+        codes::INVALID_DESTRUCTURING => I18nDiagnostic::error_i18n("compiler", "E1072", &MessageContext::new()),
+
+        codes::NON_EXHAUSTIVE_TYPE => {
+            let type_name = extract_type_from_message(message);
+            let msg_ctx = ctx1("type", type_name);
+            I18nDiagnostic::error_i18n("compiler", "E1073", &msg_ctx)
+        }
+
+        codes::CONFLICTING_REPRESENTATION => I18nDiagnostic::error_i18n("compiler", "E1074", &MessageContext::new()),
+
+        codes::DISCRIMINANT_OVERFLOW => I18nDiagnostic::error_i18n("compiler", "E1075", &MessageContext::new()),
+
+        codes::UNKNOWN_INTRINSIC => {
+            let intrinsic = extract_name_from_message(message);
+            let msg_ctx = ctx1("intrinsic", intrinsic);
+            I18nDiagnostic::error_i18n("compiler", "E1076", &msg_ctx)
+        }
+
+        codes::WRONG_INTRINSIC_SIGNATURE => {
+            let intrinsic = extract_name_from_message(message);
+            let msg_ctx = ctx1("intrinsic", intrinsic);
+            I18nDiagnostic::error_i18n("compiler", "E1077", &msg_ctx)
+        }
+
+        codes::INVALID_INTRINSIC_RETURN => {
+            let intrinsic = extract_name_from_message(message);
+            let msg_ctx = ctx1("intrinsic", intrinsic);
+            I18nDiagnostic::error_i18n("compiler", "E1078", &msg_ctx)
+        }
+
+        codes::MISSING_GENERIC_ARGUMENTS => {
+            let type_name = extract_type_from_message(message);
+            let msg_ctx = ctx1("type", type_name);
+            I18nDiagnostic::error_i18n("compiler", "E1079", &msg_ctx)
+        }
+
+        codes::TYPE_TOO_COMPLEX => I18nDiagnostic::error_i18n("compiler", "E1080", &MessageContext::new()),
+
+        // Extended control flow errors
+        codes::RETURN_IN_CLOSURE => I18nDiagnostic::error_i18n("compiler", "E1104", &MessageContext::new()),
+
+        codes::INVALID_CONTROL_FLOW => I18nDiagnostic::error_i18n("compiler", "E1105", &MessageContext::new()),
+
+        // Capability errors (E13xx)
+        codes::CAPABILITY_VIOLATION => I18nDiagnostic::error_i18n("compiler", "E1301", &MessageContext::new()),
+
+        codes::ISOLATION_VIOLATION => I18nDiagnostic::error_i18n("compiler", "E1302", &MessageContext::new()),
+
+        // Extended macro errors
+        codes::KEYWORD_IN_MACRO => {
+            let keyword = extract_name_from_message(message);
+            let msg_ctx = ctx1("keyword", keyword);
+            I18nDiagnostic::error_i18n("compiler", "E1403", &msg_ctx)
+        }
+
+        // Extended codegen errors
+        codes::FAILED_BUILD_LOAD => I18nDiagnostic::error_i18n("compiler", "E2003", &MessageContext::new()),
+
+        codes::FAILED_BUILD_STORE => I18nDiagnostic::error_i18n("compiler", "E2004", &MessageContext::new()),
+
+        codes::FAILED_BUILD_ALLOCA => I18nDiagnostic::error_i18n("compiler", "E2005", &MessageContext::new()),
+
+        codes::FAILED_BUILD_CALL => I18nDiagnostic::error_i18n("compiler", "E2006", &MessageContext::new()),
+
+        codes::FAILED_TO_CAST => {
+            let (from_type, to_type) = extract_type_mismatch(message);
+            let msg_ctx = ctx2("from_type", from_type, "to_type", to_type);
+            I18nDiagnostic::error_i18n("compiler", "E2007", &msg_ctx)
+        }
+
+        codes::FAILED_BUILD_GEP => I18nDiagnostic::error_i18n("compiler", "E2008", &MessageContext::new()),
+
+        codes::UNSUPPORTED_RETURN_TYPE => {
+            let type_name = extract_type_from_message(message);
+            let msg_ctx = ctx1("type", type_name);
+            I18nDiagnostic::error_i18n("compiler", "E2009", &msg_ctx)
+        }
+
+        // FFI errors (E40xx)
+        codes::TYPE_NOT_FFI_SAFE => {
+            let type_name = extract_type_from_message(message);
+            let msg_ctx = ctx1("type", type_name);
+            I18nDiagnostic::error_i18n("compiler", "E4005", &msg_ctx)
+        }
+
+        // Unknown error code - fall back to plain diagnostic
+        _ => create_plain_diagnostic_with_code(message, code, None),
     }
 }
 
@@ -212,8 +581,7 @@ fn create_plain_diagnostic(error: &CompileError, span: Option<I18nSpan>) -> I18n
 
 /// Create a plain diagnostic with an error code.
 fn create_plain_diagnostic_with_code(message: &str, code: &str, span: Option<I18nSpan>) -> I18nDiagnostic {
-    let mut diag = I18nDiagnostic::error(message.to_string())
-        .with_code(code.to_string());
+    let mut diag = I18nDiagnostic::error(message.to_string()).with_code(code.to_string());
 
     if let Some(s) = span {
         diag = diag.with_span(s);
@@ -227,16 +595,35 @@ fn create_plain_diagnostic_with_code(message: &str, code: &str, span: Option<I18
 fn extract_name_from_message(message: &str) -> &str {
     // Extract name from messages like "undefined variable: foo" or "cannot find variable `foo` in this scope"
     if let Some(pos) = message.find('`') {
-        if let Some(end_pos) = message[pos+1..].find('`') {
-            return &message[pos+1..pos+1+end_pos];
+        if let Some(end_pos) = message[pos + 1..].find('`') {
+            return &message[pos + 1..pos + 1 + end_pos];
         }
     }
 
     if let Some(pos) = message.find(": ") {
-        message[pos+2..].trim()
+        message[pos + 2..].trim()
     } else {
         "unknown"
     }
+}
+
+fn extract_type_from_message(message: &str) -> &str {
+    // Extract type name from messages like "type `Foo` is not FFI-safe" or "missing generic arguments for `Bar<T>`"
+    if let Some(pos) = message.find("type `") {
+        let start = pos + "type `".len();
+        if let Some(end) = message[start..].find('`') {
+            return &message[start..start + end];
+        }
+    }
+
+    // Fall back to general backtick extraction
+    if let Some(pos) = message.find('`') {
+        if let Some(end_pos) = message[pos + 1..].find('`') {
+            return &message[pos + 1..pos + 1 + end_pos];
+        }
+    }
+
+    "unknown"
 }
 
 fn extract_type_mismatch(message: &str) -> (&str, &str) {
@@ -256,6 +643,51 @@ fn extract_type_mismatch(message: &str) -> (&str, &str) {
         let start_pos = start + "found `".len();
         if let Some(end) = message[start_pos..].find('`') {
             &message[start_pos..start_pos + end]
+        } else {
+            "unknown"
+        }
+    } else {
+        "unknown"
+    };
+
+    (expected, found)
+}
+
+fn extract_count_mismatch(message: &str) -> (&str, &str) {
+    // Extract from "expected 3 arguments, found 2" or similar patterns
+    let expected = if let Some(start) = message.find("expected ") {
+        let start_pos = start + "expected ".len();
+        // Find the next space or non-digit character
+        let mut end = start_pos;
+        for (i, c) in message[start_pos..].char_indices() {
+            if !c.is_ascii_digit() {
+                end = start_pos + i;
+                break;
+            }
+            end = start_pos + i + 1;
+        }
+        if end > start_pos {
+            &message[start_pos..end]
+        } else {
+            "unknown"
+        }
+    } else {
+        "unknown"
+    };
+
+    let found = if let Some(start) = message.find("found ") {
+        let start_pos = start + "found ".len();
+        // Find the next space or non-digit character
+        let mut end = start_pos;
+        for (i, c) in message[start_pos..].char_indices() {
+            if !c.is_ascii_digit() {
+                end = start_pos + i;
+                break;
+            }
+            end = start_pos + i + 1;
+        }
+        if end > start_pos {
+            &message[start_pos..end]
         } else {
             "unknown"
         }
@@ -394,6 +826,39 @@ fn extract_duration(message: &str) -> &str {
     }
 }
 
+fn extract_method_info(message: &str) -> (&str, &str) {
+    // Extract from "method `foo` not found on type `Bar`" or similar
+    let method = if let Some(start) = message.find("`method") {
+        let start_pos = start + 8;
+        if let Some(end) = message[start_pos..].find('`') {
+            &message[start_pos..start_pos + end]
+        } else {
+            "unknown"
+        }
+    } else if let Some(start) = message.find('`') {
+        if let Some(end) = message[start + 1..].find('`') {
+            &message[start + 1..start + 1 + end]
+        } else {
+            "unknown"
+        }
+    } else {
+        "unknown"
+    };
+
+    let type_name = if let Some(start) = message.find("type `") {
+        let start_pos = start + 6;
+        if let Some(end) = message[start_pos..].find('`') {
+            &message[start_pos..start_pos + end]
+        } else {
+            "unknown"
+        }
+    } else {
+        "unknown"
+    };
+
+    (method, type_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,7 +890,10 @@ mod tests {
 
     #[test]
     fn test_extract_name_from_message() {
-        assert_eq!(extract_name_from_message("cannot find variable `foo` in this scope"), "foo");
+        assert_eq!(
+            extract_name_from_message("cannot find variable `foo` in this scope"),
+            "foo"
+        );
         assert_eq!(extract_name_from_message("undefined variable: bar"), "bar");
     }
 

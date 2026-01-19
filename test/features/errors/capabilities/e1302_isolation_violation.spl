@@ -1,0 +1,96 @@
+# E1302: Isolation Violation
+
+Feature: E1302 - Isolation Violation
+  As a Simple compiler with reference capabilities
+  I want to detect attempts to alias isolated references
+  So that isolation guarantees are maintained
+
+  Background:
+    Given I have the Simple compiler
+    And the compiler supports reference capabilities (T, mut T, iso T)
+
+  Scenario: Aliasing isolated reference
+    When I compile:
+      '''
+      fn test():
+        var x: iso Buffer = Buffer.new()
+        var y = x  # Error: cannot alias iso reference
+        x.write("data")  # x is consumed by assignment to y
+      '''
+    Then I should see error E1302 at line 3
+    And the error message should contain "cannot alias isolated reference"
+    And the label should indicate "isolation violation"
+    And the note should say "`iso` references cannot be aliased"
+    And the help should suggest "consume the isolated reference or use a different capability"
+
+  Scenario: Passing iso to function that doesn't consume
+    When I compile:
+      '''
+      fn read(buf: Buffer):  # Takes non-iso
+        print(buf.data)
+
+      fn test():
+        val buf: iso Buffer = Buffer.new()
+        read(buf)  # Error: would create alias
+        buf.close()  # buf should still be valid
+      '''
+    Then I should see error E1302 or appropriate capability error
+
+  Scenario: Returning iso from function creates alias
+    When I compile:
+      '''
+      fn create() -> iso Buffer:
+        val buf: iso Buffer = Buffer.new()
+        buf  # OK: consuming move
+
+      fn test():
+        val b1 = create()
+        val b2 = b1  # Error: aliasing iso
+      '''
+    Then I should see error E1302 at line 7
+
+  Scenario: Valid iso consumption
+    When I compile:
+      '''
+      fn consume(buf: iso Buffer):
+        buf.close()  # OK: consumes iso
+
+      fn test():
+        val buf: iso Buffer = Buffer.new()
+        consume(buf)  # OK: buf is consumed (moved)
+        # buf is no longer valid here
+      '''
+    Then compilation should succeed
+
+  Scenario: Valid iso to mut downgrade (if allowed)
+    When I compile:
+      '''
+      fn test():
+        var buf: iso Buffer = Buffer.new()
+        var mutable: mut Buffer = buf  # OK if iso -> mut allowed
+        mutable.write("data")
+      '''
+    Then compilation should succeed or show appropriate error
+
+  Scenario: Cloning iso creates new isolated value
+    When I compile:
+      '''
+      fn test():
+        val buf1: iso Buffer = Buffer.new()
+        val buf2: iso Buffer = buf1.clone()  # OK if clone creates new iso
+        buf1.close()
+        buf2.close()
+      '''
+    Then compilation should succeed if clone is properly implemented
+
+  Scenario: Korean language error
+    Given I set compiler language to "ko"
+    When I compile:
+      '''
+      fn test():
+        var x: iso Buffer = Buffer.new()
+        var y = x
+      '''
+    Then I should see error E1302
+    And the error message should contain "격리 위반"
+    And the error message should contain "별칭으로 만들 수 없습니다"

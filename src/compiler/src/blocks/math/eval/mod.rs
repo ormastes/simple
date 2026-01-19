@@ -312,9 +312,7 @@ fn eval_function(
         // ==========================================================================
         // Tensor reductions
         // ==========================================================================
-        "sum" if eval_args.len() == 1 && eval_args[0].is_tensor() => {
-            tensor_functions::eval_sum_tensor(&eval_args)
-        }
+        "sum" if eval_args.len() == 1 && eval_args[0].is_tensor() => tensor_functions::eval_sum_tensor(&eval_args),
         "mean" => tensor_functions::eval_mean(&eval_args),
         "var" => tensor_functions::eval_var(&eval_args),
         "std" => tensor_functions::eval_std(&eval_args),

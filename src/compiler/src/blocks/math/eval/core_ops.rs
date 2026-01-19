@@ -125,9 +125,9 @@ mod tests {
 
     #[test]
     fn test_unary_op_float() {
-        let result = unary_op(&MathValue::Float(3.14), |x| x * 2.0).unwrap();
+        let result = unary_op(&MathValue::Float(3.25), |x| x * 2.0).unwrap();
         match result {
-            MathValue::Float(f) => assert!((f - 6.28).abs() < 0.001),
+            MathValue::Float(f) => assert!((f - 6.5).abs() < 0.001),
             _ => panic!("expected float"),
         }
     }
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_float_or_int_fractional() {
-        let result = float_or_int_math(3.14);
+        let result = float_or_int_math(3.25);
         assert!(matches!(result, MathValue::Float(_)));
     }
 

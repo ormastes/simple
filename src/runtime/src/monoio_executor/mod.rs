@@ -33,9 +33,8 @@ pub use types::{OpResult, OpState, OpType};
 
 // Re-export FFI functions
 pub use ffi::{
-    rt_monoio_async_init, rt_monoio_async_pending_count, rt_monoio_async_poll_all,
-    rt_monoio_async_poll_one, rt_monoio_async_tcp_accept, rt_monoio_async_tcp_close,
-    rt_monoio_async_tcp_connect, rt_monoio_async_tcp_listen, rt_monoio_async_tcp_listener_close,
-    rt_monoio_async_tcp_read, rt_monoio_async_tcp_write, rt_monoio_async_udp_bind,
+    rt_monoio_async_init, rt_monoio_async_pending_count, rt_monoio_async_poll_all, rt_monoio_async_poll_one,
+    rt_monoio_async_tcp_accept, rt_monoio_async_tcp_close, rt_monoio_async_tcp_connect, rt_monoio_async_tcp_listen,
+    rt_monoio_async_tcp_listener_close, rt_monoio_async_tcp_read, rt_monoio_async_tcp_write, rt_monoio_async_udp_bind,
     rt_monoio_async_udp_close,
 };

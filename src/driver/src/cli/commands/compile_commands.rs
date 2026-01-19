@@ -104,7 +104,9 @@ fn parse_linker_flag(args: &[String]) -> Option<NativeLinker> {
 
 fn print_compile_help() {
     eprintln!("error: compile requires a source file");
-    eprintln!("Usage: simple compile <source.spl> [-o <output>] [--native] [--target <arch>] [--linker <name>] [--snapshot]");
+    eprintln!(
+        "Usage: simple compile <source.spl> [-o <output>] [--native] [--target <arch>] [--linker <name>] [--snapshot]"
+    );
     eprintln!();
     eprintln!("Options:");
     eprintln!("  -o <output>         Output file (default: source.smf or source for --native)");

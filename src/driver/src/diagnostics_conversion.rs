@@ -4,7 +4,10 @@
 //! (from `simple-common`) to full-featured i18n diagnostics (from `simple-diagnostics`).
 
 use simple_common::Diagnostic as ParserDiagnostic;
-use simple_diagnostics::{Diagnostic as I18nDiagnostic, Span as I18nSpan, i18n::{ctx1, ctx2, ContextBuilder}};
+use simple_diagnostics::{
+    Diagnostic as I18nDiagnostic, Span as I18nSpan,
+    i18n::{ctx1, ctx2, ContextBuilder},
+};
 
 /// Convert a parser diagnostic to an i18n-aware diagnostic
 ///
@@ -20,7 +23,10 @@ use simple_diagnostics::{Diagnostic as I18nDiagnostic, Span as I18nSpan, i18n::{
 /// ```
 pub fn convert_parser_diagnostic(diag: ParserDiagnostic) -> I18nDiagnostic {
     // Get primary span from first label (parser diagnostics put span in labels)
-    let span = diag.labels.first().map(|l| I18nSpan::new(l.span.start, l.span.end, l.span.line, l.span.column));
+    let span = diag
+        .labels
+        .first()
+        .map(|l| I18nSpan::new(l.span.start, l.span.end, l.span.line, l.span.column));
 
     // Match on error code to provide i18n messages
     match diag.code.as_deref() {
@@ -174,15 +180,15 @@ pub fn convert_parser_diagnostic(diag: ParserDiagnostic) -> I18nDiagnostic {
         Some(code) => {
             // Generic message for unknown codes - use the generic E0001
             let ctx = ctx1("message", diag.message.as_str());
-            let mut i18n_diag = I18nDiagnostic::error_i18n("parser", "E0001", &ctx)
-                .with_code(code);
+            let mut i18n_diag = I18nDiagnostic::error_i18n("parser", "E0001", &ctx).with_code(code);
 
             if let Some(s) = span {
                 i18n_diag = i18n_diag.with_span(s);
             }
 
             // Add labels, notes, and help from original diagnostic
-            for label in &diag.labels[1..] {  // Skip first label (already used as primary span)
+            for label in &diag.labels[1..] {
+                // Skip first label (already used as primary span)
                 let label_span = I18nSpan::new(label.span.start, label.span.end, label.span.line, label.span.column);
                 i18n_diag = i18n_diag.with_label(label_span, &label.message);
             }
@@ -207,7 +213,8 @@ pub fn convert_parser_diagnostic(diag: ParserDiagnostic) -> I18nDiagnostic {
             }
 
             // Add labels, notes, and help from original diagnostic
-            for label in &diag.labels[1..] {  // Skip first label (already used as primary span)
+            for label in &diag.labels[1..] {
+                // Skip first label (already used as primary span)
                 let label_span = I18nSpan::new(label.span.start, label.span.end, label.span.line, label.span.column);
                 i18n_diag = i18n_diag.with_label(label_span, &label.message);
             }
@@ -262,40 +269,28 @@ fn extract_expected_found(message: &str) -> (&str, &str) {
 ///
 /// Message format: "missing expected token: X"
 fn extract_expected(message: &str) -> &str {
-    message
-        .split(": ")
-        .nth(1)
-        .unwrap_or("token")
+    message.split(": ").nth(1).unwrap_or("token")
 }
 
 /// Extract literal from error message
 ///
 /// Message format: "invalid integer literal: X" or "invalid float literal: X"
 fn extract_literal(message: &str) -> &str {
-    message
-        .split(": ")
-        .nth(1)
-        .unwrap_or("<literal>")
+    message.split(": ").nth(1).unwrap_or("<literal>")
 }
 
 /// Extract escape sequence from error message
 ///
 /// Message format: "invalid escape sequence: X"
 fn extract_sequence(message: &str) -> &str {
-    message
-        .split(": ")
-        .nth(1)
-        .unwrap_or("\\?")
+    message.split(": ").nth(1).unwrap_or("\\?")
 }
 
 /// Extract message detail from error message
 ///
 /// Message format: "invalid pattern: X" or "invalid type: X"
 fn extract_message_detail(message: &str) -> &str {
-    message
-        .split(": ")
-        .nth(1)
-        .unwrap_or("<detail>")
+    message.split(": ").nth(1).unwrap_or("<detail>")
 }
 
 #[cfg(test)]

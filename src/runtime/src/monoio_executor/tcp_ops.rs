@@ -38,7 +38,12 @@ impl TcpOps {
     }
 
     /// Submit async TCP accept operation
-    pub fn tcp_accept_submit(&mut self, listener_id: i64, future_ptr: *mut MonoioFuture, op_id: u64) -> Result<PendingOp, String> {
+    pub fn tcp_accept_submit(
+        &mut self,
+        listener_id: i64,
+        future_ptr: *mut MonoioFuture,
+        op_id: u64,
+    ) -> Result<PendingOp, String> {
         if !self.tcp_listeners.is_available(listener_id) {
             return Err("Invalid listener ID".to_string());
         }

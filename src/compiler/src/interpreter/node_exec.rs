@@ -7,9 +7,7 @@ use crate::value::{Env, Value};
 use super::core_types::{Control, Enums, ImplMethods, get_identifier_name, get_pattern_name, is_immutable_by_pattern};
 use super::async_support::await_value;
 use super::expr::evaluate_expr;
-use super::interpreter_helpers::{
-    bind_pattern_value, handle_method_call_with_self_update, handle_functional_update,
-};
+use super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update, handle_functional_update};
 use super::interpreter_control::{exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with};
 use super::interpreter_state::{mark_as_moved, CONST_NAMES, IMMUTABLE_VARS, MODULE_GLOBALS};
 use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
@@ -125,9 +123,7 @@ pub(crate) fn exec_node(
             exec_assignment(assign, env, functions, classes, enums, impl_methods)
         }
         // Handle augmented assignments (+=, -=, *=, /=) and suspension variants (~+=, ~-=, etc.)
-        Node::Assignment(assign) => {
-            exec_augmented_assignment(assign, env, functions, classes, enums, impl_methods)
-        }
+        Node::Assignment(assign) => exec_augmented_assignment(assign, env, functions, classes, enums, impl_methods),
         Node::If(if_stmt) => exec_if(if_stmt, env, functions, classes, enums, impl_methods),
         Node::While(while_stmt) => exec_while(while_stmt, env, functions, classes, enums, impl_methods),
         Node::Loop(loop_stmt) => exec_loop(loop_stmt, env, functions, classes, enums, impl_methods),
@@ -480,8 +476,7 @@ fn exec_augmented_assignment(
                 match obj_val {
                     Value::Object { class, mut fields } => {
                         // Evaluate the RHS
-                        let mut rhs_value =
-                            evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+                        let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
 
                         // If suspension, await the value
                         if is_suspend {
@@ -505,8 +500,7 @@ fn exec_augmented_assignment(
                                 left: Box::new(Expr::Identifier(temp_lhs.clone())),
                                 right: Box::new(Expr::Identifier(temp_rhs.clone())),
                             };
-                            let result =
-                                evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
+                            let result = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
                             env.remove(&temp_lhs);
                             env.remove(&temp_rhs);
                             result

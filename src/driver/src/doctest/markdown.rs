@@ -170,7 +170,8 @@ fn parse_docstring_fences(docstring: &str, source: impl AsRef<Path>) -> Vec<Doct
         }
 
         if in_fence {
-            fence_content.push_str(line);
+            // Use trimmed line to handle indented code blocks in docstrings
+            fence_content.push_str(trimmed);
             fence_content.push('\n');
         }
     }
@@ -194,9 +195,11 @@ mod tests {
 ```
 "#;
         let examples = parse_markdown_doctests(content, "test.md");
-        assert_eq!(examples.len(), 1);
+        // Each >>> line creates a separate example (Python doctest style)
+        assert_eq!(examples.len(), 2);
         assert!(examples[0].section_name.is_some());
         assert_eq!(examples[0].section_name.as_ref().unwrap(), "Test Section #1");
+        assert_eq!(examples[1].section_name.as_ref().unwrap(), "Test Section #2");
     }
 
     #[test]
@@ -213,6 +216,8 @@ fn foo():
     0
 "#;
         let examples = parse_spl_doctests(content, "test.spl");
+        // One >>> line with expected output = 1 example
         assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].commands[0], "foo()");
     }
 }

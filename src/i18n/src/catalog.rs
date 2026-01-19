@@ -134,11 +134,7 @@ impl CatalogRegistry {
     /// - Other locales: Locale suffix before .spl
     #[cfg(feature = "simple-format")]
     fn get_catalog_filename(&self, locale: &str, domain: &str) -> String {
-        let basename = if domain == "common" {
-            "__init__"
-        } else {
-            domain
-        };
+        let basename = if domain == "common" { "__init__" } else { domain };
 
         if locale == "en" {
             format!("{}.spl", basename)
@@ -382,15 +378,22 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         // Create catalogs with different messages
-        create_test_catalog(temp_dir.path(), "en", "parser", vec![
-            ("E0001", "English E0001"),
-            ("E0002", "English E0002"),
-            ("E0003", "English E0003"),
-        ]);
-        create_test_catalog(temp_dir.path(), "ko", "parser", vec![
-            ("E0001", "Korean E0001"),
-            ("E0002", "Korean E0002"),
-        ]);
+        create_test_catalog(
+            temp_dir.path(),
+            "en",
+            "parser",
+            vec![
+                ("E0001", "English E0001"),
+                ("E0002", "English E0002"),
+                ("E0003", "English E0003"),
+            ],
+        );
+        create_test_catalog(
+            temp_dir.path(),
+            "ko",
+            "parser",
+            vec![("E0001", "Korean E0001"), ("E0002", "Korean E0002")],
+        );
 
         let mut registry = CatalogRegistry::new().with_catalog_dir(temp_dir.path());
         registry.load("en", "parser").unwrap();

@@ -37,7 +37,7 @@ fn main() {
         Ok(_) => println!("Unexpected success!"),
         Err(parse_error) => {
             // Convert parser error to i18n diagnostic
-            let i18n_diag = convert_parser_diagnostic(&parse_error);
+            let i18n_diag = convert_parser_diagnostic(parse_error.to_diagnostic());
 
             // Format and display
             let formatter = TextFormatter::new();
@@ -55,8 +55,7 @@ fn main() {
 
     let span = Span::new(30, 43, 2, 18);
     let ctx = ctx2("name", "undefined_var", "", "");
-    let diag = Diagnostic::error_i18n("compiler", "E1001", &ctx)
-        .with_span(span);
+    let diag = Diagnostic::error_i18n("compiler", "E1001", &ctx).with_span(span);
 
     let formatter = TextFormatter::new();
     let output = formatter.format(&diag, source2);
@@ -89,13 +88,11 @@ fn main() {
     let diagnostics = vec![
         {
             let ctx = ctx2("name", "x", "", "");
-            Diagnostic::error_i18n("compiler", "E1001", &ctx)
-                .with_span(Span::new(15, 16, 2, 5))
+            Diagnostic::error_i18n("compiler", "E1001", &ctx).with_span(Span::new(15, 16, 2, 5))
         },
         {
             let ctx = ctx2("name", "y", "", "");
-            Diagnostic::error_i18n("compiler", "E1001", &ctx)
-                .with_span(Span::new(19, 20, 2, 9))
+            Diagnostic::error_i18n("compiler", "E1001", &ctx).with_span(Span::new(19, 20, 2, 9))
         },
     ];
 

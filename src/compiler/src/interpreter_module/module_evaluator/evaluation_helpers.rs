@@ -8,9 +8,7 @@ use std::path::Path;
 
 use tracing::{trace, warn};
 
-use simple_parser::ast::{
-    ClassDef, Expr, ImportTarget, Node, Pattern,
-};
+use simple_parser::ast::{ClassDef, Expr, ImportTarget, Node, Pattern};
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
@@ -190,14 +188,9 @@ pub(super) fn process_imports_and_assignments(
             Node::Let(stmt) => {
                 // Evaluate module-level let statements (for global variables)
                 if let Some(init) = &stmt.value {
-                    if let Ok(value) = evaluate_expr(
-                        init,
-                        env,
-                        local_functions,
-                        local_classes,
-                        local_enums,
-                        impl_methods,
-                    ) {
+                    if let Ok(value) =
+                        evaluate_expr(init, env, local_functions, local_classes, local_enums, impl_methods)
+                    {
                         // Only handle simple identifier patterns for now
                         if let Pattern::Identifier(name) = &stmt.pattern {
                             env.insert(name.clone(), value);
@@ -267,7 +260,13 @@ fn process_use_stmt(
             .unwrap_or_else(|| "module".to_string()),
     };
 
-    match crate::interpreter::interpreter_module::module_loader::load_and_merge_module(use_stmt, module_path, global_functions, global_classes, global_enums) {
+    match crate::interpreter::interpreter_module::module_loader::load_and_merge_module(
+        use_stmt,
+        module_path,
+        global_functions,
+        global_classes,
+        global_enums,
+    ) {
         Ok(value) => {
             // Unpack module exports into current namespace
             if let Value::Dict(exports) = &value {
@@ -418,11 +417,7 @@ pub(super) fn export_functions(
 }
 
 /// Process bare export statements
-pub(super) fn process_bare_exports(
-    bare_exports: &[Vec<String>],
-    env: &Env,
-    exports: &mut HashMap<String, Value>,
-) {
+pub(super) fn process_bare_exports(bare_exports: &[Vec<String>], env: &Env, exports: &mut HashMap<String, Value>) {
     for export_names in bare_exports {
         for name in export_names {
             if let Some(value) = env.get(name) {

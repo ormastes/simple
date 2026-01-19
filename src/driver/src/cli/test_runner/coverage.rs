@@ -2,9 +2,7 @@
 //!
 //! Handles coverage data saving and reporting.
 
-use simple_compiler::{
-    get_coverage_output_path, get_global_coverage, save_global_coverage, is_coverage_enabled,
-};
+use simple_compiler::{get_coverage_output_path, get_global_coverage, save_global_coverage, is_coverage_enabled};
 
 /// Save coverage data and print statistics
 pub fn save_coverage_data(quiet: bool) {

@@ -6,11 +6,7 @@ use super::types::{IoResponse, ResponseSender};
 use monoio::io::{AsyncReadRent, AsyncReadRentExt, AsyncWriteRent, AsyncWriteRentExt};
 use monoio::net::udp::UdpSocket;
 
-pub(crate) async fn handle_udp_bind(
-    addr: String,
-    response_tx: ResponseSender,
-    registry: &mut StreamRegistry,
-) {
+pub(crate) async fn handle_udp_bind(addr: String, response_tx: ResponseSender, registry: &mut StreamRegistry) {
     let socket_addr = parse_addr!(addr, response_tx);
 
     match UdpSocket::bind(socket_addr) {
@@ -36,10 +32,7 @@ pub(crate) async fn handle_udp_send_to(
 
     match result {
         Ok(n) => {
-            let _ = response_tx.send(IoResponse::Data {
-                bytes: vec![],
-                len: n,
-            });
+            let _ = response_tx.send(IoResponse::Data { bytes: vec![], len: n });
         }
         Err(e) => send_error!(response_tx, -5, format!("Send failed: {}", e)),
     }
@@ -68,11 +61,7 @@ pub(crate) async fn handle_udp_recv_from(
     }
 }
 
-pub(crate) fn handle_udp_close(
-    socket_id: i64,
-    response_tx: ResponseSender,
-    registry: &mut StreamRegistry,
-) {
+pub(crate) fn handle_udp_close(socket_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
     if registry.remove_udp_socket(socket_id) {
         send_success!(response_tx, 0);
     } else {
@@ -146,18 +135,12 @@ pub(crate) fn handle_udp_leave_multicast(
     send_success!(response_tx, 0);
 }
 
-pub(crate) fn handle_udp_get_local_addr(
-    socket_id: i64,
-    response_tx: ResponseSender,
-    registry: &mut StreamRegistry,
-) {
+pub(crate) fn handle_udp_get_local_addr(socket_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
     let socket = get_udp_socket!(registry, socket_id, response_tx);
 
     match socket.local_addr() {
         Ok(addr) => {
-            let _ = response_tx.send(IoResponse::Address {
-                addr: addr.to_string(),
-            });
+            let _ = response_tx.send(IoResponse::Address { addr: addr.to_string() });
         }
         Err(e) => send_error!(response_tx, -2, format!("local_addr failed: {}", e)),
     }

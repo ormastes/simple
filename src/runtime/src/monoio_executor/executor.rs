@@ -117,7 +117,9 @@ impl AsyncExecutor {
         future_ptr: *mut MonoioFuture,
     ) -> Result<u64, String> {
         let op_id = self.alloc_op_id();
-        let op = self.tcp_ops.tcp_read_submit(stream_id, buffer, max_len, future_ptr, op_id)?;
+        let op = self
+            .tcp_ops
+            .tcp_read_submit(stream_id, buffer, max_len, future_ptr, op_id)?;
         self.pending.insert(op_id, op);
         Ok(op_id)
     }
@@ -163,7 +165,9 @@ impl AsyncExecutor {
         future_ptr: *mut MonoioFuture,
     ) -> Result<u64, String> {
         let op_id = self.alloc_op_id();
-        let op = self.udp_ops.udp_send_to_submit(socket_id, data, addr, future_ptr, op_id)?;
+        let op = self
+            .udp_ops
+            .udp_send_to_submit(socket_id, data, addr, future_ptr, op_id)?;
         self.pending.insert(op_id, op);
         Ok(op_id)
     }
@@ -177,7 +181,9 @@ impl AsyncExecutor {
         future_ptr: *mut MonoioFuture,
     ) -> Result<u64, String> {
         let op_id = self.alloc_op_id();
-        let op = self.udp_ops.udp_recv_from_submit(socket_id, buffer, max_len, future_ptr, op_id)?;
+        let op = self
+            .udp_ops
+            .udp_recv_from_submit(socket_id, buffer, max_len, future_ptr, op_id)?;
         self.pending.insert(op_id, op);
         Ok(op_id)
     }

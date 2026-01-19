@@ -75,12 +75,7 @@ impl Diagnostic {
     ///
     /// This looks up the message in the i18n catalog and interpolates it with the context.
     /// Falls back to English if the translation is not available.
-    pub fn from_i18n(
-        severity: Severity,
-        domain: &str,
-        id: &str,
-        ctx: &MessageContext,
-    ) -> Self {
+    pub fn from_i18n(severity: Severity, domain: &str, id: &str, ctx: &MessageContext) -> Self {
         let i18n = I18n::global();
         let msg = i18n.get_message_safe(domain, id, ctx);
 
@@ -142,13 +137,7 @@ impl Diagnostic {
     /// Add a labeled span from i18n
     ///
     /// This looks up the label message in the i18n catalog and interpolates it.
-    pub fn with_label_i18n(
-        mut self,
-        span: Span,
-        domain: &str,
-        label_key: &str,
-        ctx: &MessageContext,
-    ) -> Self {
+    pub fn with_label_i18n(mut self, span: Span, domain: &str, label_key: &str, ctx: &MessageContext) -> Self {
         let i18n = I18n::global();
         let label_msg = i18n.get_message_safe(domain, label_key, ctx);
         self.labels.push(Label::new(span, label_msg.message));
@@ -216,8 +205,7 @@ mod tests {
     #[test]
     fn test_diagnostic_with_label() {
         let span = Span::new(10, 15, 2, 5);
-        let diag = Diagnostic::error("type mismatch")
-            .with_label(span, "expected i32, found bool");
+        let diag = Diagnostic::error("type mismatch").with_label(span, "expected i32, found bool");
 
         assert_eq!(diag.labels.len(), 1);
         assert_eq!(diag.labels[0].span, span);
@@ -232,7 +220,10 @@ mod tests {
 
         assert_eq!(diag.notes.len(), 1);
         assert_eq!(diag.notes[0], "variable `x` is never used");
-        assert_eq!(diag.help, Some("consider prefixing with an underscore: `_x`".to_string()));
+        assert_eq!(
+            diag.help,
+            Some("consider prefixing with an underscore: `_x`".to_string())
+        );
     }
 
     #[test]

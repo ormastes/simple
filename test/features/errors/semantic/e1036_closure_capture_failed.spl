@@ -1,0 +1,81 @@
+# E1036: Closure Capture Failed
+
+Feature: E1036 - Closure Cannot Capture Variable
+  As a Simple compiler
+  I want to detect when closures cannot safely capture variables
+  So that closure captures are valid
+
+  Background:
+    Given I have the Simple compiler
+
+  Scenario: Cannot capture mutable variable across threads
+    When I compile:
+      '''
+      fn test():
+        var x = 0
+        spawn_thread(\:
+          x = 1  # Error: cannot capture mutable var across threads
+        )
+      '''
+    Then I should see error E1036 at line 4
+    And the error message should be "cannot capture variable `{name}` in closure"
+    And the label should indicate "cannot capture this variable"
+    And the help should suggest "check if the variable can be safely captured by the closure"
+
+  Scenario: Cannot capture moved value
+    When I compile:
+      '''
+      fn test():
+        val buf: iso Buffer = Buffer.new()
+        val f = \:
+          buf.write("data")  # Error: buf has iso capability
+        consume(buf)
+        f()
+      '''
+    Then I should see error E1036 or capability violation error
+
+  Scenario: Valid immutable capture
+    When I compile:
+      '''
+      fn test():
+        val x = 42
+        val f = \:
+          print(x)  # OK: immutable capture
+        f()
+      '''
+    Then compilation should succeed
+
+  Scenario: Valid mutable capture in same thread
+    When I compile:
+      '''
+      fn test():
+        var count = 0
+        val f = \:
+          count = count + 1  # OK if single-threaded
+        f()
+      '''
+    Then compilation should succeed
+
+  Scenario: Move closure captures by value
+    When I compile:
+      '''
+      fn test():
+        val x = vec![1, 2, 3]
+        val f = move \:
+          print(x.len())  # OK: move closure
+        f()
+      '''
+    Then compilation should succeed
+
+  Scenario: Korean language error
+    Given I set compiler language to "ko"
+    When I compile:
+      '''
+      fn test():
+        var x = 0
+        spawn_thread(\:
+          x = 1
+        )
+      '''
+    Then I should see error E1036
+    And the error message should contain "클로저 캡처 실패"

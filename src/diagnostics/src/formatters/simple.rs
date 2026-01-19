@@ -13,9 +13,7 @@ pub struct SimpleFormatter {
 impl SimpleFormatter {
     /// Create a new Simple formatter
     pub fn new() -> Self {
-        Self {
-            simple_syntax: true,
-        }
+        Self { simple_syntax: true }
     }
 
     /// Format a diagnostic in Simple language syntax
@@ -108,10 +106,7 @@ impl SimpleFormatter {
 
         // Span info
         if let Some(span) = diagnostic.span {
-            output.push_str(&format!(
-                " (at line {}, column {})",
-                span.line, span.column
-            ));
+            output.push_str(&format!(" (at line {}, column {})", span.line, span.column));
         }
 
         // Labels

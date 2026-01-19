@@ -33,15 +33,6 @@ impl Locale {
         &self.language
     }
 
-    /// Get the full locale string (e.g., "en", "ko", "en_US")
-    pub fn to_string(&self) -> String {
-        if let Some(region) = &self.region {
-            format!("{}_{}", self.language, region)
-        } else {
-            self.language.clone()
-        }
-    }
-
     /// Detect locale from environment variables
     ///
     /// Checks in order:
@@ -67,6 +58,16 @@ impl Locale {
 
         // Default to English
         Self::new("en", None::<String>)
+    }
+}
+
+impl std::fmt::Display for Locale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(region) = &self.region {
+            write!(f, "{}_{}", self.language, region)
+        } else {
+            write!(f, "{}", self.language)
+        }
     }
 }
 

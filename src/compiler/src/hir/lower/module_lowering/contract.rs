@@ -6,7 +6,11 @@ use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{HirContract, HirContractClause};
 
 impl Lowerer {
-    pub(super) fn lower_contract(&mut self, contract: &ast::ContractBlock, ctx: &mut FunctionContext) -> LowerResult<HirContract> {
+    pub(super) fn lower_contract(
+        &mut self,
+        contract: &ast::ContractBlock,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirContract> {
         let mut hir_contract = HirContract::default();
 
         // Set contract context BEFORE lowering any expressions (CTR-030-032)

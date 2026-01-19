@@ -82,13 +82,7 @@ impl TextFormatter {
         }
     }
 
-    fn format_source_snippet(
-        &self,
-        span: Span,
-        source: &str,
-        diagnostic: &Diagnostic,
-        output: &mut String,
-    ) {
+    fn format_source_snippet(&self, span: Span, source: &str, diagnostic: &Diagnostic, output: &mut String) {
         let lines: Vec<&str> = source.lines().collect();
 
         // Get the line (1-indexed)
@@ -156,14 +150,7 @@ impl TextFormatter {
         output.push('\n');
     }
 
-    fn format_label_snippet(
-        &self,
-        span: Span,
-        source: &str,
-        label_msg: &str,
-        severity: Severity,
-        output: &mut String,
-    ) {
+    fn format_label_snippet(&self, span: Span, source: &str, label_msg: &str, severity: Severity, output: &mut String) {
         let lines: Vec<&str> = source.lines().collect();
 
         if span.line == 0 || span.line > lines.len() {
