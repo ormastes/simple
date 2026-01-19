@@ -57,8 +57,12 @@ pub(crate) fn exec_method_function(
             Some((class.as_str(), fields)),
         )
     } else {
-        Err(CompileError::Semantic(
-            "exec_method_function called with non-object self".into(),
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_SELF_TYPE)
+            .with_help("method execution requires self to be an object");
+        Err(CompileError::semantic_with_context(
+            "exec_method_function called with non-object self".to_string(),
+            ctx,
         ))
     }
 }

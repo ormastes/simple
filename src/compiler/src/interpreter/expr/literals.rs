@@ -154,10 +154,13 @@ pub(super) fn eval_literal_expr(
             // Check if this variable has been moved (unique pointer move semantics)
             let is_moved = MOVED_VARS.with(|cell| cell.borrow().contains(name));
             if is_moved {
-                return Err(CompileError::Semantic(format!(
-                    "use of moved value: '{}'. Unique pointers can only be used once.",
-                    name
-                )));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::USE_AFTER_FREE)
+                    .with_help("unique pointers can only be used once; the value has already been moved");
+                return Err(CompileError::semantic_with_context(
+                    format!("use of moved value: '{}'. Unique pointers can only be used once.", name),
+                    ctx,
+                ));
             }
             // First check env for local variables and closures
             if let Some(val) = env.get(name) {

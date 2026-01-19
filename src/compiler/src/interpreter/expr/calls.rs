@@ -234,9 +234,16 @@ pub(super) fn eval_call_expr(
                                     captured_env: Env::new(),
                                 })
                             } else {
-                                Err(CompileError::Semantic(format!(
-                                    "unknown variant or method '{field}' on enum {enum_name}"
-                                )))
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::METHOD_NOT_FOUND)
+                                    .with_help("check that this variant or method is defined on this enum");
+                                Err(CompileError::semantic_with_context(
+                                    format!(
+                                        "unknown variant or method '{}' on enum {}",
+                                        field, enum_name
+                                    ),
+                                    ctx,
+                                ))
                             }
                         }
                     } else {

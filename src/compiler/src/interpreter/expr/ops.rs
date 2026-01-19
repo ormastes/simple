@@ -379,9 +379,18 @@ pub(super) fn eval_op_expr(
                             let needle = left_val.to_key_string();
                             Ok(Value::Bool(s.contains(&needle)))
                         }
-                        _ => Err(CompileError::Semantic(
-                            "'in' operator requires array, tuple, dict, or string".into(),
-                        )),
+                        _ => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::TYPE_MISMATCH)
+                                .with_help("'in' operator requires array, tuple, dict, or string");
+                            Err(CompileError::semantic_with_context(
+                                format!(
+                                    "'in' operator requires array, tuple, dict, or string; got {}",
+                                    right_val.type_name()
+                                ),
+                                ctx,
+                            ))
+                        }
                     }
                 }
                 BinOp::MatMul => {
@@ -433,7 +442,13 @@ pub(super) fn eval_op_expr(
                                 }));
                             }
                             Err(err) => {
-                                return Err(CompileError::Semantic(err));
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::INVALID_OPERATION)
+                                    .with_help("check that this unary operation is supported for this unit type");
+                                return Err(CompileError::semantic_with_context(
+                                    format!("invalid operation: {}", err),
+                                    ctx,
+                                ));
                             }
                         }
                     }
