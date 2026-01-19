@@ -291,9 +291,13 @@ fn exec_assignment(
                         env.insert(obj_name.clone(), Value::Object { class, fields });
                     }
                     _ => {
-                        return Err(CompileError::Semantic(format!(
-                            "cannot assign field on non-object value"
-                        )))
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_ASSIGNMENT)
+                            .with_help("field assignment requires an object with mutable access");
+                        return Err(CompileError::semantic_with_context(
+                            "invalid assignment: cannot assign field on non-object value",
+                            ctx,
+                        ))
                     }
                 }
                 Ok(Control::Next)
@@ -305,11 +309,20 @@ fn exec_assignment(
                     .chain(functions.keys().map(|s| s.as_str()))
                     .chain(classes.keys().map(|s| s.as_str()))
                     .collect();
-                let mut msg = format!("undefined variable '{obj_name}'");
-                if let Some(suggestion) = crate::error::typo::format_suggestion(obj_name, known_names) {
-                    msg.push_str(&format!("; {}", suggestion));
+                // E1001 - Undefined Variable
+                let suggestion = crate::error::typo::suggest_name(obj_name, known_names.clone());
+                let mut ctx = ErrorContext::new()
+                    .with_code(codes::UNDEFINED_VARIABLE)
+                    .with_help("check that the variable is defined and in scope");
+
+                if let Some(best_match) = suggestion {
+                    ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
                 }
-                Err(CompileError::Semantic(msg))
+
+                Err(CompileError::semantic_with_context(
+                    format!("variable `{}` not found", obj_name),
+                    ctx,
+                ))
             }
         } else {
             Err(CompileError::Semantic(
@@ -365,7 +378,14 @@ fn exec_assignment(
                 env.insert(container_name.clone(), new_container);
                 Ok(Control::Next)
             } else {
-                Err(CompileError::Semantic(format!("undefined variable '{container_name}'")))
+                // E1001 - Undefined Variable
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNDEFINED_VARIABLE)
+                    .with_help("check that the variable is defined and in scope");
+                Err(CompileError::semantic_with_context(
+                    format!("variable `{}` not found", container_name),
+                    ctx,
+                ))
             }
         } else {
             Err(CompileError::Semantic(
@@ -402,7 +422,13 @@ fn exec_assignment(
         }
         Ok(Control::Next)
     } else {
-        Err(CompileError::Semantic("unsupported assignment target".into()))
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_LHS_ASSIGNMENT)
+            .with_help("assignment target must be a variable, field, or array index");
+        Err(CompileError::semantic_with_context(
+            "invalid assignment: unsupported assignment target",
+            ctx,
+        ))
     }
 }
 
@@ -460,7 +486,16 @@ fn exec_augmented_assignment(
             let current = env
                 .get(name)
                 .cloned()
-                .ok_or_else(|| CompileError::Semantic(format!("undefined variable '{name}'")))?;
+                .ok_or_else(|| {
+                    // E1001 - Undefined Variable
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::UNDEFINED_VARIABLE)
+                        .with_help("check that the variable is defined and in scope");
+                    CompileError::semantic_with_context(
+                        format!("variable `{}` not found", name),
+                        ctx,
+                    )
+                })?;
             // Insert rhs as temp var, create binary expr, evaluate
             let temp_name = "__rhs_temp__".to_string();
             env.insert(temp_name.clone(), rhs_value);
@@ -528,14 +563,31 @@ fn exec_augmented_assignment(
                     )),
                 }
             } else {
-                Err(CompileError::Semantic(format!("undefined variable '{obj_name}'")))
+                // E1001 - Undefined Variable
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNDEFINED_VARIABLE)
+                    .with_help("check that the variable is defined and in scope");
+                Err(CompileError::semantic_with_context(
+                    format!("variable `{}` not found", obj_name),
+                    ctx,
+                ))
             }
         } else {
-            Err(CompileError::Semantic(
-                "augmented field assignment requires identifier as object".into(),
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_ASSIGNMENT)
+                .with_help("augmented field assignment requires an identifier as the object");
+            Err(CompileError::semantic_with_context(
+                "invalid assignment: augmented field assignment requires identifier as object",
+                ctx,
             ))
         }
     } else {
-        Err(CompileError::Semantic("unsupported augmented assignment target".into()))
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_ASSIGNMENT)
+            .with_help("augmented assignment target must be a variable, field, or array index");
+        Err(CompileError::semantic_with_context(
+            "invalid assignment: unsupported augmented assignment target",
+            ctx,
+        ))
     }
 }

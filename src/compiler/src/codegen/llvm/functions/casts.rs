@@ -33,7 +33,7 @@ impl LlvmBackend {
                 if let inkwell::values::BasicValueEnum::FloatValue(float_val) = source_val {
                     let result = builder
                         .build_float_to_signed_int(float_val, i64_type, "cast_f2i")
-                        .map_err(|e| CompileError::Semantic(format!("Failed to cast float to int: {}", e)))?;
+                        .map_err(|e| crate::error::factory::llvm_cast_failed("cast float to int", &e))?;
                     Ok(result.into())
                 } else {
                     Err(CompileError::Semantic(
@@ -49,7 +49,7 @@ impl LlvmBackend {
                 if let inkwell::values::BasicValueEnum::IntValue(int_val) = source_val {
                     let result = builder
                         .build_signed_int_to_float(int_val, f64_type, "cast_i2f")
-                        .map_err(|e| CompileError::Semantic(format!("Failed to cast int to float: {}", e)))?;
+                        .map_err(|e| crate::error::factory::llvm_cast_failed("cast int to float", &e))?;
                     Ok(result.into())
                 } else {
                     Err(CompileError::Semantic(
@@ -62,7 +62,7 @@ impl LlvmBackend {
                 if let inkwell::values::BasicValueEnum::IntValue(int_val) = source_val {
                     let result = builder
                         .build_int_s_extend(int_val, i64_type, "cast_i32_i64")
-                        .map_err(|e| CompileError::Semantic(format!("Failed to extend int: {}", e)))?;
+                        .map_err(|e| crate::error::factory::llvm_cast_failed("extend int", &e))?;
                     Ok(result.into())
                 } else {
                     Err(CompileError::Semantic(
@@ -75,7 +75,7 @@ impl LlvmBackend {
                     let i32_type = self.context.i32_type();
                     let result = builder
                         .build_int_truncate(int_val, i32_type, "cast_i64_i32")
-                        .map_err(|e| CompileError::Semantic(format!("Failed to truncate int: {}", e)))?;
+                        .map_err(|e| crate::error::factory::llvm_cast_failed("truncate int", &e))?;
                     Ok(result.into())
                 } else {
                     Err(CompileError::Semantic(
@@ -88,7 +88,7 @@ impl LlvmBackend {
                 if let inkwell::values::BasicValueEnum::FloatValue(float_val) = source_val {
                     let result = builder
                         .build_float_ext(float_val, f64_type, "cast_f32_f64")
-                        .map_err(|e| CompileError::Semantic(format!("Failed to extend float: {}", e)))?;
+                        .map_err(|e| crate::error::factory::llvm_cast_failed("extend float", &e))?;
                     Ok(result.into())
                 } else {
                     Err(CompileError::Semantic(
@@ -101,7 +101,7 @@ impl LlvmBackend {
                     let f32_type = self.context.f32_type();
                     let result = builder
                         .build_float_trunc(float_val, f32_type, "cast_f64_f32")
-                        .map_err(|e| CompileError::Semantic(format!("Failed to truncate float: {}", e)))?;
+                        .map_err(|e| crate::error::factory::llvm_cast_failed("truncate float", &e))?;
                     Ok(result.into())
                 } else {
                     Err(CompileError::Semantic(

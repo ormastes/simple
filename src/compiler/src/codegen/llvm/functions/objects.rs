@@ -27,16 +27,16 @@ impl LlvmBackend {
         let array_type = i8_type.array_type(struct_size);
         let alloc = builder
             .build_alloca(array_type, "struct")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build alloca: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("alloca", &e))?;
         let struct_ptr = builder
             .build_pointer_cast(alloc, i8_ptr_type, "struct_ptr")
-            .map_err(|e| CompileError::Semantic(format!("Failed to cast struct ptr: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_cast_failed("cast struct ptr", &e))?;
 
         for ((offset, field_type), value) in field_offsets.iter().zip(field_types.iter()).zip(field_values.iter()) {
             let field_val = self.get_vreg(value, vreg_map)?;
             let offset_val = self.context.i32_type().const_int(*offset as u64, false);
             let field_ptr = unsafe { builder.build_gep(i8_type, struct_ptr, &[offset_val], "field_ptr") }
-                .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
             let llvm_field_ty = self.llvm_type(field_type)?;
             let typed_ptr = builder
                 .build_pointer_cast(
@@ -44,10 +44,10 @@ impl LlvmBackend {
                     self.context.ptr_type(inkwell::AddressSpace::default()),
                     "field_typed_ptr",
                 )
-                .map_err(|e| CompileError::Semantic(format!("Failed to cast field ptr: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_cast_failed("cast field ptr", &e))?;
             builder
                 .build_store(typed_ptr, field_val)
-                .map_err(|e| CompileError::Semantic(format!("Failed to build store: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
         }
 
         vreg_map.insert(dest, struct_ptr.into());
@@ -71,10 +71,10 @@ impl LlvmBackend {
             let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
             let base_ptr = builder
                 .build_pointer_cast(ptr, i8_ptr_type, "struct_ptr")
-                .map_err(|e| CompileError::Semantic(format!("Failed to cast struct ptr: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_cast_failed("cast struct ptr", &e))?;
             let offset_val = self.context.i32_type().const_int(byte_offset as u64, false);
             let field_ptr = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr") }
-                .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
             let llvm_field_ty = self.llvm_type(field_type)?;
             let typed_ptr = builder
                 .build_pointer_cast(
@@ -82,10 +82,10 @@ impl LlvmBackend {
                     self.context.ptr_type(inkwell::AddressSpace::default()),
                     "field_typed_ptr",
                 )
-                .map_err(|e| CompileError::Semantic(format!("Failed to cast field ptr: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_cast_failed("cast field ptr", &e))?;
             let loaded = builder
                 .build_load(llvm_field_ty, typed_ptr, "field")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build load: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
 
             vreg_map.insert(dest, loaded);
             Ok(())
@@ -114,10 +114,10 @@ impl LlvmBackend {
             let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
             let base_ptr = builder
                 .build_pointer_cast(ptr, i8_ptr_type, "struct_ptr")
-                .map_err(|e| CompileError::Semantic(format!("Failed to cast struct ptr: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_cast_failed("cast struct ptr", &e))?;
             let offset_val = self.context.i32_type().const_int(byte_offset as u64, false);
             let field_ptr = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr") }
-                .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
             let llvm_field_ty = self.llvm_type(field_type)?;
             let typed_ptr = builder
                 .build_pointer_cast(
@@ -125,10 +125,10 @@ impl LlvmBackend {
                     self.context.ptr_type(inkwell::AddressSpace::default()),
                     "field_typed_ptr",
                 )
-                .map_err(|e| CompileError::Semantic(format!("Failed to cast field ptr: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_cast_failed("cast field ptr", &e))?;
             builder
                 .build_store(typed_ptr, val)
-                .map_err(|e| CompileError::Semantic(format!("Failed to build store: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
             Ok(())
         } else {
             Err(CompileError::Semantic(
@@ -155,10 +155,10 @@ impl LlvmBackend {
         let array_type = i8_type.array_type(closure_size);
         let alloc = builder
             .build_alloca(array_type, "closure")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build alloca: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("alloca", &e))?;
         let closure_ptr = builder
             .build_pointer_cast(alloc, i8_ptr_type, "closure_ptr")
-            .map_err(|e| CompileError::Semantic(format!("Failed to cast closure ptr: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_cast_failed("cast closure ptr", &e))?;
 
         let func_ptr = module
             .get_function(func_name)
@@ -166,23 +166,23 @@ impl LlvmBackend {
             .unwrap_or_else(|| i8_ptr_type.const_null());
         let func_ptr_cast = builder
             .build_pointer_cast(func_ptr, i8_ptr_type, "fn_ptr_cast")
-            .map_err(|e| CompileError::Semantic(format!("Failed to cast fn ptr: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_cast_failed("cast fn ptr", &e))?;
         let fn_slot = builder
             .build_pointer_cast(
                 closure_ptr,
                 i8_ptr_type.ptr_type(inkwell::AddressSpace::default()),
                 "fn_slot",
             )
-            .map_err(|e| CompileError::Semantic(format!("Failed to cast fn slot: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_cast_failed("cast fn slot", &e))?;
         builder
             .build_store(fn_slot, func_ptr_cast)
-            .map_err(|e| CompileError::Semantic(format!("Failed to build store: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
 
         for ((offset, field_type), value) in capture_offsets.iter().zip(capture_types.iter()).zip(captures.iter()) {
             let capture_val = self.get_vreg(value, vreg_map)?;
             let offset_val = self.context.i32_type().const_int(*offset as u64, false);
             let field_ptr = unsafe { builder.build_gep(i8_type, closure_ptr, &[offset_val], "cap_ptr") }
-                .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
             let llvm_field_ty = self.llvm_type(field_type)?;
             let typed_ptr = builder
                 .build_pointer_cast(
@@ -190,10 +190,10 @@ impl LlvmBackend {
                     self.context.ptr_type(inkwell::AddressSpace::default()),
                     "cap_typed_ptr",
                 )
-                .map_err(|e| CompileError::Semantic(format!("Failed to cast cap ptr: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_cast_failed("cast cap ptr", &e))?;
             builder
                 .build_store(typed_ptr, capture_val)
-                .map_err(|e| CompileError::Semantic(format!("Failed to build store: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
         }
 
         vreg_map.insert(dest, closure_ptr.into());

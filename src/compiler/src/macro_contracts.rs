@@ -322,13 +322,10 @@ fn eval_const_condition(
             // Check const bindings for boolean parameter
             if let Some(value_str) = const_bindings.get(name) {
                 value_str.parse::<bool>().map_err(|_| {
-                    CompileError::Semantic(format!("Const binding '{}' is not a boolean: {}", name, value_str))
+                    crate::error::factory::const_binding_wrong_type(name, "a boolean", value_str)
                 })
             } else {
-                Err(CompileError::Semantic(format!(
-                    "Unknown const parameter '{}' in condition",
-                    name
-                )))
+                Err(crate::error::factory::const_binding_not_found(name))
             }
         }
         Expr::Binary { op, left, right } => {
@@ -368,13 +365,10 @@ fn eval_const_int_expr(expr: &Expr, const_bindings: &HashMap<String, String>, en
             // Check const bindings first
             if let Some(value_str) = const_bindings.get(name) {
                 value_str.parse::<i64>().map_err(|_| {
-                    CompileError::Semantic(format!("Const binding '{}' is not an integer: {}", name, value_str))
+                    crate::error::factory::const_binding_wrong_type(name, "integer", value_str)
                 })
             } else {
-                Err(CompileError::Semantic(format!(
-                    "Undefined const binding in macro range: {}",
-                    name
-                )))
+                Err(crate::error::factory::const_binding_not_found(name))
             }
         }
         Expr::Binary { op, left, right } => {

@@ -66,7 +66,7 @@ impl LlvmBackend {
         let ret_val = self.const_value(return_type, return_val)?;
         builder
             .build_return(Some(&ret_val))
-            .map_err(|e| CompileError::Semantic(format!("Failed to build return: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("return", &e))?;
 
         Ok(())
     }
@@ -111,7 +111,7 @@ impl LlvmBackend {
                     BinOp::Mul => builder.build_float_mul(lhs, rhs, "fmul"),
                     BinOp::Div => builder.build_float_div(lhs, rhs, "fdiv"),
                 }
-                .map_err(|e| CompileError::Semantic(format!("Failed to build float op: {}", e)))?
+                .map_err(|e| crate::error::factory::llvm_build_failed("float op", &e))?
                 .into()
             }
             _ => {
@@ -123,14 +123,14 @@ impl LlvmBackend {
                     BinOp::Mul => builder.build_int_mul(lhs, rhs, "mul"),
                     BinOp::Div => builder.build_int_signed_div(lhs, rhs, "div"),
                 }
-                .map_err(|e| CompileError::Semantic(format!("Failed to build int op: {}", e)))?
+                .map_err(|e| crate::error::factory::llvm_build_failed("int op", &e))?
                 .into()
             }
         };
 
         builder
             .build_return(Some(&result))
-            .map_err(|e| CompileError::Semantic(format!("Failed to build return: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("return", &e))?;
 
         Ok(())
     }
@@ -168,34 +168,34 @@ impl LlvmBackend {
         let zero = cond_int.get_type().const_zero();
         let cond = builder
             .build_int_compare(IntPredicate::SGT, cond_int, zero, "cond")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build compare: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("compare", &e))?;
         builder
             .build_conditional_branch(cond, then_bb, else_bb)
-            .map_err(|e| CompileError::Semantic(format!("Failed to build branch: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("branch", &e))?;
 
         builder.position_at_end(then_bb);
         let then_value = self.const_value(return_type, then_val)?;
         builder
             .build_unconditional_branch(merge_bb)
-            .map_err(|e| CompileError::Semantic(format!("Failed to build branch: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("branch", &e))?;
 
         builder.position_at_end(else_bb);
         let else_value = self.const_value(return_type, else_val)?;
         builder
             .build_unconditional_branch(merge_bb)
-            .map_err(|e| CompileError::Semantic(format!("Failed to build branch: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("branch", &e))?;
 
         builder.position_at_end(merge_bb);
         let phi_type = self.llvm_type(return_type)?;
         let phi = builder
             .build_phi(phi_type, "result")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build phi: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("phi", &e))?;
         phi.add_incoming(&[(&then_value, then_bb), (&else_value, else_bb)]);
         let result = phi.as_basic_value();
 
         builder
             .build_return(Some(&result))
-            .map_err(|e| CompileError::Semantic(format!("Failed to build return: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("return", &e))?;
 
         Ok(())
     }

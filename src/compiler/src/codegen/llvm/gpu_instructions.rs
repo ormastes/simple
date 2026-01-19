@@ -28,7 +28,7 @@ impl LlvmBackend {
         let dim_val = i32_type.const_int(dim as u64, false);
         let call_site = builder
             .build_call(gpu_global_id, &[dim_val.into()], "global_id")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         call_site
             .try_as_basic_value()
@@ -55,7 +55,7 @@ impl LlvmBackend {
         let dim_val = i32_type.const_int(dim as u64, false);
         let call_site = builder
             .build_call(gpu_local_id, &[dim_val.into()], "local_id")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         call_site
             .try_as_basic_value()
@@ -82,7 +82,7 @@ impl LlvmBackend {
         let dim_val = i32_type.const_int(dim as u64, false);
         let call_site = builder
             .build_call(gpu_group_id, &[dim_val.into()], "group_id")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         call_site
             .try_as_basic_value()
@@ -109,7 +109,7 @@ impl LlvmBackend {
         let dim_val = i32_type.const_int(dim as u64, false);
         let call_site = builder
             .build_call(gpu_global_size, &[dim_val.into()], "global_size")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         call_site
             .try_as_basic_value()
@@ -136,7 +136,7 @@ impl LlvmBackend {
         let dim_val = i32_type.const_int(dim as u64, false);
         let call_site = builder
             .build_call(gpu_local_size, &[dim_val.into()], "local_size")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         call_site
             .try_as_basic_value()
@@ -163,7 +163,7 @@ impl LlvmBackend {
         let dim_val = i32_type.const_int(dim as u64, false);
         let call_site = builder
             .build_call(gpu_num_groups, &[dim_val.into()], "num_groups")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         call_site
             .try_as_basic_value()
@@ -187,7 +187,7 @@ impl LlvmBackend {
 
         builder
             .build_call(gpu_barrier, &[], "barrier")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         Ok(())
     }
@@ -218,7 +218,7 @@ impl LlvmBackend {
 
         builder
             .build_call(gpu_mem_fence, &[scope_val.into()], "mem_fence")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         Ok(())
     }
@@ -258,7 +258,7 @@ impl LlvmBackend {
 
         let call_site = builder
             .build_call(atomic_fn, &[ptr.into(), value.into()], "atomic")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         call_site
             .try_as_basic_value()
@@ -287,7 +287,7 @@ impl LlvmBackend {
 
         let call_site = builder
             .build_call(cmpxchg_fn, &[ptr.into(), expected.into(), desired.into()], "cmpxchg")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         call_site
             .try_as_basic_value()
@@ -314,7 +314,7 @@ impl LlvmBackend {
         let size_val = i64_type.const_int(size as u64, false);
         let call_site = builder
             .build_call(gpu_shared_alloc, &[size_val.into()], "shared_alloc")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         call_site
             .try_as_basic_value()

@@ -51,8 +51,12 @@ pub(super) fn eval_op_expr(
                     if let Value::Shared(shared) = inner {
                         Ok(Value::Weak(ManualWeakValue::new_from_shared(&shared)))
                     } else {
-                        Err(CompileError::Semantic(
-                            "new - expects a shared pointer to create a weak reference".into(),
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_OPERATION)
+                            .with_help("weak references can only be created from shared pointers");
+                        Err(CompileError::semantic_with_context(
+                            "invalid operation: cannot create weak reference from non-shared pointer",
+                            ctx,
                         ))
                     }
                 }
@@ -133,7 +137,13 @@ pub(super) fn eval_op_expr(
                             }));
                         }
                         Err(err) => {
-                            return Err(CompileError::Semantic(err));
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_OPERATION)
+                                .with_help("check that the operation is valid for the unit types");
+                            return Err(CompileError::semantic_with_context(
+                                format!("invalid operation: {}", err),
+                                ctx,
+                            ));
                         }
                     }
                 }
@@ -152,19 +162,25 @@ pub(super) fn eval_op_expr(
                 // Mixed unit/non-unit for non-scaling ops is an error
                 (Value::Unit { suffix: ls, .. }, _) => {
                     if !matches!(op, BinOp::Eq | BinOp::NotEq) {
-                        return Err(CompileError::Semantic(format!(
-                            "cannot apply {:?} between unit '{}' and non-unit value",
-                            op, ls
-                        )));
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_OPERATION)
+                            .with_help(format!("unit '{}' operations require both operands to be compatible units or scalar values", ls));
+                        return Err(CompileError::semantic_with_context(
+                            format!("invalid operation: cannot apply {:?} between unit '{}' and non-unit value", op, ls),
+                            ctx,
+                        ));
                     }
                     // Fall through for equality comparison
                 }
                 (_, Value::Unit { suffix: rs, .. }) => {
                     if !matches!(op, BinOp::Eq | BinOp::NotEq) {
-                        return Err(CompileError::Semantic(format!(
-                            "cannot apply {:?} between non-unit value and unit '{}'",
-                            op, rs
-                        )));
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_OPERATION)
+                            .with_help(format!("unit '{}' operations require both operands to be compatible units or scalar values", rs));
+                        return Err(CompileError::semantic_with_context(
+                            format!("invalid operation: cannot apply {:?} between non-unit value and unit '{}'", op, rs),
+                            ctx,
+                        ));
                     }
                     // Fall through for equality comparison
                 }
@@ -315,8 +331,12 @@ pub(super) fn eval_op_expr(
                         let base = left_val.as_int()?;
                         let exp = right_val.as_int()?;
                         if exp < 0 {
-                            Err(CompileError::Semantic(
-                                "negative exponent not supported for integers".into(),
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_OPERATION)
+                                .with_help("use float exponentiation for negative exponents");
+                            Err(CompileError::semantic_with_context(
+                                "invalid operation: negative exponent not supported for integers",
+                                ctx,
                             ))
                         } else {
                             Ok(Value::Int(base.pow(exp as u32)))
@@ -508,10 +528,13 @@ pub(super) fn eval_op_expr(
                             )
                         })?,
                         _ => {
-                            return Err(CompileError::Semantic(format!(
-                                "channel receive operator (<-) requires a channel, got {:?}",
-                                val.type_name()
-                            )));
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_OPERATION)
+                                .with_help("channel receive operator (<-) can only be used on channel values");
+                            return Err(CompileError::semantic_with_context(
+                                format!("invalid operation: cannot receive from non-channel value of type `{}`", val.type_name()),
+                                ctx,
+                            ));
                         }
                     }
                 }

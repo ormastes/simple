@@ -126,7 +126,7 @@ pub fn extract_path(args: &[Value], idx: usize) -> Result<String, CompileError> 
             // Unit types and other string-like values
             _ => None,
         })
-        .ok_or_else(|| CompileError::Semantic(format!("argument {} must be a path string", idx)))
+        .ok_or_else(|| crate::error::factory::argument_must_be(idx, "a path string"))
 }
 
 pub fn extract_bytes(args: &[Value], idx: usize) -> Result<Vec<u8>, CompileError> {
@@ -142,10 +142,7 @@ pub fn extract_bytes(args: &[Value], idx: usize) -> Result<Vec<u8>, CompileError
             Ok(bytes)
         }
         Some(Value::Str(s)) => Ok(s.as_bytes().to_vec()),
-        _ => Err(CompileError::Semantic(format!(
-            "argument {} must be bytes or string",
-            idx
-        ))),
+        _ => Err(crate::error::factory::argument_must_be(idx, "bytes or string")),
     }
 }
 
@@ -156,14 +153,14 @@ pub fn extract_bool(args: &[Value], idx: usize) -> bool {
 pub fn extract_int(args: &[Value], idx: usize) -> Result<i64, CompileError> {
     args.get(idx)
         .and_then(|v| v.as_int().ok())
-        .ok_or_else(|| CompileError::Semantic(format!("argument {} must be an integer", idx)))
+        .ok_or_else(|| crate::error::factory::argument_must_be(idx, "an integer"))
 }
 
 pub fn extract_open_mode(args: &[Value], idx: usize) -> Result<String, CompileError> {
     match args.get(idx) {
         Some(Value::Enum { variant, .. }) => Ok(variant.clone()),
         Some(Value::Str(s)) => Ok(s.clone()),
-        _ => Err(CompileError::Semantic(format!("argument {} must be an OpenMode", idx))),
+        _ => Err(crate::error::factory::argument_must_be(idx, "an OpenMode")),
     }
 }
 

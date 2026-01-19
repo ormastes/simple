@@ -43,7 +43,7 @@ where
     {
         process(&params, &body, &captured)
     } else {
-        Err(CompileError::Semantic(format!("{operation} expects lambda argument")))
+        Err(crate::error::factory::expects_lambda(operation))
     }
 }
 
@@ -174,7 +174,7 @@ where
     {
         process(&params, &body, &captured)
     } else {
-        Err(CompileError::Semantic(format!("{operation} expects lambda argument")))
+        Err(crate::error::factory::expects_lambda(operation))
     }
 }
 

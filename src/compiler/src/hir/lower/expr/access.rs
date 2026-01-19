@@ -5,6 +5,7 @@
 
 use simple_parser::Expr;
 
+use crate::hir::lifetime::ReferenceOrigin;
 use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
@@ -47,6 +48,23 @@ impl Lowerer {
 
         // Regular struct field access
         let (field_index, field_ty) = self.get_field_info(recv_hir.ty, field)?;
+
+        // Track field access lifetime if receiver is a local variable reference
+        if let HirExprKind::Local(idx) = &recv_hir.kind {
+            if let Some(local) = ctx.get_local(*idx) {
+                // Get the base origin and create a field origin
+                if let Some(base_origin) = self.lifetime_context.get_variable_origin(&local.name).cloned() {
+                    let field_origin = ReferenceOrigin::Field {
+                        base: Box::new(base_origin),
+                        field: field.to_string(),
+                    };
+                    // Register field access for tracking (using a synthetic name)
+                    let field_name = format!("{}.{}", local.name, field);
+                    self.lifetime_context.register_variable(&field_name, field_origin);
+                }
+            }
+        }
+
         Ok(HirExpr {
             kind: HirExprKind::FieldAccess {
                 receiver: recv_hir,
