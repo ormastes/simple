@@ -30,7 +30,9 @@ Part of [Simple Language Grammar](lexer_parser_grammar.md).
       choice(
         $.expression_statement,
         $.assignment_statement,
-        $.let_statement,
+        $.val_statement,          // val name = value (immutable, preferred)
+        $.var_statement,          // var name = value (mutable)
+        $.let_statement,          // let name = value (alternative)
         $.return_statement,
         $.break_statement,
         $.continue_statement,
@@ -57,6 +59,26 @@ Part of [Simple Language Grammar](lexer_parser_grammar.md).
 
     assignment_statement: $ => seq(
       $.expression,
+      '=',
+      $.expression,
+    ),
+
+    // Variable declarations (Scala-style preferred)
+    // val name = value   # Immutable (preferred)
+    // var name = value   # Mutable
+    // let name = value   # Alternative immutable syntax
+    val_statement: $ => seq(
+      'val',
+      $.pattern,
+      optional(seq(':', $.type)),
+      '=',
+      $.expression,
+    ),
+
+    var_statement: $ => seq(
+      'var',
+      $.pattern,
+      optional(seq(':', $.type)),
       '=',
       $.expression,
     ),
@@ -338,6 +360,9 @@ Part of [Simple Language Grammar](lexer_parser_grammar.md).
       $.method_call_expression,
       $.field_access,
       $.index_expression,
+      $.slice_expression,         // items[1:3], items[::2]
+      $.do_block,                 // do: body (BDD DSL blocks)
+      $.block_expression,         // Custom DSL blocks: m{...}, sh{...}, sql{...}
     )),
 
     identifier: $ => /[a-zA-Z_][a-zA-Z0-9_]*/,
@@ -522,6 +547,35 @@ Part of [Simple Language Grammar](lexer_parser_grammar.md).
       optional(seq(':', optional($.expression))),  // step
       ']',
     )),
+
+    // Do block: sequence of statements evaluating to unit
+    // Used for colon-block syntax in BDD DSL: describe "name": body
+    do_block: $ => seq(
+      'do',
+      ':',
+      $.block,
+    ),
+
+    // Custom block expression: m{...}, sh{...}, sql{...}, re{...}, etc.
+    // DSL embedding with typed result based on block kind.
+    // Supported kinds: m (math), sh (shell), sql, re (regex), md, html, graph, img
+    block_expression: $ => seq(
+      $.block_kind,
+      '{',
+      /[^}]*/,                    // Raw payload content
+      '}',
+    ),
+
+    block_kind: $ => choice(
+      'm',      // Math expressions
+      'sh',     // Shell commands
+      'sql',    // SQL queries
+      're',     // Regular expressions
+      'md',     // Markdown
+      'html',   // HTML
+      'graph',  // Graph/diagram
+      'img',    // Image
+    ),
 
     //=========================================================================
     // OPERATOR EXPRESSIONS
