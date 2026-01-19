@@ -44,7 +44,7 @@ pub fn to_int(args: &[Value]) -> Result<Value, CompileError> {
         Value::Str(s) => s
             .parse::<i64>()
             .map(Value::Int)
-            .map_err(|_| CompileError::Semantic(format!("cannot convert '{}' to int", s))),
+            .map_err(|_| crate::error::factory::cannot_convert(s, "int")),
         Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
         _ => Err(CompileError::Semantic("to_int expects string, int, or bool".into())),
     }

@@ -3,7 +3,7 @@
 //! Handles method dispatch for context objects, including method_missing hooks
 //! and value-to-expression conversion.
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value};
 use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef};
 use std::collections::HashMap;
@@ -54,10 +54,15 @@ pub(super) fn dispatch_context_method(
         )? {
             return Ok(result);
         }
-        return Err(CompileError::Semantic(format!(
-            "context object has no method '{}'",
-            method
-        )));
+        // E3009 - Method Not Found
+        let ctx = ErrorContext::new()
+            .with_code(codes::METHOD_NOT_FOUND)
+            .with_help("check that the method is defined for this context type")
+            .with_note("ensure the method name is spelled correctly");
+        return Err(CompileError::semantic_with_context(
+            format!("context object has no method `{}`", method),
+            ctx,
+        ));
     }
 
     let recv_expr = value_to_expr(ctx)?;
