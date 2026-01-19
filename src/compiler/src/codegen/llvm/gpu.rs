@@ -62,6 +62,48 @@ use std::cell::RefCell;
 #[cfg(feature = "llvm")]
 use std::collections::HashMap;
 
+/// NVPTX intrinsic lookup table for dimension-based intrinsics.
+/// Index by: [category][dimension] where dimension is 0=x, 1=y, 2=z
+const GPU_INTRINSIC_NAMES: [[&str; 3]; 4] = [
+    // Thread ID: tid.x, tid.y, tid.z
+    [
+        "llvm.nvvm.read.ptx.sreg.tid.x",
+        "llvm.nvvm.read.ptx.sreg.tid.y",
+        "llvm.nvvm.read.ptx.sreg.tid.z",
+    ],
+    // Block ID: ctaid.x, ctaid.y, ctaid.z
+    [
+        "llvm.nvvm.read.ptx.sreg.ctaid.x",
+        "llvm.nvvm.read.ptx.sreg.ctaid.y",
+        "llvm.nvvm.read.ptx.sreg.ctaid.z",
+    ],
+    // Block Dim: ntid.x, ntid.y, ntid.z
+    [
+        "llvm.nvvm.read.ptx.sreg.ntid.x",
+        "llvm.nvvm.read.ptx.sreg.ntid.y",
+        "llvm.nvvm.read.ptx.sreg.ntid.z",
+    ],
+    // Grid Dim: nctaid.x, nctaid.y, nctaid.z
+    [
+        "llvm.nvvm.read.ptx.sreg.nctaid.x",
+        "llvm.nvvm.read.ptx.sreg.nctaid.y",
+        "llvm.nvvm.read.ptx.sreg.nctaid.z",
+    ],
+];
+
+/// Short names for GPU intrinsic result values
+const GPU_INTRINSIC_RESULT_NAMES: [&str; 4] = ["tid", "ctaid", "ntid", "nctaid"];
+
+/// GPU intrinsic category for dimension-based operations
+#[repr(usize)]
+#[derive(Debug, Clone, Copy)]
+enum GpuIntrinsicKind {
+    ThreadId = 0,
+    BlockId = 1,
+    BlockDim = 2,
+    GridDim = 3,
+}
+
 /// GPU compute capability version
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuComputeCapability {
@@ -324,120 +366,63 @@ impl LlvmGpuBackend {
         Ok(())
     }
 
-    /// Emit a call to get thread ID for a dimension
+    /// Emit a GPU dimension intrinsic call using the lookup table.
+    /// This is the unified implementation for thread_id, block_id, block_dim, and grid_dim.
     #[cfg(feature = "llvm")]
-    pub fn emit_thread_id(&self, builder: &Builder<'static>, dim: u8) -> Result<IntValue<'static>, CompileError> {
+    fn emit_gpu_dimension_intrinsic(
+        &self,
+        builder: &Builder<'static>,
+        kind: GpuIntrinsicKind,
+        dim: u8,
+    ) -> Result<IntValue<'static>, CompileError> {
+        if dim > 2 {
+            return Err(CompileError::Semantic("Invalid dimension (must be 0, 1, or 2)".to_string()));
+        }
+
         let module = self.module.borrow();
         let module = module
             .as_ref()
             .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
 
-        let intrinsic_name = match dim {
-            0 => "llvm.nvvm.read.ptx.sreg.tid.x",
-            1 => "llvm.nvvm.read.ptx.sreg.tid.y",
-            2 => "llvm.nvvm.read.ptx.sreg.tid.z",
-            _ => return Err(CompileError::Semantic("Invalid dimension".to_string())),
-        };
+        let intrinsic_name = GPU_INTRINSIC_NAMES[kind as usize][dim as usize];
+        let result_name = GPU_INTRINSIC_RESULT_NAMES[kind as usize];
 
         let func = module
             .get_function(intrinsic_name)
             .ok_or_else(|| CompileError::Semantic(format!("Intrinsic {} not declared", intrinsic_name)))?;
 
         let call = builder
-            .build_call(func, &[], "tid")
-            .map_err(|e| CompileError::Semantic(format!("Failed to call thread ID intrinsic: {}", e)))?;
+            .build_call(func, &[], result_name)
+            .map_err(|e| CompileError::Semantic(format!("Failed to call {} intrinsic: {}", result_name, e)))?;
 
         call.try_as_basic_value()
             .left()
             .and_then(|v| v.into_int_value().into())
-            .ok_or_else(|| CompileError::Semantic("Thread ID intrinsic returned unexpected type".to_string()))
+            .ok_or_else(|| CompileError::Semantic(format!("{} intrinsic returned unexpected type", result_name)))
+    }
+
+    /// Emit a call to get thread ID for a dimension
+    #[cfg(feature = "llvm")]
+    pub fn emit_thread_id(&self, builder: &Builder<'static>, dim: u8) -> Result<IntValue<'static>, CompileError> {
+        self.emit_gpu_dimension_intrinsic(builder, GpuIntrinsicKind::ThreadId, dim)
     }
 
     /// Emit a call to get block ID for a dimension
     #[cfg(feature = "llvm")]
     pub fn emit_block_id(&self, builder: &Builder<'static>, dim: u8) -> Result<IntValue<'static>, CompileError> {
-        let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
-
-        let intrinsic_name = match dim {
-            0 => "llvm.nvvm.read.ptx.sreg.ctaid.x",
-            1 => "llvm.nvvm.read.ptx.sreg.ctaid.y",
-            2 => "llvm.nvvm.read.ptx.sreg.ctaid.z",
-            _ => return Err(CompileError::Semantic("Invalid dimension".to_string())),
-        };
-
-        let func = module
-            .get_function(intrinsic_name)
-            .ok_or_else(|| CompileError::Semantic(format!("Intrinsic {} not declared", intrinsic_name)))?;
-
-        let call = builder
-            .build_call(func, &[], "ctaid")
-            .map_err(|e| CompileError::Semantic(format!("Failed to call block ID intrinsic: {}", e)))?;
-
-        call.try_as_basic_value()
-            .left()
-            .and_then(|v| v.into_int_value().into())
-            .ok_or_else(|| CompileError::Semantic("Block ID intrinsic returned unexpected type".to_string()))
+        self.emit_gpu_dimension_intrinsic(builder, GpuIntrinsicKind::BlockId, dim)
     }
 
     /// Emit a call to get block dimension for a dimension
     #[cfg(feature = "llvm")]
     pub fn emit_block_dim(&self, builder: &Builder<'static>, dim: u8) -> Result<IntValue<'static>, CompileError> {
-        let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
-
-        let intrinsic_name = match dim {
-            0 => "llvm.nvvm.read.ptx.sreg.ntid.x",
-            1 => "llvm.nvvm.read.ptx.sreg.ntid.y",
-            2 => "llvm.nvvm.read.ptx.sreg.ntid.z",
-            _ => return Err(CompileError::Semantic("Invalid dimension".to_string())),
-        };
-
-        let func = module
-            .get_function(intrinsic_name)
-            .ok_or_else(|| CompileError::Semantic(format!("Intrinsic {} not declared", intrinsic_name)))?;
-
-        let call = builder
-            .build_call(func, &[], "ntid")
-            .map_err(|e| CompileError::Semantic(format!("Failed to call block dim intrinsic: {}", e)))?;
-
-        call.try_as_basic_value()
-            .left()
-            .and_then(|v| v.into_int_value().into())
-            .ok_or_else(|| CompileError::Semantic("Block dim intrinsic returned unexpected type".to_string()))
+        self.emit_gpu_dimension_intrinsic(builder, GpuIntrinsicKind::BlockDim, dim)
     }
 
     /// Emit a call to get grid dimension for a dimension
     #[cfg(feature = "llvm")]
     pub fn emit_grid_dim(&self, builder: &Builder<'static>, dim: u8) -> Result<IntValue<'static>, CompileError> {
-        let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
-
-        let intrinsic_name = match dim {
-            0 => "llvm.nvvm.read.ptx.sreg.nctaid.x",
-            1 => "llvm.nvvm.read.ptx.sreg.nctaid.y",
-            2 => "llvm.nvvm.read.ptx.sreg.nctaid.z",
-            _ => return Err(CompileError::Semantic("Invalid dimension".to_string())),
-        };
-
-        let func = module
-            .get_function(intrinsic_name)
-            .ok_or_else(|| CompileError::Semantic(format!("Intrinsic {} not declared", intrinsic_name)))?;
-
-        let call = builder
-            .build_call(func, &[], "nctaid")
-            .map_err(|e| CompileError::Semantic(format!("Failed to call grid dim intrinsic: {}", e)))?;
-
-        call.try_as_basic_value()
-            .left()
-            .and_then(|v| v.into_int_value().into())
-            .ok_or_else(|| CompileError::Semantic("Grid dim intrinsic returned unexpected type".to_string()))
+        self.emit_gpu_dimension_intrinsic(builder, GpuIntrinsicKind::GridDim, dim)
     }
 
     /// Compute global thread ID: blockIdx * blockDim + threadIdx

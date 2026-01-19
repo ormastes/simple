@@ -14,7 +14,7 @@ fn test_lower_struct() {
 fn test_unknown_type_error() {
     let result = parse_and_lower("fn test(x: Unknown) -> i64:\n    return 0\n");
 
-    assert!(matches!(result, Err(LowerError::UnknownType(_))));
+    assert!(matches!(result, Err(LowerError::UnknownType { .. })));
 }
 
 #[test]

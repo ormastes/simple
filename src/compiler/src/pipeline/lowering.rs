@@ -4,10 +4,41 @@ use simple_type::check as type_check;
 use std::path::Path;
 
 use super::core::CompilerPipeline;
+use crate::error::{codes, typo, ErrorContext};
 use crate::hir;
 use crate::mir;
 use crate::verification_checker::VerificationChecker;
 use crate::CompileError;
+
+/// Convert LowerError to CompileError with rich error context
+fn convert_lower_error(e: crate::hir::LowerError) -> CompileError {
+    match e {
+        crate::hir::LowerError::UnknownType { type_name, available_types } => {
+            // E1011 - Undefined Type
+            let available_strs: Vec<&str> = available_types.iter().map(|s| s.as_str()).collect();
+            let suggestion = if !available_strs.is_empty() {
+                typo::suggest_name(&type_name, available_strs)
+            } else {
+                None
+            };
+
+            let mut ctx = ErrorContext::new()
+                .with_code(codes::UNDEFINED_TYPE)
+                .with_help("check that the type is defined or imported in this scope");
+
+            if let Some(best_match) = suggestion {
+                ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
+            }
+
+            CompileError::semantic_with_context(
+                format!("type `{}` not found in this scope", type_name),
+                ctx,
+            )
+        }
+        // Other errors just get converted to simple semantic errors
+        other => CompileError::Semantic(format!("HIR lowering: {}", other)),
+    }
+}
 
 impl CompilerPipeline {
     /// Type check and lower AST to MIR.
@@ -25,7 +56,7 @@ impl CompilerPipeline {
         type_check(&ast_module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
 
         // Lower AST to HIR
-        let hir_module = hir::lower(ast_module).map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
+        let hir_module = hir::lower(ast_module).map_err(convert_lower_error)?;
 
         // Emit HIR if requested (LLM-friendly #886)
         if let Some(path) = &self.emit_hir {
@@ -121,7 +152,7 @@ impl CompilerPipeline {
 
         // Lower AST to HIR with module resolution support
         let hir_module = hir::lower_with_context(ast_module, source_file)
-            .map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
+            .map_err(convert_lower_error)?;
 
         // Emit HIR if requested (LLM-friendly #886)
         if let Some(path) = &self.emit_hir {

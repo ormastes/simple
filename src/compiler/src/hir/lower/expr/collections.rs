@@ -148,15 +148,19 @@ impl Lowerer {
             if let Some(class_ty) = self.current_class_type {
                 class_ty
             } else {
-                return Err(LowerError::UnknownType(
-                    "Self used outside of class/struct context".to_string(),
-                ));
+                return Err(LowerError::UnknownType {
+                    type_name: "Self".to_string(),
+                    available_types: vec![],
+                });
             }
         } else {
             self.module
                 .types
                 .lookup(name)
-                .ok_or_else(|| LowerError::UnknownType(name.to_string()))?
+                .ok_or_else(|| LowerError::UnknownType {
+                    type_name: name.to_string(),
+                    available_types: self.module.types.all_type_names(),
+                })?
         };
 
         // Lower field initializers (in order)

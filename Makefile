@@ -17,7 +17,8 @@
         duplication duplication-simple lint lint-fix fmt fmt-check \
         check check-full unused-deps outdated audit build build-release \
         clean clean-coverage clean-duplication install-tools help \
-        arch-test arch-test-visualize
+        arch-test arch-test-visualize \
+        check-todos gen-todos todos todos-p0
 
 # Default target
 all: check
@@ -507,6 +508,32 @@ arch-test-visualize:
 	fi
 
 # ============================================================================
+# TODO Management
+# ============================================================================
+
+# Validate TODO format (requires TODO scanning to be implemented)
+check-todos:
+	@echo "Validating TODO format..."
+	@./target/debug/simple todo-scan --parallel --validate || (echo "ERROR: Invalid TODO format found" && exit 1)
+	@echo "✓ All TODOs are properly formatted"
+
+# Generate TODO documentation (parallel mode for 7.8x speedup)
+gen-todos:
+	@echo "Updating TODO database..."
+	@./target/debug/simple todo-scan --parallel
+	@./target/debug/simple todo-gen
+	@echo "✓ Generated doc/TODO.md"
+
+# Generate and show recent TODOs
+todos: gen-todos
+	@head -30 doc/TODO.md
+
+# Show critical (P0) TODOs only
+todos-p0:
+	@echo "Critical (P0) TODOs:"
+	@grep -A 5 "## P0 Critical TODOs" doc/TODO.md | tail -n +2 || echo "✓ No P0 TODOs found!"
+
+# ============================================================================
 # Help
 # ============================================================================
 
@@ -562,6 +589,12 @@ help:
 	@echo "Architecture Testing:"
 	@echo "  make arch-test           - Run architecture tests"
 	@echo "  make arch-test-visualize - Generate dependency graph (DOT/Mermaid)"
+	@echo ""
+	@echo "TODO Management:"
+	@echo "  make gen-todos     - Update TODO database (parallel scan - 7.8x faster)"
+	@echo "  make todos         - Generate and show recent TODOs"
+	@echo "  make todos-p0      - Show critical (P0) TODOs only"
+	@echo "  make check-todos   - Validate TODO format"
 	@echo ""
 	@echo "Other:"
 	@echo "  make install-tools - Install required tools"

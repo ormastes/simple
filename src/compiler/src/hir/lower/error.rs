@@ -4,8 +4,12 @@ use super::super::types::TypeId;
 
 #[derive(Error, Debug)]
 pub enum LowerError {
-    #[error("Unknown type: {0}")]
-    UnknownType(String),
+    #[error("Unknown type: {type_name}")]
+    UnknownType {
+        type_name: String,
+        /// Available type names for suggestions
+        available_types: Vec<String>,
+    },
 
     #[error("Unknown variable: {0}")]
     UnknownVariable(String),
