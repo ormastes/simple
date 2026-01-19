@@ -129,6 +129,11 @@ pub(crate) fn evaluate_call(
             return call_extern_function(name, args, env, functions, classes, enums, impl_methods);
         }
 
+        // Check class constructors (e.g., MyClass() instantiation)
+        if classes.contains_key(name) {
+            return core::instantiate_class(name, args, env, functions, classes, enums, impl_methods);
+        }
+
         // Check context object
         let context_obj = CONTEXT_OBJECT.with(|cell| cell.borrow().clone());
         if let Some(ctx) = context_obj {

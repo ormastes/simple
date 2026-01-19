@@ -71,10 +71,7 @@ pub(super) fn call_value_with_args(
             let result = exec_block(&def.body, &mut local_env, functions, classes, enums, impl_methods);
             control_to_value(result)
         }
-        _ => Err(CompileError::Semantic(format!(
-            "cannot call value of type {}",
-            callee.type_name()
-        ))),
+        _ => Err(crate::error::factory::not_callable(callee.type_name())),
     }
 }
 
@@ -335,10 +332,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         for trait_method in &trait_def.methods {
                             // Only require implementation of abstract methods
                             if trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
-                                return Err(CompileError::Semantic(format!(
-                                    "type `{}` does not implement required method `{}` from trait `{}`",
-                                    type_name, trait_method.name, trait_name
-                                )));
+                                return Err(crate::error::factory::missing_trait_method(
+                                    &type_name, &trait_method.name, trait_name
+                                ));
                             }
                         }
 
