@@ -1,6 +1,6 @@
 /// LLVM GPU instruction compilation - GPU intrinsics and operations
 use super::LlvmBackend;
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 
 #[cfg(feature = "llvm")]
 use inkwell::builder::Builder;
@@ -30,10 +30,12 @@ impl LlvmBackend {
             .build_call(gpu_global_id, &[dim_val.into()], "global_id")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| CompileError::Semantic("rt_gpu_global_id returned void".to_string()))
+        call_site.try_as_basic_value().left().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("GPU global_id intrinsic should return a value");
+            CompileError::semantic_with_context("rt_gpu_global_id returned void", ctx)
+        })
     }
 
     /// Compile GPU local_id intrinsic - returns local work item ID within workgroup
@@ -57,10 +59,12 @@ impl LlvmBackend {
             .build_call(gpu_local_id, &[dim_val.into()], "local_id")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| CompileError::Semantic("rt_gpu_local_id returned void".to_string()))
+        call_site.try_as_basic_value().left().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("GPU local_id intrinsic should return a value");
+            CompileError::semantic_with_context("rt_gpu_local_id returned void", ctx)
+        })
     }
 
     /// Compile GPU group_id intrinsic - returns workgroup ID
@@ -84,10 +88,12 @@ impl LlvmBackend {
             .build_call(gpu_group_id, &[dim_val.into()], "group_id")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| CompileError::Semantic("rt_gpu_group_id returned void".to_string()))
+        call_site.try_as_basic_value().left().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("GPU group_id intrinsic should return a value");
+            CompileError::semantic_with_context("rt_gpu_group_id returned void", ctx)
+        })
     }
 
     /// Compile GPU global_size intrinsic - returns total number of work items
@@ -111,10 +117,12 @@ impl LlvmBackend {
             .build_call(gpu_global_size, &[dim_val.into()], "global_size")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| CompileError::Semantic("rt_gpu_global_size returned void".to_string()))
+        call_site.try_as_basic_value().left().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("GPU global_size intrinsic should return a value");
+            CompileError::semantic_with_context("rt_gpu_global_size returned void", ctx)
+        })
     }
 
     /// Compile GPU local_size intrinsic - returns workgroup size
@@ -138,10 +146,12 @@ impl LlvmBackend {
             .build_call(gpu_local_size, &[dim_val.into()], "local_size")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| CompileError::Semantic("rt_gpu_local_size returned void".to_string()))
+        call_site.try_as_basic_value().left().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("GPU local_size intrinsic should return a value");
+            CompileError::semantic_with_context("rt_gpu_local_size returned void", ctx)
+        })
     }
 
     /// Compile GPU num_groups intrinsic - returns number of workgroups
@@ -165,10 +175,12 @@ impl LlvmBackend {
             .build_call(gpu_num_groups, &[dim_val.into()], "num_groups")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| CompileError::Semantic("rt_gpu_num_groups returned void".to_string()))
+        call_site.try_as_basic_value().left().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("GPU num_groups intrinsic should return a value");
+            CompileError::semantic_with_context("rt_gpu_num_groups returned void", ctx)
+        })
     }
 
     /// Compile GPU barrier intrinsic - synchronize all threads in workgroup
@@ -260,10 +272,12 @@ impl LlvmBackend {
             .build_call(atomic_fn, &[ptr.into(), value.into()], "atomic")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| CompileError::Semantic("Atomic operation returned void".to_string()))
+        call_site.try_as_basic_value().left().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("GPU atomic operation should return a value");
+            CompileError::semantic_with_context("Atomic operation returned void", ctx)
+        })
     }
 
     /// Compile GPU atomic compare-exchange operation
@@ -289,10 +303,12 @@ impl LlvmBackend {
             .build_call(cmpxchg_fn, &[ptr.into(), expected.into(), desired.into()], "cmpxchg")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| CompileError::Semantic("CmpXchg operation returned void".to_string()))
+        call_site.try_as_basic_value().left().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("GPU compare-exchange operation should return a value");
+            CompileError::semantic_with_context("CmpXchg operation returned void", ctx)
+        })
     }
 
     /// Compile GPU shared memory allocation
@@ -316,9 +332,11 @@ impl LlvmBackend {
             .build_call(gpu_shared_alloc, &[size_val.into()], "shared_alloc")
             .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
-        call_site
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| CompileError::Semantic("rt_gpu_shared_alloc returned void".to_string()))
+        call_site.try_as_basic_value().left().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("GPU shared memory allocation should return a pointer");
+            CompileError::semantic_with_context("rt_gpu_shared_alloc returned void", ctx)
+        })
     }
 }

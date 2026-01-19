@@ -7,7 +7,7 @@
 //! - Query type detection (SELECT, INSERT, UPDATE, DELETE, etc.)
 
 use super::{BlockHandler, BlockResult};
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 use std::collections::HashMap;
 
@@ -65,7 +65,10 @@ fn parse_sql_query(payload: &str) -> Result<Value, CompileError> {
     let payload = payload.trim();
 
     if payload.is_empty() {
-        return Err(CompileError::Semantic("empty SQL query".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::SQL_BLOCK_SYNTAX_ERROR)
+            .with_help("provide a non-empty SQL query");
+        return Err(CompileError::semantic_with_context("empty SQL query", ctx));
     }
 
     // Detect query type
@@ -193,14 +196,26 @@ fn validate_sql(query: &str) -> Result<(), CompileError> {
             ')' => {
                 paren_depth -= 1;
                 if paren_depth < 0 {
-                    return Err(CompileError::Semantic("unbalanced parentheses in SQL query".into()));
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::SQL_BLOCK_SYNTAX_ERROR)
+                        .with_help("check that parentheses are balanced");
+                    return Err(CompileError::semantic_with_context(
+                        "unbalanced parentheses in SQL query",
+                        ctx,
+                    ));
                 }
             }
             _ => {}
         }
     }
     if paren_depth != 0 {
-        return Err(CompileError::Semantic("unbalanced parentheses in SQL query".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::SQL_BLOCK_SYNTAX_ERROR)
+            .with_help("check that parentheses are balanced");
+        return Err(CompileError::semantic_with_context(
+            "unbalanced parentheses in SQL query",
+            ctx,
+        ));
     }
 
     // Check for unclosed string literals
@@ -213,7 +228,13 @@ fn validate_sql(query: &str) -> Result<(), CompileError> {
         prev = ch;
     }
     if in_string {
-        return Err(CompileError::Semantic("unclosed string literal in SQL query".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::SQL_BLOCK_SYNTAX_ERROR)
+            .with_help("check that all string literals are properly closed");
+        return Err(CompileError::semantic_with_context(
+            "unclosed string literal in SQL query",
+            ctx,
+        ));
     }
 
     Ok(())

@@ -16,7 +16,7 @@ use simple_parser::ast::{
 };
 use simple_parser::token::Span;
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::macro_validation::{extract_symbol_scope, validate_intro_no_shadowing, validate_macro_contract, SymbolScope};
 use crate::value::{Env, Value};
 
@@ -265,8 +265,12 @@ fn process_intro_decl(
                     result.introduced_vars.push((var_name, var_stub.ty.clone(), is_const));
                 }
                 _ => {
-                    return Err(CompileError::Semantic(
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::UNSUPPORTED_FEATURE)
+                        .with_help("Only variable and constant introductions are supported at callsite block");
+                    return Err(CompileError::semantic_with_context(
                         "Only var/const introductions are allowed at callsite block".to_string(),
+                        ctx,
                     ));
                 }
             }
@@ -346,14 +350,26 @@ fn eval_const_condition(
                         _ => unreachable!(),
                     })
                 }
-                _ => Err(CompileError::Semantic(
-                    "Only comparison operators are supported in macro if conditions".to_string(),
-                )),
+                _ => {
+                    let ctx = ErrorContext::new().with_code(codes::INVALID_OPERATION).with_help(
+                        "Only comparison operators (==, !=, <, <=, >, >=) are supported in macro if conditions",
+                    );
+                    Err(CompileError::semantic_with_context(
+                        "Only comparison operators are supported in macro if conditions".to_string(),
+                        ctx,
+                    ))
+                }
             }
         }
-        _ => Err(CompileError::Semantic(
-            "Complex expressions not yet supported in macro if conditions".to_string(),
-        )),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("Only boolean literals, identifiers (const params), and comparison expressions are supported in macro if conditions");
+            Err(CompileError::semantic_with_context(
+                "Complex expressions not yet supported in macro if conditions".to_string(),
+                ctx,
+            ))
+        }
     }
 }
 
@@ -383,15 +399,25 @@ fn eval_const_int_expr(expr: &Expr, const_bindings: &HashMap<String, String>, en
                 BinOp::Div => left_val / right_val,
                 BinOp::Mod => left_val % right_val,
                 _ => {
-                    return Err(CompileError::Semantic(
+                    let ctx = ErrorContext::new().with_code(codes::INVALID_OPERATION).with_help(
+                        "Only arithmetic operators (+, -, *, /, %) are supported in macro const expressions",
+                    );
+                    return Err(CompileError::semantic_with_context(
                         "Only arithmetic operators are supported in macro const expressions".to_string(),
-                    ))
+                        ctx,
+                    ));
                 }
             })
         }
-        _ => Err(CompileError::Semantic(
-            "Complex expressions not yet supported in macro const eval".to_string(),
-        )),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("Only integer literals, identifiers (const params), and binary arithmetic expressions are supported in macro const evaluation");
+            Err(CompileError::semantic_with_context(
+                "Complex expressions not yet supported in macro const eval".to_string(),
+                ctx,
+            ))
+        }
     }
 }
 

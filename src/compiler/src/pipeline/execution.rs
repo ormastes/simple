@@ -13,12 +13,12 @@ use tracing::instrument;
 
 use super::core::CompilerPipeline;
 use crate::compilability::analyze_module;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::import_loader::{has_script_statements, load_module_with_imports};
 use crate::interpreter::evaluate_module_with_di_and_aop;
 use crate::mir;
 use crate::monomorphize::{monomorphize_module, specialize_bindings};
 use crate::value::FUNC_MAIN;
-use crate::CompileError;
 
 // Re-export SMF generation functions for backward compatibility
 pub use crate::smf_builder::{generate_smf_bytes, generate_smf_bytes_for_target, generate_smf_from_object_for_target};
@@ -114,7 +114,12 @@ impl CompilerPipeline {
 
         // Emit AST if requested (LLM-friendly #885)
         if let Some(path) = &self.emit_ast {
-            crate::ir_export::export_ast(&module, path.as_deref()).map_err(|e| CompileError::Semantic(e))?;
+            crate::ir_export::export_ast(&module, path.as_deref()).map_err(|e| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNSUPPORTED_FEATURE)
+                    .with_help("Failed to export AST to file");
+                CompileError::semantic_with_context(e, ctx)
+            })?;
         }
 
         self.compile_module_to_memory(module)
@@ -171,7 +176,12 @@ impl CompilerPipeline {
 
             // Emit HIR if requested
             if let Some(path) = &self.emit_hir {
-                crate::ir_export::export_hir(&hir_module, path.as_deref()).map_err(|e| CompileError::Semantic(e))?;
+                crate::ir_export::export_hir(&hir_module, path.as_deref()).map_err(|e| {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::UNSUPPORTED_FEATURE)
+                        .with_help("Failed to export HIR to file");
+                    CompileError::semantic_with_context(e, ctx)
+                })?;
             }
 
             // Lower to MIR if requested
@@ -182,8 +192,12 @@ impl CompilerPipeline {
 
                 // Emit MIR if requested
                 if let Some(path) = &self.emit_mir {
-                    crate::ir_export::export_mir(&mir_module, path.as_deref())
-                        .map_err(|e| CompileError::Semantic(e))?;
+                    crate::ir_export::export_mir(&mir_module, path.as_deref()).map_err(|e| {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::UNSUPPORTED_FEATURE)
+                            .with_help("Failed to export MIR to file");
+                        CompileError::semantic_with_context(e, ctx)
+                    })?;
                 }
             }
         } else {
@@ -223,7 +237,12 @@ impl CompilerPipeline {
 
         // Emit AST if requested (LLM-friendly #885)
         if let Some(path) = &self.emit_ast {
-            crate::ir_export::export_ast(&ast_module, path.as_deref()).map_err(|e| CompileError::Semantic(e))?;
+            crate::ir_export::export_ast(&ast_module, path.as_deref()).map_err(|e| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNSUPPORTED_FEATURE)
+                    .with_help("Failed to export AST to file");
+                CompileError::semantic_with_context(e, ctx)
+            })?;
         }
 
         self.compile_module_to_memory_native(ast_module)
@@ -433,7 +452,12 @@ impl CompilerPipeline {
 
         // Emit AST if requested
         if let Some(path) = &self.emit_ast {
-            crate::ir_export::export_ast(&ast_module, path.as_deref()).map_err(|e| CompileError::Semantic(e))?;
+            crate::ir_export::export_ast(&ast_module, path.as_deref()).map_err(|e| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNSUPPORTED_FEATURE)
+                    .with_help("Failed to export AST to file");
+                CompileError::semantic_with_context(e, ctx)
+            })?;
         }
 
         // Monomorphization
@@ -461,8 +485,12 @@ impl CompilerPipeline {
         if !options.shared {
             let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
             if !has_main_function {
-                return Err(CompileError::Semantic(
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("Define a 'main() -> i32' function in your source code");
+                return Err(CompileError::semantic_with_context(
                     "native binary requires a main function".to_string(),
+                    ctx,
                 ));
             }
         }

@@ -157,7 +157,12 @@ impl CompilerPipeline {
 
         // Emit HIR if requested (LLM-friendly #886)
         if let Some(path) = &self.emit_hir {
-            crate::ir_export::export_hir(&hir_module, path.as_deref()).map_err(|e| CompileError::Semantic(e))?;
+            crate::ir_export::export_hir(&hir_module, path.as_deref()).map_err(|e| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNSUPPORTED_FEATURE)
+                    .with_help("ensure the HIR export feature is properly configured");
+                CompileError::semantic_with_context(format!("HIR export failed: {}", e), ctx)
+            })?;
         }
 
         // Check architecture rules if any are defined (#1026-1035)
@@ -172,7 +177,10 @@ impl CompilerPipeline {
                     .map(|v| format!("Architecture violation: {}", v.message))
                     .collect::<Vec<_>>()
                     .join("\n");
-                return Err(CompileError::Semantic(msg));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("ensure your module structure complies with defined architecture rules");
+                return Err(CompileError::semantic_with_context(msg, ctx));
             }
         }
 
@@ -222,7 +230,12 @@ impl CompilerPipeline {
 
         // Emit MIR if requested (LLM-friendly #887)
         if let Some(path) = &self.emit_mir {
-            crate::ir_export::export_mir(&mir_module, path.as_deref()).map_err(|e| CompileError::Semantic(e))?;
+            crate::ir_export::export_mir(&mir_module, path.as_deref()).map_err(|e| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNSUPPORTED_FEATURE)
+                    .with_help("ensure the MIR export feature is properly configured");
+                CompileError::semantic_with_context(format!("MIR export failed: {}", e), ctx)
+            })?;
         }
 
         Ok(mir_module)
@@ -252,7 +265,12 @@ impl CompilerPipeline {
 
         // Emit HIR if requested (LLM-friendly #886)
         if let Some(path) = &self.emit_hir {
-            crate::ir_export::export_hir(&hir_module, path.as_deref()).map_err(|e| CompileError::Semantic(e))?;
+            crate::ir_export::export_hir(&hir_module, path.as_deref()).map_err(|e| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNSUPPORTED_FEATURE)
+                    .with_help("ensure the HIR export feature is properly configured");
+                CompileError::semantic_with_context(format!("HIR export failed: {}", e), ctx)
+            })?;
         }
 
         // Check architecture rules if any are defined (#1026-1035)
@@ -267,7 +285,10 @@ impl CompilerPipeline {
                     .map(|v| format!("Architecture violation: {}", v.message))
                     .collect::<Vec<_>>()
                     .join("\n");
-                return Err(CompileError::Semantic(msg));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("ensure your module structure complies with defined architecture rules");
+                return Err(CompileError::semantic_with_context(msg, ctx));
             }
         }
 
@@ -317,7 +338,12 @@ impl CompilerPipeline {
 
         // Emit MIR if requested (LLM-friendly #887)
         if let Some(path) = &self.emit_mir {
-            crate::ir_export::export_mir(&mir_module, path.as_deref()).map_err(|e| CompileError::Semantic(e))?;
+            crate::ir_export::export_mir(&mir_module, path.as_deref()).map_err(|e| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNSUPPORTED_FEATURE)
+                    .with_help("ensure the MIR export feature is properly configured");
+                CompileError::semantic_with_context(format!("MIR export failed: {}", e), ctx)
+            })?;
         }
 
         Ok(mir_module)

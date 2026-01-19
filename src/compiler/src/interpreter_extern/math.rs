@@ -2,19 +2,30 @@
 //!
 //! Basic mathematical operations for integer values.
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 /// Absolute value of an integer
 ///
 /// Callable from Simple as: `abs(n)`
 pub fn abs(args: &[Value]) -> Result<Value, CompileError> {
-    let val = args
-        .first()
-        .ok_or_else(|| CompileError::Semantic("abs expects 1 argument".into()))?;
+    let val = args.first().ok_or_else(|| {
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("abs expects exactly 1 argument");
+        CompileError::semantic_with_context("abs expects 1 argument".to_string(), ctx)
+    })?;
     match val {
         Value::Int(i) => Ok(Value::Int(i.abs())),
-        _ => Err(CompileError::Semantic("abs expects integer".into())),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("abs expects an integer argument");
+            Err(CompileError::semantic_with_context(
+                "abs expects integer".to_string(),
+                ctx,
+            ))
+        }
     }
 }
 
@@ -24,11 +35,21 @@ pub fn abs(args: &[Value]) -> Result<Value, CompileError> {
 pub fn min(args: &[Value]) -> Result<Value, CompileError> {
     let a = args
         .get(0)
-        .ok_or_else(|| CompileError::Semantic("min expects 2 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("min expects exactly 2 arguments");
+            CompileError::semantic_with_context("min expects 2 arguments".to_string(), ctx)
+        })?
         .as_int()?;
     let b = args
         .get(1)
-        .ok_or_else(|| CompileError::Semantic("min expects 2 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("min expects exactly 2 arguments");
+            CompileError::semantic_with_context("min expects 2 arguments".to_string(), ctx)
+        })?
         .as_int()?;
     Ok(Value::Int(a.min(b)))
 }
@@ -39,11 +60,21 @@ pub fn min(args: &[Value]) -> Result<Value, CompileError> {
 pub fn max(args: &[Value]) -> Result<Value, CompileError> {
     let a = args
         .get(0)
-        .ok_or_else(|| CompileError::Semantic("max expects 2 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("max expects exactly 2 arguments");
+            CompileError::semantic_with_context("max expects 2 arguments".to_string(), ctx)
+        })?
         .as_int()?;
     let b = args
         .get(1)
-        .ok_or_else(|| CompileError::Semantic("max expects 2 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("max expects exactly 2 arguments");
+            CompileError::semantic_with_context("max expects 2 arguments".to_string(), ctx)
+        })?
         .as_int()?;
     Ok(Value::Int(a.max(b)))
 }
@@ -54,7 +85,12 @@ pub fn max(args: &[Value]) -> Result<Value, CompileError> {
 pub fn sqrt(args: &[Value]) -> Result<Value, CompileError> {
     let val = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("sqrt expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("sqrt expects exactly 1 argument");
+            CompileError::semantic_with_context("sqrt expects 1 argument".to_string(), ctx)
+        })?
         .as_int()?;
     Ok(Value::Int((val as f64).sqrt() as i64))
 }
@@ -65,7 +101,12 @@ pub fn sqrt(args: &[Value]) -> Result<Value, CompileError> {
 pub fn floor(args: &[Value]) -> Result<Value, CompileError> {
     let val = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("floor expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("floor expects exactly 1 argument");
+            CompileError::semantic_with_context("floor expects 1 argument".to_string(), ctx)
+        })?
         .as_int()?;
     Ok(Value::Int(val))
 }
@@ -76,7 +117,12 @@ pub fn floor(args: &[Value]) -> Result<Value, CompileError> {
 pub fn ceil(args: &[Value]) -> Result<Value, CompileError> {
     let val = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("ceil expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("ceil expects exactly 1 argument");
+            CompileError::semantic_with_context("ceil expects 1 argument".to_string(), ctx)
+        })?
         .as_int()?;
     Ok(Value::Int(val))
 }
@@ -87,11 +133,21 @@ pub fn ceil(args: &[Value]) -> Result<Value, CompileError> {
 pub fn pow(args: &[Value]) -> Result<Value, CompileError> {
     let base = args
         .get(0)
-        .ok_or_else(|| CompileError::Semantic("pow expects 2 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("pow expects exactly 2 arguments");
+            CompileError::semantic_with_context("pow expects 2 arguments".to_string(), ctx)
+        })?
         .as_int()?;
     let exp = args
         .get(1)
-        .ok_or_else(|| CompileError::Semantic("pow expects 2 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("pow expects exactly 2 arguments");
+            CompileError::semantic_with_context("pow expects 2 arguments".to_string(), ctx)
+        })?
         .as_int()?;
     Ok(Value::Int(base.pow(exp as u32)))
 }

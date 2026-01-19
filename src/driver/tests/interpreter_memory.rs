@@ -161,8 +161,9 @@ main = *y   # dereference
 #[test]
 fn interpreter_mutable_borrow() {
     // Mutable borrow with &mut operator
+    // Note: var creates a mutable binding, which is required for &mut
     let code = r#"
-let x = 10
+var x = 10
 let y = &mut x  # mutable borrow
 main = *y       # dereference
 "#;
@@ -188,13 +189,14 @@ main = read_ref(borrowed)
 #[test]
 fn interpreter_mutable_borrow_modify() {
     // Mutable borrow allows modification through the reference
+    // Note: var creates a mutable binding, which is required for &mut
     let code = r#"
 fn add_ten(r):
     # In real borrowing, we'd modify through the ref
     # For now, just read and return modified value
     return *r + 10
 
-let x = 5
+var x = 5
 let borrowed = &mut x
 main = add_ten(borrowed)
 "#;

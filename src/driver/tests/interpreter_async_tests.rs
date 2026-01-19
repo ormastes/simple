@@ -125,7 +125,12 @@ main = value
     let result = run_code(code, &[], "");
     // With stricter type checking, await requires a Future or Actor handle
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("await requires a Future or Actor handle"));
+    let err_msg = result.unwrap_err();
+    assert!(
+        err_msg.contains("await") && err_msg.contains("Future"),
+        "Expected error about await requiring Future, got: {}",
+        err_msg
+    );
 }
 
 #[test]

@@ -130,7 +130,10 @@ pub(crate) fn evaluate_macro_invocation(
             if let Some(MacroArg::Expr(e)) = macro_args.first() {
                 let val = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
                 if !val.truthy() {
-                    return Err(CompileError::Semantic("assertion failed".into()));
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::ASSERTION_FAILED)
+                        .with_help("the assertion condition evaluated to false");
+                    return Err(CompileError::semantic_with_context("assertion failed", ctx));
                 }
             }
             Ok(Value::Nil)
@@ -158,8 +161,12 @@ pub(crate) fn evaluate_macro_invocation(
                     Value::Str(s) => s.clone(),
                     Value::Symbol(s) => s.clone(),
                     _ => {
-                        return Err(CompileError::Semantic(
-                            "assert_unit: second argument must be a string or symbol representing the unit type".into(),
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_OPERATION)
+                            .with_help("provide a string or symbol representing the unit type");
+                        return Err(CompileError::semantic_with_context(
+                            "assert_unit: second argument must be a string or symbol representing the unit type",
+                            ctx,
                         ));
                     }
                 };
@@ -174,8 +181,12 @@ pub(crate) fn evaluate_macro_invocation(
                     return Err(crate::error::factory::unit_assertion_failed(&e));
                 }
             } else {
-                return Err(CompileError::Semantic(
-                    "assert_unit requires two arguments: assert_unit!(value, \"unit_type\")".into(),
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("assert_unit requires two arguments: value and unit type");
+                return Err(CompileError::semantic_with_context(
+                    "assert_unit requires two arguments: assert_unit!(value, \"unit_type\")",
+                    ctx,
                 ));
             }
             Ok(Value::Nil)

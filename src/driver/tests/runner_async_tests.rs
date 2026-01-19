@@ -202,7 +202,7 @@ let x = 42
 let res = await x
 main = res
 "#,
-        "await requires a Future or Actor handle",
+        "requires a Future or Actor handle",
     );
 }
 

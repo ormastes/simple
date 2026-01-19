@@ -1103,10 +1103,7 @@ pub mod factory {
 
     /// Error when an unknown variant or method on enum.
     pub fn unknown_enum_variant_or_method(method: &str, enum_name: &str) -> CompileError {
-        CompileError::Semantic(format!(
-            "unknown variant or method '{}' on enum {}",
-            method, enum_name
-        ))
+        CompileError::Semantic(format!("unknown variant or method '{}' on enum {}", method, enum_name))
     }
 
     /// Error when running Lean fails.
