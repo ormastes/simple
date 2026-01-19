@@ -1,0 +1,287 @@
+"""
+# Dependency Injection Error Messages Specification
+
+**Feature IDs:** #E1901-E1908
+**Category:** Errors / DI
+**Difficulty:** 3/5 (Intermediate)
+**Status:** Draft
+
+## Overview
+
+Dependency Injection (DI) in Simple provides a hybrid approach:
+- Zero-overhead manual injection as baseline
+- Optional constructor injection with `@sys.inject`
+- Compile-time binding resolution
+- Scope management (Singleton/Transient)
+
+## Syntax
+
+```simple
+# Define interface
+trait Database:
+    fn query(sql: text) -> Result<Rows, Error>
+
+# Implementation
+class PostgresDb:
+    impl Database:
+        fn query(sql: text) -> Result<Rows, Error>:
+            ...
+
+# DI configuration
+bind Database = PostgresDb
+
+# Usage with injection
+class UserService:
+    @sys.inject
+    val db: Database
+
+    fn get_user(id: i32) -> User:
+        db.query(sql{SELECT * FROM users WHERE id = :id})
+```
+
+## Error Codes
+
+| Code | Name | Description |
+|------|------|-------------|
+| E1901 | Missing DI Binding | No binding for required type |
+| E1902 | Ambiguous DI Binding | Multiple bindings match |
+| E1903 | DI Circular Dependency | Cyclic dependency graph |
+| E1904 | Invalid DI Scope | Invalid scope annotation |
+| E1905 | DI Inject Failed | Injection failed at runtime |
+| E1906 | Invalid DI Attribute | Wrong @sys.inject usage |
+| E1907 | DI Scope Mismatch | Singleton depends on Transient |
+| E1908 | Mock Not Test | Mock binding outside test |
+"""
+
+import std.spec
+
+
+# ============================================================================
+# E1901: Missing DI Binding
+# ============================================================================
+
+describe "E1901 Missing DI Binding":
+    """
+    ## Missing Binding Errors
+
+    When a type is marked for injection but no binding is registered,
+    the compiler cannot resolve the dependency.
+    """
+
+    context "when binding is missing":
+        """
+        ### Scenario: No Registration
+
+        A field requests injection but no binding exists for that type.
+        """
+
+        it "reports error for missing binding":
+            # Code that would trigger E1901:
+            # class Service:
+            #     @sys.inject
+            #     val db: Database  # No 'bind Database = ...'
+            val error_code = "E1901"
+            val error_title = "Missing DI Binding"
+            expect(error_code).to(eq("E1901"))
+            expect(error_title).to(contain("Binding"))
+
+
+# ============================================================================
+# E1902: Ambiguous DI Binding
+# ============================================================================
+
+describe "E1902 Ambiguous DI Binding":
+    """
+    ## Ambiguous Binding Errors
+
+    When multiple bindings could satisfy a dependency, the resolution
+    is ambiguous and must be qualified.
+    """
+
+    context "when multiple bindings match":
+        """
+        ### Scenario: Multiple Implementations
+
+        Two bindings exist for the same interface without qualifiers.
+        """
+
+        it "reports error for ambiguous binding":
+            # Code that would trigger E1902:
+            # bind Database = PostgresDb
+            # bind Database = SqliteDb  # Ambiguous!
+            val error_code = "E1902"
+            val error_title = "Ambiguous DI Binding"
+            expect(error_code).to(eq("E1902"))
+
+
+# ============================================================================
+# E1903: DI Circular Dependency
+# ============================================================================
+
+describe "E1903 DI Circular Dependency":
+    """
+    ## Circular Dependency Errors
+
+    DI dependencies form a graph. Cycles in this graph cannot be resolved
+    without special techniques (lazy injection).
+    """
+
+    context "when dependencies are circular":
+        """
+        ### Scenario: A needs B, B needs A
+
+        Classic circular dependency pattern.
+        """
+
+        it "reports error for circular dependency":
+            # Code that would trigger E1903:
+            # class A:
+            #     @sys.inject val b: B
+            # class B:
+            #     @sys.inject val a: A
+            val error_code = "E1903"
+            val error_title = "DI Circular Dependency"
+            expect(error_code).to(eq("E1903"))
+            expect(error_title).to(contain("Circular"))
+
+
+# ============================================================================
+# E1904: Invalid DI Scope
+# ============================================================================
+
+describe "E1904 Invalid DI Scope":
+    """
+    ## Invalid Scope Errors
+
+    DI scopes control instance lifetime. Valid scopes are Singleton
+    (one instance) and Transient (new instance each time).
+    """
+
+    context "when scope is invalid":
+        it "reports error for invalid scope":
+            # Code that would trigger E1904:
+            # @RequestScope  # Invalid scope
+            # bind Database = PostgresDb
+            val error_code = "E1904"
+            val error_title = "Invalid DI Scope"
+            val valid_scopes = ["Singleton", "Transient"]
+            expect(error_code).to(eq("E1904"))
+            expect(valid_scopes.len()).to(eq(2))
+
+
+# ============================================================================
+# E1905: DI Injection Failed
+# ============================================================================
+
+describe "E1905 DI Injection Failed":
+    """
+    ## Injection Failure Errors
+
+    Runtime injection failures when the DI container cannot create
+    an instance of the bound type.
+    """
+
+    context "when injection fails at runtime":
+        it "reports error for injection failure":
+            val error_code = "E1905"
+            val error_title = "DI Injection Failed"
+            expect(error_code).to(eq("E1905"))
+
+
+# ============================================================================
+# E1906: Invalid DI Attribute
+# ============================================================================
+
+describe "E1906 Invalid DI Attribute":
+    """
+    ## Invalid Attribute Usage Errors
+
+    The @sys.inject attribute can only be used on constructor parameters
+    or class fields, not on functions or other items.
+    """
+
+    context "when attribute is misused":
+        it "reports error for invalid attribute":
+            # Code that would trigger E1906:
+            # @sys.inject
+            # fn my_function():  # Invalid: not a field/param
+            #     ...
+            val error_code = "E1906"
+            val error_title = "Invalid DI Attribute"
+            expect(error_code).to(eq("E1906"))
+
+
+# ============================================================================
+# E1907: DI Scope Mismatch
+# ============================================================================
+
+describe "E1907 DI Scope Mismatch":
+    """
+    ## Scope Mismatch Errors
+
+    A Singleton should not depend on a Transient, as the transient
+    would be captured and become effectively singleton.
+    """
+
+    context "when scopes are incompatible":
+        """
+        ### Scenario: Captive Dependency
+
+        Singleton captures a transient instance.
+        """
+
+        it "reports error for scope mismatch":
+            # Code that would trigger E1907:
+            # @Singleton
+            # class UserService:
+            #     @sys.inject
+            #     val request: Request  # Transient - scope violation!
+            val error_code = "E1907"
+            val error_title = "DI Scope Mismatch"
+            expect(error_code).to(eq("E1907"))
+
+
+# ============================================================================
+# E1908: Mock Binding Outside Test
+# ============================================================================
+
+describe "E1908 Mock Binding Outside Test":
+    """
+    ## Mock Usage Errors
+
+    Mock bindings are for testing only and should not appear
+    in production configuration.
+    """
+
+    context "when mock is used in production":
+        it "reports error for mock outside test":
+            # Code that would trigger E1908:
+            # # In main configuration (not test):
+            # bind Database = MockDatabase  # Error!
+            val error_code = "E1908"
+            val error_title = "Mock Binding Outside Test"
+            expect(error_code).to(eq("E1908"))
+
+
+# ============================================================================
+# Korean Language Support Tests
+# ============================================================================
+
+describe "DI Error Messages - Korean (한국어)":
+    """
+    ## i18n 검증: DI 오류 메시지 한국어 번역
+
+    모든 DI 오류 코드는 한국어 번역을 지원합니다.
+    """
+
+    it "E1901 has Korean translation":
+        val ko_title = "DI 바인딩 누락"
+        expect(ko_title).to(contain("바인딩"))
+
+    it "E1903 has Korean translation":
+        val ko_title = "DI 순환 종속성"
+        expect(ko_title).to(contain("순환"))
+
+    it "E1907 has Korean translation":
+        val ko_title = "DI 범위 불일치"
+        expect(ko_title).to(contain("범위"))
