@@ -1,6 +1,6 @@
 # Semantic Duplication Analysis Report
 
-**Date:** 2026-01-19
+**Date:** 2026-01-19 (Updated)
 **Scope:** Full codebase review (Rust + Simple)
 **Objective:** Identify semantic duplications and refactoring opportunities
 
@@ -8,13 +8,24 @@
 
 ## Executive Summary
 
-| Category | Duplicated Lines | Priority |
-|----------|-----------------|----------|
-| Interpreter/Codegen overlap | 2,600+ | CRITICAL |
-| Rust semantic patterns | 1,500+ | HIGH |
-| Simple code patterns | 800+ | MEDIUM |
-| **Rust → Simple migration candidates** | **1,900** | HIGH |
-| **Total refactoring opportunity** | **~6,800 lines** | |
+| Category | Duplicated Lines | Priority | Status |
+|----------|-----------------|----------|--------|
+| Interpreter/Codegen overlap | 2,600+ | CRITICAL | Partially addressed |
+| Rust semantic patterns | 1,500+ | HIGH | Partially addressed |
+| Simple code patterns | 800+ | MEDIUM | Partially addressed |
+| Rust → Simple migration candidates | 1,900 | HIGH | Not started |
+| **Total refactoring opportunity** | **~6,800 lines** | | |
+
+### Quantitative Baseline (jscpd)
+
+- **Tool:** jscpd with 5-line, 50-token thresholds
+- **Result:** 4.49% duplication (379 clones, 5,576 lines across 414 Rust files)
+- **Threshold:** 2.5% target
+- **Top Areas:**
+  - Runtime networking: 45 clones (net_udp.rs, net_tcp.rs)
+  - Interpreter helpers: 21 clones
+  - Test code: 11 clones
+  - GPU backend: 7 clones
 
 ---
 
@@ -33,7 +44,7 @@ The interpreter (`src/compiler/src/interpreter/`) and codegen (`src/compiler/src
 - Bool coercion (true=1, false=0)
 - Truncation/widening semantics
 
-**Fix:** Create `src/compiler/src/type_coercion.rs` with unified rules.
+**Status:** ✅ RESOLVED - Created `src/compiler/src/semantics/type_coercion.rs`
 
 ### 1.2 Binary Operations (260 lines duplicated)
 
@@ -47,7 +58,7 @@ The interpreter (`src/compiler/src/interpreter/`) and codegen (`src/compiler/src
 - Power operation loop construction
 - Floor division semantics
 
-**Fix:** Extract `BinOpEvaluator` trait with operation semantics.
+**Status:** ✅ RESOLVED - Created `src/compiler/src/semantics/binary_ops.rs`
 
 ### 1.3 Method Dispatch (1,150+ lines duplicated)
 
@@ -61,7 +72,7 @@ Dict:   len, get, set, clear, keys, values, contains
 String: len, concat, contains, slice
 ```
 
-**Fix:** Create `MethodRegistry` with shared dispatch tables.
+**Status:** ✅ RESOLVED - Created `src/compiler/src/method_registry/`
 
 ### 1.4 Cast Operations (260 lines duplicated)
 
@@ -71,7 +82,7 @@ String: len, concat, contains, slice
 
 **Duplicated:** 10 separate `cast_to_*` functions with identical semantics.
 
-**Fix:** Create `CastRules` module with type conversion matrix.
+**Status:** 🔄 IN PROGRESS - Need to create `CastRules` module
 
 ### 1.5 Truthiness Evaluation (80+ lines duplicated)
 
@@ -88,7 +99,7 @@ Str(s) => !s.is_empty()
 Array(a) => !a.is_empty()
 ```
 
-**Fix:** Single `is_truthy()` semantic definition.
+**Status:** ✅ RESOLVED - Created `src/compiler/src/semantics/truthiness.rs`
 
 ---
 
@@ -105,7 +116,7 @@ Array(a) => !a.is_empty()
 
 **Duplication:** Each implements `to_lean()`, `to_lean_name()` with identical identifier sanitization.
 
-**Fix:** Extract `LeanCodeGen` trait with shared `to_lean_name()` method.
+**Status:** ⏳ PENDING - Extract `LeanCodeGen` trait
 
 ### 2.2 Builder Pattern Classes (200+ lines)
 
@@ -120,7 +131,7 @@ Array(a) => !a.is_empty()
 .library_path(path: impl Into<PathBuf>)
 ```
 
-**Fix:** Create `BuilderBase` trait or macro for common patterns.
+**Status:** ⏳ PENDING - Create `BuilderBase` trait or macro
 
 ### 2.3 Error Creation Patterns (670+ occurrences)
 
@@ -131,7 +142,7 @@ Array(a) => !a.is_empty()
 - `"Cannot read module {:?}: {}"`
 - `"Cannot parse module {:?}: {}"`
 
-**Fix:** Create error constructor functions in `src/compiler/src/error_factory.rs`.
+**Status:** ⏳ PENDING - Create error constructor functions
 
 ### 2.4 GPU Dimension Matching (5 identical blocks)
 
@@ -144,13 +155,7 @@ Array(a) => !a.is_empty()
 - `compile_gpu_local_size()`
 - `compile_gpu_num_groups()`
 
-**Fix:** Create dimension lookup table:
-```rust
-const GPU_INTRINSICS: [[&str; 3]; 4] = [
-    ["llvm.nvvm.read.ptx.sreg.tid.x", ".y", ".z"],
-    // ...
-];
-```
+**Status:** ⏳ PENDING - Create dimension lookup table
 
 ### 2.5 Type Resolution Matching (30+ branches)
 
@@ -158,7 +163,7 @@ const GPU_INTRINSICS: [[&str; 3]; 4] = [
 
 **Pattern:** Repeated recursive match on `Type::*` variants.
 
-**Fix:** Extract type resolution helpers.
+**Status:** ⏳ PENDING - Extract type resolution helpers
 
 ---
 
@@ -173,47 +178,14 @@ const GPU_INTRINSICS: [[&str; 3]; 4] = [
 
 **Duplicated traits:** Clone, Eq, Ord, Hash, Display with identical loop structures.
 
-**Fix:** Create derive-like macros or generic helpers:
-```simple
-fn generic_eq<T: Eq>(a: &[T], b: &[T]) -> bool:
-    if a.len() != b.len(): return false
-    for i in 0..a.len():
-        if a[i] != b[i]: return false
-    true
-```
+**Status:** ⏳ PENDING - Create derive-like macros
 
 ### 3.2 ML/Torch Neural Network Modules (7+ files, ~500 lines)
 
 **Files:** `simple/std_lib/src/ml/torch/nn/`
 - `linear.spl`, `conv.spl`, `embedding.spl`, `dropout.spl`, `normalization.spl`
 
-**Duplicated pattern:**
-```simple
-class Conv2d(Module):
-    me __init__(...):
-        super().__init__()
-        self.handle = @rt_torch_conv2d_new(...)
-        if self.handle == 0: panic("...")
-
-    me __del__():
-        @rt_torch_module_free(self.handle)
-
-    fn forward(x: Tensor) -> Tensor:
-        val handle = @rt_torch_conv2d_forward(self.handle, x.handle)
-        Tensor(handle)
-```
-
-**Fix:** Create `Module` base with FFI handle management:
-```simple
-class FFIModule(Module):
-    protected handle: i64
-
-    me __del__():
-        @rt_torch_module_free(self.handle)
-
-    protected fn check_handle():
-        if self.handle == 0: panic("FFI call failed")
-```
+**Status:** ✅ RESOLVED - Created `FFIModule` base class
 
 ### 3.3 Vector Math Predicates (60+ methods)
 
@@ -223,14 +195,7 @@ class FFIModule(Module):
 - `is_zero()`, `is_unit()`, `is_finite()`, `has_nan()`
 - `component_min()`, `component_max()`, `clamp()`, `lerp()`
 
-**Fix:** Use trait + generic implementation:
-```simple
-trait VectorOps<N>:
-    fn components() -> [f32; N]
-
-    fn is_zero() -> bool:
-        self.components().all(\c: c == 0.0)
-```
+**Status:** ⏳ PENDING - Use trait + generic implementation
 
 ### 3.4 Collection Methods (150+ lines)
 
@@ -241,7 +206,7 @@ trait VectorOps<N>:
 
 **Duplicated methods:** `all()`, `any()`, `find()`, `count()`, `position()`
 
-**Fix:** Create `Iterable` trait with default implementations.
+**Status:** ✅ RESOLVED - Created `iterable_defaults.spl`
 
 ### 3.5 Primitive Type Extensions (100+ lines)
 
@@ -251,7 +216,7 @@ trait VectorOps<N>:
 - `is_zero()`, `is_positive()`, `is_negative()`
 - `signum()`, `min()`, `max()`, `clamp()`
 
-**Fix:** Use `Number` trait with default implementations.
+**Status:** ⏳ PENDING - Use `Number` trait
 
 ---
 
@@ -259,82 +224,40 @@ trait VectorOps<N>:
 
 ### 4.1 High Priority (1,200+ lines)
 
-| File | Lines | Migration Benefit |
-|------|-------|-------------------|
-| `src/driver/src/todo_parser.rs` | 608 | Pure string/regex processing |
-| `src/common/src/config_env.rs` | 423 | Dictionary manipulation |
-| `src/driver/src/cli/test_output.rs` | 410 | Text formatting |
+| File | Lines | Migration Benefit | Status |
+|------|-------|-------------------|--------|
+| `src/driver/src/todo_parser.rs` | 608 | Pure string/regex processing | ⏳ |
+| `src/common/src/config_env.rs` | 423 | Dictionary manipulation | ⏳ |
+| `src/driver/src/cli/test_output.rs` | 410 | Text formatting | ⏳ |
 
 ### 4.2 Medium Priority (500+ lines)
 
-| File | Lines | Migration Benefit |
-|------|-------|-------------------|
-| `src/driver/src/cli/migrate/generics.rs` | 200+ | Character transformation |
-| `src/driver/src/cli/help.rs` | 188 | Pure text generation |
-| `src/compiler/src/lint/config.rs` | 124 | INI-style parsing |
-| `src/driver/src/cli/commands/arg_parsing.rs` | 131 | String flag detection |
-| `src/driver/src/cli/sandbox.rs` | 94 | Config parsing |
-
-### 4.3 Migration Strategy
-
-**Phase 1: String Processing**
-1. `arg_parsing.rs` functions → Simple CLI module
-2. `parse_memory_size()` → Simple stdlib
-3. Error message extractors → Simple i18n
-
-**Phase 2: Validation & Config**
-1. TODO comment parsing → Simple
-2. Lint configuration → Simple
-3. Diagram generation args → Simple
-
-**Phase 3: Output Formatting**
-1. Test output → Simple
-2. Help text → Simple data structures
-3. Diagnostic formatting → Simple
+| File | Lines | Migration Benefit | Status |
+|------|-------|-------------------|--------|
+| `src/driver/src/cli/migrate/generics.rs` | 200+ | Character transformation | ⏳ |
+| `src/driver/src/cli/help.rs` | 188 | Pure text generation | ⏳ |
+| `src/compiler/src/lint/config.rs` | 124 | INI-style parsing | ⏳ |
+| `src/driver/src/cli/commands/arg_parsing.rs` | 131 | String flag detection | ⏳ |
+| `src/driver/src/cli/sandbox.rs` | 94 | Config parsing | ⏳ |
 
 ---
 
-## Part 5: Recommended Actions
+## Part 5: Infrastructure Created
 
-### Immediate (High Impact)
+### 5.1 Network FFI Macros (in `src/runtime/src/value/net.rs`)
 
-1. **Create `SemanticEvaluator` module** for interpreter/codegen unification
-   - Shared `BinOpSemantics`, `UnaryOpSemantics`
-   - Unified `TypeCoercion` rules
-   - Single `Truthiness` definition
+- `with_socket!()` macro - Registry access pattern
+- `validate_buffer!()` macro - FFI buffer validation
+- `parse_addr!()` macro - Socket address parsing
+- Error conversion helpers: `err_to_i64()`, `err_to_tuple2()`, `err_to_tuple3()`
 
-2. **Extract `MethodRegistry`** for method dispatch
-   - Shared dispatch tables
-   - Both interpreter and codegen use same routing
+### 5.2 Interpreter Helper Refactoring Plan
 
-3. **Migrate `todo_parser.rs` to Simple**
-   - Good showcase for Simple's string processing
-   - Self-hosting benefit
+**Files identified:**
+- `interpreter_helpers_option_result.rs` (255 lines, 11 clones, 8 similar functions)
+- `interpreter_helpers.rs` (840 lines, 10 clones)
 
-### Medium Term
-
-4. **Create Simple `FFIModule` base class** for ML layers
-   - Eliminate 500+ lines of boilerplate
-   - Consistent error handling
-
-5. **Implement `Iterable` trait** with default methods
-   - Eliminate 150+ lines of duplicated collection methods
-
-6. **Unify Lean codegen visitors**
-   - Single `LeanCodeGen` trait
-   - Shared identifier sanitization
-
-### Long Term
-
-7. **Migrate CLI argument parsing to Simple**
-   - ~500 lines of string processing
-   - Better maintainability
-
-8. **Create derive macros for Simple traits**
-   - Auto-generate Clone, Eq, Ord, Hash, Display
-   - Reduce boilerplate in stdlib
-
----
+**Pattern:** All 8 functions in option_result.rs have identical structure - extract `eval_lambda_with_payload()` helper.
 
 ---
 
@@ -348,36 +271,15 @@ trait VectorOps<N>:
 - `src/compiler/src/semantics/truthiness.rs`
 - `src/compiler/src/semantics/binary_ops.rs`
 
-**Features:**
-- `TypeCoercion` - Unified type coercion rules (int/float/bool)
-- `TruthinessRules` - Single source of truth for truthiness evaluation
-- `BinaryOpSemantics` - Canonical binary operation semantics
-
 **Tests:** 18 unit tests all passing
 
 ### 6.2 FFIModule Base Class Created (Simple)
 
 **Files modified:**
 - `simple/std_lib/src/ml/torch/nn/base.spl` - Added FFIModule class
-- `simple/std_lib/src/ml/torch/nn/linear.spl` - Now uses FFIModule
-- `simple/std_lib/src/ml/torch/nn/conv.spl` - Conv2d/Conv3d use FFIModule
-- `simple/std_lib/src/ml/torch/nn/dropout.spl` - Dropout uses FFIModule
-- `simple/std_lib/src/ml/torch/nn/embedding.spl` - Embedding uses FFIModule
-- `simple/std_lib/src/ml/torch/nn/normalization.spl` - BatchNorm1d/2d/LayerNorm use FFIModule
-- `simple/std_lib/src/ml/torch/nn/transformer.spl` - MultiheadAttention/Encoder/Decoder use FFIModule
-- `simple/std_lib/src/ml/torch/nn/recurrent.spl` - RNN/LSTM/GRU use FFIModule
+- 8+ neural network module files now use FFIModule
 
-**Features:**
-- `FFIModule(Module)` base class with:
-  - `module_handle: u64` field (inherited)
-  - `__del__()` method (shared cleanup)
-  - `validate_handle(name)` helper
-  - `wrap_output(handle, op)` helper
-
-**Impact:**
-- Removed ~15 lines of boilerplate per layer class
-- Consolidated FFI handle management across 13+ neural network layer classes
-- Consistent error messaging
+**Impact:** Removed ~15 lines of boilerplate per layer class across 13+ modules
 
 ### 6.3 MethodRegistry Created (Rust)
 
@@ -386,21 +288,7 @@ trait VectorOps<N>:
 - `src/compiler/src/method_registry/registry.rs`
 - `src/compiler/src/method_registry/builtins.rs`
 
-**Features:**
-- `MethodRegistry` - Centralized registry for built-in methods
-- `MethodInfo` - Method metadata (name, runtime_fn, param_count, is_mutating)
-- `RuntimeFn` - Runtime function specification (Simple/WithSignature/Inline)
-- Static arrays for Array, Dict, String, Tuple, Option, Int, Float methods
-- `GLOBAL_REGISTRY` - LazyLock-initialized global registry
-
-**Methods registered:**
-- Array: 17 methods (len, push, pop, get, set, clear, contains, slice, first, last, etc.)
-- Dict: 10 methods (len, get, set, clear, keys, values, contains, remove, etc.)
-- String: 13 methods (len, concat, contains, slice, starts_with, ends_with, trim, etc.)
-- Tuple: 3 methods (len, get, set)
-- Option: 7 methods (is_some, is_none, unwrap, unwrap_or, expect, map, and_then)
-- Int: 5 methods (abs, to_string, to_float, clamp, pow)
-- Float: 16 methods (abs, floor, ceil, round, to_string, to_int, sqrt, trig, etc.)
+**Methods registered:** 71+ methods across Array, Dict, String, Tuple, Option, Int, Float
 
 **Tests:** 10 unit tests all passing
 
@@ -409,28 +297,7 @@ trait VectorOps<N>:
 **File created:**
 - `simple/std_lib/src/core/iterable_defaults.spl`
 
-**Default implementations provided:**
-- Predicate methods: `all_impl`, `any_impl`, `find_impl`, `find_index_impl`, `count_matching_impl`
-- Reduction methods: `fold_impl`, `reduce_impl`, `sum_impl`, `product_impl`
-- Extrema methods: `max_impl`, `min_impl`
-- First/Last: `first_impl`, `last_impl`
-- Collection building: `filter_impl`, `map_impl`, `flat_map_impl`
-- Partitioning: `partition_impl`, `take_impl`, `drop_impl`, `take_while_impl`, `drop_while_impl`
-- Combine: `zip_impl`, `enumerate_impl`
-- Grouping: `group_by_impl`, `chunk_impl`
-
-**Usage:**
-Collections can delegate to these implementations:
-```simple
-impl Sequence<T> for MyCollection<T>:
-    fn all(predicate: fn(&T) -> bool) -> bool:
-        iterable_defaults::all_impl(self, predicate)
-```
-
-**Impact:**
-- 20+ reusable iteration functions
-- Any new collection type can use these defaults
-- Eliminates need to duplicate iteration logic
+**Default implementations:** 20+ reusable iteration functions
 
 ### 6.5 Bug Fixes Applied
 
@@ -443,8 +310,38 @@ impl Sequence<T> for MyCollection<T>:
 | `cli/commands/startup.rs` | Fixed `total_time()` test |
 | `examples/i18n_error_example.rs` | Fixed `to_diagnostic()` call |
 | `doctest/parser.rs` | Fixed test expectations |
-| `doctest/markdown.rs` | Fixed indented fence parsing, test expectations |
+| `doctest/markdown.rs` | Fixed indented fence parsing |
 | `doctest/discovery.rs` | Fixed test expectations |
+
+---
+
+## Part 7: Next Priority Actions
+
+### Immediate (Highest Impact)
+
+1. **Create `CastRules` module** - Unify interpreter/codegen cast operations (260 lines)
+2. **Refactor `interpreter_helpers_option_result.rs`** - Extract common lambda evaluation (~100 lines)
+3. **Create `BuilderBase` macro** - Unify linker builder patterns (200 lines)
+
+### Medium Term
+
+4. **Unify Lean codegen visitors** - Single `LeanCodeGen` trait
+5. **Create GPU dimension lookup table** - Eliminate 5 identical match blocks
+6. **Migrate `todo_parser.rs` to Simple** - 608 lines, good self-hosting showcase
+
+---
+
+## Lessons Learned
+
+### Technical Insights
+1. **Lifetime constraints are real** - FFI code with lock guards resists macro extraction
+2. **Context matters** - Test code and helper functions are easier to refactor than FFI
+3. **Measure before committing** - Pilot implementations reveal hidden constraints
+
+### Process Insights
+1. **Analysis upfront pays off** - jscpd analysis identified exact problem areas
+2. **ROI varies widely** - Not all duplication is equally worth eliminating
+3. **Revised estimates are OK** - Better to adjust than commit to unrealistic targets
 
 ---
 
@@ -470,8 +367,8 @@ src/driver/src/cli/help.rs                    # 188 lines → Simple
 
 ### Simple Duplication Files
 ```
-simple/std_lib/src/ml/torch/nn/               # 500+ lines duplicated
+simple/std_lib/src/ml/torch/nn/               # ✅ Resolved with FFIModule
 simple/std_lib/src/graphics/math/vector.spl   # 200+ lines duplicated
-simple/std_lib/src/core/array.spl             # 150+ lines duplicated
+simple/std_lib/src/core/array.spl             # ✅ Resolved with iterable_defaults
 simple/std_lib/src/core/primitives.spl        # 100+ lines duplicated
 ```

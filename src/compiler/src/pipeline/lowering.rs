@@ -46,6 +46,30 @@ fn convert_lower_error(e: crate::hir::LowerError) -> CompileError {
                 ctx,
             )
         }
+        crate::hir::LowerError::LetBindingFailed { pattern } => {
+            // E1016 - Let Binding Failed
+            let ctx = ErrorContext::new()
+                .with_code(codes::LET_BINDING_FAILED)
+                .with_help("use a simple identifier pattern like `let x = ...` or `let mut x = ...`")
+                .with_note("complex patterns like tuples and arrays are not yet supported in let bindings");
+
+            CompileError::semantic_with_context(
+                format!("let binding failed: pattern `{}` is not supported", pattern),
+                ctx,
+            )
+        }
+        crate::hir::LowerError::ImpureFunctionInContract { func_name } => {
+            // E1017 - Impure Function in Contract
+            let ctx = ErrorContext::new()
+                .with_code(codes::IMPURE_FUNCTION_IN_CONTRACT)
+                .with_help("add #[pure] attribute to the function or use a different function")
+                .with_note("contract expressions (requires, ensures, invariant) must only call pure functions");
+
+            CompileError::semantic_with_context(
+                format!("cannot call impure function `{}` in contract expression", func_name),
+                ctx,
+            )
+        }
         crate::hir::LowerError::CannotInferFieldType { struct_name, field, available_fields } => {
             // E1012 - Undefined Field
             let available_strs: Vec<&str> = available_fields.iter().map(|s| s.as_str()).collect();

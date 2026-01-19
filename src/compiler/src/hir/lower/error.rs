@@ -18,6 +18,10 @@ pub enum LowerError {
     #[error("cannot use `self` in static method")]
     SelfInStatic,
 
+    /// E1016: let binding failed - complex pattern not supported
+    #[error("let binding failed: {pattern} - complex patterns are not yet supported in let bindings")]
+    LetBindingFailed { pattern: String },
+
     #[error("Type mismatch: expected {expected:?}, found {found:?}")]
     TypeMismatch { expected: TypeId, found: TypeId },
 

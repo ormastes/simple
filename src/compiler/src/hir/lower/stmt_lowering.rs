@@ -36,8 +36,11 @@ impl Lowerer {
                     return Err(LowerError::CannotInferType);
                 };
 
-                let name = Self::extract_pattern_name(&let_stmt.pattern)
-                    .ok_or_else(|| LowerError::Unsupported("complex pattern in let".to_string()))?;
+                let name = Self::extract_pattern_name(&let_stmt.pattern).ok_or_else(|| {
+                    LowerError::LetBindingFailed {
+                        pattern: format!("{:?}", let_stmt.pattern),
+                    }
+                })?;
 
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
 
