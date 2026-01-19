@@ -95,10 +95,11 @@ list1.merge(list2)            # Combine collections
 [for x in 0..20 if x % 2 == 0: x]   # List comprehension with filter
 ```
 
-**String**
+**Strings:**
 ```simple
-print "Name: {name}" # format string is default, do not use f""
-print r"Parentheses open: {" # raw string with r""
+print "Hello, {name}!"        # Interpolation is default (no f"" needed)
+print "Result: {x + y}"       # Expressions in braces
+print r"regex: \d+{3}"        # Raw string (no interpolation, no escapes)
 ```
 
 **Methods (LL(1)-friendly, implicit self):**
