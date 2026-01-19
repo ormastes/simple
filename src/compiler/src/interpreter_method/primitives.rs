@@ -115,6 +115,93 @@ pub fn handle_int_methods(
             let range: Vec<Value> = (end..n).rev().map(Value::Int).collect();
             Value::Array(range)
         }
+        "gcd" => {
+            // Greatest common divisor
+            let other = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?
+                .as_int()
+                .unwrap_or(0);
+            fn gcd(mut a: i64, mut b: i64) -> i64 {
+                // Use Euclidean algorithm
+                a = a.abs();
+                b = b.abs();
+                while b != 0 {
+                    let temp = b;
+                    b = a % b;
+                    a = temp;
+                }
+                a
+            }
+            Value::Int(gcd(n, other))
+        }
+        "lcm" => {
+            // Least common multiple
+            let other = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?
+                .as_int()
+                .unwrap_or(0);
+            fn gcd(mut a: i64, mut b: i64) -> i64 {
+                a = a.abs();
+                b = b.abs();
+                while b != 0 {
+                    let temp = b;
+                    b = a % b;
+                    a = temp;
+                }
+                a
+            }
+            if n == 0 || other == 0 {
+                Value::Int(0)
+            } else {
+                let gcd_val = gcd(n, other);
+                Value::Int((n.abs() / gcd_val) * other.abs())
+            }
+        }
+        "digits" => {
+            // Return array of digits (least significant first)
+            // Optional base argument (default 10)
+            let base = eval_arg(args, 0, Value::Int(10), env, functions, classes, enums, impl_methods)?
+                .as_int()
+                .unwrap_or(10);
+
+            if base < 2 {
+                return Err(CompileError::Runtime(format!("base must be >= 2, got {}", base)));
+            }
+
+            if n < 0 {
+                return Err(CompileError::Runtime(format!("digits() requires non-negative integer, got {}", n)));
+            }
+
+            if n == 0 {
+                Value::Array(vec![Value::Int(0)])
+            } else {
+                let mut digits = Vec::new();
+                let mut num = n;
+                while num > 0 {
+                    digits.push(Value::Int(num % base));
+                    num /= base;
+                }
+                Value::Array(digits)
+            }
+        }
+        "bit_length" => {
+            // Number of bits needed to represent this number
+            // For negative numbers, returns bits needed for absolute value
+            if n == 0 {
+                Value::Int(0)
+            } else {
+                let abs_n = n.abs();
+                Value::Int(64 - abs_n.leading_zeros() as i64)
+            }
+        }
+        "chr" => {
+            // Convert to Unicode character
+            if n < 0 || n > 0x10FFFF {
+                return Err(CompileError::Runtime(format!("chr() argument out of range: {}", n)));
+            }
+            match char::from_u32(n as u32) {
+                Some(c) => Value::Str(c.to_string()),
+                None => return Err(CompileError::Runtime(format!("invalid Unicode code point: {}", n))),
+            }
+        }
         _ => return Ok(None),
     };
     Ok(Some(result))
@@ -249,6 +336,61 @@ pub fn handle_float_methods(
                 .unwrap_or(0) as i32;
             let multiplier = 10f64.powi(places);
             Value::Float((f * multiplier).round() / multiplier)
+        }
+        "is_integer" => {
+            // Check if float has no fractional part
+            Value::Bool(f.fract() == 0.0 && f.is_finite())
+        }
+        "as_integer_ratio" => {
+            // Return [numerator, denominator] array representing the float as a fraction
+            // Works for finite floats only
+            if !f.is_finite() {
+                return Err(CompileError::Runtime(format!(
+                    "as_integer_ratio() requires finite float, got {}",
+                    f
+                )));
+            }
+
+            // Simple implementation: multiply by powers of 10 until no fractional part
+            // Then simplify using GCD
+            let mut numerator = f;
+            let mut denominator = 1i64;
+
+            // Handle negative numbers
+            let sign = if numerator < 0.0 { -1 } else { 1 };
+            numerator = numerator.abs();
+
+            // Multiply until we get an integer (up to 15 decimal places)
+            for _ in 0..15 {
+                if numerator.fract() == 0.0 {
+                    break;
+                }
+                numerator *= 10.0;
+                denominator *= 10;
+            }
+
+            let mut num = (numerator.round() as i64) * sign;
+            let mut den = denominator;
+
+            // Simplify using GCD
+            fn gcd(mut a: i64, mut b: i64) -> i64 {
+                a = a.abs();
+                b = b.abs();
+                while b != 0 {
+                    let temp = b;
+                    b = a % b;
+                    a = temp;
+                }
+                a
+            }
+
+            let g = gcd(num, den);
+            if g != 0 {
+                num /= g;
+                den /= g;
+            }
+
+            Value::Array(vec![Value::Int(num), Value::Int(den)])
         }
         _ => return Ok(None),
     };

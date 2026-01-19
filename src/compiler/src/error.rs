@@ -525,6 +525,67 @@ pub mod factory {
         CompileError::Codegen(format!("failed to generate code for {}: {}", construct, reason))
     }
 
+    // ============================================
+    // Assignment/Mutation Errors
+    // ============================================
+
+    /// Error when trying to assign to a constant.
+    pub fn cannot_assign_to_const(name: &str) -> CompileError {
+        CompileError::Semantic(format!("cannot assign to const '{}'", name))
+    }
+
+    /// Error when trying to mutate an immutable value.
+    pub fn cannot_mutate_immutable(name: &str) -> CompileError {
+        CompileError::Semantic(format!("cannot mutate immutable value '{}'", name))
+    }
+
+    // ============================================
+    // Conversion/Parse Errors
+    // ============================================
+
+    /// Error when a value cannot be converted to a target type.
+    pub fn cannot_convert(value: &str, target_type: &str) -> CompileError {
+        CompileError::Semantic(format!("cannot convert '{}' to {}", value, target_type))
+    }
+
+    /// Error when a string cannot be parsed as a socket address.
+    pub fn invalid_socket_address(addr: &str) -> CompileError {
+        CompileError::Semantic(format!("invalid socket address: {}", addr))
+    }
+
+    /// Error when a config/manifest file is invalid.
+    pub fn invalid_config(kind: &str, error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("invalid {}: {}", kind, error))
+    }
+
+    // ============================================
+    // Dependency/Resolution Errors
+    // ============================================
+
+    /// Error when a circular dependency is detected.
+    pub fn circular_dependency(description: &str) -> CompileError {
+        CompileError::Semantic(format!("circular dependency detected: {}", description))
+    }
+
+    /// Error when a class is not found.
+    pub fn class_not_found(class_name: &str) -> CompileError {
+        CompileError::Semantic(format!("unknown class '{}'", class_name))
+    }
+
+    /// Error when an enum is not found.
+    pub fn enum_not_found(enum_name: &str) -> CompileError {
+        CompileError::Semantic(format!("unknown enum '{}'", enum_name))
+    }
+
+    // ============================================
+    // Block/Custom Syntax Errors
+    // ============================================
+
+    /// Error when an unknown block type is used.
+    pub fn unknown_block_type(kind: &str) -> CompileError {
+        CompileError::Semantic(format!("unknown block kind: {}", kind))
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;

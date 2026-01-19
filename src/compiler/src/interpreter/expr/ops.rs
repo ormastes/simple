@@ -221,14 +221,30 @@ pub(super) fn eval_op_expr(
                     if use_float {
                         let r = right_val.as_float()?;
                         if r == 0.0 {
-                            Err(CompileError::Semantic("division by zero".into()))
+                            // E3001 - Division By Zero
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::DIVISION_BY_ZERO)
+                                .with_help("cannot divide by zero")
+                                .with_note("check that the divisor is not zero before division");
+                            Err(CompileError::semantic_with_context(
+                                "division by zero".to_string(),
+                                ctx,
+                            ))
                         } else {
                             Ok(Value::Float(left_val.as_float()? / r))
                         }
                     } else {
                         let r = right_val.as_int()?;
                         if r == 0 {
-                            Err(CompileError::Semantic("division by zero".into()))
+                            // E3001 - Division By Zero
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::DIVISION_BY_ZERO)
+                                .with_help("cannot divide by zero")
+                                .with_note("check that the divisor is not zero before division");
+                            Err(CompileError::semantic_with_context(
+                                "division by zero".to_string(),
+                                ctx,
+                            ))
                         } else {
                             Ok(Value::Int(left_val.as_int()? / r))
                         }
@@ -238,14 +254,30 @@ pub(super) fn eval_op_expr(
                     if use_float {
                         let r = right_val.as_float()?;
                         if r == 0.0 {
-                            Err(CompileError::Semantic("modulo by zero".into()))
+                            // E3001 - Division By Zero (includes modulo)
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::DIVISION_BY_ZERO)
+                                .with_help("cannot perform modulo by zero")
+                                .with_note("check that the divisor is not zero before modulo operation");
+                            Err(CompileError::semantic_with_context(
+                                "modulo by zero".to_string(),
+                                ctx,
+                            ))
                         } else {
                             Ok(Value::Float(left_val.as_float()? % r))
                         }
                     } else {
                         let r = right_val.as_int()?;
                         if r == 0 {
-                            Err(CompileError::Semantic("modulo by zero".into()))
+                            // E3001 - Division By Zero (includes modulo)
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::DIVISION_BY_ZERO)
+                                .with_help("cannot perform modulo by zero")
+                                .with_note("check that the divisor is not zero before modulo operation");
+                            Err(CompileError::semantic_with_context(
+                                "modulo by zero".to_string(),
+                                ctx,
+                            ))
                         } else {
                             Ok(Value::Int(left_val.as_int()? % r))
                         }
@@ -294,7 +326,15 @@ pub(super) fn eval_op_expr(
                 BinOp::FloorDiv => {
                     let r = right_val.as_int()?;
                     if r == 0 {
-                        Err(CompileError::Semantic("floor division by zero".into()))
+                        // E3001 - Division By Zero
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::DIVISION_BY_ZERO)
+                            .with_help("cannot perform floor division by zero")
+                            .with_note("check that the divisor is not zero before division");
+                        Err(CompileError::semantic_with_context(
+                            "floor division by zero".to_string(),
+                            ctx,
+                        ))
                     } else {
                         let l = left_val.as_int()?;
                         // Floor division: always round towards negative infinity
