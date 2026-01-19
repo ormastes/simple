@@ -1,4 +1,4 @@
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, exec_block, exec_block_fn, exec_node, Control, Enums, ImplMethods};
 use crate::macro_contracts::{process_macro_contract, MacroContractResult};
 use crate::macro_validation::validate_macro_defined_before_use;
@@ -77,8 +77,12 @@ fn expand_user_macro_inner(
     // Find if there's a variadic parameter (must be last if present)
     if let Some(variadic_idx) = macro_def.params.iter().position(|p| p.is_variadic) {
         if variadic_idx != macro_def.params.len() - 1 {
-            return Err(CompileError::Semantic(
-                "Variadic parameter must be the last parameter".to_string(),
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Variadic parameters must be the last parameter in the parameter list");
+            return Err(CompileError::semantic_with_context(
+                "variadic parameter must be the last parameter".to_string(),
+                ctx,
             ));
         }
     }

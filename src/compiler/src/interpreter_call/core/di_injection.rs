@@ -2,7 +2,7 @@
 
 use super::class_instantiation::instantiate_class;
 use crate::di::DiScope;
-use crate::error::CompileError;
+use crate::error::{CompileError, ErrorContext, codes, typo};
 use crate::interpreter::{get_di_config, DI_SINGLETONS};
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, Parameter, SelfMode, Type};

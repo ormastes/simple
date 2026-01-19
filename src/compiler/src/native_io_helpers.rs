@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io::{self, ErrorKind};
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 //==============================================================================
@@ -136,7 +136,15 @@ pub fn extract_bytes(args: &[Value], idx: usize) -> Result<Vec<u8>, CompileError
             for v in arr {
                 match v {
                     Value::Int(i) => bytes.push(*i as u8),
-                    _ => return Err(CompileError::Semantic("byte array must contain integers".into())),
+                    _ => {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::TYPE_MISMATCH)
+                            .with_help("Byte arrays must contain only integer values");
+                        return Err(CompileError::semantic_with_context(
+                            format!("byte array element must be integer, got {}", v.type_name()),
+                            ctx,
+                        ));
+                    }
                 }
             }
             Ok(bytes)

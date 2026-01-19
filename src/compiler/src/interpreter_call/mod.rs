@@ -97,8 +97,12 @@ pub(crate) fn evaluate_call(
                         .iter()
                         .map(|a| {
                             if a.name.is_some() {
-                                return Err(CompileError::Semantic(
-                                    "native function does not support named arguments".into(),
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                                    .with_help("native functions do not support named arguments");
+                                return Err(CompileError::semantic_with_context(
+                                    "native function does not support named arguments".to_string(),
+                                    ctx,
                                 ));
                             }
                             evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)
@@ -356,8 +360,12 @@ pub(crate) fn evaluate_call(
                 .iter()
                 .map(|a| {
                     if a.name.is_some() {
-                        return Err(CompileError::Semantic(
-                            "native function does not support named arguments".into(),
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                            .with_help("native functions do not support named arguments");
+                        return Err(CompileError::semantic_with_context(
+                            "native function does not support named arguments".to_string(),
+                            ctx,
                         ));
                     }
                     evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)

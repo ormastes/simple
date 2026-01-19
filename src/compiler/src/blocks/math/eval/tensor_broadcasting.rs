@@ -78,7 +78,10 @@ pub fn flatten_to_tensor(values: &[MathValue]) -> Result<(Vec<f64>, Vec<usize>),
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)
                             .with_help("cannot mix scalar values and tensors in the same array");
-                        return Err(CompileError::semantic_with_context("mixed scalar and tensor in array".to_string(), ctx));
+                        return Err(CompileError::semantic_with_context(
+                            "mixed scalar and tensor in array".to_string(),
+                            ctx,
+                        ));
                     }
                 }
             }

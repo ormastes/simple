@@ -89,6 +89,14 @@ fn value_to_expr(val: &Value) -> Result<Expr, CompileError> {
             let exprs: Result<Vec<_>, _> = items.iter().map(value_to_expr).collect();
             Expr::Tuple(exprs?)
         }
-        _ => return Err(CompileError::Semantic("cannot convert value to expression".into())),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("Only primitive values and collections (Array, Tuple) can be converted to expressions");
+            return Err(CompileError::semantic_with_context(
+                format!("cannot convert {} value to expression", val.type_name()),
+                ctx,
+            ));
+        }
     })
 }

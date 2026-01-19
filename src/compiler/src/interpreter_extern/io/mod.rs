@@ -12,7 +12,7 @@
 pub mod input;
 pub mod print;
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 /// Write to stdout without newline (MCP transport)
@@ -27,7 +27,12 @@ pub fn stdout_write(args: &[Value]) -> Result<Value, CompileError> {
 
     let s = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("stdout_write expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("stdout_write expects exactly 1 argument");
+            CompileError::semantic_with_context("stdout_write expects 1 argument".to_string(), ctx)
+        })?
         .to_display_string();
 
     unsafe {
@@ -65,7 +70,12 @@ pub fn stderr_write(args: &[Value]) -> Result<Value, CompileError> {
 
     let s = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("stderr_write expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("stderr_write expects exactly 1 argument");
+            CompileError::semantic_with_context("stderr_write expects 1 argument".to_string(), ctx)
+        })?
         .to_display_string();
 
     unsafe {

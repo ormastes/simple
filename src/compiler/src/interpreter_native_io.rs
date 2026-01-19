@@ -4,7 +4,7 @@
 //! - simple/std_lib/src/host/async_nogc/io/fs.spl (filesystem operations)
 //! - simple/std_lib/src/host/async_nogc/io/term.spl (terminal I/O)
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -90,9 +90,13 @@ pub fn native_fs_write_string(args: &[Value]) -> Result<Value, CompileError> {
     let content = match args.get(1) {
         Some(Value::Str(s)) => s.clone(),
         _ => {
-            return Err(CompileError::Semantic(
-                "native_fs_write_string: content must be a string".into(),
-            ))
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("Second argument must be a string value");
+            return Err(CompileError::semantic_with_context(
+                "native_fs_write_string: content argument must be a string".to_string(),
+                ctx,
+            ));
         }
     };
 

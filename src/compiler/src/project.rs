@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::aop_config::{parse_aop_config, AopConfig};
 use crate::build_mode::DeterministicConfig;
 use crate::di::{parse_di_config, DiConfig};
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::hir::{LayoutAnchor, LayoutConfig, LayoutPhase};
 use crate::lint::{LintConfig, LintLevel, LintName};
 use crate::module_resolver::ModuleResolver;
@@ -120,10 +120,12 @@ impl ProjectContext {
             .map_err(|e| crate::error::factory::invalid_config("manifest", &e))?;
 
         // Extract project/package section
-        let project = toml
-            .get("project")
-            .or_else(|| toml.get("package"))
-            .ok_or_else(|| CompileError::Semantic("manifest missing [project] or [package] section".into()))?;
+        let project = toml.get("project").or_else(|| toml.get("package")).ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Add a [project] or [package] section to your manifest file");
+            CompileError::semantic_with_context("manifest missing [project] or [package] section".to_string(), ctx)
+        })?;
 
         // Get project name
         let name = project

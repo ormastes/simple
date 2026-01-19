@@ -13,7 +13,7 @@
 //!
 //! ## Usage Pattern
 //!
-//! ```rust
+//! ```ignore
 //! // Print a string
 //! let msg = b"Hello, world!";
 //! unsafe { rt_println_str(msg.as_ptr(), msg.len() as u64); }

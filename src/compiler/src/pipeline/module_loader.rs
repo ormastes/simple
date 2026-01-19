@@ -8,7 +8,8 @@ use simple_parser::ast::{Argument, Capability, Effect, Expr, ImportTarget, Modul
 use simple_parser::error_recovery::{ErrorHint, ErrorHintLevel};
 use simple_parser::Parser;
 
-use crate::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
+use crate::CompileError as _;
 
 /// Display parser error hints (warnings, etc.) to stderr
 fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
@@ -369,7 +370,13 @@ pub fn load_module_with_imports_validated(
                     let func_effects = extract_function_effects(&imported);
                     for (func_name, effects) in func_effects {
                         if let Some(err) = check_import_compatibility(&func_name, &effects, effective_caps) {
-                            return Err(CompileError::Semantic(err));
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::UNSUPPORTED_FEATURE)
+                                .with_help(&format!(
+                                    "Function `{}` uses effects not allowed by module capabilities",
+                                    func_name
+                                ));
+                            return Err(CompileError::semantic_with_context(err, ctx));
                         }
                     }
                 }

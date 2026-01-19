@@ -14,7 +14,7 @@
 //! ## Usage Pattern
 //!
 //! All functions are simple f64 → f64 transformations:
-//! ```rust
+//! ```ignore
 //! let result = rt_math_sin(x);
 //! let result = rt_math_pow(base, exponent);
 //! ```

@@ -1,7 +1,7 @@
 // Mock library for interpreter
 // Matchers: mock, spy, any, eq, be, gt, lt, contains, etc.
 
-use crate::error::CompileError;
+use crate::error::{CompileError, ErrorContext, codes};
 use crate::interpreter::evaluate_expr;
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef};
@@ -47,7 +47,15 @@ fn eval_arg_int(
         enums,
         impl_methods,
     )?;
-    val.as_int().map_err(|_| semantic_err!("expected integer"))
+    val.as_int().map_err(|_| {
+        let ctx = ErrorContext::new()
+            .with_code(codes::TYPE_MISMATCH)
+            .with_help("matcher argument must be an integer");
+        CompileError::semantic_with_context(
+            "expected integer value for mock matcher".to_string(),
+            ctx,
+        )
+    })
 }
 
 pub(super) fn eval_mock_builtin(

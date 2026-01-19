@@ -6,7 +6,7 @@
 //!
 //! Reference: https://github.com/WebAssembly/WASI/blob/main/legacy/preview1/docs.md
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 
 #[cfg(feature = "llvm")]
 use inkwell::module::Module;
@@ -265,7 +265,13 @@ pub fn declare_wasi_imports(module: &Module) -> Result<(), CompileError> {
 
 #[cfg(not(feature = "llvm"))]
 pub fn declare_wasi_imports(_module: &()) -> Result<(), CompileError> {
-    Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+    let ctx = ErrorContext::new()
+        .with_code(codes::UNSUPPORTED_FEATURE)
+        .with_help("Enable LLVM support by building with --features llvm");
+    Err(CompileError::semantic_with_context(
+        "LLVM feature not enabled for WASI imports".to_string(),
+        ctx,
+    ))
 }
 
 #[cfg(test)]

@@ -74,7 +74,7 @@ main = bad_order!(1, 2, 3)
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
-        err.contains("Variadic parameter must be the last parameter"),
+        err.contains("variadic parameter must be the last parameter"),
         "Expected variadic position error, got: {}",
         err
     );

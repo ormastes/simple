@@ -10,7 +10,10 @@ impl Tensor {
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_OPERATION)
                 .with_help("matmul requires both arguments to be 2D tensors");
-            return Err(CompileError::semantic_with_context("matmul requires 2D tensors".to_string(), ctx));
+            return Err(CompileError::semantic_with_context(
+                "matmul requires 2D tensors".to_string(),
+                ctx,
+            ));
         }
 
         let (m, k1) = (self.shape[0], self.shape[1]);
@@ -43,7 +46,10 @@ impl Tensor {
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_OPERATION)
                 .with_help("dot product requires both arguments to be 1D tensors");
-            return Err(CompileError::semantic_with_context("dot requires 1D tensors".to_string(), ctx));
+            return Err(CompileError::semantic_with_context(
+                "dot requires 1D tensors".to_string(),
+                ctx,
+            ));
         }
         if self.shape[0] != other.shape[0] {
             return Err(crate::error::factory::tensor_shape_mismatch(

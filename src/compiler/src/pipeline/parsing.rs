@@ -6,9 +6,9 @@ use simple_parser::ast::{Capability, Node};
 use tracing::instrument;
 
 use super::core::CompilerPipeline;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::lint::LintChecker;
 use crate::trait_coherence::CoherenceChecker;
-use crate::CompileError;
 
 impl CompilerPipeline {
     /// Run lint checks on AST items.
@@ -125,7 +125,10 @@ impl CompilerPipeline {
             if let Node::Function(func) = item {
                 // Use the type checker's validation function
                 if let Err(err_msg) = simple_type::validate_sync_constraint(func) {
-                    return Err(CompileError::Semantic(err_msg));
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("sync functions cannot contain suspension operators (await, ~=, if~, while~, for~)");
+                    return Err(CompileError::semantic_with_context(err_msg, ctx));
                 }
             }
         }

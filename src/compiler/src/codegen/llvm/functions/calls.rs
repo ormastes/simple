@@ -1,5 +1,5 @@
 use super::{LlvmBackend, VRegMap};
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 
 #[cfg(feature = "llvm")]
 use inkwell::builder::Builder;
@@ -122,7 +122,15 @@ impl LlvmBackend {
                         BasicTypeEnum::IntType(t) => t.fn_type(&llvm_param_types, false),
                         BasicTypeEnum::FloatType(t) => t.fn_type(&llvm_param_types, false),
                         BasicTypeEnum::PointerType(t) => t.fn_type(&llvm_param_types, false),
-                        _ => return Err(CompileError::Semantic("Unsupported return type".to_string())),
+                        _ => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::UNSUPPORTED_FEATURE)
+                                .with_help("this return type is not yet supported in indirect calls");
+                            return Err(CompileError::semantic_with_context(
+                                "Unsupported return type".to_string(),
+                                ctx,
+                            ));
+                        }
                     }
                 };
 
@@ -137,8 +145,12 @@ impl LlvmBackend {
                 }
             }
         } else {
-            return Err(CompileError::Semantic(
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("IndirectCall operation requires a closure pointer");
+            return Err(CompileError::semantic_with_context(
                 "IndirectCall requires closure pointer".to_string(),
+                ctx,
             ));
         }
 

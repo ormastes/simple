@@ -6,11 +6,11 @@ use std::sync::Arc;
 use simple_common::gc::GcAllocator;
 
 use crate::build_mode::BuildMode;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::lint::{LintConfig, LintDiagnostic};
 use crate::mir::ContractMode;
 use crate::project::ProjectContext;
 use crate::verification_checker::{VerificationChecker, VerificationViolation};
-use crate::CompileError;
 
 /// Minimal compiler pipeline that validates syntax then emits a runnable SMF.
 pub struct CompilerPipeline {
@@ -238,11 +238,14 @@ impl CompilerPipeline {
                     // For now, we check if "test" profile exists and has bindings
                     if let Some(test_profile) = di_config.profiles.get("test") {
                         if !test_profile.bindings.is_empty() {
-                            return Err(CompileError::Semantic(
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::UNSUPPORTED_FEATURE)
+                                .with_help("either remove the test profile or use debug mode");
+                            return Err(CompileError::semantic_with_context(
                                 "Release build must not select test DI profile (#1034). \
-                                 Found test profile with bindings. \
-                                 Either remove the test profile or use debug mode."
+                                 Found test profile with bindings."
                                     .to_string(),
+                                ctx,
                             ));
                         }
                     }
@@ -252,10 +255,12 @@ impl CompilerPipeline {
             // #1035: Release MUST NOT enable runtime interceptors
             if let Some(ref aop_config) = project.aop_config {
                 if aop_config.runtime_enabled {
-                    return Err(CompileError::Semantic(
-                        "Release build must not enable runtime AOP interceptors (#1035). \
-                         Set runtime_enabled=false in AOP config or use debug mode."
-                            .to_string(),
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::UNSUPPORTED_FEATURE)
+                        .with_help("set runtime_enabled=false in AOP config or use debug mode");
+                    return Err(CompileError::semantic_with_context(
+                        "Release build must not enable runtime AOP interceptors (#1035).".to_string(),
+                        ctx,
                     ));
                 }
             }

@@ -4,7 +4,7 @@
 use inkwell::IntPredicate;
 
 #[cfg(feature = "llvm")]
-use crate::error::CompileError;
+use crate::error::{CompileError, ErrorContext, codes};
 
 #[cfg(feature = "llvm")]
 use crate::hir::TypeId;
@@ -48,13 +48,25 @@ impl LlvmBackend {
     ) -> Result<(), CompileError> {
         self.create_module("test_module")?;
         let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        let module = module.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("ensure LLVM module is initialized before compilation");
+            CompileError::semantic_with_context(
+                "LLVM module not created during compilation".to_string(),
+                ctx,
+            )
+        })?;
         let builder = self.builder.borrow();
-        let builder = builder
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
+        let builder = builder.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("ensure LLVM builder is initialized before compilation");
+            CompileError::semantic_with_context(
+                "LLVM builder not created during compilation".to_string(),
+                ctx,
+            )
+        })?;
         let function = self.create_function_signature(name, param_types, return_type)?;
 
         let entry = self.context.append_basic_block(function, "entry");
@@ -79,24 +91,48 @@ impl LlvmBackend {
     ) -> Result<(), CompileError> {
         self.create_module("test_module")?;
         let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        let module = module.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("ensure LLVM module is initialized before compilation");
+            CompileError::semantic_with_context(
+                "LLVM module not created during compilation".to_string(),
+                ctx,
+            )
+        })?;
         let builder = self.builder.borrow();
-        let builder = builder
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
+        let builder = builder.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("ensure LLVM builder is initialized before compilation");
+            CompileError::semantic_with_context(
+                "LLVM builder not created during compilation".to_string(),
+                ctx,
+            )
+        })?;
         let function = self.create_function_signature(name, &[lhs_type.clone(), rhs_type.clone()], return_type)?;
 
         let entry = self.context.append_basic_block(function, "entry");
         builder.position_at_end(entry);
 
-        let lhs = function
-            .get_nth_param(0)
-            .ok_or_else(|| CompileError::Semantic("Missing lhs param".to_string()))?;
-        let rhs = function
-            .get_nth_param(1)
-            .ok_or_else(|| CompileError::Semantic("Missing rhs param".to_string()))?;
+        let lhs = function.get_nth_param(0).ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("ensure function parameters are properly initialized");
+            CompileError::semantic_with_context(
+                "missing left operand parameter in binary operation test function".to_string(),
+                ctx,
+            )
+        })?;
+        let rhs = function.get_nth_param(1).ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("ensure function parameters are properly initialized");
+            CompileError::semantic_with_context(
+                "missing right operand parameter in binary operation test function".to_string(),
+                ctx,
+            )
+        })?;
 
         let result: inkwell::values::BasicValueEnum<'static> = match *return_type {
             TypeId::F32 | TypeId::F64 => {
@@ -143,13 +179,25 @@ impl LlvmBackend {
     ) -> Result<(), CompileError> {
         self.create_module("test_module")?;
         let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        let module = module.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("ensure LLVM module is initialized before compilation");
+            CompileError::semantic_with_context(
+                "LLVM module not created during compilation".to_string(),
+                ctx,
+            )
+        })?;
         let builder = self.builder.borrow();
-        let builder = builder
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
+        let builder = builder.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("ensure LLVM builder is initialized before compilation");
+            CompileError::semantic_with_context(
+                "LLVM builder not created during compilation".to_string(),
+                ctx,
+            )
+        })?;
         let function = self.create_function_signature(name, &[cond_type.clone()], return_type)?;
 
         let entry = self.context.append_basic_block(function, "entry");
@@ -158,9 +206,15 @@ impl LlvmBackend {
         let merge_bb = self.context.append_basic_block(function, "merge");
 
         builder.position_at_end(entry);
-        let cond_param = function
-            .get_nth_param(0)
-            .ok_or_else(|| CompileError::Semantic("Missing condition param".to_string()))?;
+        let cond_param = function.get_nth_param(0).ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("ensure function parameters are properly initialized");
+            CompileError::semantic_with_context(
+                "missing condition parameter in conditional test function".to_string(),
+                ctx,
+            )
+        })?;
         let cond_int = cond_param.into_int_value();
         let zero = cond_int.get_type().const_zero();
         let cond = builder
@@ -207,8 +261,12 @@ impl LlvmBackend {
         _return_type: &TypeId,
         _return_val: i64,
     ) -> Result<(), CompileError> {
-        Err(CompileError::Semantic(
-            "LLVM feature not enabled".to_string(),
+        let ctx = ErrorContext::new()
+            .with_code(codes::UNSUPPORTED_FEATURE)
+            .with_help("compile with the 'llvm' feature enabled to use LLVM backend");
+        Err(CompileError::semantic_with_context(
+            "LLVM backend feature is not enabled".to_string(),
+            ctx,
         ))
     }
 
@@ -220,8 +278,12 @@ impl LlvmBackend {
         _return_type: &TypeId,
         _op: BinOp,
     ) -> Result<(), CompileError> {
-        Err(CompileError::Semantic(
-            "LLVM feature not enabled".to_string(),
+        let ctx = ErrorContext::new()
+            .with_code(codes::UNSUPPORTED_FEATURE)
+            .with_help("compile with the 'llvm' feature enabled to use LLVM backend");
+        Err(CompileError::semantic_with_context(
+            "LLVM backend feature is not enabled".to_string(),
+            ctx,
         ))
     }
 
@@ -233,8 +295,12 @@ impl LlvmBackend {
         _then_val: i64,
         _else_val: i64,
     ) -> Result<(), CompileError> {
-        Err(CompileError::Semantic(
-            "LLVM feature not enabled".to_string(),
+        let ctx = ErrorContext::new()
+            .with_code(codes::UNSUPPORTED_FEATURE)
+            .with_help("compile with the 'llvm' feature enabled to use LLVM backend");
+        Err(CompileError::semantic_with_context(
+            "LLVM backend feature is not enabled".to_string(),
+            ctx,
         ))
     }
 }

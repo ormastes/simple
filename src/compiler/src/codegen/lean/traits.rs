@@ -12,7 +12,7 @@
 //! - Binding validity
 
 use super::types::{LeanType, TypeTranslator};
-use crate::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use simple_parser::ast::{FunctionDef, ImplBlock, TraitDef, Type as AstType};
 
 /// A Lean type class definition
@@ -311,7 +311,13 @@ impl<'a> TraitTranslator<'a> {
     /// Translate an impl block to Lean instance
     pub fn translate_impl(&self, impl_block: &ImplBlock) -> Result<LeanInstance, CompileError> {
         let trait_name = impl_block.trait_name.as_ref().ok_or_else(|| {
-            CompileError::Semantic("Impl block without trait name cannot be translated to Lean instance".into())
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("Lean verification requires explicit trait names in impl blocks");
+            CompileError::semantic_with_context(
+                "impl block without trait name cannot be translated to Lean instance".to_string(),
+                ctx,
+            )
         })?;
 
         let for_type = self.translate_ast_type(&impl_block.target_type)?;

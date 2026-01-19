@@ -12,7 +12,7 @@ use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Nod
 
 use crate::aop_config::AopConfig;
 use crate::di::DiConfig;
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value};
 
 use super::{
@@ -644,10 +644,22 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 }
             }
             Node::Break(_) => {
-                return Err(CompileError::Semantic("break outside of loop".into()));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::BREAK_OUTSIDE_LOOP)
+                    .with_help("break statement can only be used inside a loop");
+                return Err(CompileError::semantic_with_context(
+                    "break outside of loop".to_string(),
+                    ctx,
+                ));
             }
             Node::Continue(_) => {
-                return Err(CompileError::Semantic("continue outside of loop".into()));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::CONTINUE_OUTSIDE_LOOP)
+                    .with_help("continue statement can only be used inside a loop");
+                return Err(CompileError::semantic_with_context(
+                    "continue outside of loop".to_string(),
+                    ctx,
+                ));
             }
             // Module system nodes
             Node::UseStmt(use_stmt) => {
