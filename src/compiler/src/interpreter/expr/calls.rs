@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use simple_parser::ast::Expr;
 
 use super::evaluate_expr;
-use crate::error::CompileError;
+use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::Value;
 
 use super::super::{
@@ -111,7 +111,32 @@ pub(super) fn eval_call_expr(
                             )?));
                         }
                     }
-                    Err(CompileError::Semantic(format!("unknown field {field}")))
+
+                    // E1012 - Undefined Field
+                    let available_fields: Vec<&str> = fields.keys().map(|s| s.as_str()).collect();
+                    let suggestion = if !available_fields.is_empty() {
+                        typo::suggest_name(field, available_fields.clone())
+                    } else {
+                        None
+                    };
+
+                    let mut ctx = ErrorContext::new()
+                        .with_code(codes::UNDEFINED_FIELD)
+                        .with_help("check the field name and class definition");
+
+                    if let Some(best_match) = suggestion {
+                        ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
+                    }
+
+                    if !available_fields.is_empty() && available_fields.len() <= 5 {
+                        let fields_list = available_fields.join(", ");
+                        ctx = ctx.with_note(format!("available fields: {}", fields_list));
+                    }
+
+                    Err(CompileError::semantic_with_context(
+                        format!("class `{}` has no field named `{}`", class, field),
+                        ctx,
+                    ))
                 }
                 Value::Constructor { ref class_name } => {
                     // Look up static method on class
@@ -124,12 +149,57 @@ pub(super) fn eval_call_expr(
                                 captured_env: Env::new(),
                             })
                         } else {
-                            Err(CompileError::Semantic(format!(
-                                "unknown method {field} on class {class_name}"
-                            )))
+                            // E1013 - Unknown Method (static method on class)
+                            let available_methods: Vec<&str> = class_def
+                                .methods
+                                .iter()
+                                .map(|m| m.name.as_str())
+                                .collect();
+                            let suggestion = if !available_methods.is_empty() {
+                                typo::suggest_name(field, available_methods.clone())
+                            } else {
+                                None
+                            };
+
+                            let mut ctx = ErrorContext::new()
+                                .with_code(codes::UNKNOWN_METHOD)
+                                .with_help("check that the method is defined in the class");
+
+                            if let Some(best_match) = suggestion {
+                                ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
+                            }
+
+                            if !available_methods.is_empty() && available_methods.len() <= 5 {
+                                let methods_list = available_methods.join(", ");
+                                ctx = ctx.with_note(format!("available methods: {}", methods_list));
+                            }
+
+                            Err(CompileError::semantic_with_context(
+                                format!("method `{}` not found on type `{}`", field, class_name),
+                                ctx,
+                            ))
                         }
                     } else {
-                        Err(CompileError::Semantic(format!("unknown class {class_name}")))
+                        // E1014 - Unknown Class
+                        let available_classes: Vec<&str> = classes.keys().map(|s| s.as_str()).collect();
+                        let suggestion = if !available_classes.is_empty() {
+                            typo::suggest_name(class_name, available_classes.clone())
+                        } else {
+                            None
+                        };
+
+                        let mut ctx = ErrorContext::new()
+                            .with_code(codes::UNKNOWN_CLASS)
+                            .with_help("check that the class is defined or imported in this scope");
+
+                        if let Some(best_match) = suggestion {
+                            ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
+                        }
+
+                        Err(CompileError::semantic_with_context(
+                            format!("class `{}` not found in this scope", class_name),
+                            ctx,
+                        ))
                     }
                 }
                 // Enum type field access - construct enum variants

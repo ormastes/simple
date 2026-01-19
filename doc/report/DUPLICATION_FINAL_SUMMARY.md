@@ -59,6 +59,14 @@ fn eval_option_X(
 3. `DUPLICATION_STATUS_2025-12-22.md` - Status and revised strategy
 4. `DUPLICATION_FINAL_SUMMARY.md` - This document
 
+### 6. Additional Findings (Simple stdlib)
+- `simple/std_lib/src/host/async_gc_mut/io/fs/file.spl` and `simple/std_lib/src/host/async_nogc_mut/io/fs/file.spl` share the same File API (open/read/write/staging). Differences are mostly comments and imports.
+- `simple/std_lib/src/host/async_gc_mut/io/fs/process.spl` and `simple/std_lib/src/host/async_nogc_mut/io/fs/process.spl` are the same worker/staging flow with different wording.
+- `simple/std_lib/src/host/async_gc_mut/io/fs/traits.spl` and `simple/std_lib/src/host/async_nogc_mut/io/fs/traits.spl` duplicate Read/Write/Seek/Drop and AsyncContextManager for File.
+- `simple/std_lib/src/host/async_gc_mut/io/fs/ops.spl` and `simple/std_lib/src/host/async_nogc_mut/io/fs/ops.spl` re-export the same set and implement the same `copy_zero` helper; only `DirEntries` is extra in NoGC.
+- `simple/std_lib/src/host/async_gc_mut/net/__init__.spl` and `simple/std_lib/src/host/async_nogc_mut/net/__init__.spl` are doc-only differences around the same `pub use host.common.net.*`.
+- `simple/std_lib/src/host/sync_nogc_mut/io/fs/file.spl` repeats read/write loops and open/seek/size patterns found in the async variants, only switching to sync calls.
+
 ## Revised Implementation Plan
 
 ### Priority 1: Phase 2 - Interpreter Helpers (-400 lines)

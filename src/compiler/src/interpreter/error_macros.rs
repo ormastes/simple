@@ -57,11 +57,31 @@ macro_rules! bail_semantic {
 /// Return early with unknown method error (with typo suggestions)
 macro_rules! bail_unknown_method {
     ($method:expr, $type_name:expr, $available:expr) => {{
-        let mut msg = format!("unknown method {} on {}", $method, $type_name);
-        if let Some(suggestion) = crate::error::typo::format_suggestion($method, $available.iter().copied()) {
-            msg.push_str(&format!("; {}", suggestion));
+        // E1013 - Unknown Method
+        let available_vec: Vec<&str> = $available.iter().copied().collect();
+        let suggestion = if !available_vec.is_empty() {
+            crate::error::typo::suggest_name($method, available_vec.clone())
+        } else {
+            None
+        };
+
+        let mut ctx = crate::error::ErrorContext::new()
+            .with_code(crate::error::codes::UNKNOWN_METHOD)
+            .with_help("check the method name and type definition");
+
+        if let Some(best_match) = suggestion {
+            ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
         }
-        return Err(semantic_err!("{}", msg));
+
+        if !available_vec.is_empty() && available_vec.len() <= 5 {
+            let methods_list = available_vec.join(", ");
+            ctx = ctx.with_note(format!("available methods: {}", methods_list));
+        }
+
+        return Err(crate::error::CompileError::semantic_with_context(
+            format!("method `{}` not found on type `{}`", $method, $type_name),
+            ctx,
+        ));
     }};
 }
 

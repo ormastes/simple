@@ -14,6 +14,10 @@ pub enum LowerError {
     #[error("Unknown variable: {0}")]
     UnknownVariable(String),
 
+    /// E1032: self used in static method
+    #[error("cannot use `self` in static method")]
+    SelfInStatic,
+
     #[error("Type mismatch: expected {expected:?}, found {found:?}")]
     TypeMismatch { expected: TypeId, found: TypeId },
 
@@ -30,7 +34,12 @@ pub enum LowerError {
     EmptyArrayNeedsType,
 
     #[error("Cannot infer field type: struct '{struct_name}' field '{field}'")]
-    CannotInferFieldType { struct_name: String, field: String },
+    CannotInferFieldType {
+        struct_name: String,
+        field: String,
+        /// Available field names for suggestions
+        available_fields: Vec<String>,
+    },
 
     #[error("Cannot infer element type for index into '{0}'")]
     CannotInferIndexType(String),

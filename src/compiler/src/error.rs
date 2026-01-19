@@ -121,6 +121,68 @@ pub mod codes {
     pub const MACRO_MISSING_TYPE_ANNOTATION: &str = "E1405";
     pub const MACRO_INVALID_QIDENT: &str = "E1406";
 
+    // AOP errors (E15xx)
+    pub const INVALID_POINTCUT_SYNTAX: &str = "E1501";
+    pub const UNDEFINED_JOINPOINT: &str = "E1502";
+    pub const INVALID_ADVICE_TYPE: &str = "E1503";
+    pub const CONFLICTING_ADVICE_ORDER: &str = "E1504";
+    pub const INVALID_WEAVING_TARGET: &str = "E1505";
+    pub const ASPECT_CIRCULAR_DEPENDENCY: &str = "E1506";
+    pub const INVALID_POINTCUT_SELECTOR: &str = "E1507";
+    pub const ASPECT_NOT_ENABLED: &str = "E1508";
+
+    // Custom block errors (E16xx)
+    pub const UNKNOWN_BLOCK_TYPE: &str = "E1601";
+    pub const INVALID_BLOCK_SYNTAX: &str = "E1602";
+    pub const MATH_BLOCK_INVALID_EXPR: &str = "E1603";
+    pub const MATH_BLOCK_UNDEFINED_VAR: &str = "E1604";
+    pub const SHELL_BLOCK_INVALID_CMD: &str = "E1605";
+    pub const SHELL_BLOCK_UNSAFE_OP: &str = "E1606";
+    pub const SQL_BLOCK_SYNTAX_ERROR: &str = "E1607";
+    pub const SQL_BLOCK_INVALID_PARAM: &str = "E1608";
+    pub const REGEX_BLOCK_INVALID: &str = "E1609";
+    pub const REGEX_BLOCK_UNKNOWN_FLAG: &str = "E1610";
+    pub const BLOCK_MISSING_CLOSING: &str = "E1611";
+    pub const BLOCK_TYPE_MISMATCH: &str = "E1612";
+
+    // Mixin errors (E17xx)
+    pub const MIXIN_NOT_FOUND: &str = "E1701";
+    pub const MIXIN_METHOD_CONFLICT: &str = "E1702";
+    pub const MIXIN_MISSING_REQUIRED: &str = "E1703";
+    pub const MIXIN_CIRCULAR_DEPENDENCY: &str = "E1704";
+    pub const MIXIN_INVALID_USE: &str = "E1705";
+    pub const MIXIN_FIELD_CONFLICT: &str = "E1706";
+    pub const MIXIN_SELF_REFERENCE: &str = "E1707";
+    pub const MIXIN_TYPE_MISMATCH: &str = "E1708";
+
+    // SDN errors (E18xx)
+    pub const SDN_SYNTAX_ERROR: &str = "E1801";
+    pub const SDN_UNKNOWN_KEY: &str = "E1802";
+    pub const SDN_TYPE_MISMATCH: &str = "E1803";
+    pub const SDN_MISSING_REQUIRED: &str = "E1804";
+    pub const SDN_DUPLICATE_KEY: &str = "E1805";
+    pub const SDN_INVALID_VALUE: &str = "E1806";
+    pub const SDN_NESTING_LIMIT: &str = "E1807";
+    pub const SDN_CIRCULAR_REFERENCE: &str = "E1808";
+
+    // DI errors (E19xx)
+    pub const DI_MISSING_BINDING: &str = "E1901";
+    pub const DI_AMBIGUOUS_BINDING: &str = "E1902";
+    pub const DI_CIRCULAR_DEPENDENCY: &str = "E1903";
+    pub const DI_INVALID_SCOPE: &str = "E1904";
+    pub const DI_INJECT_FAILED: &str = "E1905";
+    pub const DI_INVALID_ATTRIBUTE: &str = "E1906";
+    pub const DI_SCOPE_MISMATCH: &str = "E1907";
+    pub const DI_MOCK_NOT_TEST: &str = "E1908";
+
+    // Architecture rule errors (E1Axx)
+    pub const ARCH_FORBIDDEN_IMPORT: &str = "E1A01";
+    pub const ARCH_FORBIDDEN_DEPEND: &str = "E1A02";
+    pub const ARCH_LAYER_VIOLATION: &str = "E1A03";
+    pub const ARCH_INVALID_RULE: &str = "E1A04";
+    pub const ARCH_CONFLICTING_RULES: &str = "E1A05";
+    pub const ARCH_CIRCULAR_MODULES: &str = "E1A06";
+
     // Codegen errors (E20xx)
     pub const UNSUPPORTED_FEATURE: &str = "E2001";
     pub const FFI_ERROR: &str = "E2002";
@@ -290,6 +352,213 @@ pub mod typo {
                 Some("did you mean 'foo'?".to_string())
             );
             assert_eq!(format_suggestion("xyz", candidates.iter().copied()), None);
+        }
+    }
+}
+
+/// Error factory functions for common error patterns.
+///
+/// This module provides constructor functions for frequently-used error messages,
+/// reducing duplication and ensuring consistent error text across the codebase.
+pub mod factory {
+    use super::CompileError;
+    use std::path::Path;
+
+    // ============================================
+    // Module Resolution Errors
+    // ============================================
+
+    /// Error when a module cannot be resolved from an import path.
+    pub fn cannot_resolve_module(module_name: &str) -> CompileError {
+        CompileError::Semantic(format!("Cannot resolve module: {}", module_name))
+    }
+
+    /// Error when a module file cannot be read from disk.
+    pub fn cannot_read_module(path: &Path, error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Io(format!("Cannot read module {:?}: {}", path, error))
+    }
+
+    /// Error when a module file fails to parse.
+    pub fn cannot_parse_module(path: &Path, error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Parse(format!("Cannot parse module {:?}: {}", path, error))
+    }
+
+    /// Error when a module is not found at the expected path.
+    pub fn module_not_found(module_name: &str, searched_paths: &[&Path]) -> CompileError {
+        let paths_str = searched_paths
+            .iter()
+            .map(|p| format!("  - {:?}", p))
+            .collect::<Vec<_>>()
+            .join("\n");
+        CompileError::Semantic(format!(
+            "Module '{}' not found. Searched paths:\n{}",
+            module_name, paths_str
+        ))
+    }
+
+    // ============================================
+    // Argument/Type Errors
+    // ============================================
+
+    /// Error when a function argument has an unexpected type.
+    pub fn argument_type_mismatch(index: usize, expected: &str, found: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "argument {} must be {}, found {}",
+            index, expected, found
+        ))
+    }
+
+    /// Error when a function receives the wrong number of arguments.
+    pub fn argument_count_mismatch(expected: usize, found: usize) -> CompileError {
+        CompileError::Semantic(format!(
+            "expected {} argument(s), found {}",
+            expected, found
+        ))
+    }
+
+    /// Error when a required argument is missing.
+    pub fn missing_argument(name: &str) -> CompileError {
+        CompileError::Semantic(format!("missing required argument: {}", name))
+    }
+
+    // ============================================
+    // Macro Errors
+    // ============================================
+
+    /// Error when an unknown macro is invoked.
+    pub fn unknown_macro(name: &str) -> CompileError {
+        CompileError::Semantic(format!("unknown macro: {}!", name))
+    }
+
+    /// Error when a macro is used before its definition.
+    pub fn macro_used_before_definition(name: &str) -> CompileError {
+        CompileError::Semantic(format!("macro '{}' used before definition", name))
+    }
+
+    /// Error when a macro invocation fails.
+    pub fn macro_invocation_failed(name: &str, reason: &str) -> CompileError {
+        CompileError::Semantic(format!("macro '{}' invocation failed: {}", name, reason))
+    }
+
+    /// Error when a panic! macro is invoked.
+    pub fn panic_macro(message: &str) -> CompileError {
+        CompileError::Semantic(format!("panic: {}", message))
+    }
+
+    // ============================================
+    // Type/Name Resolution Errors
+    // ============================================
+
+    /// Error when a type is not found.
+    pub fn type_not_found(type_name: &str) -> CompileError {
+        CompileError::Semantic(format!("type '{}' not found in this scope", type_name))
+    }
+
+    /// Error when a variable is not found.
+    pub fn variable_not_found(var_name: &str) -> CompileError {
+        CompileError::Semantic(format!("cannot find variable '{}' in this scope", var_name))
+    }
+
+    /// Error when a function is not found.
+    pub fn function_not_found(func_name: &str) -> CompileError {
+        CompileError::Semantic(format!("cannot find function '{}' in this scope", func_name))
+    }
+
+    /// Error when a method is not found on a type.
+    pub fn method_not_found(method_name: &str, type_name: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "no method named '{}' found for type '{}'",
+            method_name, type_name
+        ))
+    }
+
+    /// Error when a field is not found on a struct/class.
+    pub fn field_not_found(field_name: &str, type_name: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "no field named '{}' found on type '{}'",
+            field_name, type_name
+        ))
+    }
+
+    // ============================================
+    // Type Mismatch Errors
+    // ============================================
+
+    /// Error when two types don't match.
+    pub fn type_mismatch(expected: &str, found: &str) -> CompileError {
+        CompileError::Semantic(format!("expected type '{}', found '{}'", expected, found))
+    }
+
+    /// Error when a return type doesn't match the function signature.
+    pub fn return_type_mismatch(expected: &str, found: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "return type mismatch: expected '{}', found '{}'",
+            expected, found
+        ))
+    }
+
+    // ============================================
+    // FFI/Handle Errors
+    // ============================================
+
+    /// Error when a handle argument is expected but not provided.
+    pub fn expected_handle(index: usize) -> CompileError {
+        CompileError::Semantic(format!("argument {} must be a handle", index))
+    }
+
+    /// Error when an FFI call returns an invalid handle.
+    pub fn invalid_ffi_handle(function_name: &str) -> CompileError {
+        CompileError::Semantic(format!("FFI call '{}' returned invalid handle", function_name))
+    }
+
+    // ============================================
+    // Codegen Errors
+    // ============================================
+
+    /// Error when a feature is not supported in the current backend.
+    pub fn unsupported_feature(feature: &str) -> CompileError {
+        CompileError::Codegen(format!("unsupported feature: {}", feature))
+    }
+
+    /// Error when codegen fails for a specific construct.
+    pub fn codegen_failed(construct: &str, reason: &str) -> CompileError {
+        CompileError::Codegen(format!("failed to generate code for {}: {}", construct, reason))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::path::PathBuf;
+
+        #[test]
+        fn test_module_errors() {
+            let err = cannot_resolve_module("foo.bar");
+            assert!(err.to_string().contains("Cannot resolve module: foo.bar"));
+
+            let path = PathBuf::from("/tmp/test.spl");
+            let err = cannot_read_module(&path, &"permission denied");
+            assert!(err.to_string().contains("Cannot read module"));
+        }
+
+        #[test]
+        fn test_argument_errors() {
+            let err = argument_type_mismatch(0, "an integer", "a string");
+            assert!(err.to_string().contains("argument 0 must be an integer"));
+
+            let err = argument_count_mismatch(3, 2);
+            assert!(err.to_string().contains("expected 3 argument(s), found 2"));
+        }
+
+        #[test]
+        fn test_macro_errors() {
+            let err = unknown_macro("foobar");
+            assert!(err.to_string().contains("unknown macro: foobar!"));
+        }
+
+        #[test]
+        fn test_type_errors() {
+            let err = type_mismatch("Int", "String");
+            assert!(err.to_string().contains("expected type 'Int', found 'String'"));
         }
     }
 }
