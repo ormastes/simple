@@ -633,9 +633,9 @@ module.exports = grammar({
       ')',
       optional($.unit_composite_clause),
       ':',
-      $.INDENT,
+      $._indent,
       repeat1($.unit_suffix_def),
-      $.DEDENT,
+      $._dedent,
     ),
 
     // Composite clause: = length / time
@@ -643,7 +643,7 @@ module.exports = grammar({
       '=',
       $.type_identifier,               // length
       $.unit_operator,                 // /, *, ^
-      choice($.type_identifier, $.number_literal),  // time or 3
+      choice($.type_identifier, $.integer, $.float),  // time or 3
     ),
 
     unit_operator: $ => choice('/', '*', '^'),
@@ -652,7 +652,7 @@ module.exports = grammar({
     unit_suffix_def: $ => seq(
       $.identifier,                    // km
       '=',
-      $.number_literal,                // 1000.0
+      choice($.integer, $.float),      // 1000.0
       $._newline,
     ),
 
@@ -670,7 +670,7 @@ module.exports = grammar({
 
     // Suffixed literal: 100_km, 5.5_hr, 42_uid
     suffixed_literal: $ => seq(
-      $.number_literal,                // 100
+      choice($.integer, $.float),      // 100
       '_',
       $.identifier,                    // km
     ),

@@ -64,7 +64,7 @@ impl LlvmBackend {
                     BinOp::Or => builder
                         .build_or(l, r, "or")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_or", &e))?,
-                    _ => return Err(CompileError::Semantic(format!("Unsupported integer binop: {:?}", op))),
+                    _ => return Err(crate::error::factory::unsupported_operation("integer binop", &op)),
                 };
                 Ok(result.into())
             }
@@ -82,7 +82,7 @@ impl LlvmBackend {
                     BinOp::Div => builder
                         .build_float_div(l, r, "fdiv")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_float_div", &e))?,
-                    _ => return Err(CompileError::Semantic(format!("Unsupported float binop: {:?}", op))),
+                    _ => return Err(crate::error::factory::unsupported_operation("float binop", &op)),
                 };
                 Ok(result.into())
             }
@@ -110,10 +110,7 @@ impl LlvmBackend {
                         .build_not(val, "not")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_not", &e))?,
                     _ => {
-                        return Err(CompileError::Semantic(format!(
-                            "Unsupported integer unary op: {:?}",
-                            op
-                        )))
+                        return Err(crate::error::factory::unsupported_operation("integer unary op", &op))
                     }
                 };
                 Ok(result.into())
@@ -123,7 +120,7 @@ impl LlvmBackend {
                     UnaryOp::Neg => builder
                         .build_float_neg(val, "fneg")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_float_neg", &e))?,
-                    _ => return Err(CompileError::Semantic(format!("Unsupported float unary op: {:?}", op))),
+                    _ => return Err(crate::error::factory::unsupported_operation("float unary op", &op)),
                 };
                 Ok(result.into())
             }
@@ -151,7 +148,7 @@ impl LlvmBackend {
                         .build_return(Some(val))
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_return", &e))?;
                 } else {
-                    return Err(CompileError::Semantic(format!("Undefined return value: {:?}", vreg)));
+                    return Err(crate::error::factory::undefined_reference("return value", &vreg));
                 }
             }
             Terminator::Return(None) => {
@@ -162,7 +159,7 @@ impl LlvmBackend {
             Terminator::Jump(block_id) => {
                 let target_bb = llvm_blocks
                     .get(block_id)
-                    .ok_or_else(|| CompileError::Semantic(format!("Undefined block: {:?}", block_id)))?;
+                    .ok_or_else(|| crate::error::factory::undefined_reference("block", &block_id))?;
                 builder
                     .build_unconditional_branch(*target_bb)
                     .map_err(|e| crate::error::factory::llvm_build_failed("build_unconditional_branch", &e))?;
@@ -174,15 +171,15 @@ impl LlvmBackend {
             } => {
                 let cond_val = vreg_map
                     .get(cond)
-                    .ok_or_else(|| CompileError::Semantic(format!("Undefined condition: {:?}", cond)))?;
+                    .ok_or_else(|| crate::error::factory::undefined_reference("condition", &cond))?;
 
                 if let inkwell::values::BasicValueEnum::IntValue(cond_int) = cond_val {
                     let then_bb = llvm_blocks
                         .get(then_block)
-                        .ok_or_else(|| CompileError::Semantic(format!("Undefined block: {:?}", then_block)))?;
+                        .ok_or_else(|| crate::error::factory::undefined_reference("block", &then_block))?;
                     let else_bb = llvm_blocks
                         .get(else_block)
-                        .ok_or_else(|| CompileError::Semantic(format!("Undefined block: {:?}", else_block)))?;
+                        .ok_or_else(|| crate::error::factory::undefined_reference("block", &else_block))?;
 
                     builder
                         .build_conditional_branch(*cond_int, *then_bb, *else_bb)

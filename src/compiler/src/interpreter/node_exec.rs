@@ -74,7 +74,7 @@ pub(crate) fn exec_node(
                     Some(Type::Simple(type_name)) if is_unit_type(type_name) => {
                         if let Err(e) = validate_unit_type(&value, type_name) {
                             let var_name = get_var_name(&let_stmt.pattern);
-                            return Err(CompileError::Semantic(format!("let binding '{}': {}", var_name, e)));
+                            return Err(crate::error::factory::let_binding_failed(&var_name, &e));
                         }
                         value
                     }
@@ -84,7 +84,7 @@ pub(crate) fn exec_node(
                             Ok(constrained_value) => constrained_value,
                             Err(e) => {
                                 let var_name = get_var_name(&let_stmt.pattern);
-                                return Err(CompileError::Semantic(format!("let binding '{}': {}", var_name, e)));
+                                return Err(crate::error::factory::let_binding_failed(&var_name, &e));
                             }
                         }
                     }
@@ -535,7 +535,7 @@ fn exec_augmented_assignment(
                             let current = fields
                                 .get(field)
                                 .cloned()
-                                .ok_or_else(|| CompileError::Semantic(format!("undefined field '{field}'")))?;
+                                .ok_or_else(|| crate::error::factory::undefined_field(field))?;
                             // Insert temps and evaluate
                             let temp_lhs = "__lhs_temp__".to_string();
                             let temp_rhs = "__rhs_temp__".to_string();

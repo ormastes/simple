@@ -43,9 +43,13 @@ pub(super) fn eval_collection_expr(
                             payload: None,
                         })
                     } else {
-                        Err(CompileError::Semantic(format!(
-                            "unknown variant {variant} for enum {enum_name}"
-                        )))
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_PATTERN)
+                            .with_help(format!("check that '{}' is a valid variant of enum '{}'", variant, enum_name));
+                        Err(CompileError::semantic_with_context(
+                            format!("invalid pattern: unknown variant {} for enum {}", variant, enum_name),
+                            ctx,
+                        ))
                     }
                 } else if let Some(func) = functions.get(variant).cloned() {
                     Ok(Value::Function {
@@ -58,13 +62,22 @@ pub(super) fn eval_collection_expr(
                         class_name: variant.clone(),
                     })
                 } else {
-                    Err(CompileError::Semantic(format!(
-                        "unknown path: {:?}::{variant}",
-                        segments[0]
-                    )))
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("path must reference a valid enum variant, function, or class");
+                    Err(CompileError::semantic_with_context(
+                        format!("invalid operation: unknown path {}::{}", segments[0], variant),
+                        ctx,
+                    ))
                 }
             } else {
-                Err(CompileError::Semantic(format!("unsupported path: {:?}", segments)))
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("path expressions must have exactly 2 segments (Type::Variant)");
+                Err(CompileError::semantic_with_context(
+                    format!("invalid operation: unsupported path: {:?}", segments),
+                    ctx,
+                ))
             };
             Ok(Some(result?))
         }
@@ -79,7 +92,13 @@ pub(super) fn eval_collection_expr(
                             map.insert(sk, sv);
                         }
                     } else {
-                        return Err(CompileError::Semantic("dict spread requires dict value".into()));
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::TYPE_MISMATCH)
+                            .with_help("dict spread operator (**) can only be used with dict values");
+                        return Err(CompileError::semantic_with_context(
+                            format!("type mismatch: dict spread requires dict value, got {}", spread_val.type_name()),
+                            ctx,
+                        ));
                     }
                 } else {
                     let key_val = evaluate_expr(k, env, functions, classes, enums, impl_methods)?;
@@ -121,7 +140,15 @@ pub(super) fn eval_collection_expr(
                     match spread_val {
                         Value::Array(spread_arr) => arr.extend(spread_arr),
                         Value::Tuple(tup) => arr.extend(tup),
-                        _ => return Err(CompileError::Semantic("spread operator requires array or tuple".into())),
+                        _ => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_OPERATION)
+                                .with_help("spread operator (*) can only be used with array or tuple values");
+                            return Err(CompileError::semantic_with_context(
+                                format!("invalid operation: spread operator requires array or tuple, got {}", spread_val.type_name()),
+                                ctx,
+                            ));
+                        },
                     }
                 } else {
                     arr.push(evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
@@ -134,10 +161,24 @@ pub(super) fn eval_collection_expr(
             let count_val = evaluate_expr(count, env, functions, classes, enums, impl_methods)?;
             let count_int = match count_val {
                 Value::Int(n) => n,
-                _ => return Err(CompileError::Semantic("array repeat count must be an integer".into())),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help("array repeat count must be an integer");
+                    return Err(CompileError::semantic_with_context(
+                        format!("type mismatch: array repeat count must be an integer, got {}", count_val.type_name()),
+                        ctx,
+                    ));
+                }
             };
             if count_int < 0 {
-                return Err(CompileError::Semantic("array repeat count cannot be negative".into()));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("array repeat count must be non-negative");
+                return Err(CompileError::semantic_with_context(
+                    format!("invalid operation: array repeat count cannot be negative (got {})", count_int),
+                    ctx,
+                ));
             }
             // Evaluate the value once and clone it
             let val = evaluate_expr(value, env, functions, classes, enums, impl_methods)?;
@@ -216,7 +257,15 @@ pub(super) fn eval_collection_expr(
                                 .unwrap_or_default();
                             Ok(Value::Str(sliced))
                         }
-                        _ => Err(CompileError::Semantic("slice on non-sliceable type".into())),
+                        _ => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_OPERATION)
+                                .with_help("slicing is only supported on arrays, tuples, and strings");
+                            Err(CompileError::semantic_with_context(
+                                format!("invalid operation: cannot slice value of type {}", recv_val.type_name()),
+                                ctx,
+                            ))
+                        },
                     }?));
                 }
             }
@@ -290,7 +339,15 @@ pub(super) fn eval_collection_expr(
                     let key = idx_val.to_key_string();
                     map.get(&key)
                         .cloned()
-                        .ok_or_else(|| CompileError::Semantic(format!("dict key not found: {key}")))
+                        .ok_or_else(|| {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                .with_help("ensure the key exists in the dictionary before accessing it");
+                            CompileError::semantic_with_context(
+                                format!("index out of bounds: dict key not found: {}", key),
+                                ctx,
+                            )
+                        })
                 }
                 Value::Str(s) => {
                     // E1043 - Invalid Index Type
@@ -330,9 +387,25 @@ pub(super) fn eval_collection_expr(
                     fields
                         .get(&key)
                         .cloned()
-                        .ok_or_else(|| CompileError::Semantic(format!("key not found: {key}")))
+                        .ok_or_else(|| {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                .with_help("ensure the field exists in the object before accessing it");
+                            CompileError::semantic_with_context(
+                                format!("index out of bounds: field not found: {}", key),
+                                ctx,
+                            )
+                        })
                 }
-                _ => Err(CompileError::Semantic("index access on non-indexable type".into())),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("index access is only supported on arrays, tuples, dicts, and strings");
+                    Err(CompileError::semantic_with_context(
+                        format!("invalid operation: cannot index value of type {}", recv_val.type_name()),
+                        ctx,
+                    ))
+                },
             };
             Ok(Some(result?))
         }
@@ -353,7 +426,15 @@ pub(super) fn eval_collection_expr(
                             ctx,
                         )
                     }),
-                _ => Err(CompileError::Semantic("tuple index access on non-tuple type".into())),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("tuple indexing is only supported on tuple values");
+                    Err(CompileError::semantic_with_context(
+                        format!("invalid operation: tuple index access on non-tuple type {}", recv_val.type_name()),
+                        ctx,
+                    ))
+                },
             };
             Ok(Some(result?))
         }
@@ -445,7 +526,13 @@ pub(super) fn eval_collection_expr(
             };
 
             if step_val == 0 {
-                return Err(CompileError::Semantic("slice step cannot be zero".into()));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("slice step must be non-zero");
+                return Err(CompileError::semantic_with_context(
+                    "invalid operation: slice step cannot be zero".to_string(),
+                    ctx,
+                ));
             }
 
             let result = match recv_val {

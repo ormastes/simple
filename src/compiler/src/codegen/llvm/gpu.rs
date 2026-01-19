@@ -207,7 +207,7 @@ impl LlvmGpuBackend {
         {
             // Initialize NVPTX target
             LlvmTarget::initialize_native(&InitializationConfig::default())
-                .map_err(|e| CompileError::Semantic(format!("Failed to initialize LLVM: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_init_failed("LLVM", &e))?;
 
             let context = Box::leak(Box::new(Context::create()));
             Ok(Self {
@@ -361,7 +361,7 @@ impl LlvmGpuBackend {
         // Add to nvvm.annotations named metadata
         module
             .add_global_metadata("nvvm.annotations", &annotation)
-            .map_err(|e| CompileError::Semantic(format!("Failed to add kernel metadata: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("kernel metadata", &e))?;
 
         Ok(())
     }
@@ -389,16 +389,16 @@ impl LlvmGpuBackend {
 
         let func = module
             .get_function(intrinsic_name)
-            .ok_or_else(|| CompileError::Semantic(format!("Intrinsic {} not declared", intrinsic_name)))?;
+            .ok_or_else(|| crate::error::factory::intrinsic_not_declared(intrinsic_name))?;
 
         let call = builder
             .build_call(func, &[], result_name)
-            .map_err(|e| CompileError::Semantic(format!("Failed to call {} intrinsic: {}", result_name, e)))?;
+            .map_err(|e| crate::error::factory::intrinsic_call_failed(result_name, &e))?;
 
         call.try_as_basic_value()
             .left()
             .and_then(|v| v.into_int_value().into())
-            .ok_or_else(|| CompileError::Semantic(format!("{} intrinsic returned unexpected type", result_name)))
+            .ok_or_else(|| crate::error::factory::intrinsic_unexpected_type(result_name))
     }
 
     /// Emit a call to get thread ID for a dimension
@@ -457,7 +457,7 @@ impl LlvmGpuBackend {
 
         builder
             .build_call(func, &[], "")
-            .map_err(|e| CompileError::Semantic(format!("Failed to call barrier intrinsic: {}", e)))?;
+            .map_err(|e| crate::error::factory::intrinsic_call_failed("barrier", &e))?;
 
         Ok(())
     }
@@ -482,11 +482,11 @@ impl LlvmGpuBackend {
 
         let func = module
             .get_function(intrinsic_name)
-            .ok_or_else(|| CompileError::Semantic(format!("Memory fence intrinsic {} not declared", intrinsic_name)))?;
+            .ok_or_else(|| crate::error::factory::intrinsic_not_declared(intrinsic_name))?;
 
         builder
             .build_call(func, &[], "")
-            .map_err(|e| CompileError::Semantic(format!("Failed to call memory fence intrinsic: {}", e)))?;
+            .map_err(|e| crate::error::factory::intrinsic_call_failed("memory fence", &e))?;
 
         Ok(())
     }
@@ -560,7 +560,7 @@ impl LlvmGpuBackend {
 
         // Get target
         let target = LlvmTarget::from_triple(&triple)
-            .map_err(|e| CompileError::Semantic(format!("Failed to get NVPTX target: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_target_failed("NVPTX", &e))?;
 
         // Create target machine
         let target_machine = target
@@ -577,11 +577,11 @@ impl LlvmGpuBackend {
         // Emit assembly (PTX)
         let buffer = target_machine
             .write_to_memory_buffer(module, FileType::Assembly)
-            .map_err(|e| CompileError::Semantic(format!("Failed to emit PTX: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_emit_failed("PTX", &e))?;
 
         // Convert to string
         let ptx = std::str::from_utf8(buffer.as_slice())
-            .map_err(|e| CompileError::Semantic(format!("Invalid UTF-8 in PTX: {}", e)))?
+            .map_err(|e| crate::error::factory::invalid_encoding("PTX", &e))?
             .to_string();
 
         Ok(ptx)
@@ -602,7 +602,7 @@ impl LlvmGpuBackend {
 
         module
             .verify()
-            .map_err(|e| CompileError::Semantic(format!("LLVM verification failed: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_verification_failed(&e))?;
         Ok(())
     }
 

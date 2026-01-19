@@ -15,3 +15,4 @@ mod class_tests;
 mod control_flow_tests;
 mod expression_tests;
 mod function_tests;
+mod lifetime_tests;

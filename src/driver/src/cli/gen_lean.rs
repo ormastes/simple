@@ -592,7 +592,8 @@ fn generate_memory_safety_lean(args: &[String]) -> i32 {
     };
 
     // Parse the source
-    let ast_module = match simple_parser::parse(&source) {
+    let mut parser = simple_parser::Parser::new(&source);
+    let ast_module = match parser.parse() {
         Ok(m) => m,
         Err(e) => {
             eprintln!("error: parse error: {}", e);

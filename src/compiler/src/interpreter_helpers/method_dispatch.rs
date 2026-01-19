@@ -1,6 +1,6 @@
 //! Method dispatch and method_missing hooks
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, OptionVariant, ResultVariant, Value, METHOD_MISSING};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
@@ -50,7 +50,13 @@ pub(crate) fn call_method_on_value(
                             return Ok(val.as_ref().clone());
                         }
                     }
-                    return Err(CompileError::Semantic("called unwrap on None".into()));
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                        .with_help("check that the Option contains Some before calling unwrap");
+                    return Err(CompileError::semantic_with_context(
+                        "called unwrap on None".to_string(),
+                        ctx,
+                    ));
                 }
                 "unwrap_or" => {
                     if opt_variant == Some(OptionVariant::Some) {
