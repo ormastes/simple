@@ -95,6 +95,12 @@ list1.merge(list2)            # Combine collections
 [for x in 0..20 if x % 2 == 0: x]   # List comprehension with filter
 ```
 
+**String**
+```simple
+print "Name: {name}" # format string is default, do not use f""
+print r"Parentheses open: {" # raw string with r""
+```
+
 **Methods (LL(1)-friendly, implicit self):**
 ```simple
 impl MyStruct:
