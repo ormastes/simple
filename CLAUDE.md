@@ -47,9 +47,15 @@ val name = "Alice"    # Immutable (preferred)
 var count = 0         # Mutable
 ```
 
+**Implicit val/var (type inference, future/experimental):**
+```simple
+name = "Alice"        # Implicit val (immutable)
+count_ = 0            # Implicit var (mutable, trailing underscore)
+```
+
 **Generics (use `<>` not `[]`):**
 ```simple
-# Template/wrapper types - use angle brackets
+# Template/wrapper types - use angle brackets (for libraries)
 fn map<T, U>(f: fn(T) -> U) -> U
 struct Container<T>
 Option<T>, Result<T, E>, List<Int>
@@ -58,6 +64,35 @@ Option<T>, Result<T, E>, List<Int>
 [i32]           # array type
 [1, 2, 3]       # array literal
 arr[0]          # indexing
+
+# Prefer type inference in app code
+fn double(x):             # Types inferred from usage
+    x * 2
+fn add(a, b):             # No explicit generics needed
+    a + b
+```
+
+**Implicit return:**
+```simple
+fn square(x):
+    x * x                     # Last expression is returned (preferred)
+
+fn explicit_return(x):
+    return x * x              # Use only when needed for clarity
+```
+
+**Collection methods:**
+```simple
+items.map(\x: x * 2)          # Transform each element
+items.filter(\x: x > 5)       # Keep matching elements
+list1.merge(list2)            # Combine collections
+```
+
+**Ranges and comprehensions:**
+```simple
+0..10                         # Exclusive range: 0 to 9
+0..=10                        # Inclusive range: 0 to 10
+[for x in 0..20 if x % 2 == 0: x]   # List comprehension with filter
 ```
 
 **Methods (LL(1)-friendly, implicit self):**

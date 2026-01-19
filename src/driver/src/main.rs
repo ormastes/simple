@@ -97,6 +97,13 @@ fn main() {
     let macro_trace = args.iter().any(|a| a == "--macro-trace");
     let debug_mode = args.iter().any(|a| a == "--debug");
 
+    // Parse --lang flag for i18n localization
+    if let Some(lang_pos) = args.iter().position(|a| a == "--lang") {
+        if let Some(lang) = args.get(lang_pos + 1) {
+            std::env::set_var("SIMPLE_LANG", lang);
+        }
+    }
+
     // Enable macro tracing if requested
     if macro_trace {
         simple_compiler::set_macro_trace(true);

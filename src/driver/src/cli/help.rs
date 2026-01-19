@@ -106,6 +106,7 @@ pub fn print_help() {
     eprintln!("  --gc=off       Disable garbage collection");
     eprintln!("  --macro-trace  Enable macro expansion tracing");
     eprintln!("  --debug        Enable debug mode (dprint statements will output)");
+    eprintln!("  --lang <code>  Set output language for diagnostics (e.g., ko, ja)");
     eprintln!("  --target <arch>  Target architecture for cross-compilation");
     eprintln!("  --linker <name>  Native linker: mold, lld, ld (auto-detected if not set)");
     eprintln!("  --snapshot     Create JJ snapshot on successful build/test");

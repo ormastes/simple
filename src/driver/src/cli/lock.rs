@@ -248,12 +248,7 @@ fn git_clone_checkout(cache: &Cache, url: &str, rev: Option<&str>) -> Result<std
 }
 
 /// Download a package from the registry
-fn registry_download(
-    cache: &Cache,
-    name: &str,
-    version: &str,
-    registry: &str,
-) -> Result<std::path::PathBuf, String> {
+fn registry_download(cache: &Cache, name: &str, version: &str, registry: &str) -> Result<std::path::PathBuf, String> {
     let pkg_path = cache.package_path(name, version);
 
     // Check if already downloaded
@@ -263,8 +258,7 @@ fn registry_download(
 
     // Create parent directory
     if let Some(parent) = pkg_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create cache directory: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("failed to create cache directory: {}", e))?;
     }
 
     // Construct download URL
@@ -303,8 +297,7 @@ fn registry_download(
     }
 
     // Extract the tarball
-    std::fs::create_dir_all(&pkg_path)
-        .map_err(|e| format!("failed to create package directory: {}", e))?;
+    std::fs::create_dir_all(&pkg_path).map_err(|e| format!("failed to create package directory: {}", e))?;
 
     let output = Command::new("tar")
         .args(["-xzf"])

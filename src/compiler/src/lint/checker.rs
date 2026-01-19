@@ -676,7 +676,10 @@ impl LintChecker {
             self.emit(
                 LintName::SSpecMinimalDocstrings,
                 Span::new(0, 0, 1, 1),
-                format!("file has only {} docstring(s) (minimum: {})", docstring_count, MIN_DOCSTRINGS),
+                format!(
+                    "file has only {} docstring(s) (minimum: {})",
+                    docstring_count, MIN_DOCSTRINGS
+                ),
                 Some("add docstrings to describe/context/it blocks".to_string()),
             );
         }

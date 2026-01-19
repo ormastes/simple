@@ -289,7 +289,12 @@ fn collect_references_in_expr(expr: &Expr, name: &str, uri: &str, references: &m
                 collect_references_in_expr(elem, name, uri, references);
             }
         }
-        Expr::If { condition, then_branch, else_branch, .. } => {
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             collect_references_in_expr(condition, name, uri, references);
             collect_references_in_expr(then_branch, name, uri, references);
             if let Some(else_br) = else_branch {
@@ -359,7 +364,11 @@ fn extract_symbols_from_nodes(nodes: &[Node]) -> Vec<SymbolInfo> {
     for node in nodes {
         match node {
             Node::Function(func) => {
-                symbols.push(SymbolInfo::new(&func.name, SymbolKind::Function, span_to_range(&func.span)));
+                symbols.push(SymbolInfo::new(
+                    &func.name,
+                    SymbolKind::Function,
+                    span_to_range(&func.span),
+                ));
             }
             Node::Class(class) => {
                 let mut class_symbol = SymbolInfo::new(&class.name, SymbolKind::Class, span_to_range(&class.span));
@@ -417,7 +426,11 @@ fn extract_symbols_from_nodes(nodes: &[Node]) -> Vec<SymbolInfo> {
             }
             Node::Let(let_stmt) => {
                 if let Some(name) = extract_pattern_name(&let_stmt.pattern) {
-                    symbols.push(SymbolInfo::new(name, SymbolKind::Variable, span_to_range(&let_stmt.span)));
+                    symbols.push(SymbolInfo::new(
+                        name,
+                        SymbolKind::Variable,
+                        span_to_range(&let_stmt.span),
+                    ));
                 }
             }
             _ => {}
@@ -482,7 +495,11 @@ fn extract_pattern_name(pattern: &simple_parser::ast::Pattern) -> Option<&str> {
 
 fn format_function_signature(func: &FunctionDef) -> String {
     let vis = if func.visibility.is_public() { "pub " } else { "" };
-    let async_kw = if func.effects.iter().any(|e| matches!(e, simple_parser::ast::Effect::Async)) {
+    let async_kw = if func
+        .effects
+        .iter()
+        .any(|e| matches!(e, simple_parser::ast::Effect::Async))
+    {
         "async "
     } else {
         ""
@@ -498,20 +515,42 @@ fn format_function_signature(func: &FunctionDef) -> String {
             }
         })
         .collect();
-    let ret = func.return_type.as_ref().map(|t| format!(" -> {}", type_to_string(t))).unwrap_or_default();
+    let ret = func
+        .return_type
+        .as_ref()
+        .map(|t| format!(" -> {}", type_to_string(t)))
+        .unwrap_or_default();
     format!("{}{}fn {}({}){}", vis, async_kw, func.name, params.join(", "), ret)
 }
 
 fn format_class_signature(class: &ClassDef) -> String {
     let vis = if class.visibility.is_public() { "pub " } else { "" };
-    let fields: Vec<String> = class.fields.iter().map(|f| format!("    {}: {}", f.name, type_to_string(&f.ty))).collect();
-    let methods: Vec<String> = class.methods.iter().map(|m| format!("    fn {}(...)", m.name)).collect();
-    format!("{}class {}:\n{}\n{}", vis, class.name, fields.join("\n"), methods.join("\n"))
+    let fields: Vec<String> = class
+        .fields
+        .iter()
+        .map(|f| format!("    {}: {}", f.name, type_to_string(&f.ty)))
+        .collect();
+    let methods: Vec<String> = class
+        .methods
+        .iter()
+        .map(|m| format!("    fn {}(...)", m.name))
+        .collect();
+    format!(
+        "{}class {}:\n{}\n{}",
+        vis,
+        class.name,
+        fields.join("\n"),
+        methods.join("\n")
+    )
 }
 
 fn format_struct_signature(s: &StructDef) -> String {
     let vis = if s.visibility.is_public() { "pub " } else { "" };
-    let fields: Vec<String> = s.fields.iter().map(|f| format!("    {}: {}", f.name, type_to_string(&f.ty))).collect();
+    let fields: Vec<String> = s
+        .fields
+        .iter()
+        .map(|f| format!("    {}: {}", f.name, type_to_string(&f.ty)))
+        .collect();
     format!("{}struct {}:\n{}", vis, s.name, fields.join("\n"))
 }
 
@@ -534,7 +573,11 @@ fn type_to_string(ty: &Type) -> String {
             if args.is_empty() {
                 name.clone()
             } else {
-                format!("{}<{}>", name, args.iter().map(type_to_string).collect::<Vec<_>>().join(", "))
+                format!(
+                    "{}<{}>",
+                    name,
+                    args.iter().map(type_to_string).collect::<Vec<_>>().join(", ")
+                )
             }
         }
         Type::Array { element, .. } => format!("[{}]", type_to_string(element)),
@@ -542,7 +585,10 @@ fn type_to_string(ty: &Type) -> String {
         Type::Tuple(types) => format!("({})", types.iter().map(type_to_string).collect::<Vec<_>>().join(", ")),
         Type::Function { params, ret } => {
             let params_str = params.iter().map(type_to_string).collect::<Vec<_>>().join(", ");
-            let ret_str = ret.as_ref().map(|r| type_to_string(r)).unwrap_or_else(|| "void".to_string());
+            let ret_str = ret
+                .as_ref()
+                .map(|r| type_to_string(r))
+                .unwrap_or_else(|| "void".to_string());
             format!("fn({}) -> {}", params_str, ret_str)
         }
         Type::Pointer { inner, .. } => format!("*{}", type_to_string(inner)),

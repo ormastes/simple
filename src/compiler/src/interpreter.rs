@@ -964,6 +964,6 @@ pub use interpreter_native_net::*;
 #[path = "interpreter_context.rs"]
 mod interpreter_context;
 use interpreter_context::dispatch_context_method;
-#[path = "interpreter_extern.rs"]
+#[path = "interpreter_extern/mod.rs"]
 mod interpreter_extern;
 pub(crate) use interpreter_extern::call_extern_function;
