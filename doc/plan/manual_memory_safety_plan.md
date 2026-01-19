@@ -1,50 +1,98 @@
 # Manual Memory Safety Plan (Simple)
 
 ## Summary
-Strengthen manual memory safety rules in Simple by defaulting non-primitive values to unique ownership, requiring explicit mutability, and adding compiler/interpreter enforcement for aliasing, borrowing, and lifetime violations. The goal is to bring manual mode closer to Rust-style safety without losing Simple's GC and handle-pool flexibility.
+Strengthen manual memory safety rules in Simple by defaulting to unique owning handles (`&T`, implicit), using explicit shared handles (`*T`), forbidding user-visible borrows/lifetimes, and adding compiler-inserted lifecycle operations (retain/release/drop) with debug tracing. The goal is a safe, predictable manual mode without non-owning references or lifetime syntax.
 
 ## Goals
-- Make manual memory usage safe by default for non-primitive values.
-- Require explicit mutability and enforce exclusive access for mutation.
-- Enforce aliasing and lifetime rules in compiler (static) with interpreter fallback (runtime checks) for cases the compiler cannot prove.
-- Preserve existing pointer kinds: unique `&T`, shared `*T`, weak `-T`, handle `+T`.
+- Make manual memory usage safe by default via implicit unique ownership (`&T`) and explicit shared ownership (`*T`).
+- Remove user-visible borrow/lifetime syntax from the safe subset; rely on ownership lifetimes only.
+- Enforce mutation rules: shared handles are read-only; mutation requires unique ownership or consume-and-return COW.
+- Insert compiler-managed lifecycle ops (move/drop/rc_inc/rc_dec) with debug visibility.
 - Avoid breaking GC mode or existing GC-based semantics.
 
 ## Non-Goals
 - Replace GC as the default memory model for all use cases.
-- Introduce a full Rust-like borrow checker in one step without staged rollout.
+- Introduce borrow/lifetime syntax or borrow regions in the safe subset.
 - Add cyclic GC for manual reference-counted `*T` values.
 
 ## Proposed Policy (Manual Mode)
-- **Default ownership for non-primitive values:** a bare non-primitive type `T` in manual mode resolves to unique ownership (equivalent to `&T`) unless explicitly annotated with `*T`, `-T`, or `+T`.
-- **Primitive values stay by-value:** numeric/boolean/char/etc. remain value types and do not default to `&T`.
-- **Mutability must be explicit:** any mutation of a value requires explicit `mut` and an exclusive access path.
-- **Mutation requires uniqueness or exclusive borrow:**
-  - Mutating a unique owner (`&T`) is allowed only if it is declared `mut` and not aliased.
-  - Mutating shared (`*T`) values is forbidden unless the value is obtained through an exclusive borrow (future `&mut` borrowing).
+## Proposed Policy (Manual Mode)
+- **Default ownership:** bare `T` in expression/local contexts resolves to `&T` (unique owning handle) unless explicitly `*T`.
+- **Primitive values stay by-value:** numeric/boolean/char/etc. remain value types.
+- **No user-visible borrows:** no `&T_borrow`/`&mut T_borrow` in the safe subset.
+- **Shared is read-only:** `*T` is copyable and refcounted; mutation is forbidden directly.
+- **Mutation requires unique ownership:** methods that mutate require `&T` receiver (implicit `T`).
+- **No `var *T`:** shared owners cannot be mutated in place; updates use consume-and-return patterns.
 
 ## Design and Architecture
-- **Front-end ownership model:** pointer kinds are part of the type system; the compiler resolves bare non-primitive `T` to `&T` in manual mode and rejects implicit mixing (`&T` <-> `*T`) without explicit builtins.
-- **Borrow/aliasing layer:** a dedicated analysis pass enforces exclusive mutable access or shared immutable access. This is separate from type inference to keep enforcement modular.
-- **Lifetime/escape layer:** a MIR/CFG pass ensures borrows do not outlive owners or escape their scope.
-- **Runtime debug checks:** optional cycle detection and borrow-violation checks remain in the runtime for cases the compiler cannot prove.
-- **Domain separation:** GC allocations remain in the GC domain; manual allocations remain in manual/handle domains; explicit conversion is required between domains.
+- **Front-end ownership model:** pointer kinds are part of the type system; the compiler resolves bare `T` to `&T` in manual mode and rejects implicit mixing (`&T` <-> `*T`) without explicit builtins.
+- **Lifecycle lowering:** compiler inserts explicit handle ops (move/drop/rc_inc/rc_dec) and schedules them on scope exit (or NLL-style last-use).
+- **Mutation gating:** mutating methods require unique receiver; shared receivers expose only read methods and consume-return updates.
+- **Runtime debug checks:** optional cycle detection and lifecycle tracing for debug builds.
+- **Domain separation:** GC allocations remain in GC domain; manual allocations remain in manual/handle domains; explicit conversion required between domains.
 
 ## Rust-Level Safety Conditions
-- **Manual mode, strict:** Rust-like safety is achievable only when strict mode enforces aliasing and lifetime rules as errors.
+- **Manual mode, strict:** Rust-like safety is achievable when strict mode enforces ownership + refcount rules and forbids shared mutation.
 - **Legacy mode:** not Rust-level safe by design (warnings only).
 - **GC mode:** GC-managed objects are memory-safe, but manual/RC structures still need weak edges to avoid cycles (same as Rust Rc/Weak).
 
 ## Is Borrow Checking Required?
-- **Yes for Rust-level guarantees:** without borrow checking (aliasing + lifetimes), manual mode cannot guarantee no use-after-free or invalid aliasing.
-- **GC mode can omit borrow checking:** GC prevents UAF for GC-managed objects, but aliasing rules are still needed to prevent unsafe mutation patterns if manual pointers are involved.
+- **No, if the safe subset forbids non-owning references:** memory safety comes from owning handles only.
+- **Yes, if non-owning references are reintroduced later:** borrow/lifetime rules would be required then.
 
 ## Implementation Design (Strict + Legacy)
 - **Mode plumbing:** add `MemoryMode` (strict/legacy) to compiler pipeline options and interpreter context; expose `--memory-mode=strict|legacy` in CLI.
-- **Legacy warnings:** implement memory-safety lints that mirror strict violations (mutability, aliasing, escaping borrows) and emit warnings in legacy mode.
+- **Legacy warnings:** implement memory-safety lints that mirror strict violations (shared mutation, implicit copies of unique, COW misuse) and emit warnings in legacy mode.
 - **Strict errors:** upgrade those lints to hard errors when strict mode is active.
-- **Borrow/lifetime analysis:** introduce a borrow graph and region model in MIR/CFG; enforce non-escaping borrows, one-mut-or-many-immut rule, and forbid mutable access through shared pointers.
-- **Runtime debug checks:** add cycle detection and borrow violation checks for debug builds, and surface as diagnostic errors.
+- **Lifecycle lowering:** insert `u_move/u_drop` and `rc_inc/rc_dec` ops in MIR/CFG; enforce exactly-once drop/decrement.
+- **Runtime debug checks:** add cycle detection and lifecycle tracing for debug builds, surfaced as diagnostic errors.
+
+## Core Semantics (Implicit & and Explicit *)
+### &T — unique owner (default, implicit)
+- Owns exactly one allocation of `T`.
+- Move-only; copies are errors.
+- Dropping frees the allocation and runs `drop(T)`.
+- **Defaulting rule:** a type written as `T` in expression/local contexts is interpreted as `&T` unless explicitly `*T`.
+
+### *T — shared owner (refcount)
+- Copyable; copies increment refcount.
+- Dropping decrements refcount; frees allocation at zero.
+- Read-only in safe code; mutation is forbidden directly.
+- `var *T` is forbidden.
+
+## Implicit Lifecycle Handle Model (Compiler-Inserted)
+### Handle kinds (internal)
+- `HUnique(T)` for `&T`
+- `HShared(T)` for `*T`
+
+### Inserted operations (internal)
+- **Unique:** `u_move`, `u_drop`
+- **Shared:** `rc_inc`, `rc_dec`, `rc_clone`
+- **Scope-based lifetime:** compiler schedules drops/decrements at end of scope (or last-use).
+
+### Debug tracing
+- `--debug-lifecycle`: show inferred drop points for `&`
+- `--debug-rc`: show `rc_inc`/`rc_dec` insertion sites
+- `--debug-cow`: show clone-on-write operations
+
+Example format:
+```
+RC_INC  f.spl:12:9  *Vec[Int]  reason=copy to x2
+DROP    f.spl:19:1  &Foo       reason=end_of_scope
+```
+
+## Mutation and COW (Consume-and-Return)
+- **Mutating methods require unique receiver** (`&T`, implicit `T`).
+- **Shared updates use COW** (consume `*T`, return `*T`).
+- Primitives:
+  - `into_unique[T: Clone](x: *T) -> T` (COW: reuse if rc==1, else clone)
+  - `share[T](x: T) -> *T`
+- Standard pattern:
+  - `method mut(self: *T, f: fn(T)->Void) -> *T` desugars to `into_unique -> f -> share`.
+
+## Surface Restrictions (Required for Soundness)
+- **No interior views in v1:** container getters return values or cloned owners; no view into internal buffers.
+- **No shared mutation:** `*T` does not expose mutating methods; updates return new `*T`.
 
 ## Affected Components (What to Update)
 - **Parser/AST:** add explicit borrow types `&T_borrow` and `&mut T_borrow` and ensure they round-trip through formatter.
@@ -61,10 +109,11 @@ Strengthen manual memory safety rules in Simple by defaulting non-primitive valu
 - **Diagnostics:** share violation codes/messages (e.g., `E_MEM_ALIAS`, `E_MEM_ESCAPE`, `E_MEM_CYCLE`) between compiler and interpreter.
 
 ## Syntax/Type System Changes
-- Introduce explicit borrow types in the type system (planned in `doc/design/memory.md`):
-  - `&T_borrow` and `&mut T_borrow` for non-owning views.
+### Syntax/Type System Changes
+- Keep pointer kinds `&` and `*` only; no `owned` keyword.
+- Remove/disable borrow/lifetime syntax in the safe subset.
+- Add type normalization rule: bare `T` resolves to `&T` in manual mode.
 - Add `mut` requirements to mutation operators and field assignments.
-- Add type resolution rule for manual mode: `T` resolves to `&T` when `T` is non-primitive and not explicitly annotated.
 
 ## Compiler Enforcement (Static)
 1. **Ownership resolution pass**
@@ -101,11 +150,11 @@ Strengthen manual memory safety rules in Simple by defaulting non-primitive valu
 
 ## Migration Plan
 - Phase 0: Document new rules in `doc/spec/memory.md` and `tests/specs/memory_spec.spl`.
-- Phase 1: Implement ownership resolution for bare non-primitive `T` in manual mode.
-- Phase 2: Enforce explicit `mut` and exclusive mutation rules.
-- Phase 3: Add aliasing checks for borrows and shared pointers.
-- Phase 4: Add lifetime/escape checks for borrows.
-- Phase 5: Interpreter fallback checks for unproven cases.
+- Phase 1: Implement implicit `&` normalization for bare `T` in manual mode.
+- Phase 2: Implement handle lowering (`u_move/u_drop/rc_inc/rc_dec`) and drop scheduling.
+- Phase 3: Enforce move-only `&T` and forbid `var *T` + shared mutation.
+- Phase 4: Add COW primitives (`into_unique`, `share`) and stdlib `mut()` pattern.
+- Phase 5: Add debug lifecycle/rc/cow tracing and cycle detection.
 
 ## Dual-Mode Compilation (Strict + Legacy)
 - **Mode names:** `--memory-mode=strict` and `--memory-mode=legacy` (default: legacy during migration).

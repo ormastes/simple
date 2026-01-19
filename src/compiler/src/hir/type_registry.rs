@@ -239,4 +239,9 @@ impl TypeRegistry {
             _ => None,
         }
     }
+
+    /// Get all registered type names for error suggestions (E1011)
+    pub fn all_type_names(&self) -> Vec<String> {
+        self.name_to_id.keys().cloned().collect()
+    }
 }

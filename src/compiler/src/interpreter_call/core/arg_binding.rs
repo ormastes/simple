@@ -1,7 +1,7 @@
 // Argument binding and validation for function calls
 
 use super::macros::*;
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::evaluate_expr;
 use crate::interpreter::await_value;
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
@@ -88,12 +88,24 @@ pub(crate) fn bind_args_with_injected(
                         validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
                         bound.insert(param.name.clone(), val);
                     } else {
-                        bail_semantic!("too many arguments");
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                            .with_help("check the function signature and provide the correct number of arguments");
+                        return Err(CompileError::semantic_with_context(
+                            format!("function expects {} argument(s), but more were provided", params_to_bind.len()),
+                            ctx
+                        ));
                     }
                 } else {
                     // No variadic - bind to regular parameters
                     if positional_idx >= params_to_bind.len() {
-                        bail_semantic!("too many arguments");
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                            .with_help("check the function signature and provide the correct number of arguments");
+                        return Err(CompileError::semantic_with_context(
+                            format!("function expects {} argument(s), but more were provided", params_to_bind.len()),
+                            ctx
+                        ));
                     }
                     let param = params_to_bind[positional_idx];
                     let val = wrap_trait_object!(spread_item, param.ty.as_ref());
@@ -133,7 +145,13 @@ pub(crate) fn bind_args_with_injected(
                 } else {
                     // No variadic parameter - normal positional binding
                     if positional_idx >= params_to_bind.len() {
-                        bail_semantic!("too many arguments");
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                            .with_help("check the function signature and provide the correct number of arguments");
+                        return Err(CompileError::semantic_with_context(
+                            format!("function expects {} argument(s), but more were provided", params_to_bind.len()),
+                            ctx
+                        ));
                     }
                     let param = params_to_bind[positional_idx];
                     let val = wrap_trait_object!(val, param.ty.as_ref());
@@ -165,7 +183,13 @@ pub(crate) fn bind_args_with_injected(
             } else if let Some(injected_val) = injected.get(&param.name) {
                 bound.insert(param.name.clone(), injected_val.clone());
             } else {
-                bail_semantic!("missing argument {}", param.name);
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("check the function signature and provide the correct number of arguments");
+                return Err(CompileError::semantic_with_context(
+                    format!("function expects argument for parameter '{}', but none was provided", param.name),
+                    ctx
+                ));
             }
         }
     }
@@ -189,7 +213,13 @@ pub(crate) fn bind_args_with_values(
         .collect();
 
     if args.len() > params_to_bind.len() {
-        bail_semantic!("too many arguments");
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("check the function signature and provide the correct number of arguments");
+        return Err(CompileError::semantic_with_context(
+            format!("function expects {} argument(s), but {} were provided", params_to_bind.len(), args.len()),
+            ctx
+        ));
     }
 
     let mut bound = HashMap::new();
@@ -200,7 +230,13 @@ pub(crate) fn bind_args_with_values(
         } else if let Some(default_expr) = &param.default {
             evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?
         } else {
-            bail_semantic!("missing argument {}", param.name);
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("check the function signature and provide the correct number of arguments");
+            return Err(CompileError::semantic_with_context(
+                format!("function expects argument for parameter '{}', but none was provided", param.name),
+                ctx
+            ));
         };
 
         let value = wrap_trait_object!(value, param.ty.as_ref());

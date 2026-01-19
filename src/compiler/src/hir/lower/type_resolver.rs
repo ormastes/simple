@@ -13,15 +13,24 @@ impl Lowerer {
                     if let Some(class_ty) = self.current_class_type {
                         return Ok(class_ty);
                     } else {
-                        return Err(LowerError::UnknownType(
-                            "Self used outside of class/struct context".to_string(),
-                        ));
+                        // Self used outside of class context - special case
+                        return Err(LowerError::UnknownType {
+                            type_name: "Self".to_string(),
+                            available_types: vec![],
+                        });
                     }
                 }
                 self.module
                     .types
                     .lookup(name)
-                    .ok_or_else(|| LowerError::UnknownType(name.clone()))
+                    .ok_or_else(|| {
+                        // Gather available type names for suggestions
+                        let available_types = self.module.types.all_type_names();
+                        LowerError::UnknownType {
+                            type_name: name.clone(),
+                            available_types,
+                        }
+                    })
             }
             Type::Pointer { kind, inner } => {
                 let inner_id = self.resolve_type(inner)?;
@@ -169,7 +178,10 @@ impl Lowerer {
                     }
                 } else {
                     // Cannot get inner type, error
-                    Err(LowerError::UnknownType(format!("capability inner type {:?}", inner)))
+                    Err(LowerError::UnknownType {
+                        type_name: format!("capability inner type {:?}", inner),
+                        available_types: self.module.types.all_type_names(),
+                    })
                 }
             }
             _ => Err(LowerError::Unsupported(format!("{:?}", ty))),
