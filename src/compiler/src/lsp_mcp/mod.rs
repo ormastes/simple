@@ -84,8 +84,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "lsp_definition".to_string(),
-            description: "Find where a symbol is defined. Returns the location of the symbol's definition."
-                .to_string(),
+            description: "Find where a symbol is defined. Returns the location of the symbol's definition.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -107,8 +106,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "lsp_references".to_string(),
-            description: "Find all references to a symbol. Returns all locations where the symbol is used."
-                .to_string(),
+            description: "Find all references to a symbol. Returns all locations where the symbol is used.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -134,8 +132,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "lsp_hover".to_string(),
-            description: "Get hover information for a symbol. Returns type information and documentation."
-                .to_string(),
+            description: "Get hover information for a symbol. Returns type information and documentation.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -216,7 +213,9 @@ impl LspMcpHandler {
         params: DefinitionParams,
         source: &str,
     ) -> Result<Option<Location>, String> {
-        Ok(self.tools.go_to_definition(&params.file, source, params.line, params.character))
+        Ok(self
+            .tools
+            .go_to_definition(&params.file, source, params.line, params.character))
     }
 
     /// Handle lsp_references tool call (requires source to be passed)
@@ -235,11 +234,7 @@ impl LspMcpHandler {
     }
 
     /// Handle lsp_hover tool call (requires source to be passed)
-    pub fn handle_hover_with_source(
-        &mut self,
-        params: HoverParams,
-        source: &str,
-    ) -> Result<Option<HoverInfo>, String> {
+    pub fn handle_hover_with_source(&mut self, params: HoverParams, source: &str) -> Result<Option<HoverInfo>, String> {
         Ok(self.tools.hover(&params.file, source, params.line, params.character))
     }
 

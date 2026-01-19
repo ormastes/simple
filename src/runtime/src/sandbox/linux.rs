@@ -96,9 +96,8 @@ fn apply_network_allowlist(domains: &HashSet<String>) -> SandboxResult<()> {
     let _ = run_iptables(&["-N", chain_name]);
 
     // Flush the chain
-    run_iptables(&["-F", chain_name]).map_err(|e| {
-        SandboxError::NetworkIsolation(format!("Failed to flush iptables chain: {}", e))
-    })?;
+    run_iptables(&["-F", chain_name])
+        .map_err(|e| SandboxError::NetworkIsolation(format!("Failed to flush iptables chain: {}", e)))?;
 
     // Allow loopback traffic
     run_iptables(&["-A", chain_name, "-o", "lo", "-j", "ACCEPT"]).ok();
@@ -170,9 +169,8 @@ fn apply_network_blocklist(domains: &HashSet<String>) -> SandboxResult<()> {
     let _ = run_iptables(&["-N", chain_name]);
 
     // Flush the chain
-    run_iptables(&["-F", chain_name]).map_err(|e| {
-        SandboxError::NetworkIsolation(format!("Failed to flush iptables chain: {}", e))
-    })?;
+    run_iptables(&["-F", chain_name])
+        .map_err(|e| SandboxError::NetworkIsolation(format!("Failed to flush iptables chain: {}", e)))?;
 
     // Block connections to specified IPs
     for ip in &blocked_ips {
@@ -337,9 +335,7 @@ fn bind_mount_readonly(path: &Path) -> SandboxResult<()> {
 
     // First, bind mount the path to itself
     mount::<str, Path, str, str>(Some(&path_str), path, None, MsFlags::MS_BIND | MsFlags::MS_REC, None)
-        .map_err(|e| {
-            SandboxError::FilesystemIsolation(format!("Failed to bind mount {}: {}", path_str, e))
-        })?;
+        .map_err(|e| SandboxError::FilesystemIsolation(format!("Failed to bind mount {}: {}", path_str, e)))?;
 
     // Then remount as read-only
     mount::<str, Path, str, str>(
@@ -349,9 +345,7 @@ fn bind_mount_readonly(path: &Path) -> SandboxResult<()> {
         MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY | MsFlags::MS_REC,
         None,
     )
-    .map_err(|e| {
-        SandboxError::FilesystemIsolation(format!("Failed to remount {} as read-only: {}", path_str, e))
-    })?;
+    .map_err(|e| SandboxError::FilesystemIsolation(format!("Failed to remount {} as read-only: {}", path_str, e)))?;
 
     tracing::debug!("Mounted {} as read-only", path_str);
     Ok(())
@@ -360,10 +354,7 @@ fn bind_mount_readonly(path: &Path) -> SandboxResult<()> {
 /// Apply restricted filesystem isolation with specific read and write paths.
 ///
 /// Creates a minimal filesystem with only the specified paths accessible.
-fn apply_restricted_isolation(
-    read_paths: &HashSet<PathBuf>,
-    write_paths: &HashSet<PathBuf>,
-) -> SandboxResult<()> {
+fn apply_restricted_isolation(read_paths: &HashSet<PathBuf>, write_paths: &HashSet<PathBuf>) -> SandboxResult<()> {
     use nix::sched::{unshare, CloneFlags};
 
     // Create a new mount namespace
@@ -413,9 +404,7 @@ fn bind_mount_readwrite(path: &Path) -> SandboxResult<()> {
 
     // Bind mount the path to itself (preserves write access)
     mount::<str, Path, str, str>(Some(&path_str), path, None, MsFlags::MS_BIND | MsFlags::MS_REC, None)
-        .map_err(|e| {
-            SandboxError::FilesystemIsolation(format!("Failed to bind mount {}: {}", path_str, e))
-        })?;
+        .map_err(|e| SandboxError::FilesystemIsolation(format!("Failed to bind mount {}: {}", path_str, e)))?;
 
     tracing::debug!("Mounted {} as read-write", path_str);
     Ok(())
@@ -486,7 +475,10 @@ fn apply_overlay_isolation() -> SandboxResult<()> {
         .map_err(|e| SandboxError::FilesystemIsolation(format!("Failed to chdir to overlay: {}", e)))?;
 
     tracing::info!("Applied overlay filesystem isolation at {}", merged_dir.display());
-    tracing::info!("All writes will be captured in {} and discarded on exit", upper_dir.display());
+    tracing::info!(
+        "All writes will be captured in {} and discarded on exit",
+        upper_dir.display()
+    );
     Ok(())
 }
 

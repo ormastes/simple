@@ -85,7 +85,8 @@ pub(crate) fn evaluate_method_call(
                     if method == "not_to" { "not to match" } else { "to match" },
                     matcher
                 );
-                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
+                BDD_FAILURE_MSG
+                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
             }
 
             return Ok(Value::Bool(passed));

@@ -61,9 +61,7 @@ impl Environment {
 
     /// Check if this environment is currently active
     fn is_active(name: &str) -> bool {
-        std::env::var("SIMPLE_ENV")
-            .map(|v| v == name)
-            .unwrap_or(false)
+        std::env::var("SIMPLE_ENV").map(|v| v == name).unwrap_or(false)
     }
 }
 
@@ -212,13 +210,7 @@ pub fn activate_env(name: &str, shell: Option<&str>) -> i32 {
     // Detect shell or use provided
     let shell = shell.unwrap_or_else(|| {
         std::env::var("SHELL")
-            .map(|s| {
-                if s.contains("fish") {
-                    "fish"
-                } else {
-                    "bash"
-                }
-            })
+            .map(|s| if s.contains("fish") { "fish" } else { "bash" })
             .unwrap_or("bash")
     });
 
@@ -331,10 +323,11 @@ mod dirs {
     pub fn data_local_dir() -> Option<PathBuf> {
         #[cfg(target_os = "linux")]
         {
-            std::env::var("XDG_DATA_HOME")
-                .map(PathBuf::from)
-                .ok()
-                .or_else(|| std::env::var("HOME").map(|h| PathBuf::from(h).join(".local/share")).ok())
+            std::env::var("XDG_DATA_HOME").map(PathBuf::from).ok().or_else(|| {
+                std::env::var("HOME")
+                    .map(|h| PathBuf::from(h).join(".local/share"))
+                    .ok()
+            })
         }
 
         #[cfg(target_os = "macos")]

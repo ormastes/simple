@@ -147,11 +147,7 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
 
             // Add #[ignore] for slow tests so they're skipped by default
             // Run with: cargo test -- --ignored
-            let ignore_attr = if is_slow_test {
-                "#[ignore]\n"
-            } else {
-                ""
-            };
+            let ignore_attr = if is_slow_test { "#[ignore]\n" } else { "" };
 
             // Use a larger stack size (8MB) for Simple interpreter tests
             // The interpreter uses recursive evaluation which can overflow the default 2MB stack
