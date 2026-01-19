@@ -49,7 +49,7 @@ fn doctest_supports_multiline_blocks() {
 fn doctest_matches_errors() {
     let text = r#"
 >>> missing_var
-Error: undefined variable
+Error: variable `missing_var` not found
 "#;
 
     let examples = parse_doctest_text(text, "<mem>");

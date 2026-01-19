@@ -263,33 +263,49 @@ imports   = ["std.*", "std.gpu.host.*"]
 
 ## 3. Project Directory Structure
 
+> **Note:** The actual implementation path is `simple/std_lib/src/` rather than the
+> originally planned `lib/std/`. This document reflects the actual implementation.
+
 The Simple language project uses the following directory structure:
 
 ```
 simple/
-├── lib/                    # Simple standard library (written in Simple)
-│   └── std/                # stdlib root
-│       ├── __init__.spl    # #[deny(primitive_api)] mod std
-│       ├── core/           # variant-agnostic pure core
-│       ├── core_nogc/      # variant-agnostic, explicit #[no_gc]
-│       ├── simd/           # cross-platform SIMD & vector math
-│       ├── host/           # OS-based stdlib overlays
-│       │   ├── async_nogc/ # DEFAULT
-│       │   ├── async_gc/
-│       │   ├── sync_nogc/
-│       │   └── sync_gc/
-│       ├── bare/           # baremetal stdlib overlays
-│       │   ├── async_nogc/ # DEFAULT (cooperative async)
-│       │   └── sync_nogc/
-│       ├── gpu/            # GPU device & host APIs
-│       │   ├── kernel/
-│       │   │   ├── async_nogc/  # DEFAULT (async GPU operations)
-│       │   │   └── sync_nogc/
-│       │   └── host/
-│       │       ├── async_nogc/  # DEFAULT
-│       │       ├── async_gc/
-│       │       └── sync_gc/
-│       └── tools/          # diagnostics, testing, reflection
+├── std_lib/src/            # Simple standard library (written in Simple)
+│   ├── __init__.spl        # #[deny(primitive_api, bare_string, bare_bool)] mod std
+│   ├── core/               # variant-agnostic pure core
+│   ├── core_nogc/          # variant-agnostic, explicit #[no_gc]
+│   ├── core_immut/         # variant-agnostic, explicit #[immutable]
+│   ├── core_nogc_immut/    # #[no_gc] + #[immutable]
+│   ├── simd/               # cross-platform SIMD & vector math
+│   ├── sys/                # system utilities (args, env)
+│   ├── host/               # OS-based stdlib overlays
+│   │   ├── async_nogc_mut/ # DEFAULT
+│   │   ├── async_gc_mut/
+│   │   ├── async_gc_immut/
+│   │   └── sync_nogc_mut/
+│   ├── bare/               # baremetal stdlib (flat structure)
+│   │   ├── hal/            # Hardware abstraction
+│   │   ├── io/             # Basic I/O
+│   │   ├── async/          # Async executor
+│   │   ├── startup.spl
+│   │   ├── time.spl
+│   │   └── mem.spl
+│   ├── gpu/                # GPU device & host APIs
+│   │   ├── kernel/         # Device-side (flat structure)
+│   │   └── host/
+│   │       └── async_nogc_mut/
+│   ├── tooling/            # diagnostics, testing, reflection
+│   │
+│   │   # Platform-specific modules
+│   ├── browser/            # Web browser APIs
+│   ├── electron/           # Electron desktop
+│   ├── godot/              # Godot engine
+│   ├── unreal/             # Unreal engine
+│   ├── vscode/             # VSCode extension
+│   ├── graphics/           # Graphics rendering
+│   ├── ml/                 # Machine learning
+│   ├── physics/            # Physics simulation
+│   └── web/                # Web utilities
 │
 ├── native_lib/             # Native implementations (written in Rust)
 │   ├── core/               # Core runtime support
@@ -328,37 +344,43 @@ simple/
 
 | Directory | Purpose | Language |
 |-----------|---------|----------|
-| `lib/` | Standard library | Simple |
+| `simple/std_lib/src/` | Standard library | Simple |
 | `native_lib/` | Native system interface | Rust |
 | `src/` | Compiler implementation | Rust |
 
-### Stdlib Directory Layout (`lib/std/`)
+### Stdlib Directory Layout (`simple/std_lib/src/`)
 
 ```
-lib/std/
+simple/std_lib/src/
 ├── __init__.spl        # Root manifest with #[deny(primitive_api, bare_string, bare_bool)]
 ├── prelude.spl         # Auto-imported into every file
 ├── core/               # Variant-agnostic pure core (mutable default)
 │   ├── __init__.spl
 │   ├── option.spl
 │   ├── result.spl
-│   └── traits.spl
+│   ├── traits.spl
+│   ├── math.spl        # Mathematical functions
+│   ├── iter.spl        # Iterator utilities
+│   ├── cmp_ord.spl     # Comparison and ordering
+│   ├── error.spl       # Error trait
+│   ├── fmt.spl         # Formatting trait
+│   └── graph.spl       # Graph data structure
 ├── core_immut/         # Variant-agnostic, explicit #[immutable]
 │   ├── __init__.spl
-│   ├── functional.spl  # compose, curry, flip, identity
-│   ├── pure.spl        # pure Option/Result transformations
-│   └── persistent.spl  # persistent data structures (List, etc.)
+│   └── functional.spl  # compose, curry, flip, identity
 ├── core_nogc/          # Variant-agnostic, explicit #[no_gc] (mutable)
 │   ├── __init__.spl
 │   ├── arena.spl
 │   ├── bump.spl
 │   ├── fixed_vec.spl
-│   └── fixed_string.spl
+│   ├── fixed_string.spl
+│   ├── small_vec.spl   # Small-buffer optimized vector
+│   ├── small_map.spl   # Static maps/dictionaries
+│   └── string_view.spl # Borrowed read-only string view
 ├── core_nogc_immut/    # Variant-agnostic, #[no_gc] + #[immutable]
 │   ├── __init__.spl
 │   ├── functional.spl  # pure functions (stack-only)
-│   ├── static_vec.spl  # immutable API fixed-capacity vector
-│   └── static_string.spl  # immutable API fixed-capacity string
+│   └── static_vec.spl  # immutable API fixed-capacity vector
 ├── units/              # Unit type definitions
 │   ├── __init__.spl
 │   ├── ids.spl
@@ -367,30 +389,21 @@ lib/std/
 │   ├── url.spl
 │   ├── size.spl
 │   └── time.spl
-├── simd/               # Cross-platform SIMD & vector math (single variant)
+├── simd/               # Cross-platform SIMD & vector math
 │   ├── __init__.spl
-│   ├── types.spl
-│   ├── ops.spl
-│   └── matrix.spl
+│   ├── types.spl       # Vector types (Vec2, Vec4, Vec8, Vec16)
+│   ├── ops.spl         # Vector operations
+│   └── intrinsics.spl  # Platform intrinsics
+├── sys/                # System utilities
+│   ├── args.spl        # Command-line arguments
+│   └── env.spl         # Environment variables
 ├── host/               # OS-based stdlib overlays
 │   ├── async_nogc_mut/     # DEFAULT: async + no_gc + mutable
-│   │   ├── __init__.spl
-│   │   ├── io/
-│   │   │   ├── __init__.spl
-│   │   │   ├── fs.spl
-│   │   │   ├── buf.spl
-│   │   │   ├── term.spl
-│   │   │   └── term_style.spl
-│   │   └── net/
-│   │       ├── __init__.spl
-│   │       ├── tcp.spl
-│   │       ├── udp.spl
-│   │       ├── http.spl
-│   │       └── ftp.spl
+│   │   └── (I/O, networking modules)
 │   ├── async_gc_mut/       # async + gc + mutable
 │   ├── async_gc_immut/     # async + gc + immutable (functional style)
 │   ├── sync_nogc_mut/      # blocking + no_gc + mutable
-│   └── sync_gc_mut/        # blocking + gc + mutable
+│   └── common/             # Shared utilities across variants
 ├── bare/               # Baremetal (single variant: async + nogc + immutable)
 │   ├── __init__.spl    # #[variant(platform_baremetal, async, no_gc, immutable)]
 │   ├── hal/
@@ -419,17 +432,24 @@ lib/std/
 │   │   ├── atomics.spl     # device atomics
 │   │   └── reduce.spl      # warp/block reductions
 │   └── host/           # Host-side control
-│       ├── async_nogc_mut/     # DEFAULT: async + no_gc + mutable
-│       │   ├── __init__.spl
-│       │   ├── device.spl
-│       │   ├── buffer.spl
-│       │   ├── kernel.spl
-│       │   └── stream.spl
-│       └── async_gc_mut/       # async + gc + mutable
-└── tools/              # Diagnostics, testing, reflection
-    ├── __init__.spl
-    ├── test.spl
-    └── reflect.spl
+│       └── async_nogc_mut/     # DEFAULT: async + no_gc + mutable
+├── tooling/            # Diagnostics, testing, reflection
+│   └── __init__.spl
+│
+│   # Platform-specific modules (domain bindings)
+├── browser/            # Web browser APIs
+├── electron/           # Electron desktop framework
+├── godot/              # Godot game engine
+├── unreal/             # Unreal engine
+├── vscode/             # VSCode extension APIs
+├── graphics/           # Graphics rendering
+├── ml/                 # Machine learning
+├── physics/            # Physics simulation
+├── web/                # Web framework utilities
+├── cli/                # CLI utilities
+├── doctest/            # Documentation testing
+├── mcp/                # Model Context Protocol
+└── ui/                 # UI framework
 ```
 
 **Variant Naming Convention:**
