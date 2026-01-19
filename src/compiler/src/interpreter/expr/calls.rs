@@ -240,7 +240,26 @@ pub(super) fn eval_call_expr(
                             }
                         }
                     } else {
-                        Err(CompileError::Semantic(format!("unknown enum {enum_name}")))
+                        // E1015 - Unknown Enum
+                        let available_enums: Vec<&str> = enums.keys().map(|s| s.as_str()).collect();
+                        let suggestion = if !available_enums.is_empty() {
+                            typo::suggest_name(enum_name, available_enums.clone())
+                        } else {
+                            None
+                        };
+
+                        let mut ctx = ErrorContext::new()
+                            .with_code(codes::UNKNOWN_ENUM)
+                            .with_help("check that the enum is defined or imported in this scope");
+
+                        if let Some(best_match) = suggestion {
+                            ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
+                        }
+
+                        Err(CompileError::semantic_with_context(
+                            format!("enum `{}` not found in this scope", enum_name),
+                            ctx,
+                        ))
                     }
                 }
                 // String property access (e.g., str.len, str.is_empty)
