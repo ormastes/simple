@@ -221,7 +221,7 @@ impl ModuleResolver {
     pub fn check_circular_dependencies(&self) -> ResolveResult<()> {
         self.import_graph
             .check_cycles()
-            .map_err(|e| CompileError::Semantic(format!("Circular dependency detected: {}", e)))
+            .map_err(|e| crate::error::factory::circular_dependency(&e.to_string()))
     }
 
     /// Convert a parser ModulePath to a tracker ModPath.
