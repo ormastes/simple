@@ -136,9 +136,134 @@ macro_rules! impl_linker_method {
     };
 }
 
+/// Generate boolean flag builder methods.
+///
+/// Generates: strip, pie, shared, verbose, generate_map methods
+#[macro_export]
+macro_rules! impl_bool_flag_methods {
+    (options) => {
+        /// Strip symbols from the output.
+        pub fn strip(mut self, enable: bool) -> Self {
+            self.options.strip = enable;
+            self
+        }
+
+        /// Create a position-independent executable.
+        pub fn pie(mut self, enable: bool) -> Self {
+            self.options.pie = enable;
+            self
+        }
+
+        /// Create a shared library instead of executable.
+        pub fn shared(mut self, enable: bool) -> Self {
+            self.options.shared = enable;
+            self
+        }
+
+        /// Enable verbose output.
+        pub fn verbose(mut self, enable: bool) -> Self {
+            self.options.verbose = enable;
+            self
+        }
+
+        /// Enable map file generation.
+        pub fn map(mut self, enable: bool) -> Self {
+            self.options.generate_map = enable;
+            self
+        }
+    };
+
+    (direct) => {
+        /// Strip symbols from the output.
+        pub fn strip(mut self, enable: bool) -> Self {
+            self.strip = enable;
+            self
+        }
+
+        /// Create a position-independent executable.
+        pub fn pie(mut self, enable: bool) -> Self {
+            self.pie = enable;
+            self
+        }
+
+        /// Create a shared library instead of executable.
+        pub fn shared(mut self, enable: bool) -> Self {
+            self.shared = enable;
+            self
+        }
+
+        /// Enable verbose output.
+        pub fn verbose(mut self, enable: bool) -> Self {
+            self.verbose = enable;
+            self
+        }
+
+        /// Enable map file generation.
+        pub fn map(mut self, enable: bool) -> Self {
+            self.generate_map = enable;
+            self
+        }
+    };
+}
+
+/// Generate layout optimization methods for NativeBinaryBuilder/Options.
+#[macro_export]
+macro_rules! impl_layout_methods {
+    (options) => {
+        /// Enable layout optimization.
+        pub fn layout_optimize(mut self, enable: bool) -> Self {
+            self.options.layout_optimize = enable;
+            self
+        }
+
+        /// Set profile data for guided layout.
+        pub fn layout_profile(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+            self.options.layout_profile = Some(path.into());
+            self
+        }
+    };
+
+    (direct) => {
+        /// Enable layout optimization.
+        pub fn layout_optimize(mut self, enable: bool) -> Self {
+            self.layout_optimize = enable;
+            self
+        }
+
+        /// Set profile data for guided layout.
+        pub fn layout_profile(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+            self.layout_profile = Some(path.into());
+            self
+        }
+    };
+}
+
+/// Generate target architecture method.
+#[macro_export]
+macro_rules! impl_target_method {
+    (options) => {
+        /// Set target architecture.
+        pub fn target(mut self, target: simple_common::target::Target) -> Self {
+            self.options.target = target;
+            self
+        }
+    };
+
+    (direct) => {
+        /// Set target architecture.
+        pub fn target(mut self, target: simple_common::target::Target) -> Self {
+            self.target = target;
+            self
+        }
+    };
+}
+
+pub use impl_bool_flag_methods;
+pub use impl_layout_methods;
 pub use impl_linker_builder_methods;
 pub use impl_linker_method;
 pub use impl_output_method;
+pub use impl_target_method;
 
 #[cfg(test)]
 mod tests {

@@ -13,7 +13,7 @@ use simple_dependency_tracker::{
 use simple_parser::ast::{CommonUseStmt, ImportTarget, ModulePath, Visibility};
 use std::path::Path;
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 
 impl ModuleResolver {
     /// Resolve a module path to a filesystem path
@@ -83,10 +83,16 @@ impl ModuleResolver {
             if init_path.exists() {
                 // Directory module - continue navigation
             } else if !current.exists() {
-                return Err(CompileError::Semantic(format!(
-                    "module path segment '{}' not found at {:?}",
-                    segment, current
-                )));
+                // E1034 - Unresolved Import
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNRESOLVED_IMPORT)
+                    .with_help(format!("check that the module exists at {:?}", current))
+                    .with_note("ensure the module file or __init__.spl exists");
+
+                return Err(CompileError::semantic_with_context(
+                    format!("cannot resolve import: module path segment `{}` not found", segment),
+                    ctx,
+                ));
             }
         }
 
@@ -116,10 +122,16 @@ impl ModuleResolver {
             });
         }
 
-        Err(CompileError::Semantic(format!(
-            "module '{}' not found (tried {:?} and {:?})",
-            last, file_path, init_path
-        )))
+        // E1034 - Unresolved Import
+        let ctx = ErrorContext::new()
+            .with_code(codes::UNRESOLVED_IMPORT)
+            .with_help(format!("create either {:?} or {:?}", file_path, init_path))
+            .with_note("check for typos in the import path");
+
+        Err(CompileError::semantic_with_context(
+            format!("cannot resolve import: module `{}` not found", last),
+            ctx,
+        ))
     }
 
     /// Get all symbols exported by a module
