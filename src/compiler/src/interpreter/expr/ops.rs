@@ -496,7 +496,17 @@ pub(super) fn eval_op_expr(
                 UnaryOp::ChannelRecv => {
                     // Channel receive: block until value is available
                     match val {
-                        Value::Channel(channel) => channel.recv().map_err(|e| CompileError::Semantic(e))?,
+                        Value::Channel(channel) => channel.recv().map_err(|e| {
+                            // E1203 - Channel Closed
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::CHANNEL_CLOSED)
+                                .with_help("check that the channel sender has not been dropped")
+                                .with_note(format!("channel error: {}", e));
+                            CompileError::semantic_with_context(
+                                "channel closed or disconnected".to_string(),
+                                ctx,
+                            )
+                        })?,
                         _ => {
                             return Err(CompileError::Semantic(format!(
                                 "channel receive operator (<-) requires a channel, got {:?}",

@@ -1,6 +1,6 @@
 use simple_parser::{self as ast, Module, Node};
 
-use crate::hir::lower::error::LowerResult;
+use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{HirAopAdvice, HirArchRule, HirDiBinding, HirMockDecl, HirModule, HirType, TypeId};
 
@@ -212,9 +212,9 @@ impl Lowerer {
         if self.lifetime_context.has_violations() {
             let violations = self.lifetime_context.violations().to_vec();
             if violations.len() == 1 {
-                return Err(super::error::LowerError::LifetimeViolation(violations.into_iter().next().unwrap()));
+                return Err(LowerError::LifetimeViolation(violations.into_iter().next().unwrap()));
             } else {
-                return Err(super::error::LowerError::LifetimeViolations(violations));
+                return Err(LowerError::LifetimeViolations(violations));
             }
         }
 
@@ -383,9 +383,9 @@ impl Lowerer {
         if self.lifetime_context.has_violations() {
             let violations = self.lifetime_context.violations().to_vec();
             if violations.len() == 1 {
-                return Err(super::error::LowerError::LifetimeViolation(violations.into_iter().next().unwrap()));
+                return Err(LowerError::LifetimeViolation(violations.into_iter().next().unwrap()));
             } else {
-                return Err(super::error::LowerError::LifetimeViolations(violations));
+                return Err(LowerError::LifetimeViolations(violations));
             }
         }
 
