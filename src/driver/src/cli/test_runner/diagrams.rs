@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::fs;
 
 use simple_compiler::runtime_profile::{
-    generate_arch_from_events, generate_class_from_events, generate_sequence_from_events,
-    global_profiler, DiagramOptions,
+    generate_arch_from_events, generate_class_from_events, generate_sequence_from_events, global_profiler,
+    DiagramOptions,
 };
 
 use super::types::{TestFileResult, TestOptions};

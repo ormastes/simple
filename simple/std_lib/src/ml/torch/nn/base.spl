@@ -221,6 +221,75 @@ class Module:
 
 
 # ============================================================================
+# FFI Module Base Class
+# ============================================================================
+
+class FFIModule(Module):
+    """Base class for modules with native FFI handles.
+
+    Subclasses should:
+    1. Set `module_handle` in __init__ using their FFI creation function
+    2. Override forward() to call their FFI forward function
+    3. NOT override __del__() - this class handles cleanup
+
+    This consolidates the common pattern of:
+    - Handle validation (panic on 0 handle)
+    - Resource cleanup via @rt_torch_module_free
+
+    Example:
+        ```simple
+        class MyNativeLayer(FFIModule):
+            fn __init__(config):
+                super().__init__()
+                self.module_handle = @rt_my_layer_new(config)
+                self.validate_handle("MyNativeLayer")
+
+            fn forward(x: Tensor) -> Tensor:
+                val h = @rt_my_layer_forward(self.module_handle, x.handle)
+                return self.wrap_output(h, "MyNativeLayer forward")
+        ```
+    """
+    module_handle: u64
+
+    fn __init__():
+        """Initialize FFI module."""
+        super().__init__()
+        self.module_handle = 0
+
+    fn __del__():
+        """Free native resources."""
+        if self.module_handle != 0:
+            @rt_torch_module_free(self.module_handle)
+
+    fn validate_handle(layer_name: str):
+        """Validate handle is non-zero after FFI creation.
+
+        Args:
+            layer_name: Name of layer for error message
+
+        Panics if handle is 0.
+        """
+        if self.module_handle == 0:
+            panic("Failed to create {layer_name}")
+
+    fn wrap_output(handle: u64, op_name: str) -> Tensor:
+        """Wrap FFI output handle as Tensor, validating result.
+
+        Args:
+            handle: Output handle from FFI call
+            op_name: Operation name for error message
+
+        Returns:
+            Tensor wrapping the handle
+
+        Panics if handle is 0.
+        """
+        if handle == 0:
+            panic("{op_name} failed")
+        return Tensor(handle)
+
+
+# ============================================================================
 # Sequential Container
 # ============================================================================
 

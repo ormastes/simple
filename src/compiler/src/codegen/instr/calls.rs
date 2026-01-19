@@ -6,7 +6,7 @@ use cranelift_codegen::ir::InstBuilder;
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
-use crate::mir::{FunctionRef, VReg};
+use crate::mir::{CallTarget, VReg};
 
 use super::core::compile_builtin_io_call;
 use super::{InstrContext, InstrResult};
@@ -21,7 +21,7 @@ pub fn compile_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,
-    target: &FunctionRef,
+    target: &CallTarget,
     args: &[VReg],
 ) -> InstrResult<()> {
     let func_name = target.name();

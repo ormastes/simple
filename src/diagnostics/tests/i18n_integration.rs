@@ -16,8 +16,11 @@ fn test_i18n_catalog_loading() {
 
     // Get Korean severity name
     let error_name = i18n.severity_name("error");
-    assert!(error_name.contains("오류") || error_name == "error",
-            "Expected Korean '오류' or fallback 'error', got: {}", error_name);
+    assert!(
+        error_name.contains("오류") || error_name == "error",
+        "Expected Korean '오류' or fallback 'error', got: {}",
+        error_name
+    );
 
     // Cleanup
     env::remove_var("SIMPLE_LANG");
@@ -29,8 +32,7 @@ fn test_parser_error_english() {
     env::set_var("SIMPLE_LANG", "en");
 
     let ctx = ctx2("expected", "identifier", "found", "number");
-    let diag = Diagnostic::error_i18n("parser", "E0002", &ctx)
-        .with_span(Span::new(10, 15, 2, 5));
+    let diag = Diagnostic::error_i18n("parser", "E0002", &ctx).with_span(Span::new(10, 15, 2, 5));
 
     assert_eq!(diag.code, Some("E0002".to_string()));
     assert!(diag.message.contains("identifier") || diag.message.contains("expected"));
@@ -90,8 +92,7 @@ fn test_text_formatter_with_i18n() {
     let span = Span::new(20, 23, 2, 13);
 
     let ctx = ctx2("name", "foo", "", "");
-    let diag = Diagnostic::error_i18n("compiler", "E1001", &ctx)
-        .with_span(span);
+    let diag = Diagnostic::error_i18n("compiler", "E1001", &ctx).with_span(span);
 
     let formatter = TextFormatter::new();
     let output = formatter.format(&diag, source);
@@ -108,8 +109,7 @@ fn test_json_formatter_with_i18n() {
     env::set_var("SIMPLE_LANG", "en");
 
     let ctx = ctx2("expected", "Int", "found", "Bool");
-    let diag = Diagnostic::error_i18n("compiler", "E1003", &ctx)
-        .with_span(Span::new(10, 14, 2, 5));
+    let diag = Diagnostic::error_i18n("compiler", "E1003", &ctx).with_span(Span::new(10, 14, 2, 5));
 
     let formatter = JsonFormatter::new();
     let json = formatter.format(&diag);
@@ -164,9 +164,9 @@ fn test_multiple_diagnostics() {
 fn test_all_parser_codes_exist() {
     env::set_var("SIMPLE_LANG", "en");
 
-    let parser_codes = vec!["E0001", "E0002", "E0003", "E0004", "E0005",
-                           "E0006", "E0007", "E0008", "E0009", "E0010",
-                           "E0011", "E0012"];
+    let parser_codes = vec![
+        "E0001", "E0002", "E0003", "E0004", "E0005", "E0006", "E0007", "E0008", "E0009", "E0010", "E0011", "E0012",
+    ];
 
     for code in parser_codes {
         let ctx = ctx2("test", "value", "", "");
@@ -183,11 +183,8 @@ fn test_all_compiler_codes_exist() {
     env::set_var("SIMPLE_LANG", "en");
 
     let compiler_codes = vec![
-        "E1001", "E1002", "E1003", "E1004", "E1005", "E1006", "E1007", "E1008", "E1009", "E1010",
-        "E1101", "E1102", "E1103",
-        "E1401", "E1402",
-        "E2001", "E2002",
-        "E3001", "E3002", "E3003", "E3004", "E3005"
+        "E1001", "E1002", "E1003", "E1004", "E1005", "E1006", "E1007", "E1008", "E1009", "E1010", "E1101", "E1102",
+        "E1103", "E1401", "E1402", "E2001", "E2002", "E3001", "E3002", "E3003", "E3004", "E3005",
     ];
 
     for code in compiler_codes {

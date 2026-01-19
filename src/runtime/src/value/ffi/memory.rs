@@ -104,7 +104,7 @@ mod tests {
         let ptr = rt_value_to_ptr(int_val);
         assert!(ptr.is_null());
 
-        let float_val = RuntimeValue::from_float(3.14);
+        let float_val = RuntimeValue::from_float(3.25);
         let ptr = rt_value_to_ptr(float_val);
         assert!(ptr.is_null());
 

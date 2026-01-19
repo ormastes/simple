@@ -92,11 +92,7 @@ mod tests {
 
     #[test]
     fn test_global_flags_parsing() {
-        let args = vec![
-            "simple".to_string(),
-            "--gc-log".to_string(),
-            "--debug".to_string(),
-        ];
+        let args = vec!["simple".to_string(), "--gc-log".to_string(), "--debug".to_string()];
         let flags = GlobalFlags::parse(&args);
         assert!(flags.gc_log);
         assert!(flags.debug_mode);

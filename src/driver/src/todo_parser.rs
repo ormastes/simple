@@ -16,8 +16,7 @@ use std::path::{Path, PathBuf};
 
 /// Valid TODO areas
 const TODO_AREAS: &[&str] = &[
-    "runtime", "codegen", "compiler", "parser", "type", "stdlib", "gpu", "ui", "test", "driver",
-    "loader", "pkg", "doc",
+    "runtime", "codegen", "compiler", "parser", "type", "stdlib", "gpu", "ui", "test", "driver", "loader", "pkg", "doc",
 ];
 
 /// Valid TODO priorities (both numeric and named)
@@ -48,7 +47,7 @@ pub struct TodoItem {
 
 impl TodoItem {
     /// Normalize priority (critical -> P0, high -> P1, etc.)
-    pub fn normalized_priority(&self) -> &str {
+    pub fn normalized_priority(&self) -> String {
         normalize_priority(&self.priority)
     }
 
@@ -450,13 +449,13 @@ fn detect_language(path: &Path) -> Language {
 }
 
 /// Normalize priority level
-fn normalize_priority(priority: &str) -> &str {
+fn normalize_priority(priority: &str) -> String {
     match priority.to_lowercase().as_str() {
-        "critical" => "P0",
-        "high" => "P1",
-        "medium" => "P2",
-        "low" => "P3",
-        p => p, // Keep P0-P3 as-is
+        "critical" => "P0".to_string(),
+        "high" => "P1".to_string(),
+        "medium" => "P2".to_string(),
+        "low" => "P3".to_string(),
+        _ => priority.to_string(), // Keep P0-P3 as-is
     }
 }
 

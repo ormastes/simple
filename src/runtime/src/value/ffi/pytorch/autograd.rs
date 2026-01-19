@@ -9,8 +9,8 @@ use std::sync::Mutex;
 
 #[cfg(feature = "pytorch")]
 use super::storage::{
-    get_autograd_ctx, get_autograd_ctx_mut, get_tensor, get_tensor_list, store_autograd_ctx,
-    store_tensor, store_tensor_list,
+    get_autograd_ctx, get_autograd_ctx_mut, get_tensor, get_tensor_list, store_autograd_ctx, store_tensor,
+    store_tensor_list,
 };
 
 #[cfg(feature = "pytorch")]

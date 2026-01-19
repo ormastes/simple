@@ -196,23 +196,12 @@ mod tests {
         let file_path = temp_dir.path().join("test.txt");
         fs::write(&file_path, b"original").unwrap();
 
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&file_path)
-            .unwrap();
+        let file = fs::OpenOptions::new().read(true).write(true).open(&file_path).unwrap();
         let fd = file.as_raw_fd();
         let size = 8u64;
 
         unsafe {
-            let addr = rt_file_mmap(
-                std::ptr::null_mut(),
-                size,
-                PROT_READ | PROT_WRITE,
-                MAP_SHARED,
-                fd,
-                0,
-            );
+            let addr = rt_file_mmap(std::ptr::null_mut(), size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
             assert!(!addr.is_null());
 
             // Sync the mapping

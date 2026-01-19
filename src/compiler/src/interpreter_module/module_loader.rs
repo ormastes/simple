@@ -15,8 +15,8 @@ use crate::error::CompileError;
 use crate::value::{Env, Value};
 
 use super::module_cache::{
-    cache_module_exports, decrement_load_depth, get_cached_module_exports,
-    increment_load_depth, is_module_loading, mark_module_loading, unmark_module_loading, MAX_MODULE_DEPTH,
+    cache_module_exports, decrement_load_depth, get_cached_module_exports, increment_load_depth, is_module_loading,
+    mark_module_loading, unmark_module_loading, MAX_MODULE_DEPTH,
 };
 use super::module_evaluator::evaluate_module_exports;
 use super::path_resolution::resolve_module_path;

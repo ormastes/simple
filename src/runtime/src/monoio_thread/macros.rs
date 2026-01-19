@@ -60,6 +60,4 @@ macro_rules! parse_addr {
     };
 }
 
-pub(crate) use {
-    get_tcp_listener, get_tcp_stream, get_udp_socket, parse_addr, send_error, send_success,
-};
+pub(crate) use {get_tcp_listener, get_tcp_stream, get_udp_socket, parse_addr, send_error, send_success};

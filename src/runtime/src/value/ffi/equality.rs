@@ -75,8 +75,8 @@ mod tests {
 
     #[test]
     fn test_float_equality() {
-        let a = RuntimeValue::from_float(3.14);
-        let b = RuntimeValue::from_float(3.14);
+        let a = RuntimeValue::from_float(3.25);
+        let b = RuntimeValue::from_float(3.25);
         let c = RuntimeValue::from_float(2.71);
 
         assert_eq!(rt_value_eq(a, b), 1);

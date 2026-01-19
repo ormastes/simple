@@ -6,10 +6,14 @@
 
 use crate::todo_parser::{ParseError, TodoItem, TodoParser};
 use indexmap::IndexMap;
+use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 use simple_sdn::{parse_document, SdnDocument, SdnValue};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use walkdir::WalkDir;
 
 /// A record in the TODO database
 #[derive(Debug, Clone)]
@@ -27,10 +31,18 @@ pub struct TodoRecord {
     pub valid: bool,
 }
 
+/// File hash cache entry for incremental scanning
+#[derive(Debug, Clone)]
+pub struct FileCache {
+    pub hash: String,
+    pub todo_ids: Vec<String>,
+}
+
 /// TODO database
 #[derive(Debug, Default)]
 pub struct TodoDb {
     pub records: BTreeMap<String, TodoRecord>,
+    pub file_cache: BTreeMap<String, FileCache>,
     next_id: usize,
 }
 
@@ -68,30 +80,56 @@ impl TodoDb {
 
     /// Count by priority
     pub fn count_by_priority(&self, priority: &str) -> usize {
-        self.records.values().filter(|r| r.valid && r.priority == priority).count()
+        self.records
+            .values()
+            .filter(|r| r.valid && r.priority == priority)
+            .count()
     }
 }
 
 /// Load TODO database from SDN file
 pub fn load_todo_db(path: &Path) -> Result<TodoDb, String> {
+    eprintln!("DEBUG: load_todo_db called for path: {}", path.display());
     if !path.exists() {
+        eprintln!("DEBUG: Database file does not exist, creating new");
         return Ok(TodoDb::new());
     }
 
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let doc = parse_document(&content).map_err(|e| e.to_string())?;
-    parse_todo_db(&doc)
+    eprintln!("DEBUG: Loaded {} bytes from file", content.len());
+    eprintln!("DEBUG: First 100 chars: {}", &content.chars().take(100).collect::<String>());
+    let doc = parse_document(&content).map_err(|e| {
+        eprintln!("DEBUG: parse_document failed: {}", e);
+        e.to_string()
+    })?;
+    eprintln!("DEBUG: parse_document succeeded");
+    parse_todo_db(&doc, path)
 }
 
-fn parse_todo_db(doc: &SdnDocument) -> Result<TodoDb, String> {
+fn parse_todo_db(doc: &SdnDocument, path: &Path) -> Result<TodoDb, String> {
     let root = doc.root();
-    let todos = match root {
-        SdnValue::Dict(dict) => dict.get("todos"),
-        _ => None,
+    eprintln!("DEBUG: parse_todo_db called, root type: {:?}", std::mem::discriminant(root));
+
+    // Try to get todos table - might be root itself or in a Dict
+    let (todos_table, file_cache_table) = match root {
+        SdnValue::Table { .. } => {
+            eprintln!("DEBUG: Root is a Table (single table document)");
+            (Some(root), None)
+        }
+        SdnValue::Dict(dict) => {
+            eprintln!("DEBUG: Root is Dict with {} keys", dict.len());
+            (dict.get("todos"), dict.get("file_cache"))
+        }
+        _ => {
+            eprintln!("DEBUG: Root is neither Table nor Dict");
+            (None, None)
+        }
     };
 
     let mut db = TodoDb::new();
-    let table = match todos {
+
+    // Parse todos table
+    let table = match todos_table {
         Some(SdnValue::Table { fields, rows, .. }) => (fields, rows),
         None => return Ok(db),
         _ => return Err("todos must be a table".to_string()),
@@ -141,10 +179,7 @@ fn parse_todo_db(doc: &SdnDocument) -> Result<TodoDb, String> {
             priority: row_map.get("priority").cloned().unwrap_or_else(|| "P2".to_string()),
             description: row_map.get("description").cloned().unwrap_or_default(),
             file: row_map.get("file").cloned().unwrap_or_default(),
-            line: row_map
-                .get("line")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0),
+            line: row_map.get("line").and_then(|s| s.parse().ok()).unwrap_or(0),
             issue: row_map.get("issue").cloned().filter(|s| !s.is_empty()),
             blocked,
             status: row_map.get("status").cloned().unwrap_or_else(|| "open".to_string()),
@@ -154,6 +189,49 @@ fn parse_todo_db(doc: &SdnDocument) -> Result<TodoDb, String> {
     }
 
     db.next_id = max_id + 1;
+
+    // Load file cache from separate file
+    let cache_path = path.with_extension("cache.sdn");
+    if cache_path.exists() {
+        eprintln!("DEBUG: Loading file cache from {}", cache_path.display());
+        if let Ok(cache_content) = fs::read_to_string(&cache_path) {
+            if let Ok(cache_doc) = parse_document(&cache_content) {
+                let cache_root = cache_doc.root();
+                if let SdnValue::Table { fields: Some(fields), rows, .. } = cache_root {
+                    eprintln!("DEBUG: Found file_cache table with {} rows", rows.len());
+                    for row in rows {
+                        let mut row_map = BTreeMap::new();
+                        for (idx, field) in fields.iter().enumerate() {
+                            if let Some(value) = row.get(idx) {
+                                row_map.insert(field.clone(), sdn_value_to_string(value));
+                            }
+                        }
+
+                        let path_str = row_map.get("path").cloned().unwrap_or_default();
+                        if path_str.is_empty() {
+                            continue;
+                        }
+
+                        let hash = row_map.get("hash").cloned().unwrap_or_default();
+                        let todo_ids: Vec<String> = row_map
+                            .get("todo_ids")
+                            .map(|s| {
+                                s.split(';')
+                                    .map(|x| x.trim().to_string())
+                                    .filter(|x| !x.is_empty())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        db.file_cache.insert(path_str, FileCache { hash, todo_ids });
+                    }
+                }
+            }
+        }
+    } else {
+        eprintln!("DEBUG: No file cache found at {}", cache_path.display());
+    }
+
     Ok(db)
 }
 
@@ -185,7 +263,7 @@ pub fn save_todo_db(path: &Path, db: &TodoDb) -> Result<(), std::io::Error> {
             SdnValue::String(record.priority.clone()),
             SdnValue::String(record.description.clone()),
             SdnValue::String(record.file.clone()),
-            SdnValue::Number(record.line as f64),
+            SdnValue::int(record.line as i64),
             SdnValue::String(record.issue.clone().unwrap_or_default()),
             SdnValue::String(record.blocked.join(",")),
             SdnValue::String(record.status.clone()),
@@ -194,32 +272,236 @@ pub fn save_todo_db(path: &Path, db: &TodoDb) -> Result<(), std::io::Error> {
         rows.push(row);
     }
 
-    let table = SdnValue::Table {
-        fields: Some(fields),
-        types: None,
-        rows,
+    let table = SdnValue::named_table(fields.clone(), rows);
+
+    // Create SDN content manually with two tables (not wrapped in Dict)
+    // The parser will handle this as a multi-table document
+    let mut content = String::new();
+    content.push_str("todos |");
+    content.push_str(&fields.join(", "));
+    content.push_str("|\n");
+
+    // Add each row
+    let table_rows = match &table {
+        SdnValue::Table { rows, .. } => rows,
+        _ => unreachable!(),
     };
 
-    let mut dict = IndexMap::new();
-    dict.insert("todos".to_string(), table);
+    for row in table_rows {
+        content.push_str("    ");
+        for (i, value) in row.iter().enumerate() {
+            if i > 0 {
+                content.push_str(", ");
+            }
+            match value {
+                SdnValue::String(s) => {
+                    // Quote strings that contain special characters or are empty
+                    if s.is_empty() || s.contains(',') || s.contains('"') || s.contains('\n') || s.contains(' ') {
+                        content.push_str(&format!("\"{}\"", s.replace("\"", "\\\"")));
+                    } else {
+                        content.push_str(s);
+                    }
+                }
+                SdnValue::Int(n) => content.push_str(&n.to_string()),
+                SdnValue::Float(f) => content.push_str(&f.to_string()),
+                SdnValue::Bool(b) => content.push_str(&b.to_string()),
+                _ => content.push_str(&format!("{}", value)),
+            }
+        }
+        content.push('\n');
+    }
 
-    let mut doc = SdnDocument::parse("todos |id|")
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-    *doc.root_mut() = SdnValue::Dict(dict);
-
-    let content = doc.to_sdn();
+    // Save main todo database
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, content)?;
+
+    // Save file cache separately to avoid SDN multi-table parsing issues
+    let cache_path = path.with_extension("cache.sdn");
+    let mut cache_content = String::new();
+    cache_content.push_str("file_cache |path, hash, todo_ids|\n");
+    for (path_str, cache) in &db.file_cache {
+        cache_content.push_str("    ");
+        // Escape path if needed
+        if path_str.contains(',') || path_str.contains('"') || path_str.contains(' ') {
+            cache_content.push_str(&format!("\"{}\"", path_str.replace("\"", "\\\"")));
+        } else {
+            cache_content.push_str(path_str);
+        }
+        cache_content.push_str(", ");
+        cache_content.push_str(&cache.hash);
+        cache_content.push_str(", ");
+        // Join todo_ids with semicolons
+        cache_content.push_str(&format!("\"{}\"", cache.todo_ids.join(";")));
+        cache_content.push('\n');
+    }
+    fs::write(cache_path, cache_content)?;
+
     Ok(())
 }
 
-/// Update TODO database from source code scan
-pub fn update_todo_db_from_scan(
+/// Compute SHA256 hash of file contents
+fn compute_file_hash(path: &Path) -> Result<String, std::io::Error> {
+    let content = fs::read(path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&content);
+    let result = hasher.finalize();
+    Ok(format!("{:x}", result))
+}
+
+/// Update TODO database from source code scan (legacy non-parallel version)
+pub fn update_todo_db_from_scan(db: &mut TodoDb, scan_root: &Path) -> Result<(usize, usize, usize), String> {
+    update_todo_db_incremental_parallel(db, scan_root, false, false)
+}
+
+/// Update TODO database with incremental and/or parallel scanning
+pub fn update_todo_db_incremental_parallel(
     db: &mut TodoDb,
     scan_root: &Path,
+    incremental: bool,
+    parallel: bool,
 ) -> Result<(usize, usize, usize), String> {
+    let parser = TodoParser::new();
+
+    // Collect all files to scan
+    let mut files_to_scan = Vec::new();
+    let mut skipped = 0;
+
+    eprintln!("DEBUG: File cache has {} entries", db.file_cache.len());
+    if incremental && db.file_cache.len() > 0 {
+        eprintln!("DEBUG: First cache entry: {:?}", db.file_cache.iter().next());
+    }
+
+    // Walk directory and collect files
+    WalkDir::new(scan_root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .for_each(|entry| {
+            let path = entry.path();
+
+            // Only scan .rs, .spl, and .md files
+            if let Some(ext) = path.extension() {
+                if ext == "rs" || ext == "spl" || ext == "md" {
+                    let path_str = path.display().to_string();
+
+                    // Incremental: check if file changed
+                    if incremental {
+                        if let Ok(hash) = compute_file_hash(path) {
+                            if let Some(cache) = db.file_cache.get(&path_str) {
+                                if cache.hash == hash {
+                                    // File unchanged, skip
+                                    skipped += 1;
+                                    eprintln!("DEBUG: Skipping unchanged file: {}", path_str);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
+                    files_to_scan.push(path.to_path_buf());
+                }
+            }
+        });
+
+    // Parse files (parallel or sequential)
+    let scanned_todos: Vec<TodoItem> = if parallel {
+        // Parallel scanning with rayon
+        files_to_scan
+            .par_iter()
+            .filter_map(|path| parser.parse_file(path).ok().map(|result| result.todos))
+            .flatten()
+            .collect()
+    } else {
+        // Sequential scanning
+        files_to_scan
+            .iter()
+            .filter_map(|path| parser.parse_file(path).ok().map(|result| result.todos))
+            .flatten()
+            .collect()
+    };
+
+    // Update file cache if incremental mode enabled
+    if incremental {
+        for path in &files_to_scan {
+            if let Ok(hash) = compute_file_hash(path) {
+                let path_str = path.display().to_string();
+                let todo_ids: Vec<String> = scanned_todos
+                    .iter()
+                    .filter(|t| t.file == *path)
+                    .map(|_| String::new()) // Will be filled after adding to DB
+                    .collect();
+
+                db.file_cache.insert(path_str, FileCache { hash, todo_ids });
+            }
+        }
+    }
+
+    // Create a map of file:line -> TodoItem for quick lookup
+    let mut scanned_todos_map: BTreeMap<String, TodoItem> = BTreeMap::new();
+    for todo in scanned_todos {
+        let key = format!("{}:{}", todo.file.display(), todo.line);
+        scanned_todos_map.insert(key, todo);
+    }
+
+    // Mark existing records as invalid (we'll re-validate them)
+    for record in db.records.values_mut() {
+        record.valid = false;
+    }
+
+    // Process scanned TODOs
+    let mut added = 0;
+    let mut updated = 0;
+
+    for (_key, todo) in scanned_todos_map {
+        let file = todo.file.display().to_string();
+        let line = todo.line;
+
+        // Check if this TODO already exists in database
+        let existing = db.records.values_mut().find(|r| r.file == file && r.line == line);
+
+        // Get normalized priority before moving any fields
+        let normalized_priority = todo.normalized_priority();
+
+        if let Some(existing_record) = existing {
+            // Update existing record
+            existing_record.keyword = todo.keyword;
+            existing_record.area = todo.area;
+            existing_record.priority = normalized_priority;
+            existing_record.description = todo.description;
+            existing_record.issue = todo.issue;
+            existing_record.blocked = todo.blocked;
+            existing_record.valid = true;
+            updated += 1;
+        } else {
+            // Add new record
+            let normalized_priority = todo.normalized_priority();
+            let record = TodoRecord {
+                id: db.next_id(),
+                keyword: todo.keyword,
+                area: todo.area,
+                priority: normalized_priority,
+                description: todo.description,
+                file,
+                line,
+                issue: todo.issue,
+                blocked: todo.blocked,
+                status: "open".to_string(),
+                valid: true,
+            };
+            db.insert(record);
+            added += 1;
+        }
+    }
+
+    let removed = db.records.values().filter(|r| !r.valid).count();
+
+    Ok((added, updated, removed))
+}
+
+/// Legacy update function (kept for compatibility)
+fn update_todo_db_from_scan_legacy(db: &mut TodoDb, scan_root: &Path) -> Result<(usize, usize, usize), String> {
     let parser = TodoParser::new();
     let result = parser.scan_directory(scan_root)?;
 
@@ -246,11 +528,14 @@ pub fn update_todo_db_from_scan(
         // Check if this TODO already exists in database
         let existing = db.records.values_mut().find(|r| r.file == file && r.line == line);
 
+        // Get normalized priority before moving any fields
+        let normalized_priority = todo.normalized_priority();
+
         if let Some(existing_record) = existing {
             // Update existing record
             existing_record.keyword = todo.keyword;
             existing_record.area = todo.area;
-            existing_record.priority = todo.normalized_priority().to_string();
+            existing_record.priority = normalized_priority;
             existing_record.description = todo.description;
             existing_record.issue = todo.issue;
             existing_record.blocked = todo.blocked;
@@ -262,7 +547,7 @@ pub fn update_todo_db_from_scan(
                 id: db.next_id(),
                 keyword: todo.keyword,
                 area: todo.area,
-                priority: todo.normalized_priority().to_string(),
+                priority: normalized_priority,
                 description: todo.description,
                 file,
                 line,
@@ -294,10 +579,7 @@ pub fn generate_todo_docs(db: &TodoDb, output_dir: &Path) -> Result<(), String> 
     let blocked = db.count_by_status("blocked");
     let stale = db.count_by_status("stale");
 
-    md.push_str(&format!(
-        "**Generated:** {}\n",
-        chrono::Local::now().format("%Y-%m-%d")
-    ));
+    md.push_str(&format!("**Generated:** {}\n", chrono::Local::now().format("%Y-%m-%d")));
     md.push_str(&format!(
         "**Total:** {} items | **Open:** {} | **Blocked:** {} | **Stale:** {}\n",
         total, open, blocked, stale
@@ -494,7 +776,8 @@ struct AreaStats {
 fn sdn_value_to_string(value: &SdnValue) -> String {
     match value {
         SdnValue::String(s) => s.clone(),
-        SdnValue::Number(n) => n.to_string(),
+        SdnValue::Int(n) => n.to_string(),
+        SdnValue::Float(f) => f.to_string(),
         SdnValue::Bool(b) => b.to_string(),
         SdnValue::Null => String::new(),
         _ => format!("{:?}", value),

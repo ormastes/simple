@@ -46,8 +46,7 @@ pub fn allocate_resources(
     metrics: &mut StartupMetrics,
 ) -> Option<crate::PreAllocatedResources> {
     let resource_start = std::time::Instant::now();
-    let resources =
-        crate::PreAllocatedResources::allocate(early_config.app_type, &early_config.window_hints).ok();
+    let resources = crate::PreAllocatedResources::allocate(early_config.app_type, &early_config.window_hints).ok();
     metrics.record(StartupPhase::ResourceAllocation, resource_start.elapsed());
     resources
 }
@@ -78,6 +77,9 @@ mod tests {
         let (enabled, metrics) = init_metrics();
         // Metrics are disabled by default unless --startup-metrics is passed
         assert!(!enabled || enabled); // Always true, just checking it compiles
-        assert!(metrics.total_elapsed().as_secs() >= 0);
+                                      // total_time() returns Option<Duration>, check it works
+        if let Some(elapsed) = metrics.total_time() {
+            assert!(elapsed.as_secs() >= 0);
+        }
     }
 }

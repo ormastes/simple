@@ -29,7 +29,10 @@ pub fn discover_md_doctests(root_path: &Path) -> std::io::Result<Vec<DoctestExam
 }
 
 /// Discover doctests from a README.md and its linked files
-pub(crate) fn discover_from_readme(readme_path: &Path, parent_config: &ReadmeConfig) -> std::io::Result<Vec<DoctestExample>> {
+pub(crate) fn discover_from_readme(
+    readme_path: &Path,
+    parent_config: &ReadmeConfig,
+) -> std::io::Result<Vec<DoctestExample>> {
     let mut examples = Vec::new();
 
     if !readme_path.exists() {

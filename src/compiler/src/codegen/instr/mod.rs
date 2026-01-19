@@ -183,7 +183,7 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::InterpEval { dest, expr_index } => {
-            compile_interp_eval(ctx, builder, *dest, *expr_index)?;
+            compile_interp_eval(ctx, builder, *dest, *expr_index as usize)?;
         }
 
         MirInst::ArrayLit { dest, elements } => {
@@ -391,7 +391,7 @@ pub fn compile_instruction<M: Module>(
             byte_offset,
             field_type,
         } => {
-            compile_field_get(ctx, builder, *dest, *object, *byte_offset, *field_type)?;
+            compile_field_get(ctx, builder, *dest, *object, *byte_offset as usize, *field_type)?;
         }
 
         MirInst::FieldSet {
@@ -400,7 +400,7 @@ pub fn compile_instruction<M: Module>(
             field_type,
             value,
         } => {
-            compile_field_set(ctx, builder, *object, *byte_offset, *field_type, *value)?;
+            compile_field_set(ctx, builder, *object, *byte_offset as usize, *field_type, *value)?;
         }
 
         MirInst::MethodCallStatic {

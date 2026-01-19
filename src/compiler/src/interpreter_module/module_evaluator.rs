@@ -6,17 +6,15 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use simple_parser::ast::{
-    ClassDef, EnumDef, Node,
-};
+use simple_parser::ast::{ClassDef, EnumDef, Node};
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
 
 mod evaluation_helpers;
 use evaluation_helpers::{
-    add_builtin_types, create_filtered_env, export_functions, process_bare_exports,
-    process_imports_and_assignments, register_definitions,
+    add_builtin_types, create_filtered_env, export_functions, process_bare_exports, process_imports_and_assignments,
+    register_definitions,
 };
 
 type Enums = HashMap<String, EnumDef>;

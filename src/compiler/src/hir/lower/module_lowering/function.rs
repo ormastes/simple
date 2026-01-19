@@ -4,8 +4,7 @@ use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
-    ConcurrencyMode, FunctionLayoutHint, HirContract, HirFunction, LayoutAnchor, LayoutPhase,
-    LocalVar, TypeId,
+    ConcurrencyMode, FunctionLayoutHint, HirContract, HirFunction, LayoutAnchor, LayoutPhase, LocalVar, TypeId,
 };
 
 impl Lowerer {
@@ -134,7 +133,11 @@ impl Lowerer {
 
     /// Lower a function, optionally injecting type invariants for methods
     /// `owner_type`: If this function is a method, the name of the owning type
-    pub(super) fn lower_function(&mut self, f: &ast::FunctionDef, owner_type: Option<&str>) -> LowerResult<HirFunction> {
+    pub(super) fn lower_function(
+        &mut self,
+        f: &ast::FunctionDef,
+        owner_type: Option<&str>,
+    ) -> LowerResult<HirFunction> {
         // Set current class type for Self resolution
         let previous_class_type = self.current_class_type;
         if let Some(type_name) = owner_type {

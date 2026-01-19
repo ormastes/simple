@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 
 use crate::feature_db::{generate_feature_docs, load_feature_db};
 use crate::task_db::{generate_task_docs, load_task_db};
-use crate::todo_db::{generate_todo_docs, load_todo_db, save_todo_db, update_todo_db_from_scan};
+use crate::todo_db::{
+    generate_todo_docs, load_todo_db, save_todo_db, update_todo_db_from_scan, update_todo_db_incremental_parallel,
+};
 
 /// Run feature-gen command
 pub fn run_feature_gen(args: &[String]) -> i32 {
@@ -332,8 +334,16 @@ pub fn run_todo_scan(args: &[String]) -> i32 {
         .unwrap_or_else(|| PathBuf::from("."));
 
     let validate_only = args.contains(&"--validate".to_string());
+    let incremental = args.contains(&"--incremental".to_string());
+    let parallel = args.contains(&"--parallel".to_string());
 
-    println!("Scanning TODOs from {}...", scan_path.display());
+    if incremental {
+        println!("Scanning TODOs from {} (incremental mode)...", scan_path.display());
+    } else if parallel {
+        println!("Scanning TODOs from {} (parallel mode)...", scan_path.display());
+    } else {
+        println!("Scanning TODOs from {}...", scan_path.display());
+    }
 
     // Load existing database
     let mut db = match load_todo_db(&db_path) {
@@ -345,8 +355,8 @@ pub fn run_todo_scan(args: &[String]) -> i32 {
         }
     };
 
-    // Scan and update
-    match update_todo_db_from_scan(&mut db, &scan_path) {
+    // Scan and update with incremental/parallel support
+    match update_todo_db_incremental_parallel(&mut db, &scan_path, incremental, parallel) {
         Ok((added, updated, removed)) => {
             println!("Scan complete:");
             println!("  Added:   {} TODOs", added);

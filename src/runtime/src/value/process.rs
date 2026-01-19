@@ -181,12 +181,7 @@ pub extern "C" fn native_command_run(command: RuntimeValue, args: RuntimeValue) 
         }
     };
 
-    let args_vec = unsafe {
-        match runtime_value_to_string_array(args) {
-            Some(v) => v,
-            None => Vec::new(),
-        }
-    };
+    let args_vec = unsafe { runtime_value_to_string_array(args).unwrap_or_default() };
 
     match std::process::Command::new(&cmd).args(&args_vec).status() {
         Ok(status) => RuntimeValue::from_int(status.code().unwrap_or(-1) as i64),
@@ -214,12 +209,7 @@ pub extern "C" fn native_command_output(command: RuntimeValue, args: RuntimeValu
         }
     };
 
-    let args_vec = unsafe {
-        match runtime_value_to_string_array(args) {
-            Some(v) => v,
-            None => Vec::new(),
-        }
-    };
+    let args_vec = unsafe { runtime_value_to_string_array(args).unwrap_or_default() };
 
     match std::process::Command::new(&cmd).args(&args_vec).output() {
         Ok(output) => {
@@ -256,12 +246,7 @@ pub extern "C" fn native_command_run_timeout(
         }
     };
 
-    let args_vec = unsafe {
-        match runtime_value_to_string_array(args) {
-            Some(v) => v,
-            None => Vec::new(),
-        }
-    };
+    let args_vec = unsafe { runtime_value_to_string_array(args).unwrap_or_default() };
 
     let mut child = match std::process::Command::new(&cmd).args(&args_vec).spawn() {
         Ok(c) => c,

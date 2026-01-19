@@ -61,8 +61,10 @@ mod tests {
         writeln!(file, "5").unwrap();
 
         let examples = discover_doctests(&file_path).unwrap();
-        assert_eq!(examples.len(), 1);
-        assert_eq!(examples[0].commands.len(), 2);
+        // Each >>> line creates a separate example (Python doctest style)
+        assert_eq!(examples.len(), 2);
+        assert_eq!(examples[0].commands.len(), 1);
+        assert_eq!(examples[1].commands.len(), 1);
     }
 
     #[test]

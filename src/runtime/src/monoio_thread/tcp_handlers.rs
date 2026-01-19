@@ -6,11 +6,7 @@ use super::types::{IoResponse, ResponseSender};
 use monoio::io::{AsyncReadRent, AsyncReadRentExt, AsyncWriteRent, AsyncWriteRentExt};
 use monoio::net::{TcpListener, TcpStream};
 
-pub(crate) async fn handle_tcp_listen(
-    addr: String,
-    response_tx: ResponseSender,
-    registry: &mut StreamRegistry,
-) {
+pub(crate) async fn handle_tcp_listen(addr: String, response_tx: ResponseSender, registry: &mut StreamRegistry) {
     let socket_addr = parse_addr!(addr, response_tx);
 
     match TcpListener::bind(socket_addr) {
@@ -22,11 +18,7 @@ pub(crate) async fn handle_tcp_listen(
     }
 }
 
-pub(crate) async fn handle_tcp_accept(
-    listener_id: i64,
-    response_tx: ResponseSender,
-    registry: &mut StreamRegistry,
-) {
+pub(crate) async fn handle_tcp_accept(listener_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
     let listener = get_tcp_listener!(registry, listener_id, response_tx);
 
     match listener.accept().await {
@@ -38,11 +30,7 @@ pub(crate) async fn handle_tcp_accept(
     }
 }
 
-pub(crate) async fn handle_tcp_connect(
-    addr: String,
-    response_tx: ResponseSender,
-    registry: &mut StreamRegistry,
-) {
+pub(crate) async fn handle_tcp_connect(addr: String, response_tx: ResponseSender, registry: &mut StreamRegistry) {
     let socket_addr = parse_addr!(addr, response_tx);
 
     match TcpStream::connect(socket_addr).await {
@@ -95,20 +83,13 @@ pub(crate) async fn handle_tcp_write(
 
     match result {
         Ok(n) => {
-            let _ = response_tx.send(IoResponse::Data {
-                bytes: vec![],
-                len: n,
-            });
+            let _ = response_tx.send(IoResponse::Data { bytes: vec![], len: n });
         }
         Err(e) => send_error!(response_tx, -5, format!("Write failed: {}", e)),
     }
 }
 
-pub(crate) fn handle_tcp_close(
-    stream_id: i64,
-    response_tx: ResponseSender,
-    registry: &mut StreamRegistry,
-) {
+pub(crate) fn handle_tcp_close(stream_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
     if registry.remove_tcp_stream(stream_id) {
         send_success!(response_tx, 0);
     } else {
@@ -160,11 +141,7 @@ pub(crate) async fn handle_tcp_shutdown(
     }
 }
 
-pub(crate) fn handle_tcp_listener_close(
-    listener_id: i64,
-    response_tx: ResponseSender,
-    registry: &mut StreamRegistry,
-) {
+pub(crate) fn handle_tcp_listener_close(listener_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
     if registry.remove_tcp_listener(listener_id) {
         send_success!(response_tx, 0);
     } else {
@@ -172,35 +149,23 @@ pub(crate) fn handle_tcp_listener_close(
     }
 }
 
-pub(crate) fn handle_tcp_get_local_addr(
-    stream_id: i64,
-    response_tx: ResponseSender,
-    registry: &mut StreamRegistry,
-) {
+pub(crate) fn handle_tcp_get_local_addr(stream_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
     let stream = get_tcp_stream!(registry, stream_id, response_tx);
 
     match stream.local_addr() {
         Ok(addr) => {
-            let _ = response_tx.send(IoResponse::Address {
-                addr: addr.to_string(),
-            });
+            let _ = response_tx.send(IoResponse::Address { addr: addr.to_string() });
         }
         Err(e) => send_error!(response_tx, -2, format!("local_addr failed: {}", e)),
     }
 }
 
-pub(crate) fn handle_tcp_get_peer_addr(
-    stream_id: i64,
-    response_tx: ResponseSender,
-    registry: &mut StreamRegistry,
-) {
+pub(crate) fn handle_tcp_get_peer_addr(stream_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
     let stream = get_tcp_stream!(registry, stream_id, response_tx);
 
     match stream.peer_addr() {
         Ok(addr) => {
-            let _ = response_tx.send(IoResponse::Address {
-                addr: addr.to_string(),
-            });
+            let _ = response_tx.send(IoResponse::Address { addr: addr.to_string() });
         }
         Err(e) => send_error!(response_tx, -2, format!("peer_addr failed: {}", e)),
     }

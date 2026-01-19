@@ -1,7 +1,7 @@
 //! Contract mode tests (CTR-040 to CTR-043)
 
 use super::common::*;
-use crate::mir::{BlockId, ContractKind, MirInst};
+use crate::mir::{BlockId, ContractKind, ContractMode, MirInst};
 
 #[test]
 fn test_contract_mode_off_no_checks() {

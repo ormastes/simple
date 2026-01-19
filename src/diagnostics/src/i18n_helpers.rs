@@ -67,12 +67,7 @@ pub fn ctx1(key: &str, value: impl IntoContextValue) -> MessageContext {
 ///
 /// let ctx = ctx2("expected", "i32", "found", "bool");
 /// ```
-pub fn ctx2(
-    key1: &str,
-    value1: impl IntoContextValue,
-    key2: &str,
-    value2: impl IntoContextValue,
-) -> MessageContext {
+pub fn ctx2(key1: &str, value1: impl IntoContextValue, key2: &str, value2: impl IntoContextValue) -> MessageContext {
     let mut ctx = MessageContext::new();
     ctx.insert(key1, &value1.into_context_value());
     ctx.insert(key2, &value2.into_context_value());

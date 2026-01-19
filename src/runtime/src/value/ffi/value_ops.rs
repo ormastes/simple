@@ -109,11 +109,11 @@ mod tests {
 
     #[test]
     fn test_float_creation_and_extraction() {
-        let val = rt_value_float(3.14);
+        let val = rt_value_float(3.25);
         assert!(rt_value_is_float(val));
         // Use approximate equality for floating point
         let extracted = rt_value_as_float(val);
-        assert!((extracted - 3.14).abs() < 1e-10, "Expected ~3.14, got {}", extracted);
+        assert!((extracted - 3.25).abs() < 1e-10, "Expected ~3.25, got {}", extracted);
         assert!(rt_value_truthy(val));
     }
 
@@ -145,7 +145,7 @@ mod tests {
         assert!(!rt_value_is_bool(int_val));
         assert!(!rt_value_is_nil(int_val));
 
-        let float_val = rt_value_float(3.14);
+        let float_val = rt_value_float(3.25);
         assert!(!rt_value_is_int(float_val));
         assert!(rt_value_is_float(float_val));
         assert!(!rt_value_is_bool(float_val));
@@ -181,9 +181,9 @@ mod tests {
         assert!(rt_value_truthy(neg_int));
         assert_eq!(rt_value_as_int(neg_int), -42);
 
-        let neg_float = rt_value_float(-3.14);
+        let neg_float = rt_value_float(-3.25);
         assert!(rt_value_truthy(neg_float));
         let extracted = rt_value_as_float(neg_float);
-        assert!((extracted - (-3.14)).abs() < 1e-10);
+        assert!((extracted - (-3.25)).abs() < 1e-10);
     }
 }

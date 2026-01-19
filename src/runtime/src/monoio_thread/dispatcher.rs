@@ -34,10 +34,7 @@ pub(crate) async fn dispatch_request(request: IoRequest, registry: &mut StreamRe
         } => {
             handle_tcp_write(stream_id, data, response_tx, registry).await;
         }
-        IoRequest::TcpClose {
-            stream_id,
-            response_tx,
-        } => {
+        IoRequest::TcpClose { stream_id, response_tx } => {
             handle_tcp_close(stream_id, response_tx, registry);
         }
         IoRequest::UdpBind { addr, response_tx } => {
@@ -58,10 +55,7 @@ pub(crate) async fn dispatch_request(request: IoRequest, registry: &mut StreamRe
         } => {
             handle_udp_recv_from(socket_id, max_len, response_tx, registry).await;
         }
-        IoRequest::UdpClose {
-            socket_id,
-            response_tx,
-        } => {
+        IoRequest::UdpClose { socket_id, response_tx } => {
             handle_udp_close(socket_id, response_tx, registry);
         }
         IoRequest::TcpSetNodelay {
@@ -91,16 +85,10 @@ pub(crate) async fn dispatch_request(request: IoRequest, registry: &mut StreamRe
         } => {
             handle_tcp_listener_close(listener_id, response_tx, registry);
         }
-        IoRequest::TcpGetLocalAddr {
-            stream_id,
-            response_tx,
-        } => {
+        IoRequest::TcpGetLocalAddr { stream_id, response_tx } => {
             handle_tcp_get_local_addr(stream_id, response_tx, registry);
         }
-        IoRequest::TcpGetPeerAddr {
-            stream_id,
-            response_tx,
-        } => {
+        IoRequest::TcpGetPeerAddr { stream_id, response_tx } => {
             handle_tcp_get_peer_addr(stream_id, response_tx, registry);
         }
         IoRequest::UdpSetBroadcast {
@@ -123,13 +111,7 @@ pub(crate) async fn dispatch_request(request: IoRequest, registry: &mut StreamRe
             interface_addr,
             response_tx,
         } => {
-            handle_udp_join_multicast(
-                socket_id,
-                multicast_addr,
-                interface_addr,
-                response_tx,
-                registry,
-            );
+            handle_udp_join_multicast(socket_id, multicast_addr, interface_addr, response_tx, registry);
         }
         IoRequest::UdpLeaveMulticast {
             socket_id,
@@ -137,18 +119,9 @@ pub(crate) async fn dispatch_request(request: IoRequest, registry: &mut StreamRe
             interface_addr,
             response_tx,
         } => {
-            handle_udp_leave_multicast(
-                socket_id,
-                multicast_addr,
-                interface_addr,
-                response_tx,
-                registry,
-            );
+            handle_udp_leave_multicast(socket_id, multicast_addr, interface_addr, response_tx, registry);
         }
-        IoRequest::UdpGetLocalAddr {
-            socket_id,
-            response_tx,
-        } => {
+        IoRequest::UdpGetLocalAddr { socket_id, response_tx } => {
             handle_udp_get_local_addr(socket_id, response_tx, registry);
         }
         IoRequest::Shutdown => {

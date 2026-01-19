@@ -61,7 +61,7 @@ pub fn handle_diagram(args: &[String]) -> i32 {
     }
 }
 
-fn print_diagram_usage(options: &crate::cli::diagram_gen::DiagramOptions) {
+fn print_diagram_usage(options: &crate::cli::diagram_gen::DiagramGenOptions) {
     println!("Diagram generation options:");
     println!("  Types: {:?}", options.diagram_types);
     println!("  Output: {}", options.output_dir.display());

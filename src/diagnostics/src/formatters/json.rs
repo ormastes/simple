@@ -34,10 +34,7 @@ impl JsonFormatter {
 
     /// Format multiple diagnostics as JSON array
     pub fn format_multiple(&self, diagnostics: &[Diagnostic]) -> String {
-        let values: Vec<_> = diagnostics
-            .iter()
-            .map(|d| self.diagnostic_to_json(d))
-            .collect();
+        let values: Vec<_> = diagnostics.iter().map(|d| self.diagnostic_to_json(d)).collect();
 
         if self.pretty {
             serde_json::to_string_pretty(&values).unwrap_or_else(|_| "[]".to_string())
@@ -66,17 +63,21 @@ impl JsonFormatter {
         }
 
         if !diagnostic.labels.is_empty() {
-            obj["labels"] = json!(diagnostic.labels.iter().map(|label| {
-                json!({
-                    "span": {
-                        "start": label.span.start,
-                        "end": label.span.end,
-                        "line": label.span.line,
-                        "column": label.span.column,
-                    },
-                    "message": label.message,
+            obj["labels"] = json!(diagnostic
+                .labels
+                .iter()
+                .map(|label| {
+                    json!({
+                        "span": {
+                            "start": label.span.start,
+                            "end": label.span.end,
+                            "line": label.span.line,
+                            "column": label.span.column,
+                        },
+                        "message": label.message,
+                    })
                 })
-            }).collect::<Vec<_>>());
+                .collect::<Vec<_>>());
         }
 
         if !diagnostic.notes.is_empty() {

@@ -40,11 +40,7 @@ pub fn collect_spec_files(path: &Path) -> Vec<PathBuf> {
 }
 
 /// Print migration summary for dry-run mode
-pub fn print_dry_run_summary(
-    modified_count: usize,
-    total_files: usize,
-    error_count: usize,
-) {
+pub fn print_dry_run_summary(modified_count: usize, total_files: usize, error_count: usize) {
     println!();
     println!("DRY RUN complete!");
     println!("  Would modify: {}", modified_count);
@@ -57,11 +53,7 @@ pub fn print_dry_run_summary(
 }
 
 /// Print migration summary for actual run
-pub fn print_migration_summary(
-    modified_count: usize,
-    total_files: usize,
-    error_count: usize,
-) {
+pub fn print_migration_summary(modified_count: usize, total_files: usize, error_count: usize) {
     println!();
     println!("Migration complete!");
     println!("  Modified: {}", modified_count);

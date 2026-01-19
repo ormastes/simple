@@ -104,7 +104,7 @@ fn main() {
         "-c" => {
             if args.len() < 2 {
                 eprintln!("error: -c requires a code argument");
-                return std::process::exit(1);
+                std::process::exit(1);
             }
             run_code(&args[1], global_flags.gc_log, global_flags.gc_off)
         }
@@ -122,7 +122,7 @@ fn main() {
             if args.len() < 2 {
                 eprintln!("error: watch requires a source file");
                 eprintln!("Usage: simple watch <file.spl>");
-                return std::process::exit(1);
+                std::process::exit(1);
             }
             let path = PathBuf::from(&args[1]);
             watch_file(&path)

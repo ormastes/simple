@@ -285,10 +285,10 @@ mod tests {
     #[test]
     fn test_print_value_float() {
         rt_capture_stdout_start();
-        rt_print_value(RuntimeValue::from_float(3.14));
+        rt_print_value(RuntimeValue::from_float(3.25));
         let output = rt_capture_stdout_stop();
         // Float to string conversion may have precision issues
-        assert!(output.starts_with("3.14") || output == "3.139999999999997");
+        assert!(output.starts_with("3.25") || output == "3.139999999999997");
     }
 
     #[test]
@@ -340,8 +340,8 @@ mod tests {
         assert_eq!(value_to_display_string(RuntimeValue::NIL), "nil");
         assert_eq!(value_to_display_string(RuntimeValue::from_int(42)), "42");
         // Float to string conversion may have precision issues
-        let float_str = value_to_display_string(RuntimeValue::from_float(3.14));
-        assert!(float_str.starts_with("3.14") || float_str == "3.139999999999997");
+        let float_str = value_to_display_string(RuntimeValue::from_float(3.25));
+        assert!(float_str.starts_with("3.25") || float_str == "3.139999999999997");
         assert_eq!(value_to_display_string(RuntimeValue::from_bool(true)), "true");
         assert_eq!(value_to_display_string(RuntimeValue::from_bool(false)), "false");
     }
