@@ -24,7 +24,13 @@ macro_rules! validate_unit {
         if let Some(Type::Simple(type_name)) = $ty {
             if is_unit_type(type_name) {
                 if let Err(e) = validate_unit_type($val, type_name) {
-                    bail_semantic!("{}: {}", $context, e);
+                    let ctx = $crate::error::ErrorContext::new()
+                        .with_code($crate::error::codes::TYPE_MISMATCH)
+                        .with_help("ensure the value matches the expected unit type");
+                    return Err($crate::error::CompileError::semantic_with_context(
+                        format!("{}: {}", $context, e),
+                        ctx,
+                    ));
                 }
             }
         }
