@@ -521,6 +521,20 @@ pub mod factory {
     }
 
     // ============================================
+    // Binding/Variable Errors
+    // ============================================
+
+    /// Error when a let binding fails.
+    pub fn let_binding_failed(var_name: &str, error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("let binding '{}': {}", var_name, error))
+    }
+
+    /// Error when an undefined field is accessed.
+    pub fn undefined_field(field_name: &str) -> CompileError {
+        CompileError::Semantic(format!("undefined field '{}'", field_name))
+    }
+
+    // ============================================
     // FFI/Handle Errors
     // ============================================
 
@@ -538,6 +552,39 @@ pub mod factory {
     // Codegen Errors
     // ============================================
 
+    // ============================================
+    // Pipeline/Lowering Errors
+    // ============================================
+
+    /// Error when HIR lowering fails.
+    pub fn hir_lowering_failed(error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("HIR lowering: {}", error))
+    }
+
+    /// Error when MIR lowering fails.
+    pub fn mir_lowering_failed(error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("MIR lowering: {}", error))
+    }
+
+    /// Error when type checking fails.
+    pub fn type_check_failed(error: &impl std::fmt::Debug) -> CompileError {
+        CompileError::Semantic(format!("{:?}", error))
+    }
+
+    /// Error when verification produces errors.
+    pub fn verification_errors(message: &str) -> CompileError {
+        CompileError::Semantic(format!("Verification errors:\n{}", message))
+    }
+
+    /// Error when ghost erasure produces errors.
+    pub fn ghost_erasure_errors(message: &str) -> CompileError {
+        CompileError::Semantic(format!("Ghost erasure errors:\n{}", message))
+    }
+
+    // ============================================
+    // Codegen Errors
+    // ============================================
+
     /// Error when a feature is not supported in the current backend.
     pub fn unsupported_feature(feature: &str) -> CompileError {
         CompileError::Codegen(format!("unsupported feature: {}", feature))
@@ -548,6 +595,16 @@ pub mod factory {
         CompileError::Codegen(format!("failed to generate code for {}: {}", construct, reason))
     }
 
+    /// Error when an operation is not supported.
+    pub fn unsupported_operation(op_type: &str, op: &impl std::fmt::Debug) -> CompileError {
+        CompileError::Semantic(format!("Unsupported {}: {:?}", op_type, op))
+    }
+
+    /// Error when a reference to something undefined is encountered.
+    pub fn undefined_reference(kind: &str, value: &impl std::fmt::Debug) -> CompileError {
+        CompileError::Semantic(format!("Undefined {}: {:?}", kind, value))
+    }
+
     /// Error when an LLVM build operation fails.
     pub fn llvm_build_failed(operation: &str, error: &impl std::fmt::Display) -> CompileError {
         CompileError::Semantic(format!("Failed to build {}: {}", operation, error))
@@ -556,6 +613,46 @@ pub mod factory {
     /// Error when an LLVM cast operation fails.
     pub fn llvm_cast_failed(operation: &str, error: &impl std::fmt::Display) -> CompileError {
         CompileError::Semantic(format!("Failed to {}: {}", operation, error))
+    }
+
+    /// Error when LLVM initialization fails.
+    pub fn llvm_init_failed(component: &str, error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("Failed to initialize {}: {}", component, error))
+    }
+
+    /// Error when an intrinsic is not declared.
+    pub fn intrinsic_not_declared(name: &str) -> CompileError {
+        CompileError::Semantic(format!("Intrinsic {} not declared", name))
+    }
+
+    /// Error when calling an intrinsic fails.
+    pub fn intrinsic_call_failed(name: &str, error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("Failed to call {} intrinsic: {}", name, error))
+    }
+
+    /// Error when an intrinsic returns an unexpected type.
+    pub fn intrinsic_unexpected_type(name: &str) -> CompileError {
+        CompileError::Semantic(format!("{} intrinsic returned unexpected type", name))
+    }
+
+    /// Error when LLVM target acquisition fails.
+    pub fn llvm_target_failed(target: &str, error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("Failed to get {} target: {}", target, error))
+    }
+
+    /// Error when LLVM code emission fails.
+    pub fn llvm_emit_failed(format: &str, error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("Failed to emit {}: {}", format, error))
+    }
+
+    /// Error when LLVM verification fails.
+    pub fn llvm_verification_failed(error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("LLVM verification failed: {}", error))
+    }
+
+    /// Error when data has invalid encoding.
+    pub fn invalid_encoding(context: &str, error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("Invalid encoding in {}: {}", context, error))
     }
 
     // ============================================

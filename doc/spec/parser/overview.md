@@ -1,5 +1,12 @@
 # Simple Language Lexer and Parser Specification
 
+> **⚠️ Design Document Notice**
+>
+> This document describes the TreeSitter grammar specification for Simple.
+> It is a **design document**, not the actual implementation.
+> The actual parser is implemented in Rust at `src/parser/src/`.
+> This specification serves as reference for what a TreeSitter grammar would provide.
+
 ## Overview
 
 This document specifies the complete lexer and parser implementation for the Simple programming language using Tree-sitter with GLR (Generalized LR) parsing for optimal performance. The implementation consists of:

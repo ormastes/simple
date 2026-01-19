@@ -1,0 +1,135 @@
+# Bare Metal Executor - Async task executor for bare metal
+#
+# Provides a simple async executor for cooperative multitasking.
+
+use bare.async.waker.{Waker, WakerContext}
+
+# Task state
+enum TaskState:
+    Ready
+    Pending
+    Completed
+
+# Task trait
+trait Task:
+    # Poll the task, returns true if completed
+    fn poll(waker: Waker) -> TaskState
+
+# Simple task wrapper
+struct SimpleTask:
+    id: u32
+    state: TaskState
+    poll_fn: fn(Waker) -> TaskState
+
+    static fn new(id: u32, poll_fn: fn(Waker) -> TaskState) -> SimpleTask:
+        return SimpleTask(id: id, state: TaskState.Ready, poll_fn: poll_fn)
+
+impl SimpleTask: Task:
+    fn poll(waker: Waker) -> TaskState:
+        self.state = self.poll_fn(waker)
+        return self.state
+
+# Task queue
+struct TaskQueue:
+    tasks: List<Task>
+    next_id: u32
+
+    static fn new() -> TaskQueue:
+        return TaskQueue(tasks: [], next_id: 0)
+
+    me spawn(poll_fn: fn(Waker) -> TaskState) -> u32:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.tasks.push(SimpleTask.new(id, poll_fn))
+        return id
+
+    fn len() -> usize:
+        return self.tasks.len()
+
+    fn is_empty() -> bool:
+        return self.tasks.len() == 0
+
+# Simple single-threaded executor
+struct Executor:
+    queue: TaskQueue
+    waker_context: WakerContext
+
+    static fn new() -> Executor:
+        return Executor(
+            queue: TaskQueue.new(),
+            waker_context: WakerContext.new()
+        )
+
+    me spawn(poll_fn: fn(Waker) -> TaskState) -> u32:
+        return self.queue.spawn(poll_fn)
+
+    # Run until all tasks complete
+    me run():
+        while not self.queue.is_empty():
+            self.run_once()
+
+    # Run one iteration of the event loop
+    me run_once():
+        var completed_indices: List<usize> = []
+        val waker = self.waker_context.create_waker()
+
+        for i in 0..self.queue.tasks.len():
+            val task = self.queue.tasks[i]
+            match task.poll(waker):
+                TaskState.Completed:
+                    completed_indices.push(i)
+                TaskState.Ready:
+                    pass
+                TaskState.Pending:
+                    pass
+
+        # Remove completed tasks (in reverse order to preserve indices)
+        for i in (completed_indices.len() - 1)..(-1):
+            self.queue.tasks.remove(completed_indices[i])
+
+    # Run until condition is met
+    me run_until(condition: fn() -> bool):
+        while not condition():
+            if self.queue.is_empty():
+                break
+            self.run_once()
+
+    # Run for a limited number of iterations
+    me run_for(iterations: u32):
+        for i in 0..iterations:
+            if self.queue.is_empty():
+                break
+            self.run_once()
+
+    fn task_count() -> usize:
+        return self.queue.len()
+
+# Global executor
+static var global_executor: Option<Executor> = Option.none()
+
+fn init_executor():
+    global_executor = Option.some(Executor.new())
+
+fn spawn(poll_fn: fn(Waker) -> TaskState) -> Option<u32>:
+    match global_executor:
+        Option.Some(executor):
+            return Option.some(executor.spawn(poll_fn))
+        Option.None:
+            return Option.none()
+
+fn run():
+    match global_executor:
+        Option.Some(executor):
+            executor.run()
+        Option.None:
+            pass
+
+fn run_once():
+    match global_executor:
+        Option.Some(executor):
+            executor.run_once()
+        Option.None:
+            pass
+
+export TaskState, Task, SimpleTask, TaskQueue, Executor
+export init_executor, spawn, run, run_once

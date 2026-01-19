@@ -206,49 +206,74 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
             (Value::Float(l), Value::Float(r)) => Ok(Value::Bool(l < r)),
             (Value::Int(l), Value::Float(r)) => Ok(Value::Bool((*l as f64) < *r)),
             (Value::Float(l), Value::Int(r)) => Ok(Value::Bool(*l < (*r as f64))),
-            _ => Err(CompileError::Semantic(format!(
-                "cannot compare unit values of types {} and {}",
-                left.type_name(),
-                right.type_name()
-            ))),
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("comparison is only supported for numeric unit values");
+                Err(CompileError::semantic_with_context(
+                    format!("invalid operation: cannot compare unit values of types {} and {}",
+                        left.type_name(), right.type_name()),
+                    ctx,
+                ))
+            },
         },
         BinOp::Gt => match (left, right) {
             (Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l > r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Bool(l > r)),
             (Value::Int(l), Value::Float(r)) => Ok(Value::Bool((*l as f64) > *r)),
             (Value::Float(l), Value::Int(r)) => Ok(Value::Bool(*l > (*r as f64))),
-            _ => Err(CompileError::Semantic(format!(
-                "cannot compare unit values of types {} and {}",
-                left.type_name(),
-                right.type_name()
-            ))),
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("comparison is only supported for numeric unit values");
+                Err(CompileError::semantic_with_context(
+                    format!("invalid operation: cannot compare unit values of types {} and {}",
+                        left.type_name(), right.type_name()),
+                    ctx,
+                ))
+            },
         },
         BinOp::LtEq => match (left, right) {
             (Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l <= r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Bool(l <= r)),
             (Value::Int(l), Value::Float(r)) => Ok(Value::Bool((*l as f64) <= *r)),
             (Value::Float(l), Value::Int(r)) => Ok(Value::Bool(*l <= (*r as f64))),
-            _ => Err(CompileError::Semantic(format!(
-                "cannot compare unit values of types {} and {}",
-                left.type_name(),
-                right.type_name()
-            ))),
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("comparison is only supported for numeric unit values");
+                Err(CompileError::semantic_with_context(
+                    format!("invalid operation: cannot compare unit values of types {} and {}",
+                        left.type_name(), right.type_name()),
+                    ctx,
+                ))
+            },
         },
         BinOp::GtEq => match (left, right) {
             (Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l >= r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Bool(l >= r)),
             (Value::Int(l), Value::Float(r)) => Ok(Value::Bool((*l as f64) >= *r)),
             (Value::Float(l), Value::Int(r)) => Ok(Value::Bool(*l >= (*r as f64))),
-            _ => Err(CompileError::Semantic(format!(
-                "cannot compare unit values of types {} and {}",
-                left.type_name(),
-                right.type_name()
-            ))),
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("comparison is only supported for numeric unit values");
+                Err(CompileError::semantic_with_context(
+                    format!("invalid operation: cannot compare unit values of types {} and {}",
+                        left.type_name(), right.type_name()),
+                    ctx,
+                ))
+            },
         },
-        _ => Err(CompileError::Semantic(format!(
-            "unsupported binary operation {:?} on unit values",
-            op
-        ))),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("check that the operation is supported on unit values");
+            Err(CompileError::semantic_with_context(
+                format!("invalid operation: unsupported binary operation {:?} on unit values", op),
+                ctx,
+            ))
+        },
     }
 }
 
@@ -258,10 +283,15 @@ pub(super) fn evaluate_unit_unary_inner(value: &Value, op: UnaryOp) -> Result<Va
         UnaryOp::Neg => match value {
             Value::Int(v) => Ok(Value::Int(-v)),
             Value::Float(v) => Ok(Value::Float(-v)),
-            _ => Err(CompileError::Semantic(format!(
-                "cannot negate unit value of type {}",
-                value.type_name()
-            ))),
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("negation is only supported for numeric unit values");
+                Err(CompileError::semantic_with_context(
+                    format!("invalid operation: cannot negate unit value of type {}", value.type_name()),
+                    ctx,
+                ))
+            },
         },
         UnaryOp::Not => {
             // E1041 - Invalid Unary Op

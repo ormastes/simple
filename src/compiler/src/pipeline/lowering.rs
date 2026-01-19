@@ -137,7 +137,7 @@ fn convert_lower_error(e: crate::hir::LowerError) -> CompileError {
             CompileError::semantic_with_context(messages.join("\n"), ctx)
         }
         // Other errors just get converted to simple semantic errors
-        other => CompileError::Semantic(format!("HIR lowering: {}", other)),
+        other => crate::error::factory::hir_lowering_failed(&other),
     }
 }
 
@@ -154,7 +154,7 @@ impl CompilerPipeline {
         self.verification_violations.clear();
 
         // Type check
-        type_check(&ast_module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
+        type_check(&ast_module.items).map_err(|e| crate::error::factory::type_check_failed(&e))?;
 
         // Lower AST to HIR
         let hir_module = hir::lower(ast_module).map_err(convert_lower_error)?;
@@ -189,7 +189,7 @@ impl CompilerPipeline {
 
             if self.verification_strict {
                 let msg = verifier.error_messages().join("\n");
-                return Err(CompileError::Semantic(format!("Verification errors:\n{}", msg)));
+                return Err(crate::error::factory::verification_errors(&msg));
             } else {
                 // Log warnings but continue
                 for violation in verifier.violations() {
@@ -201,7 +201,7 @@ impl CompilerPipeline {
         // Lower HIR to MIR with contract mode (and DI config if available)
         let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
         let mut mir_module = mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
-            .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
+            .map_err(|e| crate::error::factory::mir_lowering_failed(&e))?;
 
         // Ghost erasure pass: remove ghost variables before codegen
         let (ghost_stats, ghost_errors) = mir::erase_ghost_from_module(&mut mir_module);
@@ -212,7 +212,7 @@ impl CompilerPipeline {
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
                 .join("\n");
-            return Err(CompileError::Semantic(format!("Ghost erasure errors:\n{}", msg)));
+            return Err(crate::error::factory::ghost_erasure_errors(&msg));
         }
 
         if ghost_stats.ghost_params_erased > 0 || ghost_stats.ghost_locals_erased > 0 {
@@ -249,7 +249,7 @@ impl CompilerPipeline {
         self.verification_violations.clear();
 
         // Type check
-        type_check(&ast_module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
+        type_check(&ast_module.items).map_err(|e| crate::error::factory::type_check_failed(&e))?;
 
         // Lower AST to HIR with module resolution support
         let hir_module = hir::lower_with_context(ast_module, source_file)
@@ -285,7 +285,7 @@ impl CompilerPipeline {
 
             if self.verification_strict {
                 let msg = verifier.error_messages().join("\n");
-                return Err(CompileError::Semantic(format!("Verification errors:\n{}", msg)));
+                return Err(crate::error::factory::verification_errors(&msg));
             } else {
                 // Log warnings but continue
                 for violation in verifier.violations() {
@@ -297,7 +297,7 @@ impl CompilerPipeline {
         // Lower HIR to MIR with contract mode (and DI config if available)
         let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
         let mut mir_module = mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
-            .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
+            .map_err(|e| crate::error::factory::mir_lowering_failed(&e))?;
 
         // Ghost erasure pass: remove ghost variables before codegen
         let (ghost_stats, ghost_errors) = mir::erase_ghost_from_module(&mut mir_module);
@@ -308,7 +308,7 @@ impl CompilerPipeline {
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
                 .join("\n");
-            return Err(CompileError::Semantic(format!("Ghost erasure errors:\n{}", msg)));
+            return Err(crate::error::factory::ghost_erasure_errors(&msg));
         }
 
         if ghost_stats.ghost_params_erased > 0 || ghost_stats.ghost_locals_erased > 0 {
