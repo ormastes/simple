@@ -29,6 +29,7 @@ mod contracts;
 mod emitter;
 mod expressions;
 mod functions;
+pub mod memory_safety;
 pub mod naming;
 mod runner;
 mod traits;
@@ -40,6 +41,7 @@ pub use contracts::{ContractTranslator, LeanClassInvariant, LeanProp, LeanTheore
 pub use emitter::{LeanEmitter, LeanModule};
 pub use expressions::{ExprTranslator, LeanDoStmt, LeanExpr, LeanLit};
 pub use functions::{FunctionTranslator, LeanFunction};
+pub use memory_safety::{generate_memory_safety_lean, MemorySafetyLeanGen};
 pub use runner::{LeanCheckResult, LeanRunner, VerificationSummary};
 pub use traits::{LeanBinding, LeanClass, LeanInstance, LeanMethodSig, StaticPolyTheorems, TraitTranslator};
 pub use types::{LeanType, TypeTranslator};
