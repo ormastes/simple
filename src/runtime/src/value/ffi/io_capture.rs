@@ -13,7 +13,7 @@
 //!
 //! ## Usage Pattern
 //!
-//! ```rust
+//! ```ignore
 //! // Enable capture
 //! rt_capture_stdout_start();
 //!
@@ -27,7 +27,7 @@
 //!
 //! ## Mock Stdin Usage
 //!
-//! ```rust
+//! ```ignore
 //! // Set mock stdin
 //! rt_set_stdin("line1\nline2\n");
 //!

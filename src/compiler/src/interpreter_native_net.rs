@@ -5,7 +5,7 @@
 //! - simple/std_lib/src/host/async_nogc_mut/net/udp.spl
 //! - simple/std_lib/src/host/async_nogc_mut/net/http.spl
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -316,7 +316,15 @@ fn extract_socket_addr(args: &[Value], idx: usize) -> Result<SocketAddr, Compile
             let port = fields.get("port").and_then(|v| v.as_int().ok());
             match (ip, port) {
                 (Some(ip), Some(port)) => format!("{}:{}", ip, port),
-                _ => return Err(CompileError::Semantic("invalid SocketAddr object".into())),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("SocketAddr object must contain valid ip (string) and port (integer) fields");
+                    return Err(CompileError::semantic_with_context(
+                        "invalid SocketAddr object".to_string(),
+                        ctx,
+                    ));
+                }
             }
         }
         _ => return Err(crate::error::factory::argument_must_be_socket_address(idx)),

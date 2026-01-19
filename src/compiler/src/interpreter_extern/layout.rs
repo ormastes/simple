@@ -3,7 +3,7 @@
 //! Functions for marking execution phases to optimize code layout
 //! for 4KB page locality (used with --layout-record flag).
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 /// Record a layout marker for 4KB page locality optimization
@@ -19,17 +19,24 @@ use crate::value::Value;
 /// # Returns
 /// * Nil
 pub fn simple_layout_mark(args: &[Value]) -> Result<Value, CompileError> {
-    let val = args
-        .first()
-        .ok_or_else(|| CompileError::Semantic("simple_layout_mark expects 1 argument".into()))?;
+    let val = args.first().ok_or_else(|| {
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("simple_layout_mark expects exactly 1 argument");
+        CompileError::semantic_with_context("simple_layout_mark expects 1 argument".to_string(), ctx)
+    })?;
 
     let marker_name = match val {
         Value::Str(s) => s.clone(),
         Value::Symbol(s) => s.clone(),
         _ => {
-            return Err(CompileError::Semantic(
-                "simple_layout_mark expects a string argument".into(),
-            ))
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("simple_layout_mark expects a string or symbol argument");
+            return Err(CompileError::semantic_with_context(
+                "simple_layout_mark expects a string argument".to_string(),
+                ctx,
+            ));
         }
     };
 

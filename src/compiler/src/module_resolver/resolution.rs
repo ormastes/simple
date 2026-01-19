@@ -27,7 +27,13 @@ impl ModuleResolver {
     pub fn resolve(&self, path: &ModulePath, from_file: &Path) -> ResolveResult<ResolvedModule> {
         let segments = &path.segments;
         if segments.is_empty() {
-            return Err(CompileError::Semantic("empty module path".into()));
+            let ctx = ErrorContext::new()
+                .with_code(codes::MODULE_NOT_FOUND)
+                .with_help("provide at least one module path segment");
+            return Err(CompileError::semantic_with_context(
+                "empty module path".to_string(),
+                ctx,
+            ));
         }
 
         // Determine base directory
@@ -69,7 +75,13 @@ impl ModuleResolver {
         original_path: &ModulePath,
     ) -> ResolveResult<ResolvedModule> {
         if segments.is_empty() {
-            return Err(CompileError::Semantic("empty module path segments".into()));
+            let ctx = ErrorContext::new()
+                .with_code(codes::MODULE_NOT_FOUND)
+                .with_help("module path must contain at least one segment");
+            return Err(CompileError::semantic_with_context(
+                "empty module path segments".to_string(),
+                ctx,
+            ));
         }
 
         let mut current = base.to_path_buf();

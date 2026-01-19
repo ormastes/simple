@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use simple_parser::ast::{ImplBlock, Type};
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 
 #[derive(Default)]
 pub(super) struct TraitImplRegistry {
@@ -36,8 +36,12 @@ pub(super) fn register_trait_impl(
 
     let Some(trait_name) = &impl_block.trait_name else {
         if is_default {
-            return Err(CompileError::Semantic(
-                "#[default] is only valid on trait impls".to_string(),
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Use #[default] only on trait implementations");
+            return Err(CompileError::semantic_with_context(
+                "#[default] attribute is only valid on trait impls".to_string(),
+                ctx,
             ));
         }
         return Ok(());

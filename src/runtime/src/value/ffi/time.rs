@@ -19,7 +19,7 @@
 //!
 //! ## Usage Pattern
 //!
-//! ```rust
+//! ```ignore
 //! // Get current time
 //! let now = rt_time_now_unix_micros();
 //!

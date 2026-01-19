@@ -1,5 +1,5 @@
 use super::{LlvmBackend, VRegMap};
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 
 #[cfg(feature = "llvm")]
 use inkwell::builder::Builder;
@@ -117,7 +117,12 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("dict_new call", &e))?
             .try_as_basic_value()
             .left()
-            .ok_or_else(|| CompileError::Semantic("dict_new returned void".to_string()))?;
+            .ok_or_else(|| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("dict_new should return a pointer value, not void");
+                CompileError::semantic_with_context("dict_new returned void instead of pointer".to_string(), ctx)
+            })?;
 
         // Insert each key-value pair
         for (key, value) in keys.iter().zip(values.iter()) {

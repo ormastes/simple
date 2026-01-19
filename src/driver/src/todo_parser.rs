@@ -5,7 +5,7 @@
 //! data for the TODO database system.
 //!
 //! Format specification:
-//! ```
+//! ```text
 //! TODO: [area][priority] description [#issue] [blocked:#issue,#issue]
 //! FIXME: [area][priority] description [#issue] [blocked:#issue,#issue]
 //! ```

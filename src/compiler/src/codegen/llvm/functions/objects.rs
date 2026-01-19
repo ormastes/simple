@@ -1,5 +1,5 @@
 use super::{LlvmBackend, VRegMap};
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 
 #[cfg(feature = "llvm")]
 use inkwell::builder::Builder;
@@ -90,8 +90,12 @@ impl LlvmBackend {
             vreg_map.insert(dest, loaded);
             Ok(())
         } else {
-            Err(CompileError::Semantic(
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("FieldGet operation requires a pointer to a struct");
+            Err(CompileError::semantic_with_context(
                 "FieldGet requires pointer to struct".to_string(),
+                ctx,
             ))
         }
     }
@@ -131,8 +135,12 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
             Ok(())
         } else {
-            Err(CompileError::Semantic(
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("FieldSet operation requires a pointer to a struct");
+            Err(CompileError::semantic_with_context(
                 "FieldSet requires pointer to struct".to_string(),
+                ctx,
             ))
         }
     }

@@ -2,7 +2,7 @@
 
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, exec_block_fn, find_and_exec_method, Control, Enums, ImplMethods};
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef};
@@ -155,7 +155,10 @@ pub fn handle_constructor_methods(
         if let Some(suggestion) = crate::error::typo::format_suggestion(method, available) {
             msg.push_str(&format!("; {}", suggestion));
         }
-        return Err(CompileError::Semantic(msg));
+        let ctx = ErrorContext::new()
+            .with_code(codes::UNKNOWN_METHOD)
+            .with_help("check that the method exists and is spelled correctly");
+        return Err(CompileError::semantic_with_context(msg, ctx));
     }
     // Collect available classes for suggestion
     let available: Vec<&str> = classes.keys().map(|s| s.as_str()).collect();
@@ -163,5 +166,8 @@ pub fn handle_constructor_methods(
     if let Some(suggestion) = crate::error::typo::format_suggestion(class_name, available) {
         msg.push_str(&format!("; {}", suggestion));
     }
-    Err(CompileError::Semantic(msg))
+    let ctx = ErrorContext::new()
+        .with_code(codes::UNKNOWN_CLASS)
+        .with_help("check that the class exists and is spelled correctly");
+    Err(CompileError::semantic_with_context(msg, ctx))
 }

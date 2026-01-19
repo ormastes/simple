@@ -1,5 +1,5 @@
 use super::{LlvmBackend, VRegMap};
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 
 #[cfg(feature = "llvm")]
 use inkwell::builder::Builder;
@@ -27,7 +27,13 @@ impl LlvmBackend {
             vreg_map.insert(dest, loaded);
             Ok(())
         } else {
-            Err(CompileError::Semantic("Load requires pointer".to_string()))
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Load instruction requires a pointer value");
+            Err(CompileError::semantic_with_context(
+                "Load requires pointer".to_string(),
+                ctx,
+            ))
         }
     }
 
@@ -49,7 +55,13 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
             Ok(())
         } else {
-            Err(CompileError::Semantic("Store requires pointer".to_string()))
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Store instruction requires a pointer value");
+            Err(CompileError::semantic_with_context(
+                "Store requires pointer".to_string(),
+                ctx,
+            ))
         }
     }
 

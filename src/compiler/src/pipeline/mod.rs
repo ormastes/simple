@@ -533,7 +533,7 @@ main = 0
         assert!(result.is_err(), "Release mode should reject test profile");
 
         match result {
-            Err(CompileError::Semantic(msg)) => {
+            Err(CompileError::Semantic(msg)) | Err(CompileError::SemanticWithContext { message: msg, .. }) => {
                 assert!(msg.contains("#1034"), "Error should reference #1034");
                 assert!(msg.contains("test"), "Error should mention test profile");
             }
@@ -591,7 +591,7 @@ main = 0
         assert!(result.is_err(), "Release mode should reject runtime AOP");
 
         match result {
-            Err(CompileError::Semantic(msg)) => {
+            Err(CompileError::SemanticWithContext { message: msg, .. }) | Err(CompileError::Semantic(msg)) => {
                 assert!(msg.contains("#1035"), "Error should reference #1035");
                 assert!(msg.contains("runtime"), "Error should mention runtime interceptors");
             }
