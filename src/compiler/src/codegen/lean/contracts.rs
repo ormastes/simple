@@ -338,16 +338,7 @@ impl<'a> ContractTranslator<'a> {
 
     /// Convert a Simple name to Lean naming convention (PascalCase for theorems)
     fn to_lean_name(&self, name: &str) -> String {
-        // Convert snake_case to PascalCase
-        name.split('_')
-            .map(|s| {
-                let mut chars = s.chars();
-                match chars.next() {
-                    None => String::new(),
-                    Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-                }
-            })
-            .collect()
+        super::naming::to_pascal_case(name)
     }
 }
 

@@ -215,21 +215,26 @@ impl Lowerer {
                             return Ok((idx, *field_ty));
                         }
                     }
+                    // Collect available field names for suggestions
+                    let available_fields = fields.iter().map(|(name, _)| name.clone()).collect();
                     Err(LowerError::CannotInferFieldType {
                         struct_name: name.clone(),
                         field: field.to_string(),
+                        available_fields,
                     })
                 }
                 HirType::Pointer { inner, .. } => self.get_field_info(*inner, field),
                 _ => Err(LowerError::CannotInferFieldType {
                     struct_name: format!("{:?}", hir_ty),
                     field: field.to_string(),
+                    available_fields: vec![],
                 }),
             }
         } else {
             Err(LowerError::CannotInferFieldType {
                 struct_name: format!("TypeId({:?})", struct_ty),
                 field: field.to_string(),
+                available_fields: vec![],
             })
         }
     }

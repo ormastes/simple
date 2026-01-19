@@ -8,7 +8,7 @@ use super::{
     eval_arg, eval_arg_usize, evaluate_expr, exec_function, exec_function_with_captured_env, find_and_exec_method,
     instantiate_class, try_method_missing, Enums, ImplMethods,
 };
-use crate::error::CompileError;
+use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::{Env, Value};
 use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef};
 use std::collections::HashMap;
@@ -308,10 +308,15 @@ pub(crate) fn evaluate_method_call(
             )? {
                 return Ok(result);
             } else {
-                return Err(CompileError::Semantic(format!(
-                    "Method '{}' not found on dyn {}",
-                    method, trait_name
-                )));
+                // E1013 - Unknown Method (for dyn trait)
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNKNOWN_METHOD)
+                    .with_help("check that the method is defined in the trait");
+
+                return Err(CompileError::semantic_with_context(
+                    format!("method `{}` not found on type `dyn {}`", method, trait_name),
+                    ctx,
+                ));
             }
         }
         Value::Object { class, fields } => {
@@ -408,25 +413,31 @@ pub(crate) fn evaluate_method_call(
         _ => {}
     }
 
-    // Provide helpful error messages for common type conversion attempts
+    // E1013 - Unknown Method (with helpful hints for common conversions)
+    let mut ctx = ErrorContext::new()
+        .with_code(codes::UNKNOWN_METHOD);
+
     let hint = match method {
-        "to_f64" | "to_f32" | "to_float" => Some(
-            "Hint: Use implicit conversion (e.g., `float_val / int_val` auto-converts) or explicit cast: `val as f64`",
-        ),
-        "to_i64" | "to_i32" | "to_int" => Some("Hint: Use explicit cast: `val as i64` or `val as i32`"),
-        "to_str" | "to_string" | "toString" => Some("Hint: Use `str(val)` function or f-string: `f\"{val}\"`"),
+        "to_f64" | "to_f32" | "to_float" => {
+            Some("use implicit conversion (e.g., `float_val / int_val` auto-converts) or explicit cast: `val as f64`")
+        }
+        "to_i64" | "to_i32" | "to_int" => Some("use explicit cast: `val as i64` or `val as i32`"),
+        "to_str" | "to_string" | "toString" => Some("use `str(val)` function or f-string: `f\"{val}\"`"),
         _ => None,
     };
 
-    if let Some(hint) = hint {
-        Err(CompileError::Semantic(format!(
-            "method `{method}` not found on type `{}`. {hint}",
-            recv_val.type_name()
-        )))
+    if let Some(hint_text) = hint {
+        ctx = ctx.with_help(hint_text);
+        Err(CompileError::semantic_with_context(
+            format!("method `{}` not found on type `{}`", method, recv_val.type_name()),
+            ctx,
+        ))
     } else {
-        Err(CompileError::Semantic(format!(
-            "method call on unsupported type: {method}"
-        )))
+        ctx = ctx.with_help("check that the method is defined for this type");
+        Err(CompileError::semantic_with_context(
+            format!("method `{}` not found on type `{}`", method, recv_val.type_name()),
+            ctx,
+        ))
     }
 }
 

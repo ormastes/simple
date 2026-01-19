@@ -29,6 +29,7 @@ mod contracts;
 mod emitter;
 mod expressions;
 mod functions;
+pub mod naming;
 mod runner;
 mod traits;
 mod types;

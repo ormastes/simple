@@ -2,7 +2,7 @@
 
 use super::arg_binding::bind_args_with_injected;
 use super::di_injection::resolve_injected_args;
-use crate::error::CompileError;
+use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, exec_block};
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, SelfMode};
@@ -188,7 +188,31 @@ pub(crate) fn instantiate_class(
         let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
         if let Some(name) = &arg.name {
             if !fields.contains_key(name) {
-                bail_semantic!("unknown field {} for class {}", name, class_name);
+                // E1012 - Undefined Field
+                let available_fields: Vec<&str> = fields.keys().map(|s| s.as_str()).collect();
+                let suggestion = if !available_fields.is_empty() {
+                    typo::suggest_name(name, available_fields.clone())
+                } else {
+                    None
+                };
+
+                let mut ctx = ErrorContext::new()
+                    .with_code(codes::UNDEFINED_FIELD)
+                    .with_help("check the field name and class definition");
+
+                if let Some(best_match) = suggestion {
+                    ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
+                }
+
+                if !available_fields.is_empty() && available_fields.len() <= 5 {
+                    let fields_list = available_fields.join(", ");
+                    ctx = ctx.with_note(format!("available fields: {}", fields_list));
+                }
+
+                return Err(CompileError::semantic_with_context(
+                    format!("class `{}` has no field named `{}`", class_name, name),
+                    ctx,
+                ));
             }
             fields.insert(name.clone(), val);
         } else {

@@ -35,6 +35,44 @@ fn convert_lower_error(e: crate::hir::LowerError) -> CompileError {
                 ctx,
             )
         }
+        crate::hir::LowerError::SelfInStatic => {
+            // E1032 - Self in Static
+            let ctx = ErrorContext::new()
+                .with_code(codes::SELF_IN_STATIC)
+                .with_help("remove `self` or convert this to an instance method by removing `static` keyword");
+
+            CompileError::semantic_with_context(
+                "cannot use `self` in static method".to_string(),
+                ctx,
+            )
+        }
+        crate::hir::LowerError::CannotInferFieldType { struct_name, field, available_fields } => {
+            // E1012 - Undefined Field
+            let available_strs: Vec<&str> = available_fields.iter().map(|s| s.as_str()).collect();
+            let suggestion = if !available_strs.is_empty() {
+                typo::suggest_name(&field, available_strs)
+            } else {
+                None
+            };
+
+            let mut ctx = ErrorContext::new()
+                .with_code(codes::UNDEFINED_FIELD)
+                .with_help("check the field name and struct definition");
+
+            if let Some(best_match) = suggestion {
+                ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
+            }
+
+            if !available_fields.is_empty() && available_fields.len() <= 5 {
+                let fields_list = available_fields.join(", ");
+                ctx = ctx.with_note(format!("available fields: {}", fields_list));
+            }
+
+            CompileError::semantic_with_context(
+                format!("struct `{}` has no field named `{}`", struct_name, field),
+                ctx,
+            )
+        }
         // Other errors just get converted to simple semantic errors
         other => CompileError::Semantic(format!("HIR lowering: {}", other)),
     }

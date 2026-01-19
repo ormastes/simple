@@ -109,6 +109,11 @@ impl Lowerer {
                 ty,
             })
         } else {
+            // E1032 - Self in Static: Special case for 'self' not found
+            if name == "self" && self.current_class_type.is_some() {
+                // We're in a class method but self is not in scope = static method
+                return Err(LowerError::SelfInStatic);
+            }
             Err(LowerError::UnknownVariable(name.to_string()))
         }
     }

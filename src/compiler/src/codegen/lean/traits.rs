@@ -410,15 +410,7 @@ impl<'a> TraitTranslator<'a> {
 
     /// Convert a Simple name to Lean naming convention (PascalCase)
     fn to_lean_name(&self, name: &str) -> String {
-        name.split('_')
-            .map(|s| {
-                let mut chars = s.chars();
-                match chars.next() {
-                    None => String::new(),
-                    Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-                }
-            })
-            .collect()
+        super::naming::to_pascal_case(name)
     }
 
     /// Convert a Type to a Lean constraint string
