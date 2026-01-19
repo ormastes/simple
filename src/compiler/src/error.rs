@@ -1101,6 +1101,24 @@ pub mod factory {
         ))
     }
 
+    /// Error when an unknown variant or method on enum.
+    pub fn unknown_enum_variant_or_method(method: &str, enum_name: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "unknown variant or method '{}' on enum {}",
+            method, enum_name
+        ))
+    }
+
+    /// Error when running Lean fails.
+    pub fn lean_run_failed(error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("Failed to run Lean: {}", error))
+    }
+
+    /// Error when writing Lean file fails.
+    pub fn lean_write_failed(error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("Failed to write Lean file: {}", error))
+    }
+
     /// Error when an enum is not found.
     pub fn enum_not_found(enum_name: &str) -> CompileError {
         CompileError::Semantic(format!("unknown enum '{}'", enum_name))

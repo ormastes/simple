@@ -286,10 +286,7 @@ pub(crate) fn evaluate_method_call(
                     }
                 }
 
-                return Err(CompileError::Semantic(format!(
-                    "unknown variant or method '{}' on enum {}",
-                    method, enum_name
-                )));
+                return Err(crate::error::factory::unknown_enum_variant_or_method(method, enum_name));
             } else {
                 // E1015 - Unknown Enum
                 let available_enums: Vec<&str> = enums.keys().map(|s| s.as_str()).collect();
