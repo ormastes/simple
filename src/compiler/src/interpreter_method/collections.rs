@@ -445,6 +445,101 @@ pub fn handle_array_methods(
             let result: HashMap<String, Value> = groups.into_iter().map(|(k, v)| (k, Value::Array(v))).collect();
             Value::Dict(result)
         }
+        "compact" => {
+            // Remove all nil values from array
+            let result: Vec<Value> = arr.iter().filter(|v| !matches!(v, Value::Nil)).cloned().collect();
+            Value::Array(result)
+        }
+        "rotate" => {
+            // Rotate array elements by n positions (left if positive, right if negative)
+            if arr.is_empty() {
+                return Ok(Some(Value::Array(vec![])));
+            }
+            let n = eval_arg(args, 0, Value::Int(1), env, functions, classes, enums, impl_methods)?
+                .as_int()
+                .unwrap_or(1);
+            let len = arr.len() as i64;
+            let n = ((n % len) + len) % len; // Normalize to positive range
+            let pivot = n as usize;
+            let mut result = arr[pivot..].to_vec();
+            result.extend_from_slice(&arr[..pivot]);
+            Value::Array(result)
+        }
+        "shuffle" => {
+            // Randomize array order
+            use rand::seq::SliceRandom;
+            use rand::thread_rng;
+            let mut result = arr.to_vec();
+            let mut rng = thread_rng();
+            result.shuffle(&mut rng);
+            Value::Array(result)
+        }
+        "sample" => {
+            // Return random element(s) from array
+            use rand::seq::SliceRandom;
+            use rand::thread_rng;
+            if arr.is_empty() {
+                return Ok(Some(Value::Nil));
+            }
+            let n = args
+                .get(0)
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .transpose()?
+                .map(|v| v.as_int().ok())
+                .flatten();
+
+            let mut rng = thread_rng();
+            match n {
+                Some(count) if count > 0 => {
+                    // Return array of n random elements
+                    let sample: Vec<Value> = arr.choose_multiple(&mut rng, count as usize).cloned().collect();
+                    Value::Array(sample)
+                }
+                _ => {
+                    // Return single random element
+                    arr.choose(&mut rng).cloned().unwrap_or(Value::Nil)
+                }
+            }
+        }
+        "transpose" => {
+            // Transpose 2D array (array of arrays)
+            if arr.is_empty() {
+                return Ok(Some(Value::Array(vec![])));
+            }
+
+            // Check if all elements are arrays
+            let inner_arrays: Vec<&Vec<Value>> = arr
+                .iter()
+                .map(|v| match v {
+                    Value::Array(a) => Some(a),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| CompileError::Runtime("transpose requires array of arrays".into()))?;
+
+            if inner_arrays.is_empty() {
+                return Ok(Some(Value::Array(vec![])));
+            }
+
+            // Find max length
+            let max_len = inner_arrays.iter().map(|a| a.len()).max().unwrap_or(0);
+
+            // Transpose
+            let mut result = vec![vec![]; max_len];
+            for inner in inner_arrays {
+                for (i, val) in inner.iter().enumerate() {
+                    result[i].push(val.clone());
+                }
+            }
+
+            Value::Array(result.into_iter().map(Value::Array).collect())
+        }
+        "fetch" => {
+            // Get element at index with default value if out of bounds
+            let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            let default = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            arr.get(idx).cloned().unwrap_or(default)
+        }
         _ => return Ok(None),
     };
     Ok(Some(result))
@@ -645,6 +740,57 @@ pub fn handle_dict_methods(
                 enums,
                 impl_methods,
             )?));
+        }
+        "compact" => {
+            // Remove all entries with nil values
+            let result: HashMap<String, Value> = map
+                .iter()
+                .filter(|(_, v)| !matches!(v, Value::Nil))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            Value::Dict(result)
+        }
+        "fetch" => {
+            // Get value at key, or default if not present
+            let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
+            let default = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            map.get(&key).cloned().unwrap_or(default)
+        }
+        "setdefault" => {
+            // Get value if key exists, otherwise set and return default
+            let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
+            let default = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let mut new_map = map.clone();
+            let value = new_map.entry(key).or_insert(default.clone()).clone();
+            // Return tuple of [value, new_dict]
+            Value::Tuple(vec![value, Value::Dict(new_map)])
+        }
+        "dig" => {
+            // Navigate nested structures safely
+            // dig("key1", "key2", "key3") -> dict["key1"]["key2"]["key3"]
+            let mut current: Value = Value::Dict(map.clone());
+
+            for arg in args {
+                let key = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+                current = match &current {
+                    Value::Dict(m) => m.get(&key.to_key_string()).cloned().unwrap_or(Value::Nil),
+                    Value::Array(a) => {
+                        if let Ok(idx) = key.as_int() {
+                            a.get(idx as usize).cloned().unwrap_or(Value::Nil)
+                        } else {
+                            Value::Nil
+                        }
+                    }
+                    _ => Value::Nil,
+                };
+
+                // Stop if we hit nil
+                if matches!(current, Value::Nil) {
+                    break;
+                }
+            }
+
+            current
         }
         _ => {
             // Check if the dict contains a callable value at this key (module-style calls)

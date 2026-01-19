@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use simple_parser::Pattern;
 
 use super::super::types::{HirModule, TypeId};
+use super::memory_warning::MemoryWarningCollector;
 use crate::module_resolver::ModuleResolver;
 
 pub struct Lowerer {
@@ -20,6 +21,8 @@ pub struct Lowerer {
     pub(super) current_file: Option<PathBuf>,
     /// Track loaded modules to prevent circular dependencies
     pub(super) loaded_modules: HashSet<PathBuf>,
+    /// Memory safety warning collector
+    pub(super) memory_warnings: MemoryWarningCollector,
 }
 
 impl Lowerer {
@@ -32,6 +35,7 @@ impl Lowerer {
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
+            memory_warnings: MemoryWarningCollector::new(),
         }
     }
 
@@ -45,7 +49,32 @@ impl Lowerer {
             module_resolver: Some(module_resolver),
             current_file: Some(current_file),
             loaded_modules: HashSet::new(),
+            memory_warnings: MemoryWarningCollector::new(),
         }
+    }
+
+    /// Create a new lowerer with strict memory mode (warnings become errors)
+    pub fn with_strict_memory_mode() -> Self {
+        Self {
+            module: HirModule::new(),
+            globals: HashMap::new(),
+            pure_functions: HashSet::new(),
+            current_class_type: None,
+            module_resolver: None,
+            current_file: None,
+            loaded_modules: HashSet::new(),
+            memory_warnings: MemoryWarningCollector::strict(),
+        }
+    }
+
+    /// Get the collected memory warnings
+    pub fn memory_warnings(&self) -> &MemoryWarningCollector {
+        &self.memory_warnings
+    }
+
+    /// Take ownership of the memory warnings
+    pub fn take_memory_warnings(&mut self) -> MemoryWarningCollector {
+        std::mem::take(&mut self.memory_warnings)
     }
 
     /// Check if a function is marked as pure

@@ -242,7 +242,17 @@ pub(super) fn eval_collection_expr(
                     };
                     arr.get(idx)
                         .cloned()
-                        .ok_or_else(|| CompileError::Semantic(format!("array index out of bounds: {raw_idx}")))
+                        .ok_or_else(|| {
+                            // E3002 - Index Out Of Bounds
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                .with_help(format!("array has {} element(s)", len))
+                                .with_note("ensure the index is within bounds");
+                            CompileError::semantic_with_context(
+                                format!("array index out of bounds: index is {} but length is {}", raw_idx, len),
+                                ctx,
+                            )
+                        })
                 }
                 Value::Tuple(tup) => {
                     // E1043 - Invalid Index Type
@@ -264,7 +274,17 @@ pub(super) fn eval_collection_expr(
                     };
                     tup.get(idx)
                         .cloned()
-                        .ok_or_else(|| CompileError::Semantic(format!("tuple index out of bounds: {raw_idx}")))
+                        .ok_or_else(|| {
+                            // E3002 - Index Out Of Bounds
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                .with_help(format!("tuple has {} element(s)", len))
+                                .with_note("ensure the index is within bounds");
+                            CompileError::semantic_with_context(
+                                format!("tuple index out of bounds: index is {} but length is {}", raw_idx, len),
+                                ctx,
+                            )
+                        })
                 }
                 Value::Dict(map) => {
                     let key = idx_val.to_key_string();
@@ -293,7 +313,17 @@ pub(super) fn eval_collection_expr(
                     s.chars()
                         .nth(idx)
                         .map(|c| Value::Str(c.to_string()))
-                        .ok_or_else(|| CompileError::Semantic(format!("string index out of bounds: {raw_idx}")))
+                        .ok_or_else(|| {
+                            // E3002 - Index Out Of Bounds
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                .with_help(format!("string has {} character(s)", len))
+                                .with_note("ensure the index is within bounds");
+                            CompileError::semantic_with_context(
+                                format!("string index out of bounds: index is {} but length is {}", raw_idx, len),
+                                ctx,
+                            )
+                        })
                 }
                 Value::Object { fields, .. } => {
                     let key = idx_val.to_key_string();

@@ -417,7 +417,7 @@ pub(crate) fn evaluate_method_call(
             )? {
                 return Ok(result);
             } else {
-                return Err(CompileError::Semantic(format!("unknown class {}", class_name)));
+                return Err(crate::error::factory::class_not_found(class_name));
             }
         }
         Value::Mock(mock) => {
