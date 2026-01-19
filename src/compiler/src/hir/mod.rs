@@ -10,6 +10,7 @@ pub use arena::{
     HirArena, HirArenaStats,
 };
 pub use capability::*;
+pub use lifetime::{LifetimeContext, LifetimeId, LifetimeViolation, ReferenceOrigin, ScopeKind};
 pub use lower::*;
 pub use memory_model::*;
 pub use types::*;
