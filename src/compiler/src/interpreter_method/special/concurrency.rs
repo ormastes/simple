@@ -2,7 +2,7 @@
 
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::interpreter_helpers::spawn_future_with_callable;
 use crate::interpreter::{eval_arg, Enums, ImplMethods};
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
@@ -12,7 +12,12 @@ use std::collections::HashMap;
 pub fn handle_future_methods(future: &crate::value::FutureValue, method: &str) -> Result<Option<Value>, CompileError> {
     match method {
         "join" | "await" | "get" => {
-            return Ok(Some(future.await_result().map_err(|e| CompileError::Semantic(e))?));
+            return Ok(Some(future.await_result().map_err(|e| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::AWAIT_FAILED)
+                    .with_help("ensure the future completed successfully");
+                CompileError::semantic_with_context(e, ctx)
+            })?));
         }
         "is_ready" => {
             return Ok(Some(Value::Bool(future.is_ready())));

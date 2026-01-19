@@ -7,7 +7,7 @@
 //! - Compile-time regex validation
 
 use super::{BlockHandler, BlockResult};
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 use std::collections::HashMap;
 
@@ -47,7 +47,10 @@ fn parse_regex(payload: &str) -> Result<Value, CompileError> {
     let payload = payload.trim();
 
     if payload.is_empty() {
-        return Err(CompileError::Semantic("empty regex pattern".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_PATTERN)
+            .with_help("Regex pattern cannot be empty");
+        return Err(CompileError::semantic_with_context("empty regex pattern", ctx));
     }
 
     // Extract flags if present (format: /pattern/flags or just pattern)
@@ -166,7 +169,13 @@ fn validate_regex(pattern: &str) -> Result<(), CompileError> {
             ')' => {
                 paren_depth -= 1;
                 if paren_depth < 0 {
-                    return Err(CompileError::Semantic("unbalanced parentheses in regex".into()));
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_PATTERN)
+                        .with_help("Regex has unbalanced parentheses: more closing than opening");
+                    return Err(CompileError::semantic_with_context(
+                        "unbalanced parentheses in regex",
+                        ctx,
+                    ));
                 }
             }
             '[' => bracket_depth += 1,
@@ -181,16 +190,31 @@ fn validate_regex(pattern: &str) -> Result<(), CompileError> {
     }
 
     if paren_depth != 0 {
-        return Err(CompileError::Semantic("unbalanced parentheses in regex".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_PATTERN)
+            .with_help("Regex has unbalanced parentheses: more opening than closing");
+        return Err(CompileError::semantic_with_context(
+            "unbalanced parentheses in regex",
+            ctx,
+        ));
     }
 
     if bracket_depth != 0 {
-        return Err(CompileError::Semantic("unbalanced brackets in regex".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_PATTERN)
+            .with_help("Regex has unbalanced brackets: more opening than closing");
+        return Err(CompileError::semantic_with_context("unbalanced brackets in regex", ctx));
     }
 
     // Check for invalid quantifier usage
     if pattern.starts_with('*') || pattern.starts_with('+') || pattern.starts_with('?') || pattern.starts_with('{') {
-        return Err(CompileError::Semantic("regex cannot start with quantifier".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_PATTERN)
+            .with_help("Regex pattern cannot start with a quantifier (*, +, ?, {})");
+        return Err(CompileError::semantic_with_context(
+            "regex cannot start with quantifier",
+            ctx,
+        ));
     }
 
     Ok(())

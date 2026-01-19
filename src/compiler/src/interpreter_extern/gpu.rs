@@ -3,7 +3,7 @@
 //! Vulkan compute operations for GPU acceleration.
 //! Feature-gated behind the "vulkan" feature flag.
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 // Import Vulkan FFI functions when feature is enabled
@@ -39,7 +39,12 @@ pub fn rt_vk_device_create_fn(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_vk_device_free_fn(args: &[Value]) -> Result<Value, CompileError> {
     let device = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("rt_vk_device_free expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_device_free requires exactly 1 argument(s)");
+            CompileError::semantic_with_context("rt_vk_device_free expects 1 argument".to_string(), ctx)
+        })?
         .as_int()? as u64;
     let result = rt_vk_device_free(device);
     Ok(Value::Int(result as i64))
@@ -50,7 +55,12 @@ pub fn rt_vk_device_free_fn(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_vk_device_sync_fn(args: &[Value]) -> Result<Value, CompileError> {
     let device = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("rt_vk_device_sync expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_device_sync requires exactly 1 argument(s)");
+            CompileError::semantic_with_context("rt_vk_device_sync expects 1 argument".to_string(), ctx)
+        })?
         .as_int()? as u64;
     let result = rt_vk_device_sync(device);
     Ok(Value::Int(result as i64))
@@ -61,11 +71,21 @@ pub fn rt_vk_device_sync_fn(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_vk_buffer_alloc_fn(args: &[Value]) -> Result<Value, CompileError> {
     let device = args
         .get(0)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_alloc expects 2 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_buffer_alloc requires exactly 2 argument(s)");
+            CompileError::semantic_with_context("rt_vk_buffer_alloc expects 2 arguments".to_string(), ctx)
+        })?
         .as_int()? as u64;
     let size = args
         .get(1)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_alloc expects 2 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_buffer_alloc requires exactly 2 argument(s)");
+            CompileError::semantic_with_context("rt_vk_buffer_alloc expects 2 arguments".to_string(), ctx)
+        })?
         .as_int()? as u64;
     let handle = rt_vk_buffer_alloc(device, size);
     Ok(Value::Int(handle as i64))
@@ -76,7 +96,12 @@ pub fn rt_vk_buffer_alloc_fn(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_vk_buffer_free_fn(args: &[Value]) -> Result<Value, CompileError> {
     let buffer = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_free expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_buffer_free requires exactly 1 argument(s)");
+            CompileError::semantic_with_context("rt_vk_buffer_free expects 1 argument".to_string(), ctx)
+        })?
         .as_int()? as u64;
     let result = rt_vk_buffer_free(buffer);
     Ok(Value::Int(result as i64))
@@ -87,16 +112,31 @@ pub fn rt_vk_buffer_free_fn(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_vk_buffer_upload_fn(args: &[Value]) -> Result<Value, CompileError> {
     let buffer = args
         .get(0)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_upload expects 3 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_buffer_upload requires exactly 3 argument(s)");
+            CompileError::semantic_with_context("rt_vk_buffer_upload expects 3 arguments".to_string(), ctx)
+        })?
         .as_int()? as u64;
     // The second argument is a raw pointer passed as integer
     let data_ptr = args
         .get(1)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_upload expects 3 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_buffer_upload requires exactly 3 argument(s)");
+            CompileError::semantic_with_context("rt_vk_buffer_upload expects 3 arguments".to_string(), ctx)
+        })?
         .as_int()? as *const u8;
     let size = args
         .get(2)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_upload expects 3 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_buffer_upload requires exactly 3 argument(s)");
+            CompileError::semantic_with_context("rt_vk_buffer_upload expects 3 arguments".to_string(), ctx)
+        })?
         .as_int()? as u64;
     let result = rt_vk_buffer_upload(buffer, data_ptr, size);
     Ok(Value::Int(result as i64))
@@ -107,16 +147,31 @@ pub fn rt_vk_buffer_upload_fn(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_vk_buffer_download_fn(args: &[Value]) -> Result<Value, CompileError> {
     let buffer = args
         .get(0)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_download expects 3 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_buffer_download requires exactly 3 argument(s)");
+            CompileError::semantic_with_context("rt_vk_buffer_download expects 3 arguments".to_string(), ctx)
+        })?
         .as_int()? as u64;
     // The second argument is a raw pointer passed as integer
     let data_ptr = args
         .get(1)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_download expects 3 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_buffer_download requires exactly 3 argument(s)");
+            CompileError::semantic_with_context("rt_vk_buffer_download expects 3 arguments".to_string(), ctx)
+        })?
         .as_int()? as *mut u8;
     let size = args
         .get(2)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_buffer_download expects 3 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_buffer_download requires exactly 3 argument(s)");
+            CompileError::semantic_with_context("rt_vk_buffer_download expects 3 arguments".to_string(), ctx)
+        })?
         .as_int()? as u64;
     let result = rt_vk_buffer_download(buffer, data_ptr, size);
     Ok(Value::Int(result as i64))
@@ -127,16 +182,31 @@ pub fn rt_vk_buffer_download_fn(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_vk_kernel_compile_fn(args: &[Value]) -> Result<Value, CompileError> {
     let device = args
         .get(0)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_compile expects 3 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_compile requires exactly 3 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_compile expects 3 arguments".to_string(), ctx)
+        })?
         .as_int()? as u64;
     // The second argument is a raw pointer passed as integer
     let spirv_ptr = args
         .get(1)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_compile expects 3 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_compile requires exactly 3 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_compile expects 3 arguments".to_string(), ctx)
+        })?
         .as_int()? as *const u8;
     let spirv_size = args
         .get(2)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_compile expects 3 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_compile requires exactly 3 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_compile expects 3 arguments".to_string(), ctx)
+        })?
         .as_int()? as u64;
     let handle = rt_vk_kernel_compile(device, spirv_ptr, spirv_size);
     Ok(Value::Int(handle as i64))
@@ -147,7 +217,12 @@ pub fn rt_vk_kernel_compile_fn(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_vk_kernel_free_fn(args: &[Value]) -> Result<Value, CompileError> {
     let pipeline = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_free expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_free requires exactly 1 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_free expects 1 argument".to_string(), ctx)
+        })?
         .as_int()? as u64;
     let result = rt_vk_kernel_free(pipeline);
     Ok(Value::Int(result as i64))
@@ -159,40 +234,85 @@ pub fn rt_vk_kernel_launch_fn(args: &[Value]) -> Result<Value, CompileError> {
     // rt_vk_kernel_launch(pipeline, buffer_handles, buffer_count, grid_x, grid_y, grid_z, block_x, block_y, block_z)
     let pipeline = args
         .get(0)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_launch requires exactly 9 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_launch expects 9 arguments".to_string(), ctx)
+        })?
         .as_int()? as u64;
     // Buffer handles pointer passed as integer
     let buffer_handles = args
         .get(1)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_launch requires exactly 9 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_launch expects 9 arguments".to_string(), ctx)
+        })?
         .as_int()? as *const u64;
     let buffer_count = args
         .get(2)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_launch requires exactly 9 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_launch expects 9 arguments".to_string(), ctx)
+        })?
         .as_int()? as u64;
     let grid_x = args
         .get(3)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_launch requires exactly 9 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_launch expects 9 arguments".to_string(), ctx)
+        })?
         .as_int()? as u32;
     let grid_y = args
         .get(4)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_launch requires exactly 9 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_launch expects 9 arguments".to_string(), ctx)
+        })?
         .as_int()? as u32;
     let grid_z = args
         .get(5)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_launch requires exactly 9 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_launch expects 9 arguments".to_string(), ctx)
+        })?
         .as_int()? as u32;
     let block_x = args
         .get(6)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_launch requires exactly 9 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_launch expects 9 arguments".to_string(), ctx)
+        })?
         .as_int()? as u32;
     let block_y = args
         .get(7)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_launch requires exactly 9 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_launch expects 9 arguments".to_string(), ctx)
+        })?
         .as_int()? as u32;
     let block_z = args
         .get(8)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch expects 9 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_launch requires exactly 9 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_launch expects 9 arguments".to_string(), ctx)
+        })?
         .as_int()? as u32;
     let result = rt_vk_kernel_launch(
         pipeline,
@@ -214,20 +334,40 @@ pub fn rt_vk_kernel_launch_1d_fn(args: &[Value]) -> Result<Value, CompileError> 
     // rt_vk_kernel_launch_1d(pipeline, buffer_handles, buffer_count, num_elements)
     let pipeline = args
         .get(0)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_launch_1d requires exactly 4 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_launch_1d expects 4 arguments".to_string(), ctx)
+        })?
         .as_int()? as u64;
     // Buffer handles pointer passed as integer
     let buffer_handles = args
         .get(1)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_launch_1d requires exactly 4 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_launch_1d expects 4 arguments".to_string(), ctx)
+        })?
         .as_int()? as *const u64;
     let buffer_count = args
         .get(2)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_launch_1d requires exactly 4 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_launch_1d expects 4 arguments".to_string(), ctx)
+        })?
         .as_int()? as u64;
     let num_elements = args
         .get(3)
-        .ok_or_else(|| CompileError::Semantic("rt_vk_kernel_launch_1d expects 4 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_vk_kernel_launch_1d requires exactly 4 argument(s)");
+            CompileError::semantic_with_context("rt_vk_kernel_launch_1d expects 4 arguments".to_string(), ctx)
+        })?
         .as_int()? as u32;
     let result = rt_vk_kernel_launch_1d(pipeline, buffer_handles, buffer_count, num_elements);
     Ok(Value::Int(result as i64))

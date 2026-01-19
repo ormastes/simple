@@ -2,7 +2,7 @@
 //!
 //! Ratatui FFI bindings for building terminal UIs.
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 // TuiEvent struct matches the C ABI struct in ratatui_tui.rs
@@ -41,7 +41,12 @@ pub fn ratatui_terminal_new_fn(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn ratatui_terminal_cleanup_fn(args: &[Value]) -> Result<Value, CompileError> {
     let terminal = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("ratatui_terminal_cleanup expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("ratatui_terminal_cleanup expects 1 argument");
+            CompileError::semantic_with_context("ratatui_terminal_cleanup expects 1 argument".to_string(), ctx)
+        })?
         .as_int()? as u64;
     unsafe {
         ratatui_terminal_cleanup(terminal);
@@ -53,7 +58,12 @@ pub fn ratatui_terminal_cleanup_fn(args: &[Value]) -> Result<Value, CompileError
 pub fn ratatui_terminal_clear_fn(args: &[Value]) -> Result<Value, CompileError> {
     let terminal = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("ratatui_terminal_clear expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("ratatui_terminal_clear expects 1 argument");
+            CompileError::semantic_with_context("ratatui_terminal_clear expects 1 argument".to_string(), ctx)
+        })?
         .as_int()? as u64;
     unsafe {
         ratatui_terminal_clear(terminal);
@@ -71,11 +81,21 @@ pub fn ratatui_textbuffer_new_fn(_args: &[Value]) -> Result<Value, CompileError>
 pub fn ratatui_textbuffer_insert_char_fn(args: &[Value]) -> Result<Value, CompileError> {
     let buffer = args
         .get(0)
-        .ok_or_else(|| CompileError::Semantic("ratatui_textbuffer_insert_char expects 2 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("ratatui_textbuffer_insert_char expects 2 arguments");
+            CompileError::semantic_with_context("ratatui_textbuffer_insert_char expects 2 arguments".to_string(), ctx)
+        })?
         .as_int()? as u64;
     let code = args
         .get(1)
-        .ok_or_else(|| CompileError::Semantic("ratatui_textbuffer_insert_char expects 2 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("ratatui_textbuffer_insert_char expects 2 arguments");
+            CompileError::semantic_with_context("ratatui_textbuffer_insert_char expects 2 arguments".to_string(), ctx)
+        })?
         .as_int()? as u32;
     unsafe {
         ratatui_textbuffer_insert_char(buffer, code);
@@ -87,7 +107,12 @@ pub fn ratatui_textbuffer_insert_char_fn(args: &[Value]) -> Result<Value, Compil
 pub fn ratatui_textbuffer_backspace_fn(args: &[Value]) -> Result<Value, CompileError> {
     let buffer = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("ratatui_textbuffer_backspace expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("ratatui_textbuffer_backspace expects 1 argument");
+            CompileError::semantic_with_context("ratatui_textbuffer_backspace expects 1 argument".to_string(), ctx)
+        })?
         .as_int()? as u64;
     unsafe {
         ratatui_textbuffer_backspace(buffer);
@@ -99,7 +124,12 @@ pub fn ratatui_textbuffer_backspace_fn(args: &[Value]) -> Result<Value, CompileE
 pub fn ratatui_textbuffer_newline_fn(args: &[Value]) -> Result<Value, CompileError> {
     let buffer = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("ratatui_textbuffer_newline expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("ratatui_textbuffer_newline expects 1 argument");
+            CompileError::semantic_with_context("ratatui_textbuffer_newline expects 1 argument".to_string(), ctx)
+        })?
         .as_int()? as u64;
     unsafe {
         ratatui_textbuffer_newline(buffer);
@@ -111,7 +141,12 @@ pub fn ratatui_textbuffer_newline_fn(args: &[Value]) -> Result<Value, CompileErr
 pub fn ratatui_object_destroy_fn(args: &[Value]) -> Result<Value, CompileError> {
     let handle = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("ratatui_object_destroy expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("ratatui_object_destroy expects 1 argument");
+            CompileError::semantic_with_context("ratatui_object_destroy expects 1 argument".to_string(), ctx)
+        })?
         .as_int()? as u64;
     unsafe {
         ratatui_object_destroy(handle);

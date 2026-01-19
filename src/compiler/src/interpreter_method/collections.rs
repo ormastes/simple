@@ -5,7 +5,7 @@ use super::super::{
     eval_array_reduce, eval_dict_filter, eval_dict_map_values, evaluate_expr, exec_function, instantiate_class, Enums,
     ImplMethods,
 };
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::collections::HashMap;
@@ -61,7 +61,13 @@ pub fn handle_array_methods(
                 new_arr.extend(other_arr);
                 Value::Array(new_arr)
             } else {
-                return Err(CompileError::Semantic("concat expects array argument".into()));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("concat expects an array argument");
+                return Err(CompileError::semantic_with_context(
+                    "concat expects array argument",
+                    ctx,
+                ));
             }
         }
         "insert" => {
@@ -250,7 +256,10 @@ pub fn handle_array_methods(
                     .collect();
                 Value::Array(result)
             } else {
-                return Err(CompileError::Semantic("zip expects array argument".into()));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("zip expects an array argument");
+                return Err(CompileError::semantic_with_context("zip expects array argument", ctx));
             }
         }
         "flat_map" => {
@@ -515,7 +524,12 @@ pub fn handle_array_methods(
                     _ => None,
                 })
                 .collect::<Option<Vec<_>>>()
-                .ok_or_else(|| CompileError::Runtime("transpose requires array of arrays".into()))?;
+                .ok_or_else(|| {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help("transpose requires a 2D array (array of arrays)");
+                    CompileError::semantic_with_context("transpose requires array of arrays", ctx)
+                })?;
 
             if inner_arrays.is_empty() {
                 return Ok(Some(Value::Array(vec![])));
@@ -625,7 +639,10 @@ pub fn handle_tuple_methods(
                     .collect();
                 Value::Tuple(result)
             } else {
-                return Err(CompileError::Semantic("zip expects tuple argument".into()));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("zip expects a tuple argument");
+                return Err(CompileError::semantic_with_context("zip expects tuple argument", ctx));
             }
         }
         "enumerate" => {
@@ -700,7 +717,10 @@ pub fn handle_dict_methods(
                 new_map.extend(other_map);
                 Value::Dict(new_map)
             } else {
-                return Err(CompileError::Semantic("merge expects dict argument".into()));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("merge expects a dict argument");
+                return Err(CompileError::semantic_with_context("merge expects dict argument", ctx));
             }
         }
         "clear" => {

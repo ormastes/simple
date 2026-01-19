@@ -38,7 +38,7 @@
 //! let ptx = gpu_backend.emit_ptx()?;
 //! ```
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::mir::MirFunction;
 
 #[cfg(feature = "llvm")]
@@ -198,8 +198,12 @@ impl LlvmGpuBackend {
         #[cfg(not(feature = "llvm"))]
         {
             let _ = cc;
-            Err(CompileError::Semantic(
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("Enable the 'llvm' feature flag when building this crate");
+            Err(CompileError::semantic_with_context(
                 "LLVM GPU backend requires 'llvm' feature flag".to_string(),
+                ctx,
             ))
         }
 
@@ -253,16 +257,25 @@ impl LlvmGpuBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn create_kernel_module(&self, _name: &str) -> Result<(), CompileError> {
-        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+        let ctx = ErrorContext::new()
+            .with_code(codes::UNSUPPORTED_FEATURE)
+            .with_help("Enable the 'llvm' feature flag when building this crate");
+        Err(CompileError::semantic_with_context(
+            "LLVM feature not enabled".to_string(),
+            ctx,
+        ))
     }
 
     /// Declare NVPTX intrinsics in the module
     #[cfg(feature = "llvm")]
     fn declare_nvptx_intrinsics(&self) -> Result<(), CompileError> {
         let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        let module = module.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Call create_kernel_module() before declaring intrinsics");
+            CompileError::semantic_with_context("Module not created".to_string(), ctx)
+        })?;
 
         let i32_type = self.context.i32_type();
 
@@ -308,9 +321,12 @@ impl LlvmGpuBackend {
         param_types: &[BasicTypeEnum<'static>],
     ) -> Result<FunctionValue<'static>, CompileError> {
         let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        let module = module.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Call create_kernel_module() before creating kernel functions");
+            CompileError::semantic_with_context("Module not created".to_string(), ctx)
+        })?;
 
         // Kernel functions return void
         let void_type = self.context.void_type();
@@ -332,7 +348,13 @@ impl LlvmGpuBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn create_kernel_function(&self, _name: &str, _param_types: &[()]) -> Result<(), CompileError> {
-        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+        let ctx = ErrorContext::new()
+            .with_code(codes::UNSUPPORTED_FEATURE)
+            .with_help("Enable the 'llvm' feature flag when building this crate");
+        Err(CompileError::semantic_with_context(
+            "LLVM feature not enabled".to_string(),
+            ctx,
+        ))
     }
 
     /// Add kernel metadata for NVPTX
@@ -376,15 +398,22 @@ impl LlvmGpuBackend {
         dim: u8,
     ) -> Result<IntValue<'static>, CompileError> {
         if dim > 2 {
-            return Err(CompileError::Semantic(
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Dimension must be 0 (x), 1 (y), or 2 (z)");
+            return Err(CompileError::semantic_with_context(
                 "Invalid dimension (must be 0, 1, or 2)".to_string(),
+                ctx,
             ));
         }
 
         let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        let module = module.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Call create_kernel_module() before emitting GPU intrinsics");
+            CompileError::semantic_with_context("Module not created".to_string(), ctx)
+        })?;
 
         let intrinsic_name = GPU_INTRINSIC_NAMES[kind as usize][dim as usize];
         let result_name = GPU_INTRINSIC_RESULT_NAMES[kind as usize];
@@ -449,13 +478,19 @@ impl LlvmGpuBackend {
     #[cfg(feature = "llvm")]
     pub fn emit_barrier(&self, builder: &Builder<'static>) -> Result<(), CompileError> {
         let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        let module = module.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Call create_kernel_module() before emitting barriers");
+            CompileError::semantic_with_context("Module not created".to_string(), ctx)
+        })?;
 
-        let func = module
-            .get_function("llvm.nvvm.barrier0")
-            .ok_or_else(|| CompileError::Semantic("Barrier intrinsic not declared".to_string()))?;
+        let func = module.get_function("llvm.nvvm.barrier0").ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Call declare_nvptx_intrinsics() before emitting barriers");
+            CompileError::semantic_with_context("Barrier intrinsic not declared".to_string(), ctx)
+        })?;
 
         builder
             .build_call(func, &[], "")
@@ -472,9 +507,12 @@ impl LlvmGpuBackend {
         scope: crate::mir::GpuMemoryScope,
     ) -> Result<(), CompileError> {
         let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        let module = module.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Call create_kernel_module() before emitting memory fences");
+            CompileError::semantic_with_context("Module not created".to_string(), ctx)
+        })?;
 
         let intrinsic_name = match scope {
             crate::mir::GpuMemoryScope::WorkGroup => "llvm.nvvm.membar.cta",
@@ -502,25 +540,36 @@ impl LlvmGpuBackend {
         size: u32,
     ) -> Result<PointerValue<'static>, CompileError> {
         let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        let module = module.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Call create_kernel_module() before allocating shared memory");
+            CompileError::semantic_with_context("Module not created".to_string(), ctx)
+        })?;
 
         // Create array type for shared memory
         let array_type = match element_type {
             BasicTypeEnum::IntType(t) => t.array_type(size),
             BasicTypeEnum::FloatType(t) => t.array_type(size),
             _ => {
-                return Err(CompileError::Semantic(
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("Shared memory elements must be integer or float types");
+                return Err(CompileError::semantic_with_context(
                     "Unsupported shared memory element type".to_string(),
-                ))
+                    ctx,
+                ));
             }
         };
 
         // Create global variable in address space 3 (shared memory)
         // NVPTX address spaces: 0=generic, 1=global, 3=shared, 4=constant, 5=local
-        let shared_addr_space =
-            AddressSpace::try_from(3u16).map_err(|_| CompileError::Semantic("Invalid address space".to_string()))?;
+        let shared_addr_space = AddressSpace::try_from(3u16).map_err(|_| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("GPU address space 3 (shared memory) is not supported by this LLVM version");
+            CompileError::semantic_with_context("Invalid address space".to_string(), ctx)
+        })?;
 
         // Generate unique name for shared memory
         let name = format!("__shared_mem_{}", self.kernel_functions.borrow().len());
@@ -535,24 +584,36 @@ impl LlvmGpuBackend {
     #[cfg(feature = "llvm")]
     pub fn get_ir(&self) -> Result<String, CompileError> {
         let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        let module = module.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Call create_kernel_module() before retrieving IR");
+            CompileError::semantic_with_context("Module not created".to_string(), ctx)
+        })?;
         Ok(module.print_to_string().to_string())
     }
 
     #[cfg(not(feature = "llvm"))]
     pub fn get_ir(&self) -> Result<String, CompileError> {
-        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+        let ctx = ErrorContext::new()
+            .with_code(codes::UNSUPPORTED_FEATURE)
+            .with_help("Enable the 'llvm' feature flag when building this crate");
+        Err(CompileError::semantic_with_context(
+            "LLVM feature not enabled".to_string(),
+            ctx,
+        ))
     }
 
     /// Emit PTX code from the module
     #[cfg(feature = "llvm")]
     pub fn emit_ptx(&self) -> Result<String, CompileError> {
         let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        let module = module.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Call create_kernel_module() before emitting PTX code");
+            CompileError::semantic_with_context("Module not created".to_string(), ctx)
+        })?;
 
         // Initialize NVPTX targets
         inkwell::targets::Target::initialize_all(&InitializationConfig::default());
@@ -574,7 +635,12 @@ impl LlvmGpuBackend {
                 RelocMode::Default,
                 CodeModel::Default,
             )
-            .ok_or_else(|| CompileError::Semantic("Failed to create NVPTX target machine".to_string()))?;
+            .ok_or_else(|| {
+                let ctx = ErrorContext::new().with_code(codes::INVALID_OPERATION).with_help(
+                    "Verify that your compute capability setting is compatible with the target LLVM version",
+                );
+                CompileError::semantic_with_context("Failed to create NVPTX target machine".to_string(), ctx)
+            })?;
 
         // Emit assembly (PTX)
         let buffer = target_machine
@@ -591,16 +657,25 @@ impl LlvmGpuBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn emit_ptx(&self) -> Result<String, CompileError> {
-        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+        let ctx = ErrorContext::new()
+            .with_code(codes::UNSUPPORTED_FEATURE)
+            .with_help("Enable the 'llvm' feature flag when building this crate");
+        Err(CompileError::semantic_with_context(
+            "LLVM feature not enabled".to_string(),
+            ctx,
+        ))
     }
 
     /// Verify the module
     #[cfg(feature = "llvm")]
     pub fn verify(&self) -> Result<(), CompileError> {
         let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        let module = module.as_ref().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("Call create_kernel_module() before verifying the module");
+            CompileError::semantic_with_context("Module not created".to_string(), ctx)
+        })?;
 
         module
             .verify()
@@ -610,7 +685,13 @@ impl LlvmGpuBackend {
 
     #[cfg(not(feature = "llvm"))]
     pub fn verify(&self) -> Result<(), CompileError> {
-        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+        let ctx = ErrorContext::new()
+            .with_code(codes::UNSUPPORTED_FEATURE)
+            .with_help("Enable the 'llvm' feature flag when building this crate");
+        Err(CompileError::semantic_with_context(
+            "LLVM feature not enabled".to_string(),
+            ctx,
+        ))
     }
 }
 

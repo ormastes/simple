@@ -11,7 +11,7 @@
 
 use super::ast::{MathExpr, Range};
 use super::lexer::{MathLexer, MathToken};
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 
 /// Parse math expression
 pub fn parse_math(input: &str) -> Result<(MathExpr, Vec<String>), CompileError> {
@@ -57,11 +57,13 @@ impl MathParser {
             self.advance();
             Ok(())
         } else {
-            Err(CompileError::Semantic(format!(
-                "expected {:?}, found {:?}",
-                expected,
-                self.current()
-            )))
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help(format!("expected {:?}, found {:?}", expected, self.current()));
+            Err(CompileError::semantic_with_context(
+                format!("expected {:?}, found {:?}", expected, self.current()),
+                ctx,
+            ))
         }
     }
 
@@ -307,10 +309,15 @@ impl MathParser {
                 self.expect(MathToken::RBracket)?;
                 Ok(MathExpr::Array(elements))
             }
-            _ => Err(CompileError::Semantic(format!(
-                "unexpected token in math: {:?}",
-                self.current()
-            ))),
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("unexpected token in math expression");
+                Err(CompileError::semantic_with_context(
+                    format!("unexpected token in math: {:?}", self.current()),
+                    ctx,
+                ))
+            }
         }
     }
 
@@ -348,7 +355,15 @@ impl MathParser {
                 self.advance();
                 v
             }
-            _ => return Err(CompileError::Semantic("expected variable name in binder".to_string())),
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("binder requires a variable name");
+                return Err(CompileError::semantic_with_context(
+                    "expected variable name in binder",
+                    ctx,
+                ));
+            }
         };
 
         // Optional type annotation (ignored for now)
@@ -429,10 +444,13 @@ impl MathParser {
             "cdot" | "times" => {
                 // These are binary operators, but in LaTeX they appear between operands
                 // Return a placeholder that will be handled by the caller
-                Err(CompileError::Semantic(format!(
-                    "LaTeX operator \\{} should be replaced with *",
-                    cmd
-                )))
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("use * for multiplication instead of LaTeX operators");
+                Err(CompileError::semantic_with_context(
+                    format!("LaTeX operator \\{} should be replaced with *", cmd),
+                    ctx,
+                ))
             }
             // \pm -> ±
             "pm" => Ok(MathExpr::Var("pm".to_string())),
@@ -463,7 +481,12 @@ impl MathParser {
                     self.advance();
                     v
                 }
-                _ => return Err(CompileError::Semantic("expected variable in binder".to_string())),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("binder requires a variable name");
+                    return Err(CompileError::semantic_with_context("expected variable in binder", ctx));
+                }
             };
             self.expect(MathToken::Eq)?;
             let start = self.parse_expression()?;
@@ -476,7 +499,12 @@ impl MathParser {
                     self.advance();
                     v
                 }
-                _ => return Err(CompileError::Semantic("expected variable in binder".to_string())),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("binder requires a variable name");
+                    return Err(CompileError::semantic_with_context("expected variable in binder", ctx));
+                }
             };
             self.expect(MathToken::Eq)?;
             let start = self.parse_primary()?;
