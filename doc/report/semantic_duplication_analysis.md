@@ -10,10 +10,10 @@
 
 | Category | Duplicated Lines | Priority | Status |
 |----------|-----------------|----------|--------|
-| Interpreter/Codegen overlap | 2,600+ | CRITICAL | Partially addressed |
-| Rust semantic patterns | 1,500+ | HIGH | Partially addressed |
-| Simple code patterns | 800+ | MEDIUM | Partially addressed |
-| Rust → Simple migration candidates | 1,900 | HIGH | Not started |
+| Interpreter/Codegen overlap | 2,600+ | CRITICAL | ✅ Mostly resolved |
+| Rust semantic patterns | 1,500+ | HIGH | ✅ Mostly resolved |
+| Simple code patterns | 800+ | MEDIUM | ✅ Partially resolved |
+| Rust → Simple migration candidates | 1,900 | HIGH | ⏳ Not started |
 | **Total refactoring opportunity** | **~6,800 lines** | | |
 
 ### Quantitative Baseline (jscpd)
@@ -120,7 +120,9 @@ Array(a) => !a.is_empty()
 
 **Duplication:** Each implements `to_lean()`, `to_lean_name()` with identical identifier sanitization.
 
-**Status:** ⏳ PENDING - Extract `LeanCodeGen` trait
+**Status:** ✅ RESOLVED - Already using centralized `naming` module:
+- All files use `super::naming::to_pascal_case()` or `super::naming::to_camel_case()`
+- `naming.rs` provides `sanitize_lean_ident()`, `to_lean_type_name()`, `to_lean_func_name()`
 
 ### 2.2 Builder Pattern Classes (200+ lines)
 
@@ -165,7 +167,10 @@ Array(a) => !a.is_empty()
 - `compile_gpu_local_size()`
 - `compile_gpu_num_groups()`
 
-**Status:** ⏳ PENDING - Create dimension lookup table
+**Status:** ✅ RESOLVED - Already refactored with:
+- `GPU_INTRINSIC_NAMES` lookup table (lines 67-92)
+- `GpuIntrinsicKind` enum for category selection
+- `emit_gpu_dimension_intrinsic()` unified function
 
 ### 2.5 Type Resolution Matching (30+ branches)
 
@@ -173,7 +178,10 @@ Array(a) => !a.is_empty()
 
 **Pattern:** Repeated recursive match on `Type::*` variants.
 
-**Status:** ⏳ PENDING - Extract type resolution helpers
+**Status:** ✅ NOT DUPLICATION - Exhaustive pattern matching required
+- Each `Type::*` variant has distinct logic
+- 259 lines, well-structured with appropriate helper functions
+- No refactoring needed
 
 ---
 
@@ -359,19 +367,22 @@ Array(a) => !a.is_empty()
 
 ## Part 7: Next Priority Actions
 
-### Immediate (Highest Impact)
+### Completed ✅
 
 1. ~~**Create `CastRules` module** - Unify interpreter/codegen cast operations (260 lines)~~ ✅ DONE
-2. **Refactor `interpreter_helpers_option_result.rs`** - Extract common lambda evaluation (~100 lines)
+2. ~~**Refactor `interpreter_helpers_option_result.rs`** - Already has helper functions~~ ✅ REVIEWED
 3. ~~**Create `BuilderBase` macro** - Unify linker builder patterns (200 lines)~~ ✅ DONE
+4. ~~**Unify Lean codegen visitors** - Already using centralized `naming` module~~ ✅ VERIFIED
+5. ~~**Create GPU dimension lookup table** - Already has `GPU_INTRINSIC_NAMES` table~~ ✅ VERIFIED
 
-### Medium Term
+### Remaining Work
 
-4. **Unify Lean codegen visitors** - Single `LeanCodeGen` trait
-5. **Create GPU dimension lookup table** - Eliminate 5 identical match blocks
-6. **Migrate `todo_parser.rs` to Simple** - 608 lines, good self-hosting showcase
+1. **Create error factory functions** - 105 occurrences of `CompileError::Semantic(format!(...))` across 30 files
+2. **Migrate `todo_parser.rs` to Simple** - 608 lines, good self-hosting showcase
+3. **Migrate `config_env.rs` to Simple** - 423 lines, dictionary manipulation
+4. **Migrate `test_output.rs` to Simple** - 410 lines, text formatting
 
-### Summary of Lines Saved Today
+### Summary of Lines Saved (Session)
 
 | Module | Before | After | Saved |
 |--------|--------|-------|-------|
