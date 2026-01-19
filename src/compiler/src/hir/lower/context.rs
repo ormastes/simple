@@ -65,6 +65,11 @@ impl FunctionContext {
         self.local_map.get(name).copied()
     }
 
+    /// Get a local variable by index
+    pub fn get_local(&self, index: usize) -> Option<&LocalVar> {
+        self.locals.get(index)
+    }
+
     /// Check if the given name is the postcondition binding
     pub fn is_postcondition_binding(&self, name: &str) -> bool {
         if let Some(ref ctx) = self.contract_ctx {

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use simple_parser::Pattern;
 
+use super::super::lifetime::LifetimeContext;
 use super::super::types::{HirModule, TypeId};
 use super::memory_warning::MemoryWarningCollector;
 use crate::module_resolver::ModuleResolver;
@@ -23,6 +24,8 @@ pub struct Lowerer {
     pub(super) loaded_modules: HashSet<PathBuf>,
     /// Memory safety warning collector
     pub(super) memory_warnings: MemoryWarningCollector,
+    /// Lifetime inference context for tracking reference lifetimes
+    pub(super) lifetime_context: LifetimeContext,
 }
 
 impl Lowerer {
@@ -36,6 +39,7 @@ impl Lowerer {
             current_file: None,
             loaded_modules: HashSet::new(),
             memory_warnings: MemoryWarningCollector::new(),
+            lifetime_context: LifetimeContext::new(),
         }
     }
 
@@ -50,6 +54,7 @@ impl Lowerer {
             current_file: Some(current_file),
             loaded_modules: HashSet::new(),
             memory_warnings: MemoryWarningCollector::new(),
+            lifetime_context: LifetimeContext::new(),
         }
     }
 
@@ -64,6 +69,7 @@ impl Lowerer {
             current_file: None,
             loaded_modules: HashSet::new(),
             memory_warnings: MemoryWarningCollector::strict(),
+            lifetime_context: LifetimeContext::new(),
         }
     }
 
@@ -89,6 +95,31 @@ impl Lowerer {
             Pattern::Typed { pattern: inner, .. } => Self::extract_pattern_name(inner),
             _ => None,
         }
+    }
+
+    /// Get the lifetime context
+    pub fn lifetime_context(&self) -> &LifetimeContext {
+        &self.lifetime_context
+    }
+
+    /// Get mutable access to the lifetime context
+    pub fn lifetime_context_mut(&mut self) -> &mut LifetimeContext {
+        &mut self.lifetime_context
+    }
+
+    /// Check if there are any lifetime violations
+    pub fn has_lifetime_violations(&self) -> bool {
+        self.lifetime_context.has_violations()
+    }
+
+    /// Get all lifetime violations
+    pub fn lifetime_violations(&self) -> &[super::super::lifetime::LifetimeViolation] {
+        self.lifetime_context.violations()
+    }
+
+    /// Generate Lean 4 verification code for lifetime constraints
+    pub fn generate_lean4_lifetime_verification(&self) -> String {
+        self.lifetime_context.generate_lean4()
     }
 }
 

@@ -1,5 +1,6 @@
 pub mod arena;
 pub mod capability;
+pub mod lifetime;
 mod lower;
 pub mod memory_model;
 mod types;

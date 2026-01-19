@@ -1,5 +1,5 @@
 use super::expansion::expand_user_macro;
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, Enums, ImplMethods};
 use crate::value::{Env, Value};
 use simple_parser::ast::{BinOp, ClassDef, Expr, FunctionDef, MacroArg};
@@ -232,7 +232,15 @@ pub(crate) fn evaluate_macro_invocation(
             if let Some(m) = macro_def {
                 expand_user_macro(&m, macro_args, env, functions, classes, enums, impl_methods)
             } else {
-                Err(CompileError::Semantic(format!("unknown macro: {}!", name)))
+                // E1401 - Macro Undefined
+                let ctx = ErrorContext::new()
+                    .with_code(codes::MACRO_UNDEFINED)
+                    .with_help("check that the macro is defined and in scope")
+                    .with_note("ensure the macro name is spelled correctly");
+                Err(CompileError::semantic_with_context(
+                    format!("macro `{}!` is not defined", name),
+                    ctx,
+                ))
             }
         }
     }
