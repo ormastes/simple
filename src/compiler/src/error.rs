@@ -1046,6 +1046,19 @@ pub mod factory {
         ))
     }
 
+    /// Error when a value is not callable.
+    pub fn not_callable(type_name: &str) -> CompileError {
+        CompileError::Semantic(format!("cannot call value of type {}", type_name))
+    }
+
+    /// Error when a required trait method is not implemented.
+    pub fn missing_trait_method(type_name: &str, method_name: &str, trait_name: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "type `{}` does not implement required method `{}` from trait `{}`",
+            type_name, method_name, trait_name
+        ))
+    }
+
     /// Error when an enum is not found.
     pub fn enum_not_found(enum_name: &str) -> CompileError {
         CompileError::Semantic(format!("unknown enum '{}'", enum_name))
