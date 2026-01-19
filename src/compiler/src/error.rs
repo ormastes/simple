@@ -878,6 +878,22 @@ pub mod factory {
         CompileError::Semantic(format!("expected {} indices, got {}", expected, found))
     }
 
+    /// Error when tensor data length doesn't match shape.
+    pub fn tensor_data_length_mismatch(data_len: usize, shape: &[usize], expected: usize) -> CompileError {
+        CompileError::Semantic(format!(
+            "tensor data length {} doesn't match shape {:?} (expected {})",
+            data_len, shape, expected
+        ))
+    }
+
+    /// Error when item() is called on non-scalar tensor.
+    pub fn tensor_item_requires_scalar(actual_len: usize) -> CompileError {
+        CompileError::Semantic(format!(
+            "item() requires exactly one element, tensor has {}",
+            actual_len
+        ))
+    }
+
     // ============================================
     // Unit Conversion Errors
     // ============================================

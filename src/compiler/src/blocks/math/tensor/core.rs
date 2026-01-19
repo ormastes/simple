@@ -25,12 +25,7 @@ impl Tensor {
     pub fn new(data: Vec<f64>, shape: Vec<usize>) -> Result<Self, CompileError> {
         let expected_len: usize = shape.iter().product();
         if data.len() != expected_len {
-            return Err(CompileError::Semantic(format!(
-                "tensor data length {} doesn't match shape {:?} (expected {})",
-                data.len(),
-                shape,
-                expected_len
-            )));
+            return Err(crate::error::factory::tensor_data_length_mismatch(data.len(), &shape, expected_len));
         }
         let strides = compute_strides(&shape);
         Ok(Self { data, shape, strides })
@@ -54,10 +49,7 @@ impl Tensor {
     /// Get scalar value (panics if not scalar)
     pub fn item(&self) -> Result<f64, CompileError> {
         if self.data.len() != 1 {
-            return Err(CompileError::Semantic(format!(
-                "item() requires exactly one element, tensor has {}",
-                self.data.len()
-            )));
+            return Err(crate::error::factory::tensor_item_requires_scalar(self.data.len()));
         }
         Ok(self.data[0])
     }
