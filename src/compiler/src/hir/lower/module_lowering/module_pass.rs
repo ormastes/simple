@@ -208,6 +208,16 @@ impl Lowerer {
         let mut type_checker = crate::type_check::TypeChecker::new();
         type_checker.apply_promise_wrapping(&mut self.module)?;
 
+        // Seventh pass: check for lifetime violations (E2001-E2006)
+        if self.lifetime_context.has_violations() {
+            let violations = self.lifetime_context.violations().to_vec();
+            if violations.len() == 1 {
+                return Err(super::error::LowerError::LifetimeViolation(violations.into_iter().next().unwrap()));
+            } else {
+                return Err(super::error::LowerError::LifetimeViolations(violations));
+            }
+        }
+
         Ok(self.module)
     }
 
@@ -368,6 +378,16 @@ impl Lowerer {
         // Sixth pass: apply Promise auto-wrapping
         let mut type_checker = crate::type_check::TypeChecker::new();
         type_checker.apply_promise_wrapping(&mut self.module)?;
+
+        // Seventh pass: check for lifetime violations (E2001-E2006)
+        if self.lifetime_context.has_violations() {
+            let violations = self.lifetime_context.violations().to_vec();
+            if violations.len() == 1 {
+                return Err(super::error::LowerError::LifetimeViolation(violations.into_iter().next().unwrap()));
+            } else {
+                return Err(super::error::LowerError::LifetimeViolations(violations));
+            }
+        }
 
         // Take warnings before consuming self
         let warnings = std::mem::take(&mut self.memory_warnings);

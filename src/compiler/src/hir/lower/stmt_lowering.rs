@@ -97,10 +97,12 @@ impl Lowerer {
                     // If the return expression is a variable reference, check its origin
                     if let HirExprKind::Local(idx) = &expr.kind {
                         if let Some(local) = ctx.get_local(*idx) {
-                            if let Some(origin) = self.lifetime_context.get_variable_origin(&local.name) {
+                            // Clone the origin to avoid borrow checker issues
+                            let origin = self.lifetime_context.get_variable_origin(&local.name).cloned();
+                            if let Some(origin) = origin {
                                 // Check if this is a reference type being returned
                                 if self.is_reference_type(expr.ty) {
-                                    self.lifetime_context.check_return(origin, ret.span);
+                                    self.lifetime_context.check_return(&origin, ret.span);
                                 }
                             }
                         }
