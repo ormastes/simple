@@ -100,6 +100,20 @@ pub(crate) fn evaluate_call(
                         impl_methods,
                     );
                 }
+                Value::NativeFunction(native) => {
+                    let evaluated: Vec<Value> = args
+                        .iter()
+                        .map(|a| {
+                            if a.name.is_some() {
+                                return Err(CompileError::Semantic(
+                                    "native function does not support named arguments".into(),
+                                ));
+                            }
+                            evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return (native.func)(&evaluated);
+                }
                 _ => {}
             }
         }

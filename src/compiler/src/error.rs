@@ -1038,6 +1038,14 @@ pub mod factory {
         CompileError::Semantic(format!("unknown class '{}'", class_name))
     }
 
+    /// Error when a strong enum has wildcard pattern in match.
+    pub fn strong_enum_no_wildcard(enum_name: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "strong enum '{}' does not allow wildcard or catch-all patterns in match",
+            enum_name
+        ))
+    }
+
     /// Error when an enum is not found.
     pub fn enum_not_found(enum_name: &str) -> CompileError {
         CompileError::Semantic(format!("unknown enum '{}'", enum_name))
