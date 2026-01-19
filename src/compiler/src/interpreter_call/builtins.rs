@@ -1,7 +1,7 @@
 // Built-in functions for interpreter
 // Range, Option, Result, Actor primitives, Futures, Generators, etc.
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     check_effect_violations, create_range_object, evaluate_expr, message_to_value, spawn_actor_with_expr,
     spawn_future_with_callable_and_env, spawn_future_with_expr, ACTOR_INBOX, ACTOR_OUTBOX, GENERATOR_YIELDS,
@@ -91,7 +91,17 @@ pub(super) fn eval_builtin(
             if let Value::Actor(handle) = target_val {
                 handle
                     .send(Message::Value(msg_val.to_display_string()))
-                    .map_err(|e| semantic_err!("{}", e))?;
+                    .map_err(|e| {
+                        // E1201 - Actor Send Failed
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::ACTOR_SEND_FAILED)
+                            .with_help("check that the actor is still running")
+                            .with_note(format!("send error: {}", e));
+                        CompileError::semantic_with_context(
+                            "failed to send message to actor".to_string(),
+                            ctx,
+                        )
+                    })?;
                 return Ok(Some(Value::Nil));
             }
             bail_semantic!("send target must be actor");
@@ -109,7 +119,17 @@ pub(super) fn eval_builtin(
                                 .and_then(|receiver| {
                                     receiver
                                         .recv_timeout(std::time::Duration::from_secs(5))
-                                        .map_err(|e| semantic_err!("recv timeout: {}", e))
+                                        .map_err(|e| {
+                                            // E1202 - Actor Recv Failed
+                                            let ctx = ErrorContext::new()
+                                                .with_code(codes::ACTOR_RECV_FAILED)
+                                                .with_help("check that the actor is still running")
+                                                .with_note(format!("recv error: {}", e));
+                                            CompileError::semantic_with_context(
+                                                "failed to receive message from actor".to_string(),
+                                                ctx,
+                                            )
+                                        })
                                 })
                         })
                 })?;
@@ -119,7 +139,17 @@ pub(super) fn eval_builtin(
                 if let Value::Actor(handle) = handle_val {
                     let msg = handle
                         .recv_timeout(std::time::Duration::from_secs(5))
-                        .map_err(|e| semantic_err!("{}", e))?;
+                        .map_err(|e| {
+                            // E1202 - Actor Recv Failed
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::ACTOR_RECV_FAILED)
+                                .with_help("check that the actor is still running")
+                                .with_note(format!("recv error: {}", e));
+                            CompileError::semantic_with_context(
+                                "failed to receive message from actor".to_string(),
+                                ctx,
+                            )
+                        })?;
                     return Ok(Some(message_to_value(msg)));
                 }
                 bail_semantic!("recv expects actor handle");
@@ -134,7 +164,17 @@ pub(super) fn eval_builtin(
                     .ok_or_else(|| semantic_err!("reply called outside actor"))
                     .and_then(|tx| {
                         tx.send(Message::Value(msg_val.to_display_string()))
-                            .map_err(|e| semantic_err!("reply failed: {}", e))
+                            .map_err(|e| {
+                                // E1201 - Actor Send Failed
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::ACTOR_SEND_FAILED)
+                                    .with_help("check that the reply channel is still active")
+                                    .with_note(format!("reply error: {}", e));
+                                CompileError::semantic_with_context(
+                                    "failed to send reply to actor".to_string(),
+                                    ctx,
+                                )
+                            })
                     })
             })?;
             Ok(Some(Value::Nil))

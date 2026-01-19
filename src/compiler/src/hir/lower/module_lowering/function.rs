@@ -1,5 +1,6 @@
 use simple_parser as ast;
 
+use crate::hir::lifetime::{ReferenceOrigin, ScopeKind};
 use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
@@ -144,6 +145,17 @@ impl Lowerer {
             self.current_class_type = self.module.types.lookup(type_name);
         }
 
+        // Set function name for lifetime error messages
+        let func_name = if let Some(owner) = owner_type {
+            format!("{}.{}", owner, f.name)
+        } else {
+            f.name.clone()
+        };
+        self.lifetime_context.set_function(&func_name);
+
+        // Enter function scope for lifetime tracking
+        self.lifetime_context.enter_scope(ScopeKind::Function, Some(f.span));
+
         let inject = f.decorators.iter().any(|dec| {
             if let ast::Expr::Identifier(name) = &dec.name {
                 name == "inject" || name == "sys_inject"
@@ -159,7 +171,13 @@ impl Lowerer {
         let mut ctx = FunctionContext::new(return_type);
 
         // Add parameters as locals and check capability compatibility with mode
-        for param in &f.params {
+        for (param_idx, param) in f.params.iter().enumerate() {
+            // Register parameter with lifetime context
+            let origin = ReferenceOrigin::Parameter {
+                name: param.name.clone(),
+                index: param_idx,
+            };
+            self.lifetime_context.register_variable(&param.name, origin);
             let ty = if let Some(t) = &param.ty {
                 // Check if parameter has a capability that's incompatible with the mode
                 if let ast::Type::Capability { capability, .. } = t {
@@ -280,6 +298,9 @@ impl Lowerer {
 
         // Get module path (currently use module name, will be enhanced later)
         let module_path = self.module.name.clone().unwrap_or_default();
+
+        // Exit function scope for lifetime tracking
+        self.lifetime_context.exit_scope();
 
         // Restore previous class type
         self.current_class_type = previous_class_type;
