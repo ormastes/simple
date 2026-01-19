@@ -558,6 +558,45 @@ fn create_i18n_diagnostic_from_code(code: &str, message: &str, ctx: &ErrorContex
             I18nDiagnostic::error_i18n("compiler", "E2009", &msg_ctx)
         }
 
+        // Context errors (E10xx continued)
+        codes::INVALID_CONTEXT => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1081", &msg_ctx)
+        }
+
+        // Actor/Concurrency errors (E12xx)
+        codes::ACTOR_SEND_FAILED => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1201", &msg_ctx)
+        }
+
+        codes::ACTOR_RECV_FAILED => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1202", &msg_ctx)
+        }
+
+        codes::CHANNEL_CLOSED => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1203", &msg_ctx)
+        }
+
+        codes::DEADLOCK_DETECTED => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1204", &msg_ctx)
+        }
+
+        codes::ACTOR_JOIN_FAILED => {
+            let msg_ctx = ctx1("message", message);
+            I18nDiagnostic::error_i18n("compiler", "E1205", &msg_ctx)
+        }
+
+        // Custom block errors (E16xx)
+        codes::UNKNOWN_BLOCK_TYPE => {
+            let kind = extract_name_from_message(message);
+            let msg_ctx = ctx1("kind", kind);
+            I18nDiagnostic::error_i18n("compiler", "E1601", &msg_ctx)
+        }
+
         // FFI errors (E40xx)
         codes::TYPE_NOT_FFI_SAFE => {
             let type_name = extract_type_from_message(message);
