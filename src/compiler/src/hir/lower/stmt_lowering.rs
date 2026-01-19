@@ -1,5 +1,6 @@
 use simple_parser::{self as ast, Node};
 
+use super::super::lifetime::{ReferenceOrigin, ScopeKind};
 use super::super::types::*;
 use super::context::FunctionContext;
 use super::error::{LowerError, LowerResult};
@@ -7,10 +8,23 @@ use super::lowerer::Lowerer;
 
 impl Lowerer {
     pub(super) fn lower_block(&mut self, block: &ast::Block, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
+        // Enter block scope for lifetime tracking
+        let span = block.statements.first().and_then(|n| match n {
+            Node::Let(l) => Some(l.span),
+            Node::Assignment(a) => Some(a.span),
+            Node::Return(r) => Some(r.span),
+            _ => None,
+        });
+        self.lifetime_context.enter_scope(ScopeKind::Block, span);
+
         let mut stmts = Vec::new();
         for node in &block.statements {
             stmts.extend(self.lower_node(node, ctx)?);
         }
+
+        // Exit block scope
+        self.lifetime_context.exit_scope();
+
         Ok(stmts)
     }
 
@@ -52,6 +66,14 @@ impl Lowerer {
                     self.check_unique_copy(v, let_stmt.span, is_explicit_move);
                 }
 
+                // Register variable with lifetime context for tracking
+                let current_lifetime = self.lifetime_context.current_lifetime();
+                let origin = ReferenceOrigin::Local {
+                    name: name.clone(),
+                    scope: current_lifetime,
+                };
+                self.lifetime_context.register_variable(&name, origin);
+
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
 
                 Ok(vec![HirStmt::Let { local_index, ty, value }])
@@ -69,7 +91,22 @@ impl Lowerer {
 
             Node::Return(ret) => {
                 let value = if let Some(v) = &ret.value {
-                    Some(self.lower_expr(v, ctx)?)
+                    let expr = self.lower_expr(v, ctx)?;
+
+                    // Check for returning local reference (E2005)
+                    // If the return expression is a variable reference, check its origin
+                    if let HirExprKind::Local(idx) = &expr.kind {
+                        if let Some(local) = ctx.get_local(*idx) {
+                            if let Some(origin) = self.lifetime_context.get_variable_origin(&local.name) {
+                                // Check if this is a reference type being returned
+                                if self.is_reference_type(expr.ty) {
+                                    self.lifetime_context.check_return(origin, ret.span);
+                                }
+                            }
+                        }
+                    }
+
+                    Some(expr)
                 } else {
                     None
                 };

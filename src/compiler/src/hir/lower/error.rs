@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use super::super::lifetime::LifetimeViolation;
 use super::super::types::TypeId;
 
 #[derive(Error, Debug)]
@@ -73,6 +74,14 @@ pub enum LowerError {
     /// Module resolution error (cannot find or load imported module)
     #[error("Module resolution error: {0}")]
     ModuleResolution(String),
+
+    /// Lifetime violation errors (E2001-E2006)
+    #[error("{}", .0.description())]
+    LifetimeViolation(LifetimeViolation),
+
+    /// Multiple lifetime violations
+    #[error("Multiple lifetime violations detected ({} errors)", .0.len())]
+    LifetimeViolations(Vec<LifetimeViolation>),
 }
 
 pub type LowerResult<T> = Result<T, LowerError>;

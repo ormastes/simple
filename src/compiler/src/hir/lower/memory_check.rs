@@ -59,6 +59,27 @@ impl Lowerer {
         }
     }
 
+    /// Check if a type is a reference type (pointer/borrow that has lifetime concerns)
+    /// This includes unique pointers (&T), borrows (&T, &mut T), but NOT shared pointers (*T)
+    /// as shared pointers are reference counted and don't have lifetime issues
+    pub(super) fn is_reference_type(&self, ty: TypeId) -> bool {
+        if let Some(hir_type) = self.module.types.get(ty) {
+            matches!(
+                hir_type,
+                HirType::Pointer {
+                    kind: PointerKind::Unique
+                        | PointerKind::Borrow
+                        | PointerKind::BorrowMut
+                        | PointerKind::RawConst
+                        | PointerKind::RawMut,
+                    ..
+                }
+            )
+        } else {
+            false
+        }
+    }
+
     /// Get type name for error messages
     pub(super) fn get_type_name(&self, ty: TypeId) -> String {
         if let Some(hir_type) = self.module.types.get(ty) {
