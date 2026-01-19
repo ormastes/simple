@@ -465,10 +465,7 @@ pub(super) fn exec_match(
             if is_strong {
                 for arm in &match_stmt.arms {
                     if is_catch_all_pattern(&arm.pattern) {
-                        return Err(CompileError::Semantic(format!(
-                            "strong enum '{}' does not allow wildcard or catch-all patterns in match",
-                            enum_name
-                        )));
+                        return Err(crate::error::factory::strong_enum_no_wildcard(enum_name));
                     }
                 }
             }
@@ -527,10 +524,7 @@ pub(super) fn exec_match_expr(
             if is_strong {
                 for arm in &match_stmt.arms {
                     if is_catch_all_pattern(&arm.pattern) {
-                        return Err(CompileError::Semantic(format!(
-                            "strong enum '{}' does not allow wildcard or catch-all patterns in match",
-                            enum_name
-                        )));
+                        return Err(crate::error::factory::strong_enum_no_wildcard(enum_name));
                     }
                 }
             }
