@@ -4,12 +4,15 @@
 //! - `simple feature-gen` - Generate feature.md from feature_db.sdn
 //! - `simple task-gen` - Generate task.md from task_db.sdn
 //! - `simple spec-gen` - Generate doc/spec/ from tests/spec/*_spec.spl
+//! - `simple todo-scan` - Scan source code and update todo_db.sdn
+//! - `simple todo-gen` - Generate TODO.md from todo_db.sdn
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::feature_db::{generate_feature_docs, load_feature_db};
 use crate::task_db::{generate_task_docs, load_task_db};
+use crate::todo_db::{generate_todo_docs, load_todo_db, save_todo_db, update_todo_db_from_scan};
 
 /// Run feature-gen command
 pub fn run_feature_gen(args: &[String]) -> i32 {
@@ -312,6 +315,103 @@ fn title_case(s: &str) -> String {
         .join(" ")
 }
 
+/// Run todo-scan command
+pub fn run_todo_scan(args: &[String]) -> i32 {
+    let db_path = args
+        .iter()
+        .position(|a| a == "--db")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("doc/todo/todo_db.sdn"));
+
+    let scan_path = args
+        .iter()
+        .position(|a| a == "--path")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let validate_only = args.contains(&"--validate".to_string());
+
+    println!("Scanning TODOs from {}...", scan_path.display());
+
+    // Load existing database
+    let mut db = match load_todo_db(&db_path) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("warning: failed to load existing database: {}", e);
+            eprintln!("Creating new database...");
+            crate::todo_db::TodoDb::new()
+        }
+    };
+
+    // Scan and update
+    match update_todo_db_from_scan(&mut db, &scan_path) {
+        Ok((added, updated, removed)) => {
+            println!("Scan complete:");
+            println!("  Added:   {} TODOs", added);
+            println!("  Updated: {} TODOs", updated);
+            println!("  Removed: {} TODOs", removed);
+            println!("  Total:   {} TODOs", db.valid_records().len());
+
+            if !validate_only {
+                // Save database
+                if let Err(e) = save_todo_db(&db_path, &db) {
+                    eprintln!("error: failed to save database: {}", e);
+                    return 1;
+                }
+                println!("Database saved to {}", db_path.display());
+            } else {
+                println!("Validation only - database not updated");
+            }
+
+            0
+        }
+        Err(e) => {
+            eprintln!("error: failed to scan: {}", e);
+            1
+        }
+    }
+}
+
+/// Run todo-gen command
+pub fn run_todo_gen(args: &[String]) -> i32 {
+    let db_path = args
+        .iter()
+        .position(|a| a == "--db")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("doc/todo/todo_db.sdn"));
+
+    let output_dir = args
+        .iter()
+        .position(|a| a == "-o" || a == "--output")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("doc"));
+
+    println!("Generating TODO docs from {}...", db_path.display());
+
+    let db = match load_todo_db(&db_path) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("error: failed to load TODO database: {}", e);
+            return 1;
+        }
+    };
+
+    if let Err(e) = generate_todo_docs(&db, &output_dir) {
+        eprintln!("error: failed to generate docs: {}", e);
+        return 1;
+    }
+
+    let count = db.valid_records().len();
+    println!("Generated docs for {} TODOs", count);
+    println!("  -> {}/TODO.md", output_dir.display());
+
+    0
+}
+
 /// Print help for doc generation commands
 pub fn print_doc_gen_help() {
     eprintln!("Documentation Generation Commands");
@@ -320,14 +420,20 @@ pub fn print_doc_gen_help() {
     eprintln!("  simple feature-gen [options]  - Generate feature docs from feature_db.sdn");
     eprintln!("  simple task-gen [options]     - Generate task docs from task_db.sdn");
     eprintln!("  simple spec-gen [options]     - Generate spec docs from *_spec.spl files");
+    eprintln!("  simple todo-scan [options]    - Scan source code and update todo_db.sdn");
+    eprintln!("  simple todo-gen [options]     - Generate TODO.md from todo_db.sdn");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --db <path>       Input database file (feature-gen, task-gen)");
+    eprintln!("  --db <path>       Input database file (feature-gen, task-gen, todo-*)");
     eprintln!("  --input <path>    Input directory (spec-gen)");
+    eprintln!("  --path <path>     Scan directory (todo-scan, default: .)");
+    eprintln!("  --validate        Validate only, don't update database (todo-scan)");
     eprintln!("  -o, --output <path>  Output directory");
     eprintln!();
     eprintln!("Defaults:");
     eprintln!("  feature-gen: doc/feature/feature_db.sdn -> doc/feature/");
     eprintln!("  task-gen:    doc/task/task_db.sdn -> doc/task/");
     eprintln!("  spec-gen:    tests/spec/ -> doc/spec/generated/");
+    eprintln!("  todo-scan:   . -> doc/todo/todo_db.sdn");
+    eprintln!("  todo-gen:    doc/todo/todo_db.sdn -> doc/TODO.md");
 }
