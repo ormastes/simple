@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use simple_parser::ast::Expr;
 
 use super::evaluate_expr;
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 use super::super::{
@@ -223,7 +223,16 @@ pub(super) fn eval_collection_expr(
 
             let result = match recv_val {
                 Value::Array(arr) => {
-                    let raw_idx = idx_val.as_int()?;
+                    // E1043 - Invalid Index Type
+                    let raw_idx = idx_val.as_int().map_err(|_| {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_INDEX_TYPE)
+                            .with_help("array indices must be integers");
+                        CompileError::semantic_with_context(
+                            format!("cannot index array with type `{}`", idx_val.type_name()),
+                            ctx,
+                        )
+                    })?;
                     let len = arr.len() as i64;
                     // Support negative indexing
                     let idx = if raw_idx < 0 {
@@ -236,7 +245,16 @@ pub(super) fn eval_collection_expr(
                         .ok_or_else(|| CompileError::Semantic(format!("array index out of bounds: {raw_idx}")))
                 }
                 Value::Tuple(tup) => {
-                    let raw_idx = idx_val.as_int()?;
+                    // E1043 - Invalid Index Type
+                    let raw_idx = idx_val.as_int().map_err(|_| {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_INDEX_TYPE)
+                            .with_help("tuple indices must be integers");
+                        CompileError::semantic_with_context(
+                            format!("cannot index tuple with type `{}`", idx_val.type_name()),
+                            ctx,
+                        )
+                    })?;
                     let len = tup.len() as i64;
                     // Support negative indexing
                     let idx = if raw_idx < 0 {
@@ -255,7 +273,16 @@ pub(super) fn eval_collection_expr(
                         .ok_or_else(|| CompileError::Semantic(format!("dict key not found: {key}")))
                 }
                 Value::Str(s) => {
-                    let raw_idx = idx_val.as_int()?;
+                    // E1043 - Invalid Index Type
+                    let raw_idx = idx_val.as_int().map_err(|_| {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_INDEX_TYPE)
+                            .with_help("string indices must be integers");
+                        CompileError::semantic_with_context(
+                            format!("cannot index string with type `{}`", idx_val.type_name()),
+                            ctx,
+                        )
+                    })?;
                     let len = s.chars().count() as i64;
                     // Support negative indexing
                     let idx = if raw_idx < 0 {
@@ -285,7 +312,17 @@ pub(super) fn eval_collection_expr(
                 Value::Tuple(tup) => tup
                     .get(*index)
                     .cloned()
-                    .ok_or_else(|| CompileError::Semantic(format!("tuple index out of bounds: {index}"))),
+                    .ok_or_else(|| {
+                        // E1044 - Tuple Index OOB
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::TUPLE_INDEX_OOB)
+                            .with_note(format!("tuple has {} element(s)", tup.len()))
+                            .with_help("ensure the index is within bounds");
+                        CompileError::semantic_with_context(
+                            format!("tuple index out of bounds: index is {} but length is {}", index, tup.len()),
+                            ctx,
+                        )
+                    }),
                 _ => Err(CompileError::Semantic("tuple index access on non-tuple type".into())),
             };
             Ok(Some(result?))

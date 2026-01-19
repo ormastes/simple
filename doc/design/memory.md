@@ -1,62 +1,234 @@
 # Memory Design: GC + Manual Cooperation
 
-## Goals
-- GC-managed default per Feature #24, but allow manual/unique/shared/weak/handle pointers without fighting the GC.
-- Keep compiler/runtime contract narrow: compiler targets `common::gc::GcAllocator` and pointer-kind markers; runtime implements concrete policies.
-- Avoid double-free/aliasing hazards when mixing manual and GC by separating ownership domains and requiring explicit conversions.
+> **Version:** 2.0
+> **Last Updated:** 2026-01-19
+> **Related:** `doc/plan/manual_memory_safety_plan.md`
 
-## Model
-- **GC domain (default)**: values allocated via `GcAllocator`; opaque handles exposed to runtime; tracing via Abfall backend.
-- **Manual domain**:
-  - Unique (`&T`): RAII-owned; no aliasing; freed deterministically.
-  - Shared (`*T`): refcounted; freed when count hits zero.
-  - Weak (`-T`): non-owning; upgrade-or-nil semantics.
-  - Handle (`+T`): pooled, managed by runtime (e.g., FDs, resources).
-- **Interop**:
-  - From GC -> manual: require explicit `clone_unique/clone_shared` builtins; compiler emits conversions via `common` ABI.
-  - From manual -> GC: wrap in GC handle; manual source invalidated.
-  - No implicit mixing; codegen chooses correct ABI call based on type.
+## Overview
 
-## Borrow References (planned)
-- Borrow types (`&T_borrow`, `&mut T_borrow`) are **non-owning views** over data in any domain (GC, unique, shared, handle pool slots). They never perform allocation or deallocation.
-- Alias rules are purely static: multiple immutable borrows OR one mutable borrow of the same base at a time. Violations are compile-time errors; runtime only provides an escape hatch for unimplemented cases.
-- Lifetimes are scoped to blocks/CFG regions; borrows to manual owners cannot outlive the owner move/drop, and borrows to GC values cannot outlive the lexical scope that created them.
-- Handle pools expose borrowable views via `handle_get`/`handle_get_mut`; these return short-lived borrows tied to the pool slot and must not escape the call site.
+Simple uses a two-domain memory model:
+1. **GC Domain** (default) - Automatic memory management
+2. **Manual Domain** (opt-in) - Explicit ownership control
 
-## Layout/ABI
-- `common::gc` defines:
-  - `GcAllocator` (alloc/collect)
-  - `GcHandle<T>` opaque handle token
-  - `GcRoot` for pinning (future)
-- `common::manual` defines:
-  - `ManualGc` + `Unique<T>` RAII owners with tracking, `Shared<T>`/`WeakPtr<T>` for refcounted/weak, and `HandlePool`/`Handle<T>` for pool-managed handles.
-  - Conversion helpers to be added alongside richer compiler lowering once pointer kinds are enforced in type checking.
-- `runtime::memory` hosts:
-  - `gc` (Abfall-backed tracing GC)
-  - `no_gc` (GC-off profile: boxed allocations, `collect` is no-op) to support latency-critical builds; CLI/runtime can pick this via `--gc=off` or `SIMPLE_GC=off`.
-- Compiler lowers allocations:
-  - Default: `GcAllocator::alloc_bytes`
-  - Unique: stack or heap malloc/free
-  - Shared/Weak: refcounted struct with vtable
-  - Handle: runtime pool API
+---
 
-## Current Implementation Snapshot
-- Runtime exports `GcRuntime` (Abfall-backed) and `NoGcAllocator` under `runtime::memory`; both satisfy the `GcAllocator` contract from `common::gc`.
-- Manual ownership helpers (`ManualGc`, `Unique`, `Shared`, `WeakPtr`, `HandlePool`, `Handle`) live in `common::manual` and are test-covered for leak/drop accounting; compiler does not yet enforce aliasing on top of them.
-- Borrow references are specified in the language doc but not yet represented in compiler/types; no runtime enforcement exists beyond handle pool helpers returning short-lived views.
+## Pointer Types
 
-## Safety Rules (front-end)
-- Pointer kinds are explicit in types; no implicit up/downcast.
-- Assigning GC to manual requires `clone_*` builtin; type checker enforces.
-- Destructor side-effects only in manual domain; GC domain is non-deterministic finalization.
+| Syntax | Name | Domain | Ownership | Mutation |
+|--------|------|--------|-----------|----------|
+| `T` | GC Reference | GC | GC-managed | Via `mut` |
+| `&T` | Unique | Manual | Single owner | Via `mut` |
+| `*T` | Shared | Manual | Ref-counted | Read-only |
+| `-T` | Weak | Manual | Non-owning | N/A |
+| `+T` | Handle | Manual | Pool-managed | Via pool |
 
-## Incremental Plan (borrowing + memory)
-- Step 1: Add borrow reference variants to the AST and `type` crate; thread through parser/formatter without enforcement.  
-- Step 2: Enrich type inference with borrow qualifiers and forbid invalid coercions (e.g., `&mut` to `&mut` of a different base).  
-- Step 3: Introduce a lightweight MIR/CFG pass for local aliasing (one `&mut` or many `&`), covering GC and manual owners equally.  
-- Step 4: Add block-scoped region tracking to reject escaping borrows and storing borrows into longer-lived fields unless proven safe.  
-- Step 5: Extend checks to captures/actors and handle pools, keeping runtime free of borrow-state while offering a gated runtime-checked fallback for unsupported patterns.
+**Capabilities:**
+| Syntax | Name | Aliasing |
+|--------|------|----------|
+| `T` | Shared | Multiple readers OK |
+| `mut T` | Exclusive | Single writer only |
+| `iso T` | Isolated | No aliasing, transferable |
+
+---
+
+## GC Domain (Default)
+
+```simple
+# Default: GC-managed allocation
+val player = Player { name: "Hero", hp: 100 }
+val copy = player    # GC handles sharing
+```
+
+- Values allocated via `GcAllocator`
+- Tracing via Abfall backend
+- Non-deterministic finalization
+- CLI: `--gc=on` (default)
+
+---
+
+## Manual Domain (Opt-in)
+
+### Unique Pointer (`&T`)
+
+```simple
+# Single owner, RAII
+val owner: &Data = new(&) Data(42)
+val moved = move owner    # Explicit transfer
+# owner is now invalid
+```
+
+- Exactly one owner at a time
+- Move-only (no implicit copy)
+- Freed deterministically at scope end
+
+### Shared Pointer (`*T`)
+
+```simple
+# Reference counted, read-only
+val shared1: *Data = new* Data(42)
+val shared2 = shared1    # Refcount incremented
+
+# Mutation via COW pattern
+val updated = shared1.with_value(100)
+```
+
+- Multiple owners via refcount
+- Read-only in safe code
+- COW for updates (returns new `*T`)
+
+### Weak Pointer (`-T`)
+
+```simple
+# Non-owning, breaks cycles
+val shared: *Node = new* Node(1)
+val weak: -Node = weak_of(shared)
+
+match weak.upgrade():
+    case Some(strong): use(strong)
+    case None: log "Node freed"
+```
+
+- Does not keep object alive
+- Must upgrade before use
+- Returns `Option<*T>`
+
+### Handle Pointer (`+T`)
+
+```simple
+# Pool-managed, slot + generation
+handle_pool Enemy:
+    capacity: 1024
+
+val h: +Enemy = new+ Enemy(hp: 100)
+match Enemy.handle_get_mut(h):
+    case Some(e): e.hp -= 10
+    case None: log "Invalid handle"
+```
+
+- Lightweight ID into global pool
+- Generation validates stale handles
+- Ideal for entity systems
+
+---
+
+## Domain Interop
+
+**Explicit conversions required:**
+
+```simple
+# GC -> Manual
+val gc_val: Data = Data(42)
+val unique: &Data = clone_unique(gc_val)
+val shared: *Data = clone_shared(gc_val)
+
+# Manual -> GC
+val manual: &Data = new(&) Data(42)
+val gc_val: Data = into_gc(move manual)
+```
+
+- No implicit mixing between domains
+- Compiler enforces explicit conversions
+- Type checker validates pointer kinds
+
+---
+
+## Safety Rules
+
+### Rule 1: No Shared Mutation
+
+```simple
+val shared: *Data = new* Data(0)
+# shared.value = 10        # Error: shared mutation
+val updated = shared.with_value(10)  # OK: COW
+```
+
+### Rule 2: No Implicit Unique Copy
+
+```simple
+val unique: &Box = new(&) Box(42)
+# val copy = unique        # Error: implicit copy
+val moved = move unique    # OK: explicit move
+val cloned = unique.clone()  # OK: explicit clone
+```
+
+### Rule 3: No Escaping Borrows
+
+```simple
+fn bad() -> &Data:
+    val local: &Data = new(&) Data(42)
+    return local           # Error: escapes scope
+
+fn good() -> Data:
+    val local: &Data = new(&) Data(42)
+    return move local      # OK: ownership transfer
+```
+
+### Rule 4: Mut Requires Exclusive Access
+
+```simple
+fn update(data: mut Data):   # Exclusive access
+    data.value = 10          # OK
+
+fn read(data: Data):         # Shared access
+    # data.value = 10        # Error: no mut
+```
+
+---
+
+## Implementation
+
+### Layout/ABI
+
+- **`common::gc`**: `GcAllocator`, `GcHandle<T>`, `GcRoot`
+- **`common::manual`**: `Unique<T>`, `Shared<T>`, `WeakPtr<T>`, `HandlePool`, `Handle<T>`
+- **`runtime::memory`**: `gc` (Abfall), `no_gc` (boxed, no collection)
+
+### Compiler Lowering
+
+| Type | Lowering |
+|------|----------|
+| `T` | `GcAllocator::alloc_bytes` |
+| `&T` | Stack/heap malloc + RAII drop |
+| `*T` | Refcounted struct |
+| `-T` | Weak refcount |
+| `+T` | Pool slot + generation |
+
+---
+
+## Migration (Phased)
+
+See `doc/plan/manual_memory_safety_plan.md` for details.
+
+| Phase | Goal | Status |
+|-------|------|--------|
+| 1. Warnings | Identify violations | In Progress |
+| 2. Refactor | Fix all warnings | Planned |
+| 3. Strict | Default strict mode | Planned |
+| 4. Legacy | Deprecated escape | Planned |
+
+---
 
 ## Testing
-- GC logs via `--gc-log` to assert allocations/collections.
-- Manual domain: leak-check tests for unique/shared lifetimes (once implemented).
+
+```bash
+# GC logs
+simple run --gc-log script.spl
+
+# Memory warnings
+simple check --memory-warnings src/
+
+# Debug lifecycle
+simple run --debug-lifecycle script.spl
+
+# Debug refcount
+simple run --debug-rc script.spl
+```
+
+---
+
+## Related Documents
+
+- **Plan:** `doc/plan/manual_memory_safety_plan.md`
+- **Architecture:** `doc/architecture/memory_model_implementation.md`
+- **Spec:** `doc/spec/generated/memory.md`
+- **Tests:** `simple/std_lib/test/features/types/memory_safety_spec.spl`

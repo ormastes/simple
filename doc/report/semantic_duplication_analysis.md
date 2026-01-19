@@ -82,7 +82,11 @@ String: len, concat, contains, slice
 
 **Duplicated:** 10 separate `cast_to_*` functions with identical semantics.
 
-**Status:** 🔄 IN PROGRESS - Need to create `CastRules` module
+**Status:** ✅ RESOLVED - Created `src/compiler/src/semantics/cast_rules.rs`
+- Unified `NumericType` enum for all numeric casts
+- `cast_int_to_numeric()`, `cast_float_to_numeric()`, `cast_bool_to_numeric()` functions
+- `bool_cast` and `string_cast` modules for non-numeric conversions
+- Reduced `casting.rs` from 206 to 112 lines (~94 lines saved)
 
 ### 1.5 Truthiness Evaluation (80+ lines duplicated)
 
@@ -131,7 +135,13 @@ Array(a) => !a.is_empty()
 .library_path(path: impl Into<PathBuf>)
 ```
 
-**Status:** ⏳ PENDING - Create `BuilderBase` trait or macro
+**Status:** ✅ RESOLVED - Created `src/compiler/src/linker/builder_macros.rs`
+- `impl_linker_builder_methods!` - library/library_path methods
+- `impl_bool_flag_methods!` - strip/pie/shared/verbose/map flags
+- `impl_layout_methods!` - layout_optimize/layout_profile
+- `impl_target_method!` - target architecture
+- `impl_linker_method!` - linker selection
+- Reduced `native_binary.rs` from 696 to ~550 lines (~146 lines saved)
 
 ### 2.3 Error Creation Patterns (670+ occurrences)
 
@@ -299,7 +309,39 @@ Array(a) => !a.is_empty()
 
 **Default implementations:** 20+ reusable iteration functions
 
-### 6.5 Bug Fixes Applied
+### 6.5 CastRules Module Created (Rust)
+
+**Files created:**
+- `src/compiler/src/semantics/cast_rules.rs`
+
+**Features:**
+- `NumericType` enum - unified representation for i8-i64, u8-u64, f32, f64
+- `cast_int_to_numeric()` - cast i64 to any numeric type
+- `cast_float_to_numeric()` - cast f64 to any numeric type
+- `cast_bool_to_numeric()` - cast bool to any numeric type
+- `bool_cast` module - conversion rules for bool
+- `string_cast` module - conversion rules for string
+
+**Impact:** Reduced `interpreter/expr/casting.rs` from 206 to 112 lines (94 lines saved)
+
+**Tests:** 6 unit tests all passing
+
+### 6.6 Builder Macros Extended (Rust)
+
+**File modified:**
+- `src/compiler/src/linker/builder_macros.rs`
+
+**Macros added:**
+- `impl_bool_flag_methods!` - strip, pie, shared, verbose, map
+- `impl_layout_methods!` - layout_optimize, layout_profile
+- `impl_target_method!` - target architecture
+- `impl_linker_method!` - linker selection
+
+**Impact:** Reduced `native_binary.rs` from 696 to ~550 lines (146 lines saved)
+
+**Tests:** All builder tests passing (21 tests)
+
+### 6.7 Bug Fixes Applied
 
 | File | Fix |
 |------|-----|
@@ -319,15 +361,23 @@ Array(a) => !a.is_empty()
 
 ### Immediate (Highest Impact)
 
-1. **Create `CastRules` module** - Unify interpreter/codegen cast operations (260 lines)
+1. ~~**Create `CastRules` module** - Unify interpreter/codegen cast operations (260 lines)~~ ✅ DONE
 2. **Refactor `interpreter_helpers_option_result.rs`** - Extract common lambda evaluation (~100 lines)
-3. **Create `BuilderBase` macro** - Unify linker builder patterns (200 lines)
+3. ~~**Create `BuilderBase` macro** - Unify linker builder patterns (200 lines)~~ ✅ DONE
 
 ### Medium Term
 
 4. **Unify Lean codegen visitors** - Single `LeanCodeGen` trait
 5. **Create GPU dimension lookup table** - Eliminate 5 identical match blocks
 6. **Migrate `todo_parser.rs` to Simple** - 608 lines, good self-hosting showcase
+
+### Summary of Lines Saved Today
+
+| Module | Before | After | Saved |
+|--------|--------|-------|-------|
+| `interpreter/expr/casting.rs` | 206 | 111 | 95 |
+| `linker/native_binary.rs` | 696 | 577 | 119 |
+| **Total** | | | **214 lines** |
 
 ---
 
@@ -349,11 +399,13 @@ Array(a) => !a.is_empty()
 
 ### Critical Duplication Files
 ```
-src/compiler/src/interpreter/expr/ops.rs      # Binary/Unary ops
-src/compiler/src/codegen/instr/core.rs        # Codegen ops
-src/compiler/src/interpreter_method/          # Method dispatch (1000+ lines)
-src/compiler/src/codegen/instr/methods.rs     # Codegen methods
-src/compiler/src/value_impl.rs                # Type coercion
+src/compiler/src/interpreter/expr/ops.rs      # Binary/Unary ops - ✅ semantics/binary_ops.rs
+src/compiler/src/codegen/instr/core.rs        # Codegen ops - ✅ semantics/binary_ops.rs
+src/compiler/src/interpreter_method/          # Method dispatch - ✅ method_registry/
+src/compiler/src/codegen/instr/methods.rs     # Codegen methods - ✅ method_registry/
+src/compiler/src/value_impl.rs                # Type coercion - ✅ semantics/type_coercion.rs
+src/compiler/src/interpreter/expr/casting.rs  # Cast operations - ✅ semantics/cast_rules.rs
+src/compiler/src/linker/native_binary.rs      # Builder pattern - ✅ linker/builder_macros.rs
 ```
 
 ### Migration Candidate Files

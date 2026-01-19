@@ -1,6 +1,6 @@
 use simple_parser::ast::{BinOp, UnaryOp};
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::UNIT_SUFFIX_TO_FAMILY;
 use crate::interpreter_unit::decompose_si_prefix;
 use crate::value::Value;
@@ -198,11 +198,35 @@ pub(super) fn evaluate_unit_unary_inner(value: &Value, op: UnaryOp) -> Result<Va
                 value.type_name()
             ))),
         },
-        UnaryOp::Not => Err(CompileError::Semantic("cannot apply logical NOT to unit value".into())),
-        UnaryOp::BitNot => Err(CompileError::Semantic("cannot apply bitwise NOT to unit value".into())),
-        _ => Err(CompileError::Semantic(format!(
-            "unsupported unary operation {:?} on unit value",
-            op
-        ))),
+        UnaryOp::Not => {
+            // E1041 - Invalid Unary Op
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_UNARY_OP)
+                .with_help("operator `!` cannot be applied to unit values");
+            Err(CompileError::semantic_with_context(
+                "cannot apply operator `!` to unit value type".to_string(),
+                ctx,
+            ))
+        }
+        UnaryOp::BitNot => {
+            // E1041 - Invalid Unary Op
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_UNARY_OP)
+                .with_help("operator `~` cannot be applied to unit values");
+            Err(CompileError::semantic_with_context(
+                "cannot apply operator `~` to unit value type".to_string(),
+                ctx,
+            ))
+        }
+        _ => {
+            // E1041 - Invalid Unary Op
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_UNARY_OP)
+                .with_help("this operator cannot be applied to unit values");
+            Err(CompileError::semantic_with_context(
+                format!("unsupported unary operation on unit value"),
+                ctx,
+            ))
+        }
     }
 }

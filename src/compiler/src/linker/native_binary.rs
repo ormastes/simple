@@ -200,71 +200,12 @@ impl NativeBinaryBuilder {
         self
     }
 
-    /// Set target architecture.
-    pub fn target(mut self, target: Target) -> Self {
-        self.options.target = target;
-        self
-    }
-
-    /// Enable layout optimization.
-    pub fn layout_optimize(mut self, enable: bool) -> Self {
-        self.options.layout_optimize = enable;
-        self
-    }
-
-    /// Set profile data for guided layout.
-    pub fn layout_profile(mut self, path: impl Into<PathBuf>) -> Self {
-        self.options.layout_profile = Some(path.into());
-        self
-    }
-
-    /// Strip symbols.
-    pub fn strip(mut self, enable: bool) -> Self {
-        self.options.strip = enable;
-        self
-    }
-
-    /// Create PIE.
-    pub fn pie(mut self, enable: bool) -> Self {
-        self.options.pie = enable;
-        self
-    }
-
-    /// Create shared library.
-    pub fn shared(mut self, enable: bool) -> Self {
-        self.options.shared = enable;
-        self
-    }
-
-    /// Add library to link.
-    pub fn library(mut self, name: impl Into<String>) -> Self {
-        self.options.libraries.push(name.into());
-        self
-    }
-
-    /// Add library search path.
-    pub fn library_path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.options.library_paths.push(path.into());
-        self
-    }
-
-    /// Set linker.
-    pub fn linker(mut self, linker: NativeLinker) -> Self {
-        self.options.linker = Some(linker);
-        self
-    }
-
-    /// Enable map file generation.
-    pub fn map(mut self, enable: bool) -> Self {
-        self.options.generate_map = enable;
-        self
-    }
-
-    /// Enable verbose output.
-    pub fn verbose(mut self, enable: bool) -> Self {
-        self.options.verbose = enable;
-        self
-    }
+    // Use macros for common builder methods (delegating to self.options)
+    impl_target_method!(options);
+    impl_layout_methods!(options);
+    impl_bool_flag_methods!(options);
+    impl_linker_builder_methods!(options);
+    impl_linker_method!(options);
 
     /// Set custom options.
     pub fn options(mut self, options: NativeBinaryOptions) -> Self {
