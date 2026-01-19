@@ -71,7 +71,13 @@ pub(crate) fn bind_args_with_injected(
                 Value::Array(arr) => arr,
                 Value::Tuple(tup) => tup,
                 _ => {
-                    bail_semantic!("spread operator requires array or tuple value");
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help("the spread operator (...) can only be used with arrays or tuples");
+                    return Err(CompileError::semantic_with_context(
+                        "spread operator requires array or tuple value".to_string(),
+                        ctx,
+                    ));
                 }
             };
 
@@ -130,7 +136,13 @@ pub(crate) fn bind_args_with_injected(
                 // Named argument
                 let param = params_to_bind.iter().find(|p| &p.name == name);
                 if param.is_none() {
-                    bail_semantic!("unknown argument {}", name);
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::UNDEFINED_VARIABLE)
+                        .with_help("check the function signature for valid parameter names");
+                    return Err(CompileError::semantic_with_context(
+                        format!("unknown argument '{}'", name),
+                        ctx,
+                    ));
                 }
                 let val = wrap_trait_object!(val, param.and_then(|p| p.ty.as_ref()));
                 validate_unit!(&val, param.and_then(|p| p.ty.as_ref()), format!("parameter '{}'", name));

@@ -105,6 +105,10 @@ pub mod codes {
     pub const ACTOR_RECV_FAILED: &str = "E1202";
     pub const CHANNEL_CLOSED: &str = "E1203";
     pub const DEADLOCK_DETECTED: &str = "E1204";
+    pub const ACTOR_JOIN_FAILED: &str = "E1205";
+
+    // Context errors (E10xx continued)
+    pub const INVALID_CONTEXT: &str = "E1081";
 
     // Capability errors (E13xx)
     pub const CAPABILITY_VIOLATION: &str = "E1301";

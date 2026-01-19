@@ -49,15 +49,39 @@ pub(crate) fn resolve_injected_args(
         if idx < positional_count {
             continue;
         }
-        let type_name = param_type_name(param)
-            .ok_or_else(|| semantic_err!("injectable parameter '{}' missing type", param.name))?;
-        let di_config = get_di_config()
-            .ok_or_else(|| semantic_err!("missing di config for injectable parameter '{}'", param.name))?;
+        let type_name = param_type_name(param).ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_SELF_PARAM)
+                .with_help("injectable parameters must have a type annotation");
+            CompileError::semantic_with_context(
+                format!("injectable parameter '{}' is missing type annotation", param.name),
+                ctx,
+            )
+        })?;
+        let di_config = get_di_config().ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNSUPPORTED_FEATURE)
+                .with_help("ensure DI configuration is properly initialized");
+            CompileError::semantic_with_context(
+                format!("DI configuration not found for injectable parameter '{}'", param.name),
+                ctx,
+            )
+        })?;
         let ctx = create_di_match_context(&type_name, class_name, &[]);
         let binding = di_config
             .select_binding("default", &ctx)
-            .map_err(|_| semantic_err!("ambiguous DI binding for '{}'", type_name))?
-            .ok_or_else(|| semantic_err!("no DI binding for '{}'", type_name))?;
+            .map_err(|_| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ATTRIBUTE_POSITION)
+                    .with_help("check that exactly one DI binding is configured for this type");
+                CompileError::semantic_with_context(format!("ambiguous DI binding found for type '{}'", type_name), ctx)
+            })?
+            .ok_or_else(|| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNSUPPORTED_FEATURE)
+                    .with_help("ensure a DI binding is configured for this type");
+                CompileError::semantic_with_context(format!("no DI binding configured for type '{}'", type_name), ctx)
+            })?;
 
         let value = resolve_binding_instance(
             &binding.impl_type,
@@ -110,9 +134,24 @@ pub(crate) fn resolve_binding_instance(
 
     let instance = if classes.contains_key(impl_type) {
         if let Some(aop_config) = get_aop_config() {
-            let class_def = classes
-                .get(impl_type)
-                .ok_or_else(|| semantic_err!("unknown class: {}", impl_type))?;
+            let class_def = classes.get(impl_type).ok_or_else(|| {
+                let available_classes: Vec<&str> = classes.keys().map(|s| s.as_str()).collect();
+                let suggestion = if !available_classes.is_empty() {
+                    typo::suggest_name(impl_type, available_classes.clone())
+                } else {
+                    None
+                };
+
+                let mut ctx = ErrorContext::new()
+                    .with_code(codes::UNKNOWN_CLASS)
+                    .with_help("check that the class is defined or imported in this scope");
+
+                if let Some(best_match) = suggestion {
+                    ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
+                }
+
+                CompileError::semantic_with_context(format!("class `{}` not found in this scope", impl_type), ctx)
+            })?;
             let around = collect_runtime_init_advices(impl_type, class_def, &aop_config);
             if around.is_empty() {
                 instantiate_class(impl_type, &[], env, functions, classes, enums, impl_methods)?
@@ -130,7 +169,13 @@ pub(crate) fn resolve_binding_instance(
             instantiate_class(impl_type, &[], env, functions, classes, enums, impl_methods)?
         }
     } else {
-        bail_semantic!("DI binding impl '{}' is not a class", impl_type);
+        let ctx = ErrorContext::new()
+            .with_code(codes::UNKNOWN_CLASS)
+            .with_help("DI bindings must reference a class type");
+        return Err(CompileError::semantic_with_context(
+            format!("DI binding impl '{}' is not a class", impl_type),
+            ctx,
+        ));
     };
 
     if scope == DiScope::Singleton {

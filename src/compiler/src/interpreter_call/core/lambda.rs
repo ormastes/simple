@@ -1,6 +1,6 @@
 // Lambda execution support
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{await_value, evaluate_expr};
 use crate::value::*;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef};

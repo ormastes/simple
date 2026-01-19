@@ -229,7 +229,13 @@ pub(crate) fn evaluate_call(
                     );
                 }
             }
-            bail_semantic!("unknown symbol {}.{}", module_name, field);
+            let ctx = ErrorContext::new()
+                .with_code(codes::UNDEFINED_VARIABLE)
+                .with_help("check that the symbol exists in the module");
+            return Err(CompileError::semantic_with_context(
+                format!("unknown symbol {}.{}", module_name, field),
+                ctx,
+            ));
         }
     }
 
@@ -401,6 +407,14 @@ pub(crate) fn evaluate_call(
                 payload,
             })
         }
-        _ => Err(semantic_err!("unsupported callee")),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::NOT_CALLABLE)
+                .with_help("value must be a function, lambda, constructor, or other callable type");
+            Err(CompileError::semantic_with_context(
+                "value is not callable".to_string(),
+                ctx,
+            ))
+        }
     }
 }
