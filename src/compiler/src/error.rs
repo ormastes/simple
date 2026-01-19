@@ -968,6 +968,28 @@ pub mod factory {
     }
 
     // ============================================
+    // Math Evaluation Errors
+    // ============================================
+
+    /// Error when a math variable is undefined.
+    pub fn undefined_math_variable(name: &str) -> CompileError {
+        CompileError::Semantic(format!("undefined math variable: {}", name))
+    }
+
+    /// Error when a math function is unknown.
+    pub fn unknown_math_function(name: &str) -> CompileError {
+        CompileError::Semantic(format!("unknown math function: {}", name))
+    }
+
+    /// Error when a tensor index is out of bounds for a 1D tensor.
+    pub fn tensor_1d_index_out_of_bounds(index: usize, length: usize) -> CompileError {
+        CompileError::Semantic(format!(
+            "index {} out of bounds for tensor of length {}",
+            index, length
+        ))
+    }
+
+    // ============================================
     // Conversion/Parse Errors
     // ============================================
 

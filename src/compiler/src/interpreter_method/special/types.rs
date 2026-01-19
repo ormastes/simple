@@ -419,13 +419,22 @@ pub fn handle_result_methods(
             }
             if res_variant == Some(ResultVariant::Err) {
                 if let Some(err_val) = payload {
-                    return Err(CompileError::Semantic(format!(
-                        "called unwrap on Err: {}",
-                        err_val.to_display_string()
-                    )));
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                        .with_help("check that the Result is Ok before calling unwrap");
+                    return Err(CompileError::semantic_with_context(
+                        format!("called unwrap on Err: {}", err_val.to_display_string()),
+                        ctx,
+                    ));
                 }
             }
-            return Err(CompileError::Semantic("called unwrap on Err".into()));
+            let ctx = ErrorContext::new()
+                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                .with_help("check that the Result is Ok before calling unwrap");
+            return Err(CompileError::semantic_with_context(
+                "called unwrap on Err".to_string(),
+                ctx,
+            ));
         }
         "expect" => {
             if res_variant == Some(ResultVariant::Ok) {
@@ -445,14 +454,26 @@ pub fn handle_result_methods(
             )?;
             if res_variant == Some(ResultVariant::Err) {
                 if let Some(err_val) = payload {
-                    return Err(CompileError::Semantic(format!(
-                        "{}: {}",
-                        msg.to_display_string(),
-                        err_val.to_display_string()
-                    )));
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                        .with_help("check that the Result is Ok before calling expect");
+                    return Err(CompileError::semantic_with_context(
+                        format!(
+                            "{}: {}",
+                            msg.to_display_string(),
+                            err_val.to_display_string()
+                        ),
+                        ctx,
+                    ));
                 }
             }
-            return Err(CompileError::Semantic(msg.to_display_string()));
+            let ctx = ErrorContext::new()
+                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                .with_help("check that the Result is Ok before calling expect");
+            return Err(CompileError::semantic_with_context(
+                msg.to_display_string(),
+                ctx,
+            ));
         }
         "unwrap_or" => {
             if res_variant == Some(ResultVariant::Ok) {
@@ -508,7 +529,13 @@ pub fn handle_result_methods(
                     return Ok(Some(val.as_ref().clone()));
                 }
             }
-            return Err(CompileError::Semantic("called unwrap_err on Ok".into()));
+            let ctx = ErrorContext::new()
+                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                .with_help("check that the Result is Err before calling unwrap_err");
+            return Err(CompileError::semantic_with_context(
+                "called unwrap_err on Ok".to_string(),
+                ctx,
+            ));
         }
         "expect_err" => {
             if res_variant == Some(ResultVariant::Err) {
@@ -526,7 +553,13 @@ pub fn handle_result_methods(
                 enums,
                 impl_methods,
             )?;
-            return Err(CompileError::Semantic(msg.to_display_string()));
+            let ctx = ErrorContext::new()
+                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                .with_help("check that the Result is Err before calling expect_err");
+            return Err(CompileError::semantic_with_context(
+                msg.to_display_string(),
+                ctx,
+            ));
         }
         "ok" => {
             if res_variant == Some(ResultVariant::Ok) {
