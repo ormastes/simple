@@ -295,7 +295,13 @@ pub(crate) fn evaluate_call(
                 return core::instantiate_class(method_name, args, env, functions, classes, enums, impl_methods);
             }
         }
-        bail_semantic!("unsupported path call: {:?}", segments);
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_OPERATION)
+            .with_help("path calls must be Type::method() or Type::Variant()");
+        return Err(CompileError::semantic_with_context(
+            format!("unsupported path call: {:?}", segments),
+            ctx,
+        ));
     }
 
     // Handle generic type constructors like Channel[int]()

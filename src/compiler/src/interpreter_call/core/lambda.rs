@@ -39,7 +39,13 @@ pub(crate) fn exec_lambda(
             local_env.insert(name.clone(), val);
         } else {
             if positional_idx >= params.len() {
-                bail_semantic!("too many arguments to lambda");
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help(format!("lambda expects {} argument(s)", params.len()));
+                return Err(CompileError::semantic_with_context(
+                    "too many arguments to lambda".to_string(),
+                    ctx,
+                ));
             }
             local_env.insert(params[positional_idx].clone(), val);
             positional_idx += 1;
