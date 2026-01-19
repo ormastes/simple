@@ -13,7 +13,7 @@ use simple_parser::ast::{ClassDef, Expr, FunctionDef, Node, Type, Visibility};
 use simple_parser::token::Span;
 use simple_runtime::value::diagram_ffi;
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{control_to_value, evaluate_expr, evaluate_module, exec_block, Enums, ImplMethods};
 use crate::value::{Env, Value};
 use crate::value_bridge::BridgeValue;
@@ -263,7 +263,15 @@ pub unsafe extern "C" fn simple_interp_call(
         if let Some(func) = funcs.get(name).cloned() {
             call_interpreted_function(&func, args.clone(), env, funcs, classes, enums, impl_methods)
         } else {
-            Err(CompileError::Semantic(format!("function not found: {}", name)))
+            // E3008 - Function Not Found
+            let ctx = ErrorContext::new()
+                .with_code(codes::FUNCTION_NOT_FOUND)
+                .with_help("check that the function is defined and in scope")
+                .with_note("ensure the function name is spelled correctly");
+            Err(CompileError::semantic_with_context(
+                format!("function `{}` not found", name),
+                ctx,
+            ))
         }
     });
 
@@ -398,7 +406,15 @@ pub fn call_interp_function(name: &str, args: Vec<Value>) -> Result<Value, Compi
         if let Some(func) = funcs.get(name).cloned() {
             call_interpreted_function(&func, args, env, funcs, classes, enums, impl_methods)
         } else {
-            Err(CompileError::Semantic(format!("function not found: {}", name)))
+            // E3008 - Function Not Found
+            let ctx = ErrorContext::new()
+                .with_code(codes::FUNCTION_NOT_FOUND)
+                .with_help("check that the function is defined and in scope")
+                .with_note("ensure the function name is spelled correctly");
+            Err(CompileError::semantic_with_context(
+                format!("function `{}` not found", name),
+                ctx,
+            ))
         }
     })
 }
@@ -498,7 +514,15 @@ unsafe extern "C" fn interp_call_handler(
             call_interpreted_function(&func, args.clone(), env, funcs, classes, enums, impl_methods)
         } else {
             tracing::error!("rt_interp_call: function not found: {}", name);
-            Err(CompileError::Semantic(format!("function not found: {}", name)))
+            // E3008 - Function Not Found
+            let ctx = ErrorContext::new()
+                .with_code(codes::FUNCTION_NOT_FOUND)
+                .with_help("check that the function is defined and in scope")
+                .with_note("ensure the function name is spelled correctly");
+            Err(CompileError::semantic_with_context(
+                format!("function `{}` not found", name),
+                ctx,
+            ))
         }
     });
 
