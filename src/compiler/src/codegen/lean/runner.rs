@@ -132,7 +132,7 @@ impl LeanRunner {
         let output = Command::new(&self.lean_path)
             .arg(file)
             .output()
-            .map_err(|e| CompileError::Semantic(format!("Failed to run Lean: {}", e)))?;
+            .map_err(|e| crate::error::factory::lean_run_failed(&e))?;
 
         Ok(self.parse_output(file, output))
     }
@@ -141,7 +141,7 @@ impl LeanRunner {
     pub fn check_content(&self, name: &str, content: &str) -> Result<LeanCheckResult, CompileError> {
         let file_path = self
             .write_lean_file(name, content)
-            .map_err(|e| CompileError::Semantic(format!("Failed to write Lean file: {}", e)))?;
+            .map_err(|e| crate::error::factory::lean_write_failed(&e))?;
 
         self.check_file(&file_path)
     }

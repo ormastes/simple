@@ -57,16 +57,30 @@ pub fn rt_atomic_bool_load(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_atomic_bool_store(args: &[Value]) -> Result<Value, CompileError> {
     let handle = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("rt_atomic_bool_store expects 2 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_atomic_bool_store requires exactly 2 argument(s)");
+            CompileError::semantic_with_context("rt_atomic_bool_store expects 2 arguments".to_string(), ctx)
+        })?
         .as_int()?;
     let value_val = args
         .get(1)
-        .ok_or_else(|| CompileError::Semantic("rt_atomic_bool_store expects 2 arguments".into()))?;
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_atomic_bool_store requires exactly 2 argument(s)");
+            CompileError::semantic_with_context("rt_atomic_bool_store expects 2 arguments".to_string(), ctx)
+        })?;
     let value = match value_val {
         Value::Bool(b) => *b,
         _ => {
-            return Err(CompileError::Semantic(
-                "rt_atomic_bool_store expects bool argument".into(),
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("rt_atomic_bool_store expects a bool value");
+            return Err(CompileError::semantic_with_context(
+                "rt_atomic_bool_store expects bool argument".to_string(),
+                ctx,
             ))
         }
     };
