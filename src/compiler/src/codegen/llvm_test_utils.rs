@@ -31,10 +31,7 @@ impl LlvmBackend {
                 .const_int(if value == 0 { 0 } else { 1 }, false)
                 .into(),
             _ => {
-                return Err(CompileError::Semantic(format!(
-                    "Unsupported constant type for test helper: {:?}",
-                    ty
-                )))
+                return Err(crate::error::factory::unsupported_constant_type(&ty))
             }
         };
 

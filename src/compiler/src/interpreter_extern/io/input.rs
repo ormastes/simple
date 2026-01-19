@@ -43,7 +43,7 @@ pub fn input(args: &[Value]) -> Result<Value, CompileError> {
         .lines()
         .next()
         .transpose()
-        .map_err(|e| CompileError::Semantic(format!("input error: {e}")))?
+        .map_err(|e| crate::error::factory::input_error(&e))?
         .unwrap_or_default();
     Ok(Value::Str(line))
 }

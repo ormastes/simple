@@ -131,8 +131,5 @@ pub fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf,
         }
     }
 
-    Err(CompileError::Semantic(format!(
-        "Cannot resolve module: {}",
-        parts.join(".")
-    )))
+    Err(crate::error::factory::cannot_resolve_module(&parts.join(".")))
 }

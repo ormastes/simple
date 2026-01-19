@@ -183,11 +183,10 @@ macro_rules! impl_value_casts {
                     CastNumericResult::Int(v) => Ok(Value::Int(v)),
                     CastNumericResult::Float(v) => Ok(Value::Float(v)),
                 },
-                _ => Err(CompileError::Semantic(format!(
-                    "cannot cast {} to {}",
+                _ => Err($crate::error::factory::cannot_cast_type(
                     val.type_name(),
-                    target.name()
-                ))),
+                    target.name(),
+                )),
             }
         }
     };

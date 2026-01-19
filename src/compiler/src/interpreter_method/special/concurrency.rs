@@ -41,11 +41,21 @@ pub fn handle_channel_methods(
     match method {
         "send" => {
             let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            channel.send(val).map_err(|e| CompileError::Semantic(e))?;
+            channel.send(val).map_err(|e| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ACTOR_SEND_FAILED)
+                    .with_help("ensure the channel is still open and the receiver is waiting");
+                CompileError::semantic_with_context(e, ctx)
+            })?;
             return Ok(Some(Value::Nil));
         }
         "recv" => {
-            let val = channel.recv().map_err(|e| CompileError::Semantic(e))?;
+            let val = channel.recv().map_err(|e| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ACTOR_RECV_FAILED)
+                    .with_help("ensure the channel is still open and data is available");
+                CompileError::semantic_with_context(e, ctx)
+            })?;
             return Ok(Some(val));
         }
         "try_recv" => {

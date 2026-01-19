@@ -3,7 +3,7 @@
 use super::class_instantiation::instantiate_class;
 use super::function_exec::exec_function_with_values;
 use crate::aop_config::AopConfig;
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
 use std::collections::HashMap;
@@ -71,10 +71,12 @@ pub(crate) fn invoke_runtime_around_chain(
     }
 
     let advice = &advices[idx];
-    let func = ctx
-        .functions
-        .get(&advice.advice)
-        .ok_or_else(|| semantic_err!("around advice '{}' not found", advice.advice))?;
+    let func = ctx.functions.get(&advice.advice).ok_or_else(|| {
+        let ctx_err = ErrorContext::new()
+            .with_code(codes::INVALID_POINTCUT_SELECTOR)
+            .with_help("ensure the advice function is defined and exported");
+        CompileError::semantic_with_context(format!("around advice '{}' not found", advice.advice), ctx_err)
+    })?;
 
     let called = Arc::new(AtomicBool::new(false));
     let called_marker = Arc::clone(&called);
@@ -87,11 +89,21 @@ pub(crate) fn invoke_runtime_around_chain(
         name: "proceed".to_string(),
         func: Arc::new(move |args: &[Value]| {
             if !args.is_empty() {
-                return Err(CompileError::Semantic("proceed() takes no arguments".to_string()));
+                let ctx_err = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("proceed() does not accept any arguments");
+                return Err(CompileError::semantic_with_context(
+                    "proceed() takes no arguments".to_string(),
+                    ctx_err,
+                ));
             }
             if called_marker.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                return Err(CompileError::Semantic(
+                let ctx_err = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("proceed() must be called exactly once in around advice");
+                return Err(CompileError::semantic_with_context(
                     "around advice called proceed() more than once".to_string(),
+                    ctx_err,
                 ));
             }
             invoke_runtime_around_chain(Arc::clone(&advices_clone), next_idx, &impl_name, Arc::clone(&ctx_clone))
@@ -111,8 +123,12 @@ pub(crate) fn invoke_runtime_around_chain(
     )?;
 
     if !called.load(std::sync::atomic::Ordering::SeqCst) {
-        return Err(CompileError::Semantic(
+        let ctx_err = ErrorContext::new()
+            .with_code(codes::INVALID_OPERATION)
+            .with_help("around advice must call proceed() exactly once");
+        return Err(CompileError::semantic_with_context(
             "around advice did not call proceed() exactly once".to_string(),
+            ctx_err,
         ));
     }
 

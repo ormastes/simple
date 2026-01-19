@@ -2,7 +2,7 @@
 //!
 //! Provides conversion between Simple language types (int, string, bool).
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 /// Convert a value to string representation
@@ -15,9 +15,12 @@ use crate::value::Value;
 /// # Returns
 /// * String representation of the value
 pub fn to_string(args: &[Value]) -> Result<Value, CompileError> {
-    let val = args
-        .first()
-        .ok_or_else(|| CompileError::Semantic("to_string expects 1 argument".into()))?;
+    let val = args.first().ok_or_else(|| {
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("to_string expects exactly 1 argument");
+        CompileError::semantic_with_context("to_string expects 1 argument", ctx)
+    })?;
     Ok(Value::Str(val.to_display_string()))
 }
 
@@ -36,9 +39,12 @@ pub fn to_string(args: &[Value]) -> Result<Value, CompileError> {
 /// # Returns
 /// * Integer representation of the value
 pub fn to_int(args: &[Value]) -> Result<Value, CompileError> {
-    let val = args
-        .first()
-        .ok_or_else(|| CompileError::Semantic("to_int expects 1 argument".into()))?;
+    let val = args.first().ok_or_else(|| {
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("to_int expects exactly 1 argument");
+        CompileError::semantic_with_context("to_int expects 1 argument", ctx)
+    })?;
     match val {
         Value::Int(i) => Ok(Value::Int(*i)),
         Value::Str(s) => s
@@ -46,7 +52,15 @@ pub fn to_int(args: &[Value]) -> Result<Value, CompileError> {
             .map(Value::Int)
             .map_err(|_| crate::error::factory::cannot_convert(s, "int")),
         Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
-        _ => Err(CompileError::Semantic("to_int expects string, int, or bool".into())),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("to_int expects string, int, or bool");
+            Err(CompileError::semantic_with_context(
+                "to_int expects string, int, or bool",
+                ctx,
+            ))
+        }
     }
 }
 

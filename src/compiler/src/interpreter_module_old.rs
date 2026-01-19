@@ -837,10 +837,7 @@ pub(super) fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<P
         }
     }
 
-    Err(CompileError::Semantic(format!(
-        "Cannot resolve module: {}",
-        parts.join(".")
-    )))
+    Err(crate::error::factory::cannot_resolve_module(&parts.join(".")))
 }
 
 /// Merge module definitions into global state and collect exports

@@ -5,7 +5,7 @@
 
 use super::super::tensor::Tensor;
 use super::MathValue;
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 /// Convert tensor to nested Value::Array
@@ -64,14 +64,21 @@ pub fn flatten_to_tensor(values: &[MathValue]) -> Result<(Vec<f64>, Vec<usize>),
                 match v {
                     MathValue::Tensor(t2) => {
                         if t2.shape != inner_shape {
-                            return Err(CompileError::Semantic(
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::TYPE_MISMATCH)
+                                .with_help("all nested tensors must have the same shape");
+                            return Err(CompileError::semantic_with_context(
                                 "inconsistent shapes in nested array".to_string(),
+                                ctx,
                             ));
                         }
                         data.extend(&t2.data);
                     }
                     _ => {
-                        return Err(CompileError::Semantic("mixed scalar and tensor in array".to_string()));
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::TYPE_MISMATCH)
+                            .with_help("cannot mix scalar values and tensors in the same array");
+                        return Err(CompileError::semantic_with_context("mixed scalar and tensor in array".to_string(), ctx));
                     }
                 }
             }
@@ -146,10 +153,7 @@ pub fn broadcast_shapes(a: &[usize], b: &[usize]) -> Result<Vec<usize>, CompileE
         } else if b_dim == 1 {
             result[i] = a_dim;
         } else {
-            return Err(CompileError::Semantic(format!(
-                "cannot broadcast shapes {:?} and {:?}",
-                a, b
-            )));
+            return Err(crate::error::factory::tensor_cannot_broadcast_shapes(a, b));
         }
     }
 

@@ -27,10 +27,7 @@ pub(crate) fn broadcast_shapes(a: &[usize], b: &[usize]) -> Result<Vec<usize>, C
         } else if b_dim == 1 {
             result[i] = a_dim;
         } else {
-            return Err(CompileError::Semantic(format!(
-                "cannot broadcast shapes {:?} and {:?}",
-                a, b
-            )));
+            return Err(crate::error::factory::tensor_cannot_broadcast_shapes(a, b));
         }
     }
 

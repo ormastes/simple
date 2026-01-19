@@ -127,10 +127,7 @@ impl LeanCodegen {
     /// Generate Lean code for a single verified function
     pub fn generate_function(&self, func: &HirFunction, module: &HirModule) -> Result<String, CompileError> {
         if !func.verification_mode.is_verified() {
-            return Err(CompileError::Semantic(format!(
-                "Function '{}' is not marked @verify",
-                func.name
-            )));
+            return Err(crate::error::factory::function_not_verify_marked(&func.name));
         }
 
         let mut emitter = LeanEmitter::new();

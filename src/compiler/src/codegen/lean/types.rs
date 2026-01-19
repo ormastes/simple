@@ -178,7 +178,7 @@ impl<'a> TypeTranslator<'a> {
         let ty = self
             .registry
             .get(type_id)
-            .ok_or_else(|| CompileError::Semantic(format!("Unknown type ID: {:?}", type_id)))?;
+            .ok_or_else(|| crate::error::factory::unknown_type_id(&type_id))?;
 
         self.translate_hir_type(ty)
     }

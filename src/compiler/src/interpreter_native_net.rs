@@ -319,12 +319,7 @@ fn extract_socket_addr(args: &[Value], idx: usize) -> Result<SocketAddr, Compile
                 _ => return Err(CompileError::Semantic("invalid SocketAddr object".into())),
             }
         }
-        _ => {
-            return Err(CompileError::Semantic(format!(
-                "argument {} must be a socket address",
-                idx
-            )))
-        }
+        _ => return Err(crate::error::factory::argument_must_be_socket_address(idx)),
     };
 
     addr_str
