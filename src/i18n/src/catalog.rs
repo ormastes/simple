@@ -1,6 +1,9 @@
-use crate::error::{I18nError, Result};
+use crate::error::Result;
+#[cfg(feature = "simple-format")]
+use crate::error::I18nError;
 use crate::locale::Locale;
 use crate::message::LocalizedMessage;
+#[cfg(feature = "simple-format")]
 use crate::simple_catalog::SimpleCatalogParser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -75,6 +78,10 @@ impl CatalogRegistry {
     /// - Other locales: `{catalog_dir}/__init__.ko.spl`, `{catalog_dir}/parser.ko.spl`
     ///
     /// Implements automatic fallback: if locale-specific file doesn't exist, falls back to default.
+    ///
+    /// **Note**: This method requires the `simple-format` feature to be enabled.
+    /// Without this feature, only compile-time bootstrap messages are available.
+    #[cfg(feature = "simple-format")]
     pub fn load(&mut self, locale: &str, domain: &str) -> Result<()> {
         let catalog_dir = self
             .catalog_dir
@@ -112,11 +119,20 @@ impl CatalogRegistry {
         })
     }
 
+    /// Stub for load() when simple-format feature is disabled
+    #[cfg(not(feature = "simple-format"))]
+    pub fn load(&mut self, _locale: &str, _domain: &str) -> Result<()> {
+        // Without the simple-format feature, catalog loading from .spl files is not supported.
+        // This is fine for simple-diagnostics which uses compile-time bootstrap messages.
+        Ok(())
+    }
+
     /// Get the catalog filename for a given locale and domain
     ///
     /// Pattern: `<basename>.<locale>.spl`
     /// - Default locale (en): No suffix
     /// - Other locales: Locale suffix before .spl
+    #[cfg(feature = "simple-format")]
     fn get_catalog_filename(&self, locale: &str, domain: &str) -> String {
         let basename = if domain == "common" {
             "__init__"
