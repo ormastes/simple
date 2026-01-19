@@ -785,6 +785,44 @@ pub mod factory {
     }
 
     // ============================================
+    // Tensor/Math Errors
+    // ============================================
+
+    /// Error when tensor shapes don't match for an operation.
+    pub fn tensor_shape_mismatch(operation: &str, details: &str) -> CompileError {
+        CompileError::Semantic(format!("{} shape mismatch: {}", operation, details))
+    }
+
+    /// Error when tensor cannot be reshaped.
+    pub fn tensor_reshape_failed(current_size: usize, new_shape: &[usize]) -> CompileError {
+        CompileError::Semantic(format!(
+            "cannot reshape tensor of size {} to {:?}",
+            current_size, new_shape
+        ))
+    }
+
+    /// Error when tensor dimension is out of range.
+    pub fn tensor_dim_out_of_range(dim: usize, ndims: usize) -> CompileError {
+        CompileError::Semantic(format!(
+            "dimension {} out of range for tensor with {} dims",
+            dim, ndims
+        ))
+    }
+
+    /// Error when tensor index is out of bounds.
+    pub fn tensor_index_out_of_bounds(index: usize, dim: usize, size: usize) -> CompileError {
+        CompileError::Semantic(format!(
+            "index {} out of bounds for dimension {} with size {}",
+            index, dim, size
+        ))
+    }
+
+    /// Error when wrong number of indices are provided.
+    pub fn tensor_index_count_mismatch(expected: usize, found: usize) -> CompileError {
+        CompileError::Semantic(format!("expected {} indices, got {}", expected, found))
+    }
+
+    // ============================================
     // Conversion/Parse Errors
     // ============================================
 
