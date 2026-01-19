@@ -30,6 +30,8 @@ pub mod catalog;
 pub mod error;
 pub mod locale;
 pub mod message;
+
+#[cfg(feature = "simple-format")]
 pub mod simple_catalog;
 
 // Include compile-time generated catalog maps (created by build.rs)
