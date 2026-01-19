@@ -65,6 +65,6 @@ pub fn evaluate_block(kind: &str, payload: &str) -> BlockResult {
         "sql" => SqlBlock.evaluate(payload),
         "re" => RegexBlock.evaluate(payload),
         // md, html, graph, img are not yet implemented
-        _ => Err(CompileError::Semantic(format!("unknown block kind: {}", kind))),
+        _ => Err(crate::error::factory::unknown_block_type(kind)),
     }
 }

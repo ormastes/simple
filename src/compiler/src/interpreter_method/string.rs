@@ -193,6 +193,64 @@ if let Value::Str(ref s) = recv_val {
             let parts: Vec<Value> = s.lines().map(|p| Value::Str(p.to_string())).collect();
             return Ok(Value::Array(parts));
         }
+        "partition" => {
+            // Split into [before, separator, after] at first occurrence
+            let sep = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            if sep.is_empty() {
+                return Ok(Value::Array(vec![
+                    Value::Str(s.clone()),
+                    Value::Str(String::new()),
+                    Value::Str(String::new()),
+                ]));
+            }
+            match s.find(&sep) {
+                Some(idx) => {
+                    let before = &s[..idx];
+                    let after = &s[idx + sep.len()..];
+                    return Ok(Value::Array(vec![
+                        Value::Str(before.to_string()),
+                        Value::Str(sep),
+                        Value::Str(after.to_string()),
+                    ]));
+                }
+                None => {
+                    return Ok(Value::Array(vec![
+                        Value::Str(s.clone()),
+                        Value::Str(String::new()),
+                        Value::Str(String::new()),
+                    ]));
+                }
+            }
+        }
+        "rpartition" => {
+            // Split into [before, separator, after] at last occurrence
+            let sep = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            if sep.is_empty() {
+                return Ok(Value::Array(vec![
+                    Value::Str(String::new()),
+                    Value::Str(String::new()),
+                    Value::Str(s.clone()),
+                ]));
+            }
+            match s.rfind(&sep) {
+                Some(idx) => {
+                    let before = &s[..idx];
+                    let after = &s[idx + sep.len()..];
+                    return Ok(Value::Array(vec![
+                        Value::Str(before.to_string()),
+                        Value::Str(sep),
+                        Value::Str(after.to_string()),
+                    ]));
+                }
+                None => {
+                    return Ok(Value::Array(vec![
+                        Value::Str(String::new()),
+                        Value::Str(String::new()),
+                        Value::Str(s.clone()),
+                    ]));
+                }
+            }
+        }
         "replace" => {
             let old = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             let new = eval_arg(args, 1, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
