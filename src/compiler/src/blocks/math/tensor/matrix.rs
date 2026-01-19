@@ -1,13 +1,16 @@
 //! Matrix operations for tensors.
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use super::core::{Tensor, compute_strides};
 
 impl Tensor {
     /// Matrix multiplication (2D tensors)
     pub fn matmul(&self, other: &Tensor) -> Result<Tensor, CompileError> {
         if self.ndim() != 2 || other.ndim() != 2 {
-            return Err(CompileError::Semantic("matmul requires 2D tensors".to_string()));
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("matmul requires both arguments to be 2D tensors");
+            return Err(CompileError::semantic_with_context("matmul requires 2D tensors".to_string(), ctx));
         }
 
         let (m, k1) = (self.shape[0], self.shape[1]);
@@ -37,7 +40,10 @@ impl Tensor {
     /// Dot product of 1D tensors
     pub fn dot(&self, other: &Tensor) -> Result<f64, CompileError> {
         if self.ndim() != 1 || other.ndim() != 1 {
-            return Err(CompileError::Semantic("dot requires 1D tensors".to_string()));
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("dot product requires both arguments to be 1D tensors");
+            return Err(CompileError::semantic_with_context("dot requires 1D tensors".to_string(), ctx));
         }
         if self.shape[0] != other.shape[0] {
             return Err(crate::error::factory::tensor_shape_mismatch(
@@ -51,8 +57,12 @@ impl Tensor {
     /// Transpose (swap last two dimensions)
     pub fn transpose(&self) -> Result<Tensor, CompileError> {
         if self.ndim() < 2 {
-            return Err(CompileError::Semantic(
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("transpose requires at least a 2D tensor");
+            return Err(CompileError::semantic_with_context(
                 "transpose requires at least 2D tensor".to_string(),
+                ctx,
             ));
         }
 

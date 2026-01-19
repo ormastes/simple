@@ -1130,6 +1130,71 @@ pub mod factory {
         CompileError::Semantic(format!("unknown block kind: {}", kind))
     }
 
+    // ============================================
+    // FFI/Interpreter Errors
+    // ============================================
+
+    /// Error when an expression index is invalid.
+    pub fn invalid_expression_index(index: usize) -> CompileError {
+        CompileError::Semantic(format!("invalid expression index: {}", index))
+    }
+
+    /// Error when an argument must be a socket address.
+    pub fn argument_must_be_socket_address(idx: usize) -> CompileError {
+        CompileError::Semantic(format!("argument {} must be a socket address", idx))
+    }
+
+    /// Error for panic with message.
+    pub fn panic_with_message(msg: &str) -> CompileError {
+        CompileError::Semantic(format!("panic: {}", msg))
+    }
+
+    /// Error when a type cannot be cast.
+    pub fn cannot_cast_type(from_type: &str, to_type: &str) -> CompileError {
+        CompileError::Semantic(format!("cannot cast {} to {}", from_type, to_type))
+    }
+
+    /// Error when a function is not marked @verify.
+    pub fn function_not_verify_marked(func_name: &str) -> CompileError {
+        CompileError::Semantic(format!("Function '{}' is not marked @verify", func_name))
+    }
+
+    /// Error when an unknown type ID is encountered.
+    pub fn unknown_type_id(type_id: &impl std::fmt::Debug) -> CompileError {
+        CompileError::Semantic(format!("Unknown type ID: {:?}", type_id))
+    }
+
+    /// Error when macro expansion depth is exceeded.
+    pub fn macro_expansion_depth_exceeded(max: usize, macro_name: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "macro expansion depth exceeded maximum of {} (recursive macro invocation of '{}')",
+            max, macro_name
+        ))
+    }
+
+    /// Error when tensor shapes cannot be broadcast.
+    pub fn tensor_cannot_broadcast_shapes(a: &[usize], b: &[usize]) -> CompileError {
+        CompileError::Semantic(format!("cannot broadcast shapes {:?} and {:?}", a, b))
+    }
+
+    /// Error when axis is out of bounds for tensor.
+    pub fn tensor_axis_out_of_bounds(axis: usize, ndims: usize) -> CompileError {
+        CompileError::Semantic(format!(
+            "axis {} out of bounds for tensor with {} dimensions",
+            axis, ndims
+        ))
+    }
+
+    /// Error for input reading errors.
+    pub fn input_error(e: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("input error: {}", e))
+    }
+
+    /// Error when a constant type is unsupported in test helpers.
+    pub fn unsupported_constant_type(ty: &impl std::fmt::Debug) -> CompileError {
+        CompileError::Semantic(format!("Unsupported constant type for test helper: {:?}", ty))
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;

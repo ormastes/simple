@@ -554,10 +554,7 @@ extern "C" fn interp_eval_handler(expr_index: i64) -> simple_runtime::RuntimeVal
             })
         } else {
             tracing::error!("rt_interp_eval: invalid expression index: {}", expr_index);
-            Err(CompileError::Semantic(format!(
-                "invalid expression index: {}",
-                expr_index
-            )))
+            Err(crate::error::factory::invalid_expression_index(expr_index as usize))
         }
     });
 

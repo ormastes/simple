@@ -111,7 +111,7 @@ fn eval_with_env(expr: &MathExpr, env: &mut HashMap<String, MathValue>) -> Resul
                 return Ok(MathValue::Float(val));
             }
             // Unknown variable - return as error
-            Err(CompileError::Semantic(format!("undefined math variable: {}", name)))
+            Err(crate::error::factory::undefined_math_variable(name))
         }
 
         MathExpr::Add(left, right) => {
@@ -191,10 +191,7 @@ fn eval_with_env(expr: &MathExpr, env: &mut HashMap<String, MathValue>) -> Resul
                     if t.ndim() == 1 {
                         let i = *i as usize;
                         if i >= t.shape[0] {
-                            return Err(CompileError::Semantic(format!(
-                                "index {} out of bounds for tensor of length {}",
-                                i, t.shape[0]
-                            )));
+                            return Err(crate::error::factory::tensor_1d_index_out_of_bounds(i, t.shape[0]));
                         }
                         Ok(MathValue::Float(t.data[i]))
                     } else {
@@ -367,7 +364,7 @@ fn eval_function(
         "binomial" | "binom" => standard_math::eval_binomial(&eval_args),
         "atan2" => standard_math::eval_atan2(&eval_args),
 
-        _ => Err(CompileError::Semantic(format!("unknown math function: {}", name))),
+        _ => Err(crate::error::factory::unknown_math_function(name)),
     }
 }
 

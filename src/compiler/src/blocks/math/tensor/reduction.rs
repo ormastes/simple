@@ -85,11 +85,7 @@ where
     F: Fn(&[f64]) -> f64,
 {
     if axis >= tensor.ndim() {
-        return Err(CompileError::Semantic(format!(
-            "axis {} out of bounds for tensor with {} dimensions",
-            axis,
-            tensor.ndim()
-        )));
+        return Err(crate::error::factory::tensor_axis_out_of_bounds(axis, tensor.ndim()));
     }
 
     let axis_size = tensor.shape[axis];

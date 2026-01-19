@@ -62,10 +62,10 @@ pub(super) fn push_macro_depth(macro_name: &str) -> Result<(), CompileError> {
 
     if depth > MAX_MACRO_EXPANSION_DEPTH {
         MACRO_EXPANSION_DEPTH.with(|cell| *cell.borrow_mut() -= 1);
-        return Err(CompileError::Semantic(format!(
-            "macro expansion depth exceeded maximum of {} (recursive macro invocation of '{}')",
-            MAX_MACRO_EXPANSION_DEPTH, macro_name
-        )));
+        return Err(crate::error::factory::macro_expansion_depth_exceeded(
+            MAX_MACRO_EXPANSION_DEPTH,
+            macro_name,
+        ));
     }
 
     if is_macro_trace_enabled() && depth > 1 {

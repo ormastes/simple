@@ -1,6 +1,6 @@
 /// LLVM instruction compilation - binary ops, unary ops, terminators, coverage
 use super::LlvmBackend;
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 
 #[cfg(feature = "llvm")]
 use inkwell::builder::Builder;
@@ -86,7 +86,15 @@ impl LlvmBackend {
                 };
                 Ok(result.into())
             }
-            _ => Err(CompileError::Semantic("Type mismatch in binary operation".to_string())),
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("both operands must have the same type (both integers or both floats)");
+                Err(CompileError::semantic_with_context(
+                    "Type mismatch in binary operation".to_string(),
+                    ctx,
+                ))
+            }
         }
     }
 
@@ -122,9 +130,15 @@ impl LlvmBackend {
                 };
                 Ok(result.into())
             }
-            _ => Err(CompileError::Semantic(
-                "Invalid operand type for unary operation".to_string(),
-            )),
+            _ => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("unary operations are only supported for integers and floats");
+                Err(CompileError::semantic_with_context(
+                    "Invalid operand type for unary operation".to_string(),
+                    ctx,
+                ))
+            }
         }
     }
 
@@ -183,7 +197,13 @@ impl LlvmBackend {
                         .build_conditional_branch(*cond_int, *then_bb, *else_bb)
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_conditional_branch", &e))?;
                 } else {
-                    return Err(CompileError::Semantic("Branch condition must be boolean".to_string()));
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help("branch condition must be a boolean integer value");
+                    return Err(CompileError::semantic_with_context(
+                        "Branch condition must be boolean".to_string(),
+                        ctx,
+                    ));
                 }
             }
             Terminator::Unreachable => {

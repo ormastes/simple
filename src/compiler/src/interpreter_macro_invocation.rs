@@ -122,7 +122,7 @@ pub fn eval_builtin_macro(
                     }
                 })
                 .unwrap_or_else(|| "explicit panic".into());
-            Some(Err(CompileError::Semantic(format!("panic: {}", msg))))
+            Some(Err(crate::error::factory::panic_with_message(&msg)))
         }
         "format" => {
             let mut output = String::new();
