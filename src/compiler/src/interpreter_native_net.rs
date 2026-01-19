@@ -329,13 +329,13 @@ fn extract_socket_addr(args: &[Value], idx: usize) -> Result<SocketAddr, Compile
 
     addr_str
         .parse()
-        .map_err(|_| CompileError::Semantic(format!("invalid socket address: {}", addr_str)))
+        .map_err(|_| crate::error::factory::invalid_socket_address(&addr_str))
 }
 
 fn extract_handle(args: &[Value], idx: usize) -> Result<i64, CompileError> {
     args.get(idx)
         .and_then(|v| v.as_int().ok())
-        .ok_or_else(|| CompileError::Semantic(format!("argument {} must be a handle", idx)))
+        .ok_or_else(|| crate::error::factory::expected_handle(idx))
 }
 
 fn extract_timeout(args: &[Value], idx: usize) -> Option<Duration> {

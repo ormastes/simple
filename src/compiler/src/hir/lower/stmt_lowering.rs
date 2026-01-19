@@ -42,6 +42,16 @@ impl Lowerer {
                     }
                 })?;
 
+                // W1003: Check for mutable binding with shared pointer type
+                self.check_mutable_shared_binding(&name, ty, let_stmt.mutability, let_stmt.span);
+
+                // W1002: Check for implicit unique pointer copy (unless explicit move)
+                // TODO: Check if value expression is a move expression
+                if let Some(ref v) = value {
+                    let is_explicit_move = false; // TODO: Detect move keyword
+                    self.check_unique_copy(v, let_stmt.span, is_explicit_move);
+                }
+
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
 
                 Ok(vec![HirStmt::Let { local_index, ty, value }])
@@ -50,6 +60,10 @@ impl Lowerer {
             Node::Assignment(assign) => {
                 let target = self.lower_expr(&assign.target, ctx)?;
                 let value = self.lower_expr(&assign.value, ctx)?;
+
+                // W1001: Check for shared pointer mutation
+                self.check_shared_mutation(&target, assign.span);
+
                 Ok(vec![HirStmt::Assign { target, value }])
             }
 

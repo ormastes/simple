@@ -117,7 +117,7 @@ impl ProjectContext {
         // Parse as TOML
         let toml: toml::Value = content
             .parse()
-            .map_err(|e| CompileError::Semantic(format!("invalid manifest: {}", e)))?;
+            .map_err(|e| crate::error::factory::invalid_config("manifest", &e))?;
 
         // Extract project/package section
         let project = toml
@@ -171,9 +171,9 @@ impl ProjectContext {
         }
 
         let di_config =
-            parse_di_config(&toml).map_err(|e| CompileError::Semantic(format!("invalid di config: {}", e)))?;
+            parse_di_config(&toml).map_err(|e| crate::error::factory::invalid_config("di config", &e))?;
         let aop_config =
-            parse_aop_config(&toml).map_err(|e| CompileError::Semantic(format!("invalid aop config: {}", e)))?;
+            parse_aop_config(&toml).map_err(|e| crate::error::factory::invalid_config("aop config", &e))?;
 
         // Parse deterministic build configuration
         let deterministic = if let Some(build_table) = toml.get("build").and_then(|v| v.as_table()) {
