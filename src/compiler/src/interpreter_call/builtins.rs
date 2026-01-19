@@ -92,8 +92,18 @@ pub(super) fn eval_builtin(
             }
         }
         "send" => {
-            let target = args.get(0).ok_or_else(|| semantic_err!("send expects actor handle"))?;
-            let msg_arg = args.get(1).ok_or_else(|| semantic_err!("send expects message"))?;
+            let target = args.get(0).ok_or_else(|| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("send() requires an actor handle as first argument");
+                CompileError::semantic_with_context("send() expects actor handle".to_string(), ctx)
+            })?;
+            let msg_arg = args.get(1).ok_or_else(|| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("send() requires a message as second argument");
+                CompileError::semantic_with_context("send() expects message".to_string(), ctx)
+            })?;
             let target_val = evaluate_expr(&target.value, env, functions, classes, enums, impl_methods)?;
             let msg_val = evaluate_expr(&msg_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Actor(handle) = target_val {
@@ -107,7 +117,13 @@ pub(super) fn eval_builtin(
                 })?;
                 return Ok(Some(Value::Nil));
             }
-            bail_semantic!("send target must be actor");
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("send() requires an actor handle as first argument");
+            return Err(CompileError::semantic_with_context(
+                "send target must be an actor".to_string(),
+                ctx,
+            ));
         }
         "recv" => {
             check_effect_violations("recv")?;
@@ -115,10 +131,20 @@ pub(super) fn eval_builtin(
                 let msg = ACTOR_INBOX.with(|cell| {
                     cell.borrow()
                         .as_ref()
-                        .ok_or_else(|| semantic_err!("recv called outside actor without handle"))
+                        .ok_or_else(|| {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_CONTEXT)
+                                .with_help("recv() must be called within an actor context");
+                            CompileError::semantic_with_context("recv() called outside actor".to_string(), ctx)
+                        })
                         .and_then(|rx| {
                             rx.lock()
-                                .map_err(|_| semantic_err!("actor inbox lock poisoned"))
+                                .map_err(|_| {
+                                    let ctx = ErrorContext::new()
+                                        .with_code(codes::INVALID_CONTEXT)
+                                        .with_help("actor inbox lock was poisoned");
+                                    CompileError::semantic_with_context("actor inbox lock poisoned".to_string(), ctx)
+                                })
                                 .and_then(|receiver| {
                                     receiver.recv_timeout(std::time::Duration::from_secs(5)).map_err(|e| {
                                         // E1202 - Actor Recv Failed
@@ -148,16 +174,32 @@ pub(super) fn eval_builtin(
                     })?;
                     return Ok(Some(message_to_value(msg)));
                 }
-                bail_semantic!("recv expects actor handle");
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("recv() requires an actor handle as argument");
+                return Err(CompileError::semantic_with_context(
+                    "recv expects actor handle".to_string(),
+                    ctx,
+                ));
             }
         }
         "reply" => {
-            let msg_arg = args.get(0).ok_or_else(|| semantic_err!("reply expects message"))?;
+            let msg_arg = args.get(0).ok_or_else(|| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("reply() requires a message as argument");
+                CompileError::semantic_with_context("reply() expects message".to_string(), ctx)
+            })?;
             let msg_val = evaluate_expr(&msg_arg.value, env, functions, classes, enums, impl_methods)?;
             ACTOR_OUTBOX.with(|cell| {
                 cell.borrow()
                     .as_ref()
-                    .ok_or_else(|| semantic_err!("reply called outside actor"))
+                    .ok_or_else(|| {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_CONTEXT)
+                            .with_help("reply() must be called within an actor context");
+                        CompileError::semantic_with_context("reply() called outside actor".to_string(), ctx)
+                    })
                     .and_then(|tx| {
                         tx.send(Message::Value(msg_val.to_display_string())).map_err(|e| {
                             // E1201 - Actor Send Failed
@@ -173,16 +215,38 @@ pub(super) fn eval_builtin(
         }
         "join" => {
             check_effect_violations("join")?;
-            let handle_arg = args.get(0).ok_or_else(|| semantic_err!("join expects actor handle"))?;
+            let handle_arg = args.get(0).ok_or_else(|| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("join() requires an actor handle as argument");
+                CompileError::semantic_with_context("join() expects actor handle".to_string(), ctx)
+            })?;
             let handle_val = evaluate_expr(&handle_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Actor(handle) = handle_val {
-                handle.join().map_err(|e| semantic_err!("{}", e))?;
+                handle.join().map_err(|e| {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::ACTOR_JOIN_FAILED)
+                        .with_help("check that the actor completed successfully")
+                        .with_note(format!("join error: {}", e));
+                    CompileError::semantic_with_context("failed to join actor".to_string(), ctx)
+                })?;
                 return Ok(Some(Value::Int(1)));
             }
-            bail_semantic!("join target must be actor");
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("join() requires an actor handle as argument");
+            return Err(CompileError::semantic_with_context(
+                "join target must be an actor".to_string(),
+                ctx,
+            ));
         }
         "spawn" => {
-            let inner_expr = args.get(0).ok_or_else(|| semantic_err!("spawn expects a thunk"))?;
+            let inner_expr = args.get(0).ok_or_else(|| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("spawn() requires a thunk (lambda) as argument");
+                CompileError::semantic_with_context("spawn() expects a thunk".to_string(), ctx)
+            })?;
             Ok(Some(spawn_actor_with_expr(
                 &inner_expr.value,
                 env,
@@ -193,9 +257,12 @@ pub(super) fn eval_builtin(
             )))
         }
         "spawn_isolated" => {
-            let func_arg = args
-                .get(0)
-                .ok_or_else(|| semantic_err!("spawn_isolated expects a function"))?;
+            let func_arg = args.get(0).ok_or_else(|| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("spawn_isolated() requires a function as argument");
+                CompileError::semantic_with_context("spawn_isolated() expects a function".to_string(), ctx)
+            })?;
             let func_val = evaluate_expr(&func_arg.value, env, functions, classes, enums, impl_methods)?;
             let arg_val = if args.len() > 1 {
                 evaluate_expr(&args[1].value, env, functions, classes, enums, impl_methods)?
@@ -207,19 +274,33 @@ pub(super) fn eval_builtin(
             Ok(Some(Value::Future(future)))
         }
         "async" | "future" => {
-            let inner_expr = args
-                .get(0)
-                .ok_or_else(|| semantic_err!("async expects an expression"))?;
+            let inner_expr = args.get(0).ok_or_else(|| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("async/future requires an expression as argument");
+                CompileError::semantic_with_context("async/future expects an expression".to_string(), ctx)
+            })?;
             let future = spawn_future_with_expr(inner_expr.value.clone(), env, functions, classes, enums, impl_methods);
             Ok(Some(Value::Future(future)))
         }
         "is_ready" => {
-            let future_arg = args.get(0).ok_or_else(|| semantic_err!("is_ready expects a future"))?;
+            let future_arg = args.get(0).ok_or_else(|| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("is_ready() requires a future as argument");
+                CompileError::semantic_with_context("is_ready() expects a future".to_string(), ctx)
+            })?;
             let val = evaluate_expr(&future_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Future(f) = val {
                 return Ok(Some(Value::Bool(f.is_ready())));
             }
-            bail_semantic!("is_ready expects a future");
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("is_ready() requires a Future value");
+            return Err(CompileError::semantic_with_context(
+                "is_ready expects a future".to_string(),
+                ctx,
+            ));
         }
         "async_mode" => {
             if args.is_empty() {
@@ -247,11 +328,27 @@ pub(super) fn eval_builtin(
                         "manual" | "embedded" => {
                             simple_runtime::configure_async_mode(simple_runtime::AsyncMode::Manual)
                         }
-                        _ => bail_semantic!("async_mode expects 'threaded' or 'manual'"),
+                        _ => {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_OPERATION)
+                                .with_help("valid async modes are 'threaded' or 'manual'");
+                            return Err(CompileError::semantic_with_context(
+                                format!("async_mode: invalid mode '{}', expected 'threaded' or 'manual'", s),
+                                ctx,
+                            ));
+                        }
                     }
                     return Ok(Some(Value::Nil));
                 }
-                _ => bail_semantic!("async_mode expects a string"),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help("async_mode() requires a string argument");
+                    return Err(CompileError::semantic_with_context(
+                        "async_mode expects a string".to_string(),
+                        ctx,
+                    ));
+                }
             }
         }
         "async_workers" => {
@@ -260,14 +357,23 @@ pub(super) fn eval_builtin(
             Ok(Some(Value::Nil))
         }
         "poll_future" => {
-            let future_arg = args
-                .get(0)
-                .ok_or_else(|| semantic_err!("poll_future expects a future"))?;
+            let future_arg = args.get(0).ok_or_else(|| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("poll_future() requires a future as argument");
+                CompileError::semantic_with_context("poll_future() expects a future".to_string(), ctx)
+            })?;
             let val = evaluate_expr(&future_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Future(f) = val {
                 return Ok(Some(Value::Bool(f.poll())));
             }
-            bail_semantic!("poll_future expects a future");
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("poll_future() requires a Future value");
+            return Err(CompileError::semantic_with_context(
+                "poll_future expects a future".to_string(),
+                ctx,
+            ));
         }
         "poll_all_futures" => {
             let count = simple_runtime::poll_all();
@@ -296,7 +402,12 @@ pub(super) fn eval_builtin(
             Ok(Some(Value::Future(FutureValue::rejected(error_str))))
         }
         "generator" => {
-            let inner_expr = args.get(0).ok_or_else(|| semantic_err!("generator expects a lambda"))?;
+            let inner_expr = args.get(0).ok_or_else(|| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("generator() requires a lambda function as argument");
+                CompileError::semantic_with_context("generator() expects a lambda".to_string(), ctx)
+            })?;
             let val = evaluate_expr(&inner_expr.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Lambda {
                 body,
@@ -310,20 +421,40 @@ pub(super) fn eval_builtin(
                 let gen = GeneratorValue::new_with_values(yields);
                 return Ok(Some(Value::Generator(gen)));
             }
-            bail_semantic!("generator expects a lambda");
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("generator() requires a lambda function");
+            return Err(CompileError::semantic_with_context(
+                "generator expects a lambda".to_string(),
+                ctx,
+            ));
         }
         "next" => {
-            let gen_arg = args.get(0).ok_or_else(|| semantic_err!("next expects a generator"))?;
+            let gen_arg = args.get(0).ok_or_else(|| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("next() requires a generator as argument");
+                CompileError::semantic_with_context("next() expects a generator".to_string(), ctx)
+            })?;
             let val = evaluate_expr(&gen_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Generator(gen) = val {
                 return Ok(Some(gen.next().unwrap_or(Value::Nil)));
             }
-            bail_semantic!("next expects a generator");
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("next() requires a Generator value");
+            return Err(CompileError::semantic_with_context(
+                "next expects a generator".to_string(),
+                ctx,
+            ));
         }
         "collect" => {
-            let gen_arg = args
-                .get(0)
-                .ok_or_else(|| semantic_err!("collect expects a generator"))?;
+            let gen_arg = args.get(0).ok_or_else(|| {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                    .with_help("collect() requires a generator or array as argument");
+                CompileError::semantic_with_context("collect() expects a generator".to_string(), ctx)
+            })?;
             let val = evaluate_expr(&gen_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Generator(gen) = val {
                 return Ok(Some(Value::Array(gen.collect_remaining())));
@@ -331,7 +462,13 @@ pub(super) fn eval_builtin(
             if let Value::Array(arr) = val {
                 return Ok(Some(Value::Array(arr)));
             }
-            bail_semantic!("collect expects a generator or array");
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("collect() requires a Generator or Array value");
+            return Err(CompileError::semantic_with_context(
+                "collect expects a generator or array".to_string(),
+                ctx,
+            ));
         }
         "ThreadPool" => {
             let workers = args
@@ -390,5 +527,10 @@ fn eval_arg_int(
         enums,
         impl_methods,
     )?;
-    val.as_int().map_err(|_| semantic_err!("expected integer"))
+    val.as_int().map_err(|_| {
+        let ctx = ErrorContext::new()
+            .with_code(codes::TYPE_MISMATCH)
+            .with_help("builtin function argument must be an integer");
+        CompileError::semantic_with_context("expected integer value".to_string(), ctx)
+    })
 }

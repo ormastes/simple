@@ -37,30 +37,24 @@ pub(crate) fn instantiate_class(
         diagram_ffi::trace_method(class_name, "new");
     }
 
-    let class_def = classes
-        .get(class_name)
-        .cloned()
-        .ok_or_else(|| {
-            let available_classes: Vec<&str> = classes.keys().map(|s| s.as_str()).collect();
-            let suggestion = if !available_classes.is_empty() {
-                typo::suggest_name(class_name, available_classes.clone())
-            } else {
-                None
-            };
+    let class_def = classes.get(class_name).cloned().ok_or_else(|| {
+        let available_classes: Vec<&str> = classes.keys().map(|s| s.as_str()).collect();
+        let suggestion = if !available_classes.is_empty() {
+            typo::suggest_name(class_name, available_classes.clone())
+        } else {
+            None
+        };
 
-            let mut ctx = ErrorContext::new()
-                .with_code(codes::UNKNOWN_CLASS)
-                .with_help("check that the class is defined or imported in this scope");
+        let mut ctx = ErrorContext::new()
+            .with_code(codes::UNKNOWN_CLASS)
+            .with_help("check that the class is defined or imported in this scope");
 
-            if let Some(best_match) = suggestion {
-                ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
-            }
+        if let Some(best_match) = suggestion {
+            ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
+        }
 
-            CompileError::semantic_with_context(
-                format!("class `{}` not found in this scope", class_name),
-                ctx,
-            )
-        })?;
+        CompileError::semantic_with_context(format!("class `{}` not found in this scope", class_name), ctx)
+    })?;
 
     let mut fields: HashMap<String, Value> = HashMap::new();
     for field in &class_def.fields {

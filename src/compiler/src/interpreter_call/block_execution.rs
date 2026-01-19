@@ -2,7 +2,7 @@
 
 use super::super::interpreter_helpers::handle_method_call_with_self_update;
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, pattern_matches, EXTERN_FUNCTIONS, MODULE_GLOBALS};
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
@@ -35,9 +35,23 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
                 }
                 return Ok(values);
             }
-            bail_semantic!("Object is not iterable")
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("only arrays, tuples, strings, generators, and Range objects are iterable");
+            Err(CompileError::semantic_with_context(
+                format!("object of class '{}' is not iterable", class),
+                ctx,
+            ))
         }
-        _ => bail_semantic!("Value is not iterable"),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("only arrays, tuples, strings, generators, and Range objects are iterable");
+            Err(CompileError::semantic_with_context(
+                format!("value of type '{}' is not iterable", iterable.type_name()),
+                ctx,
+            ))
+        }
     }
 }
 

@@ -51,10 +51,7 @@ fn eval_arg_int(
         let ctx = ErrorContext::new()
             .with_code(codes::TYPE_MISMATCH)
             .with_help("matcher argument must be an integer");
-        CompileError::semantic_with_context(
-            "expected integer value for mock matcher".to_string(),
-            ctx,
-        )
+        CompileError::semantic_with_context("expected integer value for mock matcher".to_string(), ctx)
     })
 }
 

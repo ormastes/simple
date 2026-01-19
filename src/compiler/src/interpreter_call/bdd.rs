@@ -1,7 +1,7 @@
 // BDD testing framework for interpreter
 // describe, context, it, expect, shared_examples, hooks, etc.
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::evaluate_expr;
 use crate::value::*;
 use simple_parser::ast::{Argument, BinOp, ClassDef, EnumDef, Expr, FunctionDef, UnaryOp};
@@ -413,7 +413,13 @@ pub(super) fn eval_bdd_builtin(
                     Ok(Some(result?))
                 }
                 None => {
-                    bail_semantic!("Shared example '{}' not found", name_str);
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::UNDEFINED_VARIABLE)
+                        .with_help("define the shared example with shared_examples() before using it_behaves_like()");
+                    return Err(CompileError::semantic_with_context(
+                        format!("shared example '{}' not found", name_str),
+                        ctx,
+                    ));
                 }
             }
         }
@@ -568,7 +574,13 @@ pub(super) fn eval_bdd_builtin(
                     Ok(Some(value))
                 }
                 None => {
-                    bail_semantic!("No lazy value found for '{}'", name_str);
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::UNDEFINED_VARIABLE)
+                        .with_help("define the lazy value with let_lazy() or given_lazy() before using get_let()");
+                    return Err(CompileError::semantic_with_context(
+                        format!("no lazy value found for '{}'", name_str),
+                        ctx,
+                    ));
                 }
             }
         }
