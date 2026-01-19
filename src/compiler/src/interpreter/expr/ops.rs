@@ -5,7 +5,7 @@ use simple_parser::ast::{BinOp, Expr, PointerKind, UnaryOp};
 use super::casting::cast_value;
 use super::evaluate_expr;
 use super::units::{evaluate_unit_binary_inner, evaluate_unit_unary_inner};
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{
     BorrowMutValue, BorrowValue, ManualHandleValue, ManualSharedValue, ManualUniqueValue, ManualWeakValue, Value,
 };
@@ -341,10 +341,20 @@ pub(super) fn eval_op_expr(
                         }
                     }
                     UnaryOp::Not | UnaryOp::BitNot => {
-                        return Err(CompileError::Semantic(format!(
-                            "cannot apply {:?} to unit value '{}'",
-                            op, suffix
-                        )));
+                        // E1041 - Invalid Unary Op
+                        let op_name = match op {
+                            UnaryOp::Not => "!",
+                            UnaryOp::BitNot => "~",
+                            _ => "operator",
+                        };
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_UNARY_OP)
+                            .with_help(format!("operator `{}` cannot be applied to unit values", op_name));
+
+                        return Err(CompileError::semantic_with_context(
+                            format!("cannot apply operator `{}` to type `Unit<{}>`", op_name, suffix),
+                            ctx,
+                        ));
                     }
                     UnaryOp::Ref => {
                         return Ok(Some(Value::Borrow(BorrowValue::new(val))));
@@ -356,10 +366,15 @@ pub(super) fn eval_op_expr(
                         return Ok(Some(val.deref_pointer()));
                     }
                     UnaryOp::ChannelRecv => {
-                        return Err(CompileError::Semantic(format!(
-                            "cannot apply channel receive to unit value '{}'",
-                            suffix
-                        )));
+                        // E1041 - Invalid Unary Op
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_UNARY_OP)
+                            .with_help("channel receive operator cannot be applied to unit values");
+
+                        return Err(CompileError::semantic_with_context(
+                            format!("cannot apply operator `<-` to type `Unit<{}>`", suffix),
+                            ctx,
+                        ));
                     }
                 }
             }
