@@ -273,11 +273,21 @@ pub fn rt_atomic_int_fetch_or(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_atomic_int_fetch_xor(args: &[Value]) -> Result<Value, CompileError> {
     let handle = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("rt_atomic_int_fetch_xor expects 2 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_atomic_int_fetch_xor requires exactly 2 argument(s)");
+            CompileError::semantic_with_context("rt_atomic_int_fetch_xor expects 2 arguments".to_string(), ctx)
+        })?
         .as_int()?;
     let value = args
         .get(1)
-        .ok_or_else(|| CompileError::Semantic("rt_atomic_int_fetch_xor expects 2 arguments".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_atomic_int_fetch_xor requires exactly 2 argument(s)");
+            CompileError::semantic_with_context("rt_atomic_int_fetch_xor expects 2 arguments".to_string(), ctx)
+        })?
         .as_int()?;
     unsafe {
         let old = simple_runtime::value::rt_atomic_int_fetch_xor(handle, value);
@@ -289,7 +299,12 @@ pub fn rt_atomic_int_fetch_xor(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_atomic_int_free(args: &[Value]) -> Result<Value, CompileError> {
     let handle = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("rt_atomic_int_free expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_atomic_int_free requires exactly 1 argument(s)");
+            CompileError::semantic_with_context("rt_atomic_int_free expects 1 argument".to_string(), ctx)
+        })?
         .as_int()?;
     unsafe {
         simple_runtime::value::rt_atomic_int_free(handle);
@@ -313,7 +328,12 @@ pub fn rt_atomic_flag_new(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_atomic_flag_test_and_set(args: &[Value]) -> Result<Value, CompileError> {
     let handle = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("rt_atomic_flag_test_and_set expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_atomic_flag_test_and_set requires exactly 1 argument(s)");
+            CompileError::semantic_with_context("rt_atomic_flag_test_and_set expects 1 argument".to_string(), ctx)
+        })?
         .as_int()?;
     unsafe {
         let was_set = simple_runtime::value::rt_atomic_flag_test_and_set(handle);
@@ -325,7 +345,12 @@ pub fn rt_atomic_flag_test_and_set(args: &[Value]) -> Result<Value, CompileError
 pub fn rt_atomic_flag_clear(args: &[Value]) -> Result<Value, CompileError> {
     let handle = args
         .first()
-        .ok_or_else(|| CompileError::Semantic("rt_atomic_flag_clear expects 1 argument".into()))?
+        .ok_or_else(|| {
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("rt_atomic_flag_clear requires exactly 1 argument(s)");
+            CompileError::semantic_with_context("rt_atomic_flag_clear expects 1 argument".to_string(), ctx)
+        })?
         .as_int()?;
     unsafe {
         simple_runtime::value::rt_atomic_flag_clear(handle);
