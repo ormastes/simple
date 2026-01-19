@@ -14,10 +14,10 @@ impl Tensor {
         let (k2, n) = (other.shape[0], other.shape[1]);
 
         if k1 != k2 {
-            return Err(CompileError::Semantic(format!(
-                "matmul shape mismatch: ({}, {}) @ ({}, {})",
-                m, k1, k2, n
-            )));
+            return Err(crate::error::factory::tensor_shape_mismatch(
+                "matmul",
+                &format!("({}, {}) @ ({}, {})", m, k1, k2, n)
+            ));
         }
 
         let mut result = vec![0.0; m * n];
@@ -40,10 +40,10 @@ impl Tensor {
             return Err(CompileError::Semantic("dot requires 1D tensors".to_string()));
         }
         if self.shape[0] != other.shape[0] {
-            return Err(CompileError::Semantic(format!(
-                "dot shape mismatch: {} vs {}",
-                self.shape[0], other.shape[0]
-            )));
+            return Err(crate::error::factory::tensor_shape_mismatch(
+                "dot",
+                &format!("{} vs {}", self.shape[0], other.shape[0])
+            ));
         }
         Ok(self.data.iter().zip(other.data.iter()).map(|(a, b)| a * b).sum())
     }
@@ -94,11 +94,7 @@ impl Tensor {
     pub fn reshape(&self, new_shape: Vec<usize>) -> Result<Tensor, CompileError> {
         let new_size: usize = new_shape.iter().product();
         if new_size != self.data.len() {
-            return Err(CompileError::Semantic(format!(
-                "cannot reshape tensor of size {} to {:?}",
-                self.data.len(),
-                new_shape
-            )));
+            return Err(crate::error::factory::tensor_reshape_failed(self.data.len(), &new_shape));
         }
         Tensor::new(self.data.clone(), new_shape)
     }
@@ -126,11 +122,7 @@ impl Tensor {
     /// Unsqueeze: add dimension of size 1 at position
     pub fn unsqueeze(&self, dim: usize) -> Result<Tensor, CompileError> {
         if dim > self.shape.len() {
-            return Err(CompileError::Semantic(format!(
-                "unsqueeze dim {} out of range for tensor with {} dims",
-                dim,
-                self.shape.len()
-            )));
+            return Err(crate::error::factory::tensor_dim_out_of_range(dim, self.shape.len()));
         }
         let mut new_shape = self.shape.clone();
         new_shape.insert(dim, 1);
