@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use simple_parser::ast::{AssignOp, BinOp, ClassDef, Expr, FunctionDef, Node, Type};
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value};
 use super::core_types::{Control, Enums, ImplMethods, get_identifier_name, get_pattern_name, is_immutable_by_pattern};
 use super::async_support::await_value;
@@ -106,7 +106,18 @@ pub(crate) fn exec_node(
             Ok(Control::Next)
         }
         Node::Const(const_stmt) => {
-            let value = evaluate_expr(&const_stmt.value, env, functions, classes, enums, impl_methods)?;
+            // E1024 - Const Eval Failed
+            let value = evaluate_expr(&const_stmt.value, env, functions, classes, enums, impl_methods)
+                .map_err(|e| {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::CONST_EVAL_FAILED)
+                        .with_help("constant expressions must be evaluable at compile time")
+                        .with_note(format!("error occurred while evaluating constant `{}`", const_stmt.name));
+                    CompileError::semantic_with_context(
+                        format!("failed to evaluate constant `{}`: {}", const_stmt.name, e),
+                        ctx,
+                    )
+                })?;
             env.insert(const_stmt.name.clone(), value);
             CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
             Ok(Control::Next)
