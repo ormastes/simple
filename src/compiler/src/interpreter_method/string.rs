@@ -3,11 +3,13 @@
 // This module contains all built-in methods for String values (str type):
 // - Basic operations: len, char_count, is_empty, chars, bytes
 // - Searching: contains, starts_with, ends_with, find, index_of, rfind
-// - Case conversion: to_upper, to_lower, trim variants
-// - Manipulation: reversed, sorted, take, drop, append, prepend, push, pop, clear
-// - Slicing: split, split_lines, slice, substring, replace
+// - Case conversion: to_upper, to_lower, capitalize, swapcase, title
+// - Trimming: trim, strip, trim_start, trim_end, chomp
+// - Prefix/Suffix: removeprefix, removesuffix
+// - Manipulation: reversed, sorted, take, drop, append, prepend, push, pop, clear, squeeze
+// - Slicing: split, split_lines, slice, substring, replace, partition, rpartition
 // - Parsing: parse_int, parse_float, to_int, to_float
-// - Padding: pad_left, pad_right
+// - Padding: pad_left, pad_right, center, zfill
 // - Type checking: is_numeric, is_alpha, is_alphanumeric, is_whitespace
 // - Character codes: ord, codepoint (returns Unicode code point of first char)
 
@@ -46,9 +48,98 @@ if let Value::Str(ref s) = recv_val {
         }
         "to_upper" | "to_uppercase" => return Ok(Value::Str(s.to_uppercase())),
         "to_lower" | "to_lowercase" => return Ok(Value::Str(s.to_lowercase())),
+        "capitalize" => {
+            // Uppercase first character, lowercase the rest
+            let mut chars = s.chars();
+            match chars.next() {
+                None => return Ok(Value::Str(String::new())),
+                Some(first) => {
+                    let rest: String = chars.map(|c| c.to_lowercase().to_string()).collect::<String>();
+                    return Ok(Value::Str(format!("{}{}", first.to_uppercase(), rest)));
+                }
+            }
+        }
+        "swapcase" => {
+            // Swap case of all characters
+            let result: String = s.chars().map(|c| {
+                if c.is_uppercase() {
+                    c.to_lowercase().to_string()
+                } else {
+                    c.to_uppercase().to_string()
+                }
+            }).collect();
+            return Ok(Value::Str(result));
+        }
+        "title" | "titlecase" => {
+            // Titlecase: uppercase first character of each word
+            let mut result = String::new();
+            let mut capitalize_next = true;
+            for c in s.chars() {
+                if c.is_whitespace() || c.is_ascii_punctuation() {
+                    result.push(c);
+                    capitalize_next = true;
+                } else if capitalize_next {
+                    result.push_str(&c.to_uppercase().to_string());
+                    capitalize_next = false;
+                } else {
+                    result.push_str(&c.to_lowercase().to_string());
+                }
+            }
+            return Ok(Value::Str(result));
+        }
         "trim" | "trimmed" | "strip" => return Ok(Value::Str(s.trim().to_string())),
         "trim_start" | "trim_left" => return Ok(Value::Str(s.trim_start().to_string())),
         "trim_end" | "trim_right" => return Ok(Value::Str(s.trim_end().to_string())),
+        "removeprefix" | "remove_prefix" => {
+            // Remove prefix if present
+            let prefix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::Str(s.strip_prefix(&prefix).unwrap_or(s).to_string()));
+        }
+        "removesuffix" | "remove_suffix" => {
+            // Remove suffix if present
+            let suffix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            return Ok(Value::Str(s.strip_suffix(&suffix).unwrap_or(s).to_string()));
+        }
+        "chomp" => {
+            // Remove trailing newline or record separator (default: \n, \r\n, \r)
+            let result = s.strip_suffix("\r\n")
+                .or_else(|| s.strip_suffix('\n'))
+                .or_else(|| s.strip_suffix('\r'))
+                .unwrap_or(s);
+            return Ok(Value::Str(result.to_string()));
+        }
+        "squeeze" => {
+            // Remove duplicate adjacent characters
+            // If no argument, squeeze all duplicates. If argument provided, only squeeze those chars
+            let chars_to_squeeze = args.get(0)
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .transpose()?
+                .map(|v| v.to_key_string());
+
+            if s.is_empty() {
+                return Ok(Value::Str(String::new()));
+            }
+
+            let mut result = String::new();
+            let mut prev: Option<char> = None;
+
+            for c in s.chars() {
+                let should_check = match &chars_to_squeeze {
+                    Some(set) => set.contains(c),
+                    None => true,
+                };
+
+                if should_check {
+                    if Some(c) != prev {
+                        result.push(c);
+                    }
+                } else {
+                    result.push(c);
+                }
+                prev = Some(c);
+            }
+            return Ok(Value::Str(result));
+        }
         "reversed" => return Ok(Value::Str(s.chars().rev().collect())),
         "sorted" => {
             let mut chars: Vec<char> = s.chars().collect();
@@ -205,6 +296,44 @@ if let Value::Str(ref s) = recv_val {
             }
             let padding: String = std::iter::repeat(pad_char).take(width - current_len).collect();
             return Ok(Value::Str(format!("{}{}", s, padding)));
+        }
+        "center" => {
+            // Center string with padding on both sides
+            let width = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            let pad_char = eval_arg(args, 1, Value::Str(" ".into()), env, functions, classes, enums, impl_methods)?
+                .to_key_string()
+                .chars()
+                .next()
+                .unwrap_or(' ');
+            let current_len = s.chars().count();
+            if current_len >= width {
+                return Ok(Value::Str(s.clone()));
+            }
+            let total_padding = width - current_len;
+            let left_padding = total_padding / 2;
+            let right_padding = total_padding - left_padding;
+            let left: String = std::iter::repeat(pad_char).take(left_padding).collect();
+            let right: String = std::iter::repeat(pad_char).take(right_padding).collect();
+            return Ok(Value::Str(format!("{}{}{}", left, s, right)));
+        }
+        "zfill" => {
+            // Pad with zeros on the left to reach specified width
+            // Handles sign correctly for numeric strings
+            let width = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            let current_len = s.chars().count();
+            if current_len >= width {
+                return Ok(Value::Str(s.clone()));
+            }
+
+            // Check if string starts with + or -
+            let (sign, rest) = if s.starts_with('+') || s.starts_with('-') {
+                (&s[0..1], &s[1..])
+            } else {
+                ("", s.as_str())
+            };
+
+            let padding: String = std::iter::repeat('0').take(width - current_len).collect();
+            return Ok(Value::Str(format!("{}{}{}", sign, padding, rest)));
         }
         "is_numeric" => {
             return Ok(Value::Bool(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit())));
