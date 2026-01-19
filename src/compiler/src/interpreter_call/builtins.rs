@@ -80,7 +80,15 @@ pub(super) fn eval_builtin(
                 Value::Tuple(t) => Ok(Some(Value::Int(t.len() as i64))),
                 Value::Dict(d) => Ok(Some(Value::Int(d.len() as i64))),
                 Value::Str(s) => Ok(Some(Value::Int(s.len() as i64))),
-                _ => Err(semantic_err!("len expects array, tuple, dict, or string")),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("len() can only be used with arrays, tuples, dicts, or strings");
+                    Err(CompileError::semantic_with_context(
+                        "len expects array, tuple, dict, or string argument".to_string(),
+                        ctx,
+                    ))
+                }
             }
         }
         "send" => {
