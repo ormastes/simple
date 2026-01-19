@@ -688,6 +688,166 @@ module.exports = grammar({
       $.identifier,                    // km
     ),
 
+    //=========================================================================
+    // BITFIELD DEFINITION
+    //=========================================================================
+
+    // Bitfield: compact binary representation with bit-level field packing
+    // Example: bitfield Flags(u32): active: 1, mode: 3, _reserved: 4
+    bitfield_definition: $ => seq(
+      optional($.visibility),
+      'bitfield',
+      $.type_identifier,
+      optional(seq('(', $.type, ')')),  // Base storage type
+      ':',
+      $._indent,
+      repeat1($.bitfield_field),
+      repeat($.bitfield_constant),
+      $._dedent,
+    ),
+
+    bitfield_field: $ => seq(
+      $.identifier,                     // Field name (or _reserved)
+      ':',
+      choice(
+        $.integer,                      // Bit width: 1, 3, 8
+        $.unit_with_repr,               // Unit with repr: cm:i12
+      ),
+      $._newline,
+    ),
+
+    // Unit type with representation constraint: cm:i12 (12-bit signed centimeters)
+    unit_with_repr: $ => seq(
+      $.identifier,                     // Unit suffix: cm, ms
+      ':',
+      $.repr_type,                      // Representation: i12, u8
+    ),
+
+    repr_type: $ => /[iu]\d+|f32|f64/,  // i12, u8, f32, etc.
+
+    bitfield_constant: $ => seq(
+      'const',
+      $.identifier,
+      '=',
+      $.expression,
+      $._newline,
+    ),
+
+    //=========================================================================
+    // AOP (ASPECT-ORIENTED PROGRAMMING)
+    //=========================================================================
+
+    // Predicate expression within pc{...} syntactic island
+    // Supports boolean combinators and selector functions
+    predicate_expr: $ => choice(
+      $.predicate_selector,
+      $.predicate_not,
+      $.predicate_and,
+      $.predicate_or,
+    ),
+
+    predicate_selector: $ => seq(
+      $.identifier,                     // Selector name: execution, call, within
+      '(',
+      commaSep($.pattern_string),       // Pattern arguments
+      ')',
+    ),
+
+    pattern_string: $ => /[^,()]+/,     // Pattern string (e.g., "* User.new(..)")
+
+    predicate_not: $ => seq('!', $.predicate_expr),
+
+    predicate_and: $ => prec.left(seq(
+      $.predicate_expr,
+      '&',
+      $.predicate_expr,
+    )),
+
+    predicate_or: $ => prec.left(seq(
+      $.predicate_expr,
+      '|',
+      $.predicate_expr,
+    )),
+
+    // Pointcut block: pc{...}
+    pointcut: $ => seq(
+      'pc',
+      '{',
+      $.predicate_expr,
+      '}',
+    ),
+
+    // AOP advice declaration: on pc{...} use <Interceptor>
+    // Advice types: before, after_success, after_error, around
+    aop_advice: $ => seq(
+      'on',
+      $.pointcut,
+      optional($.advice_type),
+      'use',
+      $.module_path,                    // Interceptor class/function
+      optional(seq('priority', $.integer)),
+      $._newline,
+    ),
+
+    advice_type: $ => choice(
+      'before',
+      'after_success',
+      'after_error',
+      'around',
+    ),
+
+    // DI binding: bind on pc{...} -> <Impl> [scope] [priority]
+    di_binding: $ => seq(
+      'bind',
+      'on',
+      $.pointcut,
+      '->',
+      $.module_path,                    // Implementation type
+      optional($.di_scope),
+      optional(seq('priority', $.integer)),
+      $._newline,
+    ),
+
+    di_scope: $ => choice(
+      'singleton',
+      'transient',
+      'scoped',
+    ),
+
+    // Architecture rule: forbid/allow pc{...}
+    architecture_rule: $ => seq(
+      choice('forbid', 'allow'),
+      $.pointcut,
+      optional($.string),               // Optional message
+      $._newline,
+    ),
+
+    //=========================================================================
+    // MOCK DECLARATION (Testing)
+    //=========================================================================
+
+    // Mock declaration: mock Name implements Trait:
+    mock_declaration: $ => seq(
+      'mock',
+      $.type_identifier,
+      'implements',
+      $.type,                           // Trait being mocked
+      ':',
+      $._indent,
+      repeat($.mock_expectation),
+      $._dedent,
+    ),
+
+    // Mock expectation: expect method() -> Type:
+    mock_expectation: $ => seq(
+      'expect',
+      $.identifier,
+      $.parameters,
+      optional(seq('->', $.type)),
+      ':',
+      $.block,
+    ),
+
     // ... continued in Part 2: Statements & Expressions
   },
 });
