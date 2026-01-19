@@ -67,15 +67,9 @@ pub fn handle_trait_object_methods(
         )? {
             return Ok(Some(result));
         }
-        return Err(CompileError::Semantic(format!(
-            "Method '{}' not found on dyn {} (type: {})",
-            method, trait_name, class
-        )));
+        return Err(crate::error::factory::trait_method_not_found(method, trait_name, class));
     }
-    Err(CompileError::Semantic(format!(
-        "Cannot call method '{}' on dyn {}: inner value is not an object",
-        method, trait_name
-    )))
+    Err(crate::error::factory::trait_inner_not_object(method, trait_name))
 }
 
 /// Handle Constructor static method calls

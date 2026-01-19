@@ -90,15 +90,7 @@ pub(crate) fn evaluate_call(
                     );
                 }
                 Value::Constructor { class_name } => {
-                    return core::instantiate_class(
-                        &class_name,
-                        args,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    );
+                    return core::instantiate_class(&class_name, args, env, functions, classes, enums, impl_methods);
                 }
                 Value::NativeFunction(native) => {
                     let evaluated: Vec<Value> = args

@@ -333,7 +333,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             // Only require implementation of abstract methods
                             if trait_method.is_abstract && !impl_method_names.contains(&trait_method.name) {
                                 return Err(crate::error::factory::missing_trait_method(
-                                    &type_name, &trait_method.name, trait_name
+                                    &type_name,
+                                    &trait_method.name,
+                                    trait_name,
                                 ));
                             }
                         }

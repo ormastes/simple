@@ -24,12 +24,7 @@ macro_rules! extract_method_name {
         match &method_name {
             Value::Symbol(s) => s.clone(),
             Value::Str(s) => s.clone(),
-            _ => {
-                return Err(CompileError::Semantic(format!(
-                    "{} expects symbol or string method name",
-                    $context
-                )))
-            }
+            _ => return Err(crate::error::factory::mock_expects_method_name($context)),
         }
     }};
 }
@@ -41,10 +36,7 @@ macro_rules! with_configuring_method {
         if let Some(ref method_name) = *configuring {
             $op(method_name)
         } else {
-            Err(CompileError::Semantic(format!(
-                "{}() must be chained after verify(:method)",
-                $context
-            )))
+            Err(crate::error::factory::mock_requires_verify($context))
         }
     }};
 }
