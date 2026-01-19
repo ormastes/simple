@@ -1,0 +1,216 @@
+// Class instantiation and initialization support
+
+use super::arg_binding::bind_args_with_injected;
+use super::di_injection::resolve_injected_args;
+use crate::error::CompileError;
+use crate::interpreter::{evaluate_expr, exec_block};
+use crate::value::*;
+use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, SelfMode};
+use simple_runtime::value::diagram_ffi;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+
+type Enums = HashMap<String, EnumDef>;
+type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+
+const METHOD_SELF: &str = "self";
+const METHOD_NEW: &str = "new";
+const METHOD_INIT: &str = "__init__";
+
+// Thread-local to track classes currently executing their `new` method.
+// This prevents infinite recursion when `new` method calls `ClassName(args)` internally.
+thread_local! {
+    pub(crate) static IN_NEW_METHOD: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+pub(crate) fn instantiate_class(
+    class_name: &str,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    // Diagram tracing for class instantiation
+    if diagram_ffi::is_diagram_enabled() {
+        diagram_ffi::trace_method(class_name, "new");
+    }
+
+    let class_def = classes
+        .get(class_name)
+        .cloned()
+        .ok_or_else(|| semantic_err!("unknown class: {}", class_name))?;
+
+    let mut fields: HashMap<String, Value> = HashMap::new();
+    for field in &class_def.fields {
+        let val = if let Some(default_expr) = &field.default {
+            evaluate_expr(default_expr, env, functions, classes, enums, impl_methods)?
+        } else {
+            Value::Nil
+        };
+        fields.insert(field.name.clone(), val);
+    }
+
+    // Check if we should call the `new` method
+    // Only call `new()` if it has special attributes like #[inject]
+    // Otherwise, do field-based construction
+    let already_in_new = IN_NEW_METHOD.with(|set| set.borrow().contains(class_name));
+
+    if let Some(new_method) = class_def.methods.iter().find(|m| m.name == METHOD_NEW) {
+        // Only auto-call new() if it has special attributes like #[inject]
+        // Otherwise, use field-based construction
+        let should_call_new = has_inject_attr(new_method);
+
+        if should_call_new && !already_in_new {
+            let self_val = Value::Object {
+                class: class_name.to_string(),
+                fields: fields.clone(),
+            };
+
+            let mut local_env = env.clone();
+            local_env.insert(METHOD_SELF.to_string(), self_val);
+
+            for (k, v) in &fields {
+                local_env.insert(k.clone(), v.clone());
+            }
+
+            let self_mode = SelfMode::SkipSelf;
+            let injected = if has_inject_attr(new_method) {
+                resolve_injected_args(
+                    &new_method.params,
+                    args,
+                    class_name,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                    self_mode,
+                )?
+            } else {
+                HashMap::new()
+            };
+            let bound = bind_args_with_injected(
+                &new_method.params,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                self_mode,
+                &injected,
+            )?;
+            for (name, val) in bound {
+                local_env.insert(name, val);
+            }
+
+            // Mark this class as currently in its `new` method
+            IN_NEW_METHOD.with(|set| set.borrow_mut().insert(class_name.to_string()));
+
+            let result = match exec_block(
+                &new_method.body,
+                &mut local_env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            ) {
+                Ok(crate::interpreter::Control::Return(v)) => Ok(v),
+                Ok(_) => Ok(local_env.get("self").cloned().unwrap_or(Value::Object {
+                    class: class_name.to_string(),
+                    fields,
+                })),
+                Err(CompileError::TryError(val)) => Ok(val),
+                Err(e) => Err(e),
+            };
+
+            // Remove from tracking set
+            IN_NEW_METHOD.with(|set| set.borrow_mut().remove(class_name));
+
+            return result;
+        }
+    }
+
+    // Check if class has __init__ method for Python-style initialization
+    if let Some(init_method) = class_def.methods.iter().find(|m| m.name == METHOD_INIT) {
+        // Create the object with default field values first
+        let self_val = Value::Object {
+            class: class_name.to_string(),
+            fields: fields.clone(),
+        };
+
+        // Set up local environment for __init__
+        let mut local_env = env.clone();
+        local_env.insert(METHOD_SELF.to_string(), self_val);
+
+        // Bind arguments to __init__ parameters (skipping self)
+        let self_mode = SelfMode::SkipSelf;
+        let bound = super::arg_binding::bind_args(
+            &init_method.params,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            self_mode,
+        )?;
+        for (name, val) in bound {
+            local_env.insert(name, val);
+        }
+
+        // Execute __init__ body
+        match exec_block(
+            &init_method.body,
+            &mut local_env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        ) {
+            Ok(_) | Err(CompileError::TryError(_)) => {}
+            Err(e) => return Err(e),
+        }
+
+        // Return the modified self from local_env
+        return Ok(local_env.get(METHOD_SELF).cloned().unwrap_or(Value::Object {
+            class: class_name.to_string(),
+            fields,
+        }));
+    }
+
+    // Field-based construction
+    // Used when there's no `__init__` or `new` method with special attributes
+    let mut positional_idx = 0;
+    for arg in args {
+        let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+        if let Some(name) = &arg.name {
+            if !fields.contains_key(name) {
+                bail_semantic!("unknown field {} for class {}", name, class_name);
+            }
+            fields.insert(name.clone(), val);
+        } else {
+            if positional_idx < class_def.fields.len() {
+                let field_name = &class_def.fields[positional_idx].name;
+                fields.insert(field_name.clone(), val);
+                positional_idx += 1;
+            } else {
+                bail_semantic!("too many arguments for class {}", class_name);
+            }
+        }
+    }
+
+    Ok(Value::Object {
+        class: class_name.to_string(),
+        fields,
+    })
+}
+
+fn has_inject_attr(method: &FunctionDef) -> bool {
+    method
+        .attributes
+        .iter()
+        .any(|attr| attr.name == "inject" || attr.name == "sys_inject")
+}
