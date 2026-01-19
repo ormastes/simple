@@ -15,6 +15,7 @@ pub use error::{LowerError, LowerResult};
 pub use memory_warning::{MemoryWarning, MemoryWarningCode, MemoryWarningCollector, WarningSummary};
 pub use lowerer::Lowerer;
 
+use super::lifetime::LifetimeViolation;
 use super::types::HirModule;
 
 /// Result of lowering that includes both the module and memory warnings
@@ -24,12 +25,36 @@ pub struct LoweringOutput {
     pub module: HirModule,
     /// Memory safety warnings collected during lowering
     pub warnings: MemoryWarningCollector,
+    /// Lean 4 verification code for lifetime constraints (if any)
+    pub lifetime_lean4: Option<String>,
+    /// Lifetime violations detected (stored for reporting even if lowering succeeds)
+    pub lifetime_violations: Vec<LifetimeViolation>,
 }
 
 impl LoweringOutput {
     /// Create a new lowering output
     pub fn new(module: HirModule, warnings: MemoryWarningCollector) -> Self {
-        Self { module, warnings }
+        Self {
+            module,
+            warnings,
+            lifetime_lean4: None,
+            lifetime_violations: Vec::new(),
+        }
+    }
+
+    /// Create a new lowering output with lifetime information
+    pub fn with_lifetime(
+        module: HirModule,
+        warnings: MemoryWarningCollector,
+        lifetime_lean4: String,
+        lifetime_violations: Vec<LifetimeViolation>,
+    ) -> Self {
+        Self {
+            module,
+            warnings,
+            lifetime_lean4: Some(lifetime_lean4),
+            lifetime_violations,
+        }
     }
 
     /// Check if there are any warnings
@@ -45,6 +70,21 @@ impl LoweringOutput {
     /// Get the warning summary
     pub fn summary(&self) -> WarningSummary {
         self.warnings.summary()
+    }
+
+    /// Check if there are any lifetime violations
+    pub fn has_lifetime_violations(&self) -> bool {
+        !self.lifetime_violations.is_empty()
+    }
+
+    /// Get lifetime violation count
+    pub fn lifetime_violation_count(&self) -> usize {
+        self.lifetime_violations.len()
+    }
+
+    /// Get Lean 4 lifetime verification code
+    pub fn get_lifetime_lean4(&self) -> Option<&str> {
+        self.lifetime_lean4.as_deref()
     }
 }
 

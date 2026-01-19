@@ -416,6 +416,30 @@ pub mod factory {
         ))
     }
 
+    /// Error when a function expects a minimum number of arguments.
+    pub fn func_expects_args(func_name: &str, expected: usize, found: usize) -> CompileError {
+        CompileError::Semantic(format!(
+            "{} expects {} argument(s), got {}",
+            func_name, expected, found
+        ))
+    }
+
+    /// Error when a function expects at least N arguments.
+    pub fn func_expects_at_least(func_name: &str, min: usize, found: usize) -> CompileError {
+        CompileError::Semantic(format!(
+            "{} expects at least {} argument(s), got {}",
+            func_name, min, found
+        ))
+    }
+
+    /// Error when a function argument has the wrong type (with func name).
+    pub fn func_expects_type_at(func_name: &str, expected_type: &str, index: usize) -> CompileError {
+        CompileError::Semantic(format!(
+            "{} expects {} argument at position {}",
+            func_name, expected_type, index
+        ))
+    }
+
     /// Error when a required argument is missing.
     pub fn missing_argument(name: &str) -> CompileError {
         CompileError::Semantic(format!("missing required argument: {}", name))
@@ -468,6 +492,24 @@ pub mod factory {
         CompileError::Semantic(format!("panic: {}", message))
     }
 
+    /// Error when an assertion fails.
+    pub fn assertion_failed(left: &impl std::fmt::Debug, right: &impl std::fmt::Debug) -> CompileError {
+        CompileError::Semantic(format!("assertion failed: {:?} != {:?}", left, right))
+    }
+
+    /// Error when a unit assertion fails.
+    pub fn unit_assertion_failed(error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("unit assertion failed: {}", error))
+    }
+
+    /// Error when a type is not a valid unit type.
+    pub fn invalid_unit_type(type_name: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "assert_unit: '{}' is not a registered unit type (family or compound unit)",
+            type_name
+        ))
+    }
+
     // ============================================
     // Type/Name Resolution Errors
     // ============================================
@@ -500,6 +542,79 @@ pub mod factory {
         CompileError::Semantic(format!(
             "no field named '{}' found on type '{}'",
             field_name, type_name
+        ))
+    }
+
+    // ============================================
+    // Trait Impl Errors
+    // ============================================
+
+    /// Error when a default impl must be a blanket impl.
+    pub fn default_impl_must_be_blanket(trait_name: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "#[default] impl for trait `{}` must be a blanket impl (impl[T] Trait for T)",
+            trait_name
+        ))
+    }
+
+    /// Error when a duplicate blanket impl is found.
+    pub fn duplicate_blanket_impl(trait_name: &str) -> CompileError {
+        CompileError::Semantic(format!("duplicate blanket impl for trait `{}`", trait_name))
+    }
+
+    /// Error when overlapping impls are found.
+    pub fn overlapping_impls(trait_name: &str, context: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "overlapping impls for trait `{}`: {}",
+            trait_name, context
+        ))
+    }
+
+    /// Error when a duplicate impl is found for a specific type.
+    pub fn duplicate_impl(trait_name: &str, type_name: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "duplicate impl for trait `{}` and type `{}`",
+            trait_name, type_name
+        ))
+    }
+
+    // ============================================
+    // Effect/Capability Errors
+    // ============================================
+
+    /// Error when a blocking operation is used in async context.
+    pub fn blocking_in_async(operation: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "blocking operation '{}' not allowed in async function\n\
+             help: remove @async decorator or use non-blocking alternative",
+            operation
+        ))
+    }
+
+    /// Error when a side-effecting operation is used in pure context.
+    pub fn side_effect_in_pure(operation: &str, needed_effect: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "side-effecting operation '{}' not allowed in pure function\n\
+             help: remove @pure decorator or add {} effect to function",
+            operation, needed_effect
+        ))
+    }
+
+    /// Error when a pure function calls a non-pure function.
+    pub fn pure_calls_impure(callee_name: &str, callee_effects: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "pure function cannot call '{}' which has effects: {}\n\
+             help: remove @pure decorator from caller or add @pure to callee",
+            callee_name, callee_effects
+        ))
+    }
+
+    /// Error when a pure function calls a function with a specific effect.
+    pub fn pure_calls_effect(callee_name: &str, effect_name: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "pure function cannot call '{}' with @{} effect\n\
+             help: remove @pure decorator from caller or remove @{} from callee",
+            callee_name, effect_name, effect_name
         ))
     }
 

@@ -49,10 +49,7 @@ pub(super) fn register_trait_impl(
     };
 
     if is_default && !is_blanket {
-        return Err(CompileError::Semantic(format!(
-            "#[default] impl for trait `{}` must be a blanket impl (impl[T] Trait for T)",
-            trait_name
-        )));
+        return Err(crate::error::factory::default_impl_must_be_blanket(&trait_name));
     }
 
     let target_key = get_type_name(&impl_block.target_type);
@@ -60,16 +57,10 @@ pub(super) fn register_trait_impl(
 
     if is_blanket {
         if entry.blanket_impl {
-            return Err(CompileError::Semantic(format!(
-                "duplicate blanket impl for trait `{}`",
-                trait_name
-            )));
+            return Err(crate::error::factory::duplicate_blanket_impl(&trait_name));
         }
         if !is_default && (!entry.specific_impls.is_empty() || entry.default_blanket_impl) {
-            return Err(CompileError::Semantic(format!(
-                "overlapping impls for trait `{}`: blanket impl conflicts with existing impls",
-                trait_name
-            )));
+            return Err(crate::error::factory::overlapping_impls(&trait_name, "blanket impl conflicts with existing impls"));
         }
         entry.blanket_impl = true;
         entry.default_blanket_impl = is_default;
@@ -77,17 +68,14 @@ pub(super) fn register_trait_impl(
     }
 
     if entry.specific_impls.contains(&target_key) {
-        return Err(CompileError::Semantic(format!(
-            "duplicate impl for trait `{}` and type `{}`",
-            trait_name, target_key
-        )));
+        return Err(crate::error::factory::duplicate_impl(&trait_name, &target_key));
     }
 
     if entry.blanket_impl && !entry.default_blanket_impl {
-        return Err(CompileError::Semantic(format!(
-            "overlapping impls for trait `{}`: specific impl for `{}` conflicts with blanket impl",
-            trait_name, target_key
-        )));
+        return Err(crate::error::factory::overlapping_impls(
+            &trait_name,
+            &format!("specific impl for `{}` conflicts with blanket impl", target_key)
+        ));
     }
 
     entry.specific_impls.insert(target_key);

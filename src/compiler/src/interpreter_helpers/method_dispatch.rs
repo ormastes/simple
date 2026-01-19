@@ -91,12 +91,21 @@ pub(crate) fn call_method_on_value(
                         }
                     }
                     if let Some(err_val) = payload {
-                        return Err(CompileError::Semantic(format!(
-                            "called unwrap on Err: {}",
-                            err_val.to_display_string()
-                        )));
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                            .with_help("check that the Result is Ok before calling unwrap");
+                        return Err(CompileError::semantic_with_context(
+                            format!("called unwrap on Err: {}", err_val.to_display_string()),
+                            ctx,
+                        ));
                     }
-                    return Err(CompileError::Semantic("called unwrap on Err".into()));
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                        .with_help("check that the Result is Ok before calling unwrap");
+                    return Err(CompileError::semantic_with_context(
+                        "called unwrap on Err".to_string(),
+                        ctx,
+                    ));
                 }
                 "unwrap_err" => {
                     if res_variant == Some(ResultVariant::Err) {
@@ -104,7 +113,13 @@ pub(crate) fn call_method_on_value(
                             return Ok(val.as_ref().clone());
                         }
                     }
-                    return Err(CompileError::Semantic("called unwrap_err on Ok".into()));
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                        .with_help("check that the Result is Err before calling unwrap_err");
+                    return Err(CompileError::semantic_with_context(
+                        "called unwrap_err on Ok".to_string(),
+                        ctx,
+                    ));
                 }
                 _ => {}
             }
@@ -181,11 +196,14 @@ pub(crate) fn call_method_on_value(
         _ => {}
     }
 
-    Err(CompileError::Semantic(format!(
-        "method '{}' not found on value of type {} in nested call context",
-        method,
-        recv_val.type_name()
-    )))
+    let ctx = ErrorContext::new()
+        .with_code(codes::METHOD_NOT_FOUND)
+        .with_help("check that the method is defined on this type");
+    Err(CompileError::semantic_with_context(
+        format!("method '{}' not found on value of type {} in nested call context",
+            method, recv_val.type_name()),
+        ctx,
+    ))
 }
 
 /// Build method_missing arguments from method name and original args

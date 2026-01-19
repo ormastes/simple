@@ -159,7 +159,7 @@ impl CompilerPipeline {
         // If HIR or MIR export is requested, generate them even in interpreter mode (#886-887)
         if self.emit_hir.is_some() || self.emit_mir.is_some() {
             // Type check is required for HIR/MIR lowering
-            type_check(&module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
+            type_check(&module.items).map_err(|e| crate::error::factory::type_check_failed(&e))?;
 
             // Lower to HIR (with module resolution support if source file is available)
             let hir_module = if let Some(source_path) = source_file {
@@ -167,7 +167,7 @@ impl CompilerPipeline {
             } else {
                 crate::hir::lower(&module)
             }
-            .map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
+            .map_err(|e| crate::error::factory::hir_lowering_failed(&e))?;
 
             // Emit HIR if requested
             if let Some(path) = &self.emit_hir {
@@ -178,7 +178,7 @@ impl CompilerPipeline {
             if self.emit_mir.is_some() {
                 let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
                 let mir_module = crate::mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
-                    .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
+                    .map_err(|e| crate::error::factory::mir_lowering_failed(&e))?;
 
                 // Emit MIR if requested
                 if let Some(path) = &self.emit_mir {
@@ -190,7 +190,7 @@ impl CompilerPipeline {
             // If the module has script-style statements and no IR export needed, skip type_check
             if !has_script_statements(&module.items) {
                 // Type inference/checking (features #13/#14 scaffolding)
-                type_check(&module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
+                type_check(&module.items).map_err(|e| crate::error::factory::type_check_failed(&e))?;
             }
         }
 

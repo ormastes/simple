@@ -141,10 +141,7 @@ pub(crate) fn evaluate_macro_invocation(
                 let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
                 let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
                 if left_val != right_val {
-                    return Err(CompileError::Semantic(format!(
-                        "assertion failed: {:?} != {:?}",
-                        left_val, right_val
-                    )));
+                    return Err(crate::error::factory::assertion_failed(&left_val, &right_val));
                 }
             }
             Ok(Value::Nil)
@@ -169,15 +166,12 @@ pub(crate) fn evaluate_macro_invocation(
 
                 // Check if the type is a valid unit type
                 if !crate::interpreter::is_unit_type(&type_name) {
-                    return Err(CompileError::Semantic(format!(
-                        "assert_unit: '{}' is not a registered unit type (family or compound unit)",
-                        type_name
-                    )));
+                    return Err(crate::error::factory::invalid_unit_type(&type_name));
                 }
 
                 // Validate the value against the unit type
                 if let Err(e) = crate::interpreter::validate_unit_type(&value, &type_name) {
-                    return Err(CompileError::Semantic(format!("unit assertion failed: {}", e)));
+                    return Err(crate::error::factory::unit_assertion_failed(&e));
                 }
             } else {
                 return Err(CompileError::Semantic(
@@ -199,7 +193,7 @@ pub(crate) fn evaluate_macro_invocation(
                     }
                 })
                 .unwrap_or_else(|| "explicit panic".into());
-            Err(CompileError::Semantic(format!("panic: {}", msg)))
+            Err(crate::error::factory::panic_macro(&msg))
         }
         "format" => {
             let mut output = String::new();

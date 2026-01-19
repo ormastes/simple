@@ -220,11 +220,13 @@ fn exec_assignment(
         if !is_first_assignment {
             let is_immutable = IMMUTABLE_VARS.with(|cell| cell.borrow().contains(name));
             if is_immutable && !name.ends_with('_') {
-                return Err(CompileError::Semantic(format!(
-                    "cannot reassign to immutable variable '{name}'\n\
-                     help: consider using '{name}_' for a mutable variable, \
-                     or use '{name}->method()' for functional updates"
-                )));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help(format!("consider using '{name}_' for a mutable variable, or use '{name}->method()' for functional updates"));
+                return Err(CompileError::semantic_with_context(
+                    format!("invalid assignment: cannot reassign to immutable variable '{}'", name),
+                    ctx,
+                ));
             }
         }
 
@@ -325,8 +327,12 @@ fn exec_assignment(
                 ))
             }
         } else {
-            Err(CompileError::Semantic(
-                "field assignment requires identifier as object".into(),
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_ASSIGNMENT)
+                .with_help("field assignment requires an identifier as the object");
+            Err(CompileError::semantic_with_context(
+                "invalid assignment: field assignment requires identifier as object",
+                ctx,
             ))
         }
     } else if let Expr::Index { receiver, index } = &assign.target {
@@ -362,16 +368,23 @@ fn exec_assignment(
                             tup[idx] = value;
                             Value::Tuple(tup)
                         } else {
-                            return Err(CompileError::Semantic(format!(
-                                "tuple index {} out of bounds (len={})",
-                                idx,
-                                tup.len()
-                            )));
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                .with_help(format!("tuple has {} element(s)", tup.len()))
+                                .with_note(format!("index {} is out of bounds", idx));
+                            return Err(CompileError::semantic_with_context(
+                                format!("index out of bounds: tuple index {} out of bounds (len={})", idx, tup.len()),
+                                ctx,
+                            ));
                         }
                     }
                     _ => {
-                        return Err(CompileError::Semantic(
-                            "index assignment requires array, dict, or tuple".into(),
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_ASSIGNMENT)
+                            .with_help("index assignment requires an array, dict, or tuple");
+                        return Err(CompileError::semantic_with_context(
+                            format!("invalid assignment: cannot index assign value of type {}", container.type_name()),
+                            ctx,
                         ))
                     }
                 };
@@ -388,8 +401,12 @@ fn exec_assignment(
                 ))
             }
         } else {
-            Err(CompileError::Semantic(
-                "index assignment requires identifier as container".into(),
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_ASSIGNMENT)
+                .with_help("index assignment requires an identifier as the container");
+            Err(CompileError::semantic_with_context(
+                "invalid assignment: index assignment requires identifier as container",
+                ctx,
             ))
         }
     } else if let Expr::Tuple(targets) = &assign.target {
@@ -399,24 +416,34 @@ fn exec_assignment(
             Value::Tuple(v) => v,
             Value::Array(v) => v,
             _ => {
-                return Err(CompileError::Semantic(
-                    "tuple unpacking requires tuple or array on right side".into(),
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("tuple unpacking requires a tuple or array on the right side");
+                return Err(CompileError::semantic_with_context(
+                    format!("type mismatch: tuple unpacking requires tuple or array, got {}", value.type_name()),
+                    ctx,
                 ))
             }
         };
         if targets.len() != values.len() {
-            return Err(CompileError::Semantic(format!(
-                "tuple unpacking length mismatch: expected {}, got {}",
-                targets.len(),
-                values.len()
-            )));
+            let ctx = ErrorContext::new()
+                .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+                .with_help("ensure the right side has the same number of elements as the left side");
+            return Err(CompileError::semantic_with_context(
+                format!("argument count mismatch: tuple unpacking expected {}, got {}", targets.len(), values.len()),
+                ctx,
+            ));
         }
         for (target_expr, val) in targets.iter().zip(values.into_iter()) {
             if let Expr::Identifier(name) = target_expr {
                 env.insert(name.clone(), val);
             } else {
-                return Err(CompileError::Semantic(
-                    "tuple unpacking target must be identifier".into(),
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help("tuple unpacking targets must be identifiers");
+                return Err(CompileError::semantic_with_context(
+                    "invalid assignment: tuple unpacking target must be identifier",
+                    ctx,
                 ));
             }
         }
@@ -459,8 +486,12 @@ fn exec_augmented_assignment(
         AssignOp::DivAssign | AssignOp::SuspendDivAssign => Some(BinOp::Div),
         AssignOp::SuspendAssign => None, // ~= is simple await assignment
         AssignOp::Assign => {
-            return Err(CompileError::Semantic(
-                "plain assignment should be handled elsewhere".into(),
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("plain assignment (=) should be handled by the standard assignment function");
+            return Err(CompileError::semantic_with_context(
+                "invalid operation: plain assignment should be handled elsewhere",
+                ctx,
             ))
         }
     };
@@ -558,9 +589,15 @@ fn exec_augmented_assignment(
                         env.insert(obj_name.clone(), Value::Object { class, fields });
                         Ok(Control::Next)
                     }
-                    _ => Err(CompileError::Semantic(
-                        "cannot use augmented assignment on non-object value".into(),
-                    )),
+                    _ => {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_ASSIGNMENT)
+                            .with_help("augmented assignment on fields requires an object value");
+                        Err(CompileError::semantic_with_context(
+                            "invalid assignment: cannot use augmented assignment on non-object value",
+                            ctx,
+                        ))
+                    },
                 }
             } else {
                 // E1001 - Undefined Variable

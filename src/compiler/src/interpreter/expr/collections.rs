@@ -501,7 +501,15 @@ pub(super) fn eval_collection_expr(
                 Value::Array(arr) => arr.len() as i64,
                 Value::Str(s) => s.len() as i64,
                 Value::Tuple(t) => t.len() as i64,
-                _ => return Err(CompileError::Semantic("slice on non-sliceable type".into())),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("slicing with step is only supported on arrays, tuples, and strings");
+                    return Err(CompileError::semantic_with_context(
+                        format!("invalid operation: cannot slice value of type {} with step", recv_val.type_name()),
+                        ctx,
+                    ));
+                }
             };
 
             // Parse start, end, step with Python-style semantics
@@ -543,7 +551,15 @@ pub(super) fn eval_collection_expr(
                     Ok(Value::Str(sliced.into_iter().collect()))
                 }
                 Value::Tuple(tup) => Ok(Value::Tuple(slice_collection(&tup, start_idx, end_idx, step_val))),
-                _ => Err(CompileError::Semantic("slice on non-sliceable type".into())),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_OPERATION)
+                        .with_help("slicing with step is only supported on arrays, tuples, and strings");
+                    Err(CompileError::semantic_with_context(
+                        format!("invalid operation: cannot slice value of type {} with step", recv_val.type_name()),
+                        ctx,
+                    ))
+                },
             };
             Ok(Some(result?))
         }

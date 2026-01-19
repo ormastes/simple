@@ -624,15 +624,19 @@ fn generate_memory_safety_lean(args: &[String]) -> i32 {
     };
 
     // Generate Lean 4 memory safety verification
-    // Note: We need access to the lifetime context from the lowerer
-    // For now, generate from module and warnings only
     let lean = simple_compiler::codegen::lean::generate_memory_safety_lean(
         &output.module,
-        None, // TODO: Get lifetime context from lowerer
+        None,
         Some(&output.warnings),
     );
 
     println!("{}", lean);
+
+    // If we have lifetime-specific Lean 4 code, append it
+    if let Some(lifetime_lean) = output.get_lifetime_lean4() {
+        println!("\n-- Lifetime-specific verification code from HIR lowering:");
+        println!("{}", lifetime_lean);
+    }
 
     // Print summary
     if output.has_warnings() {

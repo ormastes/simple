@@ -379,13 +379,17 @@ impl Lowerer {
         let mut type_checker = crate::type_check::TypeChecker::new();
         type_checker.apply_promise_wrapping(&mut self.module)?;
 
-        // Seventh pass: check for lifetime violations (E2001-E2006)
-        if self.lifetime_context.has_violations() {
-            let violations = self.lifetime_context.violations().to_vec();
-            if violations.len() == 1 {
-                return Err(LowerError::LifetimeViolation(violations.into_iter().next().unwrap()));
+        // Seventh pass: capture lifetime information for Lean 4 verification
+        let lifetime_lean4 = self.lifetime_context.generate_lean4();
+        let lifetime_violations = self.lifetime_context.violations().to_vec();
+
+        // Check for lifetime violations (E2001-E2006)
+        if !lifetime_violations.is_empty() {
+            // Return error with lifetime violations
+            if lifetime_violations.len() == 1 {
+                return Err(LowerError::LifetimeViolation(lifetime_violations.into_iter().next().unwrap()));
             } else {
-                return Err(LowerError::LifetimeViolations(violations));
+                return Err(LowerError::LifetimeViolations(lifetime_violations));
             }
         }
 
@@ -393,6 +397,11 @@ impl Lowerer {
         let warnings = std::mem::take(&mut self.memory_warnings);
         let module = self.module;
 
-        Ok(super::super::LoweringOutput::new(module, warnings))
+        Ok(super::super::LoweringOutput::with_lifetime(
+            module,
+            warnings,
+            lifetime_lean4,
+            lifetime_violations,
+        ))
     }
 }
