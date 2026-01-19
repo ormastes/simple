@@ -94,7 +94,7 @@ impl LlvmBackend {
                 let param_ty = self.llvm_type(&param.ty)?;
                 let alloca = builder
                     .build_alloca(param_ty, &param.name)
-                    .map_err(|e| CompileError::Semantic(format!("Failed to build param alloca: {}", e)))?;
+                    .map_err(|e| crate::error::factory::llvm_build_failed("param alloca", &e))?;
                 local_allocas.insert(i, alloca);
             }
 
@@ -104,7 +104,7 @@ impl LlvmBackend {
                 let local_ty = self.llvm_type(&local.ty)?;
                 let alloca = builder
                     .build_alloca(local_ty, &local.name)
-                    .map_err(|e| CompileError::Semantic(format!("Failed to build local alloca: {}", e)))?;
+                    .map_err(|e| crate::error::factory::llvm_build_failed("local alloca", &e))?;
                 local_allocas.insert(param_count + i, alloca);
             }
 

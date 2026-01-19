@@ -421,6 +421,29 @@ pub mod factory {
         CompileError::Semantic(format!("missing required argument: {}", name))
     }
 
+    /// Error when an argument must be a specific type (simpler version).
+    pub fn argument_must_be(index: usize, expected_type: &str) -> CompileError {
+        CompileError::Semantic(format!("argument {} must be {}", index, expected_type))
+    }
+
+    /// Error when an operation expects a lambda argument.
+    pub fn expects_lambda(operation: &str) -> CompileError {
+        CompileError::Semantic(format!("{} expects lambda argument", operation))
+    }
+
+    /// Error when a const binding has wrong type.
+    pub fn const_binding_wrong_type(name: &str, expected: &str, found: &str) -> CompileError {
+        CompileError::Semantic(format!(
+            "Const binding '{}' is not {}: {}",
+            name, expected, found
+        ))
+    }
+
+    /// Error when a const binding is not found.
+    pub fn const_binding_not_found(name: &str) -> CompileError {
+        CompileError::Semantic(format!("Const binding '{}' not found", name))
+    }
+
     // ============================================
     // Macro Errors
     // ============================================
@@ -523,6 +546,16 @@ pub mod factory {
     /// Error when codegen fails for a specific construct.
     pub fn codegen_failed(construct: &str, reason: &str) -> CompileError {
         CompileError::Codegen(format!("failed to generate code for {}: {}", construct, reason))
+    }
+
+    /// Error when an LLVM build operation fails.
+    pub fn llvm_build_failed(operation: &str, error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("Failed to build {}: {}", operation, error))
+    }
+
+    /// Error when an LLVM cast operation fails.
+    pub fn llvm_cast_failed(operation: &str, error: &impl std::fmt::Display) -> CompileError {
+        CompileError::Semantic(format!("Failed to {}: {}", operation, error))
     }
 
     // ============================================

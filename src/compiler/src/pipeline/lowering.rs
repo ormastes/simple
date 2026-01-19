@@ -97,6 +97,45 @@ fn convert_lower_error(e: crate::hir::LowerError) -> CompileError {
                 ctx,
             )
         }
+        crate::hir::LowerError::LifetimeViolation(violation) => {
+            // E2001-E2006 - Lifetime Violations
+            let ctx = ErrorContext::new()
+                .with_code(violation.code())
+                .with_help(match &violation {
+                    crate::hir::LifetimeViolation::EscapingReference { .. } => {
+                        "consider returning an owned value instead of a reference"
+                    }
+                    crate::hir::LifetimeViolation::UseAfterDrop { .. } => {
+                        "ensure the value lives long enough for all uses"
+                    }
+                    crate::hir::LifetimeViolation::DanglingReference { .. } => {
+                        "the referenced value has been dropped"
+                    }
+                    crate::hir::LifetimeViolation::BorrowOutlivesOwner { .. } => {
+                        "reduce the borrow's scope or extend the owner's lifetime"
+                    }
+                    crate::hir::LifetimeViolation::ReturnLocalReference { .. } => {
+                        "return an owned value or use a parameter reference"
+                    }
+                    crate::hir::LifetimeViolation::StorageEscapes { .. } => {
+                        "don't store short-lived references in longer-lived locations"
+                    }
+                });
+
+            CompileError::semantic_with_context(violation.description(), ctx)
+        }
+        crate::hir::LowerError::LifetimeViolations(violations) => {
+            // Multiple lifetime violations
+            let messages: Vec<String> = violations
+                .iter()
+                .map(|v| format!("[{}] {}", v.code(), v.description()))
+                .collect();
+            let ctx = ErrorContext::new()
+                .with_code("E2000")
+                .with_note(format!("{} lifetime violations detected", violations.len()));
+
+            CompileError::semantic_with_context(messages.join("\n"), ctx)
+        }
         // Other errors just get converted to simple semantic errors
         other => CompileError::Semantic(format!("HIR lowering: {}", other)),
     }

@@ -23,7 +23,7 @@ impl LlvmBackend {
         if let inkwell::values::BasicValueEnum::PointerValue(ptr) = addr_val {
             let loaded = builder
                 .build_load(self.llvm_type(ty)?, ptr, "load")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build load: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
             vreg_map.insert(dest, loaded);
             Ok(())
         } else {
@@ -46,7 +46,7 @@ impl LlvmBackend {
         if let inkwell::values::BasicValueEnum::PointerValue(ptr) = addr_val {
             builder
                 .build_store(ptr, value_val)
-                .map_err(|e| CompileError::Semantic(format!("Failed to build store: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
             Ok(())
         } else {
             Err(CompileError::Semantic("Store requires pointer".to_string()))
@@ -65,7 +65,7 @@ impl LlvmBackend {
         let llvm_ty = self.llvm_type(ty)?;
         let alloc = builder
             .build_alloca(llvm_ty, "gc_alloc")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build alloca: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("alloca", &e))?;
         vreg_map.insert(dest, alloc.into());
         Ok(())
     }

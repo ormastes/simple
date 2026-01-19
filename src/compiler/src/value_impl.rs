@@ -11,12 +11,35 @@ impl Value {
             Value::Handle(h) => h.resolve_inner().unwrap_or(Value::Nil).as_int(),
             Value::Borrow(b) => b.inner().as_int(),
             Value::BorrowMut(b) => b.inner().as_int(),
-            Value::Str(_) => Err(CompileError::Semantic("expected int, got string".into())),
-            Value::Symbol(_) => Err(CompileError::Semantic("expected int, got symbol".into())),
+            Value::Str(_) => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("expected integer type, got string");
+                Err(CompileError::semantic_with_context(
+                    "type mismatch: cannot convert string to int",
+                    ctx,
+                ))
+            },
+            Value::Symbol(_) => {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help("expected integer type, got symbol");
+                Err(CompileError::semantic_with_context(
+                    "type mismatch: cannot convert symbol to int",
+                    ctx,
+                ))
+            },
             Value::Nil => Ok(0),
-            other => Err(CompileError::Semantic(format!(
-                "expected int, got {other:?}"
-            ))),
+            other => {
+                let actual_type = self.type_name();
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help(format!("expected integer type, got {}", actual_type));
+                Err(CompileError::semantic_with_context(
+                    format!("type mismatch: cannot convert {} to int", actual_type),
+                    ctx,
+                ))
+            },
         }
     }
 
@@ -33,9 +56,16 @@ impl Value {
             Value::Borrow(b) => b.inner().as_float(),
             Value::BorrowMut(b) => b.inner().as_float(),
             Value::Nil => Ok(0.0),
-            other => Err(CompileError::Semantic(format!(
-                "expected float, got {other:?}"
-            ))),
+            other => {
+                let actual_type = self.type_name();
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help(format!("expected float type, got {}", actual_type));
+                Err(CompileError::semantic_with_context(
+                    format!("type mismatch: cannot convert {} to float", actual_type),
+                    ctx,
+                ))
+            },
         }
     }
 

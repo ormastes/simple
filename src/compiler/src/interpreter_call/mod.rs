@@ -16,7 +16,7 @@ pub(crate) use core::{
     exec_function_with_values_and_self, exec_lambda, instantiate_class, ProceedContext, IN_NEW_METHOD,
 };
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     call_extern_function, dispatch_context_method, evaluate_expr, BUILTIN_CHANNEL, CONTEXT_OBJECT, EXTERN_FUNCTIONS,
 };
@@ -109,6 +109,32 @@ pub(crate) fn evaluate_call(
         if let Some(ctx) = context_obj {
             return dispatch_context_method(&ctx, name, args, env, functions, classes, enums, impl_methods);
         }
+
+        // If we reach here with an identifier name, the function is not found
+        // E1002 - Undefined Function
+        let known_names: Vec<&str> = functions
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+
+        let suggestion = crate::error::typo::suggest_name(name, known_names.clone());
+        let mut ctx = ErrorContext::new()
+            .with_code(codes::UNDEFINED_FUNCTION)
+            .with_help("check that the function is defined and in scope");
+
+        if let Some(best_match) = suggestion {
+            ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
+        }
+
+        if !known_names.is_empty() && known_names.len() <= 5 {
+            let names_list = known_names.join(", ");
+            ctx = ctx.with_note(format!("available functions: {}", names_list));
+        }
+
+        return Err(CompileError::semantic_with_context(
+            format!("function `{}` not found", name),
+            ctx,
+        ));
     }
 
     // Handle module-style calls: module.function()

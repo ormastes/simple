@@ -27,43 +27,43 @@ impl LlvmBackend {
                 let result = match op {
                     BinOp::Add => builder
                         .build_int_add(l, r, "add")
-                        .map_err(|e| CompileError::Semantic(format!("build_int_add: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_add", &e))?,
                     BinOp::Sub => builder
                         .build_int_sub(l, r, "sub")
-                        .map_err(|e| CompileError::Semantic(format!("build_int_sub: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_sub", &e))?,
                     BinOp::Mul => builder
                         .build_int_mul(l, r, "mul")
-                        .map_err(|e| CompileError::Semantic(format!("build_int_mul: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_mul", &e))?,
                     BinOp::Div => builder
                         .build_int_signed_div(l, r, "div")
-                        .map_err(|e| CompileError::Semantic(format!("build_int_signed_div: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_signed_div", &e))?,
                     BinOp::Eq => builder
                         .build_int_compare(IntPredicate::EQ, l, r, "eq")
-                        .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?,
                     BinOp::NotEq => builder
                         .build_int_compare(IntPredicate::NE, l, r, "ne")
-                        .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?,
                     BinOp::Lt => builder
                         .build_int_compare(IntPredicate::SLT, l, r, "lt")
-                        .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?,
                     BinOp::LtEq => builder
                         .build_int_compare(IntPredicate::SLE, l, r, "le")
-                        .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?,
                     BinOp::Gt => builder
                         .build_int_compare(IntPredicate::SGT, l, r, "gt")
-                        .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?,
                     BinOp::GtEq => builder
                         .build_int_compare(IntPredicate::SGE, l, r, "ge")
-                        .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?,
                     BinOp::Mod => builder
                         .build_int_signed_rem(l, r, "mod")
-                        .map_err(|e| CompileError::Semantic(format!("build_int_signed_rem: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_signed_rem", &e))?,
                     BinOp::And => builder
                         .build_and(l, r, "and")
-                        .map_err(|e| CompileError::Semantic(format!("build_and: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_and", &e))?,
                     BinOp::Or => builder
                         .build_or(l, r, "or")
-                        .map_err(|e| CompileError::Semantic(format!("build_or: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_or", &e))?,
                     _ => return Err(CompileError::Semantic(format!("Unsupported integer binop: {:?}", op))),
                 };
                 Ok(result.into())
@@ -72,16 +72,16 @@ impl LlvmBackend {
                 let result = match op {
                     BinOp::Add => builder
                         .build_float_add(l, r, "fadd")
-                        .map_err(|e| CompileError::Semantic(format!("build_float_add: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_float_add", &e))?,
                     BinOp::Sub => builder
                         .build_float_sub(l, r, "fsub")
-                        .map_err(|e| CompileError::Semantic(format!("build_float_sub: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_float_sub", &e))?,
                     BinOp::Mul => builder
                         .build_float_mul(l, r, "fmul")
-                        .map_err(|e| CompileError::Semantic(format!("build_float_mul: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_float_mul", &e))?,
                     BinOp::Div => builder
                         .build_float_div(l, r, "fdiv")
-                        .map_err(|e| CompileError::Semantic(format!("build_float_div: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_float_div", &e))?,
                     _ => return Err(CompileError::Semantic(format!("Unsupported float binop: {:?}", op))),
                 };
                 Ok(result.into())
@@ -105,10 +105,10 @@ impl LlvmBackend {
                 let result = match op {
                     UnaryOp::Neg => builder
                         .build_int_neg(val, "neg")
-                        .map_err(|e| CompileError::Semantic(format!("build_int_neg: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_int_neg", &e))?,
                     UnaryOp::Not => builder
                         .build_not(val, "not")
-                        .map_err(|e| CompileError::Semantic(format!("build_not: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_not", &e))?,
                     _ => {
                         return Err(CompileError::Semantic(format!(
                             "Unsupported integer unary op: {:?}",
@@ -122,7 +122,7 @@ impl LlvmBackend {
                 let result = match op {
                     UnaryOp::Neg => builder
                         .build_float_neg(val, "fneg")
-                        .map_err(|e| CompileError::Semantic(format!("build_float_neg: {}", e)))?,
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_float_neg", &e))?,
                     _ => return Err(CompileError::Semantic(format!("Unsupported float unary op: {:?}", op))),
                 };
                 Ok(result.into())
@@ -149,7 +149,7 @@ impl LlvmBackend {
                 if let Some(val) = vreg_map.get(vreg) {
                     builder
                         .build_return(Some(val))
-                        .map_err(|e| CompileError::Semantic(format!("build_return: {}", e)))?;
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_return", &e))?;
                 } else {
                     return Err(CompileError::Semantic(format!("Undefined return value: {:?}", vreg)));
                 }
@@ -157,7 +157,7 @@ impl LlvmBackend {
             Terminator::Return(None) => {
                 builder
                     .build_return(None)
-                    .map_err(|e| CompileError::Semantic(format!("build_return: {}", e)))?;
+                    .map_err(|e| crate::error::factory::llvm_build_failed("build_return", &e))?;
             }
             Terminator::Jump(block_id) => {
                 let target_bb = llvm_blocks
@@ -165,7 +165,7 @@ impl LlvmBackend {
                     .ok_or_else(|| CompileError::Semantic(format!("Undefined block: {:?}", block_id)))?;
                 builder
                     .build_unconditional_branch(*target_bb)
-                    .map_err(|e| CompileError::Semantic(format!("build_unconditional_branch: {}", e)))?;
+                    .map_err(|e| crate::error::factory::llvm_build_failed("build_unconditional_branch", &e))?;
             }
             Terminator::Branch {
                 cond,
@@ -186,7 +186,7 @@ impl LlvmBackend {
 
                     builder
                         .build_conditional_branch(*cond_int, *then_bb, *else_bb)
-                        .map_err(|e| CompileError::Semantic(format!("build_conditional_branch: {}", e)))?;
+                        .map_err(|e| crate::error::factory::llvm_build_failed("build_conditional_branch", &e))?;
                 } else {
                     return Err(CompileError::Semantic("Branch condition must be boolean".to_string()));
                 }
@@ -194,7 +194,7 @@ impl LlvmBackend {
             Terminator::Unreachable => {
                 builder
                     .build_unreachable()
-                    .map_err(|e| CompileError::Semantic(format!("build_unreachable: {}", e)))?;
+                    .map_err(|e| crate::error::factory::llvm_build_failed("build_unreachable", &e))?;
             }
         }
 
@@ -236,19 +236,19 @@ impl LlvmBackend {
         let i64_type = self.context.i64_type();
         let current = builder
             .build_load(i64_type, counter_global.as_pointer_value(), "cov_load")
-            .map_err(|e| CompileError::Semantic(format!("Failed to load coverage counter: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("load coverage counter", &e))?;
 
         // Increment
         if let inkwell::values::BasicValueEnum::IntValue(current_int) = current {
             let one = i64_type.const_int(1, false);
             let incremented = builder
                 .build_int_add(current_int, one, "cov_inc")
-                .map_err(|e| CompileError::Semantic(format!("Failed to increment coverage counter: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("increment coverage counter", &e))?;
 
             // Store back
             builder
                 .build_store(counter_global.as_pointer_value(), incremented)
-                .map_err(|e| CompileError::Semantic(format!("Failed to store coverage counter: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("store coverage counter", &e))?;
         }
 
         // Track counter for later retrieval

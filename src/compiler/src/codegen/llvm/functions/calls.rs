@@ -50,7 +50,7 @@ impl LlvmBackend {
         // Build the call
         let call_site = builder
             .build_call(called_func, &arg_vals, "call")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         // Store result if there's a destination
         if let Some(d) = dest {
@@ -83,11 +83,11 @@ impl LlvmBackend {
         if let inkwell::values::BasicValueEnum::PointerValue(closure_ptr) = callee_val {
             let base_ptr = builder
                 .build_pointer_cast(closure_ptr, i8_ptr_type, "closure_ptr")
-                .map_err(|e| CompileError::Semantic(format!("Failed to cast closure ptr: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_cast_failed("cast closure ptr", &e))?;
 
             let offset_val = self.context.i32_type().const_int(0, false);
             let fn_ptr_slot = unsafe { builder.build_gep(i8_type, base_ptr, &[offset_val], "fn_ptr_slot") }
-                .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
 
             let fn_ptr_slot = builder
                 .build_pointer_cast(
@@ -95,11 +95,11 @@ impl LlvmBackend {
                     i8_ptr_type.ptr_type(inkwell::AddressSpace::default()),
                     "fn_ptr_slot_cast",
                 )
-                .map_err(|e| CompileError::Semantic(format!("Failed to cast fn slot ptr: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_cast_failed("cast fn slot ptr", &e))?;
 
             let func_ptr = builder
                 .build_load(i8_ptr_type, fn_ptr_slot, "loaded_func")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build load: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
 
             if let inkwell::values::BasicValueEnum::PointerValue(fn_ptr) = func_ptr {
                 let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
@@ -128,7 +128,7 @@ impl LlvmBackend {
 
                 let call_site = builder
                     .build_indirect_call(fn_type, fn_ptr, &arg_vals, "indirect_call")
-                    .map_err(|e| CompileError::Semantic(format!("Failed to build indirect call: {}", e)))?;
+                    .map_err(|e| crate::error::factory::llvm_build_failed("indirect call", &e))?;
 
                 if let Some(d) = dest {
                     if let Some(ret_val) = call_site.try_as_basic_value().left() {
@@ -185,7 +185,7 @@ impl LlvmBackend {
 
         let call_site = builder
             .build_call(interp_call, &call_args, "interp_call")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         if let Some(d) = dest {
             if let Some(ret_val) = call_site.try_as_basic_value().left() {
@@ -217,7 +217,7 @@ impl LlvmBackend {
         let expr_index_val = i64_type.const_int(expr_index as u64, true);
         let call_site = builder
             .build_call(interp_eval, &[expr_index_val.into()], "eval")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?;
 
         if let Some(ret_val) = call_site.try_as_basic_value().left() {
             vreg_map.insert(dest, ret_val);

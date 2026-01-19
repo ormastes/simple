@@ -196,11 +196,25 @@ pub(super) fn eval_literal_expr(
                 .chain(functions.keys().map(|s| s.as_str()))
                 .chain(classes.keys().map(|s| s.as_str()))
                 .collect();
-            let mut msg = format!("undefined variable: {name}");
-            if let Some(suggestion) = crate::error::typo::format_suggestion(name, known_names) {
-                msg.push_str(&format!("; {}", suggestion));
+            // E1001 - Undefined Variable
+            let suggestion = crate::error::typo::suggest_name(name, known_names.clone());
+            let mut ctx = ErrorContext::new()
+                .with_code(codes::UNDEFINED_VARIABLE)
+                .with_help("check that the variable is defined and in scope");
+
+            if let Some(best_match) = suggestion {
+                ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
             }
-            Err(CompileError::Semantic(msg))
+
+            if !known_names.is_empty() && known_names.len() <= 5 {
+                let names_list = known_names.join(", ");
+                ctx = ctx.with_note(format!("available variables: {}", names_list));
+            }
+
+            Err(CompileError::semantic_with_context(
+                format!("variable `{}` not found", name),
+                ctx,
+            ))
         }
         _ => Ok(None),
     }

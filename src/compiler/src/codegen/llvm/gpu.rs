@@ -435,10 +435,10 @@ impl LlvmGpuBackend {
         // global_id = block_id * block_dim + thread_id
         let block_offset = builder
             .build_int_mul(block_id, block_dim, "block_offset")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build mul: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("mul", &e))?;
         let global_id = builder
             .build_int_add(block_offset, thread_id, "global_id")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build add: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("add", &e))?;
 
         Ok(global_id)
     }

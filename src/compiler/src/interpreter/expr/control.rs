@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use simple_parser::ast::{Expr, LambdaParam, Node};
 
 use super::evaluate_expr;
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Value, ATTR_STRONG};
 
 use super::super::{exec_node, pattern_matches, ClassDef, Control, Enums, Env, FunctionDef, ImplMethods};
@@ -61,10 +61,13 @@ pub(super) fn eval_control_expr(
                     if is_strong {
                         for arm in arms {
                             if super::super::is_catch_all_pattern(&arm.pattern) {
-                                return Err(CompileError::Semantic(format!(
-                                    "strong enum '{}' does not allow wildcard or catch-all patterns in match",
-                                    enum_name
-                                )));
+                                let ctx = ErrorContext::new()
+                                    .with_code(codes::INVALID_PATTERN)
+                                    .with_help(format!("strong enum '{}' requires all variants to be explicitly matched", enum_name));
+                                return Err(CompileError::semantic_with_context(
+                                    format!("invalid pattern: strong enum '{}' does not allow wildcard or catch-all patterns in match", enum_name),
+                                    ctx,
+                                ));
                             }
                         }
                     }
@@ -119,7 +122,13 @@ pub(super) fn eval_control_expr(
                     return Ok(Some(result));
                 }
             }
-            Err(CompileError::Semantic("match exhausted: no pattern matched".into()))
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_PATTERN)
+                .with_help("add a wildcard pattern (_) or another pattern to handle this case");
+            Err(CompileError::semantic_with_context(
+                "invalid pattern: match expression exhausted without matching any pattern",
+                ctx,
+            ))
         }
         Expr::DoBlock(nodes) => Ok(Some(Value::BlockClosure {
             nodes: nodes.clone(),

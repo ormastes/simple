@@ -26,7 +26,7 @@ impl LlvmBackend {
         let array_type = i64_type.array_type(elements.len() as u32);
         let alloc = builder
             .build_alloca(array_type, "array")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build alloca: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("alloca", &e))?;
 
         // Store each element
         for (i, elem) in elements.iter().enumerate() {
@@ -37,11 +37,11 @@ impl LlvmBackend {
                 self.context.i32_type().const_int(i as u64, false),
             ];
             let gep = unsafe { builder.build_gep(array_type, alloc, &indices, "elem_ptr") }
-                .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
 
             builder
                 .build_store(gep, elem_val)
-                .map_err(|e| CompileError::Semantic(format!("Failed to build store: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
         }
 
         vreg_map.insert(dest, alloc.into());
@@ -62,7 +62,7 @@ impl LlvmBackend {
         let struct_type = self.context.struct_type(&field_types, false);
         let alloc = builder
             .build_alloca(struct_type, "tuple")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build alloca: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("alloca", &e))?;
 
         // Store each element
         for (i, elem) in elements.iter().enumerate() {
@@ -70,11 +70,11 @@ impl LlvmBackend {
 
             let gep = builder
                 .build_struct_gep(struct_type, alloc, i as u32, "tuple_elem")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build struct gep: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("struct gep", &e))?;
 
             builder
                 .build_store(gep, elem_val)
-                .map_err(|e| CompileError::Semantic(format!("Failed to build store: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
         }
 
         vreg_map.insert(dest, alloc.into());
@@ -114,7 +114,7 @@ impl LlvmBackend {
         let capacity = i64_type.const_int(keys.len() as u64, false);
         let dict_ptr = builder
             .build_call(dict_new, &[capacity.into()], "dict")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build dict_new call: {}", e)))?
+            .map_err(|e| crate::error::factory::llvm_build_failed("dict_new call", &e))?
             .try_as_basic_value()
             .left()
             .ok_or_else(|| CompileError::Semantic("dict_new returned void".to_string()))?;
@@ -126,7 +126,7 @@ impl LlvmBackend {
 
             builder
                 .build_call(dict_insert, &[dict_ptr.into(), key_val.into(), value_val.into()], "")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build dict_insert call: {}", e)))?;
+                .map_err(|e| crate::error::factory::llvm_build_failed("dict_insert call", &e))?;
         }
 
         vreg_map.insert(dest, dict_ptr);
@@ -153,11 +153,11 @@ impl LlvmBackend {
 
                 let indices = [self.context.i32_type().const_int(0, false), idx];
                 let gep = unsafe { builder.build_gep(arr_type, ptr, &indices, "elem_ptr") }
-                    .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
+                    .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
 
                 let loaded = builder
                     .build_load(i64_type, gep, "elem")
-                    .map_err(|e| CompileError::Semantic(format!("Failed to build load: {}", e)))?;
+                    .map_err(|e| crate::error::factory::llvm_build_failed("load", &e))?;
 
                 vreg_map.insert(dest, loaded);
             }
@@ -186,11 +186,11 @@ impl LlvmBackend {
 
                 let indices = [self.context.i32_type().const_int(0, false), idx];
                 let gep = unsafe { builder.build_gep(arr_type, ptr, &indices, "elem_ptr") }
-                    .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
+                    .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
 
                 builder
                     .build_store(gep, val)
-                    .map_err(|e| CompileError::Semantic(format!("Failed to build store: {}", e)))?;
+                    .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
             }
         }
         Ok(())
@@ -249,7 +249,7 @@ impl LlvmBackend {
                 &[coll_val.into(), start_val.into(), end_val.into(), step_val.into()],
                 "slice",
             )
-            .map_err(|e| CompileError::Semantic(format!("Failed to build slice call: {}", e)))?;
+            .map_err(|e| crate::error::factory::llvm_build_failed("slice call", &e))?;
 
         if let Some(ret_val) = call_site.try_as_basic_value().left() {
             vreg_map.insert(dest, ret_val);

@@ -14,7 +14,7 @@ use simple_common::manual_mem::{
 };
 use simple_parser::ast::{Expr, FunctionDef, Node};
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 
 // Async value types (Future, Generator, Channel, ThreadPool)
 // These are split into a separate file for maintainability

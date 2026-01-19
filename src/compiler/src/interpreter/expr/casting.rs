@@ -1,6 +1,6 @@
 use simple_parser::ast::Type;
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::semantics::{
     bool_cast, cast_bool_to_numeric, cast_float_to_numeric, cast_int_to_numeric, string_cast,
     CastNumericResult, NumericType,
@@ -23,10 +23,15 @@ pub(super) fn cast_value(val: Value, target_type: &Type) -> Result<Value, Compil
                 payload: Some(Box::new(cast_val)),
             })
         }
-        _ => Err(CompileError::Semantic(format!(
-            "unsupported cast target type: {:?}",
-            target_type
-        ))),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("supported cast targets: simple types (bool, str, i64, f64, etc.) and optional types");
+            Err(CompileError::semantic_with_context(
+                format!("type mismatch: unsupported cast target type: {:?}", target_type),
+                ctx,
+            ))
+        },
     }
 }
 
@@ -49,10 +54,13 @@ fn cast_to_simple_type(val: Value, type_name: &str) -> Result<Value, CompileErro
             if actual_type == other {
                 Ok(val)
             } else {
-                Err(CompileError::Semantic(format!(
-                    "cannot cast {} to {}",
-                    actual_type, other
-                )))
+                let ctx = ErrorContext::new()
+                    .with_code(codes::TYPE_MISMATCH)
+                    .with_help(format!("cannot convert {} to {} through type assertion", actual_type, other));
+                Err(CompileError::semantic_with_context(
+                    format!("type mismatch: cannot cast {} to {}", actual_type, other),
+                    ctx,
+                ))
             }
         }
     }
@@ -73,11 +81,15 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
             CastNumericResult::Int(v) => Ok(Value::Int(v)),
             CastNumericResult::Float(v) => Ok(Value::Float(v)),
         },
-        _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to {}",
-            val.type_name(),
-            target.name()
-        ))),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help(format!("only int, float, and bool can be cast to numeric types"));
+            Err(CompileError::semantic_with_context(
+                format!("type mismatch: cannot cast {} to {}", val.type_name(), target.name()),
+                ctx,
+            ))
+        },
     }
 }
 
@@ -88,10 +100,15 @@ fn cast_to_bool(val: Value) -> Result<Value, CompileError> {
         Value::Bool(b) => Ok(Value::Bool(b)),
         Value::Str(ref s) => Ok(Value::Bool(bool_cast::from_str(s))),
         Value::Nil => Ok(Value::Bool(false)),
-        _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to bool",
-            val.type_name()
-        ))),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("only int, float, string, and nil can be cast to bool");
+            Err(CompileError::semantic_with_context(
+                format!("type mismatch: cannot cast {} to bool", val.type_name()),
+                ctx,
+            ))
+        },
     }
 }
 
@@ -103,9 +120,14 @@ fn cast_to_string(val: Value) -> Result<Value, CompileError> {
         Value::Str(s) => Ok(Value::Str(s)),
         Value::Symbol(s) => Ok(Value::Str(s)),
         Value::Nil => Ok(Value::Str("nil".to_string())),
-        _ => Err(CompileError::Semantic(format!(
-            "cannot cast {} to String",
-            val.type_name()
-        ))),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("only int, float, bool, string, symbol, and nil can be cast to String");
+            Err(CompileError::semantic_with_context(
+                format!("type mismatch: cannot cast {} to String", val.type_name()),
+                ctx,
+            ))
+        },
     }
 }

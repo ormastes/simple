@@ -86,6 +86,33 @@ impl Lowerer {
                 // W1001: Check for shared pointer mutation
                 self.check_shared_mutation(&target, assign.span);
 
+                // E2006: Check for storage escape (assigning short-lived ref to longer-lived location)
+                // If target is a field access and value is a local reference, check lifetimes
+                if let HirExprKind::FieldAccess { receiver, .. } = &target.kind {
+                    if self.is_reference_type(value.ty) {
+                        // Get target's lifetime (from receiver)
+                        if let HirExprKind::Local(target_idx) = &receiver.kind {
+                            if let Some(target_local) = ctx.get_local(*target_idx) {
+                                let target_origin = self.lifetime_context.get_variable_origin(&target_local.name).cloned();
+
+                                // Get value's lifetime
+                                if let HirExprKind::Local(value_idx) = &value.kind {
+                                    if let Some(value_local) = ctx.get_local(*value_idx) {
+                                        let value_origin = self.lifetime_context.get_variable_origin(&value_local.name).cloned();
+
+                                        if let (Some(t_origin), Some(v_origin)) = (target_origin, value_origin) {
+                                            let target_lt = t_origin.lifetime();
+                                            let value_lt = v_origin.lifetime();
+                                            // Check if value lifetime is shorter than target
+                                            self.lifetime_context.check_storage(value_lt, target_lt, assign.span);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Ok(vec![HirStmt::Assign { target, value }])
             }
 
