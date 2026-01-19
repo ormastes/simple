@@ -582,11 +582,7 @@ mod tests {
     #[test]
     fn test_mutating_methods_flagged() {
         // These should be mutating
-        let mutating: Vec<_> = ARRAY_METHODS
-            .iter()
-            .filter(|m| m.is_mutating)
-            .map(|m| m.name)
-            .collect();
+        let mutating: Vec<_> = ARRAY_METHODS.iter().filter(|m| m.is_mutating).map(|m| m.name).collect();
         assert!(mutating.contains(&"push"));
         assert!(mutating.contains(&"pop"));
         assert!(mutating.contains(&"clear"));

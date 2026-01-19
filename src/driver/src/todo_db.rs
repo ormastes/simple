@@ -97,7 +97,10 @@ pub fn load_todo_db(path: &Path) -> Result<TodoDb, String> {
 
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
     eprintln!("DEBUG: Loaded {} bytes from file", content.len());
-    eprintln!("DEBUG: First 100 chars: {}", &content.chars().take(100).collect::<String>());
+    eprintln!(
+        "DEBUG: First 100 chars: {}",
+        &content.chars().take(100).collect::<String>()
+    );
     let doc = parse_document(&content).map_err(|e| {
         eprintln!("DEBUG: parse_document failed: {}", e);
         e.to_string()
@@ -108,7 +111,10 @@ pub fn load_todo_db(path: &Path) -> Result<TodoDb, String> {
 
 fn parse_todo_db(doc: &SdnDocument, path: &Path) -> Result<TodoDb, String> {
     let root = doc.root();
-    eprintln!("DEBUG: parse_todo_db called, root type: {:?}", std::mem::discriminant(root));
+    eprintln!(
+        "DEBUG: parse_todo_db called, root type: {:?}",
+        std::mem::discriminant(root)
+    );
 
     // Try to get todos table - might be root itself or in a Dict
     let (todos_table, file_cache_table) = match root {
@@ -197,7 +203,12 @@ fn parse_todo_db(doc: &SdnDocument, path: &Path) -> Result<TodoDb, String> {
         if let Ok(cache_content) = fs::read_to_string(&cache_path) {
             if let Ok(cache_doc) = parse_document(&cache_content) {
                 let cache_root = cache_doc.root();
-                if let SdnValue::Table { fields: Some(fields), rows, .. } = cache_root {
+                if let SdnValue::Table {
+                    fields: Some(fields),
+                    rows,
+                    ..
+                } = cache_root
+                {
                     eprintln!("DEBUG: Found file_cache table with {} rows", rows.len());
                     for row in rows {
                         let mut row_map = BTreeMap::new();

@@ -2,8 +2,8 @@ use simple_parser::ast::Type;
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::semantics::{
-    bool_cast, cast_bool_to_numeric, cast_float_to_numeric, cast_int_to_numeric, string_cast,
-    CastNumericResult, NumericType,
+    bool_cast, cast_bool_to_numeric, cast_float_to_numeric, cast_int_to_numeric, string_cast, CastNumericResult,
+    NumericType,
 };
 use crate::value::Value;
 
@@ -31,7 +31,7 @@ pub(super) fn cast_value(val: Value, target_type: &Type) -> Result<Value, Compil
                 format!("type mismatch: unsupported cast target type: {:?}", target_type),
                 ctx,
             ))
-        },
+        }
     }
 }
 
@@ -54,9 +54,10 @@ fn cast_to_simple_type(val: Value, type_name: &str) -> Result<Value, CompileErro
             if actual_type == other {
                 Ok(val)
             } else {
-                let ctx = ErrorContext::new()
-                    .with_code(codes::TYPE_MISMATCH)
-                    .with_help(format!("cannot convert {} to {} through type assertion", actual_type, other));
+                let ctx = ErrorContext::new().with_code(codes::TYPE_MISMATCH).with_help(format!(
+                    "cannot convert {} to {} through type assertion",
+                    actual_type, other
+                ));
                 Err(CompileError::semantic_with_context(
                     format!("type mismatch: cannot cast {} to {}", actual_type, other),
                     ctx,
@@ -89,7 +90,7 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
                 format!("type mismatch: cannot cast {} to {}", val.type_name(), target.name()),
                 ctx,
             ))
-        },
+        }
     }
 }
 
@@ -108,7 +109,7 @@ fn cast_to_bool(val: Value) -> Result<Value, CompileError> {
                 format!("type mismatch: cannot cast {} to bool", val.type_name()),
                 ctx,
             ))
-        },
+        }
     }
 }
 
@@ -128,6 +129,6 @@ fn cast_to_string(val: Value) -> Result<Value, CompileError> {
                 format!("type mismatch: cannot cast {} to String", val.type_name()),
                 ctx,
             ))
-        },
+        }
     }
 }

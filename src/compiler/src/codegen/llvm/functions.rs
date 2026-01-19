@@ -38,12 +38,12 @@ impl LlvmBackend {
         let module = self.module.borrow();
         let module = module
             .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
 
         let builder = self.builder.borrow();
         let builder = builder
             .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
+            .ok_or_else(crate::error::factory::llvm_builder_not_created)?;
 
         // Get the function that was forward-declared in the compile() pass
         // If it doesn't exist, create it (for backwards compatibility)
@@ -114,7 +114,7 @@ impl LlvmBackend {
                     if let Some(&alloca) = local_allocas.get(&i) {
                         builder
                             .build_store(alloca, llvm_param)
-                            .map_err(|e| CompileError::Semantic(format!("Failed to store param: {}", e)))?;
+                            .map_err(|e| crate::error::factory::llvm_build_failed("store param", &e))?;
                     }
                 }
             }
@@ -221,7 +221,7 @@ impl LlvmBackend {
             MirInst::LocalAddr { dest, local_index } => {
                 let alloca = local_allocas
                     .get(local_index)
-                    .ok_or_else(|| CompileError::Semantic(format!("Unknown local index: {}", local_index)))?;
+                    .ok_or_else(|| crate::error::factory::llvm_unknown_local(*local_index))?;
                 vreg_map.insert(*dest, (*alloca).into());
             }
 
@@ -411,7 +411,7 @@ impl LlvmBackend {
         vreg_map
             .get(vreg)
             .copied()
-            .ok_or_else(|| CompileError::Semantic(format!("Undefined vreg: {:?}", vreg)))
+            .ok_or_else(|| crate::error::factory::llvm_undefined_vreg(vreg))
     }
 }
 
@@ -422,6 +422,6 @@ impl LlvmBackend {
 #[cfg(not(feature = "llvm"))]
 impl LlvmBackend {
     pub fn compile_function(&self, _func: &MirFunction) -> Result<(), CompileError> {
-        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+        Err(crate::error::factory::llvm_feature_not_enabled())
     }
 }

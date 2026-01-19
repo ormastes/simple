@@ -112,7 +112,11 @@ fn with_params(a: i32, b: i32) -> i32:
 "#;
 
     let result = lower_with_warnings(source);
-    assert!(result.is_ok(), "Parameters should have 'static-like lifetimes: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Parameters should have 'static-like lifetimes: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -175,11 +179,7 @@ fn simple():
     let result = lower_with_warnings(source).expect("Should lower successfully");
 
     // Generate Lean 4 verification
-    let lean = crate::codegen::lean::generate_memory_safety_lean(
-        &result.module,
-        None,
-        Some(&result.warnings),
-    );
+    let lean = crate::codegen::lean::generate_memory_safety_lean(&result.module, None, Some(&result.warnings));
 
     // Check basic structure
     assert!(lean.contains("namespace"), "Should have namespace");
@@ -200,11 +200,7 @@ fn has_var():
     let result = lower_with_warnings(source).expect("Should lower successfully");
 
     // Generate Lean 4 verification
-    let lean = crate::codegen::lean::generate_memory_safety_lean(
-        &result.module,
-        None,
-        Some(&result.warnings),
-    );
+    let lean = crate::codegen::lean::generate_memory_safety_lean(&result.module, None, Some(&result.warnings));
 
     // Should still generate valid Lean code
     assert!(lean.contains("namespace"), "Should have namespace");

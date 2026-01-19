@@ -750,7 +750,7 @@ fn distance(p1: Point, p2: Point) -> f64:
 
 actor GameWorld:
     state:
-        players: List[+Player] = []
+        players: List<+Player> = []
 
     on Tick(dt: f64) async:
         for handle in self.players:
@@ -785,7 +785,7 @@ fn main() {
 fn regular_function(x: i64) -> i64:
     return x * 2
 
-fn async_operation() async -> Result[Data]:
+fn async_operation() async -> Result<Data>:
     let data = await fetch_data()
     return data
 
@@ -853,7 +853,7 @@ handle_pool Particle:
 Tree-sitter uses GLR (Generalized LR) parsing to handle:
 
 1. **Ambiguous grammar constructs** - Simple has several points where the grammar is locally ambiguous:
-   - Type expressions vs comparison expressions (`List[T]` vs `a[b]`)
+   - Type expressions vs comparison expressions (`List<T>` vs `a < b`)
    - Lambda expressions vs other constructs
    - Struct literals vs blocks
 

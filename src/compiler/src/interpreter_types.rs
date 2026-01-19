@@ -60,7 +60,10 @@ pub(super) fn register_trait_impl(
             return Err(crate::error::factory::duplicate_blanket_impl(&trait_name));
         }
         if !is_default && (!entry.specific_impls.is_empty() || entry.default_blanket_impl) {
-            return Err(crate::error::factory::overlapping_impls(&trait_name, "blanket impl conflicts with existing impls"));
+            return Err(crate::error::factory::overlapping_impls(
+                &trait_name,
+                "blanket impl conflicts with existing impls",
+            ));
         }
         entry.blanket_impl = true;
         entry.default_blanket_impl = is_default;
@@ -74,7 +77,7 @@ pub(super) fn register_trait_impl(
     if entry.blanket_impl && !entry.default_blanket_impl {
         return Err(crate::error::factory::overlapping_impls(
             &trait_name,
-            &format!("specific impl for `{}` conflicts with blanket impl", target_key)
+            &format!("specific impl for `{}` conflicts with blanket impl", target_key),
         ));
     }
 

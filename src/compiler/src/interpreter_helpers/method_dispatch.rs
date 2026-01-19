@@ -200,8 +200,11 @@ pub(crate) fn call_method_on_value(
         .with_code(codes::METHOD_NOT_FOUND)
         .with_help("check that the method is defined on this type");
     Err(CompileError::semantic_with_context(
-        format!("method '{}' not found on value of type {} in nested call context",
-            method, recv_val.type_name()),
+        format!(
+            "method '{}' not found on value of type {} in nested call context",
+            method,
+            recv_val.type_name()
+        ),
         ctx,
     ))
 }

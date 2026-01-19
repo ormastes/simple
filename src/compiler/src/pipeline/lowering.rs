@@ -13,7 +13,10 @@ use crate::CompileError;
 /// Convert LowerError to CompileError with rich error context
 fn convert_lower_error(e: crate::hir::LowerError) -> CompileError {
     match e {
-        crate::hir::LowerError::UnknownType { type_name, available_types } => {
+        crate::hir::LowerError::UnknownType {
+            type_name,
+            available_types,
+        } => {
             // E1011 - Undefined Type
             let available_strs: Vec<&str> = available_types.iter().map(|s| s.as_str()).collect();
             let suggestion = if !available_strs.is_empty() {
@@ -30,10 +33,7 @@ fn convert_lower_error(e: crate::hir::LowerError) -> CompileError {
                 ctx = ctx.with_help(format!("did you mean `{}`?", best_match));
             }
 
-            CompileError::semantic_with_context(
-                format!("type `{}` not found in this scope", type_name),
-                ctx,
-            )
+            CompileError::semantic_with_context(format!("type `{}` not found in this scope", type_name), ctx)
         }
         crate::hir::LowerError::SelfInStatic => {
             // E1032 - Self in Static
@@ -41,10 +41,7 @@ fn convert_lower_error(e: crate::hir::LowerError) -> CompileError {
                 .with_code(codes::SELF_IN_STATIC)
                 .with_help("remove `self` or convert this to an instance method by removing `static` keyword");
 
-            CompileError::semantic_with_context(
-                "cannot use `self` in static method".to_string(),
-                ctx,
-            )
+            CompileError::semantic_with_context("cannot use `self` in static method".to_string(), ctx)
         }
         crate::hir::LowerError::LetBindingFailed { pattern } => {
             // E1016 - Let Binding Failed
@@ -70,7 +67,11 @@ fn convert_lower_error(e: crate::hir::LowerError) -> CompileError {
                 ctx,
             )
         }
-        crate::hir::LowerError::CannotInferFieldType { struct_name, field, available_fields } => {
+        crate::hir::LowerError::CannotInferFieldType {
+            struct_name,
+            field,
+            available_fields,
+        } => {
             // E1012 - Undefined Field
             let available_strs: Vec<&str> = available_fields.iter().map(|s| s.as_str()).collect();
             let suggestion = if !available_strs.is_empty() {
@@ -92,10 +93,7 @@ fn convert_lower_error(e: crate::hir::LowerError) -> CompileError {
                 ctx = ctx.with_note(format!("available fields: {}", fields_list));
             }
 
-            CompileError::semantic_with_context(
-                format!("struct `{}` has no field named `{}`", struct_name, field),
-                ctx,
-            )
+            CompileError::semantic_with_context(format!("struct `{}` has no field named `{}`", struct_name, field), ctx)
         }
         crate::hir::LowerError::LifetimeViolation(violation) => {
             // E2001-E2006 - Lifetime Violations
@@ -108,9 +106,7 @@ fn convert_lower_error(e: crate::hir::LowerError) -> CompileError {
                     crate::hir::LifetimeViolation::UseAfterDrop { .. } => {
                         "ensure the value lives long enough for all uses"
                     }
-                    crate::hir::LifetimeViolation::DanglingReference { .. } => {
-                        "the referenced value has been dropped"
-                    }
+                    crate::hir::LifetimeViolation::DanglingReference { .. } => "the referenced value has been dropped",
                     crate::hir::LifetimeViolation::BorrowOutlivesOwner { .. } => {
                         "reduce the borrow's scope or extend the owner's lifetime"
                     }
@@ -252,8 +248,7 @@ impl CompilerPipeline {
         type_check(&ast_module.items).map_err(|e| crate::error::factory::type_check_failed(&e))?;
 
         // Lower AST to HIR with module resolution support
-        let hir_module = hir::lower_with_context(ast_module, source_file)
-            .map_err(convert_lower_error)?;
+        let hir_module = hir::lower_with_context(ast_module, source_file).map_err(convert_lower_error)?;
 
         // Emit HIR if requested (LLM-friendly #886)
         if let Some(path) = &self.emit_hir {

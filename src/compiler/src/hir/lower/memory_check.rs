@@ -179,12 +179,7 @@ impl Lowerer {
     /// W1006: Check for mutation without mut capability
     /// Called when we see an assignment and need to verify the target has mut
     #[allow(dead_code)] // Will be used when capability tracking is integrated
-    pub(super) fn check_mutation_capability(
-        &mut self,
-        target: &HirExpr,
-        span: Span,
-        has_mut_capability: bool,
-    ) {
+    pub(super) fn check_mutation_capability(&mut self, target: &HirExpr, span: Span, has_mut_capability: bool) {
         if has_mut_capability {
             return; // Has mut, all good
         }

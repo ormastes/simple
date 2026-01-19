@@ -112,7 +112,11 @@ pub fn get_first_string<'a>(args: &'a [Value], func_name: &str) -> Result<&'a St
 #[inline]
 pub fn require_args(args: &[Value], expected: usize, func_name: &str) -> Result<(), CompileError> {
     if args.len() != expected {
-        return Err(crate::error::factory::func_expects_args(func_name, expected, args.len()));
+        return Err(crate::error::factory::func_expects_args(
+            func_name,
+            expected,
+            args.len(),
+        ));
     }
     Ok(())
 }

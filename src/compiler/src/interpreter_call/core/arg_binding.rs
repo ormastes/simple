@@ -92,8 +92,11 @@ pub(crate) fn bind_args_with_injected(
                             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                             .with_help("check the function signature and provide the correct number of arguments");
                         return Err(CompileError::semantic_with_context(
-                            format!("function expects {} argument(s), but more were provided", params_to_bind.len()),
-                            ctx
+                            format!(
+                                "function expects {} argument(s), but more were provided",
+                                params_to_bind.len()
+                            ),
+                            ctx,
                         ));
                     }
                 } else {
@@ -103,8 +106,11 @@ pub(crate) fn bind_args_with_injected(
                             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                             .with_help("check the function signature and provide the correct number of arguments");
                         return Err(CompileError::semantic_with_context(
-                            format!("function expects {} argument(s), but more were provided", params_to_bind.len()),
-                            ctx
+                            format!(
+                                "function expects {} argument(s), but more were provided",
+                                params_to_bind.len()
+                            ),
+                            ctx,
                         ));
                     }
                     let param = params_to_bind[positional_idx];
@@ -149,8 +155,11 @@ pub(crate) fn bind_args_with_injected(
                             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                             .with_help("check the function signature and provide the correct number of arguments");
                         return Err(CompileError::semantic_with_context(
-                            format!("function expects {} argument(s), but more were provided", params_to_bind.len()),
-                            ctx
+                            format!(
+                                "function expects {} argument(s), but more were provided",
+                                params_to_bind.len()
+                            ),
+                            ctx,
                         ));
                     }
                     let param = params_to_bind[positional_idx];
@@ -187,8 +196,11 @@ pub(crate) fn bind_args_with_injected(
                     .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                     .with_help("check the function signature and provide the correct number of arguments");
                 return Err(CompileError::semantic_with_context(
-                    format!("function expects argument for parameter '{}', but none was provided", param.name),
-                    ctx
+                    format!(
+                        "function expects argument for parameter '{}', but none was provided",
+                        param.name
+                    ),
+                    ctx,
                 ));
             }
         }
@@ -217,8 +229,12 @@ pub(crate) fn bind_args_with_values(
             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
             .with_help("check the function signature and provide the correct number of arguments");
         return Err(CompileError::semantic_with_context(
-            format!("function expects {} argument(s), but {} were provided", params_to_bind.len(), args.len()),
-            ctx
+            format!(
+                "function expects {} argument(s), but {} were provided",
+                params_to_bind.len(),
+                args.len()
+            ),
+            ctx,
         ));
     }
 
@@ -234,8 +250,11 @@ pub(crate) fn bind_args_with_values(
                 .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                 .with_help("check the function signature and provide the correct number of arguments");
             return Err(CompileError::semantic_with_context(
-                format!("function expects argument for parameter '{}', but none was provided", param.name),
-                ctx
+                format!(
+                    "function expects argument for parameter '{}', but none was provided",
+                    param.name
+                ),
+                ctx,
             ));
         };
 

@@ -1,6 +1,6 @@
 //! Utility functions (index normalization, slicing, control flow, comprehensions, effects, futures)
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, FutureValue, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Pattern};
 use std::collections::HashMap;
@@ -53,8 +53,24 @@ pub(crate) fn control_to_value(result: Result<Control, CompileError>) -> Result<
     match result {
         Ok(Control::Return(v)) => Ok(v),
         Ok(Control::Next) => Ok(Value::Nil),
-        Ok(Control::Break(_)) => Err(CompileError::Semantic("break outside loop".into())),
-        Ok(Control::Continue) => Err(CompileError::Semantic("continue outside loop".into())),
+        Ok(Control::Break(_)) => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("break can only be used inside a loop");
+            Err(CompileError::semantic_with_context(
+                "break outside loop".to_string(),
+                ctx,
+            ))
+        }
+        Ok(Control::Continue) => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_OPERATION)
+                .with_help("continue can only be used inside a loop");
+            Err(CompileError::semantic_with_context(
+                "continue outside loop".to_string(),
+                ctx,
+            ))
+        }
         Err(e) => Err(e),
     }
 }

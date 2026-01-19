@@ -191,7 +191,7 @@ pub fn check_call_compatibility(callee_name: &str, callee_effects: &[Effect]) ->
             if !callee_effects.contains(&Effect::Pure) && !callee_effects.is_empty() {
                 return Err(crate::error::factory::pure_calls_impure(
                     callee_name,
-                    &format_effects(callee_effects)
+                    &format_effects(callee_effects),
                 ));
             }
 
@@ -200,7 +200,7 @@ pub fn check_call_compatibility(callee_name: &str, callee_effects: &[Effect]) ->
                 if matches!(effect, Effect::Io | Effect::Net | Effect::Fs | Effect::Unsafe) {
                     return Err(crate::error::factory::pure_calls_effect(
                         callee_name,
-                        effect.decorator_name()
+                        effect.decorator_name(),
                     ));
                 }
             }

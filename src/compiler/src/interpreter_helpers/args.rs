@@ -1,6 +1,6 @@
 //! Argument evaluation utilities
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
@@ -87,6 +87,12 @@ pub(crate) fn apply_lambda_to_vec(
         }
         Ok(results)
     } else {
-        Err(CompileError::Semantic("expected lambda argument".into()))
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("provide a lambda expression as argument");
+        Err(CompileError::semantic_with_context(
+            "expected lambda argument".to_string(),
+            ctx,
+        ))
     }
 }

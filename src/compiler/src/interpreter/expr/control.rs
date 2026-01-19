@@ -61,9 +61,10 @@ pub(super) fn eval_control_expr(
                     if is_strong {
                         for arm in arms {
                             if super::super::is_catch_all_pattern(&arm.pattern) {
-                                let ctx = ErrorContext::new()
-                                    .with_code(codes::INVALID_PATTERN)
-                                    .with_help(format!("strong enum '{}' requires all variants to be explicitly matched", enum_name));
+                                let ctx = ErrorContext::new().with_code(codes::INVALID_PATTERN).with_help(format!(
+                                    "strong enum '{}' requires all variants to be explicitly matched",
+                                    enum_name
+                                ));
                                 return Err(CompileError::semantic_with_context(
                                     format!("invalid pattern: strong enum '{}' does not allow wildcard or catch-all patterns in match", enum_name),
                                     ctx,

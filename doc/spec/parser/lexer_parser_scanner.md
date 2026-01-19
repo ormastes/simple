@@ -493,7 +493,7 @@ let middle = items[1:5:2]
         parser.set_language(language()).unwrap();
 
         let source = r#"
-fn process() -> Result[Data, Error]:
+fn process() -> Result<Data, Error>:
     let file = open(path)?
     let content = file.read()?
     return Ok(parse(content)?)

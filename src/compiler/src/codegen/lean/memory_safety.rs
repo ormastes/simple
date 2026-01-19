@@ -425,12 +425,21 @@ theorem drop_order_lifo (scopes : List Scope) :
             lean.push_str("-/\n\n");
 
             for (i, violation) in ctx.violations().iter().enumerate() {
-                lean.push_str(&format!("-- Violation {}: [{}] {}\n", i + 1, violation.code(), violation.description()));
+                lean.push_str(&format!(
+                    "-- Violation {}: [{}] {}\n",
+                    i + 1,
+                    violation.code(),
+                    violation.description()
+                ));
 
                 // Generate a theorem that would prove this violation doesn't occur
                 // (which would be unprovable if the violation is real)
                 match violation {
-                    LifetimeViolation::EscapingReference { ref_lifetime, target_scope, .. } => {
+                    LifetimeViolation::EscapingReference {
+                        ref_lifetime,
+                        target_scope,
+                        ..
+                    } => {
                         lean.push_str(&format!(
                             "-- theorem no_escape_{} : outlives ctx (LifetimeId.mk {}) (LifetimeId.mk {}) = true\n",
                             i + 1,
@@ -444,7 +453,11 @@ theorem drop_order_lifo (scopes : List Scope) :
                             variable, function
                         ));
                     }
-                    LifetimeViolation::BorrowOutlivesOwner { borrow_lifetime, owner_lifetime, .. } => {
+                    LifetimeViolation::BorrowOutlivesOwner {
+                        borrow_lifetime,
+                        owner_lifetime,
+                        ..
+                    } => {
                         lean.push_str(&format!(
                             "-- theorem borrow_valid_{} : outlives ctx (LifetimeId.mk {}) (LifetimeId.mk {}) = true\n",
                             i + 1,
@@ -526,8 +539,7 @@ mod tests {
         ctx.enter_scope(ScopeKind::Function, None);
         ctx.enter_scope(ScopeKind::Block, None);
 
-        let gen = MemorySafetyLeanGen::new("TestModule")
-            .with_lifetime_context(&ctx);
+        let gen = MemorySafetyLeanGen::new("TestModule").with_lifetime_context(&ctx);
         let lean = gen.generate();
 
         assert!(lean.contains("Module-Specific Lifetime Verification"));

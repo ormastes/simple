@@ -167,7 +167,10 @@ pub fn handle_int_methods(
             }
 
             if n < 0 {
-                return Err(CompileError::Runtime(format!("digits() requires non-negative integer, got {}", n)));
+                return Err(CompileError::Runtime(format!(
+                    "digits() requires non-negative integer, got {}",
+                    n
+                )));
             }
 
             if n == 0 {

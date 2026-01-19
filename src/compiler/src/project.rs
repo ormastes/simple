@@ -170,8 +170,7 @@ impl ProjectContext {
             }
         }
 
-        let di_config =
-            parse_di_config(&toml).map_err(|e| crate::error::factory::invalid_config("di config", &e))?;
+        let di_config = parse_di_config(&toml).map_err(|e| crate::error::factory::invalid_config("di config", &e))?;
         let aop_config =
             parse_aop_config(&toml).map_err(|e| crate::error::factory::invalid_config("aop config", &e))?;
 

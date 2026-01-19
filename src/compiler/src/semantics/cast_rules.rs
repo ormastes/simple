@@ -166,8 +166,7 @@ pub mod string_cast {
 macro_rules! impl_value_casts {
     () => {
         use $crate::semantics::cast_rules::{
-            cast_bool_to_numeric, cast_float_to_numeric, cast_int_to_numeric,
-            CastNumericResult, NumericType,
+            cast_bool_to_numeric, cast_float_to_numeric, cast_int_to_numeric, CastNumericResult, NumericType,
         };
 
         fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileError> {
@@ -223,19 +222,13 @@ mod tests {
         );
 
         // i64 -> u8 (negative becomes positive due to wrap)
-        assert_eq!(
-            cast_int_to_numeric(-1, NumericType::U8),
-            CastNumericResult::Int(255)
-        );
+        assert_eq!(cast_int_to_numeric(-1, NumericType::U8), CastNumericResult::Int(255));
     }
 
     #[test]
     fn test_cast_float_to_numeric() {
         // f64 -> i64 truncation
-        assert_eq!(
-            cast_float_to_numeric(3.7, NumericType::I64),
-            CastNumericResult::Int(3)
-        );
+        assert_eq!(cast_float_to_numeric(3.7, NumericType::I64), CastNumericResult::Int(3));
 
         // f64 -> f32 precision loss
         let result = cast_float_to_numeric(1.1, NumericType::F32);
@@ -246,10 +239,7 @@ mod tests {
 
     #[test]
     fn test_cast_bool_to_numeric() {
-        assert_eq!(
-            cast_bool_to_numeric(true, NumericType::I64),
-            CastNumericResult::Int(1)
-        );
+        assert_eq!(cast_bool_to_numeric(true, NumericType::I64), CastNumericResult::Int(1));
         assert_eq!(
             cast_bool_to_numeric(false, NumericType::F64),
             CastNumericResult::Float(0.0)
@@ -269,7 +259,7 @@ mod tests {
     #[test]
     fn test_string_cast() {
         assert_eq!(string_cast::from_int(42), "42");
-        assert_eq!(string_cast::from_float(3.14), "3.14");
+        assert_eq!(string_cast::from_float(2.75), "2.75");
         assert_eq!(string_cast::from_bool(true), "true");
     }
 }

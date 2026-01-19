@@ -1,6 +1,6 @@
 //! Collection operations (map, filter, reduce, etc.)
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value, BUILTIN_RANGE};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, LambdaParam, Pattern};
 use std::collections::HashMap;
@@ -97,7 +97,13 @@ pub(crate) fn eval_array_reduce(
         }
         Ok(acc)
     } else {
-        Err(CompileError::Semantic("reduce expects lambda argument".into()))
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("reduce requires a lambda expression as argument");
+        Err(CompileError::semantic_with_context(
+            "reduce expects lambda argument".to_string(),
+            ctx,
+        ))
     }
 }
 
@@ -251,7 +257,15 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
             };
             Ok(items)
         }
-        _ => Err(CompileError::Semantic("cannot iterate over this type".into())),
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("iteration requires array, tuple, dict, string, or range types");
+            Err(CompileError::semantic_with_context(
+                "cannot iterate over this type".to_string(),
+                ctx,
+            ))
+        }
     }
 }
 

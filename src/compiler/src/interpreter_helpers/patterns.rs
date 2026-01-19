@@ -1,6 +1,6 @@
 //! Pattern matching and binding
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Pattern};
 use std::collections::HashMap;
@@ -48,9 +48,13 @@ pub(crate) fn handle_functional_update(
     if let Expr::Identifier(name) = target {
         let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(name));
         if is_const {
-            return Err(CompileError::Semantic(format!(
-                "cannot use functional update on const '{name}'"
-            )));
+            let ctx = ErrorContext::new()
+                .with_code(codes::INVALID_ASSIGNMENT)
+                .with_help(format!("consider using '{name}_' for a mutable variable"));
+            return Err(CompileError::semantic_with_context(
+                format!("cannot use functional update on const '{name}'"),
+                ctx,
+            ));
         }
         let recv_val = env.get(name).cloned().ok_or_else(|| {
             let known_names: Vec<&str> = env
@@ -59,11 +63,20 @@ pub(crate) fn handle_functional_update(
                 .chain(functions.keys().map(|s| s.as_str()))
                 .chain(classes.keys().map(|s| s.as_str()))
                 .collect();
-            let mut msg = format!("undefined variable: {name}");
-            if let Some(suggestion) = crate::error::typo::format_suggestion(name, known_names) {
-                msg.push_str(&format!("; {}", suggestion));
+            let mut ctx = ErrorContext::new()
+                .with_code(codes::UNDEFINED_VARIABLE)
+                .with_help("ensure the variable is defined before use");
+
+            if let Some(suggestion) = crate::error::typo::suggest_name(name, known_names.clone()) {
+                ctx = ctx.with_help(format!("did you mean `{suggestion}`?"));
             }
-            CompileError::Semantic(msg)
+
+            if !known_names.is_empty() && known_names.len() <= 5 {
+                let names_list = known_names.join(", ");
+                ctx = ctx.with_note(format!("available names: {}", names_list));
+            }
+
+            CompileError::semantic_with_context(format!("undefined variable: {name}"), ctx)
         })?;
         let method_call = Expr::MethodCall {
             receiver: Box::new(Expr::Identifier(name.clone())),
@@ -81,8 +94,12 @@ pub(crate) fn handle_functional_update(
         };
         Ok(Some((name.clone(), new_value)))
     } else {
-        Err(CompileError::Semantic(
-            "functional update target must be an identifier".into(),
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_PATTERN)
+            .with_help("functional update target must be a simple identifier");
+        Err(CompileError::semantic_with_context(
+            "functional update target must be an identifier".to_string(),
+            ctx,
         ))
     }
 }
@@ -178,10 +195,16 @@ pub(crate) fn handle_method_call_with_self_update(
                     // Check if variable is mutable
                     let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(obj_name));
                     if is_const {
-                        return Err(CompileError::Semantic(format!(
-                            "cannot call mutating method '{}' on immutable array '{}'",
-                            method, obj_name
-                        )));
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_ASSIGNMENT)
+                            .with_help(format!("consider using '{obj_name}_' for a mutable variable"));
+                        return Err(CompileError::semantic_with_context(
+                            format!(
+                                "cannot call mutating method '{}' on immutable array '{}'",
+                                method, obj_name
+                            ),
+                            ctx,
+                        ));
                     }
                     // Evaluate the method call - it returns the new array
                     let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
@@ -198,10 +221,16 @@ pub(crate) fn handle_method_call_with_self_update(
                 if dict_mutating.contains(&method.as_str()) {
                     let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(obj_name));
                     if is_const {
-                        return Err(CompileError::Semantic(format!(
-                            "cannot call mutating method '{}' on immutable dict '{}'",
-                            method, obj_name
-                        )));
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_ASSIGNMENT)
+                            .with_help(format!("consider using '{obj_name}_' for a mutable variable"));
+                        return Err(CompileError::semantic_with_context(
+                            format!(
+                                "cannot call mutating method '{}' on immutable dict '{}'",
+                                method, obj_name
+                            ),
+                            ctx,
+                        ));
                     }
                     let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
                     if let Value::Dict(new_dict) = &result {

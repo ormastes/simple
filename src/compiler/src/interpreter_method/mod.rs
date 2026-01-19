@@ -433,8 +433,7 @@ pub(crate) fn evaluate_method_call(
     }
 
     // E1013 - Unknown Method (with helpful hints for common conversions)
-    let mut ctx = ErrorContext::new()
-        .with_code(codes::UNKNOWN_METHOD);
+    let mut ctx = ErrorContext::new().with_code(codes::UNKNOWN_METHOD);
 
     let hint = match method {
         "to_f64" | "to_f32" | "to_float" => {

@@ -36,9 +36,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_cast_failed("cast float to int", &e))?;
                     Ok(result.into())
                 } else {
-                    Err(CompileError::Semantic(
-                        "Expected float value for float-to-int cast".to_string(),
-                    ))
+                    Err(crate::error::factory::expected_value_type("float", "float-to-int cast"))
                 }
             }
             // Int to Float (i64 -> f64)
@@ -52,9 +50,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_cast_failed("cast int to float", &e))?;
                     Ok(result.into())
                 } else {
-                    Err(CompileError::Semantic(
-                        "Expected int value for int-to-float cast".to_string(),
-                    ))
+                    Err(crate::error::factory::expected_value_type("int", "int-to-float cast"))
                 }
             }
             // Int to Int (widening or truncation)
@@ -65,9 +61,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_cast_failed("extend int", &e))?;
                     Ok(result.into())
                 } else {
-                    Err(CompileError::Semantic(
-                        "Expected int value for int-to-int cast".to_string(),
-                    ))
+                    Err(crate::error::factory::expected_value_type("int", "int-to-int cast"))
                 }
             }
             (TypeId::I64, TypeId::I32) => {
@@ -78,9 +72,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_cast_failed("truncate int", &e))?;
                     Ok(result.into())
                 } else {
-                    Err(CompileError::Semantic(
-                        "Expected int value for int-to-int cast".to_string(),
-                    ))
+                    Err(crate::error::factory::expected_value_type("int", "int-to-int cast"))
                 }
             }
             // Float to Float (widening or truncation)
@@ -91,9 +83,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_cast_failed("extend float", &e))?;
                     Ok(result.into())
                 } else {
-                    Err(CompileError::Semantic(
-                        "Expected float value for float-to-float cast".to_string(),
-                    ))
+                    Err(crate::error::factory::expected_value_type("float", "float-to-float cast"))
                 }
             }
             (TypeId::F64, TypeId::F32) => {
@@ -104,18 +94,13 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_cast_failed("truncate float", &e))?;
                     Ok(result.into())
                 } else {
-                    Err(CompileError::Semantic(
-                        "Expected float value for float-to-float cast".to_string(),
-                    ))
+                    Err(crate::error::factory::expected_value_type("float", "float-to-float cast"))
                 }
             }
             // Same type - no-op
             _ if from_type == to_type => Ok(source_val),
             // Unsupported cast
-            _ => Err(CompileError::Semantic(format!(
-                "Unsupported cast from {:?} to {:?}",
-                from_type, to_type
-            ))),
+            _ => Err(crate::error::factory::unsupported_cast(from_type, to_type)),
         }
     }
 }

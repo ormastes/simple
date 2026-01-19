@@ -387,7 +387,9 @@ impl Lowerer {
         if !lifetime_violations.is_empty() {
             // Return error with lifetime violations
             if lifetime_violations.len() == 1 {
-                return Err(LowerError::LifetimeViolation(lifetime_violations.into_iter().next().unwrap()));
+                return Err(LowerError::LifetimeViolation(
+                    lifetime_violations.into_iter().next().unwrap(),
+                ));
             } else {
                 return Err(LowerError::LifetimeViolations(lifetime_violations));
             }

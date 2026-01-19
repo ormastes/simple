@@ -112,10 +112,7 @@ pub(crate) fn evaluate_call(
 
         // If we reach here with an identifier name, the function is not found
         // E1002 - Undefined Function
-        let known_names: Vec<&str> = functions
-            .keys()
-            .map(|s| s.as_str())
-            .collect();
+        let known_names: Vec<&str> = functions.keys().map(|s| s.as_str()).collect();
 
         let suggestion = crate::error::typo::suggest_name(name, known_names.clone());
         let mut ctx = ErrorContext::new()

@@ -87,8 +87,7 @@ impl MethodRegistry {
 
     /// Get the runtime function name for a method.
     pub fn runtime_fn(&self, type_name: &str, method_name: &str) -> Option<&'static str> {
-        self.get(type_name, method_name)
-            .and_then(|info| info.runtime_fn.name())
+        self.get(type_name, method_name).and_then(|info| info.runtime_fn.name())
     }
 
     /// Check if a method exists for a type.

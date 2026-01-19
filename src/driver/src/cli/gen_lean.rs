@@ -613,22 +613,15 @@ fn generate_memory_safety_lean(args: &[String]) -> i32 {
             // Create a basic module for generation
             let module = simple_compiler::hir::HirModule::new();
             let warnings = simple_compiler::hir::MemoryWarningCollector::new();
-            let lean = simple_compiler::codegen::lean::generate_memory_safety_lean(
-                &module,
-                None,
-                Some(&warnings),
-            );
+            let lean = simple_compiler::codegen::lean::generate_memory_safety_lean(&module, None, Some(&warnings));
             println!("{}", lean);
             return 0;
         }
     };
 
     // Generate Lean 4 memory safety verification
-    let lean = simple_compiler::codegen::lean::generate_memory_safety_lean(
-        &output.module,
-        None,
-        Some(&output.warnings),
-    );
+    let lean =
+        simple_compiler::codegen::lean::generate_memory_safety_lean(&output.module, None, Some(&output.warnings));
 
     println!("{}", lean);
 

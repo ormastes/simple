@@ -154,13 +154,10 @@ impl Lowerer {
                 });
             }
         } else {
-            self.module
-                .types
-                .lookup(name)
-                .ok_or_else(|| LowerError::UnknownType {
-                    type_name: name.to_string(),
-                    available_types: self.module.types.all_type_names(),
-                })?
+            self.module.types.lookup(name).ok_or_else(|| LowerError::UnknownType {
+                type_name: name.to_string(),
+                available_types: self.module.types.all_type_names(),
+            })?
         };
 
         // Lower field initializers (in order)

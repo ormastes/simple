@@ -9,7 +9,7 @@
 
 use super::super::tensor::Tensor;
 use super::MathValue;
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 
 /// Helper for unary math functions (works on scalars and tensors)
 pub fn unary_math_fn<F>(args: &[MathValue], op: F) -> Result<MathValue, CompileError>
@@ -17,7 +17,13 @@ where
     F: Fn(f64) -> f64,
 {
     if args.len() != 1 {
-        return Err(CompileError::Semantic("function requires 1 argument".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("mathematical function requires exactly 1 argument");
+        return Err(CompileError::semantic_with_context(
+            format!("function requires 1 argument, got {}", args.len()),
+            ctx,
+        ));
     }
     match &args[0] {
         MathValue::Tensor(t) => {
@@ -34,14 +40,26 @@ where
 
 pub fn eval_sqrt(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::Semantic("sqrt requires 1 argument".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("sqrt requires exactly 1 argument");
+        return Err(CompileError::semantic_with_context(
+            format!("sqrt requires 1 argument, got {}", args.len()),
+            ctx,
+        ));
     }
     match &args[0] {
         MathValue::Tensor(t) => Ok(MathValue::Tensor(t.sqrt())),
         v => {
             let x = v.as_f64()?;
             if x < 0.0 {
-                return Err(CompileError::Semantic("cannot take sqrt of negative".into()));
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_OPERATION)
+                    .with_help("square root is not defined for negative numbers");
+                return Err(CompileError::semantic_with_context(
+                    format!("cannot take sqrt of negative number: {}", x),
+                    ctx,
+                ));
             }
             Ok(MathValue::Float(x.sqrt()))
         }
@@ -158,19 +176,37 @@ pub fn eval_atanh(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_frac(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 2 {
-        return Err(CompileError::Semantic("frac requires 2 arguments".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("frac requires exactly 2 arguments (numerator, denominator)");
+        return Err(CompileError::semantic_with_context(
+            format!("frac requires 2 arguments, got {}", args.len()),
+            ctx,
+        ));
     }
     let num = args[0].as_f64()?;
     let denom = args[1].as_f64()?;
     if denom == 0.0 {
-        return Err(CompileError::Semantic("division by zero".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_OPERATION)
+            .with_help("division by zero is not allowed");
+        return Err(CompileError::semantic_with_context(
+            format!("division by zero: {} / {}", num, denom),
+            ctx,
+        ));
     }
     Ok(MathValue::Float(num / denom))
 }
 
 pub fn eval_root(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 2 {
-        return Err(CompileError::Semantic("root requires 2 arguments".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("root requires exactly 2 arguments (degree, value)");
+        return Err(CompileError::semantic_with_context(
+            format!("root requires 2 arguments, got {}", args.len()),
+            ctx,
+        ));
     }
     let n = args[0].as_f64()?;
     let x = args[1].as_f64()?;
@@ -179,7 +215,13 @@ pub fn eval_root(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_min(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.is_empty() {
-        return Err(CompileError::Semantic("min requires at least 1 argument".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("min requires at least 1 argument");
+        return Err(CompileError::semantic_with_context(
+            "min requires at least 1 argument".to_string(),
+            ctx,
+        ));
     }
     if args.len() == 1 && args[0].is_tensor() {
         let t = get_tensor(&args[0])?;
@@ -191,7 +233,13 @@ pub fn eval_min(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_max(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.is_empty() {
-        return Err(CompileError::Semantic("max requires at least 1 argument".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("max requires at least 1 argument");
+        return Err(CompileError::semantic_with_context(
+            "max requires at least 1 argument".to_string(),
+            ctx,
+        ));
     }
     if args.len() == 1 && args[0].is_tensor() {
         let t = get_tensor(&args[0])?;
@@ -203,7 +251,13 @@ pub fn eval_max(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_atan2(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 2 {
-        return Err(CompileError::Semantic("atan2 requires 2 arguments".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("atan2 requires exactly 2 arguments (y, x)");
+        return Err(CompileError::semantic_with_context(
+            format!("atan2 requires 2 arguments, got {}", args.len()),
+            ctx,
+        ));
     }
     let y = args[0].as_f64()?;
     let x = args[1].as_f64()?;
@@ -216,7 +270,13 @@ pub fn eval_atan2(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_gcd(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 2 {
-        return Err(CompileError::Semantic("gcd requires 2 arguments".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("gcd requires exactly 2 arguments");
+        return Err(CompileError::semantic_with_context(
+            format!("gcd requires 2 arguments, got {}", args.len()),
+            ctx,
+        ));
     }
     let a = args[0].as_f64()? as i64;
     let b = args[1].as_f64()? as i64;
@@ -225,7 +285,13 @@ pub fn eval_gcd(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_lcm(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 2 {
-        return Err(CompileError::Semantic("lcm requires 2 arguments".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("lcm requires exactly 2 arguments");
+        return Err(CompileError::semantic_with_context(
+            format!("lcm requires 2 arguments, got {}", args.len()),
+            ctx,
+        ));
     }
     let a = args[0].as_f64()? as i64;
     let b = args[1].as_f64()? as i64;
@@ -237,11 +303,23 @@ pub fn eval_lcm(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_factorial(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::Semantic("factorial requires 1 argument".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("factorial requires exactly 1 argument");
+        return Err(CompileError::semantic_with_context(
+            format!("factorial requires 1 argument, got {}", args.len()),
+            ctx,
+        ));
     }
     let n = args[0].as_f64()? as i64;
     if n < 0 {
-        return Err(CompileError::Semantic("factorial of negative".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_OPERATION)
+            .with_help("factorial is not defined for negative numbers");
+        return Err(CompileError::semantic_with_context(
+            format!("factorial of negative: {}", n),
+            ctx,
+        ));
     }
     if n > 20 {
         Ok(MathValue::Float(gamma(n as f64 + 1.0)))
@@ -252,7 +330,13 @@ pub fn eval_factorial(args: &[MathValue]) -> Result<MathValue, CompileError> {
 
 pub fn eval_binomial(args: &[MathValue]) -> Result<MathValue, CompileError> {
     if args.len() != 2 {
-        return Err(CompileError::Semantic("binomial requires 2 arguments".into()));
+        let ctx = ErrorContext::new()
+            .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+            .with_help("binomial requires exactly 2 arguments (n, k)");
+        return Err(CompileError::semantic_with_context(
+            format!("binomial requires 2 arguments, got {}", args.len()),
+            ctx,
+        ));
     }
     let n = args[0].as_f64()? as i64;
     let k = args[1].as_f64()? as i64;

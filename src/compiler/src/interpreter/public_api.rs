@@ -4,7 +4,7 @@ use simple_parser::ast::Node;
 use tracing::instrument;
 use crate::aop_config::AopConfig;
 use crate::di::DiConfig;
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use super::interpreter_state::{set_di_config, set_aop_config};
 use super::interpreter_eval;
 

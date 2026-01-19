@@ -21,8 +21,8 @@ mod type_coercion;
 
 pub use binary_ops::{BinaryOpResult, BinaryOpSemantics};
 pub use cast_rules::{
-    bool_cast, cast_bool_to_numeric, cast_float_to_numeric, cast_int_to_numeric, string_cast,
-    CastNumericResult, NumericType,
+    bool_cast, cast_bool_to_numeric, cast_float_to_numeric, cast_int_to_numeric, string_cast, CastNumericResult,
+    NumericType,
 };
 pub use truthiness::TruthinessRules;
 pub use type_coercion::{CoercionResult, TypeCoercion};
