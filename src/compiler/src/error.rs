@@ -365,7 +365,7 @@ pub mod typo {
 /// This module provides constructor functions for frequently-used error messages,
 /// reducing duplication and ensuring consistent error text across the codebase.
 pub mod factory {
-    use super::CompileError;
+    use super::{codes, typo, CompileError, ErrorContext};
     use std::path::Path;
 
     // ============================================
@@ -429,7 +429,8 @@ pub mod factory {
 
     /// Error when a function receives the wrong number of arguments.
     pub fn argument_count_mismatch(expected: usize, found: usize) -> CompileError {
-        CompileError::Semantic(format!("expected {} argument(s), found {}", expected, found))
+        let ctx = ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH);
+        CompileError::semantic_with_context(format!("expected {} argument(s), found {}", expected, found), ctx)
     }
 
     /// Error when a function expects a minimum number of arguments.
@@ -526,30 +527,136 @@ pub mod factory {
 
     /// Error when a type is not found.
     pub fn type_not_found(type_name: &str) -> CompileError {
-        CompileError::Semantic(format!("type '{}' not found in this scope", type_name))
+        let ctx = ErrorContext::new().with_code(codes::UNDEFINED_TYPE);
+        CompileError::semantic_with_context(format!("type '{}' not found in this scope", type_name), ctx)
     }
 
     /// Error when a variable is not found.
     pub fn variable_not_found(var_name: &str) -> CompileError {
-        CompileError::Semantic(format!("cannot find variable '{}' in this scope", var_name))
+        let ctx = ErrorContext::new().with_code(codes::UNDEFINED_VARIABLE);
+        CompileError::semantic_with_context(format!("cannot find variable '{}' in this scope", var_name), ctx)
     }
 
     /// Error when a function is not found.
     pub fn function_not_found(func_name: &str) -> CompileError {
-        CompileError::Semantic(format!("cannot find function '{}' in this scope", func_name))
+        let ctx = ErrorContext::new().with_code(codes::UNDEFINED_FUNCTION);
+        CompileError::semantic_with_context(format!("cannot find function '{}' in this scope", func_name), ctx)
     }
 
     /// Error when a method is not found on a type.
     pub fn method_not_found(method_name: &str, type_name: &str) -> CompileError {
-        CompileError::Semantic(format!(
-            "no method named '{}' found for type '{}'",
-            method_name, type_name
-        ))
+        let ctx = ErrorContext::new().with_code(codes::UNKNOWN_METHOD);
+        CompileError::semantic_with_context(
+            format!("no method named '{}' found for type '{}'", method_name, type_name),
+            ctx,
+        )
     }
 
     /// Error when a field is not found on a struct/class.
     pub fn field_not_found(field_name: &str, type_name: &str) -> CompileError {
-        CompileError::Semantic(format!("no field named '{}' found on type '{}'", field_name, type_name))
+        let ctx = ErrorContext::new().with_code(codes::UNDEFINED_FIELD);
+        CompileError::semantic_with_context(
+            format!("no field named '{}' found on type '{}'", field_name, type_name),
+            ctx,
+        )
+    }
+
+    // ============================================
+    // Type/Name Resolution Errors with Suggestions
+    // ============================================
+
+    /// Error when a type is not found, with typo suggestions.
+    pub fn type_not_found_with_suggestions(type_name: &str, candidates: &[&str]) -> CompileError {
+        let mut ctx = ErrorContext::new().with_code(codes::UNDEFINED_TYPE);
+
+        if let Some(suggestion) = typo::suggest_name(type_name, candidates.iter().copied()) {
+            ctx = ctx.with_help(format!("did you mean '{}'?", suggestion));
+        }
+
+        CompileError::semantic_with_context(format!("type '{}' not found in this scope", type_name), ctx)
+    }
+
+    /// Error when a variable is not found, with typo suggestions.
+    pub fn variable_not_found_with_suggestions(var_name: &str, candidates: &[&str]) -> CompileError {
+        let mut ctx = ErrorContext::new().with_code(codes::UNDEFINED_VARIABLE);
+
+        if let Some(suggestion) = typo::suggest_name(var_name, candidates.iter().copied()) {
+            ctx = ctx.with_help(format!("did you mean '{}'?", suggestion));
+        }
+
+        CompileError::semantic_with_context(format!("cannot find variable '{}' in this scope", var_name), ctx)
+    }
+
+    /// Error when a function is not found, with typo suggestions.
+    pub fn function_not_found_with_suggestions(func_name: &str, candidates: &[&str]) -> CompileError {
+        let mut ctx = ErrorContext::new().with_code(codes::UNDEFINED_FUNCTION);
+
+        if let Some(suggestion) = typo::suggest_name(func_name, candidates.iter().copied()) {
+            ctx = ctx.with_help(format!("did you mean '{}'?", suggestion));
+        }
+
+        CompileError::semantic_with_context(format!("cannot find function '{}' in this scope", func_name), ctx)
+    }
+
+    /// Error when a method is not found on a type, with typo suggestions.
+    pub fn method_not_found_with_suggestions(method_name: &str, type_name: &str, candidates: &[&str]) -> CompileError {
+        let mut ctx = ErrorContext::new().with_code(codes::UNKNOWN_METHOD);
+
+        if let Some(suggestion) = typo::suggest_name(method_name, candidates.iter().copied()) {
+            ctx = ctx.with_help(format!("did you mean '{}'?", suggestion));
+        }
+
+        CompileError::semantic_with_context(
+            format!("no method named '{}' found for type '{}'", method_name, type_name),
+            ctx,
+        )
+    }
+
+    /// Error when a field is not found on a struct/class, with typo suggestions.
+    pub fn field_not_found_with_suggestions(field_name: &str, type_name: &str, candidates: &[&str]) -> CompileError {
+        let mut ctx = ErrorContext::new().with_code(codes::UNDEFINED_FIELD);
+
+        if let Some(suggestion) = typo::suggest_name(field_name, candidates.iter().copied()) {
+            ctx = ctx.with_help(format!("did you mean '{}'?", suggestion));
+        }
+
+        CompileError::semantic_with_context(
+            format!("no field named '{}' found on type '{}'", field_name, type_name),
+            ctx,
+        )
+    }
+
+    /// Error when a class is not found, with typo suggestions.
+    pub fn class_not_found_with_suggestions(class_name: &str, candidates: &[&str]) -> CompileError {
+        let mut ctx = ErrorContext::new().with_code(codes::UNKNOWN_CLASS);
+
+        if let Some(suggestion) = typo::suggest_name(class_name, candidates.iter().copied()) {
+            ctx = ctx.with_help(format!("did you mean '{}'?", suggestion));
+        }
+
+        CompileError::semantic_with_context(format!("unknown class '{}'", class_name), ctx)
+    }
+
+    /// Error when an enum is not found, with typo suggestions.
+    pub fn enum_not_found_with_suggestions(enum_name: &str, candidates: &[&str]) -> CompileError {
+        let mut ctx = ErrorContext::new().with_code(codes::UNKNOWN_ENUM);
+
+        if let Some(suggestion) = typo::suggest_name(enum_name, candidates.iter().copied()) {
+            ctx = ctx.with_help(format!("did you mean '{}'?", suggestion));
+        }
+
+        CompileError::semantic_with_context(format!("unknown enum '{}'", enum_name), ctx)
+    }
+
+    /// Error when an unknown macro is invoked, with typo suggestions.
+    pub fn unknown_macro_with_suggestions(name: &str, candidates: &[&str]) -> CompileError {
+        let mut ctx = ErrorContext::new().with_code(codes::MACRO_UNDEFINED);
+
+        if let Some(suggestion) = typo::suggest_name(name, candidates.iter().copied()) {
+            ctx = ctx.with_help(format!("did you mean '{}!'?", suggestion));
+        }
+
+        CompileError::semantic_with_context(format!("unknown macro: {}!", name), ctx)
     }
 
     // ============================================
@@ -576,10 +683,11 @@ pub mod factory {
 
     /// Error when a duplicate impl is found for a specific type.
     pub fn duplicate_impl(trait_name: &str, type_name: &str) -> CompileError {
-        CompileError::Semantic(format!(
-            "duplicate impl for trait `{}` and type `{}`",
-            trait_name, type_name
-        ))
+        let ctx = ErrorContext::new().with_code(codes::DUPLICATE_DEFINITION);
+        CompileError::semantic_with_context(
+            format!("duplicate impl for trait `{}` and type `{}`", trait_name, type_name),
+            ctx,
+        )
     }
 
     // ============================================
@@ -588,20 +696,27 @@ pub mod factory {
 
     /// Error when a blocking operation is used in async context.
     pub fn blocking_in_async(operation: &str) -> CompileError {
-        CompileError::Semantic(format!(
-            "blocking operation '{}' not allowed in async function\n\
-             help: remove @async decorator or use non-blocking alternative",
-            operation
-        ))
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_OPERATION)
+            .with_help("remove @async decorator or use non-blocking alternative");
+        CompileError::semantic_with_context(
+            format!("blocking operation '{}' not allowed in async function", operation),
+            ctx,
+        )
     }
 
     /// Error when a side-effecting operation is used in pure context.
     pub fn side_effect_in_pure(operation: &str, needed_effect: &str) -> CompileError {
-        CompileError::Semantic(format!(
-            "side-effecting operation '{}' not allowed in pure function\n\
-             help: remove @pure decorator or add {} effect to function",
-            operation, needed_effect
-        ))
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_OPERATION)
+            .with_help(format!(
+                "remove @pure decorator or add {} effect to function",
+                needed_effect
+            ));
+        CompileError::semantic_with_context(
+            format!("side-effecting operation '{}' not allowed in pure function", operation),
+            ctx,
+        )
     }
 
     /// Error when a pure function calls a non-pure function.
@@ -628,15 +743,17 @@ pub mod factory {
 
     /// Error when two types don't match.
     pub fn type_mismatch(expected: &str, found: &str) -> CompileError {
-        CompileError::Semantic(format!("expected type '{}', found '{}'", expected, found))
+        let ctx = ErrorContext::new().with_code(codes::TYPE_MISMATCH);
+        CompileError::semantic_with_context(format!("expected type '{}', found '{}'", expected, found), ctx)
     }
 
     /// Error when a return type doesn't match the function signature.
     pub fn return_type_mismatch(expected: &str, found: &str) -> CompileError {
-        CompileError::Semantic(format!(
-            "return type mismatch: expected '{}', found '{}'",
-            expected, found
-        ))
+        let ctx = ErrorContext::new().with_code(codes::INVALID_RETURN_TYPE);
+        CompileError::semantic_with_context(
+            format!("return type mismatch: expected '{}', found '{}'", expected, found),
+            ctx,
+        )
     }
 
     // ============================================
@@ -839,12 +956,14 @@ pub mod factory {
 
     /// Error when trying to assign to a constant.
     pub fn cannot_assign_to_const(name: &str) -> CompileError {
-        CompileError::Semantic(format!("cannot assign to const '{}'", name))
+        let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT);
+        CompileError::semantic_with_context(format!("cannot assign to const '{}'", name), ctx)
     }
 
     /// Error when trying to mutate an immutable value.
     pub fn cannot_mutate_immutable(name: &str) -> CompileError {
-        CompileError::Semantic(format!("cannot mutate immutable value '{}'", name))
+        let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT);
+        CompileError::semantic_with_context(format!("cannot mutate immutable value '{}'", name), ctx)
     }
 
     // ============================================
@@ -1031,12 +1150,14 @@ pub mod factory {
 
     /// Error when a circular dependency is detected.
     pub fn circular_dependency(description: &str) -> CompileError {
-        CompileError::Semantic(format!("circular dependency detected: {}", description))
+        let ctx = ErrorContext::new().with_code(codes::CIRCULAR_DEPENDENCY);
+        CompileError::semantic_with_context(format!("circular dependency detected: {}", description), ctx)
     }
 
     /// Error when a class is not found.
     pub fn class_not_found(class_name: &str) -> CompileError {
-        CompileError::Semantic(format!("unknown class '{}'", class_name))
+        let ctx = ErrorContext::new().with_code(codes::UNKNOWN_CLASS);
+        CompileError::semantic_with_context(format!("unknown class '{}'", class_name), ctx)
     }
 
     /// Error when a strong enum has wildcard pattern in match.
@@ -1122,7 +1243,8 @@ pub mod factory {
 
     /// Error when an enum is not found.
     pub fn enum_not_found(enum_name: &str) -> CompileError {
-        CompileError::Semantic(format!("unknown enum '{}'", enum_name))
+        let ctx = ErrorContext::new().with_code(codes::UNKNOWN_ENUM);
+        CompileError::semantic_with_context(format!("unknown enum '{}'", enum_name), ctx)
     }
 
     // ============================================
@@ -1131,7 +1253,8 @@ pub mod factory {
 
     /// Error when an unknown block type is used.
     pub fn unknown_block_type(kind: &str) -> CompileError {
-        CompileError::Semantic(format!("unknown block kind: {}", kind))
+        let ctx = ErrorContext::new().with_code(codes::UNKNOWN_BLOCK_TYPE);
+        CompileError::semantic_with_context(format!("unknown block kind: {}", kind), ctx)
     }
 
     // ============================================
