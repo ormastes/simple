@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `i18n/parser.ko.spl` - Korean parser error messages
   - `i18n/compiler.spl` - English compiler error messages (E1001-E3005)
   - `i18n/compiler.ko.spl` - Korean compiler error messages
+  - `i18n/verification.spl` - English verification error messages (21 codes)
+  - `i18n/verification.ko.spl` - Korean verification error messages
+  - `i18n/lint.spl` - English lint messages (8 codes)
+  - `i18n/lint.ko.spl` - Korean lint messages
 
 - **Documentation**
   - User guide: `doc/guide/i18n.md` - How to use `--lang` flag
@@ -68,9 +72,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Technical Details
 
-- **47 tests** covering i18n functionality
-- **~2750 lines** of new code
-- **18 files** created/modified
+- **66 tests** covering i18n functionality (52 unit + 14 integration)
+- **~4000+ lines** of new code
+- **25 files** created/modified
+- **64 error messages** fully localized (parser, compiler, verification, lint)
 - **Zero performance impact** - catalogs lazy-loaded once per process (~1ms)
 - **100KB memory** for English + Korean catalogs
 - **UTF-8 native** - full Unicode support for all languages

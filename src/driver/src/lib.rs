@@ -18,6 +18,8 @@ pub mod runner;
 pub mod simple_test;
 pub mod startup_metrics;
 pub mod task_db;
+pub mod todo_db;
+pub mod todo_parser;
 pub mod watcher;
 
 pub use compile_options::{CompileOptions, CompileProfiler};
