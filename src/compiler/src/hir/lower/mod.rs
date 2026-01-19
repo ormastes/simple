@@ -3,6 +3,7 @@ mod error;
 mod expr;
 mod import_loader;
 mod lowerer;
+pub mod memory_warning;
 mod module_lowering;
 pub mod parallel;
 mod stmt_lowering;
@@ -10,6 +11,7 @@ mod type_registration;
 mod type_resolver;
 
 pub use error::{LowerError, LowerResult};
+pub use memory_warning::{MemoryWarning, MemoryWarningCode, MemoryWarningCollector, WarningSummary};
 pub use lowerer::Lowerer;
 pub use parallel::{
     lower_modules_parallel, lower_modules_parallel_with_config, BatchLowerer, LoweringStats, ParallelLowerConfig,

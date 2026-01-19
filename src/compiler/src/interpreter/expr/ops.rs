@@ -11,6 +11,14 @@ use crate::value::{
 };
 
 use super::super::{await_value, check_unit_binary_op, check_unit_unary_op, ClassDef, Enums, Env, FunctionDef, ImplMethods};
+use super::super::core_types::get_identifier_name;
+use super::super::interpreter_state::{CONST_NAMES, IMMUTABLE_VARS};
+
+/// Check if a variable name refers to an immutable binding
+fn is_variable_immutable(name: &str) -> bool {
+    CONST_NAMES.with(|cell| cell.borrow().contains(name))
+        || IMMUTABLE_VARS.with(|cell| cell.borrow().contains(name))
+}
 
 pub(super) fn eval_op_expr(
     expr: &Expr,
@@ -317,6 +325,22 @@ pub(super) fn eval_op_expr(
             Ok(Some(result?))
         }
         Expr::Unary { op, operand } => {
+            // E1053 - Cannot Borrow Immutable (check before evaluating operand)
+            if matches!(op, UnaryOp::RefMut) {
+                if let Some(var_name) = get_identifier_name(operand) {
+                    if is_variable_immutable(var_name) {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::CANNOT_BORROW_IMMUTABLE)
+                            .with_help("cannot take a mutable borrow of an immutable variable")
+                            .with_note("consider declaring the variable as mutable with `let mut` or `var`");
+                        return Err(CompileError::semantic_with_context(
+                            format!("cannot borrow `{}` as mutable because it is immutable", var_name),
+                            ctx,
+                        ));
+                    }
+                }
+            }
+
             let val = evaluate_expr(operand, env, functions, classes, enums, impl_methods)?;
 
             // Check for unit type safety
