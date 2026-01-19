@@ -6,7 +6,7 @@ use simple_parser::token::NumericSuffix;
 use super::evaluate_expr;
 use super::units::{lookup_unit_family, lookup_unit_family_with_si};
 use crate::blocks;
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{OptionVariant, Value};
 
 use super::super::{ClassDef, Enums, Env, FunctionDef, ImplMethods, MODULE_GLOBALS, MOVED_VARS};
