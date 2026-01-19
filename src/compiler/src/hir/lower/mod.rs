@@ -3,6 +3,7 @@ mod error;
 mod expr;
 mod import_loader;
 mod lowerer;
+mod memory_check;
 pub mod memory_warning;
 mod module_lowering;
 pub mod parallel;
@@ -13,12 +14,50 @@ mod type_resolver;
 pub use error::{LowerError, LowerResult};
 pub use memory_warning::{MemoryWarning, MemoryWarningCode, MemoryWarningCollector, WarningSummary};
 pub use lowerer::Lowerer;
+
+use super::types::HirModule;
+
+/// Result of lowering that includes both the module and memory warnings
+#[derive(Debug)]
+pub struct LoweringOutput {
+    /// The lowered HIR module
+    pub module: HirModule,
+    /// Memory safety warnings collected during lowering
+    pub warnings: MemoryWarningCollector,
+}
+
+impl LoweringOutput {
+    /// Create a new lowering output
+    pub fn new(module: HirModule, warnings: MemoryWarningCollector) -> Self {
+        Self { module, warnings }
+    }
+
+    /// Check if there are any warnings
+    pub fn has_warnings(&self) -> bool {
+        self.warnings.has_warnings()
+    }
+
+    /// Get the warning count
+    pub fn warning_count(&self) -> usize {
+        self.warnings.count()
+    }
+
+    /// Get the warning summary
+    pub fn summary(&self) -> WarningSummary {
+        self.warnings.summary()
+    }
+}
+
+/// Convenience function to lower an AST module to HIR with warnings
+pub fn lower_with_warnings(module: &simple_parser::Module) -> LowerResult<LoweringOutput> {
+    Lowerer::new().lower_module_with_warnings(module)
+}
+
 pub use parallel::{
     lower_modules_parallel, lower_modules_parallel_with_config, BatchLowerer, LoweringStats, ParallelLowerConfig,
     ParallelModuleLowerer,
 };
 
-use super::types::HirModule;
 use crate::module_resolver::ModuleResolver;
 use simple_parser::Module;
 use std::path::Path;

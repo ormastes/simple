@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use simple_parser::ast::{MacroArg, MacroDef};
 
-use crate::error::CompileError;
+use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{evaluate_expr, ClassDef, Enums, ImplMethods};
 use crate::value::{Env, Value};
 
@@ -77,7 +77,15 @@ pub fn eval_builtin_macro(
             if let Some(MacroArg::Expr(e)) = macro_args.first() {
                 let val = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
                 if !val.truthy() {
-                    return Some(Err(CompileError::Semantic("assertion failed".into())));
+                    // E3004 - Assertion Failed
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::ASSERTION_FAILED)
+                        .with_help("the assertion condition evaluated to false")
+                        .with_note("ensure the condition is true before the assertion");
+                    return Some(Err(CompileError::semantic_with_context(
+                        "assertion failed".to_string(),
+                        ctx,
+                    )));
                 }
             }
             Some(Ok(Value::Nil))
@@ -88,10 +96,15 @@ pub fn eval_builtin_macro(
                 let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
                 let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
                 if left_val != right_val {
-                    return Some(Err(CompileError::Semantic(format!(
-                        "assertion failed: {:?} != {:?}",
-                        left_val, right_val
-                    ))));
+                    // E3004 - Assertion Failed
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::ASSERTION_FAILED)
+                        .with_help("the left and right values are not equal")
+                        .with_note(format!("left: {:?}, right: {:?}", left_val, right_val));
+                    return Some(Err(CompileError::semantic_with_context(
+                        format!("assertion failed: {:?} != {:?}", left_val, right_val),
+                        ctx,
+                    )));
                 }
             }
             Some(Ok(Value::Nil))

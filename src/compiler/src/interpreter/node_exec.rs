@@ -213,7 +213,7 @@ fn exec_assignment(
 
         let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(name));
         if is_const {
-            return Err(CompileError::Semantic(format!("cannot assign to const '{name}'")));
+            return Err(crate::error::factory::cannot_assign_to_const(name));
         }
 
         // Check immutability for reassignments (not first assignment)
@@ -443,7 +443,7 @@ fn exec_augmented_assignment(
     if let Expr::Identifier(name) = &assign.target {
         let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(name));
         if is_const {
-            return Err(CompileError::Semantic(format!("cannot assign to const '{name}'")));
+            return Err(crate::error::factory::cannot_assign_to_const(name));
         }
 
         // Evaluate the RHS

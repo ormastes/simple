@@ -154,7 +154,14 @@ Array(a) => !a.is_empty()
 - `"Cannot read module {:?}: {}"`
 - `"Cannot parse module {:?}: {}"`
 
-**Status:** ⏳ PENDING - Create error constructor functions
+**Status:** ✅ PARTIALLY RESOLVED - Extended `error::factory` module with:
+- `cannot_assign_to_const()`, `cannot_mutate_immutable()`
+- `cannot_convert()`, `invalid_socket_address()`, `invalid_config()`
+- `circular_dependency()`, `class_not_found()`, `enum_not_found()`
+- `unknown_block_type()`
+
+Updated callsites in `blocks/mod.rs`, `interpreter_method/mod.rs`.
+~103 occurrences remain - gradual migration recommended.
 
 ### 2.4 GPU Dimension Matching (5 identical blocks)
 
@@ -377,10 +384,11 @@ Array(a) => !a.is_empty()
 
 ### Remaining Work
 
-1. **Create error factory functions** - 105 occurrences of `CompileError::Semantic(format!(...))` across 30 files
+1. ~~**Create error factory functions**~~ ✅ EXTENDED - Added 9 new factory functions, ~103 occurrences remaining for gradual migration
 2. **Migrate `todo_parser.rs` to Simple** - 608 lines, good self-hosting showcase
 3. **Migrate `config_env.rs` to Simple** - 423 lines, dictionary manipulation
 4. **Migrate `test_output.rs` to Simple** - 410 lines, text formatting
+5. **Simple trait defaults** - Vector math and primitive types need trait default implementations
 
 ### Summary of Lines Saved (Session)
 
@@ -388,7 +396,21 @@ Array(a) => !a.is_empty()
 |--------|--------|-------|-------|
 | `interpreter/expr/casting.rs` | 206 | 111 | 95 |
 | `linker/native_binary.rs` | 696 | 577 | 119 |
+| `error.rs` factory extensions | - | +60 | (infrastructure) |
 | **Total** | | | **214 lines** |
+
+### Error Factory Functions Added
+
+**New functions in `error::factory`:**
+- `cannot_assign_to_const(name)` - Assignment to const error
+- `cannot_mutate_immutable(name)` - Mutation of immutable error
+- `cannot_convert(value, target_type)` - Type conversion error
+- `invalid_socket_address(addr)` - Socket address parse error
+- `invalid_config(kind, error)` - Config/manifest parse error
+- `circular_dependency(description)` - Circular dependency error
+- `class_not_found(class_name)` - Unknown class error
+- `enum_not_found(enum_name)` - Unknown enum error
+- `unknown_block_type(kind)` - Unknown custom block error
 
 ---
 
@@ -417,6 +439,7 @@ src/compiler/src/codegen/instr/methods.rs     # Codegen methods - ✅ method_reg
 src/compiler/src/value_impl.rs                # Type coercion - ✅ semantics/type_coercion.rs
 src/compiler/src/interpreter/expr/casting.rs  # Cast operations - ✅ semantics/cast_rules.rs
 src/compiler/src/linker/native_binary.rs      # Builder pattern - ✅ linker/builder_macros.rs
+src/compiler/src/error.rs                     # Error patterns - ✅ error::factory module
 ```
 
 ### Migration Candidate Files
