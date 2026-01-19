@@ -20,6 +20,19 @@ fn is_variable_immutable(name: &str) -> bool {
         || IMMUTABLE_VARS.with(|cell| cell.borrow().contains(name))
 }
 
+/// Check if a value is a pointer type (can be dereferenced)
+fn is_pointer_type(val: &Value) -> bool {
+    matches!(
+        val,
+        Value::Unique(_)
+            | Value::Shared(_)
+            | Value::Weak(_)
+            | Value::Handle(_)
+            | Value::Borrow(_)
+            | Value::BorrowMut(_)
+    )
+}
+
 pub(super) fn eval_op_expr(
     expr: &Expr,
     env: &mut Env,
@@ -387,6 +400,17 @@ pub(super) fn eval_op_expr(
                         return Ok(Some(Value::BorrowMut(BorrowMutValue::new(val))));
                     }
                     UnaryOp::Deref => {
+                        // E1054 - Invalid Dereference
+                        if !is_pointer_type(&val) {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INVALID_DEREFERENCE)
+                                .with_help("dereference operator (*) can only be applied to pointer types")
+                                .with_note("pointer types include: unique, shared, weak, handle, borrow references");
+                            return Err(CompileError::semantic_with_context(
+                                format!("cannot dereference value of type `{}`", val.type_name()),
+                                ctx,
+                            ));
+                        }
                         return Ok(Some(val.deref_pointer()));
                     }
                     UnaryOp::ChannelRecv => {
@@ -401,6 +425,18 @@ pub(super) fn eval_op_expr(
                         ));
                     }
                 }
+            }
+
+            // E1054 - Invalid Dereference (check for non-unit types)
+            if matches!(op, UnaryOp::Deref) && !is_pointer_type(&val) {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_DEREFERENCE)
+                    .with_help("dereference operator (*) can only be applied to pointer types")
+                    .with_note("pointer types include: unique, shared, weak, handle, borrow references");
+                return Err(CompileError::semantic_with_context(
+                    format!("cannot dereference value of type `{}`", val.type_name()),
+                    ctx,
+                ));
             }
 
             let result = match op {
