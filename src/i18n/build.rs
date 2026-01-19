@@ -7,6 +7,8 @@
 /// Files processed:
 /// - i18n/__init__.spl -> DEFAULT_SEVERITY (common UI strings)
 /// - i18n/parser.spl -> DEFAULT_PARSER_MESSAGES (parser errors E0001-E0012)
+/// - i18n/compiler.spl -> DEFAULT_COMPILER_MESSAGES (compiler errors E1xxx-E3xxx)
+/// - i18n/runtime.spl -> DEFAULT_RUNTIME_MESSAGES (runtime errors E4xxx-E6xxx)
 ///
 /// Generated file: src/generated.rs (included via include! macro in lib.rs)
 
@@ -29,10 +31,14 @@ fn main() {
     // Tell cargo to rerun if catalog files change
     println!("cargo:rerun-if-changed={}", i18n_dir.join("__init__.spl").display());
     println!("cargo:rerun-if-changed={}", i18n_dir.join("parser.spl").display());
+    println!("cargo:rerun-if-changed={}", i18n_dir.join("compiler.spl").display());
+    println!("cargo:rerun-if-changed={}", i18n_dir.join("runtime.spl").display());
 
     // Parse default locale catalog files
     let severity_catalog = parse_catalog_file(&i18n_dir.join("__init__.spl"), "common");
     let parser_catalog = parse_catalog_file(&i18n_dir.join("parser.spl"), "parser");
+    let compiler_catalog = parse_catalog_file(&i18n_dir.join("compiler.spl"), "compiler");
+    let runtime_catalog = parse_catalog_file(&i18n_dir.join("runtime.spl"), "runtime");
 
     // Generate Rust code
     let out_dir = env::var("OUT_DIR").unwrap();
@@ -50,6 +56,16 @@ fn main() {
     // Generate DEFAULT_PARSER_MESSAGES map
     if let Some(catalog) = parser_catalog {
         generate_messages_map(&mut code, "PARSER", &catalog);
+    }
+
+    // Generate DEFAULT_COMPILER_MESSAGES map
+    if let Some(catalog) = compiler_catalog {
+        generate_messages_map(&mut code, "COMPILER", &catalog);
+    }
+
+    // Generate DEFAULT_RUNTIME_MESSAGES map
+    if let Some(catalog) = runtime_catalog {
+        generate_messages_map(&mut code, "RUNTIME", &catalog);
     }
 
     fs::write(&generated_path, code).expect("Failed to write generated.rs");
