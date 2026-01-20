@@ -74,6 +74,48 @@ impl PartialEq for RuntimeValue {
 
 impl Eq for RuntimeValue {}
 
+impl std::hash::Hash for RuntimeValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Hash the raw bits directly
+        // This is safe because:
+        // - For floats: same float value -> same bits -> same hash
+        // - For everything else: equality is based on raw bits anyway
+        // - Consistent with Eq: if a == b, then hash(a) == hash(b)
+        self.0.hash(state);
+    }
+}
+
+impl PartialOrd for RuntimeValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RuntimeValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Order by tag first, then by payload
+        // This provides a total ordering for BTreeMap/BTreeSet
+        match self.tag().cmp(&other.tag()) {
+            std::cmp::Ordering::Equal => {
+                // Same tag, compare payloads
+                match self.tag() {
+                    tags::TAG_FLOAT => {
+                        // For floats, use total ordering (NaN sorts last)
+                        let self_f = self.as_float();
+                        let other_f = other.as_float();
+                        self_f.total_cmp(&other_f)
+                    }
+                    _ => {
+                        // For everything else, compare raw bits
+                        self.0.cmp(&other.0)
+                    }
+                }
+            }
+            other_ord => other_ord,
+        }
+    }
+}
+
 impl Default for RuntimeValue {
     fn default() -> Self {
         Self::NIL
@@ -373,6 +415,10 @@ impl RuntimeValue {
                 Some(HeapObjectType::Barrier) => "barrier",
                 Some(HeapObjectType::Atomic) => "atomic",
                 Some(HeapObjectType::MonoioFuture) => "monoio_future",
+                Some(HeapObjectType::HashMap) => "hashmap",
+                Some(HeapObjectType::BTreeMap) => "btreemap",
+                Some(HeapObjectType::HashSet) => "hashset",
+                Some(HeapObjectType::BTreeSet) => "btreeset",
                 None => "null",
             },
             _ => "unknown",

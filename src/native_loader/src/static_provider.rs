@@ -82,6 +82,17 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_btreeset_new, rt_btreeset_remove, rt_btreeset_symmetric_difference,
             rt_btreeset_to_array, rt_btreeset_union,
         };
+        // Sandbox operations
+        use simple_runtime::value::{
+            rt_sandbox_reset, rt_sandbox_set_cpu_time, rt_sandbox_set_memory,
+            rt_sandbox_set_fd_limit, rt_sandbox_set_thread_limit, rt_sandbox_disable_network,
+            rt_sandbox_set_network_allowlist, rt_sandbox_set_network_blocklist,
+            rt_sandbox_add_allowed_domain, rt_sandbox_add_blocked_domain,
+            rt_sandbox_set_fs_readonly, rt_sandbox_set_fs_restricted, rt_sandbox_set_fs_overlay,
+            rt_sandbox_add_read_path, rt_sandbox_add_write_path, rt_sandbox_apply,
+            rt_sandbox_cleanup, rt_sandbox_is_configured, rt_sandbox_get_cpu_time,
+            rt_sandbox_get_memory, rt_sandbox_get_network_mode, rt_sandbox_get_fs_mode,
+        };
         use simple_runtime::*;
 
         match_runtime_symbol!(
@@ -306,6 +317,29 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_btreeset_is_subset,
             rt_btreeset_is_superset,
             rt_btreeset_drop,
+            // Sandbox operations
+            rt_sandbox_reset,
+            rt_sandbox_set_cpu_time,
+            rt_sandbox_set_memory,
+            rt_sandbox_set_fd_limit,
+            rt_sandbox_set_thread_limit,
+            rt_sandbox_disable_network,
+            rt_sandbox_set_network_allowlist,
+            rt_sandbox_set_network_blocklist,
+            rt_sandbox_add_allowed_domain,
+            rt_sandbox_add_blocked_domain,
+            rt_sandbox_set_fs_readonly,
+            rt_sandbox_set_fs_restricted,
+            rt_sandbox_set_fs_overlay,
+            rt_sandbox_add_read_path,
+            rt_sandbox_add_write_path,
+            rt_sandbox_apply,
+            rt_sandbox_cleanup,
+            rt_sandbox_is_configured,
+            rt_sandbox_get_cpu_time,
+            rt_sandbox_get_memory,
+            rt_sandbox_get_network_mode,
+            rt_sandbox_get_fs_mode,
         )
     }
 
