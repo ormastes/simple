@@ -100,6 +100,9 @@ pub mod config;
 // Phase 12: Regular expressions
 pub mod regex;
 
+// Phase 13: Sandbox operations
+pub mod sandbox;
+
 // Re-export all public FFI functions for backward compatibility
 // Phase 1
 pub use equality::*;
@@ -146,3 +149,6 @@ pub use config::*;
 
 // Phase 12
 pub use regex::*;
+
+// Phase 13
+pub use sandbox::*;
