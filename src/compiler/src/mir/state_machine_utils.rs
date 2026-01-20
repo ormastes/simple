@@ -119,9 +119,7 @@ pub(crate) fn create_resume_block(
     // Check if we need a resume block:
     // - If there are instructions after the suspension point, OR
     // - If the block doesn't end with a Return
-    if suspension_idx + 1 < orig_block.instructions.len()
-        || !matches!(orig_block.terminator, Terminator::Return(_))
-    {
+    if suspension_idx + 1 < orig_block.instructions.len() || !matches!(orig_block.terminator, Terminator::Return(_)) {
         // Create a new block for resuming after the suspension
         let resume = rewritten.new_block();
         let mut resume_block = MirBlock::new(resume);
@@ -132,8 +130,8 @@ pub(crate) fn create_resume_block(
         }
 
         // Remap and set the terminator
-        resume_block.terminator = remap_terminator(orig_block.terminator.clone(), block_map)
-            .unwrap_or_else(|| Terminator::Return(None));
+        resume_block.terminator =
+            remap_terminator(orig_block.terminator.clone(), block_map).unwrap_or_else(|| Terminator::Return(None));
 
         write_block(rewritten, resume_block);
         resume

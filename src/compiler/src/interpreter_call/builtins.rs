@@ -35,12 +35,42 @@ pub(super) fn eval_builtin(
             // Handle range(n) as range(0, n) and range(start, end)
             let (start, end) = if args.len() == 1 {
                 // Single argument: range(n) means range(0, n)
-                let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods, "builtin function")?;
+                let n = eval_arg_int(
+                    args,
+                    0,
+                    0,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                    "builtin function",
+                )?;
                 (0, n)
             } else {
                 // Two arguments: range(start, end)
-                let start = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods, "builtin function")?;
-                let end = eval_arg_int(args, 1, 0, env, functions, classes, enums, impl_methods, "builtin function")?;
+                let start = eval_arg_int(
+                    args,
+                    0,
+                    0,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                    "builtin function",
+                )?;
+                let end = eval_arg_int(
+                    args,
+                    1,
+                    0,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                    "builtin function",
+                )?;
                 (start, end)
             };
             let inclusive = eval_arg(
@@ -353,7 +383,17 @@ pub(super) fn eval_builtin(
             }
         }
         "async_workers" => {
-            let count = eval_arg_int(args, 0, 4, env, functions, classes, enums, impl_methods, "builtin function")?;
+            let count = eval_arg_int(
+                args,
+                0,
+                4,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                "builtin function",
+            )?;
             simple_runtime::configure_worker_count(count as usize);
             Ok(Some(Value::Nil))
         }
@@ -490,4 +530,3 @@ pub(super) fn eval_builtin(
         _ => Ok(None),
     }
 }
-

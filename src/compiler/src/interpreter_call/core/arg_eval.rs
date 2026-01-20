@@ -59,9 +59,6 @@ pub(crate) fn eval_arg_int(
         let ctx = ErrorContext::new()
             .with_code(codes::TYPE_MISMATCH)
             .with_help(format!("{} argument must be an integer", error_context));
-        CompileError::semantic_with_context(
-            format!("expected integer value for {}", error_context),
-            ctx,
-        )
+        CompileError::semantic_with_context(format!("expected integer value for {}", error_context), ctx)
     })
 }

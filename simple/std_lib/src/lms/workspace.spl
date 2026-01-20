@@ -4,6 +4,9 @@
 import sys
 import protocol
 import session
+import units.lms::DocumentVersion
+import units.time::Milliseconds
+import units.size::ByteCount
 
 # File status enumeration
 pub enum FileStatus:
@@ -73,36 +76,43 @@ impl FileStatus:
 # File metadata
 pub class FileMetadata:
     uri: text
-    version: i32
+    version: DocumentVersion
     status: FileStatus
     content_hash: text        # SHA-256 hash for change detection
-    last_modified: i32          # Timestamp in milliseconds
-    size: i32                   # File size in bytes
+    last_modified: Milliseconds
+    size: ByteCount
     language: Option<text>    # Detected language (e.g., "simple", "rust")
 
-    pub fn new(uri: text, version: i32, content: text) -> FileMetadata:
+    pub fn new(uri: text, version: DocumentVersion, content: text) -> FileMetadata:
+        val now_i32 = sys.time.now_ms()
+        val now_ms = Milliseconds::from_i32(now_i32)
+        val size_i32 = content.len()
+        val size_bytes = ByteCount::from_i64(size_i32 as i64)
         FileMetadata {
             uri: uri,
             version: version,
             status: FileStatus.Clean,
             content_hash: compute_hash(content),
-            last_modified: sys.time.now_ms(),
-            size: content.len(),
+            last_modified: now_ms,
+            size: size_bytes,
             language: detect_language(uri)
         }
 
-    pub fn update(mut self, new_content: text, new_version: i32):
+    pub fn update(mut self, new_content: text, new_version: DocumentVersion):
         val new_hash = compute_hash(new_content)
         if new_hash != self.content_hash:
             self.status = FileStatus.Modified
             self.content_hash = new_hash
             self.version = new_version
-            self.last_modified = sys.time.now_ms()
-            self.size = new_content.len()
+            val now_i32 = sys.time.now_ms()
+            self.last_modified = Milliseconds::from_i32(now_i32)
+            val size_i32 = new_content.len()
+            self.size = ByteCount::from_i64(size_i32 as i64)
 
     pub fn mark_deleted(mut self):
         self.status = FileStatus.Deleted
-        self.last_modified = sys.time.now_ms()
+        val now_i32 = sys.time.now_ms()
+        self.last_modified = Milliseconds::from_i32(now_i32)
 
 # Workspace manager for multi-file tracking
 pub class WorkspaceManager:
@@ -122,7 +132,7 @@ pub class WorkspaceManager:
         }
 
     # Add or update a file in the workspace
-    pub fn add_file(mut self, uri: text, content: text, version: i32):
+    pub fn add_file(mut self, uri: text, content: text, version: DocumentVersion):
         # Create or update metadata
         match self.files.get(uri):
             Some(existing) ->
