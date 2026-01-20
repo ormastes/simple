@@ -46,15 +46,19 @@ pub unsafe extern "C" fn rt_dir_list(path_ptr: *const u8, path_len: u64) -> Runt
 
     match std::fs::read_dir(path_str) {
         Ok(entries) => {
-            // Create an array to hold the entry names
-            let array_handle = rt_array_new(0);
+            // Collect entry names first to know the count
+            let names: Vec<String> = entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .collect();
 
-            for entry in entries.flatten() {
-                if let Ok(name) = entry.file_name().into_string() {
-                    let bytes = name.as_bytes();
-                    let str_value = rt_string_new(bytes.as_ptr(), bytes.len() as u64);
-                    rt_array_push(array_handle, str_value);
-                }
+            // Create array with correct capacity
+            let array_handle = rt_array_new(names.len() as u64);
+
+            for name in names {
+                let bytes = name.as_bytes();
+                let str_value = rt_string_new(bytes.as_ptr(), bytes.len() as u64);
+                rt_array_push(array_handle, str_value);
             }
 
             array_handle
@@ -243,7 +247,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // TODO: Fix this test - rt_array_len returning 0
     fn test_dir_list() {
         let temp_dir = TempDir::new().unwrap();
         fs::write(temp_dir.path().join("file1.txt"), "").unwrap();

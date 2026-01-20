@@ -12,8 +12,8 @@
 |----------|-----------------|----------|--------|
 | Interpreter/Codegen overlap | 2,600+ | CRITICAL | ✅ Mostly resolved |
 | Rust semantic patterns | 1,500+ | HIGH | ✅ Mostly resolved |
-| Simple code patterns | 800+ | MEDIUM | ✅ Partially resolved |
-| Rust → Simple migration candidates | 1,900 | HIGH | ⏳ Not started |
+| Simple code patterns | 800+ | MEDIUM | ✅ Mostly resolved |
+| Rust → Simple migration candidates | 1,900 | HIGH | ⏳ In progress (1/5) |
 | **Total refactoring opportunity** | **~6,800 lines** | | |
 
 ### Quantitative Baseline (jscpd)
@@ -211,7 +211,7 @@ Updated callsites in:
 
 **Duplicated traits:** Clone, Eq, Ord, Hash, Display with identical loop structures.
 
-**Status:** ⏳ PENDING - Create derive-like macros
+**Status:** ⏳ PENDING - Create derive-like macros (requires macro system enhancement)
 
 ### 3.2 ML/Torch Neural Network Modules (7+ files, ~500 lines)
 
@@ -228,7 +228,8 @@ Updated callsites in:
 - `is_zero()`, `is_unit()`, `is_finite()`, `has_nan()`
 - `component_min()`, `component_max()`, `clamp()`, `lerp()`
 
-**Status:** ⏳ PENDING - Use trait + generic implementation
+**Status:** ✅ RESOLVED - Vec2, Vec3, Vec4 now implement `VectorOps` trait and delegate to shared
+helper functions in `vector_ops.spl`. Reduced ~150 lines of duplicated predicate/extrema code.
 
 ### 3.4 Collection Methods (150+ lines)
 
@@ -249,7 +250,9 @@ Updated callsites in:
 - `is_zero()`, `is_positive()`, `is_negative()`
 - `signum()`, `min()`, `max()`, `clamp()`
 
-**Status:** ⏳ PENDING - Use `Number` trait
+**Status:** ✅ REVIEWED - Both i64 and f64 already implement the `Number` trait which provides a
+unified interface. The methods are minimal 1-liners (`self == 0`, `self > 0`, etc.) that cannot be
+meaningfully reduced further. This is inherent to having both concrete methods and trait implementations.
 
 ---
 
@@ -259,7 +262,7 @@ Updated callsites in:
 
 | File | Lines | Migration Benefit | Status |
 |------|-------|-------------------|--------|
-| `src/driver/src/todo_parser.rs` | 608 | Pure string/regex processing | ⏳ |
+| `src/driver/src/todo_parser.rs` | 608 | Pure string/regex processing | ✅ DONE |
 | `src/common/src/config_env.rs` | 423 | Dictionary manipulation | ⏳ |
 | `src/driver/src/cli/test_output.rs` | 410 | Text formatting | ⏳ |
 
@@ -393,7 +396,7 @@ Updated callsites in:
 ### Remaining Work
 
 1. ~~**Create error factory functions**~~ ✅ EXTENDED - Added 9 new factory functions, ~103 occurrences remaining for gradual migration
-2. **Migrate `todo_parser.rs` to Simple** - 608 lines, good self-hosting showcase
+2. ~~**Migrate `todo_parser.rs` to Simple**~~ ✅ DONE - Created `simple/std_lib/src/tooling/todo_parser.spl` (365 lines)
 3. **Migrate `config_env.rs` to Simple** - 423 lines, dictionary manipulation
 4. **Migrate `test_output.rs` to Simple** - 410 lines, text formatting
 5. **Simple trait defaults** - Vector math and primitive types need trait default implementations
@@ -452,7 +455,7 @@ src/compiler/src/error.rs                     # Error patterns - ✅ error::fact
 
 ### Migration Candidate Files
 ```
-src/driver/src/todo_parser.rs                 # 608 lines → Simple
+src/driver/src/todo_parser.rs                 # 608 lines → Simple ✅ DONE
 src/common/src/config_env.rs                  # 423 lines → Simple
 src/driver/src/cli/test_output.rs             # 410 lines → Simple
 src/driver/src/cli/migrate/generics.rs        # 200 lines → Simple
@@ -462,7 +465,7 @@ src/driver/src/cli/help.rs                    # 188 lines → Simple
 ### Simple Duplication Files
 ```
 simple/std_lib/src/ml/torch/nn/               # ✅ Resolved with FFIModule
-simple/std_lib/src/graphics/math/vector.spl   # 200+ lines duplicated
+simple/std_lib/src/graphics/math/vector.spl   # ✅ Resolved with VectorOps trait delegation
 simple/std_lib/src/core/array.spl             # ✅ Resolved with iterable_defaults
-simple/std_lib/src/core/primitives.spl        # 100+ lines duplicated
+simple/std_lib/src/core/primitives.spl        # ✅ Reviewed - Number trait already used
 ```

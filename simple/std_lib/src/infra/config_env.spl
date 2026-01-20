@@ -13,28 +13,29 @@ fn parse_int_helper(s: text) -> i64:
     var negative = false
     var start = 0
 
-    if s.len() > 0 and s.char_at(0) == '-':
+    if s.len() > 0 and s.char_at(0) == "-":
         negative = true
         start = 1
 
     for i in start..s.len():
         val ch = s.char_at(i)
-        if ch >= '0' and ch <= '9':
-            val digit = (ch as i64) - ('0' as i64)
+        val ord_val = ch.ord()
+        if ord_val >= 48 and ord_val <= 57:  # '0' to '9'
+            val digit = ord_val - 48
             result = result * 10 + digit
 
     if negative:
-        -result
+        return -result
     else:
-        result
+        return result
 
 pub struct ConfigEnv:
-    self.data: Dict<text, text>
+    data: Dict<text, text>
 
 impl ConfigEnv:
     # Create a new empty ConfigEnv.
     static fn new() -> ConfigEnv:
-        ConfigEnv(self.data: {})
+        ConfigEnv(data: {})
 
     # Create a ConfigEnv from command-line arguments.
     #
@@ -55,12 +56,16 @@ impl ConfigEnv:
                 val key_value = arg.substring(2, arg.len())
 
                 if key_value.contains("="):
-                    match key_value.split_once("="):
-                        case Some((key, value)):
-                            config.set(key, value)
-                            i = i + 1
-                        case nil:
-                            i = i + 1
+                    # Find the equals sign and split manually
+                    var eq_pos = 0
+                    while eq_pos < key_value.len() and key_value.char_at(eq_pos) != "=":
+                        eq_pos = eq_pos + 1
+
+                    if eq_pos < key_value.len():
+                        val key = key_value.substring(0, eq_pos)
+                        val value = key_value.substring(eq_pos + 1, key_value.len())
+                        config.set(key, value)
+                    i = i + 1
                 elif i + 1 < args.len() and not args[i + 1].starts_with("-"):
                     # --key value format
                     config.set(key_value, args[i + 1])
@@ -84,7 +89,7 @@ impl ConfigEnv:
                 positional_idx = positional_idx + 1
                 i = i + 1
 
-        config
+        return config
 
     # Create a ConfigEnv from all environment variables.
     static fn from_env() -> ConfigEnv:
@@ -92,7 +97,7 @@ impl ConfigEnv:
         val env_vars = get_env_vars()  # FFI call to get all env vars
         for pair in env_vars:
             config.set(pair.0, pair.1)
-        config
+        return config
 
     # Create a ConfigEnv from environment variables with a specific prefix.
     #
@@ -107,45 +112,47 @@ impl ConfigEnv:
             if key.starts_with(prefix):
                 val stripped_key = key.substring(prefix.len(), key.len())
                 config.set(stripped_key, value)
-        config
+        return config
 
     # Get a value by key.
     fn get(key: text) -> Option<text>:
         if self.data.contains(key):
-            Some(self.data[key])
+            return Some(self.data[key])
         else:
-            nil
+            return nil
 
     # Get a value by key, or return a default.
     fn get_or(key: text, default_value: text) -> text:
         if self.data.contains(key):
-            self.data[key]
+            return self.data[key]
         else:
-            default_value
+            return default_value
 
     # Set a key-value pair.
     me set(key: text, value: text):
-        self.data.set(key, value)
+        var d = self.data
+        d.set(key, value)
+        self.data = d
 
     # Check if a key exists.
     fn contains(key: text) -> bool:
-        self.data.contains(key)
+        return self.data.contains(key)
 
     # Remove a key and return its value.
     # TODO(dict): Implement rt_dict_remove() in runtime
     me remove(key: text) -> Option<text>:
         if self.data.contains(key):
             val value = self.data[key]
-            # NOTE: self.data.remove() not yet implemented in runtime
+            # NOTE: data.remove() not yet implemented in runtime
             # For now, we can't actually remove the key
             # This is a known limitation
-            Some(value)
+            return Some(value)
         else:
-            nil
+            return nil
 
     # Get a value as an integer.
     fn get_int(key: text) -> Option<i64>:
-        match get(key):
+        match self.get(key):
             case Some(s):
                 # Try to parse the string as an integer
                 val result = parse_int_helper(s)
@@ -155,7 +162,7 @@ impl ConfigEnv:
 
     # Get a value as an integer with a default.
     fn get_int_or(key: text, default_value: i64) -> i64:
-        match get_int(key):
+        match self.get_int(key):
             case Some(i): return i
             case nil: return default_value
 
@@ -165,31 +172,31 @@ impl ConfigEnv:
     # Returns false for "false", "0", "no", "off" (case-insensitive).
     # Returns nil for other values or missing keys.
     fn get_bool(key: text) -> Option<bool>:
-        match get(key):
-            case Some(s):
-                val lower = s.lowercased()
-                if lower == "true" or lower == "1" or lower == "yes" or lower == "on":
-                    return Some(true)
-                elif lower == "false" or lower == "0" or lower == "no" or lower == "off":
-                    return Some(false)
-                else:
-                    return nil
-            case nil:
-                return nil
+        if not self.data.contains(key):
+            return nil
+
+        val s = self.data[key]
+        # Check all variations without lowercased() to avoid type issues
+        if s == "true" or s == "True" or s == "TRUE" or s == "1" or s == "yes" or s == "Yes" or s == "YES" or s == "on" or s == "On" or s == "ON":
+            return Some(true)
+        elif s == "false" or s == "False" or s == "FALSE" or s == "0" or s == "no" or s == "No" or s == "NO" or s == "off" or s == "Off" or s == "OFF":
+            return Some(false)
+        else:
+            return nil
 
     # Get a value as a boolean with a default.
     fn get_bool_or(key: text, default_value: bool) -> bool:
-        match get_bool(key):
+        match self.get_bool(key):
             case Some(b): return b
             case nil: return default_value
 
     # Get all keys.
     fn keys() -> [text]:
-        self.data.keys()
+        return self.data.keys()
 
     # Get all values.
     fn values() -> [text]:
-        self.data.values()
+        return self.data.values()
 
     # Iterate over all key-value pairs.
     fn iter() -> [(text, text)]:
@@ -198,24 +205,26 @@ impl ConfigEnv:
         var result: [(text, text)] = []
         for i in 0..keys.len():
             result.push((keys[i], values[i]))
-        result
+        return result
 
     # Get the number of entries.
     fn len() -> i64:
-        self.data.len()
+        return self.data.len()
 
     # Check if empty.
     fn is_empty() -> bool:
-        self.data.len() == 0
+        return self.data.len() == 0
 
     # Merge another ConfigEnv into this one.
     #
     # Values from `other` override existing values.
     me merge(other: ConfigEnv):
-        val keys = other.self.data.keys()
-        val values = other.self.data.values()
+        var d = self.data
+        val keys = other.data.keys()
+        val values = other.data.values()
         for i in 0..keys.len():
-            self.data.set(keys[i], values[i])
+            d.set(keys[i], values[i])
+        self.data = d
 
     # Add environment variables to this config.
     #
@@ -223,8 +232,8 @@ impl ConfigEnv:
     me with_env() -> ConfigEnv:
         val env_vars = get_env_vars()
         for pair in env_vars:
-            set(pair.0, pair.1)
-        self
+            self.set(pair.0, pair.1)
+        return self
 
     # Add environment variables with a prefix to this config.
     me with_env_prefix(prefix: text) -> ConfigEnv:
@@ -234,16 +243,16 @@ impl ConfigEnv:
             val value = pair.1
             if key.starts_with(prefix):
                 val stripped_key = key.substring(prefix.len(), key.len())
-                set(stripped_key, value)
-        self
+                self.set(stripped_key, value)
+        return self
 
     # Add command-line arguments to this config.
     #
     # Argument values override existing config values.
     me with_args(args: [text]) -> ConfigEnv:
         val args_config = ConfigEnv.from_args(args)
-        merge(args_config)
-        self
+        self.merge(args_config)
+        return self
 
 # FFI: Get all environment variables as array of (key, value) tuples
 # TODO(runtime): Implement rt_env_vars() in runtime/src/ffi/env.rs
