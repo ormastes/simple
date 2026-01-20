@@ -190,6 +190,7 @@ pub struct PhaseTimer<'a> {
     metrics: &'a mut StartupMetrics,
     phase: StartupPhase,
     start: Instant,
+    enabled: bool,
 }
 
 impl<'a> PhaseTimer<'a> {
@@ -199,14 +200,17 @@ impl<'a> PhaseTimer<'a> {
             metrics,
             phase,
             start: Instant::now(),
+            enabled: metrics_enabled(),
         }
     }
 }
 
 impl<'a> Drop for PhaseTimer<'a> {
     fn drop(&mut self) {
-        let duration = self.start.elapsed();
-        self.metrics.record(self.phase, duration);
+        if self.enabled {
+            let duration = self.start.elapsed();
+            self.metrics.record(self.phase, duration);
+        }
     }
 }
 

@@ -40,11 +40,11 @@ pub mod net
 ```
 
 This means:
-- All stdlib public APIs use unit types, enums, and `Option[T]`
+- All stdlib public APIs use unit types, enums, and `Option<T>`
 - No bare `i32`, `i64`, `f64` in public function signatures
 - No bare `str`/`String` - use `FilePath`, `Url`, `IpAddr`, etc.
 - No bare `bool` - use semantic enums
-- Implicit `nil` is always forbidden (must use `Option[T]`)
+- Implicit `nil` is always forbidden (must use `Option<T>`)
 - Lint enforcement propagates through `__init__.spl` attribute inheritance
 
 **Standard Unit Type Suffixes:**
@@ -136,8 +136,8 @@ When designing APIs for immutable modules (`#[immutable]`), follow these pattern
 
 | Operation | Mutable Pattern | Immutable Pattern |
 |-----------|-----------------|-------------------|
-| Append | `fn push(self, v: T) -> bool` | `fn push(self, v: T) -> Option[Self]` |
-| Remove | `fn pop(self) -> Option[T]` | `fn pop(self) -> Option[(T, Self)]` |
+| Append | `fn push(self, v: T) -> bool` | `fn push(self, v: T) -> Option<Self>` |
+| Remove | `fn pop(self) -> Option<T>` | `fn pop(self) -> Option<(T, Self)>` |
 | Update | `fn set(self, i: u64, v: T)` | `fn with(self, i: u64, v: T) -> Self` |
 | Clear | `fn clear(self)` | `fn cleared() -> Self` |
 | Sort | `fn sort(self)` | `fn sorted(self) -> Self` |
@@ -156,7 +156,7 @@ pub fn push(self, value: T) -> bool:
 **Example - Immutable API (core_nogc_immut/static_vec.spl):**
 ```simple
 # Returns new vector with element appended
-fn push(self, val: T) -> Option[StaticVec[T, N]]:
+fn push(self, val: T) -> Option<StaticVec<T, N>>:
     if self._len < N:
         var new_data = self._data
         new_data[self._len] = val
@@ -169,17 +169,17 @@ fn push(self, val: T) -> Option[StaticVec[T, N]]:
 
 For GC-enabled immutable modules, use structural sharing:
 ```simple
-enum List[T]:
+enum List<T>:
     Nil
-    Cons(T, Box[List[T]])
+    Cons(T, Box<List<T>>)
 
-fn prepend(self, x: T) -> List[T]:
+fn prepend(self, x: T) -> List<T>:
     List.Cons(x, Box.new(self))  # Reuses existing list
 ```
 
 **Guidelines:**
 1. Immutable methods return new instances; original remains unchanged
-2. Use `Option[Self]` for operations that may fail (capacity exceeded)
+2. Use `Option<Self>` for operations that may fail (capacity exceeded)
 3. Use tuples `(extracted_value, new_collection)` for pop-like operations
 4. Prefer verbs ending in `-ed` for transformation methods: `sorted`, `filtered`, `mapped`
 5. Use `with_*` prefix for update methods: `with_element`, `with_capacity`
@@ -481,10 +481,10 @@ The `native_lib/` directory contains Rust implementations of system-level functi
 
 ```simple
 # lib/std/host/async_gc/io/fs.spl
-extern fn native_read_file(path: &str) -> Result[Bytes, IoError]
-extern fn native_write_file(path: &str, data: &Bytes) -> Result[(), IoError]
+extern fn native_read_file(path: &str) -> Result<Bytes, IoError>
+extern fn native_write_file(path: &str, data: &Bytes) -> Result<(), IoError>
 
-pub fn read_file(path: FilePath) -> Result[Bytes, IoError]:
+pub fn read_file(path: FilePath) -> Result<Bytes, IoError>:
     return native_read_file(path.as_str())
 ```
 

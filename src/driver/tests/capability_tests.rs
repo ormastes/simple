@@ -73,7 +73,7 @@ fn transfer(data: iso Data) -> i64:
 #[test]
 fn test_capability_with_generic() {
     let source = r#"
-fn process(items: mut List[i64]) -> i64:
+fn process(items: mut List<i64>) -> i64:
     return 0
 "#;
 

@@ -152,15 +152,15 @@ Lists directories to recursively scan. Each listed directory MUST contain a READ
 - Links MUST end with `/` to indicate directory
 - Directory MUST contain README.md
 - Links are relative to current README.md location
-- Standard markdown link syntax: `[Text](path/)`
+- Standard markdown link syntax: `[Text>(path/)`
 
 **Example:**
 ```markdown
 ## Subdirectory
 
-- [Language Spec](spec/)
-- [Developer Guides](guides/)
-- [Tutorials](tutorials/)
+- [Language Spec>(spec/)
+- [Developer Guides>(guides/)
+- [Tutorials>(tutorials/)
 ```
 
 ### Section: `## Files`
@@ -178,15 +178,15 @@ Lists individual markdown files to scan for doctests.
 - Links MUST NOT end with `/`
 - Links are relative to current README.md location
 - Files must have `.md` extension
-- Standard markdown link syntax: `[Text](file.md)`
+- Standard markdown link syntax: `[Text>(file.md)`
 
 **Example:**
 ```markdown
 ## Files
 
-- [API Reference](api_reference.md)
-- [Feature Index](feature_index.md)
-- [Getting Started](getting_started.md)
+- [API Reference>(api_reference.md)
+- [Feature Index>(feature_index.md)
+- [Getting Started>(getting_started.md)
 ```
 
 ### Section Termination
@@ -204,26 +204,26 @@ Doctest sections end when:
 
 | Format | Type | Example |
 |--------|------|---------|
-| `[Name](dir/)` | Subdirectory | `[Spec](spec/)` |
-| `[Name](file.md)` | File | `[API](api.md)` |
-| `[Name](sub/dir/)` | Nested subdir | `[Testing](spec/testing/)` |
-| `[Name](sub/file.md)` | Nested file | `[Types](spec/types.md)` |
+| `[Name>(dir/)` | Subdirectory | `[Spec>(spec/)` |
+| `[Name>(file.md)` | File | `[API>(api.md)` |
+| `[Name>(sub/dir/)` | Nested subdir | `[Testing>(spec/testing/)` |
+| `[Name>(sub/file.md)` | Nested file | `[Types>(spec/types.md)` |
 
 ### Ignored Links
 
 | Format | Reason |
 |--------|--------|
-| `[Name](https://...)` | External URL |
-| `[Name](#anchor)` | Internal anchor |
-| `[Name](mailto:...)` | Email link |
-| `[Name]()` | Empty href |
+| `[Name>(https://...)` | External URL |
+| `[Name>(#anchor)` | Internal anchor |
+| `[Name>(mailto:...)` | Email link |
+| `[Name>()` | Empty href |
 
 ---
 
 ## Discovery Algorithm
 
 ```
-FUNCTION discover(root_path) -> List[DoctestFile]:
+FUNCTION discover(root_path) -> List<DoctestFile>:
     readme = root_path / "README.md"
     IF NOT readme.exists():
         RETURN []
@@ -380,15 +380,15 @@ timeout: 5000
 
 ## Subdirectory
 
-- [Language Specification](spec/)
-- [Developer Guides](guides/)
-- [Tutorials](tutorials/)
+- [Language Specification>(spec/)
+- [Developer Guides>(guides/)
+- [Tutorials>(tutorials/)
 
 ## Files
 
-- [Feature Index](feature_index.md)
-- [API Reference](api_reference.md)
-- [FAQ](faq.md)
+- [Feature Index>(feature_index.md)
+- [API Reference>(api_reference.md)
+- [FAQ>(faq.md)
 
 ---
 
@@ -419,16 +419,16 @@ graphics_3d/
 
 ## Subdirectory
 
-- [Testing](testing/)
-- [Tooling](tooling/)
+- [Testing>(testing/)
+- [Tooling>(tooling/)
 
 ## Files
 
-- [Syntax](syntax.md)
-- [Types](types.md)
-- [Functions](functions.md)
-- [Memory](memory.md)
-- [Concurrency](concurrency.md)
+- [Syntax>(syntax.md)
+- [Types>(types.md)
+- [Functions>(functions.md)
+- [Memory>(memory.md)
+- [Concurrency>(concurrency.md)
 
 ---
 
@@ -493,7 +493,7 @@ WARNING: File 'api_reference.md' listed but not found
 ```
 WARNING: Invalid link format in ## Subdirectory section:
          '- Invalid link without proper markdown'
-         Expected: '- [Name](path/)'
+         Expected: '- [Name>(path/)'
 ```
 
 ---

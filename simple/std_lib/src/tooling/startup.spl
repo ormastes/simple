@@ -1,0 +1,173 @@
+# Startup initialization and metrics handling
+# Migrated from: src/driver/src/cli/commands/startup.rs
+# Purpose: Handle startup metrics and early initialization phases
+
+# Initialize startup metrics if requested
+# Returns (enabled, metrics) tuple
+fn init_metrics() -> (bool, StartupMetrics):
+    val args = sys.get_args()
+    val enable = args.any(\a: a == "--startup-metrics")
+    if enable:
+        enable_metrics_global()
+
+    var metrics = StartupMetrics.new()
+    metrics.start()
+    (enable, metrics)
+
+# Perform early startup phase: parse args and start prefetching
+fn early_startup(metrics: StartupMetrics) -> (EarlyConfig, StartupMetrics):
+    val early_start = time.now()
+    val args = sys.get_args()
+    val early_config = parse_early_args(args.skip(1))
+    val elapsed = time.since(early_start)
+    var updated_metrics = metrics
+    updated_metrics.record(StartupPhase::EarlyArgParse, elapsed)
+    (early_config, updated_metrics)
+
+# Start file prefetching in background if enabled
+fn start_prefetch(early_config: EarlyConfig, metrics: StartupMetrics) -> (Option<PrefetchHandle>, StartupMetrics):
+    val prefetch_start = time.now()
+    var handle: Option<PrefetchHandle> = None
+
+    if early_config.enable_prefetch and early_config.input_files.len() > 0:
+        val maybe_handle = prefetch_files(early_config.input_files)
+        if maybe_handle.is_ok():
+            handle = Some(maybe_handle.unwrap())
+
+    var updated_metrics = metrics
+    if handle.is_some():
+        val elapsed = time.since(prefetch_start)
+        updated_metrics.record(StartupPhase::FilePrefetch, elapsed)
+
+    (handle, updated_metrics)
+
+# Pre-allocate resources based on application type
+fn allocate_resources(early_config: EarlyConfig, metrics: StartupMetrics) -> (Option<PreAllocatedResources>, StartupMetrics):
+    val resource_start = time.now()
+    val resources = PreAllocatedResources.allocate(early_config.app_type, early_config.window_hints)
+    val maybe_resources = if resources.is_ok():
+        Some(resources.unwrap())
+    else:
+        None
+
+    val elapsed = time.since(resource_start)
+    var updated_metrics = metrics
+    updated_metrics.record(StartupPhase::ResourceAllocation, elapsed)
+    (maybe_resources, updated_metrics)
+
+# Wait for prefetching to complete
+fn wait_for_prefetch(handle: Option<PrefetchHandle>, metrics: StartupMetrics) -> StartupMetrics:
+    var updated_metrics = metrics
+    match handle:
+        Some(h) =>
+            val wait_start = time.now()
+            h.wait()  # Best-effort, ignore errors
+            val elapsed = time.since(wait_start)
+            updated_metrics.record(StartupPhase::PrefetchWait, elapsed)
+        None =>
+            ()
+    updated_metrics
+
+# Print metrics and exit
+fn exit_with_metrics(code: i32, metrics: StartupMetrics):
+    if metrics_enabled():
+        metrics.print_report()
+    sys.exit(code)
+
+
+# Stub types and functions
+# TODO: Implement or import from actual modules when available
+
+struct StartupMetrics:
+    phases: List<(StartupPhase, Duration)>
+    started: bool
+
+impl StartupMetrics:
+    static fn new() -> StartupMetrics:
+        StartupMetrics(phases: [], started: false)
+
+    me start():
+        started = true
+
+    me record(phase: StartupPhase, duration: Duration):
+        phases = phases.append((phase, duration))
+
+    fn print_report():
+        print "[startup] Metrics report (stub):"
+        for phase_data in phases:
+            val (phase, dur) = phase_data
+            print "  {phase}: {dur.as_millis()}ms"
+
+    fn total_time() -> Option<Duration>:
+        if phases.len() > 0:
+            Some(Duration.from_millis(100))  # Stub
+        else:
+            None
+
+enum StartupPhase:
+    EarlyArgParse
+    FilePrefetch
+    ResourceAllocation
+    PrefetchWait
+
+struct Duration:
+    millis: u64
+
+impl Duration:
+    static fn from_millis(ms: u64) -> Duration:
+        Duration(millis: ms)
+
+    fn as_millis() -> u64:
+        millis
+
+    fn as_secs() -> u64:
+        millis / 1000
+
+struct EarlyConfig:
+    enable_prefetch: bool
+    input_files: List<text>
+    app_type: text
+    window_hints: text
+
+struct PrefetchHandle:
+    files: List<text>
+
+impl PrefetchHandle:
+    fn wait():
+        print "[startup] Prefetch wait (stub)"
+
+struct PreAllocatedResources:
+    allocated: bool
+
+impl PreAllocatedResources:
+    static fn allocate(app_type: text, window_hints: text) -> Result<PreAllocatedResources, text>:
+        Ok(PreAllocatedResources(allocated: true))
+
+# Stub functions
+fn enable_metrics_global():
+    print "[startup] Metrics enabled (stub)"
+
+fn metrics_enabled() -> bool:
+    false  # Stub: always false
+
+fn parse_early_args(args: List<text>) -> EarlyConfig:
+    EarlyConfig(
+        enable_prefetch: false,
+        input_files: [],
+        app_type: "default",
+        window_hints: ""
+    )
+
+fn prefetch_files(files: List<text>) -> Result<PrefetchHandle, text>:
+    Ok(PrefetchHandle(files: files))
+
+# Time utilities (stubs)
+struct Instant:
+    timestamp: u64
+
+struct time:
+    static fn now() -> Instant:
+        Instant(timestamp: 0)
+
+    static fn since(start: Instant) -> Duration:
+        Duration.from_millis(1)  # Stub

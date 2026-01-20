@@ -660,17 +660,11 @@ mod tests {
     #[test]
     fn test_web_init_creates_project() {
         let temp = TempDir::new().unwrap();
-        let project_name = "test_project";
+        let project_path = temp.path().join("test_project");
 
-        // Change to temp directory
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
+        // Use absolute path to avoid race conditions from parallel tests
+        let result = web_init(project_path.to_str().unwrap());
 
-        let result = web_init(project_name);
-
-        std::env::set_current_dir(&original_dir).unwrap();
-
-        let project_path = temp.path().join(project_name);
         assert_eq!(result, 0, "web_init should return 0");
         assert!(project_path.exists(), "Project directory should exist");
         assert!(project_path.join("app.sui").exists(), "app.sui should exist");
@@ -684,12 +678,8 @@ mod tests {
         let project_path = temp.path().join("existing_project");
         fs::create_dir(&project_path).unwrap();
 
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp.path()).unwrap();
-
-        let result = web_init("existing_project");
-
-        std::env::set_current_dir(original_dir).unwrap();
+        // Use absolute path to avoid race conditions from parallel tests
+        let result = web_init(project_path.to_str().unwrap());
 
         assert_eq!(result, 1); // Should fail
     }

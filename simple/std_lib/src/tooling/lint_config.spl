@@ -1,0 +1,255 @@
+# Lint configuration and level management
+# Migrated from: src/compiler/src/lint/config.rs
+# Purpose: Parse and manage lint configuration from simple.sdn files
+
+# TODO: [stdlib][P2] Add HashMap/Map type to stdlib
+# Using List<(LintName, LintLevel)> instead of HashMap for now
+
+# Lint severity level
+enum LintLevel:
+    Allow    # Suppress the lint entirely
+    Warn     # Emit a warning (default for most lints)
+    Deny     # Treat as a compile error
+
+impl LintLevel:
+    # Parse lint level from string (attribute value)
+    static fn from_str(s: text) -> Option<LintLevel>:
+        val lower = s.to_lowercase()
+        if lower == "allow":
+            Some(LintLevel.Allow)
+        elif lower == "warn":
+            Some(LintLevel.Warn)
+        elif lower == "deny":
+            Some(LintLevel.Deny)
+        else:
+            None
+
+    # Convert to string representation
+    fn to_str() -> text:
+        match self:
+            LintLevel.Allow: "allow"
+            LintLevel.Warn: "warn"
+            LintLevel.Deny: "deny"
+
+# Known lint names
+enum LintName:
+    PrimitiveApi             # Bare primitives in public API signatures
+    BareBool                 # Bare bool parameters (suggest enum)
+    PrintInTestSpec          # Print calls in test spec files
+    TodoFormat               # Improperly formatted TODO/FIXME comments
+    SSpecNoPrintBasedTests   # Print-based BDD tests (use proper SSpec syntax)
+    SSpecMissingDocstrings   # Missing docstrings in describe/context/it blocks
+    SSpecMinimalDocstrings   # Files with minimal docstring usage
+    SSpecManualAssertions    # Manual pass/fail tracking instead of expect()
+
+impl LintName:
+    # Get the string name of the lint
+    fn as_str() -> text:
+        match self:
+            LintName.PrimitiveApi: "primitive_api"
+            LintName.BareBool: "bare_bool"
+            LintName.PrintInTestSpec: "print_in_test_spec"
+            LintName.TodoFormat: "todo_format"
+            LintName.SSpecNoPrintBasedTests: "sspec_no_print_based_tests"
+            LintName.SSpecMissingDocstrings: "sspec_missing_docstrings"
+            LintName.SSpecMinimalDocstrings: "sspec_minimal_docstrings"
+            LintName.SSpecManualAssertions: "sspec_manual_assertions"
+
+    # Parse lint name from string
+    static fn from_str(s: text) -> Option<LintName>:
+        if s == "primitive_api":
+            Some(LintName.PrimitiveApi)
+        elif s == "bare_bool":
+            Some(LintName.BareBool)
+        elif s == "print_in_test_spec":
+            Some(LintName.PrintInTestSpec)
+        elif s == "todo_format":
+            Some(LintName.TodoFormat)
+        elif s == "sspec_no_print_based_tests":
+            Some(LintName.SSpecNoPrintBasedTests)
+        elif s == "sspec_missing_docstrings":
+            Some(LintName.SSpecMissingDocstrings)
+        elif s == "sspec_minimal_docstrings":
+            Some(LintName.SSpecMinimalDocstrings)
+        elif s == "sspec_manual_assertions":
+            Some(LintName.SSpecManualAssertions)
+        else:
+            None
+
+    # Get the default level for this lint
+    fn default_level() -> LintLevel:
+        match self:
+            LintName.PrimitiveApi: LintLevel.Warn
+            LintName.BareBool: LintLevel.Warn
+            LintName.PrintInTestSpec: LintLevel.Warn
+            LintName.TodoFormat: LintLevel.Warn
+            LintName.SSpecNoPrintBasedTests: LintLevel.Deny
+            LintName.SSpecMissingDocstrings: LintLevel.Warn
+            LintName.SSpecMinimalDocstrings: LintLevel.Warn
+            LintName.SSpecManualAssertions: LintLevel.Warn
+
+    # Get all available lint names
+    static fn all_lints() -> List<LintName>:
+        [
+            LintName.PrimitiveApi,
+            LintName.BareBool,
+            LintName.PrintInTestSpec,
+            LintName.TodoFormat,
+            LintName.SSpecNoPrintBasedTests,
+            LintName.SSpecMissingDocstrings,
+            LintName.SSpecMinimalDocstrings,
+            LintName.SSpecManualAssertions
+        ]
+
+# Lint configuration for a scope (module, function, etc.)
+struct LintConfig:
+    # Overridden lint levels (using List instead of HashMap)
+    levels: List<(LintName, LintLevel)>
+
+impl LintConfig:
+    # Create a new empty lint configuration
+    static fn new() -> LintConfig:
+        LintConfig(levels: [])
+
+    # TODO: [stdlib][P1] Add file reading FFI
+    # Load lint configuration from a simple.sdn file
+    # Expected format:
+    # ```sdn
+    # [lints]
+    # primitive_api = "deny"
+    # bare_bool = "warn"
+    # ```
+    static fn from_sdn_file(path: text) -> Result<LintConfig, text>:
+        match read_file(path):
+            Ok(content): LintConfig.from_sdn_string(content)
+            Err(e): Err("Failed to read lint config: {e}")
+
+    # Parse lint configuration from SDN string
+    static fn from_sdn_string(content: text) -> Result<LintConfig, text>:
+        var config = LintConfig.new()
+        var in_lints_section = false
+
+        val lines = content.split("\n")
+        var i = 0
+        while i < lines.len():
+            val line = lines[i].trim()
+
+            # Skip empty lines and comments
+            if line.is_empty() or line.starts_with("#"):
+                i = i + 1
+                continue
+
+            # Check for [lints] section
+            if line == "[lints]":
+                in_lints_section = true
+                i = i + 1
+                continue
+
+            # Check for other sections (exit lints section)
+            if line.starts_with("[") and line.ends_with("]"):
+                in_lints_section = false
+                i = i + 1
+                continue
+
+            # Parse lint = "level" entries
+            if in_lints_section:
+                match split_once(line, "="):
+                    Some((lint_name_raw, level_str_raw)):
+                        val lint_name = lint_name_raw.trim()
+                        # Remove quotes from level string
+                        var level_str = level_str_raw.trim()
+                        level_str = remove_quotes(level_str)
+
+                        match LintName.from_str(lint_name):
+                            Some(lint):
+                                match LintLevel.from_str(level_str):
+                                    Some(level):
+                                        config.set_level(lint, level)
+                                    None:
+                                        return Err("Invalid lint level '{level_str}' for lint '{lint_name}'")
+                            None:
+                                # Unknown lint name - warning
+                                print "Warning: Unknown lint name '{lint_name}'"
+                    None:
+                        pass
+
+            i = i + 1
+
+        Ok(config)
+
+    # Set the level for a specific lint
+    me set_level(lint: LintName, level: LintLevel):
+        # Find existing entry and replace, or append new
+        var found = false
+        var new_levels: List<(LintName, LintLevel)> = []
+
+        var i = 0
+        while i < self.levels.len():
+            val (existing_lint, existing_level) = self.levels[i]
+            if existing_lint == lint:
+                new_levels.append((lint, level))
+                found = true
+            else:
+                new_levels.append((existing_lint, existing_level))
+            i = i + 1
+
+        if not found:
+            new_levels.append((lint, level))
+
+        self.levels = new_levels
+
+    # Get the effective level for a lint
+    fn get_level(lint: LintName) -> LintLevel:
+        # Search for override
+        var i = 0
+        while i < self.levels.len():
+            val (existing_lint, existing_level) = self.levels[i]
+            if existing_lint == lint:
+                return existing_level
+            i = i + 1
+
+        # Return default if not found
+        lint.default_level()
+
+    # TODO: [compiler][P2] Add Attribute type to Simple or use FFI
+    # Parse lint attributes and update config
+    # Handles: #[allow(lint)], #[warn(lint)], #[deny(lint)]
+    # me apply_attributes(attributes: List<Attribute>):
+    #     # Stub: Will be implemented when AST types are available
+
+    # Create a child config that inherits from this one
+    fn child() -> LintConfig:
+        LintConfig(levels: self.levels.clone())
+
+# Helper: Split string once by delimiter
+fn split_once(s: text, delimiter: text) -> Option<(text, text)>:
+    # TODO: [stdlib][P1] Add split_once method to text type
+    val parts = s.split(delimiter)
+    if parts.len() >= 2:
+        val first = parts[0]
+        # Join remaining parts
+        var rest = parts[1]
+        var i = 2
+        while i < parts.len():
+            rest = rest + delimiter + parts[i]
+            i = i + 1
+        Some((first, rest))
+    else:
+        None
+
+# Helper: Remove surrounding quotes from string
+fn remove_quotes(s: text) -> text:
+    var result = s
+    # Remove double quotes
+    if result.starts_with("\"") and result.ends_with("\"") and result.len() >= 2:
+        result = result.slice(1, result.len() - 1)
+    # Remove single quotes
+    if result.starts_with("'") and result.ends_with("'") and result.len() >= 2:
+        result = result.slice(1, result.len() - 1)
+    result
+
+# TODO: [stdlib][P1] Add file reading to stdlib
+# Temporary FFI stub for file reading
+fn read_file(path: text) -> Result<text, text>:
+    # Stub: Should call runtime FFI for file reading
+    Err("file reading not yet implemented")

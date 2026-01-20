@@ -97,6 +97,52 @@ pub(crate) fn write_block(func: &mut MirFunction, block: MirBlock) {
     }
 }
 
+/// Create a resume block containing instructions after a suspension point (await/yield).
+///
+/// # Arguments
+/// * `rewritten` - The function being rewritten
+/// * `orig_block` - The original block containing the suspension point
+/// * `suspension_idx` - Index of the suspension instruction (await/yield)
+/// * `block_map` - Mapping from original block IDs to rewritten block IDs
+/// * `complete_block` - Block ID to use if no resume is needed
+///
+/// # Returns
+/// The block ID of the resume block. If there are no remaining instructions
+/// and the current block returns normally, returns `complete_block` instead.
+pub(crate) fn create_resume_block(
+    rewritten: &mut MirFunction,
+    orig_block: &MirBlock,
+    suspension_idx: usize,
+    block_map: &HashMap<BlockId, BlockId>,
+    complete_block: BlockId,
+) -> BlockId {
+    // Check if we need a resume block:
+    // - If there are instructions after the suspension point, OR
+    // - If the block doesn't end with a Return
+    if suspension_idx + 1 < orig_block.instructions.len()
+        || !matches!(orig_block.terminator, Terminator::Return(_))
+    {
+        // Create a new block for resuming after the suspension
+        let resume = rewritten.new_block();
+        let mut resume_block = MirBlock::new(resume);
+
+        // Copy remaining instructions after the suspension point
+        for inst_after in orig_block.instructions.iter().skip(suspension_idx + 1) {
+            resume_block.instructions.push(inst_after.clone());
+        }
+
+        // Remap and set the terminator
+        resume_block.terminator = remap_terminator(orig_block.terminator.clone(), block_map)
+            .unwrap_or_else(|| Terminator::Return(None));
+
+        write_block(rewritten, resume_block);
+        resume
+    } else {
+        // No resume needed - use the completion block
+        complete_block
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,295 @@
+# Spec Generator - Generate markdown documentation from _spec.spl files
+# Migrated from: scripts/spec_gen.py
+# Purpose: Convert executable specification files to formatted documentation
+
+# TODO: [stdlib][P1] Add regex library to Simple
+# TODO: [stdlib][P1] Add file I/O library to Simple
+# TODO: [stdlib][P1] Add Path/PathBuf type to Simple
+# TODO: [stdlib][P1] Add datetime library to Simple
+
+# Represents a parsed _spec.spl file
+struct SpecFile:
+    path: text
+    header_docstring: text
+    metadata: List<(text, text)>      # HashMap replacement
+    test_cases: List<TestCase>
+
+# Represents a test case from a spec file
+struct TestCase:
+    name: text
+    section: text
+    line_number: u64
+    docstring: text
+    code: text
+    symbols: List<text>
+    related_tests: List<text>
+
+impl SpecFile:
+    # Create a new empty spec file
+    static fn new(path: text) -> SpecFile:
+        SpecFile(
+            path: path,
+            header_docstring: "",
+            metadata: [],
+            test_cases: []
+        )
+
+impl TestCase:
+    # Create a new test case
+    static fn new(name: text, section: text, line_num: u64) -> TestCase:
+        TestCase(
+            name: name,
+            section: section,
+            line_number: line_num,
+            docstring: "",
+            code: "",
+            symbols: [],
+            related_tests: []
+        )
+
+# TODO: [stdlib][P1] Add regex support for pattern matching
+# Parse a _spec.spl file and extract documentation
+fn parse_spec_file(filepath: text) -> Result<SpecFile, text>:
+    # Stub: Needs file I/O and regex
+    # Would:
+    # 1. Read file content
+    # 2. Extract header docstring (first """ ... """)
+    # 3. Parse metadata (lines like **Key:** value)
+    # 4. Extract test cases (## Test: markers)
+    # 5. For each test: extract docstring, code, symbols
+    Err("file parsing not yet implemented - needs file I/O and regex")
+
+# TODO: [stdlib][P1] Implement string utilities
+# Convert test name to potential symbol names
+fn convert_test_name_to_symbols(test_name: text) -> List<text>:
+    # Stub: Complex string manipulation
+    # Would convert: "type_inference_basic" -> ["type_inference", "TypeInference"]
+    []
+
+# TODO: [stdlib][P1] Add regex library
+# Extract explicit symbol links from docstring
+fn extract_symbols_from_docstring(docstring: text) -> (List<text>, List<text>):
+    # Stub: Needs regex for patterns like **Links:** or **Symbols:**
+    # Returns: (symbols, related_tests)
+    ([], [])
+
+# TODO: [stdlib][P1] Add regex library
+# Scan code for potential symbol references
+fn scan_code_for_symbols(code: text) -> List<text>:
+    # Stub: Needs regex for patterns like:
+    # - Function calls: symbol()
+    # - Method calls: object.method()
+    # - Type usage: Type::variant
+    []
+
+# Generate markdown documentation from parsed spec
+fn generate_markdown(spec: SpecFile, current_time: text) -> text:
+    var md = ""
+
+    # Extract title from header or use filename
+    val title = extract_title_or_default(spec.header_docstring, spec.path)
+
+    # Header
+    md = md + "# {title}\n\n"
+    md = md + "> **⚠️ GENERATED FILE** - Do not edit directly!\n"
+    md = md + "> **Source:** `{spec.path}`\n"
+    md = md + "> **Generated:** {current_time}\n"
+    md = md + ">\n"
+    md = md + "> To update this file, edit the source _spec.spl file and run:\n"
+    md = md + "> ```bash\n"
+    md = md + "> simple run spec_gen.spl --input {spec.path}\n"
+    md = md + "> ```\n\n"
+
+    # Metadata
+    if not spec.metadata.is_empty():
+        var i = 0
+        while i < spec.metadata.len():
+            val (key, value) = spec.metadata[i]
+            # Skip certain metadata that goes in header
+            if key != "Migrated From" and key != "Source" and key != "Type":
+                md = md + "**{key}:** {value}\n"
+            i = i + 1
+        md = md + "\n"
+
+    # Quick Navigation TOC
+    md = md + "## Quick Navigation\n\n"
+    md = md + "- [Overview](#overview)\n"
+    md = md + "- [Test Cases](#test-cases) ({spec.test_cases.len()} tests)\n"
+    md = md + "- [Source Code](#source-code)\n\n"
+
+    md = md + "---\n\n"
+
+    # Test cases summary table
+    if not spec.test_cases.is_empty():
+        md = md + "## Test Cases ({spec.test_cases.len()} total)\n\n"
+        md = md + "| # | Test | Section | Description |\n"
+        md = md + "|---|------|---------|-------------|\n"
+
+        var i = 0
+        while i < spec.test_cases.len():
+            val tc = spec.test_cases[i]
+            val num = i + 1
+
+            # Get first line of docstring as description
+            val desc = get_first_line(tc.docstring, 40)
+            val escaped_desc = escape_markdown_table(desc)
+
+            md = md + "| {num} | [{tc.name}](#test-{num}) | {tc.section} | {escaped_desc} |\n"
+            i = i + 1
+
+        md = md + "\n---\n\n"
+
+    # Detailed test cases
+    var i = 0
+    while i < spec.test_cases.len():
+        val tc = spec.test_cases[i]
+        val num = i + 1
+
+        md = md + "### Test {num}: {tc.section}\n\n"
+
+        if tc.line_number > 0:
+            md = md + "*Source line: ~{tc.line_number}*\n\n"
+
+        md = md + "**Test name:** `{tc.name}`\n\n"
+
+        if not tc.docstring.is_empty():
+            md = md + "**Description:**\n\n"
+            md = md + "{tc.docstring}\n\n"
+
+        # Linked symbols (if any)
+        if not tc.symbols.is_empty():
+            md = md + "**Linked Symbols:**\n"
+            var j = 0
+            val max_symbols = if tc.symbols.len() < 10: tc.symbols.len() else: 10
+            while j < max_symbols:
+                md = md + "- `{tc.symbols[j]}`\n"
+                j = j + 1
+            if tc.symbols.len() > 10:
+                val remaining = tc.symbols.len() - 10
+                md = md + "- ... and {remaining} more\n"
+            md = md + "\n"
+
+        # Related tests (if any)
+        if not tc.related_tests.is_empty():
+            md = md + "**Related Tests:**\n"
+            var j = 0
+            while j < tc.related_tests.len():
+                val related = tc.related_tests[j]
+                md = md + "- [{related}](#{related})\n"
+                j = j + 1
+            md = md + "\n"
+
+        # Code block
+        md = md + "**Code:**\n\n"
+        md = md + "```simple\n"
+        md = md + "{tc.code}\n"
+        md = md + "```\n\n"
+
+        i = i + 1
+
+    # Source code section
+    md = md + "---\n\n"
+    md = md + "## Source Code\n\n"
+    md = md + "**View full specification:** [{spec.path}]({spec.path})\n\n"
+
+    # Footer
+    md = md + "---\n\n"
+    md = md + "*This file was auto-generated from the executable specification.*\n"
+    md = md + "*Source: `{spec.path}`*\n\n"
+
+    md
+
+# Helper: Extract title from header docstring or generate from filename
+fn extract_title_or_default(header: text, path: text) -> text:
+    # TODO: [stdlib][P1] Add regex for title extraction
+    # For now, use filename
+    # Would search for: ^# (.+)
+    path.replace("_spec", "").replace("_", " ")
+
+# Helper: Get first line or N chars of text
+fn get_first_line(text: text, max_len: u64) -> text:
+    if text.is_empty():
+        return ""
+
+    # Find first newline
+    var first_line = text
+    val lines = text.split("\n")
+    if lines.len() > 0:
+        first_line = lines[0]
+
+    # Truncate if too long
+    if first_line.len() > max_len:
+        first_line.slice(0, max_len) + "..."
+    else:
+        first_line
+
+# Helper: Escape markdown table special characters
+fn escape_markdown_table(text: text) -> text:
+    # Replace | with \| and newlines with spaces
+    text.replace("|", "\\|").replace("\n", " ")
+
+# TODO: [stdlib][P1] Add file writing support
+# Write markdown to file
+fn write_markdown_file(markdown: text, output_path: text) -> Result<(), text>:
+    # Stub: Needs file I/O
+    Err("file writing not yet implemented")
+
+# TODO: [stdlib][P1] Add glob/directory listing
+# Generate markdown for all _spec.spl files in directory
+fn generate_all(specs_dir: text, output_dir: text) -> Result<(u64, u64), text>:
+    # Stub: Needs directory listing and file operations
+    # Would:
+    # 1. List all *_spec.spl files in specs_dir
+    # 2. For each file: parse_spec_file() and generate_markdown()
+    # 3. Write to output_dir
+    # 4. Return (success_count, total_count)
+    Err("batch processing not yet implemented")
+
+# Statistics about spec generation
+struct SpecStats:
+    total_specs: u64
+    total_tests: u64
+    success_count: u64
+    failed_count: u64
+
+impl SpecStats:
+    # Create empty stats
+    static fn new() -> SpecStats:
+        SpecStats(
+            total_specs: 0,
+            total_tests: 0,
+            success_count: 0,
+            failed_count: 0
+        )
+
+    # Add a successful spec
+    me add_success(test_count: u64):
+        self.total_specs = self.total_specs + 1
+        self.success_count = self.success_count + 1
+        self.total_tests = self.total_tests + test_count
+
+    # Add a failed spec
+    me add_failure():
+        self.total_specs = self.total_specs + 1
+        self.failed_count = self.failed_count + 1
+
+    # Generate summary report
+    fn summary() -> text:
+        var report = ""
+        report = report + "Spec Generation Summary:\n"
+        report = report + "  Total Specs: {self.total_specs}\n"
+        report = report + "  Successful: {self.success_count}\n"
+        report = report + "  Failed: {self.failed_count}\n"
+        report = report + "  Total Tests: {self.total_tests}\n"
+        report
+
+# TODO: [stdlib][P1] Add command-line argument parsing
+# Main entry point (would be called from CLI)
+fn main_spec_gen(args: List<text>) -> Result<(), text>:
+    # Stub: Needs argument parsing, file I/O, etc.
+    # Would handle:
+    # --input <file.spl>      Generate from single file
+    # --output <file.md>      Output file
+    # --all                   Generate all specs
+    # --index                 Generate root TOC
+    Err("CLI not yet implemented - use as library instead")

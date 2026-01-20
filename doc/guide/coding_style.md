@@ -39,7 +39,7 @@ export use impl.*
 ```simple
 fn create_user(name: String, age: Int, active: Bool) -> User
 fn set_timeout(ms: Int)
-fn process(data: List[u8])
+fn process(data: List<u8])
 ```
 
 **Good:**
@@ -58,7 +58,7 @@ struct UserId:
 struct Email:
     value: String
 
-    fn new(value: String) -> Result[Email, ValidationError]:
+    fn new(value: String) -> Result<Email, ValidationError>:
         if not value.contains("@"):
             Err(ValidationError.invalid_email(value))
         else:
@@ -132,7 +132,7 @@ config = ServerConfig.new()
 mod myapp
 
 # Module-level configuration
-let _config: Option[AppConfig] = None
+let _config: Option<AppConfig> = None
 
 fn configure(config: AppConfig):
     _config = Some(config)
@@ -179,9 +179,9 @@ struct ConfigLoader:
 struct RequestContext:
     config: RequestConfig
     logger: Logger
-    user: Option[User]
+    user: Option<User>
 
-fn with_context[T](ctx: RequestContext, f: fn() -> T) -> T:
+fn with_context<T>(ctx: RequestContext, f: fn() -> T) -> T:
     _current_context.set(ctx)
     result = f()
     _current_context.clear()
@@ -208,7 +208,7 @@ fn handle_create_user(req: Request) -> Response:
 ```simple
 # std_lib/src/http/client.spl - explicit types
 
-pub fn get(url: Url, headers: Headers) -> Result[Response, HttpError]:
+pub fn get(url: Url, headers: Headers) -> Result<Response, HttpError>:
     conn: Connection = Connection.new(url.host())
     request: Request = Request.get(url).with_headers(headers)
     response: Response = conn.send(request)?
@@ -258,7 +258,7 @@ fn create_user(name: String) -> User:
 
 # Keep 'return' for:
 # - Early returns
-fn validate(input: String) -> Result[Data, Error]:
+fn validate(input: String) -> Result<Data, Error>:
     if input.is_empty():
         return Err(Error.empty_input())
 
@@ -309,7 +309,7 @@ struct BankAccount:
 
     @pre("amount > 0 and amount <= balance")
     @post("balance == old(balance) - amount")
-    fn withdraw(mut self, amount: Money) -> Result[Money, InsufficientFunds]:
+    fn withdraw(mut self, amount: Money) -> Result<Money, InsufficientFunds>:
         if amount > self.balance:
             Err(InsufficientFunds)
         else:
@@ -377,7 +377,7 @@ fn handle_request(req: Request) -> Response:
 ### Structured Logging
 ```simple
 @log(structured: true)
-fn create_order(user_id: UserId, items: List[Item]) -> Order:
+fn create_order(user_id: UserId, items: List<Item>) -> Order:
     # Automatically logs:
     # { "method": "create_order", "user_id": 123, "items_count": 5 }
     ...
@@ -390,12 +390,12 @@ fn create_order(user_id: UserId, items: List[Item]) -> Order:
 ### 1. Error Handling
 ```simple
 # Use Result types, not exceptions
-fn parse_config(path: Path) -> Result[Config, ConfigError]:
+fn parse_config(path: Path) -> Result<Config, ConfigError>:
     content = fs.read(path)?
     parse_toml(content)
 
 # Propagate with ?
-fn load_and_validate() -> Result[Data, Error]:
+fn load_and_validate() -> Result<Data, Error>:
     config = parse_config(path)?
     validate(config)?
     Ok(config.data)
@@ -418,7 +418,7 @@ trait Renderable:
     fn render(self) -> String
 
 trait Saveable:
-    fn save(self) -> Result[(), Error]
+    fn save(self) -> Result<(), Error>
 
 struct Document:
     impl Renderable, Saveable
@@ -473,7 +473,7 @@ fn factorial(n: Int) -> Int:
 #
 # ## Usage
 #
-# >>> stack = Stack[Int].new()
+# >>> stack = Stack<Int>.new()
 # >>> stack.push(10)
 # >>> stack.push(20)
 # >>> stack.pop()
@@ -491,19 +491,19 @@ fn factorial(n: Int) -> Int:
 # |-----------|------|-------|
 # | push      | O(1) | O(1)  |
 # | pop       | O(1) | O(1)  |
-class Stack[T]:
-    items: List[T]
+class Stack<T>:
+    items: List<T>
 
     ## Create an empty stack.
     #
-    # >>> Stack[Int].new().is_empty()
+    # >>> Stack<Int>.new().is_empty()
     # True
-    fn new() -> Stack[T]:
+    fn new() -> Stack<T>:
         Stack { items: [] }
 
     ## Push item onto stack.
     #
-    # >>> s = Stack[Int].new()
+    # >>> s = Stack<Int>.new()
     # >>> s.push(42)
     # >>> s.peek()
     # 42
@@ -512,7 +512,7 @@ class Stack[T]:
 
     ## Pop and return top item.
     #
-    # >>> s = Stack[Int].new()
+    # >>> s = Stack<Int>.new()
     # >>> s.push(1); s.push(2)
     # >>> s.pop()
     # 2
@@ -521,7 +521,7 @@ class Stack[T]:
 
     ## Check if stack is empty.
     #
-    # >>> Stack[Int].new().is_empty()
+    # >>> Stack<Int>.new().is_empty()
     # True
     fn is_empty(self) -> Bool:
         self.items.len() == 0

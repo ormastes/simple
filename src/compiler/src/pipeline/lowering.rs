@@ -138,23 +138,9 @@ fn convert_lower_error(e: crate::hir::LowerError) -> CompileError {
 }
 
 impl CompilerPipeline {
-    /// Type check and lower AST to MIR.
-    ///
-    /// This is a common pipeline step extracted from compile_source_to_memory_native
-    /// and compile_source_to_memory_native_for_target.
-    pub(super) fn type_check_and_lower(
-        &mut self,
-        ast_module: &simple_parser::ast::Module,
-    ) -> Result<mir::MirModule, CompileError> {
-        // Clear previous verification violations
-        self.verification_violations.clear();
-
-        // Type check
-        type_check(&ast_module.items).map_err(|e| crate::error::factory::type_check_failed(&e))?;
-
-        // Lower AST to HIR
-        let hir_module = hir::lower(ast_module).map_err(convert_lower_error)?;
-
+    /// Process HIR module through architecture checks, verification, and MIR lowering.
+    /// This is the common logic shared by both type_check_and_lower variants.
+    fn process_hir_to_mir(&mut self, hir_module: hir::HirModule) -> Result<mir::MirModule, CompileError> {
         // Emit HIR if requested (LLM-friendly #886)
         if let Some(path) = &self.emit_hir {
             crate::ir_export::export_hir(&hir_module, path.as_deref()).map_err(|e| {
@@ -241,6 +227,27 @@ impl CompilerPipeline {
         Ok(mir_module)
     }
 
+    /// Type check and lower AST to MIR.
+    ///
+    /// This is a common pipeline step extracted from compile_source_to_memory_native
+    /// and compile_source_to_memory_native_for_target.
+    pub(super) fn type_check_and_lower(
+        &mut self,
+        ast_module: &simple_parser::ast::Module,
+    ) -> Result<mir::MirModule, CompileError> {
+        // Clear previous verification violations
+        self.verification_violations.clear();
+
+        // Type check
+        type_check(&ast_module.items).map_err(|e| crate::error::factory::type_check_failed(&e))?;
+
+        // Lower AST to HIR
+        let hir_module = hir::lower(ast_module).map_err(convert_lower_error)?;
+
+        // Process HIR to MIR using common logic
+        self.process_hir_to_mir(hir_module)
+    }
+
     /// Type check and lower AST to MIR with module resolution support.
     ///
     /// This variant enables compile-time type checking for imports by loading
@@ -263,89 +270,7 @@ impl CompilerPipeline {
         // Lower AST to HIR with module resolution support
         let hir_module = hir::lower_with_context(ast_module, source_file).map_err(convert_lower_error)?;
 
-        // Emit HIR if requested (LLM-friendly #886)
-        if let Some(path) = &self.emit_hir {
-            crate::ir_export::export_hir(&hir_module, path.as_deref()).map_err(|e| {
-                let ctx = ErrorContext::new()
-                    .with_code(codes::UNSUPPORTED_FEATURE)
-                    .with_help("ensure the HIR export feature is properly configured");
-                CompileError::semantic_with_context(format!("HIR export failed: {}", e), ctx)
-            })?;
-        }
-
-        // Check architecture rules if any are defined (#1026-1035)
-        if !hir_module.arch_rules.is_empty() {
-            let arch_config = crate::arch_rules::ArchRulesConfig::from_hir_rules(&hir_module.arch_rules);
-            let checker = crate::arch_rules::ArchRulesChecker::new(arch_config);
-            let violations = checker.check_module(&hir_module);
-
-            if !violations.is_empty() {
-                let msg = violations
-                    .iter()
-                    .map(|v| format!("Architecture violation: {}", v.message))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let ctx = ErrorContext::new()
-                    .with_code(codes::INVALID_OPERATION)
-                    .with_help("ensure your module structure complies with defined architecture rules");
-                return Err(CompileError::semantic_with_context(msg, ctx));
-            }
-        }
-
-        // Check verification constraints (#1840-1909)
-        let mut verifier = VerificationChecker::new(self.verification_strict);
-        verifier.check_module(&hir_module);
-
-        if verifier.has_violations() {
-            self.verification_violations = verifier.violations().to_vec();
-
-            if self.verification_strict {
-                let msg = verifier.error_messages().join("\n");
-                return Err(crate::error::factory::verification_errors(&msg));
-            } else {
-                // Log warnings but continue
-                for violation in verifier.violations() {
-                    tracing::warn!("{}", violation);
-                }
-            }
-        }
-
-        // Lower HIR to MIR with contract mode (and DI config if available)
-        let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
-        let mut mir_module = mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
-            .map_err(|e| crate::error::factory::mir_lowering_failed(&e))?;
-
-        // Ghost erasure pass: remove ghost variables before codegen
-        let (ghost_stats, ghost_errors) = mir::erase_ghost_from_module(&mut mir_module);
-
-        if !ghost_errors.is_empty() {
-            let msg = ghost_errors
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-                .join("\n");
-            return Err(crate::error::factory::ghost_erasure_errors(&msg));
-        }
-
-        if ghost_stats.ghost_params_erased > 0 || ghost_stats.ghost_locals_erased > 0 {
-            tracing::debug!(
-                "Ghost erasure: {} params, {} locals, {} instructions erased",
-                ghost_stats.ghost_params_erased,
-                ghost_stats.ghost_locals_erased,
-                ghost_stats.instructions_erased
-            );
-        }
-
-        // Emit MIR if requested (LLM-friendly #887)
-        if let Some(path) = &self.emit_mir {
-            crate::ir_export::export_mir(&mir_module, path.as_deref()).map_err(|e| {
-                let ctx = ErrorContext::new()
-                    .with_code(codes::UNSUPPORTED_FEATURE)
-                    .with_help("ensure the MIR export feature is properly configured");
-                CompileError::semantic_with_context(format!("MIR export failed: {}", e), ctx)
-            })?;
-        }
-
-        Ok(mir_module)
+        // Process HIR to MIR using common logic
+        self.process_hir_to_mir(hir_module)
     }
 }

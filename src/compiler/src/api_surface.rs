@@ -340,13 +340,13 @@ fn type_to_string(ty: &Type) -> String {
     match ty {
         Type::Simple(name) => name.clone(),
         Type::Array { element, .. } => format!("[{}]", type_to_string(element)),
-        Type::Optional(inner) => format!("Option[{}]", type_to_string(inner)),
+        Type::Optional(inner) => format!("Option<{}>", type_to_string(inner)),
         Type::Generic { name, args } => {
             if args.is_empty() {
                 name.clone()
             } else {
                 format!(
-                    "{}[{}]",
+                    "{}<{}>",
                     name,
                     args.iter().map(type_to_string).collect::<Vec<_>>().join(", ")
                 )

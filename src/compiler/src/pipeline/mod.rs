@@ -455,14 +455,9 @@ main = 0
         assert_eq!(pipeline.build_mode(), BuildMode::Release);
     }
 
-    #[test]
-    fn test_debug_mode_allows_test_profile() {
-        // Debug mode should allow test DI profile
-        let source = "main = 42";
-
-        // Create a project context with test DI profile
+    /// Helper to create a project context with test DI profile
+    fn create_project_with_test_di_profile() -> crate::project::ProjectContext {
         use crate::di::{DiBindingRule, DiConfig, DiMode, DiProfile, DiScope};
-        use crate::project::ProjectContext;
         use std::collections::HashMap;
 
         let mut profiles = HashMap::new();
@@ -483,9 +478,17 @@ main = 0
             profiles,
         };
 
-        let mut project = ProjectContext::single_file(Path::new("."));
+        let mut project = crate::project::ProjectContext::single_file(Path::new("."));
         project.di_config = Some(di_config);
+        project
+    }
 
+    #[test]
+    fn test_debug_mode_allows_test_profile() {
+        // Debug mode should allow test DI profile
+        let source = "main = 42";
+
+        let project = create_project_with_test_di_profile();
         let mut pipeline = CompilerPipeline::with_project(project).expect("pipeline ok");
         pipeline.set_build_mode(BuildMode::Debug);
 
@@ -499,32 +502,7 @@ main = 0
         // Release mode should reject test DI profile (#1034)
         let source = "main = 42";
 
-        // Create a project context with test DI profile
-        use crate::di::{DiBindingRule, DiConfig, DiMode, DiProfile, DiScope};
-        use crate::project::ProjectContext;
-        use std::collections::HashMap;
-
-        let mut profiles = HashMap::new();
-        let mut test_profile = DiProfile::default();
-        // Add a test binding to simulate active test profile
-        test_profile.bindings.push(DiBindingRule {
-            predicate: crate::predicate::Predicate::Selector(crate::predicate::Selector::Within("*".to_string())),
-            impl_type: "TestLogger".to_string(),
-            scope: DiScope::Singleton,
-            priority: 0,
-            order: 0,
-            raw_predicate: "*".to_string(),
-        });
-        profiles.insert("test".to_string(), test_profile);
-
-        let di_config = DiConfig {
-            mode: DiMode::Hybrid,
-            profiles,
-        };
-
-        let mut project = ProjectContext::single_file(Path::new("."));
-        project.di_config = Some(di_config);
-
+        let project = create_project_with_test_di_profile();
         let mut pipeline = CompilerPipeline::with_project(project).expect("pipeline ok");
         pipeline.set_build_mode(BuildMode::Release);
 

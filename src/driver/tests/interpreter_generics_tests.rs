@@ -85,13 +85,13 @@ main = 0
     }
 }
 
-/// Test 5: Nested generic types - List[Option[T]]
+/// Test 5: Nested generic types - List<Option<T>>
 /// From: various stdlib files
 #[test]
 fn stdlib_nested_generic_types() {
     let code = r#"
 struct Container:
-    items: List[Option[i64]]
+    items: List<Option<i64>>
 
 main = 0
 "#;
@@ -149,7 +149,7 @@ fn stdlib_associated_type() {
     let code = r#"
 trait Iterator:
     type Item
-    fn next(self) -> Option[Self.Item]
+    fn next(self) -> Option<Self.Item>
 
 main = 0
 "#;
