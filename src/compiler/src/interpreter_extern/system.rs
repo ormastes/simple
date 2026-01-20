@@ -5,8 +5,12 @@
 use crate::error::CompileError;
 use crate::value::Value;
 use crate::value_bridge::runtime_to_value;
-use simple_runtime::value::ffi::env_process;
-use simple_runtime::value::ffi::config;
+use simple_runtime::value::{
+    rt_env_all as ffi_env_all, rt_env_cwd as ffi_env_cwd, rt_env_exists as ffi_env_exists,
+    rt_env_get as ffi_env_get, rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove,
+    rt_env_set as ffi_env_set, rt_env_temp as ffi_env_temp, rt_set_debug_mode as ffi_set_debug_mode,
+    rt_set_macro_trace as ffi_set_macro_trace,
+};
 
 /// Get command-line arguments
 ///
@@ -56,16 +60,22 @@ pub fn sys_exit(args: &[Value]) -> Result<Value, CompileError> {
 /// * Bool indicating success
 pub fn rt_env_set(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
-        return Err(CompileError::RuntimeError(
-            "rt_env_set requires 2 arguments (key, value)".to_string(),
+        return Err(CompileError::runtime(
+            "rt_env_set requires 2 arguments (key, value)",
         ));
     }
 
-    let key = args[0].as_string()?;
-    let value = args[1].as_string()?;
+    let key = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(CompileError::runtime("rt_env_set: key must be a string")),
+    };
+    let value = match &args[1] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(CompileError::runtime("rt_env_set: value must be a string")),
+    };
 
     unsafe {
-        let result = env_process::rt_env_set(
+        let result = ffi_env_set(
             key.as_ptr(),
             key.len() as u64,
             value.as_ptr(),
@@ -86,15 +96,16 @@ pub fn rt_env_set(args: &[Value]) -> Result<Value, CompileError> {
 /// * String value of the environment variable
 pub fn rt_env_get(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
-        return Err(CompileError::RuntimeError(
-            "rt_env_get requires 1 argument (key)".to_string(),
-        ));
+        return Err(CompileError::runtime("rt_env_get requires 1 argument (key)"));
     }
 
-    let key = args[0].as_string()?;
+    let key = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(CompileError::runtime("rt_env_get: key must be a string")),
+    };
 
     unsafe {
-        let result = env_process::rt_env_get(key.as_ptr(), key.len() as u64);
+        let result = ffi_env_get(key.as_ptr(), key.len() as u64);
         Ok(runtime_to_value(result))
     }
 }
@@ -110,15 +121,16 @@ pub fn rt_env_get(args: &[Value]) -> Result<Value, CompileError> {
 /// * Bool indicating if the variable exists
 pub fn rt_env_exists(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
-        return Err(CompileError::RuntimeError(
-            "rt_env_exists requires 1 argument (key)".to_string(),
-        ));
+        return Err(CompileError::runtime("rt_env_exists requires 1 argument (key)"));
     }
 
-    let key = args[0].as_string()?;
+    let key = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(CompileError::runtime("rt_env_exists: key must be a string")),
+    };
 
     unsafe {
-        let result = env_process::rt_env_exists(key.as_ptr(), key.len() as u64);
+        let result = ffi_env_exists(key.as_ptr(), key.len() as u64);
         Ok(Value::Bool(result))
     }
 }
@@ -134,15 +146,16 @@ pub fn rt_env_exists(args: &[Value]) -> Result<Value, CompileError> {
 /// * Bool indicating success
 pub fn rt_env_remove(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
-        return Err(CompileError::RuntimeError(
-            "rt_env_remove requires 1 argument (key)".to_string(),
-        ));
+        return Err(CompileError::runtime("rt_env_remove requires 1 argument (key)"));
     }
 
-    let key = args[0].as_string()?;
+    let key = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(CompileError::runtime("rt_env_remove: key must be a string")),
+    };
 
     unsafe {
-        let result = env_process::rt_env_remove(key.as_ptr(), key.len() as u64);
+        let result = ffi_env_remove(key.as_ptr(), key.len() as u64);
         Ok(Value::Bool(result))
     }
 }
@@ -155,7 +168,7 @@ pub fn rt_env_remove(args: &[Value]) -> Result<Value, CompileError> {
 /// * Array of (key, value) tuples
 pub fn rt_env_all(_args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
-        let result = env_process::rt_env_all();
+        let result = ffi_env_all();
         Ok(runtime_to_value(result))
     }
 }
@@ -168,7 +181,7 @@ pub fn rt_env_all(_args: &[Value]) -> Result<Value, CompileError> {
 /// * String path to home directory
 pub fn rt_env_home(_args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
-        let result = env_process::rt_env_home();
+        let result = ffi_env_home();
         Ok(runtime_to_value(result))
     }
 }
@@ -181,7 +194,7 @@ pub fn rt_env_home(_args: &[Value]) -> Result<Value, CompileError> {
 /// * String path to temp directory
 pub fn rt_env_temp(_args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
-        let result = env_process::rt_env_temp();
+        let result = ffi_env_temp();
         Ok(runtime_to_value(result))
     }
 }
@@ -194,7 +207,7 @@ pub fn rt_env_temp(_args: &[Value]) -> Result<Value, CompileError> {
 /// * String path to current working directory
 pub fn rt_env_cwd(_args: &[Value]) -> Result<Value, CompileError> {
     unsafe {
-        let result = env_process::rt_env_cwd();
+        let result = ffi_env_cwd();
         Ok(runtime_to_value(result))
     }
 }
@@ -207,11 +220,14 @@ pub fn rt_env_cwd(_args: &[Value]) -> Result<Value, CompileError> {
 /// * `args` - Evaluated arguments [enabled: Bool]
 ///
 /// # Returns
-/// * Unit
+/// * Nil
 pub fn rt_set_macro_trace(args: &[Value]) -> Result<Value, CompileError> {
-    let enabled = args.first().map(|v| v.as_bool()).transpose()?.unwrap_or(false);
-    config::rt_set_macro_trace(enabled);
-    Ok(Value::Unit)
+    let enabled = match args.first() {
+        Some(Value::Bool(b)) => *b,
+        _ => false,
+    };
+    ffi_set_macro_trace(enabled);
+    Ok(Value::Nil)
 }
 
 /// Enable or disable debug mode
@@ -222,11 +238,14 @@ pub fn rt_set_macro_trace(args: &[Value]) -> Result<Value, CompileError> {
 /// * `args` - Evaluated arguments [enabled: Bool]
 ///
 /// # Returns
-/// * Unit
+/// * Nil
 pub fn rt_set_debug_mode(args: &[Value]) -> Result<Value, CompileError> {
-    let enabled = args.first().map(|v| v.as_bool()).transpose()?.unwrap_or(false);
-    config::rt_set_debug_mode(enabled);
-    Ok(Value::Unit)
+    let enabled = match args.first() {
+        Some(Value::Bool(b)) => *b,
+        _ => false,
+    };
+    ffi_set_debug_mode(enabled);
+    Ok(Value::Nil)
 }
 
 #[cfg(test)]

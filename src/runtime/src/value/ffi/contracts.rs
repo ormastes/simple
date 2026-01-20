@@ -26,6 +26,33 @@
 
 use crate::value::contracts::ContractViolationKind;
 
+/// Internal function to check contract and generate panic message.
+/// This is a safe Rust function that can be tested with catch_unwind.
+///
+/// Returns `Ok(())` if condition is true, `Err(message)` if contract violated.
+fn check_contract_internal(
+    condition: bool,
+    kind: ContractViolationKind,
+    func_name: &str,
+    custom_msg: Option<&str>,
+) -> Result<(), String> {
+    if condition {
+        return Ok(());
+    }
+
+    let base_msg = format!(
+        "{} violation in function '{}': contract condition failed",
+        kind.name(),
+        func_name
+    );
+
+    if let Some(msg) = custom_msg {
+        Err(format!("{} ({})", base_msg, msg))
+    } else {
+        Err(base_msg)
+    }
+}
+
 /// Check a contract condition and panic if it fails.
 /// This is called from compiled code when contract checking is enabled.
 ///
@@ -44,12 +71,6 @@ pub unsafe extern "C" fn simple_contract_check(
     func_name_ptr: *const u8,
     func_name_len: i64,
 ) {
-    if condition != 0 {
-        // Condition is true, contract satisfied
-        return;
-    }
-
-    // Contract violated - panic with formatted message
     let violation_kind = ContractViolationKind::from_i64(kind).unwrap_or(ContractViolationKind::Pre);
 
     let func_name = if func_name_ptr.is_null() || func_name_len <= 0 {
@@ -59,11 +80,9 @@ pub unsafe extern "C" fn simple_contract_check(
         std::str::from_utf8(slice).unwrap_or("<invalid UTF-8>")
     };
 
-    panic!(
-        "{} violation in function '{}': contract condition failed",
-        violation_kind.name(),
-        func_name
-    );
+    if let Err(msg) = check_contract_internal(condition != 0, violation_kind, func_name, None) {
+        panic!("{}", msg);
+    }
 }
 
 /// Check a contract condition with a custom message and panic if it fails.
@@ -88,12 +107,6 @@ pub unsafe extern "C" fn simple_contract_check_msg(
     message_ptr: *const u8,
     message_len: i64,
 ) {
-    if condition != 0 {
-        // Condition is true, contract satisfied
-        return;
-    }
-
-    // Contract violated - panic with formatted message
     let violation_kind = ContractViolationKind::from_i64(kind).unwrap_or(ContractViolationKind::Pre);
 
     let func_name = if func_name_ptr.is_null() || func_name_len <= 0 {
@@ -110,22 +123,17 @@ pub unsafe extern "C" fn simple_contract_check_msg(
         std::str::from_utf8(slice).ok()
     };
 
-    let base_msg = format!(
-        "{} violation in function '{}': contract condition failed",
-        violation_kind.name(),
-        func_name
-    );
-
-    if let Some(msg) = custom_msg {
-        panic!("{} ({})", base_msg, msg);
-    } else {
-        panic!("{}", base_msg);
+    if let Err(msg) = check_contract_internal(condition != 0, violation_kind, func_name, custom_msg) {
+        panic!("{}", msg);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Tests for FFI functions - only test non-panic paths
+    // (extern "C" functions cannot unwind through catch_unwind)
 
     #[test]
     fn test_contract_check_true_condition() {
@@ -144,10 +152,88 @@ mod tests {
         }
     }
 
-    // NOTE: Panic tests for contracts are temporarily disabled due to test harness issues
-    // with unsafe extern "C" functions that panic. The actual contract functionality works
-    // correctly in production code. These tests can be re-enabled once we have a better
-    // test strategy for FFI panic behavior.
-    //
-    // TODO: [test][P2] Re-enable contract panic tests with proper FFI panic handling
+    // Tests for internal contract checking logic (testable with catch_unwind)
+
+    #[test]
+    fn test_check_contract_internal_true_returns_ok() {
+        let result = check_contract_internal(
+            true,
+            ContractViolationKind::Pre,
+            "test_func",
+            None,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_contract_internal_false_returns_err() {
+        let result = check_contract_internal(
+            false,
+            ContractViolationKind::Pre,
+            "test_func",
+            None,
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("Precondition violation"), "Expected 'Precondition violation' in: {}", msg);
+        assert!(msg.contains("test_func"), "Expected function name in: {}", msg);
+    }
+
+    #[test]
+    fn test_check_contract_internal_with_custom_message() {
+        let result = check_contract_internal(
+            false,
+            ContractViolationKind::Post,
+            "my_function",
+            Some("custom error message"),
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("Postcondition violation"), "Expected 'Postcondition violation' in: {}", msg);
+        assert!(msg.contains("my_function"), "Expected function name in: {}", msg);
+        assert!(msg.contains("custom error message"), "Expected custom message in: {}", msg);
+    }
+
+    #[test]
+    fn test_check_contract_internal_all_violation_kinds() {
+        // Test all violation kinds - names must match ContractViolationKind::name()
+        let kinds = [
+            (ContractViolationKind::Pre, "Precondition"),
+            (ContractViolationKind::Post, "Postcondition"),
+            (ContractViolationKind::ErrPost, "Error postcondition"),
+            (ContractViolationKind::InvariantEntry, "Entry invariant"),
+            (ContractViolationKind::InvariantExit, "Exit invariant"),
+        ];
+
+        for (kind, expected_name) in kinds {
+            let result = check_contract_internal(false, kind, "test_func", None);
+            assert!(result.is_err(), "Expected Err for {:?}", kind);
+            let msg = result.unwrap_err();
+            assert!(
+                msg.contains(expected_name),
+                "Expected '{}' in message for {:?}, got: {}",
+                expected_name,
+                kind,
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_check_contract_internal_special_function_names() {
+        // Test with empty function name
+        let result = check_contract_internal(false, ContractViolationKind::Pre, "", None);
+        assert!(result.is_err());
+
+        // Test with function name containing special characters
+        let result = check_contract_internal(
+            false,
+            ContractViolationKind::Pre,
+            "my::module::function<T>",
+            None,
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("my::module::function<T>"));
+    }
 }

@@ -275,18 +275,35 @@ impl DapServer:
 
     # Handle stackTrace request
     fn handle_stack_trace(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
-        # Build a mock stack frame
-        # TODO: [stdlib][P3] Get actual stack from interpreter
-        val frame = protocol.StackFrame.new(
-            self.current_frame_id,
-            "main",
-            1,
-            0
-        )
+        # Build stack frames from debug context
+        var stack_frames: List<Dict> = []
+        var frame_id = self.current_frame_id
+
+        # Use actual call stack from debug context
+        if self.debug_context.call_stack.len() > 0:
+            for entry in self.debug_context.call_stack:
+                val frame = protocol.StackFrame.new(
+                    frame_id,
+                    entry.name,
+                    entry.line,
+                    entry.column
+                ).with_source(entry.source_path)
+
+                stack_frames.push(frame.to_json())
+                frame_id = frame_id + 1
+        else:
+            # Fallback: create entry frame from launch config
+            val frame = protocol.StackFrame.new(
+                frame_id,
+                "main",
+                self.debug_context.current_line,
+                self.debug_context.current_column
+            ).with_source(self.debug_context.source_path)
+            stack_frames.push(frame.to_json())
 
         val body = {
-            "stackFrames": [frame.to_json()],
-            "totalFrames": 1
+            "stackFrames": stack_frames,
+            "totalFrames": stack_frames.len()
         }
 
         transport.write_response(request_seq, true, command, Some(body))?
@@ -313,21 +330,57 @@ impl DapServer:
     # Handle variables request
     fn handle_variables(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         match arguments:
-            case None:
+            None:
                 return Err("Missing arguments for variables")
-            case Some(args):
+            Some(args):
                 val variables_reference = args.get("variablesReference")?
 
-                # Mock variables for now
-                # TODO: [stdlib][P3] Get actual variables from interpreter
-                val var1 = protocol.Variable.new("x", "42").with_type("Int")
-                val var2 = protocol.Variable.new("name", "\"example\"").with_type("String")
+                var variables: List<Dict> = []
+
+                # Variables reference 1 = local scope, 2 = global scope
+                if variables_reference == 1:
+                    # Return local variables from debug context
+                    for (name, info) in self.debug_context.local_variables.items():
+                        val var = protocol.Variable.new(name, info.value)
+                            .with_type(info.type_name)
+                        if info.variables_reference > 0:
+                            var = var.with_variables_reference(info.variables_reference)
+                        variables.push(var.to_json())
+
+                    # If no local variables in context, show placeholder
+                    if variables.len() == 0:
+                        # NOTE: When interpreter integration is complete,
+                        # this will show actual local variables
+                        val placeholder = protocol.Variable.new(
+                            "(no local variables)",
+                            "",
+                        ).with_type("")
+                        variables.push(placeholder.to_json())
+
+                elif variables_reference == 2:
+                    # Return global variables from debug context
+                    for (name, info) in self.debug_context.global_variables.items():
+                        val var = protocol.Variable.new(name, info.value)
+                            .with_type(info.type_name)
+                        if info.variables_reference > 0:
+                            var = var.with_variables_reference(info.variables_reference)
+                        variables.push(var.to_json())
+
+                    # If no global variables in context, show placeholder
+                    if variables.len() == 0:
+                        val placeholder = protocol.Variable.new(
+                            "(no global variables)",
+                            ""
+                        ).with_type("")
+                        variables.push(placeholder.to_json())
+
+                else:
+                    # Nested variable inspection (for objects, arrays, etc.)
+                    # NOTE: Expand child variables when interpreter provides them
+                    pass
 
                 val body = {
-                    "variables": [
-                        var1.to_json(),
-                        var2.to_json()
-                    ]
+                    "variables": variables
                 }
 
                 transport.write_response(request_seq, true, command, Some(body))?
@@ -338,6 +391,9 @@ impl DapServer:
     fn handle_continue(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling continue request")
 
+        # Clear any step mode
+        self.step_mode = None
+
         # Update state
         self.state = DebuggerState.Running
 
@@ -347,8 +403,12 @@ impl DapServer:
 
         transport.write_response(request_seq, true, command, Some(body))?
 
-        # TODO: [stdlib][P3] Actually continue execution
-        # For now, just acknowledge
+        # Continue execution until next breakpoint
+        # NOTE: When interpreter integration is complete, this will:
+        # 1. Resume interpreter execution
+        # 2. Check breakpoints at each step
+        # 3. Stop when a breakpoint is hit or program terminates
+        self.execute_until_stop()?
 
         Ok(nil)
 
@@ -368,12 +428,14 @@ impl DapServer:
     fn handle_next(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling next (step over) request")
 
+        # Set step mode to step over
+        self.step_mode = Some(StepMode.StepOver)
+
         # Send response
         transport.write_response(request_seq, true, command, None)?
 
-        # TODO: [stdlib][P3] Actually step
-        # For now, send stopped event immediately
-        self.send_stopped_event(protocol.StopReason.Step)?
+        # Execute single step
+        self.execute_step()?
 
         Ok(nil)
 
@@ -381,9 +443,13 @@ impl DapServer:
     fn handle_step_in(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling stepIn request")
 
+        # Set step mode to step in
+        self.step_mode = Some(StepMode.StepIn)
+
         transport.write_response(request_seq, true, command, None)?
 
-        self.send_stopped_event(protocol.StopReason.Step)?
+        # Execute single step, entering function calls
+        self.execute_step()?
 
         Ok(nil)
 
@@ -391,8 +457,89 @@ impl DapServer:
     fn handle_step_out(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling stepOut request")
 
+        # Set step mode to step out
+        self.step_mode = Some(StepMode.StepOut)
+
         transport.write_response(request_seq, true, command, None)?
 
+        # Execute until current function returns
+        self.execute_step()?
+
+        Ok(nil)
+
+    # Execute until a stop condition is met (breakpoint or end)
+    fn execute_until_stop() -> Result<Nil, String>:
+        # NOTE: This is the interpreter integration point
+        # When connected to the interpreter, this will:
+        # 1. Run the interpreter in a loop
+        # 2. Before each statement, check for breakpoints
+        # 3. If breakpoint hit, update debug context and send stopped event
+        # 4. If program terminates, send terminated event
+
+        # For now, simulate stopping at the next line
+        self.debug_context.current_line = self.debug_context.current_line + 1
+
+        # Check if we hit a breakpoint
+        match self.breakpoint_manager.should_stop_at_line(
+            self.debug_context.source_path,
+            self.debug_context.current_line
+        ):
+            Some(bp):
+                # Hit a breakpoint
+                self.breakpoint_manager.increment_hit_count(bp.id)
+                self.send_stopped_event(protocol.StopReason.Breakpoint)?
+            None:
+                # No breakpoint - in a real implementation, continue execution
+                # For now, just stop (simulating end of program or next statement)
+                self.send_stopped_event(protocol.StopReason.Step)?
+
+        Ok(nil)
+
+    # Execute a single step based on current step mode
+    fn execute_step() -> Result<Nil, String>:
+        # NOTE: This is the interpreter integration point
+        # When connected to the interpreter, this will:
+        # - StepOver: Execute one statement, skipping into function calls
+        # - StepIn: Execute one statement, entering function calls
+        # - StepOut: Execute until current function returns
+
+        match self.step_mode:
+            Some(StepMode.StepOver):
+                # Step to next line in current function
+                self.debug_context.current_line = self.debug_context.current_line + 1
+
+            Some(StepMode.StepIn):
+                # Step into function call (or next line if no call)
+                # For now, same as step over
+                self.debug_context.current_line = self.debug_context.current_line + 1
+
+            Some(StepMode.StepOut):
+                # Step out of current function
+                # For now, pop stack and advance line
+                if self.debug_context.call_stack.len() > 1:
+                    self.debug_context.call_stack.pop()
+                    # Update line to caller
+                    match self.debug_context.call_stack.last():
+                        Some(frame):
+                            self.debug_context.current_line = frame.line + 1
+                        None:
+                            self.debug_context.current_line = self.debug_context.current_line + 1
+                else:
+                    self.debug_context.current_line = self.debug_context.current_line + 1
+
+            None:
+                # No step mode, just advance
+                self.debug_context.current_line = self.debug_context.current_line + 1
+
+        # Update call stack with new position
+        if self.debug_context.call_stack.len() > 0:
+            match self.debug_context.call_stack.last_mut():
+                Some(frame):
+                    frame.line = self.debug_context.current_line
+                None:
+                    pass
+
+        # Send stopped event
         self.send_stopped_event(protocol.StopReason.Step)?
 
         Ok(nil)

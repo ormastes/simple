@@ -123,6 +123,15 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // String operations
     "rt_string_new",
     "rt_string_concat",
+    // Regex operations
+    "ffi_regex_is_match",
+    "ffi_regex_find",
+    "ffi_regex_find_all",
+    "ffi_regex_captures",
+    "ffi_regex_replace",
+    "ffi_regex_replace_all",
+    "ffi_regex_split",
+    "ffi_regex_split_n",
     // Value creation/conversion
     "rt_value_int",
     "rt_value_float",
