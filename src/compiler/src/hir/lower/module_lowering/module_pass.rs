@@ -5,58 +5,80 @@ use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{HirAopAdvice, HirArchRule, HirDiBinding, HirMockDecl, HirModule, HirType, TypeId};
 
 impl Lowerer {
+    /// Helper: Register type and function declarations from an AST node
+    fn register_declarations_from_node(&mut self, item: &Node) -> LowerResult<()> {
+        match item {
+            Node::Struct(s) => {
+                self.register_struct(s)?;
+            }
+            Node::Function(f) => {
+                let ret_ty = self.resolve_type_opt(&f.return_type)?;
+                self.globals.insert(f.name.clone(), ret_ty);
+                // Track pure functions for CTR-030-032
+                if f.is_pure() {
+                    self.pure_functions.insert(f.name.clone());
+                }
+            }
+            Node::Class(c) => {
+                self.register_class(c)?;
+            }
+            Node::Enum(e) => {
+                let variants = e
+                    .variants
+                    .iter()
+                    .map(|v| {
+                        let fields = v.fields.as_ref().map(|enum_fields| {
+                            enum_fields
+                                .iter()
+                                .map(|f| self.resolve_type(&f.ty).unwrap_or(TypeId::VOID))
+                                .collect()
+                        });
+                        (v.name.clone(), fields)
+                    })
+                    .collect();
+                self.module.types.register_named(
+                    e.name.clone(),
+                    HirType::Enum {
+                        name: e.name.clone(),
+                        variants,
+                    },
+                );
+            }
+            Node::Mixin(m) => {
+                self.register_mixin(m)?;
+            }
+            Node::TypeAlias(ta) => {
+                self.register_type_alias(ta)?;
+            }
+            Node::Trait(t) => {
+                // Register trait with vtable slot information for static polymorphism
+                self.register_trait(t)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
         self.module.name = ast_module.name.clone();
 
         // First pass: collect type and function declarations
         for item in &ast_module.items {
+            self.register_declarations_from_node(item)?;
+        }
+
+        // Continue with rest of lowering...
+        for item in &ast_module.items {
             match item {
-                Node::Struct(s) => {
-                    self.register_struct(s)?;
-                }
-                Node::Function(f) => {
-                    let ret_ty = self.resolve_type_opt(&f.return_type)?;
-                    self.globals.insert(f.name.clone(), ret_ty);
-                    // Track pure functions for CTR-030-032
-                    if f.is_pure() {
-                        self.pure_functions.insert(f.name.clone());
-                    }
-                }
-                Node::Class(c) => {
-                    self.register_class(c)?;
-                }
-                Node::Enum(e) => {
-                    let variants = e
-                        .variants
-                        .iter()
-                        .map(|v| {
-                            let fields = v.fields.as_ref().map(|enum_fields| {
-                                enum_fields
-                                    .iter()
-                                    .map(|f| self.resolve_type(&f.ty).unwrap_or(TypeId::VOID))
-                                    .collect()
-                            });
-                            (v.name.clone(), fields)
-                        })
-                        .collect();
-                    self.module.types.register_named(
-                        e.name.clone(),
-                        HirType::Enum {
-                            name: e.name.clone(),
-                            variants,
-                        },
-                    );
-                }
-                Node::Mixin(m) => {
-                    self.register_mixin(m)?;
-                }
-                Node::TypeAlias(ta) => {
-                    self.register_type_alias(ta)?;
-                }
-                Node::Trait(t) => {
-                    // Register trait with vtable slot information for static polymorphism
-                    self.register_trait(t)?;
-                }
+                // These were already registered in first pass
+                Node::Struct(_)
+                | Node::Function(_)
+                | Node::Class(_)
+                | Node::Enum(_)
+                | Node::Mixin(_)
+                | Node::TypeAlias(_)
+                | Node::Trait(_) => {}
+                // Other node types
                 Node::Actor(_)
                 | Node::Impl(_)
                 | Node::Extern(_)
@@ -228,53 +250,7 @@ impl Lowerer {
 
         // First pass: collect type and function declarations
         for item in &ast_module.items {
-            match item {
-                Node::Struct(s) => {
-                    self.register_struct(s)?;
-                }
-                Node::Function(f) => {
-                    let ret_ty = self.resolve_type_opt(&f.return_type)?;
-                    self.globals.insert(f.name.clone(), ret_ty);
-                    if f.is_pure() {
-                        self.pure_functions.insert(f.name.clone());
-                    }
-                }
-                Node::Class(c) => {
-                    self.register_class(c)?;
-                }
-                Node::Enum(e) => {
-                    let variants = e
-                        .variants
-                        .iter()
-                        .map(|v| {
-                            let fields = v.fields.as_ref().map(|enum_fields| {
-                                enum_fields
-                                    .iter()
-                                    .map(|f| self.resolve_type(&f.ty).unwrap_or(TypeId::VOID))
-                                    .collect()
-                            });
-                            (v.name.clone(), fields)
-                        })
-                        .collect();
-                    self.module.types.register_named(
-                        e.name.clone(),
-                        HirType::Enum {
-                            name: e.name.clone(),
-                            variants,
-                        },
-                    );
-                }
-                Node::Mixin(m) => {
-                    self.register_mixin(m)?;
-                }
-                Node::TypeAlias(ta) => {
-                    self.register_type_alias(ta)?;
-                }
-                Node::Trait(t) => {
-                    self.register_trait(t)?;
-                }
-                _ => {}
-            }
+            self.register_declarations_from_node(item)?;
         }
 
         // Second pass: lower function bodies

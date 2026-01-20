@@ -1,6 +1,7 @@
 // Built-in functions for interpreter
 // Range, Option, Result, Actor primitives, Futures, Generators, etc.
 
+use super::core::{eval_arg, eval_arg_int};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     check_effect_violations, create_range_object, evaluate_expr, message_to_value, spawn_actor_with_expr,
@@ -34,12 +35,12 @@ pub(super) fn eval_builtin(
             // Handle range(n) as range(0, n) and range(start, end)
             let (start, end) = if args.len() == 1 {
                 // Single argument: range(n) means range(0, n)
-                let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods, "builtin function")?;
                 (0, n)
             } else {
                 // Two arguments: range(start, end)
-                let start = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-                let end = eval_arg_int(args, 1, 0, env, functions, classes, enums, impl_methods)?;
+                let start = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods, "builtin function")?;
+                let end = eval_arg_int(args, 1, 0, env, functions, classes, enums, impl_methods, "builtin function")?;
                 (start, end)
             };
             let inclusive = eval_arg(
@@ -352,7 +353,7 @@ pub(super) fn eval_builtin(
             }
         }
         "async_workers" => {
-            let count = eval_arg_int(args, 0, 4, env, functions, classes, enums, impl_methods)?;
+            let count = eval_arg_int(args, 0, 4, env, functions, classes, enums, impl_methods, "builtin function")?;
             simple_runtime::configure_worker_count(count as usize);
             Ok(Some(Value::Nil))
         }
@@ -490,47 +491,3 @@ pub(super) fn eval_builtin(
     }
 }
 
-fn eval_arg(
-    args: &[Argument],
-    index: usize,
-    default: Value,
-    env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
-    classes: &mut HashMap<String, ClassDef>,
-    enums: &Enums,
-    impl_methods: &ImplMethods,
-) -> Result<Value, CompileError> {
-    if let Some(arg) = args.get(index) {
-        evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)
-    } else {
-        Ok(default)
-    }
-}
-
-fn eval_arg_int(
-    args: &[Argument],
-    index: usize,
-    default: i64,
-    env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
-    classes: &mut HashMap<String, ClassDef>,
-    enums: &Enums,
-    impl_methods: &ImplMethods,
-) -> Result<i64, CompileError> {
-    let val = eval_arg(
-        args,
-        index,
-        Value::Int(default),
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )?;
-    val.as_int().map_err(|_| {
-        let ctx = ErrorContext::new()
-            .with_code(codes::TYPE_MISMATCH)
-            .with_help("builtin function argument must be an integer");
-        CompileError::semantic_with_context("expected integer value".to_string(), ctx)
-    })
-}

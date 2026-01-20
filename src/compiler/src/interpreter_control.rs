@@ -448,14 +448,16 @@ pub(super) fn exec_for(
     Ok(Control::Next)
 }
 
-pub(super) fn exec_match(
+/// Core match execution logic shared between exec_match and exec_match_expr.
+/// Returns (Control, Option<Value>) where the value is from the matched arm.
+fn exec_match_core(
     match_stmt: &MatchStmt,
     env: &mut Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
-) -> Result<Control, CompileError> {
+) -> Result<(Control, Option<Value>), CompileError> {
     let subject = evaluate_expr(&match_stmt.subject, env, functions, classes, enums, impl_methods)?;
 
     // Check for strong enum - disallow wildcard/catch-all patterns
@@ -489,20 +491,33 @@ pub(super) fn exec_match(
                 env.insert(name, value);
             }
 
-            // Use exec_block_fn to capture implicit return value from match arms
-            let (flow, _last_val) = exec_block_fn(&arm.body, env, functions, classes, enums, impl_methods)?;
-            match flow {
-                Control::Return(_) | Control::Break(_) | Control::Continue => return Ok(flow),
-                Control::Next => {
-                    // Match arm completed normally - continue after match
-                    // Note: implicit return from match arms should NOT return from function
-                    return Ok(Control::Next);
-                }
-            }
+            // Execute the match arm body and capture both flow and value
+            let (flow, last_val) = exec_block_fn(&arm.body, env, functions, classes, enums, impl_methods)?;
+            return Ok((flow, last_val));
         }
     }
 
-    Ok(Control::Next)
+    // No arm matched
+    Ok((Control::Next, None))
+}
+
+pub(super) fn exec_match(
+    match_stmt: &MatchStmt,
+    env: &mut Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Control, CompileError> {
+    let (flow, _last_val) = exec_match_core(match_stmt, env, functions, classes, enums, impl_methods)?;
+    match flow {
+        Control::Return(_) | Control::Break(_) | Control::Continue => Ok(flow),
+        Control::Next => {
+            // Match arm completed normally - continue after match
+            // Note: implicit return from match arms should NOT return from function
+            Ok(Control::Next)
+        }
+    }
 }
 
 /// Execute a match statement as an expression, returning the match arm's value.
@@ -515,51 +530,13 @@ pub(super) fn exec_match_expr(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    let subject = evaluate_expr(&match_stmt.subject, env, functions, classes, enums, impl_methods)?;
-
-    // Check for strong enum - disallow wildcard/catch-all patterns
-    if let Value::Enum { enum_name, .. } = &subject {
-        if let Some(enum_def) = enums.get(enum_name) {
-            let is_strong = enum_def.attributes.iter().any(|attr| attr.name == ATTR_STRONG);
-            if is_strong {
-                for arm in &match_stmt.arms {
-                    if is_catch_all_pattern(&arm.pattern) {
-                        return Err(crate::error::factory::strong_enum_no_wildcard(enum_name));
-                    }
-                }
-            }
+    let (flow, last_val) = exec_match_core(match_stmt, env, functions, classes, enums, impl_methods)?;
+    match flow {
+        Control::Return(v) => Ok(v),
+        Control::Break(_) | Control::Continue => Ok(Value::Nil),
+        Control::Next => {
+            // Return the implicit value from the match arm
+            Ok(last_val.unwrap_or(Value::Nil))
         }
     }
-
-    for arm in &match_stmt.arms {
-        let mut bindings = HashMap::new();
-        if pattern_matches(&arm.pattern, &subject, &mut bindings, enums)? {
-            if let Some(guard) = &arm.guard {
-                let mut guard_env = env.clone();
-                for (name, value) in &bindings {
-                    guard_env.insert(name.clone(), value.clone());
-                }
-                if !evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?.truthy() {
-                    continue;
-                }
-            }
-
-            for (name, value) in bindings {
-                env.insert(name, value);
-            }
-
-            // Capture implicit return value from match arm
-            let (flow, last_val) = exec_block_fn(&arm.body, env, functions, classes, enums, impl_methods)?;
-            match flow {
-                Control::Return(v) => return Ok(v),
-                Control::Break(_) | Control::Continue => return Ok(Value::Nil),
-                Control::Next => {
-                    // Return the implicit value from the match arm
-                    return Ok(last_val.unwrap_or(Value::Nil));
-                }
-            }
-        }
-    }
-
-    Ok(Value::Nil)
 }

@@ -85,22 +85,13 @@ pub fn lower_generator(func: &MirFunction, body_block: BlockId) -> GeneratorLowe
                 let state_id = states.len() as u32;
 
                 // Create a resume block for the remaining instructions (if any).
-                let resume_id = if idx + 1 < orig_block.instructions.len()
-                    || !matches!(orig_block.terminator, Terminator::Return(_))
-                {
-                    let resume = rewritten.new_block();
-                    let mut resume_block = MirBlock::new(resume);
-                    for inst_after in orig_block.instructions.iter().skip(idx + 1) {
-                        resume_block.instructions.push(inst_after.clone());
-                    }
-                    resume_block.terminator =
-                        state_machine_utils::remap_terminator(orig_block.terminator.clone(), &block_map)
-                            .unwrap_or_else(|| Terminator::Return(None));
-                    state_machine_utils::write_block(&mut rewritten, resume_block);
-                    resume
-                } else {
-                    complete_block
-                };
+                let resume_id = state_machine_utils::create_resume_block(
+                    &mut rewritten,
+                    orig_block,
+                    idx,
+                    &block_map,
+                    complete_block,
+                );
 
                 let mut live: Vec<VReg> = live_after
                     .get(idx + 1)

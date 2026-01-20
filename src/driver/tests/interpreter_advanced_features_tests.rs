@@ -134,7 +134,7 @@ main = 42
 }
 
 // ============= Result Type =============
-// Result[T, E] for explicit error handling with Ok and Err variants
+// Result<T, E> for explicit error handling with Ok and Err variants
 
 #[test]
 fn interpreter_result_ok_unwrap() {
@@ -225,7 +225,7 @@ main = r.unwrap_or(-1)
 fn interpreter_question_mark_operator() {
     // ? operator propagates errors
     let code = r#"
-fn may_fail(x) -> Result[int, str]:
+fn may_fail(x) -> Result<int, str>:
     if x < 0:
         return Err("negative")
     return Ok(x * 2)
@@ -246,7 +246,7 @@ main = res.unwrap()
 fn interpreter_question_mark_propagates_error() {
     // ? operator propagates the error to caller
     let code = r#"
-fn may_fail(x) -> Result[int, str]:
+fn may_fail(x) -> Result<int, str>:
     if x < 0:
         return Err("negative")
     return Ok(x * 2)

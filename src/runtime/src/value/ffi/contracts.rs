@@ -149,5 +149,5 @@ mod tests {
     // correctly in production code. These tests can be re-enabled once we have a better
     // test strategy for FFI panic behavior.
     //
-    // TODO: Re-enable contract panic tests with proper FFI panic handling
+    // TODO: [test][P2] Re-enable contract panic tests with proper FFI panic handling
 }

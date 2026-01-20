@@ -699,48 +699,48 @@ fn extract_type_mismatch(message: &str) -> (&str, &str) {
     (expected, found)
 }
 
+/// Helper to extract a number following a keyword in a message
+fn extract_number_after_keyword<'a>(message: &'a str, keyword: &str) -> &'a str {
+    if let Some(start) = message.find(keyword) {
+        let start_pos = start + keyword.len();
+        // Find the next space or non-digit character
+        let mut end = start_pos;
+        for (i, c) in message[start_pos..].char_indices() {
+            if !c.is_ascii_digit() {
+                end = start_pos + i;
+                break;
+            }
+            end = start_pos + i + 1;
+        }
+        if end > start_pos {
+            &message[start_pos..end]
+        } else {
+            "unknown"
+        }
+    } else {
+        "unknown"
+    }
+}
+
+/// Helper to extract a backtick-quoted string following a keyword in a message
+/// E.g., extract_quoted("struct `Foo` ...", "struct `") returns "Foo"
+fn extract_quoted<'a>(message: &'a str, keyword: &str) -> &'a str {
+    if let Some(start) = message.find(keyword) {
+        let start_pos = start + keyword.len();
+        if let Some(end) = message[start_pos..].find('`') {
+            &message[start_pos..start_pos + end]
+        } else {
+            "unknown"
+        }
+    } else {
+        "unknown"
+    }
+}
+
 fn extract_count_mismatch(message: &str) -> (&str, &str) {
     // Extract from "expected 3 arguments, found 2" or similar patterns
-    let expected = if let Some(start) = message.find("expected ") {
-        let start_pos = start + "expected ".len();
-        // Find the next space or non-digit character
-        let mut end = start_pos;
-        for (i, c) in message[start_pos..].char_indices() {
-            if !c.is_ascii_digit() {
-                end = start_pos + i;
-                break;
-            }
-            end = start_pos + i + 1;
-        }
-        if end > start_pos {
-            &message[start_pos..end]
-        } else {
-            "unknown"
-        }
-    } else {
-        "unknown"
-    };
-
-    let found = if let Some(start) = message.find("found ") {
-        let start_pos = start + "found ".len();
-        // Find the next space or non-digit character
-        let mut end = start_pos;
-        for (i, c) in message[start_pos..].char_indices() {
-            if !c.is_ascii_digit() {
-                end = start_pos + i;
-                break;
-            }
-            end = start_pos + i + 1;
-        }
-        if end > start_pos {
-            &message[start_pos..end]
-        } else {
-            "unknown"
-        }
-    } else {
-        "unknown"
-    };
-
+    let expected = extract_number_after_keyword(message, "expected ");
+    let found = extract_number_after_keyword(message, "found ");
     (expected, found)
 }
 
@@ -757,78 +757,26 @@ fn extract_target_from_message(message: &str) -> &str {
 
 fn extract_operation_info(message: &str) -> (&str, &str) {
     // Extract from "cannot apply operator `+` to type `String`"
-    let operator = if let Some(start) = message.find("operator `") {
-        let start_pos = start + 10;
-        if let Some(end) = message[start_pos..].find('`') {
-            &message[start_pos..start_pos + end]
-        } else {
-            "unknown"
-        }
-    } else {
-        "unknown"
-    };
-
-    let type_name = if let Some(start) = message.find("type `") {
-        let start_pos = start + 6;
-        if let Some(end) = message[start_pos..].find('`') {
-            &message[start_pos..start_pos + end]
-        } else {
-            "unknown"
-        }
-    } else {
-        "unknown"
-    };
-
+    let operator = extract_quoted(message, "operator `");
+    let type_name = extract_quoted(message, "type `");
     (operator, type_name)
 }
 
 fn extract_field_info(message: &str) -> (&str, &str) {
     // Extract from "struct `Foo` does not have a field named `bar`"
-    let struct_name = if let Some(start) = message.find("struct `") {
-        let start_pos = start + 8;
-        if let Some(end) = message[start_pos..].find('`') {
-            &message[start_pos..start_pos + end]
-        } else {
-            "unknown"
-        }
-    } else {
-        "unknown"
-    };
-
-    let field_name = if let Some(start) = message.find("field named `") {
-        let start_pos = start + 13;
-        if let Some(end) = message[start_pos..].find('`') {
-            &message[start_pos..start_pos + end]
-        } else {
-            "unknown"
-        }
-    } else {
-        "unknown"
-    };
-
+    let struct_name = extract_quoted(message, "struct `");
+    let field_name = extract_quoted(message, "field named `");
     (struct_name, field_name)
 }
 
 fn extract_module_name(message: &str) -> &str {
     // Extract from "module `foo` not found"
-    if let Some(start) = message.find("module `") {
-        let start_pos = start + 8;
-        if let Some(end) = message[start_pos..].find('`') {
-            return &message[start_pos..start_pos + end];
-        }
-    }
-    "unknown"
+    extract_quoted(message, "module `")
 }
 
 fn extract_feature_name(message: &str) -> &str {
     // Extract from "feature `foo` is not supported in this context"
-    if let Some(start) = message.find("feature `") {
-        let start_pos = start + 9;
-        if let Some(end) = message[start_pos..].find('`') {
-            return &message[start_pos..start_pos + end];
-        }
-    }
-    "unknown"
+    extract_quoted(message, "feature `")
 }
 
 fn extract_index_bounds(message: &str) -> (&str, &str) {
@@ -874,33 +822,13 @@ fn extract_duration(message: &str) -> &str {
 
 fn extract_method_info(message: &str) -> (&str, &str) {
     // Extract from "method `foo` not found on type `Bar`" or similar
-    let method = if let Some(start) = message.find("`method") {
-        let start_pos = start + 8;
-        if let Some(end) = message[start_pos..].find('`') {
-            &message[start_pos..start_pos + end]
-        } else {
-            "unknown"
-        }
-    } else if let Some(start) = message.find('`') {
-        if let Some(end) = message[start + 1..].find('`') {
-            &message[start + 1..start + 1 + end]
-        } else {
-            "unknown"
-        }
+    let method = if message.contains("`method") {
+        extract_quoted(message, "`method")
     } else {
-        "unknown"
+        extract_quoted(message, "`")
     };
 
-    let type_name = if let Some(start) = message.find("type `") {
-        let start_pos = start + 6;
-        if let Some(end) = message[start_pos..].find('`') {
-            &message[start_pos..start_pos + end]
-        } else {
-            "unknown"
-        }
-    } else {
-        "unknown"
-    };
+    let type_name = extract_quoted(message, "type `");
 
     (method, type_name)
 }

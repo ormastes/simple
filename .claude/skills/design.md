@@ -85,7 +85,7 @@ fn fetch_url(url: String) -> Response:
 
 **Enums with variants:**
 ```simple
-enum Result[T, E]:
+enum Result<T, E>:
     Ok(value: T)
     Err(error: E)
 ```

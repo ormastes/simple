@@ -59,9 +59,9 @@ impl Lowerer {
                 self.check_mutable_shared_binding(&name, ty, let_stmt.mutability, let_stmt.span);
 
                 // W1002: Check for implicit unique pointer copy (unless explicit move)
-                // TODO: Check if value expression is a move expression
+                // TODO: [compiler][P2] Check if value expression is a move expression
                 if let Some(ref v) = value {
-                    let is_explicit_move = false; // TODO: Detect move keyword
+                    let is_explicit_move = false; // TODO: [compiler][P2] Detect move keyword in let bindings
                     self.check_unique_copy(v, let_stmt.span, is_explicit_move);
                 }
 

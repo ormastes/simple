@@ -155,10 +155,7 @@ pub extern "C" fn native_tcp_shutdown(handle: i64, how: i64) -> i64 {
 /// Returns error_code
 #[no_mangle]
 pub extern "C" fn native_tcp_close(handle: i64) -> i64 {
-    match unregister_socket(handle) {
-        Some(_) => NetError::Success as i64,
-        None => NetError::InvalidHandle as i64,
-    }
+    close_socket(handle)
 }
 
 /// Set the connection backlog for a TCP listener.
@@ -200,41 +197,9 @@ pub extern "C" fn native_tcp_set_keepalive(handle: i64, keepalive_ns: i64) -> i6
     })
 }
 
-/// Set read timeout.
-/// Returns error_code
-#[no_mangle]
-pub extern "C" fn native_tcp_set_read_timeout(handle: i64, timeout_ns: i64) -> i64 {
-    with_socket!(handle, TcpStream, err_to_i64, stream => {
-        let timeout = if timeout_ns > 0 {
-            Some(Duration::from_nanos(timeout_ns as u64))
-        } else {
-            None
-        };
-
-        match stream.set_read_timeout(timeout) {
-            Ok(_) => NetError::Success as i64,
-            Err(e) => NetError::from(e) as i64,
-        }
-    })
-}
-
-/// Set write timeout.
-/// Returns error_code
-#[no_mangle]
-pub extern "C" fn native_tcp_set_write_timeout(handle: i64, timeout_ns: i64) -> i64 {
-    with_socket!(handle, TcpStream, err_to_i64, stream => {
-        let timeout = if timeout_ns > 0 {
-            Some(Duration::from_nanos(timeout_ns as u64))
-        } else {
-            None
-        };
-
-        match stream.set_write_timeout(timeout) {
-            Ok(_) => NetError::Success as i64,
-            Err(e) => NetError::from(e) as i64,
-        }
-    })
-}
+// Use macro to generate timeout setters
+impl_timeout_setter!(native_tcp_set_read_timeout, TcpStream, set_read_timeout);
+impl_timeout_setter!(native_tcp_set_write_timeout, TcpStream, set_write_timeout);
 
 /// Get TCP_NODELAY option.
 /// Returns (nodelay, error_code)

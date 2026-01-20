@@ -269,7 +269,7 @@ print "first: {first}, second: {second}"
 pub fn get_user_id() -> UserId:
     return 42_uid
 
-pub fn read_config(path: FilePath) -> Result[Bytes, IOError]:
+pub fn read_config(path: FilePath) -> Result<Bytes, IOError>:
     return std.fs.read_bytes(path)
 ```
 
@@ -286,7 +286,7 @@ pub fn bad_get_user_id() -> i64:
 pub fn bad_read_file(path: str) -> Bytes:
     return std.fs.read_bytes(path)
 
-# ERROR (always): implicit nil without Option[...] in public API shape
+# ERROR (always): implicit nil without Option<...> in public API shape
 pub fn bad_find_user(id: UserId) -> User:
     # if a user is not found, returning nil here should be illegal
     return nil
@@ -547,7 +547,7 @@ print "joined"
 ```simple
 # This is a shape-check sample: async/await is part of the concurrency spec scope. :contentReference[oaicite:36]{index=36}
 
-async fn fetch_user(id: UserId) -> Result[User, NetError]:
+async fn fetch_user(id: UserId) -> Result<User, NetError>:
     valresp = await http.get("/users/{id}")
     return parse_user(resp)
 
@@ -615,7 +615,7 @@ print r.routes["/hello"]()
 pub fn app_config_path() -> FilePath:
     return "/etc/simple/app.toml"_file
 
-pub fn load_config(path: FilePath) -> Result[Config, ConfigError]:
+pub fn load_config(path: FilePath) -> Result<Config, ConfigError>:
     valbytes = std.fs.read_bytes(path)?
     return std.config.parse(bytes)
 
@@ -625,7 +625,7 @@ pub fn load_config(path: FilePath) -> Result[Config, ConfigError]:
 
 ---
 
-## 95_simd_vectors.spl (vec[N,T], lane-wise ops, reductions)
+## 95_simd_vectors.spl (vec[N,T>, lane-wise ops, reductions)
 
 ```simple
 # SIMD vector types and ops. :contentReference[oaicite:41]{index=41}

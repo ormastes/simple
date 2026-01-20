@@ -11,10 +11,12 @@ use crate::value::collections::rt_string_new;
 use crate::value::RuntimeValue;
 use std::path::Path;
 
-/// Get basename (filename) from path
-/// Returns the final component of the path
-#[no_mangle]
-pub unsafe extern "C" fn rt_path_basename(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
+/// Helper function for path operations that return strings
+/// Handles null checks, UTF-8 conversion, and result wrapping
+unsafe fn path_string_helper<F>(path_ptr: *const u8, path_len: u64, operation: F) -> RuntimeValue
+where
+    F: FnOnce(&Path) -> &str,
+{
     if path_ptr.is_null() {
         return rt_string_new(b"".as_ptr(), 0);
     }
@@ -26,49 +28,36 @@ pub unsafe extern "C" fn rt_path_basename(path_ptr: *const u8, path_len: u64) ->
     };
 
     let path = Path::new(path_str);
-    let basename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let result = operation(&path);
 
-    rt_string_new(basename.as_ptr(), basename.len() as u64)
+    rt_string_new(result.as_ptr(), result.len() as u64)
+}
+
+/// Get basename (filename) from path
+/// Returns the final component of the path
+#[no_mangle]
+pub unsafe extern "C" fn rt_path_basename(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
+    path_string_helper(path_ptr, path_len, |path| {
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("")
+    })
 }
 
 /// Get dirname (directory) from path
 /// Returns the directory component of the path
 #[no_mangle]
 pub unsafe extern "C" fn rt_path_dirname(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
-    if path_ptr.is_null() {
-        return rt_string_new(b"".as_ptr(), 0);
-    }
-
-    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
-    let path_str = match std::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return rt_string_new(b"".as_ptr(), 0),
-    };
-
-    let path = Path::new(path_str);
-    let dirname = path.parent().and_then(|p| p.to_str()).unwrap_or("");
-
-    rt_string_new(dirname.as_ptr(), dirname.len() as u64)
+    path_string_helper(path_ptr, path_len, |path| {
+        path.parent().and_then(|p| p.to_str()).unwrap_or("")
+    })
 }
 
 /// Get file extension from path
 /// Returns the extension without the leading dot
 #[no_mangle]
 pub unsafe extern "C" fn rt_path_ext(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
-    if path_ptr.is_null() {
-        return rt_string_new(b"".as_ptr(), 0);
-    }
-
-    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
-    let path_str = match std::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return rt_string_new(b"".as_ptr(), 0),
-    };
-
-    let path = Path::new(path_str);
-    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-
-    rt_string_new(ext.as_ptr(), ext.len() as u64)
+    path_string_helper(path_ptr, path_len, |path| {
+        path.extension().and_then(|s| s.to_str()).unwrap_or("")
+    })
 }
 
 /// Convert path to absolute path

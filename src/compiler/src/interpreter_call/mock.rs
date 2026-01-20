@@ -1,6 +1,7 @@
 // Mock library for interpreter
 // Matchers: mock, spy, any, eq, be, gt, lt, contains, etc.
 
+use super::core::{eval_arg, eval_arg_int};
 use crate::error::{CompileError, ErrorContext, codes};
 use crate::interpreter::evaluate_expr;
 use crate::value::*;
@@ -9,51 +10,6 @@ use std::collections::HashMap;
 
 type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
-
-fn eval_arg(
-    args: &[Argument],
-    index: usize,
-    default: Value,
-    env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
-    classes: &mut HashMap<String, ClassDef>,
-    enums: &Enums,
-    impl_methods: &ImplMethods,
-) -> Result<Value, CompileError> {
-    if let Some(arg) = args.get(index) {
-        evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)
-    } else {
-        Ok(default)
-    }
-}
-
-fn eval_arg_int(
-    args: &[Argument],
-    index: usize,
-    default: i64,
-    env: &mut Env,
-    functions: &mut HashMap<String, FunctionDef>,
-    classes: &mut HashMap<String, ClassDef>,
-    enums: &Enums,
-    impl_methods: &ImplMethods,
-) -> Result<i64, CompileError> {
-    let val = eval_arg(
-        args,
-        index,
-        Value::Int(default),
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )?;
-    val.as_int().map_err(|_| {
-        let ctx = ErrorContext::new()
-            .with_code(codes::TYPE_MISMATCH)
-            .with_help("matcher argument must be an integer");
-        CompileError::semantic_with_context("expected integer value for mock matcher".to_string(), ctx)
-    })
-}
 
 pub(super) fn eval_mock_builtin(
     name: &str,
@@ -107,11 +63,11 @@ pub(super) fn eval_mock_builtin(
             Ok(Some(Value::Matcher(crate::value::MatcherValue::Exact(Box::new(val)))))
         }
         "be_gt" => {
-            let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods, "mock matcher")?;
             Ok(Some(Value::Matcher(crate::value::MatcherValue::GreaterThan(n))))
         }
         "be_lt" => {
-            let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods, "mock matcher")?;
             Ok(Some(Value::Matcher(crate::value::MatcherValue::LessThan(n))))
         }
         "be_nil" => Ok(Some(Value::Matcher(crate::value::MatcherValue::Exact(Box::new(
@@ -162,19 +118,19 @@ pub(super) fn eval_mock_builtin(
             Ok(Some(Value::Matcher(crate::value::MatcherValue::EndsWith(s_str))))
         }
         "gt" => {
-            let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods, "mock matcher")?;
             Ok(Some(Value::Matcher(crate::value::MatcherValue::GreaterThan(n))))
         }
         "lt" => {
-            let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods, "mock matcher")?;
             Ok(Some(Value::Matcher(crate::value::MatcherValue::LessThan(n))))
         }
         "gte" => {
-            let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods, "mock matcher")?;
             Ok(Some(Value::Matcher(crate::value::MatcherValue::GreaterOrEqual(n))))
         }
         "lte" => {
-            let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods, "mock matcher")?;
             Ok(Some(Value::Matcher(crate::value::MatcherValue::LessOrEqual(n))))
         }
         "contains" => {

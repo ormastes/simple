@@ -211,41 +211,9 @@ pub extern "C" fn native_udp_set_ttl(handle: i64, ttl: i64) -> i64 {
     })
 }
 
-/// Set read timeout.
-/// Returns error_code
-#[no_mangle]
-pub extern "C" fn native_udp_set_read_timeout(handle: i64, timeout_ns: i64) -> i64 {
-    with_socket!(handle, UdpSocket, err_to_i64, socket => {
-        let timeout = if timeout_ns > 0 {
-            Some(Duration::from_nanos(timeout_ns as u64))
-        } else {
-            None
-        };
-
-        match socket.set_read_timeout(timeout) {
-            Ok(_) => NetError::Success as i64,
-            Err(e) => NetError::from(e) as i64,
-        }
-    })
-}
-
-/// Set write timeout.
-/// Returns error_code
-#[no_mangle]
-pub extern "C" fn native_udp_set_write_timeout(handle: i64, timeout_ns: i64) -> i64 {
-    with_socket!(handle, UdpSocket, err_to_i64, socket => {
-        let timeout = if timeout_ns > 0 {
-            Some(Duration::from_nanos(timeout_ns as u64))
-        } else {
-            None
-        };
-
-        match socket.set_write_timeout(timeout) {
-            Ok(_) => NetError::Success as i64,
-            Err(e) => NetError::from(e) as i64,
-        }
-    })
-}
+// Use macro to generate timeout setters
+impl_timeout_setter!(native_udp_set_read_timeout, UdpSocket, set_read_timeout);
+impl_timeout_setter!(native_udp_set_write_timeout, UdpSocket, set_write_timeout);
 
 /// Get broadcast option.
 /// Returns (broadcast, error_code)
@@ -361,8 +329,5 @@ pub unsafe extern "C" fn native_udp_leave_multicast_v6(
 /// Returns error_code
 #[no_mangle]
 pub extern "C" fn native_udp_close(handle: i64) -> i64 {
-    match unregister_socket(handle) {
-        Some(_) => NetError::Success as i64,
-        None => NetError::InvalidHandle as i64,
-    }
+    close_socket(handle)
 }

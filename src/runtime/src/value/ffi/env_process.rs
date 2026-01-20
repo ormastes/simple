@@ -82,6 +82,12 @@ pub unsafe extern "C" fn rt_env_get(name_ptr: *const u8, name_len: u64) -> Runti
     }
 }
 
+/// Alias for rt_env_get for backwards compatibility
+#[no_mangle]
+pub unsafe extern "C" fn rt_get_env(name_ptr: *const u8, name_len: u64) -> RuntimeValue {
+    rt_env_get(name_ptr, name_len)
+}
+
 /// Set environment variable
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_set(name_ptr: *const u8, name_len: u64, value_ptr: *const u8, value_len: u64) -> bool {
@@ -103,6 +109,12 @@ pub unsafe extern "C" fn rt_env_set(name_ptr: *const u8, name_len: u64, value_pt
 
     std::env::set_var(name_str, value_str);
     true
+}
+
+/// Alias for rt_env_set for backwards compatibility
+#[no_mangle]
+pub unsafe extern "C" fn rt_set_env(name_ptr: *const u8, name_len: u64, value_ptr: *const u8, value_len: u64) {
+    rt_env_set(name_ptr, name_len, value_ptr, value_len);
 }
 
 /// Get current working directory

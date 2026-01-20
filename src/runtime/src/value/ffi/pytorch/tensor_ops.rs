@@ -25,31 +25,47 @@ macro_rules! pytorch_fn {
     };
 }
 
+/// Macro for binary tensor operations (add, sub, mul, div, etc.)
+/// Reduces duplication by handling tensor extraction, operation, and storage
+macro_rules! binary_tensor_op {
+    ($name:ident, $op:tt) => {
+        #[cfg(feature = "pytorch")]
+        #[no_mangle]
+        pub extern "C" fn $name(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
+            let a_handle = match value_to_tensor_handle(a) {
+                Some(h) => h,
+                None => return RuntimeValue::NIL,
+            };
+            let b_handle = match value_to_tensor_handle(b) {
+                Some(h) => h,
+                None => return RuntimeValue::NIL,
+            };
+
+            let a_tensor = match get_tensor(a_handle) {
+                Some(t) => t,
+                None => return RuntimeValue::NIL,
+            };
+            let b_tensor = match get_tensor(b_handle) {
+                Some(t) => t,
+                None => return RuntimeValue::NIL,
+            };
+
+            let result = a_tensor $op b_tensor;
+            let handle = store_tensor(result);
+            RuntimeValue::from_int(handle)
+        }
+
+        #[cfg(not(feature = "pytorch"))]
+        #[no_mangle]
+        pub extern "C" fn $name(_a: RuntimeValue, _b: RuntimeValue) -> RuntimeValue {
+            RuntimeValue::NIL
+        }
+    };
+}
+
 // Arithmetic Operations
 
-pytorch_fn!(rt_torch_add, (a: RuntimeValue, b: RuntimeValue), {
-    let a_handle = match value_to_tensor_handle(a) {
-        Some(h) => h,
-        None => return RuntimeValue::NIL,
-    };
-    let b_handle = match value_to_tensor_handle(b) {
-        Some(h) => h,
-        None => return RuntimeValue::NIL,
-    };
-
-    let a_tensor = match get_tensor(a_handle) {
-        Some(t) => t,
-        None => return RuntimeValue::NIL,
-    };
-    let b_tensor = match get_tensor(b_handle) {
-        Some(t) => t,
-        None => return RuntimeValue::NIL,
-    };
-
-    let result = a_tensor + b_tensor;
-    let handle = store_tensor(result);
-    RuntimeValue::from_int(handle)
-});
+binary_tensor_op!(rt_torch_add, +);
 
 pytorch_fn!(rt_torch_add_scalar, (tensor: RuntimeValue, scalar: f64), {
     let tensor_handle = match value_to_tensor_handle(tensor) {
@@ -67,53 +83,8 @@ pytorch_fn!(rt_torch_add_scalar, (tensor: RuntimeValue, scalar: f64), {
     RuntimeValue::from_int(handle)
 });
 
-pytorch_fn!(rt_torch_sub, (a: RuntimeValue, b: RuntimeValue), {
-    let a_handle = match value_to_tensor_handle(a) {
-        Some(h) => h,
-        None => return RuntimeValue::NIL,
-    };
-    let b_handle = match value_to_tensor_handle(b) {
-        Some(h) => h,
-        None => return RuntimeValue::NIL,
-    };
-
-    let a_tensor = match get_tensor(a_handle) {
-        Some(t) => t,
-        None => return RuntimeValue::NIL,
-    };
-    let b_tensor = match get_tensor(b_handle) {
-        Some(t) => t,
-        None => return RuntimeValue::NIL,
-    };
-
-    let result = a_tensor - b_tensor;
-    let handle = store_tensor(result);
-    RuntimeValue::from_int(handle)
-});
-
-pytorch_fn!(rt_torch_mul, (a: RuntimeValue, b: RuntimeValue), {
-    let a_handle = match value_to_tensor_handle(a) {
-        Some(h) => h,
-        None => return RuntimeValue::NIL,
-    };
-    let b_handle = match value_to_tensor_handle(b) {
-        Some(h) => h,
-        None => return RuntimeValue::NIL,
-    };
-
-    let a_tensor = match get_tensor(a_handle) {
-        Some(t) => t,
-        None => return RuntimeValue::NIL,
-    };
-    let b_tensor = match get_tensor(b_handle) {
-        Some(t) => t,
-        None => return RuntimeValue::NIL,
-    };
-
-    let result = a_tensor * b_tensor;
-    let handle = store_tensor(result);
-    RuntimeValue::from_int(handle)
-});
+binary_tensor_op!(rt_torch_sub, -);
+binary_tensor_op!(rt_torch_mul, *);
 
 pytorch_fn!(rt_torch_mul_scalar, (tensor: RuntimeValue, scalar: f64), {
     let tensor_handle = match value_to_tensor_handle(tensor) {
@@ -131,29 +102,7 @@ pytorch_fn!(rt_torch_mul_scalar, (tensor: RuntimeValue, scalar: f64), {
     RuntimeValue::from_int(handle)
 });
 
-pytorch_fn!(rt_torch_div, (a: RuntimeValue, b: RuntimeValue), {
-    let a_handle = match value_to_tensor_handle(a) {
-        Some(h) => h,
-        None => return RuntimeValue::NIL,
-    };
-    let b_handle = match value_to_tensor_handle(b) {
-        Some(h) => h,
-        None => return RuntimeValue::NIL,
-    };
-
-    let a_tensor = match get_tensor(a_handle) {
-        Some(t) => t,
-        None => return RuntimeValue::NIL,
-    };
-    let b_tensor = match get_tensor(b_handle) {
-        Some(t) => t,
-        None => return RuntimeValue::NIL,
-    };
-
-    let result = a_tensor / b_tensor;
-    let handle = store_tensor(result);
-    RuntimeValue::from_int(handle)
-});
+binary_tensor_op!(rt_torch_div, /);
 
 pytorch_fn!(rt_torch_matmul, (a: RuntimeValue, b: RuntimeValue), {
     let a_handle = match value_to_tensor_handle(a) {

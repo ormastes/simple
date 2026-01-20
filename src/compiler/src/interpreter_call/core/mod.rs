@@ -10,6 +10,9 @@ pub(crate) mod async_support;
 // Argument binding and validation
 pub(crate) mod arg_binding;
 
+// Argument evaluation helpers
+pub(crate) mod arg_eval;
+
 // Lambda execution
 pub(crate) mod lambda;
 
@@ -27,6 +30,7 @@ pub(crate) mod aop_advice;
 
 // Re-export public interface for backward compatibility
 pub(crate) use arg_binding::{bind_args, bind_args_with_injected};
+pub(crate) use arg_eval::{eval_arg, eval_arg_int};
 pub(crate) use class_instantiation::instantiate_class;
 pub(crate) use function_exec::{
     exec_function, exec_function_with_captured_env, exec_function_with_values, exec_function_with_values_and_self,

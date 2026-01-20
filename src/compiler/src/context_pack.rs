@@ -298,7 +298,7 @@ mod tests {
 pub fn calculate(x: i64, y: i64) -> i64:
     return x + y
 
-pub fn process(data: str) -> Result[i64, str]:
+pub fn process(data: str) -> Result<i64, str>:
     return Ok(42)
 "#;
         let nodes = parse_code(code);

@@ -247,10 +247,64 @@ fn err_to_tuple2(e: NetError) -> (i64, i64) {
     (0, e as i64)
 }
 
-/// Convert error code to (0, 0, error_code) tuple  
+/// Convert error code to (0, 0, error_code) tuple
 #[inline]
 fn err_to_tuple3(e: NetError) -> (i64, i64, i64) {
     (0, 0, e as i64)
+}
+
+/// Helper trait for sockets that support timeout configuration
+trait TimeoutSocket {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()>;
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()>;
+}
+
+impl TimeoutSocket for UdpSocket {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        UdpSocket::set_read_timeout(self, timeout)
+    }
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        UdpSocket::set_write_timeout(self, timeout)
+    }
+}
+
+impl TimeoutSocket for TcpStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        TcpStream::set_read_timeout(self, timeout)
+    }
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        TcpStream::set_write_timeout(self, timeout)
+    }
+}
+
+/// Unified close function for all socket types
+fn close_socket(handle: i64) -> i64 {
+    match unregister_socket(handle) {
+        Some(_) => NetError::Success as i64,
+        None => NetError::InvalidHandle as i64,
+    }
+}
+
+/// Macro to create timeout setter functions (read/write)
+/// Usage: impl_timeout_setters!(native_tcp_set_read_timeout, TcpStream, read)
+macro_rules! impl_timeout_setter {
+    ($fn_name:ident, $socket_type:ident, $timeout_method:ident) => {
+        #[no_mangle]
+        pub extern "C" fn $fn_name(handle: i64, timeout_ns: i64) -> i64 {
+            with_socket!(handle, $socket_type, err_to_i64, socket => {
+                let timeout = if timeout_ns > 0 {
+                    Some(Duration::from_nanos(timeout_ns as u64))
+                } else {
+                    None
+                };
+
+                match socket.$timeout_method(timeout) {
+                    Ok(_) => NetError::Success as i64,
+                    Err(e) => NetError::from(e) as i64,
+                }
+            })
+        }
+    };
 }
 
 // ============================================================================
