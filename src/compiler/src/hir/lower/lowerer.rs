@@ -79,6 +79,23 @@ impl Lowerer {
         }
     }
 
+    /// Create a new lowerer with lenient memory mode (for backwards compatibility)
+    /// In lenient mode, capability violations are warnings instead of errors
+    pub fn with_lenient_mode() -> Self {
+        Self {
+            module: HirModule::new(),
+            globals: HashMap::new(),
+            pure_functions: HashSet::new(),
+            current_class_type: None,
+            module_resolver: None,
+            current_file: None,
+            loaded_modules: HashSet::new(),
+            memory_warnings: MemoryWarningCollector::new(), // Lenient mode (warnings)
+            lifetime_context: LifetimeContext::new(),
+            capability_env: CapabilityEnv::new(),
+        }
+    }
+
     /// Get the collected memory warnings
     pub fn memory_warnings(&self) -> &MemoryWarningCollector {
         &self.memory_warnings
@@ -127,6 +144,16 @@ impl Lowerer {
     /// Generate Lean 4 verification code for lifetime constraints
     pub fn generate_lean4_lifetime_verification(&self) -> String {
         self.lifetime_context.generate_lean4()
+    }
+
+    /// Get the capability environment
+    pub fn capability_env(&self) -> &CapabilityEnv {
+        &self.capability_env
+    }
+
+    /// Get mutable access to the capability environment
+    pub fn capability_env_mut(&mut self) -> &mut CapabilityEnv {
+        &mut self.capability_env
     }
 }
 

@@ -7,6 +7,7 @@ use simple_parser::ast::Mutability;
 use simple_parser::Span;
 
 use super::super::types::{HirExpr, HirExprKind, HirType, PointerKind, TypeId};
+use super::context::FunctionContext;
 use super::lowerer::Lowerer;
 use super::memory_warning::{MemoryWarning, MemoryWarningCode};
 
@@ -178,7 +179,6 @@ impl Lowerer {
 
     /// W1006: Check for mutation without mut capability
     /// Called when we see an assignment and need to verify the target has mut
-    #[allow(dead_code)] // Will be used when capability tracking is integrated
     pub(super) fn check_mutation_capability(&mut self, target: &HirExpr, span: Span, has_mut_capability: bool) {
         if has_mut_capability {
             return; // Has mut, all good
@@ -224,6 +224,78 @@ impl Lowerer {
                     );
                 }
             }
+        }
+    }
+
+    /// Check if an expression has mutation capability
+    ///
+    /// Returns true if the expression can be legally mutated based on:
+    /// - Local variable mutability (var vs val)
+    /// - Pointer capability (Exclusive, Isolated allow mutation)
+    /// - Receiver capability for field access
+    pub(super) fn expr_has_mut_capability(&self, expr: &HirExpr, ctx: &FunctionContext) -> bool {
+        match &expr.kind {
+            // Local variable: check mutability and capability
+            HirExprKind::Local(idx) => {
+                // First check if the local is declared as mutable (var)
+                if let Some(local) = ctx.get_local(*idx) {
+                    if local.mutability == Mutability::Mutable {
+                        return true;
+                    }
+                }
+                // Also check if it has a mutable capability
+                ctx.has_mut_capability(*idx)
+            }
+
+            // Field access: check receiver's capability
+            HirExprKind::FieldAccess { receiver, .. } => self.expr_has_mut_capability(receiver, ctx),
+
+            // Index access: check receiver's capability
+            HirExprKind::Index { receiver, .. } => self.expr_has_mut_capability(receiver, ctx),
+
+            // Deref: check the pointer's capability
+            HirExprKind::Deref(inner) => {
+                // Check if the inner type is a pointer with mut capability
+                if let Some(HirType::Pointer { capability, .. }) = self.module.types.get(inner.ty) {
+                    capability.allows_mutation()
+                } else {
+                    false
+                }
+            }
+
+            // Global variables are generally mutable (for now)
+            HirExprKind::Global(_) => true,
+
+            // Other expressions: check if they are pointers with mut capability
+            _ => {
+                if let Some(HirType::Pointer { capability, .. }) = self.module.types.get(expr.ty) {
+                    capability.allows_mutation()
+                } else {
+                    // Non-pointer types: value semantics, mutability depends on binding
+                    // This case shouldn't typically be reached for assignment targets
+                    false
+                }
+            }
+        }
+    }
+
+    /// Get the reference ID for an expression (for aliasing tracking)
+    /// Returns Some(id) if the expression represents a trackable reference
+    pub(super) fn get_expr_ref_id(&self, expr: &HirExpr) -> Option<usize> {
+        match &expr.kind {
+            HirExprKind::Local(idx) => Some(*idx),
+            HirExprKind::FieldAccess { receiver, field_index } => {
+                // Combine receiver ID with field index for unique identification
+                self.get_expr_ref_id(receiver)
+                    .map(|base_id| base_id * 1000 + field_index)
+            }
+            HirExprKind::Index { receiver, .. } => {
+                // For array indexing, just use the receiver ID
+                // (we can't statically determine the index)
+                self.get_expr_ref_id(receiver)
+            }
+            HirExprKind::Deref(inner) => self.get_expr_ref_id(inner),
+            _ => None,
         }
     }
 }

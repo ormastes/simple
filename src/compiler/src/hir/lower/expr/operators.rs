@@ -103,10 +103,21 @@ impl Lowerer {
         };
 
         match op {
-            ast::UnaryOp::Ref | ast::UnaryOp::RefMut => Ok(HirExpr {
-                kind: HirExprKind::Ref(operand_hir),
-                ty,
-            }),
+            ast::UnaryOp::Ref | ast::UnaryOp::RefMut => {
+                // Check aliasing rules for exclusive/isolated capabilities
+                if *op == ast::UnaryOp::RefMut {
+                    if let Some(id) = self.get_expr_ref_id(&operand_hir) {
+                        // Check if we can acquire exclusive capability
+                        self.capability_env.can_acquire(id, ReferenceCapability::Exclusive)?;
+                        // Acquire the capability to track it
+                        self.capability_env.acquire(id, ReferenceCapability::Exclusive);
+                    }
+                }
+                Ok(HirExpr {
+                    kind: HirExprKind::Ref(operand_hir),
+                    ty,
+                })
+            }
             ast::UnaryOp::Deref => Ok(HirExpr {
                 kind: HirExprKind::Deref(operand_hir),
                 ty,
