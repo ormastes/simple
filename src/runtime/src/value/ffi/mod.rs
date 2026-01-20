@@ -43,6 +43,12 @@
 //! ## Phase 10B: PyTorch/ML Integration ✅
 //! - `pytorch` - PyTorch operations (tensors, autograd, layers, optimizers, JIT, ONNX, distributed)
 //!
+//! ## Phase 11: Runtime Configuration ✅
+//! - `config` - Runtime configuration (macro trace, debug mode)
+//!
+//! ## Phase 12: Regular Expressions ✅
+//! - `regex` - Regular expression operations (match, find, capture, replace, split)
+//!
 //! ## Refactoring Complete! ✅
 //! All FFI functions have been extracted from ffi_legacy.rs into organized, tested modules.
 //!
@@ -88,6 +94,12 @@ pub mod utils;
 // Phase 10B: PyTorch/ML integration
 pub mod pytorch;
 
+// Phase 11: Runtime configuration
+pub mod config;
+
+// Phase 12: Regular expressions
+pub mod regex;
+
 // Re-export all public FFI functions for backward compatibility
 // Phase 1
 pub use equality::*;
@@ -128,3 +140,9 @@ pub use utils::*;
 
 // Phase 10B
 pub use pytorch::*;
+
+// Phase 11
+pub use config::*;
+
+// Phase 12
+pub use regex::*;

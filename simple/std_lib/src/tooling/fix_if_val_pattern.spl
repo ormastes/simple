@@ -3,7 +3,8 @@
 # Purpose: Fix 'if val Some(x) = ...' pattern to use match instead
 
 # TODO: [stdlib][P1] Add regex library to Simple
-# TODO: [stdlib][P1] Add file I/O library to Simple
+
+import fs.{read_text, write_text, glob}
 
 # Migration statistics
 struct FixIfValStats:
@@ -107,40 +108,64 @@ fn fix_if_val_content(content: text) -> text:
 
     content  # Return unchanged for now
 
-# TODO: [stdlib][P1] Add file I/O and regex
 # Fix if-val patterns in a single file
+# TODO: [stdlib][P1] Needs regex for actual pattern fixing
 fn fix_if_val_file(filepath: text) -> MigrationResult:
-    # Stub: Needs file I/O and regex
-    # Would:
-    # 1. Read file content
-    # 2. Check if 'if val Some' exists in content (optimization)
-    # 3. Apply fix_if_val_content()
-    # 4. If changed:
-    #    - Write fixed content
-    #    - Count patterns fixed
-    #    - Return MigrationResult.fixed(count)
-    # 5. Else return MigrationResult.unchanged()
-    MigrationResult.error("file I/O not yet implemented")
+    # Read file content
+    match read_text(filepath):
+        Ok(content):
+            # Check if 'if val Some' exists in content (optimization)
+            if not content.contains("if val Some"):
+                return MigrationResult.unchanged()
 
-# TODO: [stdlib][P1] Add directory operations
+            # Apply fix_if_val_content() (currently a stub without regex)
+            val fixed_content = fix_if_val_content(content)
+
+            # Check if anything changed
+            if fixed_content == content:
+                MigrationResult.unchanged()
+            else:
+                # Write fixed content
+                match write_text(filepath, fixed_content):
+                    Ok(_):
+                        # TODO: Count patterns fixed once regex is available
+                        MigrationResult.fixed(1)
+                    Err(e):
+                        MigrationResult.error("Failed to write file: {e}")
+        Err(e):
+            MigrationResult.error("Failed to read file: {e}")
+
 # Find all .spl files in directory
 fn find_spl_files(root_dir: text) -> List<text>:
-    # Stub: Needs glob/directory listing
-    # Would:
-    # 1. Glob for **/*.spl
-    # 2. Return list of file paths
-    []
+    # Glob for **/*.spl
+    match glob(root_dir, "**/*.spl"):
+        Ok(files): files
+        Err(_): []  # Return empty list on error
 
-# TODO: [stdlib][P1] Add file I/O
 # Run fix on all .spl files in directory
+# TODO: [stdlib][P1] Needs regex for actual pattern fixing
 fn run_fix_if_val(root_dir: text) -> FixIfValStats:
-    # Stub: Needs file I/O, regex, directory ops
-    # Would:
-    # 1. Find all .spl files
-    # 2. Process each file
-    # 3. Track statistics
-    # 4. Return stats
-    FixIfValStats.new()
+    var stats = FixIfValStats.new()
+
+    # Find all .spl files
+    val files = find_spl_files(root_dir)
+
+    # Process each file
+    var i = 0
+    while i < files.len():
+        val filepath = files[i]
+        stats.add_processed()
+
+        val result = fix_if_val_file(filepath)
+        if result.modified:
+            stats.add_modified(result.patterns_fixed)
+        elif not result.error.is_empty():
+            # Error occurred, but continue processing
+            print "Error processing {filepath}: {result.error}"
+
+        i = i + 1
+
+    stats
 
 # Pattern documentation
 struct FixIfValPattern:
@@ -216,10 +241,69 @@ fn print_fix_if_val_examples() -> text:
 
     output
 
-# TODO: [stdlib][P1] Add CLI argument parsing
+# CLI options for fix_if_val command
+struct FixIfValOptions:
+    root_dir: text
+    show_help: bool
+
+impl FixIfValOptions:
+    # Create default options
+    static fn default() -> FixIfValOptions:
+        FixIfValOptions(
+            root_dir: "simple/std_lib/src/spec",
+            show_help: false
+        )
+
+    # Parse CLI arguments
+    static fn parse(args: List<text>) -> FixIfValOptions:
+        var options = FixIfValOptions.default()
+        var i = 0
+
+        while i < args.len():
+            val arg = args[i]
+
+            if arg == "--help" or arg == "-h":
+                options.show_help = true
+            elif not arg.starts_with("-"):
+                # Positional argument: root directory
+                options.root_dir = arg
+
+            i = i + 1
+
+        options
+
+# Print usage help for fix_if_val
+fn print_fix_if_val_help() -> text:
+    var help = ""
+    help = help + "Usage: simple fix-if-val [OPTIONS] [ROOT_DIR]\n\n"
+    help = help + "Fix 'if val Some(x) = ...' patterns to use match expressions instead.\n\n"
+    help = help + "Arguments:\n"
+    help = help + "  ROOT_DIR         Directory to process (default: simple/std_lib/src/spec)\n\n"
+    help = help + "Options:\n"
+    help = help + "  -h, --help       Show this help message\n\n"
+    help = help + "Examples:\n"
+    help = help + "  simple fix-if-val                         # Fix in default spec directory\n"
+    help = help + "  simple fix-if-val src/                    # Fix in src/ directory\n"
+    help
+
 # Main entry point
 fn main_fix_if_val(args: List<text>) -> Result<(), text>:
-    # Stub: Needs argument parsing and file I/O
-    # Would handle:
-    # <root_dir>        Directory to process (default: simple/std_lib/src/spec)
-    Err("CLI not yet implemented - use as library instead")
+    val options = FixIfValOptions.parse(args)
+
+    # Show help if requested
+    if options.show_help:
+        print print_fix_if_val_help()
+        return Ok(())
+
+    print "Fixing if-val-Some patterns in: {options.root_dir}"
+
+    # Run the fix
+    val stats = run_fix_if_val(options.root_dir)
+
+    # Print summary
+    print stats.summary()
+
+    # Print pattern examples for reference
+    print print_fix_if_val_examples()
+
+    Ok(())

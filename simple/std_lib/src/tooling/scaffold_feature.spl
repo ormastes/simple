@@ -3,7 +3,8 @@
 # Purpose: Generate BDD test templates from feature markdown files
 
 # TODO: [stdlib][P1] Add regex library to Simple
-# TODO: [stdlib][P1] Add file I/O library to Simple
+
+import fs.{read_text, write_text}
 
 # Feature metadata extracted from markdown
 struct FeatureMetadata:
@@ -209,16 +210,27 @@ fn join_u64_list(list: List<u64>) -> text:
         i = i + 1
     result
 
-# TODO: [stdlib][P1] Add file I/O
 # Generate scaffold from markdown file
+# TODO: [stdlib][P1] Needs regex support for full parsing
 fn scaffold_from_file(md_path: text) -> ScaffoldResult:
-    # Stub: Needs file I/O and regex
-    # Would:
-    # 1. Read markdown file
-    # 2. Parse metadata using regex functions
-    # 3. Generate scaffold
-    # 4. Return result
-    ScaffoldResult.error("file I/O not yet implemented")
+    # Read markdown file
+    match read_text(md_path):
+        Ok(content):
+            # Parse metadata using regex functions (currently stubs)
+            val metadata = parse_overview_table(content)
+
+            # TODO: Once regex is available, implement proper parsing:
+            # - Extract description from "Description" section
+            # - Parse file table for implementation files
+            # - Parse test table for test files
+            # - Extract dependencies and required_by
+            # - Extract notes section
+
+            # Generate scaffold
+            val scaffold_content = generate_test_scaffold(metadata, md_path)
+            ScaffoldResult.success(scaffold_content)
+        Err(e):
+            ScaffoldResult.error("Failed to read markdown file: {e}")
 
 # Scaffold statistics
 struct ScaffoldStats:
@@ -254,10 +266,125 @@ impl ScaffoldStats:
         report = report + "  Failed: {self.failed}\n"
         report
 
-# TODO: [stdlib][P1] Add CLI argument parsing
+# Write scaffold to file
+fn write_scaffold_to_file(output_path: text, content: text) -> Result<(), text>:
+    match write_text(output_path, content):
+        Ok(_): Ok(())
+        Err(e): Err("Failed to write scaffold: {e}")
+
+# Generate and write scaffold from markdown file to output file
+fn scaffold_and_write(md_path: text, output_path: text) -> Result<(), text>:
+    match scaffold_from_file(md_path):
+        Ok(result):
+            if result.success:
+                write_scaffold_to_file(output_path, result.content)
+            else:
+                Err(result.error_message)
+        Err(e):
+            Err(e)
+
+# CLI options for scaffold_feature command
+struct ScaffoldFeatureOptions:
+    markdown_file: Option<text>
+    output_file: Option<text>
+    stdout: bool
+    show_help: bool
+
+impl ScaffoldFeatureOptions:
+    # Create default options
+    static fn default() -> ScaffoldFeatureOptions:
+        ScaffoldFeatureOptions(
+            markdown_file: None,
+            output_file: None,
+            stdout: false,
+            show_help: false
+        )
+
+    # Parse CLI arguments
+    static fn parse(args: List<text>) -> ScaffoldFeatureOptions:
+        var options = ScaffoldFeatureOptions.default()
+        var positional_count = 0
+        var i = 0
+
+        while i < args.len():
+            val arg = args[i]
+
+            if arg == "--stdout" or arg == "-s":
+                options.stdout = true
+            elif arg == "--output" or arg == "-o" and i + 1 < args.len():
+                i = i + 1
+                options.output_file = Some(args[i])
+            elif arg == "--help" or arg == "-h":
+                options.show_help = true
+            elif not arg.starts_with("-"):
+                # Positional arguments: markdown_file and output_file
+                if positional_count == 0:
+                    options.markdown_file = Some(arg)
+                elif positional_count == 1:
+                    options.output_file = Some(arg)
+                positional_count = positional_count + 1
+
+            i = i + 1
+
+        options
+
+# Print usage help for scaffold_feature
+fn print_scaffold_feature_help() -> text:
+    var help = ""
+    help = help + "Usage: simple scaffold-feature [OPTIONS] <MARKDOWN_FILE> [OUTPUT_FILE]\n\n"
+    help = help + "Generate BDD test templates from feature markdown files.\n\n"
+    help = help + "Arguments:\n"
+    help = help + "  MARKDOWN_FILE    Feature description markdown file\n"
+    help = help + "  OUTPUT_FILE      Output _spec.spl file (optional)\n\n"
+    help = help + "Options:\n"
+    help = help + "  -o, --output     Specify output file explicitly\n"
+    help = help + "  -s, --stdout     Print scaffold to stdout instead of file\n"
+    help = help + "  -h, --help       Show this help message\n\n"
+    help = help + "Examples:\n"
+    help = help + "  simple scaffold-feature doc/features/001_lexer.md\n"
+    help = help + "  simple scaffold-feature doc/features/001_lexer.md tests/001_lexer_spec.spl\n"
+    help = help + "  simple scaffold-feature --stdout doc/features/001_lexer.md\n"
+    help
+
 # Main entry point
 fn main_scaffold_feature(args: List<text>) -> Result<(), text>:
-    # Stub: Needs argument parsing and file I/O
-    # Would handle:
-    # <markdown_file>     Generate scaffold from file
-    Err("CLI not yet implemented - use as library instead")
+    val options = ScaffoldFeatureOptions.parse(args)
+
+    # Show help if requested
+    if options.show_help:
+        print print_scaffold_feature_help()
+        return Ok(())
+
+    # Require markdown file
+    match options.markdown_file:
+        Some(md_path):
+            print "Scaffolding from: {md_path}"
+
+            # Generate scaffold
+            val result = scaffold_from_file(md_path)
+
+            if result.success:
+                if options.stdout:
+                    # Print to stdout
+                    print result.content
+                    Ok(())
+                else:
+                    # Write to file
+                    val output_path = match options.output_file:
+                        Some(path): path
+                        None:
+                            # Generate default output path
+                            # Replace .md with _spec.spl
+                            val base = md_path.replace(".md", "")
+                            "{base}_spec.spl"
+
+                    match write_scaffold_to_file(output_path, result.content):
+                        Ok(_):
+                            print "Scaffold written to: {output_path}"
+                            Ok(())
+                        Err(e):
+                            Err(e)
+            else:
+                Err(result.error_message)
+        None:
+            Err("Missing required argument: MARKDOWN_FILE\nRun with --help for usage information.")

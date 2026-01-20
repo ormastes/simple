@@ -396,7 +396,19 @@ impl<'a> Parser<'a> {
             // Gherkin-style system test DSL (Features #606-610)
             TokenKind::Feature => self.parse_feature(),
             TokenKind::Scenario => self.parse_scenario(),
-            TokenKind::Examples => self.parse_examples(),
+            TokenKind::Examples => {
+                // Check if this is an expression/assignment vs a Gherkin examples block
+                // Gherkin examples: `examples name:` - followed by identifier then colon
+                // Expression uses: assignment, method call, index, return value
+                if self.peek_is(&TokenKind::Assign) || self.peek_is(&TokenKind::Dot)
+                    || self.peek_is(&TokenKind::LBracket) || self.peek_is(&TokenKind::LParen)
+                    || self.peek_is(&TokenKind::Newline) || self.peek_is(&TokenKind::Dedent)
+                {
+                    self.parse_expression_or_assignment()
+                } else {
+                    self.parse_examples()
+                }
+            }
             TokenKind::Given | TokenKind::When | TokenKind::Then | TokenKind::AndThen => self.parse_step_ref_as_node(),
             // Wildcard suspension: _ ~= expr (discard awaited result)
             TokenKind::Underscore => self.parse_wildcard_suspend(),

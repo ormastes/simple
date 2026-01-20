@@ -184,6 +184,23 @@ pub use ffi::{
     rt_process_execute, rt_process_run, rt_process_spawn, rt_set_env,
 };
 
+// Re-export runtime configuration FFI functions
+pub use ffi::{rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_set_debug_mode, rt_set_macro_trace};
+
+// Re-export file I/O FFI functions
+pub use ffi::{
+    // Metadata
+    rt_file_exists, rt_file_stat,
+    // File ops
+    rt_file_canonicalize, rt_file_read_text, rt_file_write_text, rt_file_copy, rt_file_remove, rt_file_rename,
+    // Directory ops
+    rt_dir_create, rt_dir_list, rt_dir_remove, rt_file_find, rt_dir_glob,
+    // Descriptor ops
+    rt_file_open, rt_file_get_size, rt_file_close,
+    // Path ops
+    rt_path_basename, rt_path_dirname, rt_path_ext, rt_path_absolute, rt_path_separator,
+};
+
 // Re-export atomic operations FFI functions
 pub use ffi::{
     rt_atomic_bool_free, rt_atomic_bool_load, rt_atomic_bool_new, rt_atomic_bool_store, rt_atomic_bool_swap,

@@ -199,6 +199,37 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_decision_probe",
     "rt_condition_probe",
     "rt_path_probe",
+    // Runtime configuration
+    "rt_set_macro_trace",
+    "rt_is_macro_trace_enabled",
+    "rt_set_debug_mode",
+    "rt_is_debug_mode_enabled",
+    // File I/O operations - metadata
+    "rt_file_exists",
+    "rt_file_stat",
+    // File I/O operations - file ops
+    "rt_file_canonicalize",
+    "rt_file_read_text",
+    "rt_file_write_text",
+    "rt_file_copy",
+    "rt_file_remove",
+    "rt_file_rename",
+    // File I/O operations - directory
+    "rt_dir_create",
+    "rt_dir_list",
+    "rt_dir_remove",
+    "rt_file_find",
+    "rt_dir_glob",
+    // File I/O operations - descriptor
+    "rt_file_open",
+    "rt_file_get_size",
+    "rt_file_close",
+    // File I/O operations - path
+    "rt_path_basename",
+    "rt_path_dirname",
+    "rt_path_ext",
+    "rt_path_absolute",
+    "rt_path_separator",
 ];
 
 #[cfg(test)]
