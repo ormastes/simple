@@ -13,7 +13,7 @@
 | Interpreter/Codegen overlap | 2,600+ | CRITICAL | ✅ Mostly resolved |
 | Rust semantic patterns | 1,500+ | HIGH | ✅ Mostly resolved |
 | Simple code patterns | 800+ | MEDIUM | ✅ Mostly resolved |
-| Rust → Simple migration candidates | 1,900 | HIGH | ⏳ In progress (1/5) |
+| Rust → Simple migration candidates | 1,900 | HIGH | ✅ Complete (3/3 high priority) |
 | **Total refactoring opportunity** | **~6,800 lines** | | |
 
 ### Quantitative Baseline (jscpd)
@@ -263,8 +263,8 @@ meaningfully reduced further. This is inherent to having both concrete methods a
 | File | Lines | Migration Benefit | Status |
 |------|-------|-------------------|--------|
 | `src/driver/src/todo_parser.rs` | 608 | Pure string/regex processing | ✅ DONE |
-| `src/common/src/config_env.rs` | 423 | Dictionary manipulation | ⏳ |
-| `src/driver/src/cli/test_output.rs` | 410 | Text formatting | ⏳ |
+| `src/common/src/config_env.rs` | 423 | Dictionary manipulation | ✅ DONE |
+| `src/driver/src/cli/test_output.rs` | 410 | Text formatting | ✅ DONE |
 
 ### 4.2 Medium Priority (500+ lines)
 
@@ -397,9 +397,11 @@ meaningfully reduced further. This is inherent to having both concrete methods a
 
 1. ~~**Create error factory functions**~~ ✅ EXTENDED - Added 9 new factory functions, ~103 occurrences remaining for gradual migration
 2. ~~**Migrate `todo_parser.rs` to Simple**~~ ✅ DONE - Created `simple/std_lib/src/tooling/todo_parser.spl` (365 lines)
-3. **Migrate `config_env.rs` to Simple** - 423 lines, dictionary manipulation
-4. **Migrate `test_output.rs` to Simple** - 410 lines, text formatting
-5. **Simple trait defaults** - Vector math and primitive types need trait default implementations
+3. ~~**Migrate `config_env.rs` to Simple**~~ ✅ DONE - Created `simple/std_lib/src/tooling/config_env.spl` (250 lines)
+4. ~~**Migrate `test_output.rs` to Simple**~~ ✅ DONE - Created `simple/std_lib/src/tooling/test_output.spl` (340 lines)
+5. ~~**Simple trait defaults**~~ ✅ DONE - Vector types now use VectorOps trait; primitives use Number trait
+
+**All high-priority migration tasks complete!**
 
 ### Summary of Lines Saved (Session)
 
@@ -456,10 +458,10 @@ src/compiler/src/error.rs                     # Error patterns - ✅ error::fact
 ### Migration Candidate Files
 ```
 src/driver/src/todo_parser.rs                 # 608 lines → Simple ✅ DONE
-src/common/src/config_env.rs                  # 423 lines → Simple
-src/driver/src/cli/test_output.rs             # 410 lines → Simple
-src/driver/src/cli/migrate/generics.rs        # 200 lines → Simple
-src/driver/src/cli/help.rs                    # 188 lines → Simple
+src/common/src/config_env.rs                  # 423 lines → Simple ✅ DONE
+src/driver/src/cli/test_output.rs             # 410 lines → Simple ✅ DONE
+src/driver/src/cli/migrate/generics.rs        # 200 lines → Simple (medium priority)
+src/driver/src/cli/help.rs                    # 188 lines → Simple (medium priority)
 ```
 
 ### Simple Duplication Files
