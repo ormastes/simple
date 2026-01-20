@@ -283,7 +283,7 @@ theorem wellformed_no_conflicts (env : RefEnv) (h_wf : wellFormed env) :
     rw [List.any_eq_false]
     intros ref h_mem
     unfold allowsAccess
-    simp only [Bool.and_eq_true, beq_iff_eq, Bool.or_eq_true, decide_eq_true_eq]
+    simp only [Bool.and_eq_true, beq_iff_eq, Bool.or_eq_true]
     intro ⟨_, h_cap⟩
     cases h_cap with
     | inl h_excl => exact h_no_excl ref h_mem h_excl

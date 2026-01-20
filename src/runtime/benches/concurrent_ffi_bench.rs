@@ -35,7 +35,7 @@ fn bench_map_operations(c: &mut Criterion) {
                                 let ops_per_thread = 100_000 / num_threads as usize;
                                 for i in 0..ops_per_thread {
                                     let key = ((thread_id * 10000 + i) % 1000) as i64;
-                                    let value = RuntimeValue::Int(i as i64);
+                                    let value = RuntimeValue::from_int(i as i64);
 
                                     let op_type = i % 100;
                                     if op_type < 80 {
@@ -78,7 +78,7 @@ fn bench_map_operations(c: &mut Criterion) {
                                 let ops_per_thread = 10_000 / num_threads as usize;
                                 for i in 0..ops_per_thread {
                                     let key = (thread_id * 10000 + i) as i64;
-                                    let value = RuntimeValue::Int(i as i64);
+                                    let value = RuntimeValue::from_int(i as i64);
                                     black_box(rt_concurrent_map_insert(*map_handle, key, value));
                                 }
                             })
@@ -125,7 +125,7 @@ fn bench_queue_operations(c: &mut Criterion) {
                         handles.push(thread::spawn(move || {
                             let ops_per_thread = 100_000 / producers as usize;
                             for i in 0..ops_per_thread {
-                                let value = RuntimeValue::Int((thread_id * 100000 + i) as i64);
+                                let value = RuntimeValue::from_int((thread_id * 100000 + i) as i64);
                                 black_box(rt_concurrent_queue_push(*queue_handle, value));
                             }
                         }));
@@ -139,7 +139,7 @@ fn bench_queue_operations(c: &mut Criterion) {
                             for _ in 0..ops_per_thread {
                                 loop {
                                     let val = rt_concurrent_queue_pop(*queue_handle);
-                                    if !matches!(val, RuntimeValue::None) {
+                                    if val != RuntimeValue::NIL {
                                         black_box(val);
                                         break;
                                     }
@@ -180,7 +180,7 @@ fn bench_stack_operations(c: &mut Criterion) {
 
                     // Pre-populate stack
                     for i in 0..10_000 {
-                        rt_concurrent_stack_push(*stack_handle, RuntimeValue::Int(i));
+                        rt_concurrent_stack_push(*stack_handle, RuntimeValue::from_int(i));
                     }
 
                     let handles: Vec<_> = (0..num_threads)
@@ -190,7 +190,7 @@ fn bench_stack_operations(c: &mut Criterion) {
                                 let ops_per_thread = 100_000 / num_threads as usize;
                                 for i in 0..ops_per_thread {
                                     if i % 2 == 0 {
-                                        let value = RuntimeValue::Int((thread_id * 100000 + i) as i64);
+                                        let value = RuntimeValue::from_int((thread_id * 100000 + i) as i64);
                                         black_box(rt_concurrent_stack_push(*stack_handle, value));
                                     } else {
                                         black_box(rt_concurrent_stack_pop(*stack_handle));
@@ -231,7 +231,7 @@ fn bench_pool_operations(c: &mut Criterion) {
 
                     // Pre-populate pool
                     for i in 0..1000 {
-                        rt_pool_release(*pool_handle, RuntimeValue::Int(i));
+                        rt_pool_release(*pool_handle, RuntimeValue::from_int(i));
                     }
 
                     let handles: Vec<_> = (0..num_threads)
@@ -241,7 +241,7 @@ fn bench_pool_operations(c: &mut Criterion) {
                                 let ops_per_thread = 100_000 / num_threads as usize;
                                 for _ in 0..ops_per_thread {
                                     let value = rt_pool_acquire(*pool_handle);
-                                    if !matches!(value, RuntimeValue::None) {
+                                    if value != RuntimeValue::NIL {
                                         black_box(rt_pool_release(*pool_handle, value));
                                     }
                                 }
@@ -328,7 +328,7 @@ fn bench_tls_operations(c: &mut Criterion) {
                                 let ops_per_thread = 100_000 / num_threads as usize;
                                 let thread_key = thread_id as u64;
                                 for i in 0..ops_per_thread {
-                                    let value = RuntimeValue::Int(i as i64);
+                                    let value = RuntimeValue::from_int(i as i64);
                                     rt_tls_set(*tls_handle, thread_key, value);
                                     black_box(rt_tls_get(*tls_handle, thread_key));
                                 }

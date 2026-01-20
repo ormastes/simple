@@ -2,8 +2,8 @@
 # Migrated from: scripts/spec_gen.py
 # Purpose: Convert executable specification files to formatted documentation
 
-# TODO: [stdlib][P1] Add regex library to Simple
-# NOTE: Path/PathBuf is available in infra.path module
+import fs.{read_text, write_text, list_dir}
+import regex.{captures, find_all}
 
 use super.time_utils.{current_timestamp_string}
 
@@ -47,17 +47,100 @@ impl TestCase:
             related_tests: []
         )
 
-# TODO: [stdlib][P1] Add regex support for pattern matching
 # Parse a _spec.spl file and extract documentation
 fn parse_spec_file(filepath: text) -> Result<SpecFile, text>:
-    # Stub: Needs file I/O and regex
-    # Would:
-    # 1. Read file content
-    # 2. Extract header docstring (first """ ... """)
-    # 3. Parse metadata (lines like **Key:** value)
-    # 4. Extract test cases (## Test: markers)
-    # 5. For each test: extract docstring, code, symbols
-    Err("file parsing not yet implemented - needs file I/O and regex")
+    match read_text(filepath):
+        Ok(content):
+            var spec = SpecFile.new(filepath)
+            val lines = content.split("\n")
+            var current_section = "General"
+            var current_test: Option<TestCase> = None
+            var in_docstring = false
+            var docstring_lines: List<text> = []
+            var code_lines: List<text> = []
+            var line_num: u64 = 0
+
+            for line in lines:
+                line_num = line_num + 1
+                val trimmed = line.trim()
+
+                # Track docstrings (""" ... """)
+                if trimmed.starts_with("\"\"\""):
+                    if in_docstring:
+                        in_docstring = false
+                        val docstring = docstring_lines.join("\n")
+                        match current_test:
+                            Some(test):
+                                test.docstring = docstring
+                            None:
+                                # This is the header docstring
+                                spec.header_docstring = docstring
+                                # Extract metadata from header
+                                spec.metadata = extract_metadata_from_header(docstring)
+                        docstring_lines = []
+                    else:
+                        in_docstring = true
+                    continue
+
+                if in_docstring:
+                    docstring_lines.push(trimmed)
+                    continue
+
+                # Track sections: context "Section Name":
+                val section_caps = captures(r"context\s+\"([^\"]+)\":", line)
+                if section_caps.len() > 1:
+                    current_section = section_caps[1]
+
+                # Track test cases: it "test name":
+                val test_caps = captures(r"it\s+\"([^\"]+)\":", line)
+                if test_caps.len() > 1:
+                    val test_name = test_caps[1]
+                    # Save previous test if exists
+                    match current_test:
+                        Some(test):
+                            test.code = code_lines.join("\n")
+                            spec.test_cases.push(test)
+                        None: pass
+
+                    # Start new test
+                    current_test = Some(TestCase.new(test_name, current_section, line_num))
+                    code_lines = []
+
+                # Collect code for current test
+                match current_test:
+                    Some(_):
+                        if not trimmed.is_empty() and not trimmed.starts_with("#"):
+                            code_lines.push(line)
+                    None: pass
+
+            # Save last test if exists
+            match current_test:
+                Some(test):
+                    test.code = code_lines.join("\n")
+                    spec.test_cases.push(test)
+                None: pass
+
+            Ok(spec)
+        Err(e):
+            Err("Failed to read file: {e}")
+
+# Helper: Extract metadata from header docstring
+fn extract_metadata_from_header(header: text) -> List<(text, text)>:
+    var metadata: List<(text, text)> = []
+
+    # Look for patterns like **Key:** Value
+    val matches = find_all(r"\*\*([^*]+)\*\*:\s*([^\n]+)", header)
+    var i = 0
+    while i < matches.len():
+        val match_ = matches[i]
+        val caps = captures(r"\*\*([^*]+)\*\*:\s*([^\n]+)", match_.text)
+        if caps.len() > 2:
+            val key = caps[1].trim()
+            val value = caps[2].trim()
+            metadata.push((key, value))
+        i = i + 1
+
+    metadata
 
 # Convert test name to potential symbol names
 # Example: "type_inference_basic" -> ["type_inference", "TypeInference", "type_inference_basic"]
@@ -99,21 +182,80 @@ fn convert_test_name_to_symbols(test_name: text) -> List<text>:
     use super.list_utils.dedup
     dedup(symbols)
 
-# TODO: [stdlib][P1] Add regex library
 # Extract explicit symbol links from docstring
 fn extract_symbols_from_docstring(docstring: text) -> (List<text>, List<text>):
-    # Stub: Needs regex for patterns like **Links:** or **Symbols:**
-    # Returns: (symbols, related_tests)
-    ([], [])
+    var symbols: List<text> = []
+    var related_tests: List<text> = []
 
-# TODO: [stdlib][P1] Add regex library
+    # Look for **Symbols:** or **Links:** sections
+    val symbols_caps = captures(r"\*\*(?:Symbols?|Links?):\*\*\s*([^\n]+)", docstring)
+    if symbols_caps.len() > 1:
+        val symbols_str = symbols_caps[1]
+        # Split by comma and extract each symbol
+        val parts = symbols_str.split(",")
+        var i = 0
+        while i < parts.len():
+            val symbol = parts[i].trim().replace("`", "")
+            if not symbol.is_empty():
+                symbols.push(symbol)
+            i = i + 1
+
+    # Look for **Related Tests:** section
+    val tests_caps = captures(r"\*\*Related Tests?:\*\*\s*([^\n]+)", docstring)
+    if tests_caps.len() > 1:
+        val tests_str = tests_caps[1]
+        val parts = tests_str.split(",")
+        var j = 0
+        while j < parts.len():
+            val test = parts[j].trim().replace("[", "").replace("]", "")
+            if not test.is_empty():
+                related_tests.push(test)
+            j = j + 1
+
+    (symbols, related_tests)
+
 # Scan code for potential symbol references
 fn scan_code_for_symbols(code: text) -> List<text>:
-    # Stub: Needs regex for patterns like:
-    # - Function calls: symbol()
-    # - Method calls: object.method()
-    # - Type usage: Type::variant
-    []
+    var symbols: List<text> = []
+
+    # Find function calls: identifier()
+    val fn_calls = find_all(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", code)
+    var i = 0
+    while i < fn_calls.len():
+        val match_ = fn_calls[i]
+        val caps = captures(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", match_.text)
+        if caps.len() > 1:
+            val fn_name = caps[1]
+            if not symbols.contains(fn_name):
+                symbols.push(fn_name)
+        i = i + 1
+
+    # Find method calls: object.method()
+    val method_calls = find_all(r"\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", code)
+    var j = 0
+    while j < method_calls.len():
+        val match_ = method_calls[j]
+        val caps = captures(r"\.([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", match_.text)
+        if caps.len() > 1:
+            val method_name = caps[1]
+            if not symbols.contains(method_name):
+                symbols.push(method_name)
+                    None: pass
+            None: pass
+
+    # Find type usage: Type::variant or Type.method
+    val type_refs = find_all(r"\b([A-Z][a-zA-Z0-9_]*)::", code)
+    var k = 0
+    while k < type_refs.len():
+        val match_ = type_refs[k]
+        val caps = captures(r"\b([A-Z][a-zA-Z0-9_]*)::", match_.text)
+        if caps.len() > 1:
+            val type_name = caps[1]
+            if not symbols.contains(type_name):
+                symbols.push(type_name)
+        k = k + 1
+
+    symbols
 
 # Generate markdown documentation from parsed spec
 fn generate_markdown(spec: SpecFile, current_time: text) -> text:
@@ -234,10 +376,18 @@ fn generate_markdown(spec: SpecFile, current_time: text) -> text:
 
 # Helper: Extract title from header docstring or generate from filename
 fn extract_title_or_default(header: text, path: text) -> text:
-    # TODO: [stdlib][P1] Add regex for title extraction
-    # For now, use filename
-    # Would search for: ^# (.+)
-    path.replace("_spec", "").replace("_", " ")
+    # Try to extract title from header: # Title
+    match regex_captures(r"^#\s+(.+)", header):
+        Some(caps):
+            match caps.groups[0]:
+                Some(title): return title.trim()
+                None: pass
+        None: pass
+
+    # Fallback: generate from filename
+    val parts = path.split("/")
+    val filename = if parts.len() > 0: parts[parts.len() - 1] else: path
+    filename.replace("_spec.spl", "").replace("_spec", "").replace("_", " ")
 
 # Helper: Get first line or N chars of text
 fn get_first_line(text: text, max_len: u64) -> text:
@@ -263,8 +413,9 @@ fn escape_markdown_table(text: text) -> text:
 
 # Write markdown to file
 fn write_markdown_file(markdown: text, output_path: text) -> Result<(), text>:
-    # Stub: Needs file I/O
-    Err("file writing not yet implemented")
+    match write_text(output_path, markdown):
+        Ok(_): Ok(())
+        Err(e): Err("Failed to write markdown: {e}")
 
 # TODO: [stdlib][P1] Add glob/directory listing
 # Generate markdown for all _spec.spl files in directory

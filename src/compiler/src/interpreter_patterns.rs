@@ -15,7 +15,7 @@ use super::Enums;
 pub(crate) fn is_catch_all_pattern(pattern: &Pattern) -> bool {
     match pattern {
         Pattern::Wildcard => true,
-        Pattern::Identifier(_) | Pattern::MutIdentifier(_) => true,
+        Pattern::Identifier(_) | Pattern::MutIdentifier(_) | Pattern::MoveIdentifier(_) => true,
         Pattern::Or(patterns) => patterns.iter().any(is_catch_all_pattern),
         Pattern::Typed { pattern, .. } => is_catch_all_pattern(pattern),
         _ => false,
@@ -142,6 +142,13 @@ pub(crate) fn pattern_matches(
         }
 
         Pattern::MutIdentifier(name) => {
+            bindings.insert(name.clone(), value.clone());
+            Ok(true)
+        }
+
+        Pattern::MoveIdentifier(name) => {
+            // Move pattern - transfers ownership during pattern matching
+            // For the interpreter, this behaves the same as a regular binding
             bindings.insert(name.clone(), value.clone());
             Ok(true)
         }
