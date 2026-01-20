@@ -59,6 +59,29 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             ffi_regex_captures, ffi_regex_find, ffi_regex_find_all, ffi_regex_is_match,
             ffi_regex_replace, ffi_regex_replace_all, ffi_regex_split, ffi_regex_split_n,
         };
+        // High-performance collections
+        use simple_runtime::value::{
+            // HashMap
+            rt_hashmap_clear, rt_hashmap_contains_key, rt_hashmap_drop, rt_hashmap_entries,
+            rt_hashmap_get, rt_hashmap_insert, rt_hashmap_keys, rt_hashmap_len, rt_hashmap_new,
+            rt_hashmap_remove, rt_hashmap_values,
+            // BTreeMap
+            rt_btreemap_clear, rt_btreemap_contains_key, rt_btreemap_drop, rt_btreemap_entries,
+            rt_btreemap_first_key, rt_btreemap_get, rt_btreemap_insert, rt_btreemap_keys,
+            rt_btreemap_last_key, rt_btreemap_len, rt_btreemap_new, rt_btreemap_remove,
+            rt_btreemap_values,
+            // HashSet
+            rt_hashset_clear, rt_hashset_contains, rt_hashset_difference, rt_hashset_drop,
+            rt_hashset_insert, rt_hashset_intersection, rt_hashset_is_subset,
+            rt_hashset_is_superset, rt_hashset_len, rt_hashset_new, rt_hashset_remove,
+            rt_hashset_symmetric_difference, rt_hashset_to_array, rt_hashset_union,
+            // BTreeSet
+            rt_btreeset_clear, rt_btreeset_contains, rt_btreeset_difference, rt_btreeset_drop,
+            rt_btreeset_first, rt_btreeset_insert, rt_btreeset_intersection,
+            rt_btreeset_is_subset, rt_btreeset_is_superset, rt_btreeset_last, rt_btreeset_len,
+            rt_btreeset_new, rt_btreeset_remove, rt_btreeset_symmetric_difference,
+            rt_btreeset_to_array, rt_btreeset_union,
+        };
         use simple_runtime::*;
 
         match_runtime_symbol!(
@@ -225,6 +248,64 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_path_ext,
             rt_path_absolute,
             rt_path_separator,
+            // High-performance collections - HashMap
+            rt_hashmap_new,
+            rt_hashmap_insert,
+            rt_hashmap_get,
+            rt_hashmap_contains_key,
+            rt_hashmap_remove,
+            rt_hashmap_len,
+            rt_hashmap_clear,
+            rt_hashmap_keys,
+            rt_hashmap_values,
+            rt_hashmap_entries,
+            rt_hashmap_drop,
+            // High-performance collections - BTreeMap
+            rt_btreemap_new,
+            rt_btreemap_insert,
+            rt_btreemap_get,
+            rt_btreemap_contains_key,
+            rt_btreemap_remove,
+            rt_btreemap_len,
+            rt_btreemap_clear,
+            rt_btreemap_keys,
+            rt_btreemap_values,
+            rt_btreemap_entries,
+            rt_btreemap_first_key,
+            rt_btreemap_last_key,
+            rt_btreemap_drop,
+            // High-performance collections - HashSet
+            rt_hashset_new,
+            rt_hashset_insert,
+            rt_hashset_contains,
+            rt_hashset_remove,
+            rt_hashset_len,
+            rt_hashset_clear,
+            rt_hashset_to_array,
+            rt_hashset_union,
+            rt_hashset_intersection,
+            rt_hashset_difference,
+            rt_hashset_symmetric_difference,
+            rt_hashset_is_subset,
+            rt_hashset_is_superset,
+            rt_hashset_drop,
+            // High-performance collections - BTreeSet
+            rt_btreeset_new,
+            rt_btreeset_insert,
+            rt_btreeset_contains,
+            rt_btreeset_remove,
+            rt_btreeset_len,
+            rt_btreeset_clear,
+            rt_btreeset_to_array,
+            rt_btreeset_first,
+            rt_btreeset_last,
+            rt_btreeset_union,
+            rt_btreeset_intersection,
+            rt_btreeset_difference,
+            rt_btreeset_symmetric_difference,
+            rt_btreeset_is_subset,
+            rt_btreeset_is_superset,
+            rt_btreeset_drop,
         )
     }
 
