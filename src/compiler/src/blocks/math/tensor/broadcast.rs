@@ -4,7 +4,7 @@ use crate::error::CompileError;
 use super::core::{Tensor, compute_strides};
 
 /// Broadcast shapes for element-wise operations
-pub(crate) fn broadcast_shapes(a: &[usize], b: &[usize]) -> Result<Vec<usize>, CompileError> {
+pub fn broadcast_shapes(a: &[usize], b: &[usize]) -> Result<Vec<usize>, CompileError> {
     let max_len = a.len().max(b.len());
     let mut result = vec![0; max_len];
 

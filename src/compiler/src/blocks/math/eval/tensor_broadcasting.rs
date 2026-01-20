@@ -8,6 +8,9 @@ use super::MathValue;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
+// Re-export broadcast_shapes from the canonical location in tensor module
+pub use super::super::tensor::broadcast_shapes;
+
 /// Convert tensor to nested Value::Array
 pub fn tensor_to_value(tensor: &Tensor) -> Value {
     if tensor.shape.is_empty() {
@@ -120,47 +123,6 @@ where
     }
 
     Tensor::new(result_data, result_shape)
-}
-
-/// Compute broadcast shapes using NumPy broadcasting rules
-///
-/// NumPy broadcasting rules:
-/// - Dimensions are aligned from the right (trailing dimensions)
-/// - Each dimension must be either equal or one of them must be 1
-/// - Result shape is the maximum of each aligned dimension
-///
-/// Examples:
-/// - (3, 1) + (3, 4) → (3, 4)
-/// - (5, 1, 4) + (3, 4) → (5, 3, 4)
-/// - (2, 3) + (2, 3) → (2, 3)
-pub fn broadcast_shapes(a: &[usize], b: &[usize]) -> Result<Vec<usize>, CompileError> {
-    let max_len = a.len().max(b.len());
-    let mut result = vec![0; max_len];
-
-    for i in 0..max_len {
-        let a_dim = if i < max_len - a.len() {
-            1
-        } else {
-            a[i - (max_len - a.len())]
-        };
-        let b_dim = if i < max_len - b.len() {
-            1
-        } else {
-            b[i - (max_len - b.len())]
-        };
-
-        if a_dim == b_dim {
-            result[i] = a_dim;
-        } else if a_dim == 1 {
-            result[i] = b_dim;
-        } else if b_dim == 1 {
-            result[i] = a_dim;
-        } else {
-            return Err(crate::error::factory::tensor_cannot_broadcast_shapes(a, b));
-        }
-    }
-
-    Ok(result)
 }
 
 /// Compute index in source array for broadcast

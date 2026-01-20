@@ -1,0 +1,345 @@
+# Package management command handlers
+# Migrated from: src/driver/src/cli/commands/pkg_commands.rs
+# Purpose: Handle package management subcommands (init, add, remove, install, update, list, tree, cache)
+
+# Handle 'init' command - create new project
+fn handle_init(args: List<text>) -> i32:
+    val name = if args.len() > 1:
+        Some(args[1])
+    else:
+        None
+
+    val dir = sys.get_current_dir()
+    match pkg_init_project(dir, name):
+        Ok(()) =>
+            val name_str = match name:
+                Some(n) => " '{n}'"
+                None => ""
+            print "Created new Simple project{name_str}"
+            0
+        Err(e) =>
+            print_err("error: {e}")
+            1
+
+# Handle 'add' command - add dependency
+fn handle_add(args: List<text>) -> i32:
+    if args.len() < 2:
+        print_err("error: add requires a package name")
+        print_err("Usage: simple add <pkg> [version] [--path <path>] [--git <url>] [--dev]")
+        return 1
+
+    val pkg_name = args[1]
+    val dir = sys.get_current_dir()
+
+    # Parse options using mutable struct pattern
+    var options = AddOptions.default()
+    var i = 2
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--path":
+            i = i + 1
+            if i < args.len():
+                options.path = Some(args[i])
+        elif arg == "--git":
+            i = i + 1
+            if i < args.len():
+                options.git = Some(args[i])
+        elif arg == "--branch":
+            i = i + 1
+            if i < args.len():
+                options.branch = Some(args[i])
+        elif arg == "--tag":
+            i = i + 1
+            if i < args.len():
+                options.tag = Some(args[i])
+        elif arg == "--rev":
+            i = i + 1
+            if i < args.len():
+                options.rev = Some(args[i])
+        elif arg == "--dev":
+            options.dev = true
+        elif not arg.starts_with("-") and options.version.is_none():
+            options.version = Some(arg)
+        i = i + 1
+
+    match pkg_add_dependency(dir, pkg_name, options):
+        Ok(()) =>
+            print "Added dependency '{pkg_name}'"
+            0
+        Err(e) =>
+            print_err("error: {e}")
+            1
+
+# Handle 'remove' command - remove dependency
+fn handle_remove(args: List<text>) -> i32:
+    if args.len() < 2:
+        print_err("error: remove requires a package name")
+        print_err("Usage: simple remove <pkg> [--dev]")
+        return 1
+
+    val pkg_name = args[1]
+    val dev = args.any(\a: a == "--dev")
+    val dir = sys.get_current_dir()
+
+    match pkg_remove_dependency(dir, pkg_name, dev):
+        Ok(true) =>
+            print "Removed dependency '{pkg_name}'"
+            0
+        Ok(false) =>
+            print_err("error: dependency '{pkg_name}' not found")
+            1
+        Err(e) =>
+            print_err("error: {e}")
+            1
+
+# Handle 'install' command - install dependencies
+fn handle_install() -> i32:
+    val dir = sys.get_current_dir()
+    match pkg_install_dependencies(dir):
+        Ok(result) =>
+            if result.installed == 0 and result.up_to_date == 0 and result.skipped == 0:
+                print "No dependencies to install"
+            else:
+                if result.installed > 0:
+                    print "Installed {result.installed} package(s)"
+                if result.up_to_date > 0:
+                    print "{result.up_to_date} package(s) up to date"
+                if result.skipped > 0:
+                    print "{result.skipped} package(s) skipped (git/registry not yet supported)"
+            0
+        Err(e) =>
+            print_err("error: {e}")
+            1
+
+# Handle 'update' command - update dependencies
+fn handle_update(args: List<text>) -> i32:
+    val dir = sys.get_current_dir()
+    val pkg_name = if args.len() > 1:
+        Some(args[1])
+    else:
+        None
+
+    val result = match pkg_name:
+        Some(name) => pkg_update_package(dir, name)
+        None => pkg_update_all(dir)
+
+    match result:
+        Ok(r) =>
+            if r.updated.len() == 0:
+                print "All dependencies up to date"
+            else:
+                val updated_str = r.updated.join(", ")
+                print "Updated: {updated_str}"
+            0
+        Err(e) =>
+            print_err("error: {e}")
+            1
+
+# Handle 'list' command - list dependencies
+fn handle_list() -> i32:
+    val dir = sys.get_current_dir()
+
+    match pkg_list_dependencies(dir):
+        Ok(packages) =>
+            if packages.len() == 0:
+                print "No dependencies installed"
+            else:
+                for pkg in packages:
+                    val status = if pkg.is_linked: "" else: " (not linked)"
+                    print "{pkg.name} ({pkg.version}) [{pkg.source_type}]{status}"
+            0
+        Err(e) =>
+            print_err("error: {e}")
+            1
+
+# Handle 'tree' command - show dependency tree
+fn handle_tree() -> i32:
+    val dir = sys.get_current_dir()
+
+    match pkg_dependency_tree(dir):
+        Ok(tree) =>
+            print "{tree.name} ({tree.version})"
+            var i = 0
+            while i < tree.children.len():
+                val child = tree.children[i]
+                val is_last = i == tree.children.len() - 1
+                print pkg_format_tree(child, "", is_last)
+                i = i + 1
+            0
+        Err(e) =>
+            print_err("error: {e}")
+            1
+
+# Handle 'cache' command - manage package cache
+fn handle_cache(args: List<text>) -> i32:
+    val subcommand = if args.len() > 1:
+        Some(args[1])
+    else:
+        None
+
+    match subcommand:
+        Some("clean") =>
+            match pkg_cache_clean():
+                Ok(size) =>
+                    val size_str = pkg_format_size(size)
+                    print "Cleaned {size_str} from cache"
+                    0
+                Err(e) =>
+                    print_err("error: {e}")
+                    1
+
+        Some("list") =>
+            match pkg_cache_list():
+                Ok(packages) =>
+                    if packages.len() == 0:
+                        print "Cache is empty"
+                    else:
+                        for pkg_info in packages:
+                            val (name, version) = pkg_info
+                            print "{name} ({version})"
+                    0
+                Err(e) =>
+                    print_err("error: {e}")
+                    1
+
+        Some("info") =>
+            match pkg_cache_info():
+                Ok(info) =>
+                    print "Cache location: {info.location}"
+                    val size_str = pkg_format_size(info.size_bytes)
+                    print "Total size: {size_str}"
+                    print "Packages: {info.package_count}"
+                    print "Git repos: {info.git_repo_count}"
+                    0
+                Err(e) =>
+                    print_err("error: {e}")
+                    1
+
+        None =>
+            match pkg_cache_info():
+                Ok(info) =>
+                    print "Cache location: {info.location}"
+                    val size_str = pkg_format_size(info.size_bytes)
+                    print "Total size: {size_str}"
+                    print "Packages: {info.package_count}"
+                    print "Git repos: {info.git_repo_count}"
+                    0
+                Err(e) =>
+                    print_err("error: {e}")
+                    1
+
+        Some(cmd) =>
+            print_err("error: unknown cache subcommand: {cmd}")
+            print_err("Usage: simple cache [info|list|clean]")
+            1
+
+
+# Stub types and functions
+# TODO: Implement or import from pkg module when available
+
+struct AddOptions:
+    path: Option<text>
+    git: Option<text>
+    branch: Option<text>
+    tag: Option<text>
+    rev: Option<text>
+    version: Option<text>
+    dev: bool
+
+impl AddOptions:
+    static fn default() -> AddOptions:
+        AddOptions(
+            path: None,
+            git: None,
+            branch: None,
+            tag: None,
+            rev: None,
+            version: None,
+            dev: false
+        )
+
+struct InstallResult:
+    installed: i32
+    up_to_date: i32
+    skipped: i32
+
+struct UpdateResult:
+    updated: List<text>
+
+struct PackageInfo:
+    name: text
+    version: text
+    source_type: text
+    is_linked: bool
+
+struct DependencyTree:
+    name: text
+    version: text
+    children: List<DependencyTree>
+
+struct CacheInfo:
+    location: text
+    size_bytes: u64
+    package_count: i32
+    git_repo_count: i32
+
+# Stub functions for pkg module operations
+fn pkg_init_project(dir: text, name: Option<text>) -> Result<(), text>:
+    print "[pkg] Would init project in: {dir} (stub)"
+    Ok(())
+
+fn pkg_add_dependency(dir: text, name: text, options: AddOptions) -> Result<(), text>:
+    print "[pkg] Would add {name} to {dir} (stub)"
+    Ok(())
+
+fn pkg_remove_dependency(dir: text, name: text, dev: bool) -> Result<bool, text>:
+    print "[pkg] Would remove {name} from {dir} (stub)"
+    Ok(true)
+
+fn pkg_install_dependencies(dir: text) -> Result<InstallResult, text>:
+    print "[pkg] Would install dependencies in {dir} (stub)"
+    Ok(InstallResult(installed: 0, up_to_date: 0, skipped: 0))
+
+fn pkg_update_package(dir: text, name: text) -> Result<UpdateResult, text>:
+    print "[pkg] Would update {name} in {dir} (stub)"
+    Ok(UpdateResult(updated: []))
+
+fn pkg_update_all(dir: text) -> Result<UpdateResult, text>:
+    print "[pkg] Would update all in {dir} (stub)"
+    Ok(UpdateResult(updated: []))
+
+fn pkg_list_dependencies(dir: text) -> Result<List<PackageInfo>, text>:
+    print "[pkg] Would list dependencies in {dir} (stub)"
+    Ok([])
+
+fn pkg_dependency_tree(dir: text) -> Result<DependencyTree, text>:
+    print "[pkg] Would show tree for {dir} (stub)"
+    Ok(DependencyTree(name: "root", version: "1.0.0", children: []))
+
+fn pkg_cache_clean() -> Result<u64, text>:
+    print "[pkg] Would clean cache (stub)"
+    Ok(0)
+
+fn pkg_cache_list() -> Result<List<(text, text)>, text>:
+    print "[pkg] Would list cache (stub)"
+    Ok([])
+
+fn pkg_cache_info() -> Result<CacheInfo, text>:
+    print "[pkg] Would show cache info (stub)"
+    Ok(CacheInfo(location: "/tmp/cache", size_bytes: 0, package_count: 0, git_repo_count: 0))
+
+fn pkg_format_tree(tree: DependencyTree, prefix: text, is_last: bool) -> text:
+    "{prefix}{tree.name}"
+
+fn pkg_format_size(bytes: u64) -> text:
+    "{bytes} bytes"
+
+# Helper for stderr output
+fn print_err(msg: text):
+    # TODO: Use actual stderr when available
+    print msg
+
+# System utilities (stubs)
+struct sys:
+    static fn get_current_dir() -> text:
+        "."

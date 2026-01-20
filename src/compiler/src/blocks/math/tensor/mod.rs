@@ -20,3 +20,6 @@ mod tests;
 
 // Re-export the Tensor struct for backward compatibility
 pub use core::Tensor;
+
+// Re-export broadcast utilities
+pub use broadcast::broadcast_shapes;
