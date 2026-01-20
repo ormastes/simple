@@ -283,12 +283,8 @@ inductive PointerKind where
   | Handle : PointerKind  -- +T (arena handle)
   deriving DecidableEq, Repr
 
--- Capability for mutation control
-inductive Capability where
-  | Shared : Capability   -- T (read-only, aliasable)
-  | Exclusive : Capability -- mut T (mutable, exclusive)
-  | Isolated : Capability  -- iso T (isolated, transferable)
-  deriving DecidableEq, Repr
+-- Capability for mutation control (reuse verified definitions)
+abbrev Capability := RefCapability
 
 -- Typed pointer with capability
 structure TypedPtr (α : Type) where
@@ -299,15 +295,15 @@ structure TypedPtr (α : Type) where
 -- Aliasing rules
 def canAlias (cap : Capability) : Bool :=
   match cap with
-  | .Shared => true
-  | .Exclusive => false
-  | .Isolated => false
+  | RefCapability.Shared => true
+  | RefCapability.Exclusive => false
+  | RefCapability.Isolated => false
 
 def canMutate (cap : Capability) : Bool :=
   match cap with
-  | .Shared => false
-  | .Exclusive => true
-  | .Isolated => true
+  | RefCapability.Shared => false
+  | RefCapability.Exclusive => true
+  | RefCapability.Isolated => true
 
 -- Shared pointer is read-only (W1001 rule)
 theorem shared_readonly : ∀ (ptr : TypedPtr α),

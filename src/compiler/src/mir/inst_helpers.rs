@@ -347,6 +347,9 @@ impl MirInst {
                 input, predicate, ..
             } => vec![*input, *predicate],
             MirInst::ParForEach { input, closure, .. } => vec![*input, *closure],
+            // Memory safety instructions
+            MirInst::Drop { value, .. } => vec![*value],
+            MirInst::EndScope { .. } => vec![], // No register uses
         }
     }
 }

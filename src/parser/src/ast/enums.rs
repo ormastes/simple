@@ -69,7 +69,7 @@ impl Mutability {
 ///   | exclusive  -- mut T (single writer, no aliasing)
 ///   | isolated   -- iso T (unique + transferable across threads)
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ReferenceCapability {
     /// Shared immutable reference (default)
     /// - Read-only access

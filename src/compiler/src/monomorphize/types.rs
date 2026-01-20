@@ -1,5 +1,6 @@
 //! Type definitions for monomorphization.
 
+use simple_parser::ast::ReferenceCapability;
 use std::collections::HashMap;
 
 /// A unique key for a specialization.
@@ -78,6 +79,7 @@ pub enum ConcreteType {
     /// Pointer types
     Pointer {
         kind: PointerKind,
+        capability: ReferenceCapability,
         inner: Box<ConcreteType>,
     },
 
@@ -122,7 +124,7 @@ impl std::fmt::Display for ConcreteType {
                 write!(f, "Fn_{}_{}", p, ret)
             }
             ConcreteType::Optional(inner) => write!(f, "Opt_{}", inner),
-            ConcreteType::Pointer { kind, inner } => {
+            ConcreteType::Pointer { kind, capability, inner } => {
                 let k = match kind {
                     PointerKind::Unique => "Unique",
                     PointerKind::Shared => "Shared",
@@ -133,7 +135,12 @@ impl std::fmt::Display for ConcreteType {
                     PointerKind::RawConst => "RawConst",
                     PointerKind::RawMut => "RawMut",
                 };
-                write!(f, "{}_{}", k, inner)
+                let cap = match capability {
+                    ReferenceCapability::Shared => "sh",
+                    ReferenceCapability::Exclusive => "ex",
+                    ReferenceCapability::Isolated => "iso",
+                };
+                write!(f, "{}{}_{}", k, cap, inner)
             }
             ConcreteType::Specialized { name, args } => {
                 let a = args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join("_");

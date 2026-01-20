@@ -1,7 +1,9 @@
+use simple_parser::Span;
 use thiserror::Error;
 
 use super::super::lifetime::LifetimeViolation;
 use super::super::types::TypeId;
+use super::memory_warning::{MemoryWarningCode, MemoryWarningCollector};
 
 #[derive(Error, Debug)]
 pub enum LowerError {
@@ -82,6 +84,20 @@ pub enum LowerError {
     /// Multiple lifetime violations
     #[error("Multiple lifetime violations detected ({} errors)", .0.len())]
     LifetimeViolations(Vec<LifetimeViolation>),
+
+    /// Memory safety violation (strict mode - Rust-level safety)
+    /// W1001-W1006 become compile errors in strict mode
+    #[error("Memory safety error [{code}]: {message}")]
+    MemorySafetyViolation {
+        /// The warning code that became an error
+        code: MemoryWarningCode,
+        /// Human-readable error message
+        message: String,
+        /// Source location
+        span: Span,
+        /// All collected warnings (for detailed diagnostics)
+        all_warnings: MemoryWarningCollector,
+    },
 }
 
 pub type LowerResult<T> = Result<T, LowerError>;

@@ -92,6 +92,30 @@ pub enum MirInst {
     },
 
     // =========================================================================
+    // Memory safety instructions (Drop/cleanup)
+    // =========================================================================
+    /// Drop a value at scope exit (calls destructor if applicable).
+    /// Generated at scope boundaries to ensure proper cleanup ordering (LIFO).
+    /// For Rust-level memory safety, this instruction ensures:
+    /// - Unique/Isolated pointers are freed
+    /// - Borrowed references are released
+    /// - Custom Drop implementations are called
+    Drop {
+        /// The value to drop
+        value: VReg,
+        /// Type of the value (for correct cleanup behavior)
+        ty: TypeId,
+    },
+
+    /// Mark the end of a value's scope (for borrow checker).
+    /// This is a no-op at runtime but provides lifetime information
+    /// for static analysis and verification.
+    EndScope {
+        /// Local index that's going out of scope
+        local_index: usize,
+    },
+
+    // =========================================================================
     // Interpreter fallback instructions (will be removed once all codegen implemented)
     // =========================================================================
     /// Call interpreter for a function that can't be compiled yet.

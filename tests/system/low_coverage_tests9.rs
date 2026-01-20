@@ -337,6 +337,7 @@ mod monomorphize_table_tests {
 // ===========================================================================
 mod monomorphize_types_tests {
     use simple_compiler::{ConcreteType, PointerKind, SpecializationKey, TypeBindings};
+    use simple_parser::ast::ReferenceCapability;
 
     #[test]
     fn test_specialization_key_new() {
@@ -455,54 +456,60 @@ mod monomorphize_types_tests {
     fn test_concrete_type_pointer_unique() {
         let ty = ConcreteType::Pointer {
             kind: PointerKind::Unique,
+            capability: ReferenceCapability::Isolated,
             inner: Box::new(ConcreteType::Int),
         };
-        assert_eq!(ty.to_string(), "Unique_Int");
+        assert_eq!(ty.to_string(), "Uniqueiso_Int");
     }
 
     #[test]
     fn test_concrete_type_pointer_shared() {
         let ty = ConcreteType::Pointer {
             kind: PointerKind::Shared,
+            capability: ReferenceCapability::Shared,
             inner: Box::new(ConcreteType::Int),
         };
-        assert_eq!(ty.to_string(), "Shared_Int");
+        assert_eq!(ty.to_string(), "Sharedsh_Int");
     }
 
     #[test]
     fn test_concrete_type_pointer_weak() {
         let ty = ConcreteType::Pointer {
             kind: PointerKind::Weak,
+            capability: ReferenceCapability::Shared,
             inner: Box::new(ConcreteType::Int),
         };
-        assert_eq!(ty.to_string(), "Weak_Int");
+        assert_eq!(ty.to_string(), "Weaksh_Int");
     }
 
     #[test]
     fn test_concrete_type_pointer_handle() {
         let ty = ConcreteType::Pointer {
             kind: PointerKind::Handle,
+            capability: ReferenceCapability::Shared,
             inner: Box::new(ConcreteType::Int),
         };
-        assert_eq!(ty.to_string(), "Handle_Int");
+        assert_eq!(ty.to_string(), "Handlesh_Int");
     }
 
     #[test]
     fn test_concrete_type_pointer_borrow() {
         let ty = ConcreteType::Pointer {
             kind: PointerKind::Borrow,
+            capability: ReferenceCapability::Shared,
             inner: Box::new(ConcreteType::Int),
         };
-        assert_eq!(ty.to_string(), "Borrow_Int");
+        assert_eq!(ty.to_string(), "Borrowsh_Int");
     }
 
     #[test]
     fn test_concrete_type_pointer_borrow_mut() {
         let ty = ConcreteType::Pointer {
             kind: PointerKind::BorrowMut,
+            capability: ReferenceCapability::Exclusive,
             inner: Box::new(ConcreteType::Int),
         };
-        assert_eq!(ty.to_string(), "BorrowMut_Int");
+        assert_eq!(ty.to_string(), "BorrowMutex_Int");
     }
 
     #[test]

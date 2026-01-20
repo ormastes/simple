@@ -250,6 +250,22 @@ impl Lowerer {
             }
         }
 
+        // Eighth pass: in strict mode (Rust-level safety), memory warnings become errors
+        if self.memory_warnings.is_strict() && self.memory_warnings.has_warnings() {
+            let first_warning = self.memory_warnings.warnings().first().unwrap();
+            return Err(LowerError::MemorySafetyViolation {
+                code: first_warning.code,
+                message: format!(
+                    "{}{}{}",
+                    first_warning.code.description(),
+                    first_warning.name.as_ref().map(|n| format!(" ({})", n)).unwrap_or_default(),
+                    first_warning.context.as_ref().map(|c| format!(": {}", c)).unwrap_or_default()
+                ),
+                span: first_warning.span,
+                all_warnings: std::mem::take(&mut self.memory_warnings),
+            });
+        }
+
         Ok(self.module)
     }
 
@@ -342,6 +358,23 @@ impl Lowerer {
         // Take warnings before consuming self
         let warnings = std::mem::take(&mut self.memory_warnings);
         let module = self.module;
+
+        // CRITICAL: In strict mode (Rust-level safety), memory warnings become errors
+        if warnings.is_strict() && warnings.has_warnings() {
+            // Convert most severe warning to error
+            let first_warning = warnings.warnings().first().unwrap();
+            return Err(LowerError::MemorySafetyViolation {
+                code: first_warning.code,
+                message: format!(
+                    "{}{}{}",
+                    first_warning.code.description(),
+                    first_warning.name.as_ref().map(|n| format!(" ({})", n)).unwrap_or_default(),
+                    first_warning.context.as_ref().map(|c| format!(": {}", c)).unwrap_or_default()
+                ),
+                span: first_warning.span,
+                all_warnings: warnings,
+            });
+        }
 
         Ok(super::super::LoweringOutput::with_lifetime(
             module,

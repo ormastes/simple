@@ -91,6 +91,10 @@ impl<'a> MirLowerer<'a> {
                     }
                 }
 
+                // Emit drop instructions for all locals before returning
+                // This ensures proper cleanup in LIFO order (Rust-level memory safety)
+                self.emit_function_drops()?;
+
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
                     block.terminator = Terminator::Return(ret_reg);
@@ -299,5 +303,72 @@ impl<'a> MirLowerer<'a> {
         }
 
         false
+    }
+
+    /// Emit drop instructions for all locals in the current function.
+    /// Drops are emitted in LIFO order (last declared first) to ensure proper
+    /// cleanup ordering, matching Rust's drop semantics.
+    ///
+    /// This is called before return statements to ensure all locals are properly
+    /// cleaned up. For scope-level drops (e.g., block exit), use emit_scope_drops.
+    pub(super) fn emit_function_drops(&mut self) -> MirLowerResult<()> {
+        // First, collect information about which locals need dropping
+        let locals_to_drop: Vec<(usize, crate::hir::TypeId)> = self.with_func(|func, _| {
+            func.locals
+                .iter()
+                .enumerate()
+                .rev() // LIFO order
+                .filter_map(|(idx, local)| {
+                    // Skip ghost variables (verification-only)
+                    if local.is_ghost {
+                        return None;
+                    }
+                    // Skip parameters (not owned by this function)
+                    if local.kind.is_parameter() {
+                        return None;
+                    }
+                    Some((idx, local.ty))
+                })
+                .collect()
+        })?;
+
+        // Now emit drop instructions for each local
+        for (local_index, ty) in locals_to_drop {
+            self.with_func(|func, current_block| {
+                let addr_vreg = func.new_vreg();
+                let value_vreg = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+
+                // Get address of local
+                block.instructions.push(MirInst::LocalAddr {
+                    dest: addr_vreg,
+                    local_index,
+                });
+
+                // Load the value to drop
+                block.instructions.push(MirInst::Load {
+                    dest: value_vreg,
+                    addr: addr_vreg,
+                    ty,
+                });
+
+                // Emit the drop instruction
+                block.instructions.push(MirInst::Drop {
+                    value: value_vreg,
+                    ty,
+                });
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Emit EndScope marker for a local going out of scope.
+    /// This provides lifetime information for static analysis but is a no-op at runtime.
+    pub(super) fn emit_end_scope(&mut self, local_index: usize) -> MirLowerResult<()> {
+        self.with_func(|func, current_block| {
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::EndScope { local_index });
+        })
     }
 }
