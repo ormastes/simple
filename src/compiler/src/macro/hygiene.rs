@@ -511,6 +511,7 @@ pub(super) fn apply_macro_hygiene_pattern(
     match pattern {
         Pattern::Identifier(name) => Pattern::Identifier(ctx.bind(name, reuse_if_bound)),
         Pattern::MutIdentifier(name) => Pattern::MutIdentifier(ctx.bind(name, reuse_if_bound)),
+        Pattern::MoveIdentifier(name) => Pattern::MoveIdentifier(ctx.bind(name, reuse_if_bound)),
         Pattern::Literal(expr) => Pattern::Literal(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Pattern::Tuple(items) => Pattern::Tuple(
             items

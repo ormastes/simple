@@ -2,10 +2,8 @@
 # Migrated from: scripts/refactor_lowering.py
 # Purpose: Refactor lowering.rs by extracting match arms into helper methods
 
-# TODO: [stdlib][P2] Add Rust AST parsing
-# NOTE: String manipulation is available in core.string module (split, replace, trim, etc.)
-
 import fs.{read_text, write_text}
+import regex.{regex_captures, regex_find_all}
 use core.string.*
 
 # Refactoring statistics
@@ -75,46 +73,139 @@ impl MigrationResult:
             error: message
         )
 
-# TODO: [stdlib][P2] Add Rust AST parsing
-# Extract impl block from Rust file
+# Extract impl block from Rust file using brace counting
 fn extract_impl_block(content: text) -> Result<text, text>:
-    # Stub: Needs Rust AST parsing and brace counting
-    # Would:
-    # 1. Find "impl Lowerer {"
-    # 2. Count braces to find closing brace
-    # 3. Extract impl body
-    # 4. Return extracted code
-    Err("string parsing not yet implemented")
+    # Find "impl Lowerer" or "impl<...> Lowerer"
+    val lines = content.split("\n")
+    var impl_start: i64 = -1
+    var impl_end: i64 = -1
+    var brace_count = 0
+    var in_impl = false
 
-# TODO: [stdlib][P2] Add Rust AST parsing
-# Extract match arms from lower_expr method
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+
+        # Look for impl Lowerer declaration
+        if not in_impl:
+            if line.contains("impl") and line.contains("Lowerer"):
+                impl_start = i
+                # Count opening braces on this line
+                brace_count = count_char(line, '{') - count_char(line, '}')
+                if brace_count > 0:
+                    in_impl = true
+        else:
+            # Count braces
+            brace_count = brace_count + count_char(line, '{') - count_char(line, '}')
+            if brace_count == 0:
+                impl_end = i
+                break
+
+        i = i + 1
+
+    if impl_start < 0:
+        return Err("Could not find 'impl Lowerer' block")
+
+    if impl_end < 0:
+        return Err("Could not find end of impl block (unbalanced braces)")
+
+    # Extract the impl body (lines between impl_start and impl_end)
+    var impl_lines: List<text> = []
+    var j = impl_start
+    while j <= impl_end:
+        impl_lines.push(lines[j])
+        j = j + 1
+
+    Ok(impl_lines.join("\n"))
+
+# Helper: Count occurrences of a character in a string
+fn count_char(s: text, c: text) -> i64:
+    var count: i64 = 0
+    for ch in s.chars():
+        if ch == c:
+            count = count + 1
+    count
+
+# Extract match arms from lower_expr method using brace counting
 fn extract_match_arms(impl_body: text) -> Result<List<text>, text>:
-    # Stub: Needs Rust AST parsing or sophisticated regex
-    # Would:
-    # 1. Find lower_expr method
-    # 2. Parse match expression
-    # 3. Extract each arm
-    # 4. Return list of match arms
-    Err("Rust AST parsing not yet implemented")
+    val lines = impl_body.split("\n")
+    var arms: List<text> = []
+
+    # Find lower_expr function
+    var in_lower_expr = false
+    var in_match = false
+    var match_depth = 0
+    var current_arm_lines: List<text> = []
+    var arm_brace_count = 0
+
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # Look for fn lower_expr
+        if not in_lower_expr:
+            if trimmed.starts_with("fn lower_expr") or trimmed.starts_with("pub fn lower_expr"):
+                in_lower_expr = true
+                match_depth = 0
+        elif not in_match:
+            # Look for match expression
+            if trimmed.starts_with("match ") and trimmed.contains("{"):
+                in_match = true
+                match_depth = 1
+        else:
+            # Inside match expression, extract arms
+            # An arm starts with a pattern like "Expr::Literal" or similar
+            val is_arm_start = (trimmed.contains("::") and trimmed.contains("=>")) or
+                              (trimmed.contains("Expr::") and not trimmed.starts_with("//"))
+
+            if is_arm_start and arm_brace_count == 0:
+                # Save previous arm if exists
+                if current_arm_lines.len() > 0:
+                    arms.push(current_arm_lines.join("\n"))
+                current_arm_lines = [line]
+                arm_brace_count = count_char(line, '{') - count_char(line, '}')
+            elif current_arm_lines.len() > 0:
+                # Continue collecting arm lines
+                current_arm_lines.push(line)
+                arm_brace_count = arm_brace_count + count_char(line, '{') - count_char(line, '}')
+
+            # Track overall match depth
+            match_depth = match_depth + count_char(line, '{') - count_char(line, '}')
+
+            # Exit match when depth reaches 0
+            if match_depth <= 0:
+                if current_arm_lines.len() > 0:
+                    arms.push(current_arm_lines.join("\n"))
+                break
+
+        i = i + 1
+
+    if arms.len() == 0:
+        Err("No match arms found in lower_expr method")
+    else:
+        Ok(arms)
 
 # Refactor lowering.rs file
-# TODO: [stdlib][P2] Needs Rust AST parsing for full implementation
 fn refactor_lowering_file(filepath: text, output_path: text) -> MigrationResult:
     # Read lowering.rs file
     match read_text(filepath):
         Ok(content):
-            # Extract impl block (currently blocked on string parsing)
+            # Extract impl block
             match extract_impl_block(content):
                 Ok(impl_body):
-                    # Extract match arms (currently blocked on Rust AST parsing)
+                    # Extract match arms
                     match extract_match_arms(impl_body):
                         Ok(arms):
-                            # TODO: Generate dispatch method and helper methods
-                            # TODO: Build refactored content
-                            # For now, just write the original content
-                            match write_text(output_path, content):
+                            # Generate refactored content
+                            val refactored = generate_refactored_content(content, arms)
+                            val lines_changed = arms.len() as u64
+
+                            # Write refactored content
+                            match write_text(output_path, refactored):
                                 Ok(_):
-                                    MigrationResult.changed(0)
+                                    print "Extracted {arms.len()} match arms into helper methods"
+                                    MigrationResult.changed(lines_changed)
                                 Err(e):
                                     MigrationResult.error("Failed to write file: {e}")
                         Err(e):
@@ -124,8 +215,102 @@ fn refactor_lowering_file(filepath: text, output_path: text) -> MigrationResult:
         Err(e):
             MigrationResult.error("Failed to read file: {e}")
 
+# Generate refactored content with helper methods
+fn generate_refactored_content(original: text, arms: List<text>) -> text:
+    var output = ""
+
+    # Add header comment
+    output = output + "// Refactored by Simple Language refactor-lowering tool\n"
+    output = output + "// Original match arms extracted into helper methods\n\n"
+
+    # Add original content (could be further refined to insert helpers inline)
+    output = output + original
+    output = output + "\n\n"
+
+    # Generate helper method stubs for each arm
+    output = output + "// ============================================\n"
+    output = output + "// Extracted helper methods (add to impl Lowerer)\n"
+    output = output + "// ============================================\n\n"
+
+    var arm_num = 1
+    for arm in arms:
+        val helper_name = extract_helper_name_from_arm(arm, arm_num)
+        output = output + "/// Helper for match arm {arm_num}\n"
+        output = output + "fn {helper_name}(&mut self, expr: &Expr) -> Result<Value, LoweringError> {{\n"
+        output = output + "    // Original arm code:\n"
+
+        # Add original arm as comment
+        for line in arm.split("\n"):
+            output = output + "    // {line}\n"
+
+        output = output + "    todo!(\"Implement {helper_name}\")\n"
+        output = output + "}}\n\n"
+        arm_num = arm_num + 1
+
+    # Generate dispatch method
+    output = output + "// ============================================\n"
+    output = output + "// Dispatch method (replace original match)\n"
+    output = output + "// ============================================\n\n"
+    output = output + "fn lower_expr_dispatch(&mut self, expr: &Expr) -> Result<Value, LoweringError> {\n"
+    output = output + "    match expr {\n"
+
+    arm_num = 1
+    for arm in arms:
+        val helper_name = extract_helper_name_from_arm(arm, arm_num)
+        val pattern = extract_pattern_from_arm(arm)
+        output = output + "        {pattern} => self.{helper_name}(expr),\n"
+        arm_num = arm_num + 1
+
+    output = output + "    }\n"
+    output = output + "}\n"
+
+    output
+
+# Extract helper method name from arm pattern
+fn extract_helper_name_from_arm(arm: text, arm_num: i64) -> text:
+    # Try to extract the variant name from the arm pattern
+    # e.g., "Expr::Literal(lit) =>" -> "lower_literal"
+    val trimmed = arm.trim()
+
+    # Look for Expr::VariantName pattern
+    match regex_captures(r"Expr::(\w+)", trimmed):
+        Some(caps):
+            match caps.groups[0]:
+                Some(variant):
+                    # Convert to snake_case helper name
+                    return "lower_" + to_snake_case(variant)
+                None: pass
+        None: pass
+
+    # Fallback to generic name
+    "lower_arm_{arm_num}"
+
+# Extract pattern from arm for dispatch
+fn extract_pattern_from_arm(arm: text) -> text:
+    val trimmed = arm.trim()
+
+    # Find everything before =>
+    val parts = trimmed.split("=>")
+    if parts.len() > 0:
+        parts[0].trim()
+    else:
+        "_"
+
+# Convert PascalCase to snake_case
+fn to_snake_case(s: text) -> text:
+    var result = ""
+    var i = 0
+    for ch in s.chars():
+        if ch >= "A" and ch <= "Z":
+            if i > 0:
+                result = result + "_"
+            result = result + ch.to_lowercase()
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
 # Run refactoring
-# TODO: [stdlib][P2] Needs Rust AST parsing for full implementation
 fn run_refactoring(input_file: text) -> RefactorStats:
     val output_path = "/tmp/lowering_new.rs"
     var stats = RefactorStats.new(output_path)

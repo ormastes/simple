@@ -110,6 +110,8 @@ pub(super) fn exec_block_closure(
                         local_env.insert(name.clone(), val);
                     } else if let simple_parser::ast::Pattern::MutIdentifier(name) = &let_stmt.pattern {
                         local_env.insert(name.clone(), val);
+                    } else if let simple_parser::ast::Pattern::MoveIdentifier(name) = &let_stmt.pattern {
+                        local_env.insert(name.clone(), val);
                     }
                 }
                 last_value = Value::Nil;
@@ -304,6 +306,8 @@ pub(super) fn exec_block_closure(
                         local_env.insert(name.clone(), val);
                     } else if let simple_parser::ast::Pattern::MutIdentifier(ref name) = for_stmt.pattern {
                         local_env.insert(name.clone(), val);
+                    } else if let simple_parser::ast::Pattern::MoveIdentifier(ref name) = for_stmt.pattern {
+                        local_env.insert(name.clone(), val);
                     }
                     // Use mutable env version so assignments inside the loop persist
                     last_value = exec_block_closure_mut(
@@ -386,6 +390,8 @@ fn exec_block_closure_mut(
                     if let simple_parser::ast::Pattern::Identifier(name) = &let_stmt.pattern {
                         local_env.insert(name.clone(), val);
                     } else if let simple_parser::ast::Pattern::MutIdentifier(name) = &let_stmt.pattern {
+                        local_env.insert(name.clone(), val);
+                    } else if let simple_parser::ast::Pattern::MoveIdentifier(name) = &let_stmt.pattern {
                         local_env.insert(name.clone(), val);
                     }
                 }
@@ -480,6 +486,8 @@ fn exec_block_closure_mut(
                     if let simple_parser::ast::Pattern::Identifier(ref name) = for_stmt.pattern {
                         local_env.insert(name.clone(), val);
                     } else if let simple_parser::ast::Pattern::MutIdentifier(ref name) = for_stmt.pattern {
+                        local_env.insert(name.clone(), val);
+                    } else if let simple_parser::ast::Pattern::MoveIdentifier(ref name) = for_stmt.pattern {
                         local_env.insert(name.clone(), val);
                     }
                     last_value = exec_block_closure_mut(

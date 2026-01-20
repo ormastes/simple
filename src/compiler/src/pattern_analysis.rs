@@ -125,6 +125,7 @@ fn pattern_to_string(pattern: &Pattern) -> Option<String> {
         Pattern::Wildcard => Some("_".to_string()),
         Pattern::Identifier(name) => Some(name.clone()),
         Pattern::MutIdentifier(name) => Some(format!("mut {}", name)),
+        Pattern::MoveIdentifier(name) => Some(format!("move {}", name)),
         Pattern::Literal(expr) => Some(format!("{:?}", expr)),
         Pattern::Tuple(patterns) => {
             let parts: Vec<String> = patterns.iter().filter_map(pattern_to_string).collect();

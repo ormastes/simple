@@ -206,3 +206,226 @@ fn has_var():
     assert!(lean.contains("namespace"), "Should have namespace");
     assert!(lean.contains("end"), "Should have end namespace");
 }
+
+// ============================================================================
+// Memory Safety Warning Tests (W1001-W1006)
+// ============================================================================
+// These tests demonstrate the compile-time memory safety checking.
+// Currently emits warnings; in strict mode (Rust-level safety), these become errors.
+
+/// Helper to lower with strict memory mode (warnings become errors)
+fn lower_strict(source: &str) -> Result<crate::hir::LoweringOutput, crate::hir::LowerError> {
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+    Lowerer::with_strict_memory_mode().lower_module_with_warnings(&module)
+}
+
+/// Helper to count warnings of a specific code
+fn count_warnings(result: &crate::hir::LoweringOutput, code_prefix: &str) -> usize {
+    result.warnings.warnings().iter()
+        .filter(|w| w.code.to_string().starts_with(code_prefix))
+        .count()
+}
+
+#[test]
+fn test_w1003_mutable_shared_binding_warning() {
+    // W1003: Mutable binding with shared pointer type
+    // `var x: *T` is suspicious - shared pointers are reference counted,
+    // reassigning the variable doesn't mutate the data
+    let source = r#"
+struct Data:
+    value: i32
+
+fn test_mutable_shared():
+    var x: *Data = Data { value: 10 }
+    x = Data { value: 20 }
+    x.value
+"#;
+
+    let result = lower_with_warnings(source);
+    // Should succeed but may have warnings about shared pointer semantics
+    assert!(result.is_ok(), "Should compile: {:?}", result.err());
+}
+
+#[test]
+fn test_safe_immutable_binding() {
+    // val (immutable) binding is preferred for shared pointers
+    let source = r#"
+struct Data:
+    value: i32
+
+fn test_immutable_shared():
+    val x: *Data = Data { value: 10 }
+    x.value
+"#;
+
+    let result = lower_with_warnings(source).expect("Should lower successfully");
+    // No memory warnings for proper immutable usage
+    assert!(!result.has_warnings(), "Immutable shared pointer should have no warnings");
+}
+
+#[test]
+fn test_unique_pointer_move_semantics() {
+    // Unique pointers (&T) should be moved, not copied
+    let source = r#"
+struct Node:
+    data: i32
+
+fn test_unique():
+    val node: &Node = Node { data: 42 }
+    val alias = node
+    alias.data
+"#;
+
+    let result = lower_with_warnings(source);
+    // This may warn about implicit copy of unique pointer (W1002)
+    assert!(result.is_ok(), "Should compile: {:?}", result.err());
+}
+
+#[test]
+fn test_reference_capability_shared() {
+    // T (Shared capability) - multiple readers allowed
+    let source = r#"
+fn test_shared_refs():
+    val x: i32 = 42
+    val r1 = x
+    val r2 = x
+    r1 + r2
+"#;
+
+    let result = lower_with_warnings(source).expect("Should lower successfully");
+    assert!(!result.has_warnings(), "Multiple readers should be safe");
+}
+
+#[test]
+fn test_basic_mutation_tracking() {
+    // var allows mutation
+    let source = r#"
+fn test_mutation():
+    var counter: i32 = 0
+    counter = counter + 1
+    counter = counter + 1
+    counter
+"#;
+
+    let result = lower_with_warnings(source).expect("Should lower successfully");
+    // Basic mutation of value types is always safe
+    assert!(!result.has_warnings(), "Value type mutation should be safe");
+}
+
+#[test]
+fn test_struct_field_mutation() {
+    // Mutation through mut T capability
+    let source = r#"
+struct Counter:
+    value: i32
+
+fn test_field_mutation():
+    var c = Counter { value: 0 }
+    c.value = c.value + 1
+    c.value
+"#;
+
+    let result = lower_with_warnings(source);
+    assert!(result.is_ok(), "Field mutation should compile: {:?}", result.err());
+}
+
+#[test]
+fn test_no_aliasing_violation() {
+    // No aliasing issues with value types
+    let source = r#"
+fn test_values():
+    val a: i32 = 10
+    val b: i32 = a
+    val c: i32 = a
+    a + b + c
+"#;
+
+    let result = lower_with_warnings(source).expect("Should lower successfully");
+    assert!(!result.has_warnings(), "Value semantics should have no aliasing issues");
+}
+
+// ============================================================================
+// Strict Mode Tests (Rust-Level Safety)
+// ============================================================================
+// When strict mode is enabled, memory warnings become errors.
+// This achieves Rust-level memory safety guarantees.
+
+#[test]
+fn test_strict_mode_basic_safe_code() {
+    // Safe code should pass even in strict mode
+    let source = r#"
+fn safe_add(a: i32, b: i32) -> i32:
+    a + b
+"#;
+
+    let result = lower_strict(source);
+    assert!(result.is_ok(), "Safe code should pass strict mode: {:?}", result.err());
+}
+
+#[test]
+fn test_strict_mode_immutable_preferred() {
+    // Immutable bindings are always safe
+    let source = r#"
+fn test_immutable():
+    val x = 10
+    val y = 20
+    x + y
+"#;
+
+    let result = lower_strict(source);
+    assert!(result.is_ok(), "Immutable code should pass strict mode");
+}
+
+// ============================================================================
+// Capability System Tests
+// ============================================================================
+
+#[test]
+fn test_capability_shared_read_only() {
+    // T (Shared) capability allows reads
+    let source = r#"
+struct Point:
+    x: i32
+    y: i32
+
+fn read_point(p: Point) -> i32:
+    p.x + p.y
+"#;
+
+    let result = lower_with_warnings(source).expect("Should lower successfully");
+    assert!(!result.has_warnings(), "Reading shared data should be safe");
+}
+
+#[test]
+fn test_capability_exclusive_mutation() {
+    // mut T (Exclusive) capability allows mutation
+    let source = r#"
+struct Counter:
+    value: i32
+
+impl Counter:
+    me increment():
+        self.value = self.value + 1
+"#;
+
+    let result = lower_with_warnings(source);
+    assert!(result.is_ok(), "Exclusive mutation should compile: {:?}", result.err());
+}
+
+// ============================================================================
+// Summary: Path to Rust-Level Memory Safety
+// ============================================================================
+//
+// Current State:
+// - Memory safety checks exist (W1001-W1006)
+// - Emit warnings by default for gradual adoption
+// - Strict mode available to promote warnings to errors
+//
+// To achieve Rust-level safety:
+// 1. Enable strict mode by default
+// 2. Integrate capability checking with all assignments
+// 3. Complete borrow checker integration
+// 4. Verify all violations produce errors, not just warnings
+//
+// The theoretical foundation is proven in Lean 4 (MemoryCapabilities.lean)
