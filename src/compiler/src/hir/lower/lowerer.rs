@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use simple_parser::Pattern;
 
+use super::super::capability::CapabilityEnv;
 use super::super::lifetime::LifetimeContext;
 use super::super::types::{HirModule, TypeId};
 use super::memory_warning::MemoryWarningCollector;
@@ -26,6 +27,8 @@ pub struct Lowerer {
     pub(super) memory_warnings: MemoryWarningCollector,
     /// Lifetime inference context for tracking reference lifetimes
     pub(super) lifetime_context: LifetimeContext,
+    /// Capability environment for tracking active reference capabilities
+    pub(super) capability_env: CapabilityEnv,
 }
 
 impl Lowerer {
@@ -40,6 +43,7 @@ impl Lowerer {
             loaded_modules: HashSet::new(),
             memory_warnings: MemoryWarningCollector::new(),
             lifetime_context: LifetimeContext::new(),
+            capability_env: CapabilityEnv::new(),
         }
     }
 
@@ -55,6 +59,7 @@ impl Lowerer {
             loaded_modules: HashSet::new(),
             memory_warnings: MemoryWarningCollector::new(),
             lifetime_context: LifetimeContext::new(),
+            capability_env: CapabilityEnv::new(),
         }
     }
 
@@ -70,6 +75,7 @@ impl Lowerer {
             loaded_modules: HashSet::new(),
             memory_warnings: MemoryWarningCollector::strict(),
             lifetime_context: LifetimeContext::new(),
+            capability_env: CapabilityEnv::new(),
         }
     }
 

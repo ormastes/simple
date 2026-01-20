@@ -287,14 +287,54 @@ fn parse_sandbox_config(args: List<text>) -> Option<SandboxConfig>:
     Some(config)
 
 # Apply sandbox configuration to the current process
-# TODO: [runtime][P1] Implement FFI binding to simple_runtime::apply_sandbox()
-# Requires:
-# - Complex struct marshalling (SandboxConfig with nested structs/enums)
-# - Two approaches possible:
-#   1. Serialize to JSON/msgpack and deserialize in Rust
-#   2. Create builder-style FFI functions to construct config piece by piece
-# - Reference: src/runtime/src/sandbox/mod.rs::apply_sandbox()
+# Uses builder-style FFI functions to construct config piece by piece
 fn apply_sandbox(config: SandboxConfig) -> Result<(), text>:
-    # Stub: Will be implemented when struct marshalling is available
-    # In production, this would call: simple_runtime::apply_sandbox(&config)
-    Ok(())
+    # Reset any previous configuration
+    rt_sandbox_reset()
+
+    # Set resource limits
+    match config.time_limit_secs:
+        Some(secs): rt_sandbox_set_cpu_time(secs)
+        None: pass
+
+    match config.memory_limit_bytes:
+        Some(bytes): rt_sandbox_set_memory(bytes)
+        None: pass
+
+    match config.fd_limit:
+        Some(count): rt_sandbox_set_fd_limit(count)
+        None: pass
+
+    match config.thread_limit:
+        Some(count): rt_sandbox_set_thread_limit(count)
+        None: pass
+
+    # Set network configuration
+    if config.no_network:
+        rt_sandbox_disable_network()
+    elif config.network_allowlist.len() > 0:
+        rt_sandbox_set_network_allowlist()
+        for domain in config.network_allowlist:
+            rt_sandbox_add_allowed_domain(domain)
+    elif config.network_blocklist.len() > 0:
+        rt_sandbox_set_network_blocklist()
+        for domain in config.network_blocklist:
+            rt_sandbox_add_blocked_domain(domain)
+
+    # Set filesystem configuration
+    if config.read_paths.len() > 0 and config.write_paths.len() == 0:
+        rt_sandbox_set_fs_readonly()
+        for path in config.read_paths:
+            rt_sandbox_add_read_path(path)
+    elif config.read_paths.len() > 0 or config.write_paths.len() > 0:
+        rt_sandbox_set_fs_restricted()
+        for path in config.read_paths:
+            rt_sandbox_add_read_path(path)
+        for path in config.write_paths:
+            rt_sandbox_add_write_path(path)
+
+    # Apply the sandbox
+    if rt_sandbox_apply():
+        Ok(())
+    else:
+        Err("Failed to apply sandbox configuration")

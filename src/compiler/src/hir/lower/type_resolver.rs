@@ -31,9 +31,16 @@ impl Lowerer {
             }
             Type::Pointer { kind, inner } => {
                 let inner_id = self.resolve_type(inner)?;
+                let ptr_kind: PointerKind = (*kind).into();
+                // Determine capability based on pointer kind
+                let capability = match ptr_kind {
+                    PointerKind::Unique => ReferenceCapability::Isolated, // Sole owner
+                    PointerKind::BorrowMut | PointerKind::RawMut => ReferenceCapability::Exclusive, // Mutable
+                    _ => ReferenceCapability::Shared, // Shared, Borrow, Weak, Handle, RawConst
+                };
                 let ptr_type = HirType::Pointer {
-                    kind: (*kind).into(),
-                    capability: ReferenceCapability::Shared, // Default capability
+                    kind: ptr_kind,
+                    capability,
                     inner: inner_id,
                 };
                 Ok(self.module.types.register(ptr_type))

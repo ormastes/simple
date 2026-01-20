@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use simple_parser::ast::Mutability;
+use simple_parser::ast::{Mutability, ReferenceCapability};
 
 use super::super::types::{LocalVar, TypeId};
 
@@ -19,6 +19,8 @@ pub(super) struct FunctionContext {
     pub return_type: TypeId,
     /// Contract context for binding names (None when not in contract lowering)
     pub contract_ctx: Option<ContractLoweringContext>,
+    /// Capability tracking for each local variable (local_id -> capability)
+    pub local_capabilities: HashMap<usize, ReferenceCapability>,
 }
 
 impl FunctionContext {
@@ -28,6 +30,7 @@ impl FunctionContext {
             local_map: HashMap::new(),
             return_type,
             contract_ctx: None,
+            local_capabilities: HashMap::new(),
         }
     }
 
@@ -88,5 +91,23 @@ impl FunctionContext {
             }
         }
         false
+    }
+
+    /// Set the capability for a local variable
+    pub fn set_local_capability(&mut self, local_index: usize, capability: ReferenceCapability) {
+        self.local_capabilities.insert(local_index, capability);
+    }
+
+    /// Get the capability for a local variable (defaults to Shared if not set)
+    pub fn get_local_capability(&self, local_index: usize) -> ReferenceCapability {
+        self.local_capabilities
+            .get(&local_index)
+            .copied()
+            .unwrap_or(ReferenceCapability::Shared)
+    }
+
+    /// Check if a local variable has mutation capability (Exclusive or Isolated)
+    pub fn has_mut_capability(&self, local_index: usize) -> bool {
+        self.get_local_capability(local_index).allows_mutation()
     }
 }
