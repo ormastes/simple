@@ -155,24 +155,43 @@ theorem conversion_is_safe :
   intros src dest h_convert
   cases src <;> cases dest <;> simp [canConvert, isMoreRestrictive] at h_convert ⊢
 
+-- Helper: empty list has zero count for any capability
+theorem empty_count_zero (cap : RefCapability) :
+  countRefsWithCapability [] cap = 0 := by
+  simp [countRefsWithCapability]
+
 -- Property 4: Conversions preserve or reduce aliasing potential
 theorem conversion_preserves_safety (env : RefEnv) (loc : Nat) (src dest : RefCapability) :
   canConvert src dest = true ->
   canCreateRef env loc src = true ->
   canCreateRef env loc dest = true := by
   intros h_convert h_can_src
-  cases src <;> cases dest <;> simp [canConvert] at h_convert <;> simp [canCreateRef] at h_can_src ⊢
-  -- All allowed conversions preserve safety because:
-  -- 1. Same capability (Shared->Shared, Exclusive->Exclusive, Isolated->Isolated): trivial
-  -- 2. Weakening (Exclusive->Shared, Isolated->Shared, Isolated->Exclusive):
-  --    If we can create the stronger capability, we can create the weaker one
-  all_goals (
-    first
-    | exact h_can_src
-    | (simp only [countRefsWithCapability, List.filter_nil, List.length_nil] at h_can_src ⊢
-       rw [h_can_src]; simp)
-    | sorry
-  )
+  unfold canCreateRef at h_can_src ⊢
+  cases src <;> cases dest <;> simp only [canConvert] at h_convert <;>
+    simp only [decide_eq_true_eq, Bool.not_eq_true', decide_eq_false_iff_not, not_lt,
+               Nat.le_zero, Bool.and_eq_true] at h_can_src ⊢
+  -- Shared -> Shared: trivial
+  · exact h_can_src
+  -- Shared -> Exclusive: conversion not allowed
+  · cases h_convert
+  -- Shared -> Isolated: conversion not allowed
+  · cases h_convert
+  -- Exclusive -> Shared: if list is empty, counts are 0
+  · have h_nil : getActiveRefs env loc = [] := List.isEmpty_iff.mp h_can_src
+    rw [h_nil]
+    simp [countRefsWithCapability]
+  -- Exclusive -> Exclusive: trivial
+  · exact h_can_src
+  -- Exclusive -> Isolated: conversion not allowed
+  · cases h_convert
+  -- Isolated -> Shared: if list is empty, counts are 0
+  · have h_nil : getActiveRefs env loc = [] := List.isEmpty_iff.mp h_can_src
+    rw [h_nil]
+    simp [countRefsWithCapability]
+  -- Isolated -> Exclusive: both require empty list
+  · exact h_can_src
+  -- Isolated -> Isolated: trivial
+  · exact h_can_src
 
 -- Creating a reference maintains well-formedness (axiomatized)
 axiom create_ref_preserves_wellformed (env : RefEnv) (ref : Reference) :
@@ -215,20 +234,85 @@ def hasConflictingAccess (env : RefEnv) (loc : Nat) : Bool :=
   -- Conflict: multiple refs and at least one allows write
   refs.length > 1 && refs.any (fun r => allowsAccess r (MemAccess.Write loc))
 
--- Well-formed environments have no conflicts (proven from wellFormed)
+-- Helper: if a ref allows write at loc, it must have Exclusive or Isolated capability
+theorem allowsWrite_capability (ref : Reference) (loc : Nat) :
+  allowsAccess ref (MemAccess.Write loc) = true ->
+  ref.location = loc ∧ (ref.refType.capability = RefCapability.Exclusive ∨
+                        ref.refType.capability = RefCapability.Isolated) := by
+  intro h
+  simp [allowsAccess] at h
+  constructor
+  · cases h_loc : (ref.location == loc) <;> simp_all
+  · cases h_cap : ref.refType.capability <;> simp_all
+
+-- Helper: count 0 means no refs have that capability
+theorem count_zero_means_none (refs : List Reference) (cap : RefCapability) :
+  countRefsWithCapability refs cap = 0 ->
+  forall r, r ∈ refs -> r.refType.capability ≠ cap := by
+  intro h_count r h_mem h_eq
+  unfold countRefsWithCapability at h_count
+  have h_in_filter : r ∈ refs.filter (fun r => r.refType.capability == cap) := by
+    rw [List.mem_filter]
+    exact ⟨h_mem, by simp [h_eq]⟩
+  have h_len_pos := List.length_pos_of_mem h_in_filter
+  rw [h_count] at h_len_pos
+  exact Nat.not_lt_zero 0 h_len_pos
+
+-- Helper: if count <= 1 and length > 1, then count can only be 0
+-- (because count = 1 would imply length = 1)
+theorem count_zero_when_length_gt_one (refs : List Reference) (cap : RefCapability)
+  (h_len : refs.length > 1)
+  (h_count_le : countRefsWithCapability refs cap <= 1)
+  (h_alone : countRefsWithCapability refs cap = 1 -> refs.length = 1) :
+  countRefsWithCapability refs cap = 0 := by
+  cases h_count : countRefsWithCapability refs cap with
+  | zero => rfl
+  | succ n =>
+    cases n with
+    | zero =>
+      -- count = 1 implies length = 1, contradiction
+      have h_len_one := h_alone h_count
+      omega
+    | succ m =>
+      -- count >= 2 contradicts count_le
+      have h_ge_2 : countRefsWithCapability refs cap >= 2 := by rw [h_count]; omega
+      omega
+
+-- Well-formed environments have no conflicts (fully proven)
 theorem wellformed_no_conflicts (env : RefEnv) (h_wf : wellFormed env) :
   forall loc, hasConflictingAccess env loc = false := by
   intro loc
-  simp [hasConflictingAccess]
-  by_cases h : (getActiveRefs env loc).length > 1
-  · -- If multiple refs exist, none can be Exclusive/Isolated (by wellFormed)
-    simp [h, allowsAccess]
-    have h_excl := exclusive_prevents_aliasing env loc h_wf
-    have h_iso := isolated_prevents_aliasing env loc h_wf
-    -- If length > 1, then Exclusive count != 1 and Isolated count != 1
-    -- Therefore no ref allows write
-    sorry  -- Requires more detailed list reasoning
-  · simp [h]
+  unfold hasConflictingAccess
+  by_cases h_len : (getActiveRefs env loc).length > 1
+  · -- If multiple refs exist, we show no ref allows write
+    -- Get wellformedness properties
+    have h_excl_unique := exclusive_is_unique env loc h_wf
+    have h_iso_unique := isolated_is_unique env loc h_wf
+    have h_excl_alone := exclusive_prevents_aliasing env loc h_wf
+    have h_iso_alone := isolated_prevents_aliasing env loc h_wf
+    -- Since length > 1, counts must be 0
+    have h_excl_zero := count_zero_when_length_gt_one
+      (getActiveRefs env loc) RefCapability.Exclusive h_len h_excl_unique h_excl_alone
+    have h_iso_zero := count_zero_when_length_gt_one
+      (getActiveRefs env loc) RefCapability.Isolated h_len h_iso_unique h_iso_alone
+    -- No ref has Exclusive or Isolated capability
+    have h_no_excl := count_zero_means_none (getActiveRefs env loc) RefCapability.Exclusive h_excl_zero
+    have h_no_iso := count_zero_means_none (getActiveRefs env loc) RefCapability.Isolated h_iso_zero
+    -- Therefore no ref allows write: show that any returns false
+    -- h_len implies (decide h_len.length > 1) = true, so the && becomes just the any
+    have h_decide : decide ((getActiveRefs env loc).length > 1) = true := by simp [h_len]
+    simp only [h_decide, Bool.true_and]
+    rw [List.any_eq_false]
+    intros ref h_mem
+    unfold allowsAccess
+    simp only [Bool.and_eq_true, beq_iff_eq, Bool.or_eq_true, decide_eq_true_eq]
+    intro ⟨_, h_cap⟩
+    cases h_cap with
+    | inl h_excl => exact h_no_excl ref h_mem h_excl
+    | inr h_iso => exact h_no_iso ref h_mem h_iso
+  · -- If length <= 1, the first conjunct is false
+    have h_decide : decide ((getActiveRefs env loc).length > 1) = false := by simp [h_len]
+    simp only [h_decide, Bool.false_and]
 
 -- Data race definition: concurrent conflicting accesses
 structure DataRaceScenario where

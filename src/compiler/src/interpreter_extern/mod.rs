@@ -274,6 +274,24 @@ pub(crate) fn call_extern_function(
         "sys_exit" => system::sys_exit(&evaluated),
 
         // ====================================================================
+        // Environment Operations (8 functions)
+        // ====================================================================
+        "rt_env_set" => system::rt_env_set(&evaluated),
+        "rt_env_get" => system::rt_env_get(&evaluated),
+        "rt_env_exists" => system::rt_env_exists(&evaluated),
+        "rt_env_remove" => system::rt_env_remove(&evaluated),
+        "rt_env_all" => system::rt_env_all(&evaluated),
+        "rt_env_home" => system::rt_env_home(&evaluated),
+        "rt_env_temp" => system::rt_env_temp(&evaluated),
+        "rt_env_cwd" => system::rt_env_cwd(&evaluated),
+
+        // ====================================================================
+        // Runtime Config Operations (2 functions)
+        // ====================================================================
+        "rt_set_macro_trace" => system::rt_set_macro_trace(&evaluated),
+        "rt_set_debug_mode" => system::rt_set_debug_mode(&evaluated),
+
+        // ====================================================================
         // Ratatui TUI Functions (8 functions)
         // ====================================================================
         "ratatui_terminal_new" => tui::ratatui_terminal_new_fn(&evaluated),
