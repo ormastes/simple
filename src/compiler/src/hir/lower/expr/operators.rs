@@ -89,6 +89,10 @@ impl Lowerer {
                 // Look up inner type from pointer type
                 self.get_deref_type(operand_hir.ty)?
             }
+            ast::UnaryOp::Move => {
+                // Move operator preserves the operand's type
+                operand_hir.ty
+            }
             _ => operand_hir.ty,
         };
 
@@ -101,6 +105,11 @@ impl Lowerer {
                 kind: HirExprKind::Deref(operand_hir),
                 ty,
             }),
+            ast::UnaryOp::Move => {
+                // Move is a semantic marker - just return the operand
+                // The semantic check happens in stmt_lowering
+                Ok(*operand_hir)
+            }
             _ => Ok(HirExpr {
                 kind: HirExprKind::Unary {
                     op: (*op).into(),

@@ -140,6 +140,11 @@ impl TypeChecker {
                             }
                         }
                     }
+                    UnaryOp::Move => {
+                        // Move is a semantic marker for ownership transfer
+                        // Type remains unchanged
+                        Ok(operand_ty)
+                    }
                 }
             }
             Expr::Call { callee, args } => {

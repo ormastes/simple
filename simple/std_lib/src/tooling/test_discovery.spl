@@ -3,6 +3,8 @@
 # Purpose: Discover test files and handle tag filtering
 
 import test_args::TestLevel
+use super.path_utils.{get_filename, get_parent_dir, join_path}
+use super.string_utils.{trim_end, trim_start}
 
 # Discover test files in a directory
 fn discover_tests(dir: text, level: TestLevel) -> List<text>:
@@ -58,10 +60,9 @@ fn extract_tags(path: text) -> List<text>:
 
     # Check file name for tag patterns
     val name = get_filename(path)
-    val stem = name
-        .trim_end(".spl")
-        .trim_end("_spec")
-        .trim_end("_test")
+    var stem = trim_end(name, ".spl")
+    stem = trim_end(stem, "_spec")
+    stem = trim_end(stem, "_test")
 
     if stem.len() > 0:
         # Split by underscore and take potential tag prefixes
@@ -98,45 +99,55 @@ fn extract_tags_from_content(content: text) -> List<text>:
 
         # Match #[tag("name")]
         if trimmed.starts_with("#[tag(\""):
-            val rest = trimmed.trim_start("#[tag(\"")
-            if rest.contains("\")]"):
-                val end_idx = rest.find("\")]")
-                val tag = rest.substring(0, end_idx)
-                tags.push(tag.to_lowercase())
+            val rest = trim_start(trimmed, "#[tag(\"")
+            match rest.find("\")]"):
+                Some(end_idx) =>
+                    val tag = rest.substring(0, end_idx)
+                    tags.push(tag.to_lowercase())
+                None =>
+                    {}
 
         # Match @tag name (in comments like # @tag slow)
-        if trimmed.contains("@tag "):
-            val idx = trimmed.find("@tag ")
-            val after = trimmed.substring(idx + 5, trimmed.len())
-            var tag = ""
-            for ch in after.chars():
-                if ch.is_alphanumeric() or ch == "_":
-                    tag = tag + ch
-                else:
-                    break
-            if tag.len() > 0:
-                tags.push(tag.to_lowercase())
+        match trimmed.find("@tag "):
+            Some(idx) =>
+                val after = trimmed.substring(idx + 5, trimmed.len())
+                var tag = ""
+                for ch in after.chars():
+                    if ch.is_alphanumeric() or ch == "_":
+                        tag = tag + ch
+                    else:
+                        break
+                if tag.len() > 0:
+                    tags.push(tag.to_lowercase())
+            None =>
+                {}
 
         # Match @name shorthand for known tags (e.g., # @gui, # @slow)
         for shorthand in SHORTHAND_TAGS:
             val pattern = "@{shorthand}"
-            if trimmed.contains(pattern):
-                # Make sure it's not part of a longer word
-                val idx = trimmed.find(pattern)
-                val after_idx = idx + pattern.len()
-                val is_end = after_idx >= trimmed.len()
-                val is_word_boundary = if is_end:
-                    true
-                else:
-                    val next_ch = trimmed.chars()[after_idx]
-                    not (next_ch.is_alphanumeric() or next_ch == "_")
+            match trimmed.find(pattern):
+                Some(idx) =>
+                    # Make sure it's not part of a longer word
+                    val after_idx = idx + pattern.len()
+                    val is_end = after_idx >= trimmed.len()
+                    val is_word_boundary = if is_end:
+                        true
+                    else:
+                        val chars = trimmed.chars()
+                        if after_idx < chars.len():
+                            val next_ch = chars[after_idx]
+                            not (next_ch.is_alphanumeric() or next_ch == "_")
+                        else:
+                            true
 
-                if is_word_boundary:
-                    tags.push(shorthand)
+                    if is_word_boundary:
+                        tags.push(shorthand)
+                None =>
+                    {}
 
         # Match #tag: name
         if trimmed.starts_with("#tag:"):
-            val rest = trimmed.trim_start("#tag:").trim()
+            val rest = trim_start(trimmed, "#tag:").trim()
             var tag = ""
             for ch in rest.chars():
                 if ch.is_alphanumeric() or ch == "_":
@@ -201,33 +212,14 @@ fn read_directory(path: text) -> List<text>:
     []
 
 fn get_dir_name(path: text) -> text:
-    # Stub: would extract directory name from path
-    val parts = path.split("/")
-    if parts.len() > 0:
-        parts[parts.len() - 1]
-    else:
-        ""
-
-fn get_filename(path: text) -> text:
-    val parts = path.split("/")
-    if parts.len() > 0:
-        parts[parts.len() - 1]
-    else:
-        path
-
-fn get_parent_dir(path: text) -> text:
-    val parts = path.split("/")
-    if parts.len() > 1:
-        parts[0..parts.len()-1].join("/")
-    else:
-        ""
+    # Use path_utils implementation
+    use super.path_utils.get_dir_name as path_get_dir_name
+    path_get_dir_name(path)
 
 fn get_parent_dir_option(path: text) -> Option<text>:
-    val parent = get_parent_dir(path)
-    if parent.len() > 0:
-        Some(parent)
-    else:
-        None
+    # Use path_utils implementation
+    use super.path_utils.get_parent_dir_option as path_get_parent_dir_option
+    path_get_parent_dir_option(path)
 
 fn read_file_content(path: text) -> Result<text, text>:
     # Stub: would read file content
@@ -237,5 +229,4 @@ fn file_exists(path: text) -> bool:
     # Stub: would check if file exists
     false
 
-fn join_path(dir: text, file: text) -> text:
-    "{dir}/{file}"
+# Note: join_path is imported from path_utils

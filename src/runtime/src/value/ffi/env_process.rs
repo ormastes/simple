@@ -130,6 +130,100 @@ pub unsafe extern "C" fn rt_env_cwd() -> RuntimeValue {
     }
 }
 
+/// Get all environment variables as array of (key, value) tuples
+#[no_mangle]
+pub unsafe extern "C" fn rt_env_vars() -> RuntimeValue {
+    rt_env_all()
+}
+
+/// Get all environment variables as List<(text, text)>
+/// Alias for rt_env_vars with better name
+#[no_mangle]
+pub unsafe extern "C" fn rt_env_all() -> RuntimeValue {
+    use crate::value::collections::rt_array_new;
+
+    // First, count environment variables to allocate proper capacity
+    let env_count = std::env::vars().count() as u64;
+
+    // Allocate array with sufficient capacity
+    let array = rt_array_new(env_count);
+
+    // Iterate through all environment variables
+    for (key, value) in std::env::vars() {
+        // Create strings for key and value
+        let key_bytes = key.as_bytes();
+        let key_str = rt_string_new(key_bytes.as_ptr(), key_bytes.len() as u64);
+
+        let value_bytes = value.as_bytes();
+        let value_str = rt_string_new(value_bytes.as_ptr(), value_bytes.len() as u64);
+
+        // Create tuple (key, value)
+        let tuple = rt_tuple_new(2);
+        rt_tuple_set(tuple, 0, key_str);
+        rt_tuple_set(tuple, 1, value_str);
+
+        // Add tuple to array
+        let pushed = crate::value::collections::rt_array_push(array, tuple);
+        debug_assert!(pushed, "Failed to push to array - capacity issue");
+    }
+
+    array
+}
+
+/// Check if environment variable exists
+#[no_mangle]
+pub unsafe extern "C" fn rt_env_exists(name_ptr: *const u8, name_len: u64) -> bool {
+    if name_ptr.is_null() {
+        return false;
+    }
+
+    let name_bytes = std::slice::from_raw_parts(name_ptr, name_len as usize);
+    let name_str = match std::str::from_utf8(name_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    std::env::var(name_str).is_ok()
+}
+
+/// Remove environment variable
+#[no_mangle]
+pub unsafe extern "C" fn rt_env_remove(name_ptr: *const u8, name_len: u64) -> bool {
+    if name_ptr.is_null() {
+        return false;
+    }
+
+    let name_bytes = std::slice::from_raw_parts(name_ptr, name_len as usize);
+    let name_str = match std::str::from_utf8(name_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    std::env::remove_var(name_str);
+    true
+}
+
+/// Get home directory path
+#[no_mangle]
+pub unsafe extern "C" fn rt_env_home() -> RuntimeValue {
+    match std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        Ok(home) => {
+            let bytes = home.as_bytes();
+            rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+        }
+        Err(_) => RuntimeValue::NIL,
+    }
+}
+
+/// Get temp directory path
+#[no_mangle]
+pub unsafe extern "C" fn rt_env_temp() -> RuntimeValue {
+    let temp = std::env::temp_dir();
+    let path_str = temp.to_string_lossy();
+    let bytes = path_str.as_bytes();
+    rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+}
+
 // ============================================================================
 // Process Execution
 // ============================================================================
@@ -473,6 +567,90 @@ mod tests {
             assert_eq!(platform, "macos");
             #[cfg(target_os = "linux")]
             assert_eq!(platform, "linux");
+        }
+    }
+
+    #[test]
+    fn test_env_vars() {
+        unsafe {
+            // Set a test environment variable
+            let (name_ptr, name_len) = str_to_ptr("TEST_ENV_VARS_SIMPLE");
+            let (value_ptr, value_len) = str_to_ptr("test_value");
+            rt_env_set(name_ptr, name_len, value_ptr, value_len);
+
+            // Get all environment variables (both functions should work the same)
+            let result1 = rt_env_vars();
+            let result2 = rt_env_all();
+            assert!(!result1.is_nil());
+            assert!(!result2.is_nil());
+
+            // Check that it's an array
+            let len = rt_array_len(result1);
+            assert!(len > 0);
+
+            // Find our test variable in the results
+            let mut found = false;
+            for i in 0..len {
+                let tuple = rt_array_get(result1, i);
+                let key = rt_tuple_get(tuple, 0);
+                let value = rt_tuple_get(tuple, 1);
+
+                let key_str = extract_string_test(key);
+                if key_str == "TEST_ENV_VARS_SIMPLE" {
+                    let value_str = extract_string_test(value);
+                    assert_eq!(value_str, "test_value");
+                    found = true;
+                    break;
+                }
+            }
+
+            assert!(found, "TEST_ENV_VARS_SIMPLE not found in environment variables");
+
+            // Clean up
+            std::env::remove_var("TEST_ENV_VARS_SIMPLE");
+        }
+    }
+
+    #[test]
+    fn test_env_exists() {
+        unsafe {
+            // Set a test variable
+            let (name_ptr, name_len) = str_to_ptr("TEST_ENV_EXISTS_SIMPLE");
+            let (value_ptr, value_len) = str_to_ptr("exists");
+            rt_env_set(name_ptr, name_len, value_ptr, value_len);
+
+            // Check it exists
+            assert!(rt_env_exists(name_ptr, name_len));
+
+            // Remove it
+            assert!(rt_env_remove(name_ptr, name_len));
+
+            // Check it no longer exists
+            assert!(!rt_env_exists(name_ptr, name_len));
+        }
+    }
+
+    #[test]
+    fn test_env_home() {
+        unsafe {
+            let result = rt_env_home();
+            // Should return a path (might be NIL on some systems, but usually not)
+            if !result.is_nil() {
+                let home = extract_string_test(result);
+                assert!(!home.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_env_temp() {
+        unsafe {
+            let result = rt_env_temp();
+            assert!(!result.is_nil());
+
+            let temp = extract_string_test(result);
+            assert!(!temp.is_empty());
+            assert!(std::path::Path::new(&temp).exists());
         }
     }
 }

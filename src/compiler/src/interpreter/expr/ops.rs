@@ -498,6 +498,11 @@ pub(super) fn eval_op_expr(
                             ctx,
                         ));
                     }
+                    UnaryOp::Move => {
+                        // Move is a semantic marker for ownership transfer
+                        // For unit types, just return the value unchanged
+                        return Ok(Some(val));
+                    }
                 }
             }
 
@@ -551,6 +556,11 @@ pub(super) fn eval_op_expr(
                             ));
                         }
                     }
+                }
+                UnaryOp::Move => {
+                    // Move is a semantic marker for ownership transfer
+                    // Just return the value unchanged - ownership tracking is compile-time only
+                    val
                 }
             };
             Ok(Some(result))

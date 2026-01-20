@@ -7,6 +7,17 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
 impl Lowerer {
+    /// Check if an AST expression is a move expression
+    fn is_move_expr(expr: &ast::Expr) -> bool {
+        matches!(
+            expr,
+            ast::Expr::Unary {
+                op: ast::UnaryOp::Move,
+                ..
+            }
+        )
+    }
+
     pub(super) fn lower_block(&mut self, block: &ast::Block, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
         // Enter block scope for lifetime tracking
         let span = block.statements.first().and_then(|n| match n {
@@ -59,9 +70,13 @@ impl Lowerer {
                 self.check_mutable_shared_binding(&name, ty, let_stmt.mutability, let_stmt.span);
 
                 // W1002: Check for implicit unique pointer copy (unless explicit move)
-                // TODO: [compiler][P2] Check if value expression is a move expression
                 if let Some(ref v) = value {
-                    let is_explicit_move = false; // TODO: [compiler][P2] Detect move keyword in let bindings
+                    // Check if the original AST expression is a move expression
+                    let is_explicit_move = if let Some(ast_value) = &let_stmt.value {
+                        Self::is_move_expr(ast_value)
+                    } else {
+                        false
+                    };
                     self.check_unique_copy(v, let_stmt.span, is_explicit_move);
                 }
 

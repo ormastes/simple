@@ -179,6 +179,26 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_eprintln_value",
     "rt_capture_stdout_start",
     "rt_capture_stderr_start",
+    // Environment & Process operations
+    "rt_env_get",
+    "rt_env_set",
+    "rt_get_env",
+    "rt_set_env",
+    "rt_env_cwd",
+    "rt_env_all",
+    "rt_env_vars",
+    "rt_env_exists",
+    "rt_env_remove",
+    "rt_env_home",
+    "rt_env_temp",
+    "rt_exit",
+    "rt_process_run",
+    "rt_process_spawn",
+    "rt_process_execute",
+    "rt_platform_name",
+    "rt_decision_probe",
+    "rt_condition_probe",
+    "rt_path_probe",
 ];
 
 #[cfg(test)]

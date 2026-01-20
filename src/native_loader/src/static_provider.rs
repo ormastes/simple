@@ -38,10 +38,13 @@ macro_rules! match_runtime_symbol {
 impl RuntimeSymbolProvider for StaticSymbolProvider {
     fn get_symbol(&self, name: &str) -> Option<*const u8> {
         use simple_runtime::value::{
-            rt_array_clear, rt_capture_stderr_start, rt_capture_stdout_start, rt_contains, rt_dict_clear, rt_dict_keys,
-            rt_dict_values, rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_function_not_found,
-            rt_interp_call, rt_interp_eval, rt_method_not_found, rt_print_str, rt_print_value, rt_println_str,
-            rt_println_value, rt_value_eq,
+            rt_array_clear, rt_capture_stderr_start, rt_capture_stdout_start, rt_condition_probe, rt_contains,
+            rt_decision_probe, rt_dict_clear, rt_dict_keys, rt_dict_values, rt_env_all, rt_env_cwd, rt_env_exists,
+            rt_env_get, rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_eprint_str,
+            rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_exit, rt_function_not_found, rt_get_env,
+            rt_interp_call, rt_interp_eval, rt_method_not_found, rt_path_probe, rt_platform_name, rt_print_str,
+            rt_print_value, rt_println_str, rt_println_value, rt_process_execute, rt_process_run, rt_process_spawn,
+            rt_set_env, rt_value_eq,
         };
         use simple_runtime::*;
 
@@ -149,6 +152,26 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_eprintln_value,
             rt_capture_stdout_start,
             rt_capture_stderr_start,
+            // Environment & Process operations
+            rt_env_get,
+            rt_env_set,
+            rt_get_env,
+            rt_set_env,
+            rt_env_cwd,
+            rt_env_all,
+            rt_env_vars,
+            rt_env_exists,
+            rt_env_remove,
+            rt_env_home,
+            rt_env_temp,
+            rt_exit,
+            rt_process_run,
+            rt_process_spawn,
+            rt_process_execute,
+            rt_platform_name,
+            rt_decision_probe,
+            rt_condition_probe,
+            rt_path_probe,
         )
     }
 

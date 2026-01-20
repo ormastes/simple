@@ -674,6 +674,7 @@ pub enum UnaryOp {
     RefMut,      // &mut (mutable borrow)
     Deref,       // *
     ChannelRecv, // <- (channel receive)
+    Move,        // move (explicit ownership transfer)
 }
 
 // Patterns

@@ -22,12 +22,12 @@ fn parse_sdoctest(script: &str) -> (Vec<String>, Vec<String>) {
             commands.push(trimmed.trim_start_matches(">>>").trim_start().to_string());
             in_command = true;
         } else if trimmed.starts_with("...") {
-            // Continuation line - strip "..." and indentation
-            // The sdoctest shows indentation for readability, but REPL auto-adds it
-            // So we strip both "..." and the following whitespace
+            // Continuation line - strip "..." but preserve indentation
+            // The indentation is required by the parser to understand block structure
             if let Some(last) = commands.last_mut() {
                 last.push('\n');
-                let content = trimmed.strip_prefix("...").unwrap_or(trimmed).trim_start();
+                // Strip "..." prefix but keep the rest (including indentation)
+                let content = line.strip_prefix("...").unwrap_or(&line);
                 last.push_str(content);
             }
         } else if trimmed.is_empty() {
@@ -148,7 +148,6 @@ fn interpreter_basic_sample_check_transcript() {
 }
 
 #[test]
-#[ignore = "REPL doesn't properly handle multi-line blocks (if/else, fn definitions)"]
 fn interpreter_repl_regressions() {
     let script = include_str!("repl_regressions.sdt");
     run_repl_script(script).expect("repl regression transcript should pass");
