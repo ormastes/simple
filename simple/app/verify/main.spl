@@ -199,17 +199,174 @@ fn cmd_list() -> Int:
     print("=================")
     print("")
 
-    # TODO: [stdlib][P3] Load and display actual obligations from source files
-    print("To list proof obligations, use: simple verify check")
-    print("")
-    print("Obligation categories:")
-    print("  - Preconditions: requires clauses")
-    print("  - Postconditions: ensures clauses")
-    print("  - Invariants: class and loop invariants")
-    print("  - Termination: decreases clauses")
-    print("  - Safety: memory safety properties")
+    # Load obligations from source files
+    val source_dir = args.get_flag("--dir").unwrap_or(".")
+    val obls = load_obligations_from_dir(source_dir)
+
+    if obls.is_empty():
+        print("No proof obligations found in {source_dir}")
+        print("")
+        print("Add verification annotations to your code:")
+        print("  @requires(condition)  - Precondition")
+        print("  @ensures(condition)   - Postcondition")
+        print("  @invariant(condition) - Invariant")
+        print("  @decreases(expr)      - Termination measure")
+    else:
+        # Group by category
+        var preconditions: List<Obligation> = []
+        var postconditions: List<Obligation> = []
+        var invariants: List<Obligation> = []
+        var termination: List<Obligation> = []
+        var safety: List<Obligation> = []
+
+        for obl in obls:
+            match obl.category:
+                case ObligationCategory::Precondition: preconditions.push(obl)
+                case ObligationCategory::Postcondition: postconditions.push(obl)
+                case ObligationCategory::Invariant: invariants.push(obl)
+                case ObligationCategory::Termination: termination.push(obl)
+                case ObligationCategory::Safety: safety.push(obl)
+
+        print("Found {obls.len()} proof obligations:")
+        print("")
+
+        if not preconditions.is_empty():
+            print("Preconditions ({preconditions.len()}):")
+            for obl in preconditions:
+                print("  {obl.location}: {obl.description}")
+            print("")
+
+        if not postconditions.is_empty():
+            print("Postconditions ({postconditions.len()}):")
+            for obl in postconditions:
+                print("  {obl.location}: {obl.description}")
+            print("")
+
+        if not invariants.is_empty():
+            print("Invariants ({invariants.len()}):")
+            for obl in invariants:
+                print("  {obl.location}: {obl.description}")
+            print("")
+
+        if not termination.is_empty():
+            print("Termination ({termination.len()}):")
+            for obl in termination:
+                print("  {obl.location}: {obl.description}")
+            print("")
+
+        if not safety.is_empty():
+            print("Safety ({safety.len()}):")
+            for obl in safety:
+                print("  {obl.location}: {obl.description}")
+            print("")
 
     0
+
+# Obligation data structure
+struct Obligation:
+    location: String      # file:line
+    category: ObligationCategory
+    description: String
+    condition: String
+
+enum ObligationCategory:
+    Precondition
+    Postcondition
+    Invariant
+    Termination
+    Safety
+
+# Load obligations from all Simple files in a directory
+fn load_obligations_from_dir(dir: String) -> List<Obligation>:
+    var all_obls: List<Obligation> = []
+
+    # Find all .spl files
+    match fs.glob(dir, "**/*.spl"):
+        case Ok(files):
+            for file in files:
+                val file_obls = load_obligations_from_file(file)
+                all_obls.extend(file_obls)
+        case Err(_):
+            pass
+
+    return all_obls
+
+# Load obligations from a single file
+fn load_obligations_from_file(path: String) -> List<Obligation>:
+    var obls: List<Obligation> = []
+
+    match fs.read_text(path):
+        case Ok(content):
+            val lines = content.split("\n")
+            var line_num = 1
+
+            for line in lines:
+                val trimmed = line.trim()
+
+                # Check for @requires annotation
+                if trimmed.starts_with("@requires("):
+                    val cond = extract_annotation(trimmed, "@requires(")
+                    obls.push(Obligation {
+                        location: "{path}:{line_num}",
+                        category: ObligationCategory::Precondition,
+                        description: "requires {cond}",
+                        condition: cond
+                    })
+
+                # Check for @ensures annotation
+                else if trimmed.starts_with("@ensures("):
+                    val cond = extract_annotation(trimmed, "@ensures(")
+                    obls.push(Obligation {
+                        location: "{path}:{line_num}",
+                        category: ObligationCategory::Postcondition,
+                        description: "ensures {cond}",
+                        condition: cond
+                    })
+
+                # Check for @invariant annotation
+                else if trimmed.starts_with("@invariant("):
+                    val cond = extract_annotation(trimmed, "@invariant(")
+                    obls.push(Obligation {
+                        location: "{path}:{line_num}",
+                        category: ObligationCategory::Invariant,
+                        description: "invariant {cond}",
+                        condition: cond
+                    })
+
+                # Check for @decreases annotation
+                else if trimmed.starts_with("@decreases("):
+                    val expr = extract_annotation(trimmed, "@decreases(")
+                    obls.push(Obligation {
+                        location: "{path}:{line_num}",
+                        category: ObligationCategory::Termination,
+                        description: "decreases {expr}",
+                        condition: expr
+                    })
+
+                # Check for @safe annotation
+                else if trimmed.starts_with("@safe("):
+                    val prop = extract_annotation(trimmed, "@safe(")
+                    obls.push(Obligation {
+                        location: "{path}:{line_num}",
+                        category: ObligationCategory::Safety,
+                        description: "safe {prop}",
+                        condition: prop
+                    })
+
+                line_num = line_num + 1
+
+        case Err(_):
+            pass
+
+    return obls
+
+# Extract content from annotation like @requires(condition)
+fn extract_annotation(line: String, prefix: String) -> String:
+    val start = prefix.len()
+    val end = line.rfind(")")
+    if end > start:
+        return line.slice(start, end)
+    return line.slice(start)
 
 fn is_lean_available() -> Bool:
     # Try to run lean --version

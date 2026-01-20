@@ -2,8 +2,11 @@
 //!
 //! Exposes compiler functionality (Parser, ApiSurface) to Simple code via FFI.
 //! This allows Simple stdlib to parse and analyze Simple source code.
+//!
+//! NOTE: This module is currently a stub. The actual implementation requires
+//! updating to the new parser API. See TODO.md for details.
 
-use simple_parser::{Parser, ParserMode};
+use simple_parser::Parser;
 use simple_runtime::value::core::RuntimeValue;
 use simple_runtime::value::rt_string_from_str;
 use crate::api_surface::ApiSurface;
@@ -25,8 +28,8 @@ pub extern "C" fn rt_parse_simple_file(path: RuntimeValue) -> RuntimeValue {
     };
 
     // Parse with Parser
-    let mut parser = Parser::new(&content, ParserMode::Standard);
-    let module = match parser.parse_module() {
+    let mut parser = Parser::new(&content);
+    let module = match parser.parse() {
         Ok(m) => m,
         Err(_) => return RuntimeValue::NIL,
     };
@@ -56,14 +59,19 @@ pub extern "C" fn rt_api_surface_extract(path: RuntimeValue) -> RuntimeValue {
     };
 
     // Parse with Parser
-    let mut parser = Parser::new(&content, ParserMode::Standard);
-    let module = match parser.parse_module() {
+    let mut parser = Parser::new(&content);
+    let module = match parser.parse() {
         Ok(m) => m,
         Err(_) => return RuntimeValue::NIL,
     };
 
-    // Extract API surface
-    let api_surface = ApiSurface::from_module(&module, Path::new(&path_str).file_stem().unwrap_or_default().to_string_lossy().to_string());
+    // Extract API surface from parsed nodes
+    let module_name = Path::new(&path_str)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let api_surface = ApiSurface::from_nodes(module_name, &module.items);
 
     // Convert to JSON
     let json = match serde_json::to_string_pretty(&api_surface) {
@@ -94,8 +102,8 @@ pub extern "C" fn rt_symbol_usage_find(path: RuntimeValue, target: RuntimeValue)
     };
 
     // Parse with Parser
-    let mut parser = Parser::new(&content, ParserMode::Standard);
-    let module = match parser.parse_module() {
+    let mut parser = Parser::new(&content);
+    let module = match parser.parse() {
         Ok(m) => m,
         Err(_) => return RuntimeValue::NIL,
     };
@@ -136,15 +144,18 @@ fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
 
 // Helper: Find all symbols used by a function
 fn find_used_symbols(module: &simple_parser::ast::Module, target: &str) -> Vec<String> {
-    use simple_parser::ast::Node;
+    use simple_parser::Node;
+    use simple_parser::Expr;
     let mut symbols = Vec::new();
 
     // Find the target function
     for item in &module.items {
-        if let Node::FunctionDef(func) = item {
+        if let Node::Function(func) = item {
             if func.name == target {
                 // Walk the function body to collect all symbol references
-                collect_symbols_from_node(&func.body, &mut symbols);
+                for stmt in &func.body.statements {
+                    collect_symbols_from_node(stmt, &mut symbols);
+                }
                 break;
             }
         }
@@ -157,50 +168,82 @@ fn find_used_symbols(module: &simple_parser::ast::Module, target: &str) -> Vec<S
 }
 
 // Helper: Recursively collect symbol references from AST node
-fn collect_symbols_from_node(node: &Node, symbols: &mut Vec<String>) {
-    use simple_parser::ast::Node;
+fn collect_symbols_from_node(node: &simple_parser::Node, symbols: &mut Vec<String>) {
+    use simple_parser::Node;
+    use simple_parser::Expr;
 
     match node {
-        Node::Identifier(name) => {
-            symbols.push(name.clone());
-        }
-        Node::Call(call) => {
-            collect_symbols_from_node(&call.callee, symbols);
-            for arg in &call.arguments {
-                collect_symbols_from_node(arg, symbols);
-            }
-        }
-        Node::BinaryOp(bin) => {
-            collect_symbols_from_node(&bin.left, symbols);
-            collect_symbols_from_node(&bin.right, symbols);
-        }
-        Node::Block(block) => {
-            for stmt in &block.statements {
-                collect_symbols_from_node(stmt, symbols);
-            }
-        }
-        Node::IfStmt(if_stmt) => {
-            collect_symbols_from_node(&if_stmt.condition, symbols);
-            collect_symbols_from_node(&if_stmt.then_block, symbols);
-            if let Some(else_block) = &if_stmt.else_block {
-                collect_symbols_from_node(else_block, symbols);
-            }
+        Node::Expression(expr) => {
+            collect_symbols_from_expr(expr, symbols);
         }
         Node::Return(ret) => {
             if let Some(value) = &ret.value {
-                collect_symbols_from_node(value, symbols);
+                collect_symbols_from_expr(value, symbols);
             }
         }
         Node::Assignment(assign) => {
-            collect_symbols_from_node(&assign.value, symbols);
+            collect_symbols_from_expr(&assign.target, symbols);
+            collect_symbols_from_expr(&assign.value, symbols);
         }
-        Node::MethodCall(method) => {
-            collect_symbols_from_node(&method.receiver, symbols);
-            for arg in &method.arguments {
-                collect_symbols_from_node(arg, symbols);
+        Node::If(if_stmt) => {
+            collect_symbols_from_expr(&if_stmt.condition, symbols);
+            for stmt in &if_stmt.then_block.statements {
+                collect_symbols_from_node(stmt, symbols);
+            }
+            if let Some(else_block) = &if_stmt.else_block {
+                for stmt in &else_block.statements {
+                    collect_symbols_from_node(stmt, symbols);
+                }
+            }
+        }
+        Node::While(while_stmt) => {
+            collect_symbols_from_expr(&while_stmt.condition, symbols);
+            for stmt in &while_stmt.body.statements {
+                collect_symbols_from_node(stmt, symbols);
+            }
+        }
+        Node::Let(let_stmt) => {
+            if let Some(value) = &let_stmt.value {
+                collect_symbols_from_expr(value, symbols);
             }
         }
         // Add more node types as needed
+        _ => {}
+    }
+}
+
+// Helper: Collect symbols from expressions
+fn collect_symbols_from_expr(expr: &simple_parser::Expr, symbols: &mut Vec<String>) {
+    use simple_parser::Expr;
+
+    match expr {
+        Expr::Identifier(name) => {
+            symbols.push(name.clone());
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_symbols_from_expr(callee, symbols);
+            for arg in args {
+                collect_symbols_from_expr(&arg.value, symbols);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_symbols_from_expr(left, symbols);
+            collect_symbols_from_expr(right, symbols);
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            collect_symbols_from_expr(receiver, symbols);
+            for arg in args {
+                collect_symbols_from_expr(&arg.value, symbols);
+            }
+        }
+        Expr::FieldAccess { receiver, .. } => {
+            collect_symbols_from_expr(receiver, symbols);
+        }
+        Expr::Index { receiver, index } => {
+            collect_symbols_from_expr(receiver, symbols);
+            collect_symbols_from_expr(index, symbols);
+        }
+        // Add more expression types as needed
         _ => {}
     }
 }

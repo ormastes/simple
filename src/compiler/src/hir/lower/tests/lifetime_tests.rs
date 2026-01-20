@@ -7,18 +7,19 @@ use simple_parser::Parser;
 use crate::hir::lower::Lowerer;
 use crate::hir::LifetimeViolation;
 
-/// Helper to parse and lower with warnings
+/// Helper to parse and lower with LENIENT mode (warnings, not errors)
+/// Use this for tests that expect code to compile with warnings.
 fn lower_with_warnings(source: &str) -> Result<crate::hir::LoweringOutput, crate::hir::LowerError> {
     let mut parser = Parser::new(source);
     let module = parser.parse().expect("parse failed");
-    Lowerer::new().lower_module_with_warnings(&module)
+    Lowerer::with_lenient_mode().lower_module_with_warnings(&module)
 }
 
 /// Helper to check if lowering produces a lifetime violation error
 fn has_lifetime_error(source: &str) -> bool {
     let mut parser = Parser::new(source);
     let module = parser.parse().expect("parse failed");
-    match Lowerer::new().lower_module_with_warnings(&module) {
+    match Lowerer::with_lenient_mode().lower_module_with_warnings(&module) {
         Err(crate::hir::LowerError::LifetimeViolation(_)) => true,
         Err(crate::hir::LowerError::LifetimeViolations(_)) => true,
         _ => false,
@@ -213,11 +214,12 @@ fn has_var():
 // These tests demonstrate the compile-time memory safety checking.
 // Currently emits warnings; in strict mode (Rust-level safety), these become errors.
 
-/// Helper to lower with strict memory mode (warnings become errors)
+/// Helper to lower with STRICT memory mode (Rust-level safety - errors, not warnings)
+/// This is now the DEFAULT behavior with Lowerer::new()
 fn lower_strict(source: &str) -> Result<crate::hir::LoweringOutput, crate::hir::LowerError> {
     let mut parser = Parser::new(source);
     let module = parser.parse().expect("parse failed");
-    Lowerer::with_strict_memory_mode().lower_module_with_warnings(&module)
+    Lowerer::new().lower_module_with_warnings(&module) // new() is now strict by default
 }
 
 /// Helper to count warnings of a specific code

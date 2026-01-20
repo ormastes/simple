@@ -93,10 +93,9 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_sandbox_cleanup, rt_sandbox_is_configured, rt_sandbox_get_cpu_time,
             rt_sandbox_get_memory, rt_sandbox_get_network_mode, rt_sandbox_get_fs_mode,
         };
-        // Parser and compiler operations
-        use simple_compiler::ffi_bridge::{
-            rt_parse_simple_file, rt_api_surface_extract, rt_symbol_usage_find,
-        };
+        // NOTE: Parser and compiler operations (rt_parse_simple_file, rt_api_surface_extract,
+        // rt_symbol_usage_find) are not included to avoid cyclic dependency
+        // (compiler -> native-loader -> compiler).
         use simple_runtime::*;
 
         match_runtime_symbol!(
@@ -345,10 +344,6 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_sandbox_get_memory,
             rt_sandbox_get_network_mode,
             rt_sandbox_get_fs_mode,
-            // Parser and compiler operations
-            rt_parse_simple_file,
-            rt_api_surface_extract,
-            rt_symbol_usage_find,
         )
     }
 

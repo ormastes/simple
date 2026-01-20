@@ -32,6 +32,9 @@ pub struct Lowerer {
 }
 
 impl Lowerer {
+    /// Create a new lowerer with STRICT memory mode (Rust-level safety)
+    /// Memory safety violations are compile-time ERRORS by default.
+    /// Use `with_lenient_mode()` for backwards compatibility during migration.
     pub fn new() -> Self {
         Self {
             module: HirModule::new(),
@@ -41,13 +44,14 @@ impl Lowerer {
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
-            memory_warnings: MemoryWarningCollector::new(),
+            memory_warnings: MemoryWarningCollector::strict(), // STRICT by default for Rust-level safety
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
         }
     }
 
     /// Create a new lowerer with module resolution support for loading imported types
+    /// Uses strict memory mode by default.
     pub fn with_module_resolver(module_resolver: ModuleResolver, current_file: PathBuf) -> Self {
         Self {
             module: HirModule::new(),
@@ -57,30 +61,21 @@ impl Lowerer {
             module_resolver: Some(module_resolver),
             current_file: Some(current_file),
             loaded_modules: HashSet::new(),
-            memory_warnings: MemoryWarningCollector::new(),
+            memory_warnings: MemoryWarningCollector::strict(), // STRICT by default
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
         }
     }
 
-    /// Create a new lowerer with strict memory mode (warnings become errors)
+    /// Alias for `new()` - strict mode is now the default
+    #[deprecated(since = "1.0.0", note = "strict mode is now the default; use `new()` instead")]
     pub fn with_strict_memory_mode() -> Self {
-        Self {
-            module: HirModule::new(),
-            globals: HashMap::new(),
-            pure_functions: HashSet::new(),
-            current_class_type: None,
-            module_resolver: None,
-            current_file: None,
-            loaded_modules: HashSet::new(),
-            memory_warnings: MemoryWarningCollector::strict(),
-            lifetime_context: LifetimeContext::new(),
-            capability_env: CapabilityEnv::new(),
-        }
+        Self::new()
     }
 
-    /// Create a new lowerer with lenient memory mode (for backwards compatibility)
-    /// In lenient mode, capability violations are warnings instead of errors
+    /// Create a new lowerer with LENIENT memory mode (for backwards compatibility)
+    /// In lenient mode, capability violations produce WARNINGS instead of errors.
+    /// Use this during migration to strict mode.
     pub fn with_lenient_mode() -> Self {
         Self {
             module: HirModule::new(),
@@ -90,7 +85,7 @@ impl Lowerer {
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
-            memory_warnings: MemoryWarningCollector::new(), // Lenient mode (warnings)
+            memory_warnings: MemoryWarningCollector::new(), // Lenient mode (warnings only)
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
         }
