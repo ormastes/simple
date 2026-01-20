@@ -1,0 +1,330 @@
+# Parsing utilities for text processing
+# Simple parsers without regex dependencies
+
+use super.string_utils.{trim_start, trim_end}
+use super.option_utils.{map_option, ok_or}
+
+# =====================================
+# Number Parsing
+# =====================================
+
+# Parse integer from string
+fn parse_int(s: text) -> Option<i32>:
+    if s.is_empty():
+        return None
+
+    var result = 0
+    var is_negative = false
+    var start_idx = 0
+
+    # Handle negative sign
+    if s.chars()[0] == "-":
+        is_negative = true
+        start_idx = 1
+
+    if start_idx >= s.len():
+        return None
+
+    # Parse digits
+    for i in start_idx..s.len():
+        val ch = s.chars()[i]
+        if not ch.is_numeric():
+            return None
+
+        val digit = char_to_digit(ch)
+        result = result * 10 + digit
+
+    if is_negative:
+        Some(-result)
+    else:
+        Some(result)
+
+# Convert character to digit
+fn char_to_digit(ch: text) -> i32:
+    match ch:
+        "0" => 0
+        "1" => 1
+        "2" => 2
+        "3" => 3
+        "4" => 4
+        "5" => 5
+        "6" => 6
+        "7" => 7
+        "8" => 8
+        "9" => 9
+        _ => 0
+
+# Parse boolean from string
+fn parse_bool(s: text) -> Option<bool>:
+    val lower = s.to_lowercase().trim()
+    match lower:
+        "true" => Some(true)
+        "false" => Some(false)
+        "yes" => Some(true)
+        "no" => Some(false)
+        "1" => Some(true)
+        "0" => Some(false)
+        _ => None
+
+# =====================================
+# Key-Value Parsing
+# =====================================
+
+# Parse key=value pair
+fn parse_key_value(line: text, separator: text) -> Option<(text, text)>:
+    match line.find(separator):
+        None => None
+        Some(idx) =>
+            val key = line.substring(0, idx).trim()
+            val value = line.substring(idx + separator.len(), line.len()).trim()
+            Some((key, value))
+
+# Parse multiple key=value lines
+fn parse_key_values(text: text, separator: text) -> List<(text, text)>:
+    var results = []
+
+    for line in text.lines():
+        val trimmed = line.trim()
+        if trimmed.is_empty() or trimmed.starts_with("#"):
+            continue
+
+        match parse_key_value(trimmed, separator):
+            Some(pair) => results.push(pair)
+            None => {}
+
+    results
+
+# =====================================
+# List Parsing
+# =====================================
+
+# Parse comma-separated values
+fn parse_csv_line(line: text) -> List<text>:
+    parse_delimited(line, ",")
+
+# Parse delimited values
+fn parse_delimited(line: text, delimiter: text) -> List<text>:
+    val parts = line.split(delimiter)
+    parts.map(\p: p.trim())
+
+# Parse numbered list (e.g., "1. Item\n2. Item")
+fn parse_numbered_list(text: text) -> List<text>:
+    var results = []
+
+    for line in text.lines():
+        val trimmed = line.trim()
+        if trimmed.is_empty():
+            continue
+
+        # Check if line starts with number and dot
+        var found_dot = false
+        var dot_idx = 0
+
+        for i in 0..trimmed.len():
+            val ch = trimmed.chars()[i]
+            if ch == ".":
+                found_dot = true
+                dot_idx = i
+                break
+            elif not ch.is_numeric():
+                break
+
+        if found_dot and dot_idx > 0:
+            val content = trimmed.substring(dot_idx + 1, trimmed.len()).trim()
+            results.push(content)
+
+    results
+
+# Parse bulleted list (e.g., "- Item\n* Item")
+fn parse_bulleted_list(text: text) -> List<text>:
+    var results = []
+
+    for line in text.lines():
+        val trimmed = line.trim()
+        if trimmed.is_empty():
+            continue
+
+        # Check for common bullet characters
+        if trimmed.starts_with("- ") or trimmed.starts_with("* ") or trimmed.starts_with("• "):
+            val content = trimmed.substring(2, trimmed.len()).trim()
+            results.push(content)
+
+    results
+
+# =====================================
+# Path/URL Parsing
+# =====================================
+
+# Parse query string parameters (e.g., "?key1=val1&key2=val2")
+fn parse_query_string(query: text) -> List<(text, text)>:
+    val clean = trim_start(query, "?")
+    val pairs = clean.split("&")
+
+    var results = []
+
+    for pair in pairs:
+        match parse_key_value(pair, "="):
+            Some(kv) => results.push(kv)
+            None => {}
+
+    results
+
+# Extract file extension from filename
+fn extract_extension(filename: text) -> Option<text>:
+    match filename.rfind("."):
+        None => None
+        Some(idx) =>
+            if idx == filename.len() - 1:
+                None
+            else:
+                Some(filename.substring(idx + 1, filename.len()))
+
+# =====================================
+# Version Parsing
+# =====================================
+
+# Parse semantic version (e.g., "1.2.3")
+struct Version:
+    major: i32
+    minor: i32
+    patch: i32
+
+fn parse_version(s: text) -> Option<Version>:
+    val parts = s.split(".")
+
+    if parts.len() != 3:
+        return None
+
+    match parse_int(parts[0]):
+        None => return None
+        Some(major) =>
+            match parse_int(parts[1]):
+                None => return None
+                Some(minor) =>
+                    match parse_int(parts[2]):
+                        None => return None
+                        Some(patch) =>
+                            Some(Version(
+                                major: major,
+                                minor: minor,
+                                patch: patch
+                            ))
+
+# Compare versions
+fn compare_versions(v1: Version, v2: Version) -> i32:
+    if v1.major != v2.major:
+        return v1.major - v2.major
+
+    if v1.minor != v2.minor:
+        return v1.minor - v2.minor
+
+    v1.patch - v2.patch
+
+# =====================================
+# Memory Size Parsing
+# =====================================
+
+# Parse memory size with units (e.g., "512MB", "2GB")
+fn parse_memory_size(s: text) -> Option<i32>:
+    val trimmed = s.trim().to_uppercase()
+
+    # Extract number and unit
+    var num_str = ""
+    var unit = ""
+    var in_number = true
+
+    for ch in trimmed.chars():
+        if ch.is_numeric() or ch == ".":
+            if in_number:
+                num_str = num_str + ch
+        else:
+            in_number = false
+            unit = unit + ch
+
+    # Parse number
+    match parse_int(num_str):
+        None => return None
+        Some(num) =>
+            # Apply unit multiplier
+            val multiplier = match unit.trim():
+                "B" => 1
+                "KB" => 1024
+                "MB" => 1024 * 1024
+                "GB" => 1024 * 1024 * 1024
+                "K" => 1024
+                "M" => 1024 * 1024
+                "G" => 1024 * 1024 * 1024
+                "" => 1
+                _ => return None
+
+            Some(num * multiplier)
+
+# =====================================
+# Duration Parsing
+# =====================================
+
+# Parse duration (e.g., "5s", "2m", "1h")
+fn parse_duration_seconds(s: text) -> Option<i32>:
+    val trimmed = s.trim().to_lowercase()
+
+    var num_str = ""
+    var unit = ""
+
+    for ch in trimmed.chars():
+        if ch.is_numeric():
+            num_str = num_str + ch
+        else:
+            unit = unit + ch
+
+    match parse_int(num_str):
+        None => return None
+        Some(num) =>
+            val multiplier = match unit.trim():
+                "s" => 1
+                "m" => 60
+                "h" => 3600
+                "d" => 86400
+                "sec" => 1
+                "min" => 60
+                "hour" => 3600
+                "day" => 86400
+                "" => 1
+                _ => return None
+
+            Some(num * multiplier)
+
+# =====================================
+# Command Line Argument Parsing
+# =====================================
+
+# Parse command line flag (--flag or -f)
+fn is_flag(arg: text) -> bool:
+    arg.starts_with("-")
+
+# Parse flag name (remove leading dashes)
+fn parse_flag_name(arg: text) -> text:
+    var result = arg
+    result = trim_start(result, "--")
+    result = trim_start(result, "-")
+    result
+
+# Parse flag with value (--key=value)
+fn parse_flag_with_value(arg: text) -> Option<(text, text)>:
+    if not arg.starts_with("-"):
+        return None
+
+    val clean = parse_flag_name(arg)
+    parse_key_value(clean, "=")
+
+# Split arguments into flags and positional args
+fn split_args(args: List<text>) -> (List<text>, List<text>):
+    var flags = []
+    var positional = []
+
+    for arg in args:
+        if is_flag(arg):
+            flags.push(arg)
+        else:
+            positional.push(arg)
+
+    (flags, positional)

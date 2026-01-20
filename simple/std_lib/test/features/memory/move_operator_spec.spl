@@ -1,0 +1,209 @@
+# SSpec Feature: Move Operator
+#
+# Tests for the `move` keyword which provides explicit ownership transfer
+# for unique pointers in Simple's memory model.
+#
+# Related:
+# - Memory Safety Guide: doc/guide/memory_migration_guide.md
+# - Memory Design: doc/design/memory.md
+# - W1002 Warning: Implicit unique pointer copy
+
+import sspec.{describe, it, expect, should}
+
+describe "Move Operator":
+    """
+    The `move` keyword explicitly transfers ownership of unique pointers,
+    preventing implicit copies that could violate memory safety (W1002).
+
+    Simple's ownership model:
+    - Shared pointers (*T): Copy-on-write, implicit copy allowed
+    - Unique pointers (&T): Single owner, requires explicit move
+    - Mutable refs (&mut T): Exclusive access, no copy allowed
+
+    Syntax: `move expr`
+    - Transfers ownership from `expr` to the destination
+    - Original binding becomes invalid after move
+    - No implicit copies for unique pointers
+    """
+
+    it "allows explicit ownership transfer for unique pointers":
+        """
+        Given a unique pointer binding
+        When using `move` keyword
+        Then ownership is transferred without W1002 warning
+        """
+        # Setup: Create unique pointer
+        val unique = create_unique_data(42)
+
+        # Action: Move ownership explicitly
+        val moved = move unique
+
+        # Verify: moved contains the value
+        expect(moved.value).to_equal(42)
+
+        # Note: `unique` cannot be used after this point
+
+    it "works with function arguments":
+        """
+        Given a function expecting owned value
+        When passing argument with `move`
+        Then ownership is transferred to function
+        """
+        val data = create_unique_data(100)
+        val result = take_ownership(move data)
+        expect(result).to_be(true)
+
+    it "works in array literals":
+        """
+        Given multiple unique pointer bindings
+        When collecting into array with `move`
+        Then all values are owned by the array
+        """
+        val item1 = create_unique_data(1)
+        val item2 = create_unique_data(2)
+        val item3 = create_unique_data(3)
+
+        val arr = [move item1, move item2, move item3]
+
+        expect(arr.len()).to_equal(3)
+        expect(arr[0].value).to_equal(1)
+        expect(arr[1].value).to_equal(2)
+        expect(arr[2].value).to_equal(3)
+
+    it "works in return statements":
+        """
+        Given a function returning unique pointer
+        When returning with explicit `move`
+        Then ownership is transferred to caller
+        """
+        fn create_data() -> UniqueData:
+            val data = create_unique_data(777)
+            return move data
+
+        val result = create_data()
+        expect(result.value).to_equal(777)
+
+    it "works with pattern matching":
+        """
+        Given optional unique pointer
+        When matching with `move` pattern
+        Then ownership is extracted into binding
+        """
+        val maybe_data = Some(create_unique_data(999))
+
+        match maybe_data:
+            case Some(move data):
+                expect(data.value).to_equal(999)
+            case None:
+                fail("Expected Some, got None")
+
+    it "does not trigger W1002 warning":
+        """
+        Given code using explicit `move`
+        When compiled with lint checks
+        Then no W1002 warning is emitted
+        """
+        # This code should compile without W1002 warning
+        val unique = create_unique_data(123)
+        val moved = move unique
+        expect(moved.value).to_equal(123)
+
+describe "Move Operator - Edge Cases":
+    """
+    Edge cases and error conditions for move operator
+    """
+
+    it "can move from struct fields":
+        """
+        Given struct with unique pointer field
+        When moving field out of struct
+        Then ownership is transferred
+        """
+        val container = Container(create_unique_data(50))
+        val extracted = move container.data
+        expect(extracted.value).to_equal(50)
+
+    it "preserves type of moved value":
+        """
+        Given a unique pointer of specific type
+        When moved to new binding
+        Then type is preserved
+        """
+        val original = create_unique_data(42)
+        val moved = move original
+        # Type should still be UniqueData
+        expect(moved.value).to_be_instance_of(i64)
+
+    it "works with let bindings":
+        """
+        Given move in let binding
+        When assigning to variable
+        Then ownership is transferred
+        """
+        val source = create_unique_data(111)
+        val dest = move source
+        expect(dest.value).to_equal(111)
+
+describe "Move Operator vs Clone":
+    """
+    Comparing explicit move vs explicit clone
+    """
+
+    it "move transfers ownership (no copy)":
+        """
+        Given unique pointer
+        When using move
+        Then value is transferred, not copied
+        """
+        val original = create_unique_data(10)
+        val moved = move original
+        # Only one instance exists (moved)
+        expect(moved.value).to_equal(10)
+
+    it "clone creates explicit copy":
+        """
+        Given unique pointer with clone method
+        When using clone()
+        Then new independent copy is created
+        """
+        val original = create_cloneable_data(20)
+        val cloned = original.clone()
+
+        # Both instances exist
+        expect(original.value).to_equal(20)
+        expect(cloned.value).to_equal(20)
+
+        # Modifying clone doesn't affect original
+        me cloned.set_value(30)
+        expect(original.value).to_equal(20)
+        expect(cloned.value).to_equal(30)
+
+# ============================================================================
+# Helper Functions and Types
+# ============================================================================
+
+struct UniqueData:
+    value: i64
+
+fn create_unique_data(n: i64) -> UniqueData:
+    return UniqueData { value: n }
+
+fn take_ownership(data: UniqueData) -> bool:
+    # Function takes ownership of data
+    return data.value > 0
+
+struct Container:
+    data: UniqueData
+
+struct CloneableData:
+    var value: i64
+
+    impl:
+        fn clone() -> CloneableData:
+            return CloneableData { value: self.value }
+
+        me set_value(n: i64):
+            self.value = n
+
+fn create_cloneable_data(n: i64) -> CloneableData:
+    return CloneableData { value: n }

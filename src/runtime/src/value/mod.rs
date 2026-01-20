@@ -177,6 +177,13 @@ pub use ffi::{
 // Re-export time FFI functions
 pub use ffi::rt_time_now_seconds;
 
+// Re-export environment & process FFI functions
+pub use ffi::{
+    rt_condition_probe, rt_decision_probe, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get, rt_env_home,
+    rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_path_probe, rt_platform_name,
+    rt_process_execute, rt_process_run, rt_process_spawn, rt_set_env,
+};
+
 // Re-export atomic operations FFI functions
 pub use ffi::{
     rt_atomic_bool_free, rt_atomic_bool_load, rt_atomic_bool_new, rt_atomic_bool_store, rt_atomic_bool_swap,

@@ -462,6 +462,7 @@ impl From<simple_parser::UnaryOp> for UnaryOp {
             simple_parser::UnaryOp::RefMut => UnaryOp::Not, // Handled separately
             simple_parser::UnaryOp::Deref => UnaryOp::Not, // Handled separately
             simple_parser::UnaryOp::ChannelRecv => UnaryOp::Not, // Handled separately
+            simple_parser::UnaryOp::Move => UnaryOp::Not, // Handled separately - move is semantic marker only
         }
     }
 }
