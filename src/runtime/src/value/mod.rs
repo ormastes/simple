@@ -638,6 +638,12 @@ pub use simd::{
     rt_vec_min, rt_vec_product, rt_vec_round, rt_vec_select, rt_vec_shuffle, rt_vec_sqrt, rt_vec_sum, rt_vec_with,
 };
 
+// Re-export regex FFI functions
+pub use ffi::regex::{
+    ffi_regex_captures, ffi_regex_find, ffi_regex_find_all, ffi_regex_is_match, ffi_regex_replace,
+    ffi_regex_replace_all, ffi_regex_split, ffi_regex_split_n,
+};
+
 // Re-export diagram FFI functions (for spec framework)
 pub use diagram_ffi::{
     rt_diagram_clear, rt_diagram_disable, rt_diagram_enable, rt_diagram_free_string, rt_diagram_generate_arch,

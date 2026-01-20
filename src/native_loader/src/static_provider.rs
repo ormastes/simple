@@ -54,6 +54,11 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_file_find, rt_dir_glob, rt_file_open, rt_file_get_size, rt_file_close,
             rt_path_basename, rt_path_dirname, rt_path_ext, rt_path_absolute, rt_path_separator,
         };
+        // Regex operations
+        use simple_runtime::value::{
+            ffi_regex_captures, ffi_regex_find, ffi_regex_find_all, ffi_regex_is_match,
+            ffi_regex_replace, ffi_regex_replace_all, ffi_regex_split, ffi_regex_split_n,
+        };
         use simple_runtime::*;
 
         match_runtime_symbol!(
@@ -92,6 +97,15 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_string_concat,
             rt_string_len,
             rt_string_data,
+            // Regex operations
+            ffi_regex_is_match,
+            ffi_regex_find,
+            ffi_regex_find_all,
+            ffi_regex_captures,
+            ffi_regex_replace,
+            ffi_regex_replace_all,
+            ffi_regex_split,
+            ffi_regex_split_n,
             // Value creation/conversion
             rt_value_int,
             rt_value_float,

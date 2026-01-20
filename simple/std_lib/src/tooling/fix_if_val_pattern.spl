@@ -2,9 +2,8 @@
 # Migrated from: scripts/fix_if_val_pattern.py
 # Purpose: Fix 'if val Some(x) = ...' pattern to use match instead
 
-# TODO: [stdlib][P1] Add regex library to Simple
-
 import fs.{read_text, write_text}
+import regex.{replace_all, is_match}
 
 use super.file_utils.{find_spl_files, count_changed_lines}
 
@@ -72,46 +71,44 @@ impl MigrationResult:
             error: message
         )
 
-# TODO: [stdlib][P1] Add regex support
 # Fix if-val-Some pattern in content
 fn fix_if_val_content(content: text) -> text:
-    # Stub: Needs regex for complex pattern matching and replacement
     # Two transformation passes needed:
     #
-    # Pass 1: Statement form
-    # Pattern: r'(\s*)if val Some\((\w+)\)\s*=\s*([^:]+):\s*\n((?:\1    .+\n)*)\1else:\s*\n((?:\1    .+\n)*)'
-    # Converts:
-    #   if val Some(x) = opt:
-    #       body
-    #   else:
-    #       else_body
-    # To:
-    #   match opt:
-    #       case Some(x):
-    #           body
-    #       case None:
-    #           else_body
+    # Pass 1: Statement form - Simple single-line case
+    # Converts: if val Some(x) = opt: ... else: ...
+    # To: match opt: case Some(x): ... case None: ...
     #
-    # Pass 2: Expression form
-    # Pattern: r'(\s*)val\s+(\w+)\s*=\s*if val Some\((\w+)\)\s*=\s*([^:]+):\s*\n(\1    )(.+)\n\1else:\s*\n(\1    )(.+)'
-    # Converts:
-    #   val result = if val Some(y) = opt:
-    #       expr1
-    #   else:
-    #       expr2
-    # To:
-    #   val result = match opt:
-    #       case Some(y):
-    #           expr1
-    #       case None:
-    #           expr2
+    # Pass 2: Expression form - Assignment with if-val
+    # Converts: val result = if val Some(x) = opt: ... else: ...
+    # To: val result = match opt: case Some(x): ... case None: ...
     #
-    # Complexity: Requires capture groups, indentation handling, and dedenting/re-indenting
+    # Note: This is a simplified implementation for common single-line cases.
+    # Complex multi-line patterns with preserved indentation would require
+    # a more sophisticated AST-based transformation.
 
-    content  # Return unchanged for now
+    var result = content
+
+    # Pass 1: Statement form (simple cases)
+    # Pattern: if val Some(var) = expr: body else: else_body
+    result = replace_all(
+        r"if\s+val\s+Some\((\w+)\)\s*=\s*([^:]+):",
+        result,
+        "match $2: case Some($1):"
+    )
+
+    # Pass 2: Fix the else clause to become case None
+    # This is a simple heuristic - find "else:" after our pattern and convert to "case None:"
+    # Note: This may need refinement for nested structures
+    result = replace_all(
+        r"(match\s+\w+:\s+case\s+Some\(\w+\):.*?)\s+else:",
+        result,
+        "$1 case None:"
+    )
+
+    result
 
 # Fix if-val patterns in a single file
-# TODO: [stdlib][P1] Needs regex for actual pattern fixing
 fn fix_if_val_file(filepath: text) -> MigrationResult:
     # Read file content
     match read_text(filepath):
@@ -120,7 +117,7 @@ fn fix_if_val_file(filepath: text) -> MigrationResult:
             if not content.contains("if val Some"):
                 return MigrationResult.unchanged()
 
-            # Apply fix_if_val_content() (currently a stub without regex)
+            # Apply if-val pattern fixes
             val fixed_content = fix_if_val_content(content)
 
             # Check if anything changed
@@ -142,7 +139,6 @@ fn fix_if_val_file(filepath: text) -> MigrationResult:
 # It automatically filters out target, .git, .migration_backup directories
 
 # Run fix on all .spl files in directory
-# TODO: [stdlib][P1] Needs regex for actual pattern fixing
 fn run_fix_if_val(root_dir: text) -> FixIfValStats:
     var stats = FixIfValStats.new()
 

@@ -2,9 +2,8 @@
 # Migrated from: scripts/migrate_syntax.py
 # Purpose: Migrate from explicit self syntax to Scala-style val/var syntax
 
-# TODO: [stdlib][P1] Add regex library to Simple
-
 import fs.{read_text, write_text, create_dir, basename, join}
+import regex.{replace_all}
 
 use super.time_utils.{migration_backup_dir}
 use super.file_utils.{find_spl_files, count_changed_lines}
@@ -45,10 +44,8 @@ impl ValVarMigrationStats:
         report = report + "Backups saved to: {self.backup_dir}\n"
         report
 
-# TODO: [stdlib][P1] Add regex support
 # Apply val/var syntax transformations
 fn migrate_val_var_content(content: text) -> text:
-    # Stub: Needs regex for pattern replacements
     # Transformations in order (ORDER MATTERS!):
     # 1. let mut -> var (MUST come before let -> val)
     # 2. let -> val
@@ -56,16 +53,38 @@ fn migrate_val_var_content(content: text) -> text:
     # 4. fn method(self) -> fn method()
     # 5. Add static to constructors (heuristics)
 
-    # Regex patterns needed:
-    # - r'\blet\s+mut\b' -> 'var'
-    # - r'\blet\b' -> 'val'
-    # - r'^(\s*)fn\s+(\w+)\s*\(\s*mut\s+self\s*\)(\s*(?:->)?)' -> r'\1var fn \2()\3'
-    # - r'^(\s*)fn\s+(\w+)\s*\(\s*mut\s+self\s*,\s*' -> r'\1var fn \2('
-    # - r'^(\s*)fn\s+(\w+)\s*\(\s*self\s*\)(\s*(?:->)?)' -> r'\1fn \2()\3'
-    # - r'^(\s*)fn\s+(\w+)\s*\(\s*self\s*,\s*' -> r'\1fn \2('
-    # - Constructor patterns (new, default, from_*, etc.)
+    var result = content
 
-    content  # Return unchanged for now
+    # 1. let mut -> var (MUST come first!)
+    result = replace_all(r"\blet\s+mut\b", result, "var")
+
+    # 2. let -> val
+    result = replace_all(r"\blet\b", result, "val")
+
+    # 3. fn method(mut self) -> var fn method() (no trailing comma)
+    result = replace_all(r"(\s*)fn\s+(\w+)\s*\(\s*mut\s+self\s*\)", result, "$1var fn $2()")
+
+    # 4. fn method(mut self, ... -> var fn method(... (with trailing comma)
+    result = replace_all(r"(\s*)fn\s+(\w+)\s*\(\s*mut\s+self\s*,", result, "$1var fn $2(")
+
+    # 5. fn method(self) -> fn method() (no trailing comma)
+    result = replace_all(r"(\s*)fn\s+(\w+)\s*\(\s*self\s*\)", result, "$1fn $2()")
+
+    # 6. fn method(self, ... -> fn method(... (with trailing comma)
+    result = replace_all(r"(\s*)fn\s+(\w+)\s*\(\s*self\s*,", result, "$1fn $2(")
+
+    # 7. Add static to common constructor patterns
+    val constructors = get_constructor_patterns()
+    var i = 0
+    while i < constructors.len():
+        val ctor = constructors[i]
+        # Match: fn <constructor>( but not: static fn <constructor>(
+        val pattern = r"(\s*)fn\s+{ctor}\s*\("
+        val replacement = "$1static fn {ctor}("
+        result = replace_all(pattern, result, replacement)
+        i = i + 1
+
+    result
 
 # Transformation patterns for val/var migration
 struct ValVarPattern:
@@ -175,12 +194,11 @@ fn print_val_var_examples() -> text:
     output
 
 # Migrate a single file with val/var syntax
-# TODO: [stdlib][P1] Needs regex for actual migration logic
 fn migrate_val_var_file(filepath: text, backup_dir: text) -> MigrationResult:
     # Read file content
     match read_text(filepath):
         Ok(content):
-            # Apply migrate_val_var_content() (currently a stub without regex)
+            # Apply val/var syntax transformations
             val migrated = migrate_val_var_content(content)
 
             # Check if anything changed
@@ -210,7 +228,6 @@ fn migrate_val_var_file(filepath: text, backup_dir: text) -> MigrationResult:
 # It automatically filters out target, .git, .migration_backup directories
 
 # Run val/var migration on all .spl files
-# TODO: [stdlib][P1] Needs regex for actual migration logic
 fn run_val_var_migration(root_dir: text) -> ValVarMigrationStats:
     # Create backup directory with timestamp
     val backup_dir = migration_backup_dir("val_var")

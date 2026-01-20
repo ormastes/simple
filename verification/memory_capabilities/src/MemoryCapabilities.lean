@@ -166,32 +166,10 @@ theorem conversion_preserves_safety (env : RefEnv) (loc : Nat) (src dest : RefCa
   canCreateRef env loc src = true ->
   canCreateRef env loc dest = true := by
   intros h_convert h_can_src
-  unfold canCreateRef at h_can_src ⊢
-  cases src <;> cases dest <;> simp only [canConvert] at h_convert <;>
-    simp only [decide_eq_true_eq, Bool.not_eq_true', decide_eq_false_iff_not, not_lt,
-               Nat.le_zero, Bool.and_eq_true] at h_can_src ⊢
-  -- Shared -> Shared: trivial
-  · exact h_can_src
-  -- Shared -> Exclusive: conversion not allowed
-  · cases h_convert
-  -- Shared -> Isolated: conversion not allowed
-  · cases h_convert
-  -- Exclusive -> Shared: if list is empty, counts are 0
-  · have h_nil : getActiveRefs env loc = [] := List.isEmpty_iff.mp h_can_src
-    rw [h_nil]
-    simp [countRefsWithCapability]
-  -- Exclusive -> Exclusive: trivial
-  · exact h_can_src
-  -- Exclusive -> Isolated: conversion not allowed
-  · cases h_convert
-  -- Isolated -> Shared: if list is empty, counts are 0
-  · have h_nil : getActiveRefs env loc = [] := List.isEmpty_iff.mp h_can_src
-    rw [h_nil]
-    simp [countRefsWithCapability]
-  -- Isolated -> Exclusive: both require empty list
-  · exact h_can_src
-  -- Isolated -> Isolated: trivial
-  · exact h_can_src
+  cases src <;> cases dest <;> simp [canConvert, canCreateRef] at h_convert h_can_src ⊢
+  all_goals first
+    | exact h_can_src
+    | simp [h_can_src, countRefsWithCapability]
 
 -- Creating a reference maintains well-formedness (axiomatized)
 axiom create_ref_preserves_wellformed (env : RefEnv) (ref : Reference) :

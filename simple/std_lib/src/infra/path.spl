@@ -1,0 +1,240 @@
+# Path and PathBuf - Cross-platform path manipulation
+# Provides type-safe path handling with chainable operations
+
+use core.option.{Option, Some}
+use core.result.{Result, Ok, Err}
+use infra.file_io.{
+    basename as get_basename,
+    dirname as get_dirname,
+    extension as get_extension,
+    absolute_path as get_absolute,
+    path_separator,
+    join_path as join_text_paths,
+    split_path as split_text_path,
+    file_exists,
+    is_file,
+    is_dir
+}
+
+# PathBuf - Owned, mutable path type
+# Represents a filesystem path that can be built up incrementally
+pub struct PathBuf:
+    inner: text
+
+impl PathBuf:
+    # Create a new empty PathBuf
+    pub static fn new() -> PathBuf:
+        PathBuf(inner: "")
+
+    # Create a PathBuf from a string
+    pub static fn from(path: text) -> PathBuf:
+        PathBuf(inner: path)
+
+    # Get the path as text
+    pub fn as_text() -> text:
+        self.inner
+
+    # Get the path as a string reference
+    pub fn as_str() -> text:
+        self.inner
+
+    # Push a component onto the path
+    pub me push(component: text):
+        if self.inner.is_empty():
+            self.inner = component
+        else if self.inner.ends_with(path_separator()):
+            self.inner = self.inner + component
+        else:
+            self.inner = self.inner + path_separator() + component
+
+    # Pop the last component from the path
+    pub me pop() -> bool:
+        match self.parent():
+            Some(parent):
+                self.inner = parent
+                true
+            nil:
+                false
+
+    # Set the file extension
+    pub me set_extension(extension: text):
+        val stem = self.file_stem()
+        val parent = self.parent_str()
+
+        if parent.is_empty():
+            if extension.is_empty():
+                self.inner = stem
+            else:
+                self.inner = stem + "." + extension
+        else:
+            if extension.is_empty():
+                self.inner = parent + path_separator() + stem
+            else:
+                self.inner = parent + path_separator() + stem + "." + extension
+
+    # Get the file name (last component)
+    pub fn file_name() -> text:
+        get_basename(self.inner)
+
+    # Get the file stem (name without extension)
+    pub fn file_stem() -> text:
+        val name = self.file_name()
+        match name.find_str("."):
+            Some(pos):
+                if pos == 0:
+                    # Hidden file like ".gitignore"
+                    name
+                else:
+                    name.substring(0, pos)
+            nil:
+                name
+
+    # Get the file extension
+    pub fn extension() -> text:
+        get_extension(self.inner)
+
+    # Get the parent directory as a new PathBuf
+    pub fn parent() -> Option<text>:
+        val parent_str = get_dirname(self.inner)
+        if parent_str.is_empty() or parent_str == self.inner:
+            nil
+        else:
+            Some(parent_str)
+
+    # Get parent directory as string
+    fn parent_str() -> text:
+        match self.parent():
+            Some(p): p
+            nil: ""
+
+    # Check if this path exists
+    pub fn exists() -> bool:
+        file_exists(self.inner)
+
+    # Check if this path is a file
+    pub fn is_file() -> bool:
+        is_file(self.inner)
+
+    # Check if this path is a directory
+    pub fn is_dir() -> bool:
+        is_dir(self.inner)
+
+    # Check if the path is absolute
+    pub fn is_absolute() -> bool:
+        if self.inner.is_empty():
+            return false
+
+        # Unix: starts with /
+        if self.inner.starts_with("/"):
+            return true
+
+        # Windows: starts with drive letter (C:, D:, etc.)
+        if self.inner.len() >= 2:
+            val first = self.inner.char_at(0)
+            val second = self.inner.char_at(1)
+            if second == ':':
+                if (first >= 'A' and first <= 'Z') or (first >= 'a' and first <= 'z'):
+                    return true
+
+        false
+
+    # Check if the path is relative
+    pub fn is_relative() -> bool:
+        not self.is_absolute()
+
+    # Convert to absolute path
+    pub fn to_absolute() -> PathBuf:
+        PathBuf::from(get_absolute(self.inner))
+
+    # Get all components of the path
+    pub fn components() -> List<text>:
+        split_text_path(self.inner)
+
+    # Join with another path component
+    pub fn join(other: text) -> PathBuf:
+        var result = PathBuf::from(self.inner)
+        result.push(other)
+        result
+
+    # Join with another PathBuf
+    pub fn join_path(other: PathBuf) -> PathBuf:
+        self.join(other.inner)
+
+    # Get the path with a new extension
+    pub fn with_extension(extension: text) -> PathBuf:
+        var result = PathBuf::from(self.inner)
+        result.set_extension(extension)
+        result
+
+    # Get the path with a new file name
+    pub fn with_file_name(file_name: text) -> PathBuf:
+        match self.parent():
+            Some(parent):
+                PathBuf::from(parent).join(file_name)
+            nil:
+                PathBuf::from(file_name)
+
+    # Check if path starts with the given prefix
+    pub fn starts_with(prefix: text) -> bool:
+        self.inner.starts_with(prefix)
+
+    # Check if path ends with the given suffix
+    pub fn ends_with(suffix: text) -> bool:
+        self.inner.ends_with(suffix)
+
+    # Strip prefix from path if present
+    pub fn strip_prefix(prefix: text) -> Option<PathBuf>:
+        if self.inner.starts_with(prefix):
+            val remaining = self.inner.substring(prefix.len(), self.inner.len())
+            # Remove leading separator if present
+            val cleaned = if remaining.starts_with(path_separator()):
+                remaining.substring(path_separator().len(), remaining.len())
+            else:
+                remaining
+            Some(PathBuf::from(cleaned))
+        else:
+            nil
+
+    # Clone the PathBuf
+    pub fn clone() -> PathBuf:
+        PathBuf::from(self.inner)
+
+# Path - Borrowed path type (alias for now since Simple doesn't have lifetimes)
+# In a more advanced implementation, this would be a reference type
+pub type Path = PathBuf
+
+# Helper functions for creating paths
+
+# Create a PathBuf from text
+pub fn path(p: text) -> PathBuf:
+    PathBuf::from(p)
+
+# Join multiple path components
+pub fn join_paths(components: List<text>) -> PathBuf:
+    PathBuf::from(join_text_paths(components))
+
+# Example usage:
+# ```simple
+# use infra.path.{PathBuf, path}
+#
+# # Create a path
+# val p = path("/home/user/documents")
+#
+# # Build up a path
+# var p2 = PathBuf::new()
+# p2.push("home")
+# p2.push("user")
+# p2.push("file.txt")
+#
+# # Check properties
+# if p.is_dir():
+#     print "It's a directory"
+#
+# # Get components
+# val name = p.file_name()
+# val ext = p.extension()
+# val parent = p.parent()
+#
+# # Chain operations
+# val new_path = p.join("file.txt").with_extension("md")
+# ```

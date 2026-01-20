@@ -1,0 +1,217 @@
+# Regular Expression Module
+# Purpose: Pattern matching, searching, and text transformation using regex
+
+# ============================================================================
+# FFI Declarations
+# ============================================================================
+
+# Core matching and searching
+extern fn ffi_regex_is_match(pattern: text, text: text) -> bool
+extern fn ffi_regex_find(pattern: text, text: text) -> List<RuntimeValue>
+extern fn ffi_regex_find_all(pattern: text, text: text) -> List<List<RuntimeValue>>
+extern fn ffi_regex_captures(pattern: text, text: text) -> List<text>
+
+# Replacement
+extern fn ffi_regex_replace(pattern: text, text: text, replacement: text) -> text
+extern fn ffi_regex_replace_all(pattern: text, text: text, replacement: text) -> text
+
+# Splitting
+extern fn ffi_regex_split(pattern: text, text: text) -> List<text>
+extern fn ffi_regex_split_n(pattern: text, text: text, limit: i64) -> List<text>
+
+# ============================================================================
+# Match Type
+# ============================================================================
+
+# Represents a regex match with captured text and position
+struct Match:
+    text: text       # The matched text
+    start: i64       # Start position in original string
+    end: i64         # End position in original string
+
+impl Match:
+    # Create a new Match
+    static fn new(text: text, start: i64, end: i64) -> Match:
+        Match(text: text, start: start, end: end)
+
+    # Get the length of the match
+    fn len() -> i64:
+        self.end - self.start
+
+    # Check if match is empty
+    fn is_empty() -> bool:
+        self.text.is_empty()
+
+# ============================================================================
+# High-Level Functions
+# ============================================================================
+
+# Check if pattern matches anywhere in text
+fn is_match(pattern: text, text: text) -> bool:
+    ffi_regex_is_match(pattern, text)
+
+# Find first match in text
+fn find(pattern: text, text: text) -> Option<Match>:
+    val result = ffi_regex_find(pattern, text)
+
+    # FFI returns [text, start, end] or empty array
+    if result.is_empty():
+        return None
+
+    # Extract match data
+    val match_text = result[0].as_text()
+    val start = result[1].as_int()
+    val end = result[2].as_int()
+
+    Some(Match.new(match_text, start, end))
+
+# Find all matches in text
+fn find_all(pattern: text, text: text) -> List<Match>:
+    val results = ffi_regex_find_all(pattern, text)
+    var matches: List<Match> = []
+
+    # FFI returns array of [text, start, end] arrays
+    var i = 0
+    while i < results.len():
+        val match_array = results[i]
+        if not match_array.is_empty():
+            val match_text = match_array[0].as_text()
+            val start = match_array[1].as_int()
+            val end = match_array[2].as_int()
+            matches.append(Match.new(match_text, start, end))
+        i = i + 1
+
+    matches
+
+# Get capture groups from first match
+# Returns [full_match, group1, group2, ...] or empty list if no match
+fn captures(pattern: text, text: text) -> List<text>:
+    ffi_regex_captures(pattern, text)
+
+# Replace first occurrence of pattern
+fn replace(pattern: text, text: text, replacement: text) -> text:
+    ffi_regex_replace(pattern, text, replacement)
+
+# Replace all occurrences of pattern
+fn replace_all(pattern: text, text: text, replacement: text) -> text:
+    ffi_regex_replace_all(pattern, text, replacement)
+
+# Split text by pattern
+fn split(pattern: text, text: text) -> List<text>:
+    ffi_regex_split(pattern, text)
+
+# Split text by pattern with limit
+fn split_n(pattern: text, text: text, limit: i64) -> List<text>:
+    ffi_regex_split_n(pattern, text, limit)
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+# Extract all matched strings (without position info)
+fn extract_all(pattern: text, text: text) -> List<text>:
+    val matches = find_all(pattern, text)
+    var results: List<text> = []
+
+    var i = 0
+    while i < matches.len():
+        results.append(matches[i].text)
+        i = i + 1
+
+    results
+
+# Count matches
+fn count_matches(pattern: text, text: text) -> u64:
+    val matches = find_all(pattern, text)
+    matches.len() as u64
+
+# Check if entire string matches pattern (anchored match)
+fn matches(pattern: text, text: text) -> bool:
+    # Add anchors to ensure full string match
+    val anchored = "^{pattern}$"
+    is_match(anchored, text)
+
+# Find and replace with callback function
+# Note: This is a simple version, real implementation needs lambda support
+fn replace_with(pattern: text, text: text, replacer: fn(text) -> text) -> text:
+    # Get all matches
+    val matches = find_all(pattern, text)
+
+    if matches.is_empty():
+        return text
+
+    # Build result by replacing each match
+    var result = text
+    # Process in reverse to maintain indices
+    var i = matches.len() as i64 - 1
+    while i >= 0:
+        val m = matches[i as u64]
+        val replacement = replacer(m.text)
+
+        # Replace this specific occurrence
+        # Extract parts: before + replacement + after
+        val before = result.slice(0, m.start as u64)
+        val after = result.slice(m.end as u64, result.len())
+        result = before + replacement + after
+
+        i = i - 1
+
+    result
+
+# ============================================================================
+# Common Patterns (Convenience Constants)
+# ============================================================================
+
+# Email pattern (simple)
+static EMAIL_PATTERN: text = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
+
+# URL pattern (simple)
+static URL_PATTERN: text = r"https?://[^\s]+"
+
+# Integer number
+static INTEGER_PATTERN: text = r"-?\d+"
+
+# Floating point number
+static FLOAT_PATTERN: text = r"-?\d+\.?\d*"
+
+# Whitespace
+static WHITESPACE_PATTERN: text = r"\s+"
+
+# Word
+static WORD_PATTERN: text = r"\w+"
+
+# Hex color
+static HEX_COLOR_PATTERN: text = r"#[0-9a-fA-F]{6}"
+
+# ============================================================================
+# Validation Functions
+# ============================================================================
+
+# Check if string is a valid email (simple check)
+fn is_email(text: text) -> bool:
+    matches(EMAIL_PATTERN, text)
+
+# Check if string is a valid URL
+fn is_url(text: text) -> bool:
+    is_match(URL_PATTERN, text)
+
+# Check if string is an integer
+fn is_integer(text: text) -> bool:
+    matches(INTEGER_PATTERN, text)
+
+# Check if string is a float
+fn is_float(text: text) -> bool:
+    matches(FLOAT_PATTERN, text)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Match
+export is_match, find, find_all, captures
+export replace, replace_all
+export split, split_n
+export extract_all, count_matches, matches, replace_with
+export EMAIL_PATTERN, URL_PATTERN, INTEGER_PATTERN, FLOAT_PATTERN
+export WHITESPACE_PATTERN, WORD_PATTERN, HEX_COLOR_PATTERN
+export is_email, is_url, is_integer, is_float
