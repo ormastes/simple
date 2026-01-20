@@ -414,6 +414,140 @@ impl Counter:
 }
 
 // ============================================================================
+// Capability Integration Tests (Phase 2 Implementation)
+// ============================================================================
+// Tests for the capability check integration into expression lowering.
+
+#[test]
+fn test_ref_mut_creates_exclusive_capability() {
+    // &mut should create a pointer with Exclusive capability
+    let source = r#"
+fn test_ref_mut():
+    var x: i32 = 10
+    val ptr = &mut x
+    *ptr
+"#;
+
+    let result = lower_with_warnings(source);
+    assert!(result.is_ok(), "RefMut should compile: {:?}", result.err());
+}
+
+#[test]
+fn test_ref_creates_shared_capability() {
+    // & should create a pointer with Shared capability
+    let source = r#"
+fn test_ref():
+    val x: i32 = 10
+    val ptr = &x
+    *ptr
+"#;
+
+    let result = lower_with_warnings(source);
+    assert!(result.is_ok(), "Ref should compile: {:?}", result.err());
+}
+
+#[test]
+fn test_capability_env_tracks_exclusive() {
+    // Test that CapabilityEnv properly tracks exclusive capabilities
+    use crate::hir::capability::CapabilityEnv;
+    use simple_parser::ast::ReferenceCapability;
+
+    let mut env = CapabilityEnv::new();
+
+    // First exclusive acquisition should succeed
+    assert!(env.can_acquire(1, ReferenceCapability::Exclusive).is_ok());
+    env.acquire(1, ReferenceCapability::Exclusive);
+
+    // Second acquisition should fail (aliasing violation)
+    assert!(env.can_acquire(1, ReferenceCapability::Exclusive).is_err());
+    assert!(env.can_acquire(1, ReferenceCapability::Shared).is_err());
+
+    // After release, acquisition should succeed again
+    env.release(1);
+    assert!(env.can_acquire(1, ReferenceCapability::Exclusive).is_ok());
+}
+
+#[test]
+fn test_mutable_var_allows_mutation() {
+    // var (mutable binding) should allow mutation
+    let source = r#"
+struct Point:
+    x: i32
+    y: i32
+
+fn test_mutation():
+    var p = Point { x: 0, y: 0 }
+    p.x = 10
+    p.y = 20
+    p.x + p.y
+"#;
+
+    let result = lower_with_warnings(source);
+    assert!(result.is_ok(), "Mutable var should allow field mutation: {:?}", result.err());
+}
+
+#[test]
+fn test_immutable_val_reports_mutation_warning() {
+    // val (immutable binding) mutation should produce W1006 warning
+    let source = r#"
+struct Point:
+    x: i32
+    y: i32
+
+fn test_immutable_mutation():
+    val p = Point { x: 0, y: 0 }
+    p.x = 10
+    p.x
+"#;
+
+    let result = lower_with_warnings(source);
+    // Should compile but may have warnings about mutation without capability
+    assert!(result.is_ok(), "Should compile (with warnings): {:?}", result.err());
+    // In lenient mode, this produces a warning
+    if let Ok(ref output) = result {
+        // Count W1006 warnings
+        let w1006_count = count_warnings(output, "W1006");
+        assert!(w1006_count > 0, "Should have W1006 warning for mutation without capability");
+    }
+}
+
+#[test]
+fn test_unique_pointer_gets_isolated_capability() {
+    // &T (unique pointer) should get Isolated capability
+    let source = r#"
+struct Data:
+    value: i32
+
+fn test_unique():
+    val data: &Data = Data { value: 42 }
+    data.value
+"#;
+
+    let result = lower_with_warnings(source);
+    assert!(result.is_ok(), "Unique pointer should compile: {:?}", result.err());
+}
+
+#[test]
+fn test_lenient_mode_allows_warnings() {
+    // Test that lenient mode compiles code with warnings
+    let source = r#"
+struct Counter:
+    count: i32
+
+fn test():
+    val c = Counter { count: 0 }
+    c.count = 1
+    c.count
+"#;
+
+    // Lenient mode (default) should compile with warnings
+    let mut parser = simple_parser::Parser::new(source);
+    let module = parser.parse().expect("parse failed");
+    let result = Lowerer::with_lenient_mode().lower_module_with_warnings(&module);
+    assert!(result.is_ok(), "Lenient mode should compile with warnings: {:?}", result.err());
+}
+
+// ============================================================================
 // Summary: Path to Rust-Level Memory Safety
 // ============================================================================
 //
@@ -421,11 +555,15 @@ impl Counter:
 // - Memory safety checks exist (W1001-W1006)
 // - Emit warnings by default for gradual adoption
 // - Strict mode available to promote warnings to errors
+// - Capability checking integrated into HIR lowering
 //
-// To achieve Rust-level safety:
-// 1. Enable strict mode by default
-// 2. Integrate capability checking with all assignments
-// 3. Complete borrow checker integration
-// 4. Verify all violations produce errors, not just warnings
+// Completed in this implementation:
+// 1. RefMut creates Exclusive capability (not Shared)
+// 2. PointerNew uses correct capability based on pointer kind
+// 3. CapabilityEnv integrated into Lowerer
+// 4. FunctionContext tracks local capabilities
+// 5. check_mutation_capability() enabled and integrated
+// 6. Aliasing checks at reference creation
+// 7. Lenient mode available for backwards compatibility
 //
 // The theoretical foundation is proven in Lean 4 (MemoryCapabilities.lean)

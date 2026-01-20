@@ -100,6 +100,10 @@ impl Lowerer {
                 // W1001: Check for shared pointer mutation
                 self.check_shared_mutation(&target, assign.span);
 
+                // W1006: Check for mutation without proper capability
+                let has_mut = self.expr_has_mut_capability(&target, ctx);
+                self.check_mutation_capability(&target, assign.span, has_mut);
+
                 // E2006: Check for storage escape (assigning short-lived ref to longer-lived location)
                 // If target is a field access and value is a local reference, check lifetimes
                 if let HirExprKind::FieldAccess { receiver, .. } = &target.kind {
