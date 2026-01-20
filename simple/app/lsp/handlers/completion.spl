@@ -249,31 +249,166 @@ fn collect_symbols(tree: Tree) -> List<CompletionItem>:
     traverse(tree.root_node)
     symbols
 
-# Determine completion context
-fn get_completion_context(tree: Tree, line: Int, column: Int) -> String:
-    # Simplified context detection
-    # TODO: [stdlib][P3] Implement sophisticated context analysis for smarter completions
-    # - After "fn " → function name
-    # - After "val " → variable name
-    # - After ": " → type name
-    # - In expression → keywords + symbols
+# Completion context types
+enum CompletionContext:
+    FunctionName   # After "fn " - suggest function names
+    VariableName   # After "val " or "var " - suggest variable names
+    TypeName       # After ": " - suggest types
+    Import         # After "import " - suggest modules
+    Expression     # Default - suggest keywords, types, and symbols
 
-    "expression"  # Default context
+# Determine completion context by analyzing the source text before cursor
+fn get_completion_context(tree: Tree, line: Int, column: Int) -> String:
+    # Find the node at cursor position
+    match find_node_at_cursor(tree, line, column):
+        Some(node):
+            # Check parent node to determine context
+            val parent_id = find_parent_node(tree, node.id)
+            match parent_id:
+                Some(pid):
+                    match tree.arena.get(pid):
+                        Some(parent):
+                            # Determine context based on parent node type
+                            match parent.kind:
+                                "function_def":
+                                    # Check if cursor is at name position
+                                    match parent.fields.get("name"):
+                                        Some(name_id):
+                                            if name_id == node.id:
+                                                return "function_name"
+                                        None:
+                                            pass
+                                    # Check if cursor is at return type position
+                                    match parent.fields.get("return_type"):
+                                        Some(rt_id):
+                                            if rt_id == node.id:
+                                                return "type"
+                                        None:
+                                            pass
+                                "let_stmt":
+                                    # Variable declaration - check for type annotation
+                                    match parent.fields.get("type"):
+                                        Some(type_id):
+                                            if type_id == node.id:
+                                                return "type"
+                                        None:
+                                            pass
+                                "parameter":
+                                    # Function parameter - check for type annotation
+                                    match parent.fields.get("type"):
+                                        Some(type_id):
+                                            if type_id == node.id:
+                                                return "type"
+                                        None:
+                                            pass
+                                "type_annotation":
+                                    return "type"
+                                "import_stmt":
+                                    return "import"
+                                _:
+                                    pass
+                        None:
+                            pass
+                None:
+                    pass
+        None:
+            pass
+
+    # Default to expression context
+    "expression"
+
+# Find node at cursor position (helper for context detection)
+fn find_node_at_cursor(tree: Tree, line: Int, column: Int) -> Option<Node>:
+    fn position_in_span(span: Span, l: Int, c: Int) -> Bool:
+        if l < span.start_line or l > span.end_line:
+            return false
+        if l == span.start_line and c < span.start_column:
+            return false
+        if l == span.end_line and c > span.end_column:
+            return false
+        true
+
+    fn traverse(node_id: NodeId, best: Option<Node>) -> Option<Node>:
+        match tree.arena.get(node_id):
+            None:
+                best
+            Some(node):
+                if not position_in_span(node.span, line, column):
+                    return best
+                var new_best = Some(node)
+                for child_id in node.children:
+                    new_best = traverse(child_id, new_best)
+                new_best
+
+    traverse(tree.root_node, None)
+
+# Find parent node (helper for context detection)
+fn find_parent_node(tree: Tree, target_id: NodeId) -> Option<NodeId>:
+    fn search(node_id: NodeId) -> Option<NodeId>:
+        match tree.arena.get(node_id):
+            None:
+                None
+            Some(node):
+                for child_id in node.children:
+                    if child_id == target_id:
+                        return Some(node_id)
+                for child_id in node.children:
+                    match search(child_id):
+                        Some(parent):
+                            return Some(parent)
+                        None:
+                            continue
+                None
+
+    search(tree.root_node)
 
 # Generate completions based on context
 fn generate_completions(tree: Tree, context: String) -> List<CompletionItem>:
     var completions: List<CompletionItem> = []
 
-    # Always include keywords
-    completions.extend(get_keyword_completions())
+    match context:
+        "type":
+            # Type context - only suggest types
+            completions.extend(get_type_completions())
+            # Also include struct/class definitions from the tree
+            for symbol in collect_symbols(tree):
+                if symbol.kind == CompletionItemKind.Struct or symbol.kind == CompletionItemKind.Class:
+                    completions.push(symbol)
 
-    # Always include types
-    completions.extend(get_type_completions())
+        "function_name":
+            # After "fn " - no suggestions, user defines the name
+            pass
 
-    # Include symbols from tree
-    completions.extend(collect_symbols(tree))
+        "import":
+            # Import context - suggest known modules
+            completions.extend(get_module_completions())
+
+        _:
+            # Expression context - include everything
+            completions.extend(get_keyword_completions())
+            completions.extend(get_type_completions())
+            completions.extend(collect_symbols(tree))
 
     completions
+
+# Built-in module completions for import statements
+fn get_module_completions() -> List<CompletionItem>:
+    [
+        CompletionItem.new("std", CompletionItemKind.Module)
+            .with_detail("Standard library"),
+        CompletionItem.new("core", CompletionItemKind.Module)
+            .with_detail("Core library"),
+        CompletionItem.new("io", CompletionItemKind.Module)
+            .with_detail("I/O operations"),
+        CompletionItem.new("fs", CompletionItemKind.Module)
+            .with_detail("File system operations"),
+        CompletionItem.new("math", CompletionItemKind.Module)
+            .with_detail("Math functions"),
+        CompletionItem.new("collections", CompletionItemKind.Module)
+            .with_detail("Collection types"),
+        CompletionItem.new("json", CompletionItemKind.Module)
+            .with_detail("JSON parsing/serialization"),
+    ]
 
 # Filter completions by prefix
 fn filter_by_prefix(completions: List<CompletionItem>, prefix: String) -> List<CompletionItem>:
@@ -288,6 +423,45 @@ fn filter_by_prefix(completions: List<CompletionItem>, prefix: String) -> List<C
 
     filtered
 
+# Extract the word prefix at cursor position for filtering completions
+fn extract_prefix_at_cursor(source: String, line: Int, column: Int) -> String:
+    # Split source into lines
+    val lines = source.split("\n")
+
+    # Validate line number
+    if line < 0 or line >= lines.len():
+        return ""
+
+    val current_line = lines[line]
+
+    # Validate column number
+    if column < 0 or column > current_line.len():
+        return ""
+
+    # Walk backwards from cursor to find start of identifier
+    var start = column
+    while start > 0:
+        val char = current_line[start - 1]
+        # Check if character is part of an identifier (alphanumeric or underscore)
+        if is_identifier_char(char):
+            start = start - 1
+        else:
+            break
+
+    # Extract the prefix
+    if start < column:
+        current_line.slice(start, column)
+    else:
+        ""
+
+# Check if a character can be part of an identifier
+fn is_identifier_char(c: Char) -> Bool:
+    # Alphanumeric or underscore
+    (c >= 'a' and c <= 'z') or
+    (c >= 'A' and c <= 'Z') or
+    (c >= '0' and c <= '9') or
+    c == '_'
+
 # Handle textDocument/completion request
 fn handle_completion(tree: Tree, source: String, line: Int, column: Int) -> Result<Option<List<Dict>>, String>:
     # Determine completion context
@@ -296,9 +470,8 @@ fn handle_completion(tree: Tree, source: String, line: Int, column: Int) -> Resu
     # Generate completions
     val completions = generate_completions(tree, context)
 
-    # TODO: [stdlib][P3] Extract prefix at cursor position for better filtering
-    # For now, return all completions
-    val prefix = ""
+    # Extract prefix at cursor position for filtering
+    val prefix = extract_prefix_at_cursor(source, line, column)
 
     # Filter by prefix
     val filtered = filter_by_prefix(completions, prefix)

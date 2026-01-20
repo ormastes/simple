@@ -6,6 +6,110 @@ import dap.protocol as protocol
 import dap.transport as transport
 import dap.breakpoints as breakpoints
 
+# Launch configuration parsed from DAP launch request
+class LaunchConfig:
+    program: String               # Path to the program to debug
+    args: List<String>            # Command line arguments
+    cwd: Option<String>           # Working directory
+    stop_on_entry: Bool           # Stop at program entry
+    no_debug: Bool                # Run without debugging
+
+    static fn default() -> LaunchConfig:
+        LaunchConfig(
+            program: "",
+            args: [],
+            cwd: None,
+            stop_on_entry: true,
+            no_debug: false
+        )
+
+    static fn from_json(args: Dict) -> LaunchConfig:
+        var config = LaunchConfig.default()
+
+        # Parse program path (required)
+        match args.get("program"):
+            Some(p):
+                config.program = p
+            None:
+                pass
+
+        # Parse arguments (optional)
+        match args.get("args"):
+            Some(a):
+                config.args = a
+            None:
+                pass
+
+        # Parse working directory (optional)
+        match args.get("cwd"):
+            Some(c):
+                config.cwd = Some(c)
+            None:
+                pass
+
+        # Parse stopOnEntry (optional, default true)
+        match args.get("stopOnEntry"):
+            Some(s):
+                config.stop_on_entry = s
+            None:
+                pass
+
+        # Parse noDebug (optional, default false)
+        match args.get("noDebug"):
+            Some(n):
+                config.no_debug = n
+            None:
+                pass
+
+        config
+
+# Debug context capturing interpreter state
+class DebugContext:
+    source_path: String           # Current source file
+    current_line: Int             # Current line number
+    current_column: Int           # Current column
+    call_stack: List<StackEntry>  # Call stack frames
+    local_variables: Dict<String, VariableInfo>   # Local scope variables
+    global_variables: Dict<String, VariableInfo>  # Global scope variables
+
+    static fn new() -> DebugContext:
+        DebugContext(
+            source_path: "",
+            current_line: 1,
+            current_column: 0,
+            call_stack: [],
+            local_variables: {},
+            global_variables: {}
+        )
+
+# Stack entry for call stack
+class StackEntry:
+    name: String                  # Function/method name
+    source_path: String           # Source file path
+    line: Int                     # Line number
+    column: Int                   # Column number
+
+    fn new(name: String, source_path: String, line: Int, column: Int) -> StackEntry:
+        StackEntry(name: name, source_path: source_path, line: line, column: column)
+
+# Variable info for inspection
+class VariableInfo:
+    name: String
+    value: String
+    type_name: String
+    variables_reference: Int      # Non-zero if this variable has children
+
+    fn new(name: String, value: String, type_name: String) -> VariableInfo:
+        VariableInfo(name: name, value: value, type_name: type_name, variables_reference: 0)
+
+    fn with_children(variables_reference: Int) -> VariableInfo:
+        VariableInfo(
+            name: self.name,
+            value: self.value,
+            type_name: self.type_name,
+            variables_reference: variables_reference
+        )
+
 # Debugger state
 enum DebuggerState:
     Uninitialized
@@ -22,6 +126,9 @@ class DapServer:
     current_thread_id: Int
     current_frame_id: Int
     stop_reason: Option<protocol.StopReason>
+    launch_config: LaunchConfig
+    debug_context: DebugContext
+    step_mode: Option<StepMode>   # Current stepping mode
 
     static fn new() -> DapServer:
         DapServer(
@@ -29,9 +136,19 @@ class DapServer:
             breakpoint_manager: breakpoints.BreakpointManager.new(),
             current_thread_id: 1,
             current_frame_id: 1,
-            stop_reason: None
+            stop_reason: None,
+            launch_config: LaunchConfig.default(),
+            debug_context: DebugContext.new(),
+            step_mode: None
         )
 
+# Step mode for stepping commands
+enum StepMode:
+    StepOver    # Next line in current function
+    StepIn      # Step into function calls
+    StepOut     # Step out of current function
+
+impl DapServer:
     # Handle initialize request
     fn handle_initialize(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling initialize request")
@@ -54,14 +171,18 @@ class DapServer:
     fn handle_launch(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling launch request")
 
-        # Extract launch configuration
+        # Parse launch configuration
         match arguments:
-            case Some(args):
-                # TODO: [stdlib][P2] Parse program path, args, etc.
-                # For now, just acknowledge
-                transport.log_debug("Launch config: {args}")
-            case None:
-                pass
+            Some(args):
+                self.launch_config = LaunchConfig.from_json(args)
+                transport.log_debug("Launching program: {self.launch_config.program}")
+                transport.log_debug("Arguments: {self.launch_config.args}")
+                transport.log_debug("Stop on entry: {self.launch_config.stop_on_entry}")
+
+                # Initialize debug context with source path
+                self.debug_context.source_path = self.launch_config.program
+            None:
+                transport.log_debug("No launch arguments provided")
 
         # Update state
         self.state = DebuggerState.Launched
@@ -81,9 +202,24 @@ class DapServer:
         # Update state to running
         self.state = DebuggerState.Running
 
-        # TODO: [stdlib][P3] Actually start execution
-        # For now, immediately send a stopped event
-        self.send_stopped_event(protocol.StopReason.Entry)?
+        # Check if we should stop on entry
+        if self.launch_config.stop_on_entry:
+            # Initialize stack with entry frame
+            val entry_frame = StackEntry.new(
+                "main",
+                self.launch_config.program,
+                1,
+                0
+            )
+            self.debug_context.call_stack = [entry_frame]
+            self.debug_context.current_line = 1
+
+            # Send stopped event at entry point
+            self.send_stopped_event(protocol.StopReason.Entry)?
+        else:
+            # Start execution without stopping
+            # NOTE: Interpreter integration needed for actual execution
+            transport.log_debug("Starting execution without stopping on entry")
 
         Ok(nil)
 
