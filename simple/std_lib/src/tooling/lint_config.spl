@@ -7,6 +7,70 @@
 
 import fs.{read_text}
 
+# ============================================================================
+# AST Types (mirrors src/parser/src/ast/nodes/core.rs)
+# ============================================================================
+
+# Represents a source code location
+struct Span:
+    start: u64
+    end: u64
+    file: text
+
+impl Span:
+    static fn new(start: u64, end: u64, file: text) -> Span:
+        Span(start: start, end: end, file: file)
+
+    static fn empty() -> Span:
+        Span(start: 0, end: 0, file: "")
+
+# Attribute applied to an item: #[name] or #[name(args)]
+# Examples:
+#   #[allow(primitive_api)]
+#   #[deny(bare_bool, todo_format)]
+#   #[deprecated = "Use new_function instead"]
+struct Attribute:
+    span: Span
+    name: text              # The attribute name (e.g., "allow", "deny", "warn")
+    args: List<text>        # Arguments as identifiers: #[name(arg1, arg2)]
+    value: Option<text>     # Optional value: #[name = "value"]
+
+impl Attribute:
+    # Create a simple attribute with just a name
+    static fn simple(name: text) -> Attribute:
+        Attribute(
+            span: Span.empty(),
+            name: name,
+            args: [],
+            value: None
+        )
+
+    # Create an attribute with arguments (e.g., #[allow(lint1, lint2)])
+    static fn with_args(name: text, args: List<text>) -> Attribute:
+        Attribute(
+            span: Span.empty(),
+            name: name,
+            args: args,
+            value: None
+        )
+
+    # Create an attribute with a value (e.g., #[deprecated = "message"])
+    static fn with_value(name: text, value: text) -> Attribute:
+        Attribute(
+            span: Span.empty(),
+            name: name,
+            args: [],
+            value: Some(value)
+        )
+
+    # Check if this is a lint-related attribute
+    fn is_lint_attribute() -> bool:
+        self.name == "allow" or self.name == "warn" or self.name == "deny"
+
+# ============================================================================
+# Lint Configuration
+# ============================================================================
+
 # Lint severity level
 enum LintLevel:
     Allow    # Suppress the lint entirely
@@ -212,11 +276,30 @@ impl LintConfig:
         # Return default if not found
         lint.default_level()
 
-    # TODO: [compiler][P2] Add Attribute type to Simple or use FFI
     # Parse lint attributes and update config
     # Handles: #[allow(lint)], #[warn(lint)], #[deny(lint)]
-    # me apply_attributes(attributes: List<Attribute>):
-    #     # Stub: Will be implemented when AST types are available
+    me apply_attributes(attributes: List<Attribute>):
+        for attr in attributes:
+            # Determine lint level from attribute name
+            val level = match attr.name:
+                "allow": Some(LintLevel.Allow)
+                "warn": Some(LintLevel.Warn)
+                "deny": Some(LintLevel.Deny)
+                _: None
+
+            match level:
+                Some(lint_level):
+                    # Apply level to all lint names in args
+                    for arg in attr.args:
+                        match LintName.from_str(arg):
+                            Some(lint):
+                                self.set_level(lint, lint_level)
+                            None:
+                                # Unknown lint name, silently ignore
+                                pass
+                None:
+                    # Not a lint attribute, skip
+                    pass
 
     # Create a child config that inherits from this one
     fn child() -> LintConfig:
@@ -236,4 +319,99 @@ fn remove_quotes(s: text) -> text:
         result = result.slice(1, result.len() - 1)
     result
 
-# (read_file function removed - now using fs.read_text)
+# ============================================================================
+# Attribute Parsing
+# ============================================================================
+
+import regex.{regex_captures, regex_find_all}
+
+# Parse a single attribute from string like "#[allow(lint1, lint2)]"
+fn parse_attribute(attr_str: text) -> Option<Attribute>:
+    val trimmed = attr_str.trim()
+
+    # Must start with #[
+    if not trimmed.starts_with("#["):
+        return None
+
+    # Must end with ]
+    if not trimmed.ends_with("]"):
+        return None
+
+    # Extract content between #[ and ]
+    val content = trimmed.slice(2, trimmed.len() - 1).trim()
+
+    if content.is_empty():
+        return None
+
+    # Check for attribute with value: name = "value"
+    match regex_captures(r"^(\w+)\s*=\s*(.+)$", content):
+        Some(caps):
+            match caps.groups[0]:
+                Some(name):
+                    match caps.groups[1]:
+                        Some(value):
+                            return Some(Attribute.with_value(name, remove_quotes(value)))
+                        None: pass
+                None: pass
+        None: pass
+
+    # Check for attribute with args: name(arg1, arg2)
+    match regex_captures(r"^(\w+)\s*\(([^)]*)\)$", content):
+        Some(caps):
+            match caps.groups[0]:
+                Some(name):
+                    match caps.groups[1]:
+                        Some(args_str):
+                            # Parse comma-separated args
+                            var args: List<text> = []
+                            for arg in args_str.split(","):
+                                val trimmed_arg = arg.trim()
+                                if not trimmed_arg.is_empty():
+                                    args.push(trimmed_arg)
+                            return Some(Attribute.with_args(name, args))
+                        None:
+                            return Some(Attribute.with_args(name, []))
+                None: pass
+        None: pass
+
+    # Simple attribute: just name
+    match regex_captures(r"^(\w+)$", content):
+        Some(caps):
+            match caps.groups[0]:
+                Some(name):
+                    return Some(Attribute.simple(name))
+                None: pass
+        None: pass
+
+    None
+
+# Parse all attributes from source code
+fn parse_attributes_from_source(source: text) -> List<Attribute>:
+    var attributes: List<Attribute> = []
+
+    # Find all #[...] patterns
+    val matches = regex_find_all(r"#\[[^\]]+\]", source)
+    for match_ in matches:
+        match parse_attribute(match_.text):
+            Some(attr):
+                attributes.push(attr)
+            None:
+                pass
+
+    attributes
+
+# Extract lint attributes from a list of attributes
+fn filter_lint_attributes(attributes: List<Attribute>) -> List<Attribute>:
+    var lint_attrs: List<Attribute> = []
+    for attr in attributes:
+        if attr.is_lint_attribute():
+            lint_attrs.push(attr)
+    lint_attrs
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Span, Attribute
+export LintLevel, LintName, LintConfig
+export parse_attribute, parse_attributes_from_source, filter_lint_attributes

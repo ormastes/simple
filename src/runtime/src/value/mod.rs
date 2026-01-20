@@ -26,6 +26,8 @@ mod contracts;
 mod core;
 pub mod diagram_ffi;
 mod dict;
+// High-performance collections module (using Rust std::collections)
+pub mod hpcollections;
 mod doctest_io;
 pub mod ffi;
 mod file_io;
@@ -72,6 +74,68 @@ pub use collections::{
 
 // Re-export dict FFI functions
 pub use dict::{rt_dict_clear, rt_dict_get, rt_dict_keys, rt_dict_len, rt_dict_new, rt_dict_set, rt_dict_values};
+
+// Re-export high-performance collection FFI functions (Rust std::collections)
+pub use hpcollections::{
+    // HashMap
+    rt_hashmap_clear,
+    rt_hashmap_contains_key,
+    rt_hashmap_drop,
+    rt_hashmap_entries,
+    rt_hashmap_get,
+    rt_hashmap_insert,
+    rt_hashmap_keys,
+    rt_hashmap_len,
+    rt_hashmap_new,
+    rt_hashmap_remove,
+    rt_hashmap_values,
+    // BTreeMap
+    rt_btreemap_clear,
+    rt_btreemap_contains_key,
+    rt_btreemap_drop,
+    rt_btreemap_entries,
+    rt_btreemap_first_key,
+    rt_btreemap_get,
+    rt_btreemap_insert,
+    rt_btreemap_keys,
+    rt_btreemap_last_key,
+    rt_btreemap_len,
+    rt_btreemap_new,
+    rt_btreemap_remove,
+    rt_btreemap_values,
+    // HashSet
+    rt_hashset_clear,
+    rt_hashset_contains,
+    rt_hashset_difference,
+    rt_hashset_drop,
+    rt_hashset_insert,
+    rt_hashset_intersection,
+    rt_hashset_is_subset,
+    rt_hashset_is_superset,
+    rt_hashset_len,
+    rt_hashset_new,
+    rt_hashset_remove,
+    rt_hashset_symmetric_difference,
+    rt_hashset_to_array,
+    rt_hashset_union,
+    // BTreeSet
+    rt_btreeset_clear,
+    rt_btreeset_contains,
+    rt_btreeset_difference,
+    rt_btreeset_drop,
+    rt_btreeset_first,
+    rt_btreeset_insert,
+    rt_btreeset_intersection,
+    rt_btreeset_is_subset,
+    rt_btreeset_is_superset,
+    rt_btreeset_last,
+    rt_btreeset_len,
+    rt_btreeset_new,
+    rt_btreeset_remove,
+    rt_btreeset_symmetric_difference,
+    rt_btreeset_to_array,
+    rt_btreeset_union,
+};
 
 // Re-export object FFI functions
 pub use objects::{

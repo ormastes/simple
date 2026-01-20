@@ -28,6 +28,11 @@ pub enum HeapObjectType {
     Atomic = 0x15,
     // Monoio direct async I/O (feature: monoio-direct)
     MonoioFuture = 0x16,
+    // High-performance collections (Rust std::collections)
+    HashMap = 0x17,
+    BTreeMap = 0x18,
+    HashSet = 0x19,
+    BTreeSet = 0x1A,
 }
 
 /// Header for all heap-allocated objects
