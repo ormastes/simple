@@ -231,5 +231,50 @@ fn call_dict_method(interp: &Interpreter, d: &Dict<Value, Value>, method: &str, 
 
 # Call method on object instance
 fn call_object_method(interp: &Interpreter, class: &str, fields: &Dict<String, Value>, method: &str, args: Array<Value>) -> Result<Value, InterpreterError>:
-    # TODO: [stdlib][P3] Look up method in class definition
-    return Err(InterpreterError::NotImplemented("object methods".to_string()))
+    # Look up method in class definition from environment
+    val class_name = class.to_string()
+    val method_key = "{class_name}.{method}"
+
+    # Try to find method in environment (class methods are stored as "ClassName.method_name")
+    match interp.env.get(&method_key):
+        case Some(func_value):
+            # Create self object
+            val self_obj = Value {
+                kind: ValueKind::Object,
+                data: RuntimeValue::Object {
+                    class: class_name.clone(),
+                    fields: fields.clone()
+                }
+            }
+            # Prepend self to arguments
+            var full_args = [self_obj]
+            for arg in args:
+                full_args.push(arg)
+            # Call the method
+            return call_value(interp, func_value, full_args)
+
+        case None:
+            # Try builtin methods for common operations
+            match method:
+                case "to_string":
+                    val s = format_object(class, fields)
+                    return Ok(Value::string(s))
+                case "clone":
+                    return Ok(Value {
+                        kind: ValueKind::Object,
+                        data: RuntimeValue::Object {
+                            class: class_name,
+                            fields: fields.clone()
+                        }
+                    })
+                case _:
+                    return Err(InterpreterError::AttributeError(
+                        "method '{method}' not found on class '{class}'".to_string()
+                    ))
+
+# Format object for display
+fn format_object(class: &str, fields: &Dict<String, Value>) -> String:
+    var parts: Array<String> = []
+    for (key, val) in fields.iter():
+        parts.push("{key}: {val.to_debug_string()}")
+    return "{class} {{ {parts.join(\", \")} }}"

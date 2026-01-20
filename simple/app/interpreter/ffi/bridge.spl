@@ -115,10 +115,63 @@ enum NativeValue:
 
 # Call into compiled Simple module
 fn call_compiled_function(module: &str, function: &str, args: Array<Value>) -> Result<Value, InterpreterError>:
-    # TODO: [stdlib][P3] Load compiled module and call function
-    # Requires:
-    # - Module loading infrastructure (dynamic library loading)
-    # - Symbol resolution for Simple functions
-    # - ABI compatibility between interpreter and compiled code
-    # - Metadata for function signatures
-    return Err(InterpreterError::NotImplemented("compiled module calls require module loading infrastructure".to_string()))
+    # Load compiled module using extern library loading
+    import .extern.{load_library, resolve_symbol}
+
+    # Determine library path based on platform
+    val lib_path = get_module_library_path(module)
+
+    # Load the library
+    val lib = match load_library(&lib_path):
+        case Ok(l): l
+        case Err(e): return Err(e)
+
+    # Simple function names are mangled: simple_<module>_<function>
+    val symbol_name = "simple_{module}_{function}"
+
+    # Resolve the function symbol
+    val symbol = match resolve_symbol(&lib, &symbol_name):
+        case Ok(s): s
+        case Err(e): return Err(e)
+
+    # Call the function with marshalling
+    # Simple ABI: all args passed as u64, returns u64
+    return symbol.call(args)
+
+# Get the library path for a compiled Simple module
+fn get_module_library_path(module: &str) -> String:
+    # Platform-specific library naming
+    #[cfg(target_os = "linux")]
+    return "lib{module}.so"
+
+    #[cfg(target_os = "macos")]
+    return "lib{module}.dylib"
+
+    #[cfg(target_os = "windows")]
+    return "{module}.dll"
+
+# Cache of loaded compiled modules
+static mut COMPILED_MODULES: Option<Dict<String, ExternLib>> = None
+
+fn get_or_load_module(module: &str) -> Result<&ExternLib, InterpreterError>:
+    import .extern.{load_library, ExternLib}
+
+    unsafe:
+        if COMPILED_MODULES.is_none():
+            COMPILED_MODULES = Some(Dict::new())
+
+        if val Some(ref mut cache) = COMPILED_MODULES:
+            # Check cache first
+            if val Some(lib) = cache.get(module):
+                return Ok(lib)
+
+            # Load and cache
+            val lib_path = get_module_library_path(module)
+            match load_library(&lib_path):
+                case Ok(lib):
+                    cache.set(module.to_string(), lib)
+                    return Ok(cache.get(module).unwrap())
+                case Err(e):
+                    return Err(e)
+
+    return Err(InterpreterError::LoadError("failed to initialize module cache".to_string()))
