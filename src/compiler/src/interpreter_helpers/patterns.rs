@@ -22,6 +22,11 @@ pub(crate) fn bind_pattern(pattern: &Pattern, value: &Value, env: &mut Env) -> b
             env.insert(name.clone(), value.clone());
             true
         }
+        Pattern::MoveIdentifier(name) => {
+            // Move pattern - transfers ownership during pattern matching
+            env.insert(name.clone(), value.clone());
+            true
+        }
         Pattern::Tuple(patterns) => bind_sequence_pattern(value, patterns, env, true),
         Pattern::Array(patterns) => bind_sequence_pattern(value, patterns, env, false),
         _ => {
@@ -257,6 +262,10 @@ fn bind_let_pattern_element(pat: &Pattern, val: Value, is_mutable: bool, env: &m
             }
         }
         Pattern::MutIdentifier(name) => {
+            env.insert(name.clone(), val);
+        }
+        Pattern::MoveIdentifier(name) => {
+            // Move pattern - transfers ownership
             env.insert(name.clone(), val);
         }
         Pattern::Typed { pattern, .. } => {

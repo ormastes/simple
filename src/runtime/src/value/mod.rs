@@ -27,7 +27,7 @@ mod core;
 pub mod diagram_ffi;
 mod dict;
 mod doctest_io;
-mod ffi;
+pub mod ffi;
 mod file_io;
 pub mod gpu;
 pub mod gpu_backend;

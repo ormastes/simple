@@ -38,15 +38,27 @@ impl<'a> Parser<'a> {
                 let name = self.expect_identifier()?;
                 Ok(Pattern::MutIdentifier(name))
             }
+            TokenKind::Move => {
+                self.advance();
+                // Check if followed by an identifier - this is a move pattern (move name)
+                // Otherwise, "move" by itself is just an identifier
+                if let TokenKind::Identifier { name, .. } = &self.current.kind {
+                    let name = name.clone();
+                    self.advance();
+                    Ok(Pattern::MoveIdentifier(name))
+                } else {
+                    // Just "move" by itself as identifier
+                    Ok(Pattern::Identifier("move".to_string()))
+                }
+            }
             // Allow certain keywords as identifier patterns
             // These are keywords that are commonly used as variable names
-            TokenKind::New | TokenKind::Old | TokenKind::Type | TokenKind::Examples | TokenKind::Move => {
+            TokenKind::New | TokenKind::Old | TokenKind::Type | TokenKind::Examples => {
                 let name = match &self.current.kind {
                     TokenKind::New => "new".to_string(),
                     TokenKind::Old => "old".to_string(),
                     TokenKind::Type => "type".to_string(),
                     TokenKind::Examples => "examples".to_string(),
-                    TokenKind::Move => "move".to_string(),
                     _ => unreachable!(),
                 };
                 self.advance();

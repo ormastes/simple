@@ -684,6 +684,7 @@ pub enum Pattern {
     Wildcard,
     Identifier(String),
     MutIdentifier(String),
+    MoveIdentifier(String), // move name - transfers ownership during pattern matching
     Literal(Box<Expr>),
     Tuple(Vec<Pattern>),
     Array(Vec<Pattern>),
