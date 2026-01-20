@@ -200,6 +200,7 @@ pub enum TokenKind {
     Bounds, // bounds (for @simd kernel bounds: clause)
     Dyn,    // dyn (for dynamic trait objects)
     Repr,   // repr (for unit representation constraints)
+    Lean,   // lean (for Lean 4 verification blocks)
     // Note: 'allow' is parsed as identifier (not a keyword) to avoid conflict with #[allow(...)]
     // Note: 'checked', 'saturate', 'wrap', 'range' are parsed as identifiers in where clauses
 
@@ -231,6 +232,9 @@ pub enum TokenKind {
     Old,       // old() (previous value in postconditions)
     Result,    // result (return value in ensures) - legacy
     Decreases, // decreases: (termination measure for Lean verification)
+    // Inline assertions (statement-level contract checks)
+    Assert, // assert expr or assert expr, "message"
+    Check,  // check (alias for assert)
 
     // Infix keywords (for BDD spec framework)
     // These parse as infix method calls: `A to B` → `A.to(B)`

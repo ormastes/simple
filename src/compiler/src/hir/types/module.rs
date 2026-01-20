@@ -109,6 +109,8 @@ pub struct HirModule {
     pub imports: Vec<HirImport>,
     /// Trait information for static polymorphism (vtable slot resolution)
     pub trait_infos: HashMap<String, HirTraitInfo>,
+    /// Lean 4 verification blocks for embedding formal proofs
+    pub lean_blocks: Vec<HirLeanBlock>,
 }
 
 impl HirModule {
@@ -126,6 +128,7 @@ impl HirModule {
             mock_decls: Vec::new(),
             imports: Vec::new(),
             trait_infos: HashMap::new(),
+            lean_blocks: Vec::new(),
         }
     }
 

@@ -1,12 +1,10 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use simple_runtime::value::ffi::concurrent::{
     rt_concurrent_map_new, rt_concurrent_map_free, rt_concurrent_map_insert, rt_concurrent_map_get,
-    rt_concurrent_map_remove,
-    rt_concurrent_queue_new, rt_concurrent_queue_free, rt_concurrent_queue_push, rt_concurrent_queue_pop,
-    rt_concurrent_stack_new, rt_concurrent_stack_free, rt_concurrent_stack_push, rt_concurrent_stack_pop,
-    rt_pool_new, rt_pool_free, rt_pool_acquire, rt_pool_release,
-    rt_arena_new, rt_arena_free, rt_arena_alloc,
-    rt_tls_new, rt_tls_free, rt_tls_set, rt_tls_get,
+    rt_concurrent_map_remove, rt_concurrent_queue_new, rt_concurrent_queue_free, rt_concurrent_queue_push,
+    rt_concurrent_queue_pop, rt_concurrent_stack_new, rt_concurrent_stack_free, rt_concurrent_stack_push,
+    rt_concurrent_stack_pop, rt_pool_new, rt_pool_free, rt_pool_acquire, rt_pool_release, rt_arena_new, rt_arena_free,
+    rt_arena_alloc, rt_tls_new, rt_tls_free, rt_tls_set, rt_tls_get,
 };
 use simple_runtime::value::RuntimeValue;
 use std::sync::Arc;
@@ -43,7 +41,8 @@ fn bench_map_operations(c: &mut Criterion) {
                                         black_box(rt_concurrent_map_get(*map_handle, key));
                                     } else if op_type < 95 {
                                         // 15% inserts
-                                        black_box(rt_concurrent_map_insert(*map_handle, key, value));
+                                        rt_concurrent_map_insert(*map_handle, key, value);
+                                        black_box(());
                                     } else {
                                         // 5% removes
                                         black_box(rt_concurrent_map_remove(*map_handle, key));
@@ -79,7 +78,8 @@ fn bench_map_operations(c: &mut Criterion) {
                                 for i in 0..ops_per_thread {
                                     let key = (thread_id * 10000 + i) as i64;
                                     let value = RuntimeValue::from_int(i as i64);
-                                    black_box(rt_concurrent_map_insert(*map_handle, key, value));
+                                    rt_concurrent_map_insert(*map_handle, key, value);
+                                    black_box(());
                                 }
                             })
                         })
@@ -126,7 +126,8 @@ fn bench_queue_operations(c: &mut Criterion) {
                             let ops_per_thread = 100_000 / producers as usize;
                             for i in 0..ops_per_thread {
                                 let value = RuntimeValue::from_int((thread_id * 100000 + i) as i64);
-                                black_box(rt_concurrent_queue_push(*queue_handle, value));
+                                rt_concurrent_queue_push(*queue_handle, value);
+                                black_box(());
                             }
                         }));
                     }
@@ -191,7 +192,8 @@ fn bench_stack_operations(c: &mut Criterion) {
                                 for i in 0..ops_per_thread {
                                     if i % 2 == 0 {
                                         let value = RuntimeValue::from_int((thread_id * 100000 + i) as i64);
-                                        black_box(rt_concurrent_stack_push(*stack_handle, value));
+                                        rt_concurrent_stack_push(*stack_handle, value);
+                                        black_box(());
                                     } else {
                                         black_box(rt_concurrent_stack_pop(*stack_handle));
                                     }
@@ -242,7 +244,8 @@ fn bench_pool_operations(c: &mut Criterion) {
                                 for _ in 0..ops_per_thread {
                                     let value = rt_pool_acquire(*pool_handle);
                                     if value != RuntimeValue::NIL {
-                                        black_box(rt_pool_release(*pool_handle, value));
+                                        rt_pool_release(*pool_handle, value);
+                                        black_box(());
                                     }
                                 }
                             })

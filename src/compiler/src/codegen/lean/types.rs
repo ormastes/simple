@@ -45,6 +45,14 @@ pub enum LeanType {
         methods: Vec<(String, LeanType)>,
         type_params: Vec<String>,
     },
+    /// Subtype/Refinement type (e.g., {x : Int // x > 0})
+    /// Generated from Simple's `type Pos = i64 where self > 0`
+    Subtype {
+        name: String,
+        base_type: Box<LeanType>,
+        /// Predicate as a Lean proposition string
+        predicate: String,
+    },
 }
 
 impl LeanType {
@@ -56,6 +64,7 @@ impl LeanType {
             LeanType::Structure { name, .. } => name.clone(),
             LeanType::Inductive { name, .. } => name.clone(),
             LeanType::Mixin { name, .. } => name.clone(),
+            LeanType::Subtype { name, .. } => name.clone(),
             LeanType::Function { params, result } => {
                 let params_str = params.iter().map(|p| p.to_lean()).collect::<Vec<_>>().join(" → ");
                 format!("{} → {}", params_str, result.to_lean())
@@ -66,6 +75,27 @@ impl LeanType {
                 let types_str = types.iter().map(|t| t.to_lean()).collect::<Vec<_>>().join(" × ");
                 format!("({})", types_str)
             }
+        }
+    }
+
+    /// Emit subtype definition
+    /// Generates: def TypeName : Type := {x : BaseType // predicate}
+    pub fn emit_subtype(&self) -> Option<String> {
+        match self {
+            LeanType::Subtype {
+                name,
+                base_type,
+                predicate,
+            } => {
+                Some(format!(
+                    "/-- Refinement type: {} --/\ndef {} : Type := {{x : {} // {}}}\n",
+                    name,
+                    name,
+                    base_type.to_lean(),
+                    predicate
+                ))
+            }
+            _ => None,
         }
     }
 

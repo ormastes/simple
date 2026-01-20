@@ -28,7 +28,7 @@ mutual
     | Ty.bool, Ty.bool => true
     | Ty.str, Ty.str => true
     | Ty.generic name args, Ty.generic name' args' =>
-      if h_name : name = name' then
+      if _h_name : name = name' then
         listEq args args'
       else
         false

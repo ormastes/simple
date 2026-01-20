@@ -224,6 +224,7 @@ impl TypeChecker {
                 | Node::Loop(_)
                 | Node::Break(_)
                 | Node::Continue(_)
+                | Node::Assert(_)
                 | Node::Context(_)
                 | Node::With(_)
                 | Node::Expression(_) => {
@@ -235,8 +236,9 @@ impl TypeChecker {
                 | Node::CommonUseStmt(_)
                 | Node::ExportUseStmt(_)
                 | Node::AutoImportStmt(_)
-                | Node::RequiresCapabilities(_) => {
-                    // Module system nodes don't introduce type bindings directly
+                | Node::RequiresCapabilities(_)
+                | Node::LeanBlock(_) => {
+                    // Module system nodes and embedded lean blocks don't introduce type bindings directly
                 }
                 // AOP nodes (declarative configuration, not type bindings)
                 Node::AopAdvice(_)

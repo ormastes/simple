@@ -67,9 +67,11 @@ pub enum Node {
     Loop(LoopStmt),
     Break(BreakStmt),
     Continue(ContinueStmt),
+    Assert(AssertStmt),
     Context(ContextStmt),
     With(WithStmt),
     Expression(Expr),
+    LeanBlock(LeanBlock),
 }
 
 /// Decorator applied to a function: @decorator or @decorator(args)

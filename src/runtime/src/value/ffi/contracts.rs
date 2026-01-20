@@ -11,6 +11,7 @@
 //! - **Error Postcondition (ErrPost)**: Must be true when function returns with error
 //! - **Invariant Entry (InvEntry)**: Must be true when method is called
 //! - **Invariant Exit (InvExit)**: Must be true when method returns
+//! - **Assertion**: Must be true at the point of the assert/check statement
 //!
 //! ## Usage Pattern
 //!
@@ -58,7 +59,7 @@ fn check_contract_internal(
 ///
 /// # Arguments
 /// * `condition` - The boolean condition (1 = true, 0 = false)
-/// * `kind` - Type of contract (0=Pre, 1=Post, 2=ErrPost, 3=InvEntry, 4=InvExit)
+/// * `kind` - Type of contract (0=Pre, 1=Post, 2=ErrPost, 3=InvEntry, 4=InvExit, 5=Assertion)
 /// * `func_name_ptr` - Pointer to function name string (UTF-8), may be null
 /// * `func_name_len` - Length of function name
 ///
@@ -90,7 +91,7 @@ pub unsafe extern "C" fn simple_contract_check(
 ///
 /// # Arguments
 /// * `condition` - The boolean condition (1 = true, 0 = false)
-/// * `kind` - Type of contract (0=Pre, 1=Post, 2=ErrPost, 3=InvEntry, 4=InvExit)
+/// * `kind` - Type of contract (0=Pre, 1=Post, 2=ErrPost, 3=InvEntry, 4=InvExit, 5=Assertion)
 /// * `func_name_ptr` - Pointer to function name string (UTF-8), may be null
 /// * `func_name_len` - Length of function name
 /// * `message_ptr` - Pointer to message string (UTF-8), may be null
@@ -156,26 +157,20 @@ mod tests {
 
     #[test]
     fn test_check_contract_internal_true_returns_ok() {
-        let result = check_contract_internal(
-            true,
-            ContractViolationKind::Pre,
-            "test_func",
-            None,
-        );
+        let result = check_contract_internal(true, ContractViolationKind::Pre, "test_func", None);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_check_contract_internal_false_returns_err() {
-        let result = check_contract_internal(
-            false,
-            ContractViolationKind::Pre,
-            "test_func",
-            None,
-        );
+        let result = check_contract_internal(false, ContractViolationKind::Pre, "test_func", None);
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("Precondition violation"), "Expected 'Precondition violation' in: {}", msg);
+        assert!(
+            msg.contains("Precondition violation"),
+            "Expected 'Precondition violation' in: {}",
+            msg
+        );
         assert!(msg.contains("test_func"), "Expected function name in: {}", msg);
     }
 
@@ -189,9 +184,17 @@ mod tests {
         );
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("Postcondition violation"), "Expected 'Postcondition violation' in: {}", msg);
+        assert!(
+            msg.contains("Postcondition violation"),
+            "Expected 'Postcondition violation' in: {}",
+            msg
+        );
         assert!(msg.contains("my_function"), "Expected function name in: {}", msg);
-        assert!(msg.contains("custom error message"), "Expected custom message in: {}", msg);
+        assert!(
+            msg.contains("custom error message"),
+            "Expected custom message in: {}",
+            msg
+        );
     }
 
     #[test]
@@ -226,12 +229,7 @@ mod tests {
         assert!(result.is_err());
 
         // Test with function name containing special characters
-        let result = check_contract_internal(
-            false,
-            ContractViolationKind::Pre,
-            "my::module::function<T>",
-            None,
-        );
+        let result = check_contract_internal(false, ContractViolationKind::Pre, "my::module::function<T>", None);
         assert!(result.is_err());
         let msg = result.unwrap_err();
         assert!(msg.contains("my::module::function<T>"));

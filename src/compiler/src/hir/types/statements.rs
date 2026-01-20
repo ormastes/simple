@@ -29,6 +29,12 @@ pub enum HirStmt {
     },
     Break,
     Continue,
+    /// Assert statement for inline contract checks
+    /// assert condition, "message"
+    Assert {
+        condition: HirExpr,
+        message: Option<String>,
+    },
 }
 
 /// Local variable info

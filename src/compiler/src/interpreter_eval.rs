@@ -661,6 +661,41 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     ctx,
                 ));
             }
+            Node::Assert(assert_stmt) => {
+                // Evaluate the condition
+                let condition_value = evaluate_expr(
+                    &assert_stmt.condition,
+                    &mut env,
+                    &mut functions,
+                    &mut classes,
+                    &enums,
+                    &impl_methods,
+                )?;
+                match condition_value {
+                    Value::Bool(true) => {
+                        // Assertion passed, continue
+                    }
+                    Value::Bool(false) => {
+                        // Assertion failed - panic with message
+                        let base_msg = "Assertion violation: condition failed";
+                        let msg = if let Some(ref custom_msg) = assert_stmt.message {
+                            format!("{} ({})", base_msg, custom_msg)
+                        } else {
+                            base_msg.to_string()
+                        };
+                        panic!("{}", msg);
+                    }
+                    _ => {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::TYPE_MISMATCH)
+                            .with_help("assert condition must be a boolean");
+                        return Err(CompileError::semantic_with_context(
+                            "assert condition must be a boolean".to_string(),
+                            ctx,
+                        ));
+                    }
+                }
+            }
             // Module system nodes
             Node::UseStmt(use_stmt) => {
                 // Handle runtime module loading
@@ -761,12 +796,14 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::DiBinding(_)
             | Node::ArchitectureRule(_)
             | Node::MockDecl(_)
-            | Node::Mixin(_) => {
+            | Node::Mixin(_)
+            | Node::LeanBlock(_) => {
                 // Module system is handled by the module resolver
                 // HandlePool is processed at compile time for allocation
                 // Bitfield is processed at compile time for bit-level field access
                 // AOP nodes are declarative configuration handled at compile time
                 // Mixin composition is handled at compile time
+                // LeanBlock is embedded Lean code for verification (not runtime)
                 // These are no-ops in the interpreter
             }
         }

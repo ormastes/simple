@@ -161,6 +161,8 @@ impl<'a> super::Lexer<'a> {
             "bounds" => TokenKind::Bounds,
             "dyn" => TokenKind::Dyn,
             "repr" => TokenKind::Repr,
+            // Note: "lean" is NOT a keyword - it's parsed contextually to avoid breaking
+            // existing module paths like "verification.lean.codegen"
             // Note: "allow" is NOT a keyword - it's parsed contextually in unit definitions
             // to avoid conflicts with #[allow(...)] attributes
             // Contract keywords (new spec)
@@ -175,6 +177,9 @@ impl<'a> super::Lexer<'a> {
             "old" => TokenKind::Old,
             "result" => TokenKind::Result,
             "decreases" => TokenKind::Decreases,
+            // Inline assertion keywords
+            "assert" => TokenKind::Assert,
+            "check" => TokenKind::Check,
             // Infix keywords (for BDD spec framework)
             "to" => TokenKind::To,
             "not_to" => TokenKind::NotTo,
@@ -312,6 +317,20 @@ impl<'a> super::Lexer<'a> {
                     self.advance(); // consume 'g'
                     self.advance(); // consume '{'
                     return Some(self.scan_custom_block_payload("img"));
+                }
+            }
+            'l' => {
+                // Check for lean{...} custom block
+                if self.peek() == Some('e')
+                    && self.peek_ahead(1) == Some('a')
+                    && self.peek_ahead(2) == Some('n')
+                    && self.peek_ahead(3) == Some('{')
+                {
+                    self.advance(); // consume 'e'
+                    self.advance(); // consume 'a'
+                    self.advance(); // consume 'n'
+                    self.advance(); // consume '{'
+                    return Some(self.scan_custom_block_payload("lean"));
                 }
             }
             _ => {}

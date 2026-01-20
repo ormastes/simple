@@ -262,6 +262,29 @@ impl<'a> MirLowerer<'a> {
                 })?;
                 Ok(())
             }
+
+            HirStmt::Assert { condition, message } => {
+                // Lower the assertion condition
+                let cond_reg = self.lower_expr(condition)?;
+
+                // Get function name for error message (best effort)
+                let func_name = self
+                    .try_contract_ctx()
+                    .map(|ctx| ctx.func_name.clone())
+                    .unwrap_or_else(|_| "<unknown>".to_string());
+
+                // Emit contract check instruction with Assertion kind
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ContractCheck {
+                        condition: cond_reg,
+                        kind: crate::mir::instructions::ContractKind::Assertion,
+                        func_name,
+                        message: message.clone(),
+                    });
+                })?;
+                Ok(())
+            }
         }
     }
 
@@ -353,10 +376,7 @@ impl<'a> MirLowerer<'a> {
                 });
 
                 // Emit the drop instruction
-                block.instructions.push(MirInst::Drop {
-                    value: value_vreg,
-                    ty,
-                });
+                block.instructions.push(MirInst::Drop { value: value_vreg, ty });
             })?;
         }
 

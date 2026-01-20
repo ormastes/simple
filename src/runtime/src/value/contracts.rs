@@ -28,6 +28,8 @@ pub enum ContractViolationKind {
     InvariantEntry = 3,
     /// Invariant failure at function exit (CTR-054)
     InvariantExit = 4,
+    /// Inline assertion failure (assert/check statement)
+    Assertion = 5,
 }
 
 impl ContractViolationKind {
@@ -39,6 +41,7 @@ impl ContractViolationKind {
             2 => Some(Self::ErrPost),
             3 => Some(Self::InvariantEntry),
             4 => Some(Self::InvariantExit),
+            5 => Some(Self::Assertion),
             _ => None,
         }
     }
@@ -51,6 +54,7 @@ impl ContractViolationKind {
             Self::ErrPost => "Error postcondition",
             Self::InvariantEntry => "Entry invariant",
             Self::InvariantExit => "Exit invariant",
+            Self::Assertion => "Assertion",
         }
     }
 }
@@ -369,7 +373,11 @@ mod tests {
             ContractViolationKind::from_i64(4),
             Some(ContractViolationKind::InvariantExit)
         );
-        assert_eq!(ContractViolationKind::from_i64(5), None);
+        assert_eq!(
+            ContractViolationKind::from_i64(5),
+            Some(ContractViolationKind::Assertion)
+        );
+        assert_eq!(ContractViolationKind::from_i64(6), None);
         assert_eq!(ContractViolationKind::from_i64(-1), None);
     }
 
@@ -380,6 +388,7 @@ mod tests {
         assert_eq!(ContractViolationKind::ErrPost.name(), "Error postcondition");
         assert_eq!(ContractViolationKind::InvariantEntry.name(), "Entry invariant");
         assert_eq!(ContractViolationKind::InvariantExit.name(), "Exit invariant");
+        assert_eq!(ContractViolationKind::Assertion.name(), "Assertion");
     }
 
     #[test]

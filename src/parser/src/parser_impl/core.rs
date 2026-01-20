@@ -371,6 +371,7 @@ impl<'a> Parser<'a> {
             TokenKind::Return => self.parse_return(),
             TokenKind::Break => self.parse_break(),
             TokenKind::Continue => self.parse_continue(),
+            TokenKind::Assert | TokenKind::Check => self.parse_assert(),
             TokenKind::Context => {
                 // Check if this is a context statement (context expr:) or function call (context(...)) or BDD DSL (context "string":)
                 let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
@@ -393,6 +394,24 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::With => self.parse_with(),
+            // Lean 4 verification blocks
+            // Note: lean{...} (no space) is handled as CustomBlock by lexer
+            TokenKind::CustomBlock { kind, .. } if kind == "lean" => self.parse_lean_custom_block_as_node(),
+            // lean import "..." needs contextual check since "lean" is also a valid identifier
+            TokenKind::Identifier { name, .. } if name == "lean" => {
+                // Check if this is "lean import" - if so, parse as lean block
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
+                if matches!(next.kind, TokenKind::Import) {
+                    self.parse_lean_import_block()
+                } else {
+                    // Just an identifier named "lean" - parse as expression
+                    self.parse_expression_or_assignment()
+                }
+            }
             // Gherkin-style system test DSL (Features #606-610)
             TokenKind::Feature => self.parse_feature(),
             TokenKind::Scenario => self.parse_scenario(),
@@ -400,9 +419,12 @@ impl<'a> Parser<'a> {
                 // Check if this is an expression/assignment vs a Gherkin examples block
                 // Gherkin examples: `examples name:` - followed by identifier then colon
                 // Expression uses: assignment, method call, index, return value
-                if self.peek_is(&TokenKind::Assign) || self.peek_is(&TokenKind::Dot)
-                    || self.peek_is(&TokenKind::LBracket) || self.peek_is(&TokenKind::LParen)
-                    || self.peek_is(&TokenKind::Newline) || self.peek_is(&TokenKind::Dedent)
+                if self.peek_is(&TokenKind::Assign)
+                    || self.peek_is(&TokenKind::Dot)
+                    || self.peek_is(&TokenKind::LBracket)
+                    || self.peek_is(&TokenKind::LParen)
+                    || self.peek_is(&TokenKind::Newline)
+                    || self.peek_is(&TokenKind::Dedent)
                 {
                     self.parse_expression_or_assignment()
                 } else {

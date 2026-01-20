@@ -28,6 +28,7 @@ pub(super) fn compile_contract_check<M: Module>(
         ContractKind::ErrorPostcondition => 2i64,
         ContractKind::InvariantEntry => 3i64,
         ContractKind::InvariantExit => 4i64,
+        ContractKind::Assertion => 5i64,
     };
 
     // Check if we have the runtime contract check function

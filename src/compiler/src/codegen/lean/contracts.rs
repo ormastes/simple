@@ -26,6 +26,8 @@ pub struct LeanTheorem {
     pub proof: Option<String>,
     /// Documentation
     pub doc: Option<String>,
+    /// Termination measure for recursive functions (from decreases: clause)
+    pub termination_by: Option<LeanExpr>,
 }
 
 /// A Lean proposition
@@ -108,6 +110,11 @@ impl LeanTheorem {
             out.push_str(&format!("\n  {}\n", proof));
         } else {
             out.push_str("\n  sorry\n");
+        }
+
+        // Termination measure (for recursive functions)
+        if let Some(ref measure) = self.termination_by {
+            out.push_str(&format!("termination_by {}\n", measure.to_lean()));
         }
 
         out
@@ -225,7 +232,14 @@ impl<'a> ContractTranslator<'a> {
             .collect();
         let preconditions = preconditions?;
 
-        // Translate postconditions
+        // Translate termination measure (decreases clause) to Lean expression
+        let termination_by = if let Some(ref decreases) = contract.decreases {
+            Some(expr_translator.translate(&decreases.condition)?)
+        } else {
+            None
+        };
+
+        // Translate success postconditions (out(ret):)
         for (i, clause) in contract.postconditions.iter().enumerate() {
             let conclusion = self.translate_predicate(&expr_translator, &clause.condition)?;
 
@@ -237,12 +251,36 @@ impl<'a> ContractTranslator<'a> {
                 .collect();
 
             let theorem = LeanTheorem {
-                name: format!("{}Post{}", self.to_lean_name(&func.name), i + 1),
+                name: format!("{}Post_success{}", self.to_lean_name(&func.name), i + 1),
                 type_params: vec![],
                 hypotheses,
                 conclusion,
                 proof: None,
-                doc: Some(format!("Postcondition {} for function {}", i + 1, func.name)),
+                doc: Some(format!("Success postcondition {} for function {}", i + 1, func.name)),
+                termination_by: termination_by.clone(),
+            };
+            theorems.push(theorem);
+        }
+
+        // Translate error postconditions (out_err(err):)
+        for (i, clause) in contract.error_postconditions.iter().enumerate() {
+            let conclusion = self.translate_predicate(&expr_translator, &clause.condition)?;
+
+            // Build hypotheses from preconditions
+            let hypotheses: Vec<_> = preconditions
+                .iter()
+                .enumerate()
+                .map(|(j, p)| (format!("h{}", j + 1), p.clone()))
+                .collect();
+
+            let theorem = LeanTheorem {
+                name: format!("{}Post_error{}", self.to_lean_name(&func.name), i + 1),
+                type_params: vec![],
+                hypotheses,
+                conclusion,
+                proof: None,
+                doc: Some(format!("Error postcondition {} for function {}", i + 1, func.name)),
+                termination_by: termination_by.clone(),
             };
             theorems.push(theorem);
         }
@@ -258,6 +296,7 @@ impl<'a> ContractTranslator<'a> {
                 conclusion: inv_prop,
                 proof: None,
                 doc: Some(format!("Invariant {} for function {}", i + 1, func.name)),
+                termination_by: None, // Invariants don't have termination measures
             };
             theorems.push(theorem);
         }
@@ -432,11 +471,35 @@ mod tests {
             ),
             proof: None,
             doc: Some("Adding positive numbers yields positive".to_string()),
+            termination_by: None,
         };
 
         let output = theorem.to_lean(true);
         assert!(output.contains("theorem addPositive"));
         assert!(output.contains("(hx : (x > 0))"));
         assert!(output.contains("sorry"));
+    }
+
+    #[test]
+    fn test_lean_theorem_with_termination_by() {
+        let theorem = LeanTheorem {
+            name: "factorial".to_string(),
+            type_params: vec![],
+            hypotheses: vec![(
+                "hn".to_string(),
+                LeanProp::Ge(LeanExpr::Var("n".to_string()), LeanExpr::Lit(LeanLit::Int(0))),
+            )],
+            conclusion: LeanProp::Gt(
+                LeanExpr::Var("result".to_string()),
+                LeanExpr::Lit(LeanLit::Int(0)),
+            ),
+            proof: None,
+            doc: Some("Factorial is always positive".to_string()),
+            termination_by: Some(LeanExpr::Var("n".to_string())),
+        };
+
+        let output = theorem.to_lean(true);
+        assert!(output.contains("theorem factorial"));
+        assert!(output.contains("termination_by n"));
     }
 }

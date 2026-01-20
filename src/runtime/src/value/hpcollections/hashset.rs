@@ -172,10 +172,7 @@ pub extern "C" fn rt_hashset_union(handle1: RuntimeValue, handle2: RuntimeValue)
 
 /// Intersection of two sets (returns new set)
 #[no_mangle]
-pub extern "C" fn rt_hashset_intersection(
-    handle1: RuntimeValue,
-    handle2: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_hashset_intersection(handle1: RuntimeValue, handle2: RuntimeValue) -> RuntimeValue {
     let new_set = rt_hashset_new();
     if new_set.is_nil() {
         return RuntimeValue::NIL;
@@ -196,10 +193,7 @@ pub extern "C" fn rt_hashset_intersection(
 
 /// Difference of two sets (elements in first but not second)
 #[no_mangle]
-pub extern "C" fn rt_hashset_difference(
-    handle1: RuntimeValue,
-    handle2: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_hashset_difference(handle1: RuntimeValue, handle2: RuntimeValue) -> RuntimeValue {
     let new_set = rt_hashset_new();
     if new_set.is_nil() {
         return RuntimeValue::NIL;
@@ -220,10 +214,7 @@ pub extern "C" fn rt_hashset_difference(
 
 /// Symmetric difference of two sets (elements in either but not both)
 #[no_mangle]
-pub extern "C" fn rt_hashset_symmetric_difference(
-    handle1: RuntimeValue,
-    handle2: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_hashset_symmetric_difference(handle1: RuntimeValue, handle2: RuntimeValue) -> RuntimeValue {
     let new_set = rt_hashset_new();
     if new_set.is_nil() {
         return RuntimeValue::NIL;

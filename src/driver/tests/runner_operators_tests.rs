@@ -511,14 +511,14 @@ main = o.inner.value
 fn runner_handles_early_return() {
     run_expect(
         r#"
-fn check(x: i64) -> i64:
+fn verify(x: i64) -> i64:
     if x > 10:
         return 1
     if x > 5:
         return 2
     return 3
 
-main = check(7)
+main = verify(7)
 "#,
         2,
     );

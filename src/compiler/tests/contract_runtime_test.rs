@@ -6,7 +6,7 @@
 use simple_compiler::CompilerPipeline;
 use std::path::Path;
 
-/// Test helper: Compile a function with contracts through the full pipeline
+/// Test helper: Compile a function with contracts through the full pipeline (interpreter mode)
 fn compile_function(source: &str) -> Result<(), String> {
     let dir = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {}", e))?;
     let src_path = dir.path().join("test.spl");
@@ -22,6 +22,26 @@ fn compile_function(source: &str) -> Result<(), String> {
             eprintln!("Compilation error: {:?}", e);
             eprintln!("Source:\n{}", source);
             Err(format!("Compilation error: {:?}", e))
+        }
+    }
+}
+
+/// Test helper: Compile a function with contracts through native codegen (HIR -> MIR -> machine code)
+fn compile_function_native(source: &str) -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    let src_path = dir.path().join("test.spl");
+    let out_path = dir.path().join("test.smf");
+
+    std::fs::write(&src_path, source).map_err(|e| format!("Failed to write source: {}", e))?;
+
+    let mut compiler = CompilerPipeline::new().map_err(|e| format!("Failed to create compiler: {:?}", e))?;
+
+    match compiler.compile_native(&src_path, &out_path) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("Native compilation error: {:?}", e);
+            eprintln!("Source:\n{}", source);
+            Err(format!("Native compilation error: {:?}", e))
         }
     }
 }
@@ -461,4 +481,81 @@ fn early_exit(x: i64) -> i64:
 "#;
 
     assert!(compile_function(source).is_ok());
+}
+
+// ============================================================================
+// Native Codegen Tests for old() Expression Handling
+// ============================================================================
+// These tests verify that old() expressions are correctly lowered through
+// HIR -> MIR -> native code generation path.
+
+#[test]
+fn test_native_old_capture_simple() {
+    // Test simple old() capture through native codegen
+    let source = r#"
+fn main() -> i64:
+    return increment(5)
+
+fn increment(x: i64) -> i64:
+    out(ret):
+        ret == old(x) + 1
+    return x + 1
+"#;
+
+    assert!(compile_function_native(source).is_ok());
+}
+
+#[test]
+fn test_native_old_capture_multiple() {
+    // Test multiple old() captures through native codegen
+    let source = r#"
+fn main() -> i64:
+    return sum(3, 4)
+
+fn sum(a: i64, b: i64) -> i64:
+    out(ret):
+        ret == old(a) + old(b)
+    return a + b
+"#;
+
+    assert!(compile_function_native(source).is_ok());
+}
+
+#[test]
+fn test_native_old_with_complex_expression() {
+    // Test old() with complex expressions in native codegen
+    let source = r#"
+fn main() -> i64:
+    return transform(5, 2)
+
+fn transform(x: i64, y: i64) -> i64:
+    out(ret):
+        ret == (old(x) + old(y)) * 2
+        ret > old(x)
+    return (x + y) * 2
+"#;
+
+    assert!(compile_function_native(source).is_ok());
+}
+
+#[test]
+fn test_native_combined_contracts() {
+    // Test function with all contract types and old() in native codegen
+    let source = r#"
+fn main() -> i64:
+    return checked_add(10, 5)
+
+fn checked_add(x: i64, y: i64) -> i64:
+    in:
+        x >= 0
+        y >= 0
+    invariant:
+        x >= 0
+    out(ret):
+        ret == old(x) + old(y)
+        ret >= old(x)
+    return x + y
+"#;
+
+    assert!(compile_function_native(source).is_ok());
 }

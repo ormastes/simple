@@ -155,11 +155,15 @@ def instantiateWithBounds (registry : ImplRegistry)
 --==============================================================================
 
 -- Theorem: Trait method inference is deterministic
-axiom traitMethod_deterministic (env : TraitEnv) (registry : ImplRegistry)
+theorem traitMethod_deterministic (env : TraitEnv) (registry : ImplRegistry)
     (traitName methodName : String) (selfTy : Ty) (argTys : List Ty) (retTy1 retTy2 : Ty) :
   inferTraitMethodCall env registry traitName methodName selfTy argTys = some retTy1 →
   inferTraitMethodCall env registry traitName methodName selfTy argTys = some retTy2 →
-  retTy1 = retTy2
+  retTy1 = retTy2 := by
+  intro h1 h2
+  rw [h1] at h2
+  cases h2
+  rfl
 
 -- Theorem: Implementation completeness
 -- If a type implements a trait, all required methods must have implementations
@@ -172,16 +176,19 @@ axiom coherence_no_overlap (registry : ImplRegistry) (impl1 impl2 : TraitImpl) :
   checkCoherence registry = true →
   impl1 ≠ impl2 → !implsOverlap impl1 impl2
 
--- Theorem: Trait bounds satisfaction is monotonic
--- If bounds are satisfied for a type, they remain satisfied
-axiom bounds_monotonic (registry : ImplRegistry) (bounds : List (Ty × String)) :
-  checkTraitBounds registry bounds = true
+-- Note: bounds_monotonic removed - the statement had no preconditions and was incorrect.
+-- A proper monotonicity theorem would state that adding implementations to the registry
+-- preserves previously satisfied bounds, but this requires a more complex formulation.
 
 -- Theorem: Associated type resolution is deterministic
-axiom assocType_deterministic (impl : TraitImpl) (assocName : String) (ty1 ty2 : Ty) :
+theorem assocType_deterministic (impl : TraitImpl) (assocName : String) (ty1 ty2 : Ty) :
   resolveAssocType impl assocName = some ty1 →
   resolveAssocType impl assocName = some ty2 →
-  ty1 = ty2
+  ty1 = ty2 := by
+  intro h1 h2
+  rw [h1] at h2
+  cases h2
+  rfl
 
 -- Theorem: Unification is symmetric
 axiom unify_symmetric (ty1 ty2 : Ty) :
@@ -317,9 +324,12 @@ theorem binding_deterministic (bindings : BindingRegistry) (traitName : String)
   injection h2
 
 -- Theorem: Valid bindings imply implementation exists
-axiom valid_binding_impl_exists (implRegistry : ImplRegistry) (binding : InterfaceBinding) :
+theorem valid_binding_impl_exists (implRegistry : ImplRegistry) (binding : InterfaceBinding) :
   isValidBinding implRegistry binding = true →
-  implementsTrait implRegistry binding.impl_type binding.trait_name = true
+  implementsTrait implRegistry binding.impl_type binding.trait_name = true := by
+  intro h
+  unfold isValidBinding at h
+  exact h
 
 -- Theorem: Static dispatch preserves type safety
 -- If a binding is valid, the bound type satisfies all trait requirements
@@ -343,14 +353,16 @@ theorem dispatch_consistent (bindings : BindingRegistry) (implRegistry : ImplReg
 -- Theorem: Static dispatch is equivalent to direct call
 -- Calling through binding produces same result as calling impl directly
 -- (This is trivially true since bind is always static dispatch)
-axiom static_equiv_direct (env : TraitEnv) (implRegistry : ImplRegistry)
+theorem static_equiv_direct (env : TraitEnv) (implRegistry : ImplRegistry)
     (bindings : BindingRegistry) (binding : InterfaceBinding)
     (methodName : String) (args : List Ty) (ret : Ty) :
   lookupBinding bindings binding.trait_name = some binding →
   isValidBinding implRegistry binding = true →
   inferTraitMethodCall env implRegistry binding.trait_name methodName binding.impl_type args = some ret →
   -- Direct call to impl_type.methodName produces same result
-  inferTraitMethodCall env implRegistry binding.trait_name methodName binding.impl_type args = some ret
+  inferTraitMethodCall env implRegistry binding.trait_name methodName binding.impl_type args = some ret := by
+  intro _ _ h
+  exact h
 
 --==============================================================================
 -- Additional Theorems for Type Inference Specification Tests
@@ -381,13 +393,15 @@ theorem trait_inheritance_methods (env : TraitEnv) (child parent : TraitDef) :
 
 -- Theorem: Default trait method availability
 -- Rust test: test_trait_default_method
-axiom default_method_available (env : TraitEnv) (registry : ImplRegistry)
+theorem default_method_available (env : TraitEnv) (registry : ImplRegistry)
     (trait : TraitDef) (impl : TraitImpl) (defaultMethod : TraitMethod) :
   lookupTrait env trait.name = some trait →
   findImpl registry trait.name impl.for_type = some impl →
   defaultMethod ∈ trait.methods →
   -- Default method can be called
-  True
+  True := by
+  intros
+  trivial
 
 -- Theorem: Trait object method dispatch
 -- Rust test: test_trait_object_type
@@ -433,21 +447,25 @@ theorem conflicting_bounds_allowed (registry : ImplRegistry) (ty : Ty)
 
 -- Theorem: Impl block method signature must match trait
 -- Rust test: test_impl_method_type_mismatch
-axiom impl_signature_match (env : TraitEnv) (impl : TraitImpl) (trait : TraitDef)
+theorem impl_signature_match (env : TraitEnv) (impl : TraitImpl) (trait : TraitDef)
     (methodName : String) (traitMethod : TraitMethod) (implTy : Ty) :
   lookupTrait env impl.trait_name = some trait →
   lookupTraitMethod trait methodName = some traitMethod →
   (methodName, implTy) ∈ impl.method_impls →
   -- Method signature must match (this is enforced by type checker)
-  True
+  True := by
+  intros
+  trivial
 
 -- Theorem: Missing trait method detection
 -- Rust test: test_impl_missing_trait_method
-axiom missing_method_detected (env : TraitEnv) (trait : TraitDef) (impl : TraitImpl) :
+theorem missing_method_detected (env : TraitEnv) (trait : TraitDef) (impl : TraitImpl) :
   lookupTrait env impl.trait_name = some trait →
   impl.method_impls.length < trait.methods.length →
   -- Incomplete implementation (enforced by type checker)
-  True
+  True := by
+  intros
+  trivial
 
 -- Theorem: Generic impl instantiation
 -- Rust test: test_impl_generic_class, test_impl_generic_trait_for_generic_class
@@ -475,3 +493,49 @@ theorem self_type_unification (env : TraitEnv) (registry : ImplRegistry)
     True := by
   intros
   trivial
+
+--==============================================================================
+-- Lookup Function Properties (Provable)
+--==============================================================================
+
+/-- lookupTrait returns None for empty environment -/
+theorem lookupTrait_empty (name : String) :
+    lookupTrait [] name = none := rfl
+
+/-- lookupTraitMethod returns None for empty methods -/
+theorem lookupTraitMethod_empty (trait : TraitDef) (methodName : String) :
+    trait.methods = [] →
+    lookupTraitMethod trait methodName = none := by
+  intro h
+  unfold lookupTraitMethod
+  simp [h]
+
+/-- findImpl returns None for empty registry -/
+theorem findImpl_empty (traitName : String) (forType : Ty) :
+    findImpl [] traitName forType = none := rfl
+
+/-- implementsTrait is false for empty registry -/
+theorem implementsTrait_empty (ty : Ty) (traitName : String) :
+    implementsTrait [] ty traitName = false := rfl
+
+/-- resolveAssocType returns None for empty bindings -/
+theorem resolveAssocType_empty (impl : TraitImpl) (assocName : String) :
+    impl.assoc_type_bindings = [] →
+    resolveAssocType impl assocName = none := by
+  intro h
+  unfold resolveAssocType
+  simp [h]
+
+/-- lookupBinding returns None for empty registry -/
+theorem lookupBinding_empty (traitName : String) :
+    lookupBinding [] traitName = none := rfl
+
+/-- Empty trait bounds are always satisfied -/
+theorem empty_bounds_satisfied (registry : ImplRegistry) :
+    checkTraitBounds registry [] = true := rfl
+
+/-- Single bound satisfaction reduces to implementsTrait -/
+theorem single_bound_satisfaction (registry : ImplRegistry) (ty : Ty) (traitName : String) :
+    checkTraitBounds registry [(ty, traitName)] = implementsTrait registry ty traitName := by
+  unfold checkTraitBounds
+  simp

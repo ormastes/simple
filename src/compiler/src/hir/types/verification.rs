@@ -83,6 +83,59 @@ pub struct VerificationContext {
     pub in_ghost: bool,
 }
 
+/// HIR representation of a Lean 4 block.
+///
+/// Lean blocks embed formal verification code directly in Simple sources.
+/// They are collected during HIR lowering and emitted during Lean code generation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirLeanBlock {
+    /// Optional import path for external Lean file
+    pub import_path: Option<String>,
+    /// Inline Lean 4 code
+    pub code: String,
+    /// Context where the lean block was defined (e.g., "module", "fn:factorial")
+    pub context: String,
+}
+
+impl HirLeanBlock {
+    /// Create a new lean block with inline code only.
+    pub fn inline(code: String, context: String) -> Self {
+        Self {
+            import_path: None,
+            code,
+            context,
+        }
+    }
+
+    /// Create a new lean block with import only.
+    pub fn import(path: String, context: String) -> Self {
+        Self {
+            import_path: Some(path),
+            code: String::new(),
+            context,
+        }
+    }
+
+    /// Create a new lean block with import and inline code.
+    pub fn import_with_code(path: String, code: String, context: String) -> Self {
+        Self {
+            import_path: Some(path),
+            code,
+            context,
+        }
+    }
+
+    /// Check if this block has an import path.
+    pub fn has_import(&self) -> bool {
+        self.import_path.is_some()
+    }
+
+    /// Check if this block has inline code.
+    pub fn has_code(&self) -> bool {
+        !self.code.is_empty()
+    }
+}
+
 impl VerificationContext {
     /// Create a new unverified context.
     pub fn unverified() -> Self {

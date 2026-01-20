@@ -72,6 +72,9 @@ impl Lowerer {
                     self.check_stmt_for_async_calls(s, caller_name, function_suspension)?;
                 }
             }
+            HirStmt::Assert { condition, .. } => {
+                self.check_expr_for_async_calls(condition, caller_name, function_suspension)?;
+            }
             HirStmt::Let { value: None, .. } | HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue => {}
         }
         Ok(())

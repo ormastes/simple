@@ -29,6 +29,8 @@ pub enum ContractKind {
     InvariantEntry,
     /// Invariant at function exit
     InvariantExit,
+    /// Inline assertion (assert/check statement)
+    Assertion,
 }
 
 /// Overflow behavior for unit bound checks

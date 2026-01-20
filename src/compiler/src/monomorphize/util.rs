@@ -327,7 +327,11 @@ pub fn concrete_to_ast_type(concrete: &ConcreteType) -> AstType {
             ret: Some(Box::new(concrete_to_ast_type(ret))),
         },
         ConcreteType::Optional(inner) => AstType::Optional(Box::new(concrete_to_ast_type(inner))),
-        ConcreteType::Pointer { kind, capability: _, inner } => {
+        ConcreteType::Pointer {
+            kind,
+            capability: _,
+            inner,
+        } => {
             // Note: capability is preserved in ConcreteType for monomorphization,
             // but AST Pointer doesn't have a capability field - it's derived from kind
             let ast_kind = match kind {

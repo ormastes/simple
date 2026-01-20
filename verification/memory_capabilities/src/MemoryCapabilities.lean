@@ -123,22 +123,64 @@ def wellFormed (env : RefEnv) : Prop :=
     (countRefsWithCapability refs RefCapability.Exclusive = 1 -> refs.length = 1) ∧
     (countRefsWithCapability refs RefCapability.Isolated = 1 -> refs.length = 1)
 
--- Property 1: Exclusive and Isolated references are unique (axiomatized)
+-- Property 1: Exclusive and Isolated references are unique
 -- This holds when environment is maintained through canCreateRef/addRef API
-axiom exclusive_is_unique (env : RefEnv) (loc : Nat) (h_wf : wellFormed env) :
-  countRefsWithCapability (getActiveRefs env loc) RefCapability.Exclusive <= 1
+theorem exclusive_is_unique (env : RefEnv) (loc : Nat) (h_wf : wellFormed env) :
+  countRefsWithCapability (getActiveRefs env loc) RefCapability.Exclusive <= 1 := by
+  unfold getActiveRefs
+  match h_find : env.activeRefs.find? (fun (l, _) => l == loc) with
+  | some (loc', refs) =>
+    simp only [h_find]
+    have h_mem := List.mem_of_find?_eq_some h_find
+    have h_wf_loc := h_wf loc' refs h_mem
+    exact h_wf_loc.1
+  | none =>
+    simp only [h_find]
+    simp [countRefsWithCapability]
 
-axiom isolated_is_unique (env : RefEnv) (loc : Nat) (h_wf : wellFormed env) :
-  countRefsWithCapability (getActiveRefs env loc) RefCapability.Isolated <= 1
+theorem isolated_is_unique (env : RefEnv) (loc : Nat) (h_wf : wellFormed env) :
+  countRefsWithCapability (getActiveRefs env loc) RefCapability.Isolated <= 1 := by
+  unfold getActiveRefs
+  match h_find : env.activeRefs.find? (fun (l, _) => l == loc) with
+  | some (loc', refs) =>
+    simp only [h_find]
+    have h_mem := List.mem_of_find?_eq_some h_find
+    have h_wf_loc := h_wf loc' refs h_mem
+    exact h_wf_loc.2.1
+  | none =>
+    simp only [h_find]
+    simp [countRefsWithCapability]
 
--- Property 2: Exclusive and Isolated prevent other references (axiomatized)
-axiom exclusive_prevents_aliasing (env : RefEnv) (loc : Nat) (h_wf : wellFormed env) :
+-- Property 2: Exclusive and Isolated prevent other references
+theorem exclusive_prevents_aliasing (env : RefEnv) (loc : Nat) (h_wf : wellFormed env) :
   countRefsWithCapability (getActiveRefs env loc) RefCapability.Exclusive = 1 ->
-  (getActiveRefs env loc).length = 1
+  (getActiveRefs env loc).length = 1 := by
+  intro h_count
+  unfold getActiveRefs at h_count ⊢
+  match h_find : env.activeRefs.find? (fun (l, _) => l == loc) with
+  | some (loc', refs) =>
+    simp only [h_find] at h_count ⊢
+    have h_mem := List.mem_of_find?_eq_some h_find
+    have h_wf_loc := h_wf loc' refs h_mem
+    exact h_wf_loc.2.2.1 h_count
+  | none =>
+    simp only [h_find] at h_count
+    simp [countRefsWithCapability] at h_count
 
-axiom isolated_prevents_aliasing (env : RefEnv) (loc : Nat) (h_wf : wellFormed env) :
+theorem isolated_prevents_aliasing (env : RefEnv) (loc : Nat) (h_wf : wellFormed env) :
   countRefsWithCapability (getActiveRefs env loc) RefCapability.Isolated = 1 ->
-  (getActiveRefs env loc).length = 1
+  (getActiveRefs env loc).length = 1 := by
+  intro h_count
+  unfold getActiveRefs at h_count ⊢
+  match h_find : env.activeRefs.find? (fun (l, _) => l == loc) with
+  | some (loc', refs) =>
+    simp only [h_find] at h_count ⊢
+    have h_mem := List.mem_of_find?_eq_some h_find
+    have h_wf_loc := h_wf loc' refs h_mem
+    exact h_wf_loc.2.2.2 h_count
+  | none =>
+    simp only [h_find] at h_count
+    simp [countRefsWithCapability] at h_count
 
 -- Property 3: Capability conversions are monotonic (lose privileges)
 -- isMoreRestrictive a b means 'a' has fewer permissions than 'b'
@@ -160,6 +202,56 @@ theorem empty_count_zero (cap : RefCapability) :
   countRefsWithCapability [] cap = 0 := by
   simp [countRefsWithCapability]
 
+-- Helper: count after adding a ref with same capability increases by 1
+theorem count_cons_same (refs : List Reference) (ref : Reference) (cap : RefCapability) :
+  ref.refType.capability = cap ->
+  countRefsWithCapability (ref :: refs) cap = countRefsWithCapability refs cap + 1 := by
+  intro h_cap
+  simp [countRefsWithCapability, h_cap]
+
+-- Helper: count after adding a ref with different capability stays same
+theorem count_cons_diff (refs : List Reference) (ref : Reference) (cap : RefCapability) :
+  ref.refType.capability ≠ cap ->
+  countRefsWithCapability (ref :: refs) cap = countRefsWithCapability refs cap := by
+  intro h_cap
+  simp [countRefsWithCapability]
+  have h : ¬(ref.refType.capability == cap) = true := by
+    simp only [beq_iff_eq]
+    exact h_cap
+  simp [h]
+
+-- Helper: membership in addRef activeRefs
+theorem addRef_mem_iff (env : RefEnv) (ref : Reference) (loc : Nat) (refs : List Reference) :
+  (loc, refs) ∈ (addRef env ref).activeRefs ↔
+  (loc = ref.location ∧ refs = ref :: getActiveRefs env ref.location) ∨
+  (loc ≠ ref.location ∧ (loc, refs) ∈ env.activeRefs) := by
+  unfold addRef getActiveRefs
+  simp only [List.mem_cons]
+  constructor
+  · intro h
+    cases h with
+    | inl h_head =>
+      left
+      cases h_head
+      constructor <;> rfl
+    | inr h_tail =>
+      right
+      simp only [List.mem_filter] at h_tail
+      obtain ⟨h_mem, h_ne⟩ := h_tail
+      constructor
+      · simp only [bne_iff_ne] at h_ne
+        exact h_ne
+      · exact h_mem
+  · intro h
+    cases h with
+    | inl h_eq =>
+      left
+      simp [h_eq.1, h_eq.2]
+    | inr h_ne =>
+      right
+      simp only [List.mem_filter, bne_iff_ne]
+      exact ⟨h_ne.2, h_ne.1⟩
+
 -- Property 4: Conversions preserve or reduce aliasing potential
 theorem conversion_preserves_safety (env : RefEnv) (loc : Nat) (src dest : RefCapability) :
   canConvert src dest = true ->
@@ -171,7 +263,59 @@ theorem conversion_preserves_safety (env : RefEnv) (loc : Nat) (src dest : RefCa
     | exact h_can_src
     | simp [h_can_src, countRefsWithCapability]
 
--- Creating a reference maintains well-formedness (axiomatized)
+-- Creating a reference maintains well-formedness
+-- The key insight: canCreateRef returns true only when adding ref
+-- would not violate the wellFormed invariants.
+
+-- Helper: single-element list has count 0 or 1 for any capability
+theorem single_elem_count_le_one (ref : Reference) (cap : RefCapability) :
+    countRefsWithCapability [ref] cap <= 1 := by
+  simp [countRefsWithCapability]
+  by_cases h : ref.refType.capability == cap
+  · simp [h]
+  · simp [h]
+
+-- Helper: single-element list has length 1
+theorem single_elem_length (ref : Reference) : [ref].length = 1 := rfl
+
+-- Helper: empty list has count 0
+theorem empty_list_count_zero (cap : RefCapability) :
+    countRefsWithCapability [] cap = 0 := rfl
+
+-- Helper: if existingRefs is empty, adding a ref gives a single-element list
+theorem cons_empty_gives_single (ref : Reference) :
+    (ref :: []).length = 1 := rfl
+
+-- Helper: if list.isEmpty = false returns false, list must be empty
+theorem isEmpty_false_means_empty {α : Type} (l : List α) :
+    (!l.isEmpty) = false → l = [] := by
+  cases l with
+  | nil => intro _; rfl
+  | cons h t => simp [List.isEmpty]
+
+-- Helper: capability not equal
+theorem shared_ne_exclusive : RefCapability.Shared ≠ RefCapability.Exclusive := by decide
+theorem shared_ne_isolated : RefCapability.Shared ≠ RefCapability.Isolated := by decide
+theorem exclusive_ne_shared : RefCapability.Exclusive ≠ RefCapability.Shared := by decide
+theorem exclusive_ne_isolated : RefCapability.Exclusive ≠ RefCapability.Isolated := by decide
+theorem isolated_ne_shared : RefCapability.Isolated ≠ RefCapability.Shared := by decide
+theorem isolated_ne_exclusive : RefCapability.Isolated ≠ RefCapability.Exclusive := by decide
+
+-- Main theorem: Creating a reference maintains well-formedness
+-- Axiomatized for now: The proof requires complex reasoning about list membership
+-- and capability counting that is tedious but straightforward.
+-- The key invariant is that canCreateRef returns true only when the resulting
+-- environment would be well-formed.
+--
+-- Proof strategy:
+-- Case 1: loc = ref.location
+--   - Shared: canCreateRef true means no Exclusive/Isolated exist in existing refs
+--     Adding Shared ref keeps counts for Exclusive/Isolated at 0
+--   - Exclusive: canCreateRef true means existing refs is empty
+--     After adding: refs = [ref], count Exclusive = 1, length = 1
+--   - Isolated: same as Exclusive
+-- Case 2: loc ≠ ref.location
+--   - Original wellFormed hypothesis applies directly
 axiom create_ref_preserves_wellformed (env : RefEnv) (ref : Reference) :
   wellFormed env ->
   canCreateRef env ref.location ref.refType.capability = true ->
