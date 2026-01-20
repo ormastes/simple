@@ -42,9 +42,17 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_decision_probe, rt_dict_clear, rt_dict_keys, rt_dict_values, rt_env_all, rt_env_cwd, rt_env_exists,
             rt_env_get, rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_eprint_str,
             rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_exit, rt_function_not_found, rt_get_env,
-            rt_interp_call, rt_interp_eval, rt_method_not_found, rt_path_probe, rt_platform_name, rt_print_str,
-            rt_print_value, rt_println_str, rt_println_value, rt_process_execute, rt_process_run, rt_process_spawn,
-            rt_set_env, rt_value_eq,
+            rt_interp_call, rt_interp_eval, rt_is_debug_mode_enabled, rt_is_macro_trace_enabled,
+            rt_method_not_found, rt_path_probe, rt_platform_name, rt_print_str, rt_print_value, rt_println_str,
+            rt_println_value, rt_process_execute, rt_process_run, rt_process_spawn, rt_set_debug_mode,
+            rt_set_env, rt_set_macro_trace, rt_value_eq,
+        };
+        // File I/O operations
+        use simple_runtime::value::{
+            rt_file_exists, rt_file_stat, rt_file_canonicalize, rt_file_read_text, rt_file_write_text,
+            rt_file_copy, rt_file_remove, rt_file_rename, rt_dir_create, rt_dir_list, rt_dir_remove,
+            rt_file_find, rt_dir_glob, rt_file_open, rt_file_get_size, rt_file_close,
+            rt_path_basename, rt_path_dirname, rt_path_ext, rt_path_absolute, rt_path_separator,
         };
         use simple_runtime::*;
 
@@ -172,6 +180,37 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_decision_probe,
             rt_condition_probe,
             rt_path_probe,
+            // Runtime configuration
+            rt_set_macro_trace,
+            rt_is_macro_trace_enabled,
+            rt_set_debug_mode,
+            rt_is_debug_mode_enabled,
+            // File I/O operations - metadata
+            rt_file_exists,
+            rt_file_stat,
+            // File I/O operations - file ops
+            rt_file_canonicalize,
+            rt_file_read_text,
+            rt_file_write_text,
+            rt_file_copy,
+            rt_file_remove,
+            rt_file_rename,
+            // File I/O operations - directory
+            rt_dir_create,
+            rt_dir_list,
+            rt_dir_remove,
+            rt_file_find,
+            rt_dir_glob,
+            // File I/O operations - descriptor
+            rt_file_open,
+            rt_file_get_size,
+            rt_file_close,
+            // File I/O operations - path
+            rt_path_basename,
+            rt_path_dirname,
+            rt_path_ext,
+            rt_path_absolute,
+            rt_path_separator,
         )
     }
 

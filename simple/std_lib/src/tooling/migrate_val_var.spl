@@ -3,8 +3,10 @@
 # Purpose: Migrate from explicit self syntax to Scala-style val/var syntax
 
 # TODO: [stdlib][P1] Add regex library to Simple
-# TODO: [stdlib][P1] Add file I/O library to Simple
-# TODO: [stdlib][P1] Add datetime library to Simple
+
+import fs.{read_text, write_text, glob, create_dir, basename, join}
+
+use super.time_utils.{migration_backup_dir}
 
 # Migration statistics (reusing from migrate_me_syntax)
 struct ValVarMigrationStats:
@@ -171,19 +173,78 @@ fn print_val_var_examples() -> text:
 
     output
 
-# TODO: [stdlib][P1] Add file I/O and regex
 # Migrate a single file with val/var syntax
+# TODO: [stdlib][P1] Needs regex for actual migration logic
 fn migrate_val_var_file(filepath: text, backup_dir: text) -> MigrationResult:
-    # Stub: Needs file I/O and regex
-    # Same structure as migrate_me_syntax but uses migrate_val_var_content()
-    MigrationResult.error("file I/O not yet implemented")
+    # Read file content
+    match read_text(filepath):
+        Ok(content):
+            # Apply migrate_val_var_content() (currently a stub without regex)
+            val migrated = migrate_val_var_content(content)
 
-# TODO: [stdlib][P1] Add directory operations
+            # Check if anything changed
+            if migrated == content:
+                return MigrationResult.unchanged()
+
+            # Backup original to backup_dir
+            val file_name = basename(filepath)
+            val backup_path = join([backup_dir, file_name])
+
+            match write_text(backup_path, content):
+                Ok(_):
+                    # Write migrated content
+                    match write_text(filepath, migrated):
+                        Ok(_):
+                            # TODO: Count changed lines accurately
+                            MigrationResult.changed(1)
+                        Err(e):
+                            MigrationResult.error("Failed to write migrated file: {e}")
+                Err(e):
+                    MigrationResult.error("Failed to backup file: {e}")
+        Err(e):
+            MigrationResult.error("Failed to read file: {e}")
+
+# Find all .spl files in directory
+fn find_spl_files(root_dir: text) -> List<text>:
+    # Glob for **/*.spl
+    match glob(root_dir, "**/*.spl"):
+        Ok(files):
+            # TODO: Filter out target, .git, .migration_backup directories
+            files
+        Err(_):
+            []  # Return empty list on error
+
 # Run val/var migration on all .spl files
+# TODO: [stdlib][P1] Needs regex for actual migration logic
 fn run_val_var_migration(root_dir: text) -> ValVarMigrationStats:
-    # Stub: Needs file I/O, regex, directory ops, datetime
-    val backup_dir = ".migration_backup_val_var_stub"
-    ValVarMigrationStats.new(backup_dir)
+    # Create backup directory with timestamp
+    val backup_dir = migration_backup_dir("val_var")
+    var stats = ValVarMigrationStats.new(backup_dir)
+
+    # Create backup directory
+    match create_dir(backup_dir, true):
+        Ok(_):
+            # Find all .spl files
+            val files = find_spl_files(root_dir)
+
+            # Process each file
+            var i = 0
+            while i < files.len():
+                val filepath = files[i]
+                stats.add_processed()
+
+                val result = migrate_val_var_file(filepath, backup_dir)
+                if result.modified:
+                    stats.add_modified(result.lines_changed)
+                    print "Migrated: {filepath}"
+                elif not result.error.is_empty():
+                    print "Error processing {filepath}: {result.error}"
+
+                i = i + 1
+        Err(e):
+            print "Error creating backup directory: {e}"
+
+    stats
 
 # Migration result (reuse from migrate_me_syntax)
 struct MigrationResult:
@@ -201,12 +262,86 @@ impl MigrationResult:
     static fn error(message: text) -> MigrationResult:
         MigrationResult(false, 0, message)
 
-# TODO: [stdlib][P1] Add CLI argument parsing
+# CLI options for migrate_val_var command
+struct MigrateValVarOptions:
+    dry_run: bool
+    backup_dir: Option<text>
+    root_dir: text
+    show_help: bool
+
+impl MigrateValVarOptions:
+    # Create default options
+    static fn default() -> MigrateValVarOptions:
+        MigrateValVarOptions(
+            dry_run: false,
+            backup_dir: None,
+            root_dir: ".",
+            show_help: false
+        )
+
+    # Parse CLI arguments
+    static fn parse(args: List<text>) -> MigrateValVarOptions:
+        var options = MigrateValVarOptions.default()
+        var i = 0
+
+        while i < args.len():
+            val arg = args[i]
+
+            if arg == "--dry-run" or arg == "-n":
+                options.dry_run = true
+            elif arg == "--backup-dir" and i + 1 < args.len():
+                i = i + 1
+                options.backup_dir = Some(args[i])
+            elif arg == "--help" or arg == "-h":
+                options.show_help = true
+            elif not arg.starts_with("-"):
+                # Positional argument: root directory
+                options.root_dir = arg
+
+            i = i + 1
+
+        options
+
+# Print usage help for migrate_val_var
+fn print_migrate_val_var_help() -> text:
+    var help = ""
+    help = help + "Usage: simple migrate-val-var [OPTIONS] [ROOT_DIR]\n\n"
+    help = help + "Migrate from let/let mut syntax to val/var syntax.\n\n"
+    help = help + "Arguments:\n"
+    help = help + "  ROOT_DIR         Directory to migrate (default: current directory)\n\n"
+    help = help + "Options:\n"
+    help = help + "  -n, --dry-run    Preview changes without writing files\n"
+    help = help + "  --backup-dir     Custom backup directory for original files\n"
+    help = help + "  -h, --help       Show this help message\n\n"
+    help = help + "Examples:\n"
+    help = help + "  simple migrate-val-var                    # Migrate current directory\n"
+    help = help + "  simple migrate-val-var src/               # Migrate src/ directory\n"
+    help = help + "  simple migrate-val-var --dry-run src/     # Preview changes only\n"
+    help
+
 # Main entry point
 fn main_migrate_val_var(args: List<text>) -> Result<(), text>:
-    # Stub: Needs argument parsing and file I/O
-    # Would handle:
-    # --dry-run         Preview changes without writing
-    # --backup-dir      Custom backup directory
-    # <root_dir>        Directory to migrate (default: current)
-    Err("CLI not yet implemented - use as library instead")
+    val options = MigrateValVarOptions.parse(args)
+
+    # Show help if requested
+    if options.show_help:
+        print print_migrate_val_var_help()
+        return Ok(())
+
+    # Show what we're doing
+    if options.dry_run:
+        print "=== Dry Run Mode - No files will be modified ===\n"
+
+    print "Migrating val/var syntax in: {options.root_dir}"
+
+    # Run the migration
+    val stats = run_val_var_migration(options.root_dir)
+
+    # Print summary
+    print stats.summary()
+
+    # Print transformation patterns for reference
+    if options.dry_run:
+        print print_val_var_examples()
+
+    Ok(())

@@ -2,8 +2,7 @@
 # Migrated from: scripts/extract_tests_from_spec.py
 # Purpose: Convert markdown specs to executable _spec.spl test files
 
-# TODO: [stdlib][P1] Add regex library to Simple
-# TODO: [stdlib][P1] Add file I/O library to Simple
+import core.regex
 
 # Metadata extracted from markdown file
 struct SpecMetadata:
@@ -66,25 +65,116 @@ impl ExtractionResult:
             error_message: message
         )
 
-# TODO: [stdlib][P1] Add regex support
 # Extract metadata from markdown content
 fn extract_metadata(md_content: text) -> SpecMetadata:
-    # Stub: Needs regex for pattern matching
-    # Would search for:
-    # - **Status:** (.+)
-    # - **Feature IDs:** (.+)
-    # - ^# (.+) for title
-    SpecMetadata.new()
+    var title = ""
+    var status = "Reference"
+    var feature_ids = ""
 
-# TODO: [stdlib][P1] Add regex support
+    # Extract title from first level-1 heading
+    val title_pattern = regex.compile("^# (.+)$")
+    val title_matches = title_pattern.findall(md_content)
+    if title_matches.len() > 0:
+        val first_match = title_matches[0]
+        title = first_match.matched_text()
+        # Remove the '# ' prefix
+        title = title.substring(2, title.len())
+
+    # Extract status from **Status:** line
+    val status_pattern = regex.compile("\\*\\*Status:\\*\\* (.+)")
+    val status_match = status_pattern.search(md_content)
+    if status_match!= nil:
+        val m = status_match.unwrap()
+        # Extract the captured group (after the colon and space)
+        if m.group_count() > 0:
+            val group_opt = m.group(0)
+            if group_opt!= nil:
+                status = group_opt.unwrap()
+
+    # Extract feature IDs from **Feature IDs:** line
+    val fids_pattern = regex.compile("\\*\\*Feature IDs:\\*\\* (.+)")
+    val fids_match = fids_pattern.search(md_content)
+    if fids_match!= nil:
+        val m = fids_match.unwrap()
+        if m.group_count() > 0:
+            val group_opt = m.group(0)
+            if group_opt!= nil:
+                feature_ids = group_opt.unwrap()
+
+    SpecMetadata.with_values(title, status, feature_ids)
+
 # Extract code examples from markdown
 fn extract_code_examples(md_content: text) -> List<CodeExample>:
-    # Stub: Needs regex to find:
-    # - ## sections
-    # - ```simple code blocks
-    # - Context paragraphs
-    # Returns list of (section, context, code, line_number)
-    []
+    # Initialize with a dummy example to establish type
+    val dummy = CodeExample.new("", "", "", 0)
+    var examples = [dummy]
+    examples = []
+
+    # Split content into lines for line tracking
+    val lines = md_content.split("\n")
+
+    var current_section = "General"
+    var line_num: u64 = 0
+    var in_code_block = false
+    var current_code = ""
+    var current_context = ""
+    var code_start_line: u64 = 0
+
+    # Patterns
+    val section_pattern = regex.compile("^## (.+)$")
+    val code_fence_pattern = regex.compile("^```simple")
+    val code_end_pattern = regex.compile("^```$")
+
+    for line in lines:
+        line_num = line_num + 1
+
+        # Check for section headers
+        val section_match = section_pattern.search(line)
+        if section_match != nil:
+            val m = section_match.unwrap()
+            val section_text = m.matched_text()
+            # Remove '## ' prefix
+            current_section = section_text.substring(3, section_text.len())
+            current_context = ""
+            continue
+
+        # Check for code block start
+        if not in_code_block:
+            val fence_match = code_fence_pattern.search(line)
+            if fence_match != nil:
+                in_code_block = true
+                current_code = ""
+                code_start_line = line_num + 1
+                continue
+            else:
+                # Accumulate context (non-empty lines that aren't headers or fences)
+                if not line.trim().is_empty() and not line.starts_with("#"):
+                    if not current_context.is_empty():
+                        current_context = current_context + " "
+                    current_context = current_context + line.trim()
+        else:
+            # We're in a code block - check for end
+            val end_match = code_end_pattern.search(line)
+            if end_match != nil:
+                # End of code block - create example
+                in_code_block = false
+                if not current_code.trim().is_empty():
+                    val example = CodeExample.new(
+                        current_section,
+                        current_context,
+                        current_code.trim(),
+                        code_start_line
+                    )
+                    examples.append(example)
+                current_code = ""
+                current_context = ""
+            else:
+                # Accumulate code
+                if not current_code.is_empty():
+                    current_code = current_code + "\n"
+                current_code = current_code + line
+
+    examples
 
 # Generate _spec.spl file content from examples
 fn generate_spec_spl(
@@ -215,7 +305,6 @@ fn indent_code(code: text, spaces: u64) -> text:
 
     result
 
-# TODO: [stdlib][P1] Add file I/O
 # Extract tests from markdown file to _spec.spl file
 fn extract_tests(
     input_md: text,
@@ -230,7 +319,6 @@ fn extract_tests(
     # 4. Write to output file (unless dry_run)
     ExtractionResult.error("file I/O not yet implemented")
 
-# TODO: [stdlib][P1] Add file I/O
 # Extract tests from all Category B files
 fn extract_all_category_b(
     base_dir: text,
@@ -293,13 +381,135 @@ impl ExtractionStats:
         report = report + "  Total Examples: {self.total_examples}\n"
         report
 
-# TODO: [stdlib][P1] Add CLI argument parsing
+# CLI options for extract_tests command
+struct ExtractTestsOptions:
+    all_files: bool
+    dry_run: bool
+    verbose: bool
+    input_md: Option<text>
+    output_spl: Option<text>
+    output_dir: Option<text>
+    show_help: bool
+
+impl ExtractTestsOptions:
+    # Create default options
+    static fn default() -> ExtractTestsOptions:
+        ExtractTestsOptions(
+            all_files: false,
+            dry_run: false,
+            verbose: false,
+            input_md: None,
+            output_spl: None,
+            output_dir: None,
+            show_help: false
+        )
+
+    # Parse CLI arguments
+    static fn parse(args: List<text>) -> ExtractTestsOptions:
+        var options = ExtractTestsOptions.default()
+        var positional_count = 0
+        var i = 0
+
+        while i < args.len():
+            val arg = args[i]
+
+            if arg == "--all" or arg == "-a":
+                options.all_files = true
+            elif arg == "--dry-run" or arg == "-n":
+                options.dry_run = true
+            elif arg == "--verbose" or arg == "-v":
+                options.verbose = true
+            elif arg == "--output" and i + 1 < args.len():
+                i = i + 1
+                options.output_dir = Some(args[i])
+            elif arg == "--help" or arg == "-h":
+                options.show_help = true
+            elif not arg.starts_with("-"):
+                # Positional arguments: input_md and output_spl
+                if positional_count == 0:
+                    options.input_md = Some(arg)
+                elif positional_count == 1:
+                    options.output_spl = Some(arg)
+                positional_count = positional_count + 1
+
+            i = i + 1
+
+        options
+
+# Print usage help for extract_tests
+fn print_extract_tests_help() -> text:
+    var help = ""
+    help = help + "Usage: simple extract-tests [OPTIONS] [INPUT_MD] [OUTPUT_SPL]\n\n"
+    help = help + "Extract testable code examples from markdown specs into _spec.spl files.\n\n"
+    help = help + "Arguments:\n"
+    help = help + "  INPUT_MD         Input markdown specification file\n"
+    help = help + "  OUTPUT_SPL       Output _spec.spl test file\n\n"
+    help = help + "Options:\n"
+    help = help + "  -a, --all        Extract from all Category B files\n"
+    help = help + "  -n, --dry-run    Preview extraction without writing files\n"
+    help = help + "  -v, --verbose    Show detailed extraction information\n"
+    help = help + "  --output DIR     Output directory for extracted tests\n"
+    help = help + "  -h, --help       Show this help message\n\n"
+    help = help + "Examples:\n"
+    help = help + "  simple extract-tests doc/spec/functions.md tests/specs/functions_spec.spl\n"
+    help = help + "  simple extract-tests --all                  # Extract all Category B files\n"
+    help = help + "  simple extract-tests --all --dry-run        # Preview all extractions\n"
+    help
+
 # Main entry point
 fn main_extract_tests(args: List<text>) -> Result<(), text>:
-    # Stub: Needs argument parsing and file I/O
-    # Would handle:
-    # --all                   Extract from all Category B files
-    # --dry-run               Preview without writing
-    # --verbose               Show detailed info
-    # input_md output_spl     Single file extraction
-    Err("CLI not yet implemented - use as library instead")
+    val options = ExtractTestsOptions.parse(args)
+
+    # Show help if requested
+    if options.show_help:
+        print print_extract_tests_help()
+        return Ok(())
+
+    # Determine mode: all files or single file
+    if options.all_files:
+        # Extract from all Category B files
+        print "Extracting tests from all Category B files..."
+        if options.dry_run:
+            print "=== Dry Run Mode - No files will be written ===\n"
+
+        val base_dir = "doc/spec"
+        val output_dir = match options.output_dir:
+            Some(dir): dir
+            None: "tests/specs"
+
+        val (success_count, total_count) = extract_all_category_b(base_dir, output_dir, options.dry_run)
+
+        print "\n=== Extraction Complete ==="
+        print "Files processed: {total_count}"
+        print "Successfully extracted: {success_count}"
+
+        if options.verbose:
+            print "\nCategory B files:"
+            val files = get_category_b_files()
+            var j = 0
+            while j < files.len():
+                val (md, spl) = files[j]
+                print "  {md} -> {spl}"
+                j = j + 1
+
+        Ok(())
+    else:
+        # Single file extraction
+        match (options.input_md, options.output_spl):
+            (Some(input), Some(output)):
+                print "Extracting tests from: {input}"
+                print "Output file: {output}"
+
+                if options.dry_run:
+                    print "=== Dry Run Mode - No files will be written ===\n"
+
+                val result = extract_tests(input, output, options.dry_run)
+                if result.success:
+                    print "\n=== Extraction Complete ==="
+                    print "Examples extracted: {result.examples_count}"
+                    print "Output: {result.output_path}"
+                    Ok(())
+                else:
+                    Err(result.error_message)
+            _:
+                Err("Missing required arguments. Use --all or provide INPUT_MD OUTPUT_SPL.\nRun with --help for usage information.")

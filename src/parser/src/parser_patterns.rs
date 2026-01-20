@@ -39,11 +39,13 @@ impl<'a> Parser<'a> {
                 Ok(Pattern::MutIdentifier(name))
             }
             // Allow certain keywords as identifier patterns
-            TokenKind::New | TokenKind::Old | TokenKind::Type => {
+            // These are keywords that are commonly used as variable names
+            TokenKind::New | TokenKind::Old | TokenKind::Type | TokenKind::Examples => {
                 let name = match &self.current.kind {
                     TokenKind::New => "new".to_string(),
                     TokenKind::Old => "old".to_string(),
                     TokenKind::Type => "type".to_string(),
+                    TokenKind::Examples => "examples".to_string(),
                     _ => unreachable!(),
                 };
                 self.advance();
