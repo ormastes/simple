@@ -6,6 +6,7 @@ import core.result
 import core.option
 import net::{NetError, error_from_code}
 import units.net::ShutdownMode
+import units.size::ByteCount
 
 # External TCP functions
 extern fn monoio_tcp_listen(addr: text) -> i64
@@ -127,13 +128,15 @@ pub struct TcpStream:
     # Returns number of bytes read (0 means EOF)
     #
     # Example:
-    #   var buffer = Bytes::with_capacity(1024)
-    #   val n = await stream.read(&mut buffer, 1024)?
-    pub async fn read(self, buffer: &mut any, max_len: i64) -> Result<i64, NetError>:
-        val n = monoio_tcp_read(self.handle, buffer, max_len)
+    #   var buffer = Bytes::with_capacity(1024_bytes)
+    #   val n = await stream.read(&mut buffer, 1024_bytes)?
+    pub async fn read(self, buffer: &mut any, max_len: ByteCount) -> Result<ByteCount, NetError>:
+        val max_len_i64 = max_len.value() as i64
+        val n = monoio_tcp_read(self.handle, buffer, max_len_i64)
         if n < 0:
             return Err(error_from_code(n))
-        return Ok(n)
+        val bytes_read = ByteCount::from_i64(n)
+        return Ok(bytes_read)
 
     # Write data from a buffer to the stream
     # Feature #1748: Zero-copy TCP write
@@ -143,11 +146,12 @@ pub struct TcpStream:
     # Example:
     #   val data = "Hello, world!".as_bytes()
     #   val n = await stream.write(data)?
-    pub async fn write(self, buffer: any) -> Result<i64, NetError>:
+    pub async fn write(self, buffer: any) -> Result<ByteCount, NetError>:
         val n = monoio_tcp_write(self.handle, buffer)
         if n < 0:
             return Err(error_from_code(n))
-        return Ok(n)
+        val bytes_written = ByteCount::from_i64(n)
+        return Ok(bytes_written)
 
     # Flush pending writes to the stream
     pub async fn flush(self) -> Result<(), NetError>:
@@ -164,24 +168,28 @@ pub struct TcpStream:
 
         while written < total_len:
             val n = await self.write(buffer[written:])?
-            if n == 0:
+            val n_val = n.value() as i32
+            if n_val == 0:
                 return Err(NetError::WriteZero)
-            written = written + n
+            written = written + n_val
 
         await self.flush()?
         return Ok(())
 
     # Read exact amount of data (convenience method)
     # Keeps reading until buffer is full
-    pub async fn read_exact(self, buffer: &mut any, len: i64) -> Result<(), NetError>:
+    pub async fn read_exact(self, buffer: &mut any, len: ByteCount) -> Result<(), NetError>:
         var total_read = 0
+        val len_val = len.value() as i64
 
-        while total_read < len:
-            val remaining = len - total_read
-            val n = await self.read(buffer[total_read:], remaining)?
-            if n == 0:
+        while total_read < len_val:
+            val remaining = len_val - total_read
+            val remaining_bytes = ByteCount::from_i64(remaining)
+            val n = await self.read(buffer[total_read:], remaining_bytes)?
+            val n_val = n.value() as i64
+            if n_val == 0:
                 return Err(NetError::ConnectionReset)
-            total_read = total_read + n
+            total_read = total_read + n_val
 
         return Ok(())
 

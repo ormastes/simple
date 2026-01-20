@@ -156,25 +156,7 @@ impl Lowerer {
                         // SIMD type static methods: f32x4.load(), f32x4.gather()
                         match method.as_str() {
                             "load" | "gather" | "load_masked" => {
-                                let simd_ty = match recv_name.as_str() {
-                                    "f32x4" => self.module.types.register(HirType::Simd {
-                                        lanes: 4,
-                                        element: TypeId::F32,
-                                    }),
-                                    "f64x4" => self.module.types.register(HirType::Simd {
-                                        lanes: 4,
-                                        element: TypeId::F64,
-                                    }),
-                                    "i32x4" => self.module.types.register(HirType::Simd {
-                                        lanes: 4,
-                                        element: TypeId::I32,
-                                    }),
-                                    "i64x4" => self.module.types.register(HirType::Simd {
-                                        lanes: 4,
-                                        element: TypeId::I64,
-                                    }),
-                                    _ => unreachable!(),
-                                };
+                                let simd_ty = self.register_simd_type(&recv_name);
                                 return Ok(simd_ty);
                             }
                             _ => {}

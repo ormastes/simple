@@ -11,6 +11,28 @@ use super::super::{
     ImplMethods,
 };
 
+/// Compute slice indices from start, end, length, and inclusive flag.
+/// Handles negative indices (counted from end) and bounds clamping.
+fn compute_slice_indices(start: i64, end: Option<i64>, len: i64, inclusive: bool) -> (usize, usize) {
+    let start_idx = if start < 0 {
+        (len + start).max(0) as usize
+    } else {
+        start as usize
+    };
+    let end_idx = match end {
+        Some(e) => {
+            let e = if e < 0 { (len + e).max(0) as i64 } else { e };
+            if inclusive {
+                (e + 1).min(len) as usize
+            } else {
+                e.min(len) as usize
+            }
+        }
+        None => len as usize,
+    };
+    (start_idx, end_idx)
+}
+
 pub(super) fn eval_collection_expr(
     expr: &Expr,
     env: &mut Env,
@@ -223,22 +245,7 @@ pub(super) fn eval_collection_expr(
                     return Ok(Some(match recv_val {
                         Value::Array(arr) => {
                             let len = arr.len() as i64;
-                            let start_idx = if start < 0 {
-                                (len + start).max(0) as usize
-                            } else {
-                                start as usize
-                            };
-                            let end_idx = match end {
-                                Some(e) => {
-                                    let e = if e < 0 { (len + e).max(0) as i64 } else { e };
-                                    if inclusive {
-                                        (e + 1).min(len) as usize
-                                    } else {
-                                        e.min(len) as usize
-                                    }
-                                }
-                                None => len as usize,
-                            };
+                            let (start_idx, end_idx) = compute_slice_indices(start, end, len, inclusive);
                             let sliced: Vec<Value> = arr
                                 .get(start_idx..end_idx.min(arr.len()))
                                 .map(|s| s.to_vec())
@@ -248,22 +255,7 @@ pub(super) fn eval_collection_expr(
                         Value::Str(s) => {
                             let chars: Vec<char> = s.chars().collect();
                             let len = chars.len() as i64;
-                            let start_idx = if start < 0 {
-                                (len + start).max(0) as usize
-                            } else {
-                                start as usize
-                            };
-                            let end_idx = match end {
-                                Some(e) => {
-                                    let e = if e < 0 { (len + e).max(0) as i64 } else { e };
-                                    if inclusive {
-                                        (e + 1).min(len) as usize
-                                    } else {
-                                        e.min(len) as usize
-                                    }
-                                }
-                                None => len as usize,
-                            };
+                            let (start_idx, end_idx) = compute_slice_indices(start, end, len, inclusive);
                             let sliced: String = chars
                                 .get(start_idx..end_idx.min(chars.len()))
                                 .map(|s| s.iter().collect())

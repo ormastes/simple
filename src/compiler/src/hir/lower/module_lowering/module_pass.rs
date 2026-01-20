@@ -59,6 +59,60 @@ impl Lowerer {
         Ok(())
     }
 
+    /// Lower AOP constructs (advice, DI bindings, architecture rules, mocks) from AST to HIR.
+    ///
+    /// This pass processes:
+    /// - AOP advice (before/after/around interceptors) #1000-1050
+    /// - Dependency injection bindings
+    /// - Architecture rules (forbid/allow patterns)
+    /// - Mock declarations for testing
+    fn lower_aop_constructs(&mut self, ast_module: &Module) -> LowerResult<()> {
+        for item in &ast_module.items {
+            match item {
+                Node::AopAdvice(advice) => {
+                    self.module.aop_advices.push(HirAopAdvice {
+                        predicate_text: self.predicate_to_string(&advice.pointcut),
+                        advice_function: advice.interceptor.clone(),
+                        form: advice.advice_type.as_str().to_string(),
+                        priority: advice.priority.unwrap_or(0),
+                    });
+                }
+                Node::DiBinding(binding) => {
+                    self.module.di_bindings.push(HirDiBinding {
+                        predicate_text: self.predicate_to_string(&binding.pointcut),
+                        implementation: binding.implementation.clone(),
+                        scope: binding.scope.map(|s| s.as_str().to_string()),
+                        priority: binding.priority.unwrap_or(0),
+                    });
+                }
+                Node::ArchitectureRule(rule) => {
+                    self.module.arch_rules.push(HirArchRule {
+                        rule_type: match rule.rule_type {
+                            ast::ArchRuleType::Forbid => "forbid".to_string(),
+                            ast::ArchRuleType::Allow => "allow".to_string(),
+                        },
+                        predicate_text: self.predicate_to_string(&rule.pointcut),
+                        message: rule.message.clone(),
+                        priority: 0,
+                    });
+                }
+                Node::MockDecl(mock) => {
+                    let mut expectations = Vec::new();
+                    for exp in &mock.expectations {
+                        expectations.push(self.lower_mock_expectation(exp)?);
+                    }
+                    self.module.mock_decls.push(HirMockDecl {
+                        name: mock.name.clone(),
+                        trait_name: mock.trait_name.clone(),
+                        expectations,
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
         self.module.name = ast_module.name.clone();
 
@@ -164,51 +218,7 @@ impl Lowerer {
         }
 
         // Third pass: lower AOP constructs (#1000-1050)
-        for item in &ast_module.items {
-            match item {
-                Node::AopAdvice(advice) => {
-                    self.module.aop_advices.push(HirAopAdvice {
-                        predicate_text: self.predicate_to_string(&advice.pointcut),
-                        advice_function: advice.interceptor.clone(),
-                        form: advice.advice_type.as_str().to_string(),
-                        priority: advice.priority.unwrap_or(0),
-                    });
-                }
-                Node::DiBinding(binding) => {
-                    self.module.di_bindings.push(HirDiBinding {
-                        predicate_text: self.predicate_to_string(&binding.pointcut),
-                        implementation: binding.implementation.clone(),
-                        scope: binding.scope.map(|s| s.as_str().to_string()),
-                        priority: binding.priority.unwrap_or(0),
-                    });
-                }
-                Node::ArchitectureRule(rule) => {
-                    self.module.arch_rules.push(HirArchRule {
-                        rule_type: match rule.rule_type {
-                            ast::ArchRuleType::Forbid => "forbid".to_string(),
-                            ast::ArchRuleType::Allow => "allow".to_string(),
-                        },
-                        predicate_text: self.predicate_to_string(&rule.pointcut),
-                        message: rule.message.clone(),
-                        priority: 0, // Architecture rules don't have priority in AST
-                    });
-                }
-                Node::MockDecl(mock) => {
-                    // Convert MockExpectation to structured HIR representation
-                    let mut expectations = Vec::new();
-                    for exp in &mock.expectations {
-                        expectations.push(self.lower_mock_expectation(exp)?);
-                    }
-
-                    self.module.mock_decls.push(HirMockDecl {
-                        name: mock.name.clone(),
-                        trait_name: mock.trait_name.clone(),
-                        expectations,
-                    });
-                }
-                _ => {}
-            }
-        }
+        self.lower_aop_constructs(ast_module)?;
 
         // Fourth pass: lower import statements for dependency tracking AND load types
         for item in &ast_module.items {
@@ -295,49 +305,7 @@ impl Lowerer {
         }
 
         // Third pass: lower AOP constructs
-        for item in &ast_module.items {
-            match item {
-                Node::AopAdvice(advice) => {
-                    self.module.aop_advices.push(HirAopAdvice {
-                        predicate_text: self.predicate_to_string(&advice.pointcut),
-                        advice_function: advice.interceptor.clone(),
-                        form: advice.advice_type.as_str().to_string(),
-                        priority: advice.priority.unwrap_or(0),
-                    });
-                }
-                Node::DiBinding(binding) => {
-                    self.module.di_bindings.push(HirDiBinding {
-                        predicate_text: self.predicate_to_string(&binding.pointcut),
-                        implementation: binding.implementation.clone(),
-                        scope: binding.scope.map(|s| s.as_str().to_string()),
-                        priority: binding.priority.unwrap_or(0),
-                    });
-                }
-                Node::ArchitectureRule(rule) => {
-                    self.module.arch_rules.push(HirArchRule {
-                        rule_type: match rule.rule_type {
-                            ast::ArchRuleType::Forbid => "forbid".to_string(),
-                            ast::ArchRuleType::Allow => "allow".to_string(),
-                        },
-                        predicate_text: self.predicate_to_string(&rule.pointcut),
-                        message: rule.message.clone(),
-                        priority: 0,
-                    });
-                }
-                Node::MockDecl(mock) => {
-                    let mut expectations = Vec::new();
-                    for exp in &mock.expectations {
-                        expectations.push(self.lower_mock_expectation(exp)?);
-                    }
-                    self.module.mock_decls.push(HirMockDecl {
-                        name: mock.name.clone(),
-                        trait_name: mock.trait_name.clone(),
-                        expectations,
-                    });
-                }
-                _ => {}
-            }
-        }
+        self.lower_aop_constructs(ast_module)?;
 
         // Fourth pass: lower imports
         for item in &ast_module.items {

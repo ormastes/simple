@@ -13,6 +13,29 @@ use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 
 impl Lowerer {
+    /// Register a SIMD type from its string name (f32x4, i32x4, etc.)
+    pub(super) fn register_simd_type(&mut self, type_name: &str) -> TypeId {
+        match type_name {
+            "f32x4" => self.module.types.register(HirType::Simd {
+                lanes: 4,
+                element: TypeId::F32,
+            }),
+            "f64x4" => self.module.types.register(HirType::Simd {
+                lanes: 4,
+                element: TypeId::F64,
+            }),
+            "i32x4" => self.module.types.register(HirType::Simd {
+                lanes: 4,
+                element: TypeId::I32,
+            }),
+            "i64x4" => self.module.types.register(HirType::Simd {
+                lanes: 4,
+                element: TypeId::I64,
+            }),
+            _ => unreachable!(),
+        }
+    }
+
     pub(super) fn lower_gpu_method(
         &mut self,
         method: &str,
@@ -139,25 +162,7 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
-        let simd_ty = match type_name {
-            "f32x4" => self.module.types.register(HirType::Simd {
-                lanes: 4,
-                element: TypeId::F32,
-            }),
-            "f64x4" => self.module.types.register(HirType::Simd {
-                lanes: 4,
-                element: TypeId::F64,
-            }),
-            "i32x4" => self.module.types.register(HirType::Simd {
-                lanes: 4,
-                element: TypeId::I32,
-            }),
-            "i64x4" => self.module.types.register(HirType::Simd {
-                lanes: 4,
-                element: TypeId::I64,
-            }),
-            _ => unreachable!(),
-        };
+        let simd_ty = self.register_simd_type(type_name);
 
         match method {
             "load" => {

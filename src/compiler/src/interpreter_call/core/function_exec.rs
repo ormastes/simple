@@ -141,7 +141,16 @@ pub(crate) fn exec_function_with_values_and_self(
             self_mode,
         )?;
 
-        execute_function_body(func, bound, &mut local_env, functions, classes, enums, impl_methods, false)
+        execute_function_body(
+            func,
+            bound,
+            &mut local_env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            false,
+        )
     })
 }
 
@@ -170,7 +179,16 @@ pub(crate) fn exec_function_with_captured_env(
             self_mode,
         )?;
 
-        execute_function_body(func, bound_args, &mut local_env, functions, classes, enums, impl_methods, false)
+        execute_function_body(
+            func,
+            bound_args,
+            &mut local_env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            false,
+        )
     })
 }
 
@@ -241,7 +259,16 @@ fn exec_function_inner(
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
 
-    execute_function_body(func, bound, &mut local_env, functions, classes, enums, impl_methods, true)
+    execute_function_body(
+        func,
+        bound,
+        &mut local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        true,
+    )
 }
 
 fn exec_function_with_values_inner(
@@ -282,5 +309,14 @@ fn exec_function_with_values_inner(
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
 
-    execute_function_body(func, bound, &mut local_env, functions, classes, enums, impl_methods, true)
+    execute_function_body(
+        func,
+        bound,
+        &mut local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        true,
+    )
 }

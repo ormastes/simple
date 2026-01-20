@@ -5,6 +5,7 @@
 import core.result
 import core.option
 import net::{NetError, error_from_code}
+import units.size::ByteCount
 
 # External UDP functions
 extern fn monoio_udp_bind(addr: text) -> i64
@@ -52,11 +53,12 @@ pub struct UdpSocket:
     # Example:
     #   val data = "Hello, UDP!".as_bytes()
     #   val n = await socket.send_to(data, "127.0.0.1:8080")?
-    pub async fn send_to(self, buffer: any, addr: text) -> Result<i64, NetError>:
+    pub async fn send_to(self, buffer: any, addr: text) -> Result<ByteCount, NetError>:
         val n = monoio_udp_send_to(self.handle, buffer, addr)
         if n < 0:
             return Err(error_from_code(n))
-        return Ok(n)
+        val bytes_sent = ByteCount::from_i64(n)
+        return Ok(bytes_sent)
 
     # Receive data from any sender
     # Feature #1747: UDP receive operations
@@ -64,16 +66,18 @@ pub struct UdpSocket:
     # Returns (bytes_received, sender_address)
     #
     # Example:
-    #   var buffer = Bytes::with_capacity(1024)
-    #   val (n, peer) = await socket.recv_from(&mut buffer, 1024)?
-    pub async fn recv_from(self, buffer: &mut any, max_len: i64) -> Result<(i64, text), NetError>:
-        val result = monoio_udp_recv_from(self.handle, buffer, max_len)
+    #   var buffer = Bytes::with_capacity(1024_bytes)
+    #   val (n, peer) = await socket.recv_from(&mut buffer, 1024_bytes)?
+    pub async fn recv_from(self, buffer: &mut any, max_len: ByteCount) -> Result<(ByteCount, text), NetError>:
+        val max_len_i64 = max_len.value() as i64
+        val result = monoio_udp_recv_from(self.handle, buffer, max_len_i64)
 
         match result:
             case Some((n, addr)):
                 if n < 0:
                     return Err(error_from_code(n))
-                return Ok((n, addr))
+                val bytes_received = ByteCount::from_i64(n)
+                return Ok((bytes_received, addr))
             case None:
                 return Err(NetError::IoError("recv_from failed"))
 
@@ -98,29 +102,32 @@ pub struct UdpSocket:
     # Example:
     #   await socket.connect("127.0.0.1:8080")?
     #   val n = await socket.send(data)?
-    pub async fn send(self, buffer: any) -> Result<i64, NetError>:
+    pub async fn send(self, buffer: any) -> Result<ByteCount, NetError>:
         if not self.is_connected:
             return Err(NetError::NotConnected)
 
         val n = monoio_udp_send(self.handle, buffer)
         if n < 0:
             return Err(error_from_code(n))
-        return Ok(n)
+        val bytes_sent = ByteCount::from_i64(n)
+        return Ok(bytes_sent)
 
     # Receive data from connected peer
     # Socket must be connected first via connect()
     #
     # Example:
     #   await socket.connect("127.0.0.1:8080")?
-    #   val n = await socket.recv(&mut buffer, 1024)?
-    pub async fn recv(self, buffer: &mut any, max_len: i64) -> Result<i64, NetError>:
+    #   val n = await socket.recv(&mut buffer, 1024_bytes)?
+    pub async fn recv(self, buffer: &mut any, max_len: ByteCount) -> Result<ByteCount, NetError>:
         if not self.is_connected:
             return Err(NetError::NotConnected)
 
-        val n = monoio_udp_recv(self.handle, buffer, max_len)
+        val max_len_i64 = max_len.value() as i64
+        val n = monoio_udp_recv(self.handle, buffer, max_len_i64)
         if n < 0:
             return Err(error_from_code(n))
-        return Ok(n)
+        val bytes_received = ByteCount::from_i64(n)
+        return Ok(bytes_received)
 
     # Get local address the socket is bound to
     pub fn local_addr(self) -> Option<text>:
