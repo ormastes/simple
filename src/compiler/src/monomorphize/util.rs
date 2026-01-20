@@ -1,7 +1,7 @@
 //! Utility functions for type conversion.
 
 use super::types::{ConcreteType, PointerKind};
-use simple_parser::ast::{Expr, Type as AstType};
+use simple_parser::ast::{Expr, ReferenceCapability, Type as AstType};
 use std::collections::HashMap;
 
 #[cfg(test)]
@@ -105,8 +105,18 @@ pub fn ast_type_to_concrete(ty: &AstType, bindings: &HashMap<String, ConcreteTyp
                 simple_parser::ast::PointerKind::RawConst => PointerKind::RawConst,
                 simple_parser::ast::PointerKind::RawMut => PointerKind::RawMut,
             };
+            // Derive capability from pointer kind:
+            // - Unique/Isolated: owns the data, no aliasing
+            // - BorrowMut/RawMut: exclusive mutable access
+            // - Others: shared/immutable access
+            let capability = match pk {
+                PointerKind::Unique => ReferenceCapability::Isolated,
+                PointerKind::BorrowMut | PointerKind::RawMut => ReferenceCapability::Exclusive,
+                _ => ReferenceCapability::Shared,
+            };
             ConcreteType::Pointer {
                 kind: pk,
+                capability,
                 inner: Box::new(ast_type_to_concrete(inner, bindings)),
             }
         }
@@ -317,7 +327,9 @@ pub fn concrete_to_ast_type(concrete: &ConcreteType) -> AstType {
             ret: Some(Box::new(concrete_to_ast_type(ret))),
         },
         ConcreteType::Optional(inner) => AstType::Optional(Box::new(concrete_to_ast_type(inner))),
-        ConcreteType::Pointer { kind, inner } => {
+        ConcreteType::Pointer { kind, capability: _, inner } => {
+            // Note: capability is preserved in ConcreteType for monomorphization,
+            // but AST Pointer doesn't have a capability field - it's derived from kind
             let ast_kind = match kind {
                 PointerKind::Unique => simple_parser::ast::PointerKind::Unique,
                 PointerKind::Shared => simple_parser::ast::PointerKind::Shared,

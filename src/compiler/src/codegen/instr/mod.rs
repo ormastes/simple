@@ -785,6 +785,19 @@ pub fn compile_instruction<M: Module>(
         } => {
             compile_par_for_each(ctx, builder, *input, *closure, *backend)?;
         }
+
+        // Memory safety instructions
+        MirInst::Drop { value, ty } => {
+            // TODO: Call destructor if applicable
+            // For now, this is a no-op for primitive types
+            // Future: look up Drop trait implementation and call it
+            let _ = (value, ty); // Suppress unused warnings
+        }
+
+        MirInst::EndScope { local_index } => {
+            // No-op at runtime - this is just a marker for lifetime analysis
+            let _ = local_index; // Suppress unused warnings
+        }
     }
     Ok(())
 }

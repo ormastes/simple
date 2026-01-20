@@ -421,6 +421,69 @@ impl Counter:
 // Tests for the capability check integration into expression lowering.
 
 #[test]
+fn test_strict_mode_rejects_immutable_mutation() {
+    // CRITICAL TEST: Strict mode MUST reject mutation of immutable (val) bindings
+    // This is the key test for Rust-level memory safety
+    let source = r#"
+struct Point:
+    x: i32
+    y: i32
+
+fn violate_immutability():
+    val p = Point { x: 0, y: 0 }
+    p.x = 10
+    p.x
+"#;
+
+    // Strict mode (default) should REJECT this with an error
+    let result = lower_strict(source);
+    assert!(
+        result.is_err(),
+        "Strict mode should REJECT mutation of immutable binding, got: {:?}",
+        result
+    );
+
+    // Verify it's specifically a MemorySafetyViolation error
+    if let Err(ref err) = result {
+        let err_str = format!("{:?}", err);
+        assert!(
+            err_str.contains("MemorySafetyViolation") || err_str.contains("W1006"),
+            "Error should be MemorySafetyViolation or W1006, got: {}",
+            err_str
+        );
+    }
+}
+
+#[test]
+fn test_lenient_mode_accepts_with_warning() {
+    // Lenient mode should accept the same code but emit a warning
+    let source = r#"
+struct Point:
+    x: i32
+    y: i32
+
+fn test_immutable_mutation():
+    val p = Point { x: 0, y: 0 }
+    p.x = 10
+    p.x
+"#;
+
+    // Lenient mode should ACCEPT this (with warnings)
+    let result = lower_with_warnings(source);
+    assert!(
+        result.is_ok(),
+        "Lenient mode should accept with warnings: {:?}",
+        result.err()
+    );
+
+    // Should have W1006 warning
+    if let Ok(ref output) = result {
+        let w1006_count = count_warnings(output, "W1006");
+        assert!(w1006_count > 0, "Should have W1006 warning");
+    }
+}
+
+#[test]
 fn test_ref_mut_creates_exclusive_capability() {
     // &mut should create a pointer with Exclusive capability
     let source = r#"
@@ -467,6 +530,43 @@ fn test_capability_env_tracks_exclusive() {
     // After release, acquisition should succeed again
     env.release(1);
     assert!(env.can_acquire(1, ReferenceCapability::Exclusive).is_ok());
+}
+
+#[test]
+fn test_mutable_aliasing_rejected() {
+    // CRITICAL: Two &mut to the same variable should be rejected
+    let source = r#"
+fn mutable_aliasing():
+    var x: i32 = 10
+    val r1 = &mut x
+    val r2 = &mut x
+    *r1 + *r2
+"#;
+
+    // This should fail due to aliasing violation
+    let result = lower_strict(source);
+
+    // MUST be an error for Rust-level safety
+    assert!(
+        result.is_err(),
+        "CRITICAL: Mutable aliasing MUST be rejected for Rust-level safety! Got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_shared_aliasing_allowed() {
+    // Multiple & (shared/immutable) references should be allowed
+    let source = r#"
+fn shared_aliasing():
+    val x: i32 = 10
+    val r1 = &x
+    val r2 = &x
+    *r1 + *r2
+"#;
+
+    let result = lower_with_warnings(source);
+    assert!(result.is_ok(), "Multiple shared references should be allowed: {:?}", result.err());
 }
 
 #[test]
@@ -569,3 +669,165 @@ fn test():
 // 7. Lenient mode available for backwards compatibility
 //
 // The theoretical foundation is proven in Lean 4 (MemoryCapabilities.lean)
+
+// ============================================================================
+// Regression Tests: Generic Capability Preservation
+// ============================================================================
+//
+// These tests verify that capability information is correctly preserved during
+// monomorphization of generic types. This is critical for Rust-level memory safety.
+
+#[test]
+fn test_concrete_type_pointer_preserves_isolated_capability() {
+    use crate::monomorphize::{ConcreteType, PointerKind};
+    use simple_parser::ast::ReferenceCapability;
+
+    // Create a Unique pointer type with Isolated capability
+    let ty = ConcreteType::Pointer {
+        kind: PointerKind::Unique,
+        capability: ReferenceCapability::Isolated,
+        inner: Box::new(ConcreteType::Int),
+    };
+
+    // Verify the string representation includes capability info
+    let s = ty.to_string();
+    assert!(
+        s.contains("iso"),
+        "Unique pointer should preserve Isolated capability in string repr: {}",
+        s
+    );
+}
+
+#[test]
+fn test_concrete_type_pointer_preserves_exclusive_capability() {
+    use crate::monomorphize::{ConcreteType, PointerKind};
+    use simple_parser::ast::ReferenceCapability;
+
+    // Create a BorrowMut pointer type with Exclusive capability
+    let ty = ConcreteType::Pointer {
+        kind: PointerKind::BorrowMut,
+        capability: ReferenceCapability::Exclusive,
+        inner: Box::new(ConcreteType::String),
+    };
+
+    // Verify the string representation includes capability info
+    let s = ty.to_string();
+    assert!(
+        s.contains("ex"),
+        "BorrowMut pointer should preserve Exclusive capability in string repr: {}",
+        s
+    );
+}
+
+#[test]
+fn test_concrete_type_pointer_preserves_shared_capability() {
+    use crate::monomorphize::{ConcreteType, PointerKind};
+    use simple_parser::ast::ReferenceCapability;
+
+    // Create a Borrow pointer type with Shared capability
+    let ty = ConcreteType::Pointer {
+        kind: PointerKind::Borrow,
+        capability: ReferenceCapability::Shared,
+        inner: Box::new(ConcreteType::Bool),
+    };
+
+    // Verify the string representation includes capability info
+    let s = ty.to_string();
+    assert!(
+        s.contains("sh"),
+        "Borrow pointer should preserve Shared capability in string repr: {}",
+        s
+    );
+}
+
+#[test]
+fn test_ast_to_concrete_type_derives_correct_capabilities() {
+    use crate::monomorphize::{ast_type_to_concrete, ConcreteType, PointerKind};
+    use simple_parser::ast::{PointerKind as AstPointerKind, ReferenceCapability, Type as AstType};
+    use std::collections::HashMap;
+
+    // Test Unique pointer derives Isolated capability
+    let unique_ptr = AstType::Pointer {
+        kind: AstPointerKind::Unique,
+        inner: Box::new(AstType::Simple("Int".to_string())),
+    };
+    let concrete = ast_type_to_concrete(&unique_ptr, &HashMap::new());
+    if let ConcreteType::Pointer { capability, kind, .. } = &concrete {
+        assert_eq!(*kind, PointerKind::Unique);
+        assert_eq!(
+            *capability,
+            ReferenceCapability::Isolated,
+            "Unique pointer should have Isolated capability"
+        );
+    } else {
+        panic!("Expected Pointer type");
+    }
+
+    // Test BorrowMut pointer derives Exclusive capability
+    let borrow_mut_ptr = AstType::Pointer {
+        kind: AstPointerKind::BorrowMut,
+        inner: Box::new(AstType::Simple("String".to_string())),
+    };
+    let concrete = ast_type_to_concrete(&borrow_mut_ptr, &HashMap::new());
+    if let ConcreteType::Pointer { capability, kind, .. } = &concrete {
+        assert_eq!(*kind, PointerKind::BorrowMut);
+        assert_eq!(
+            *capability,
+            ReferenceCapability::Exclusive,
+            "BorrowMut pointer should have Exclusive capability"
+        );
+    } else {
+        panic!("Expected Pointer type");
+    }
+
+    // Test Borrow pointer derives Shared capability
+    let borrow_ptr = AstType::Pointer {
+        kind: AstPointerKind::Borrow,
+        inner: Box::new(AstType::Simple("Bool".to_string())),
+    };
+    let concrete = ast_type_to_concrete(&borrow_ptr, &HashMap::new());
+    if let ConcreteType::Pointer { capability, kind, .. } = &concrete {
+        assert_eq!(*kind, PointerKind::Borrow);
+        assert_eq!(
+            *capability,
+            ReferenceCapability::Shared,
+            "Borrow pointer should have Shared capability"
+        );
+    } else {
+        panic!("Expected Pointer type");
+    }
+}
+
+#[test]
+fn test_generic_pointer_type_preserves_capability_after_substitution() {
+    use crate::monomorphize::{ast_type_to_concrete, ConcreteType, PointerKind};
+    use simple_parser::ast::{PointerKind as AstPointerKind, ReferenceCapability, Type as AstType};
+    use std::collections::HashMap;
+
+    // Simulate a generic pointer type: &mut T where T = Int
+    let mut bindings = HashMap::new();
+    bindings.insert("T".to_string(), ConcreteType::Int);
+
+    let generic_borrow_mut = AstType::Pointer {
+        kind: AstPointerKind::BorrowMut,
+        inner: Box::new(AstType::Simple("T".to_string())),
+    };
+
+    let concrete = ast_type_to_concrete(&generic_borrow_mut, &bindings);
+
+    if let ConcreteType::Pointer { capability, kind, inner } = &concrete {
+        assert_eq!(*kind, PointerKind::BorrowMut);
+        assert_eq!(
+            *capability,
+            ReferenceCapability::Exclusive,
+            "Generic &mut T should preserve Exclusive capability after substitution"
+        );
+        assert_eq!(
+            **inner,
+            ConcreteType::Int,
+            "Inner type should be substituted to Int"
+        );
+    } else {
+        panic!("Expected Pointer type after substitution");
+    }
+}

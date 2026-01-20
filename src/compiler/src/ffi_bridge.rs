@@ -2,17 +2,13 @@
 //!
 //! Exposes compiler functionality (Parser, ApiSurface) to Simple code via FFI.
 //! This allows Simple stdlib to parse and analyze Simple source code.
-//!
-//! NOTE: This module is currently a stub. The actual implementation requires
-//! updating to the new parser API. See TODO.md for details.
 
 use simple_parser::Parser;
-use simple_runtime::value::core::RuntimeValue;
-use simple_runtime::value::rt_string_from_str;
+use simple_runtime::value::{RuntimeValue, rt_string_new, HeapHeader, HeapObjectType, RuntimeString};
 use crate::api_surface::ApiSurface;
 use std::path::Path;
 
-/// Parse a Simple source file and return the AST as JSON
+/// Parse a Simple source file and return the AST as a debug string
 #[no_mangle]
 pub extern "C" fn rt_parse_simple_file(path: RuntimeValue) -> RuntimeValue {
     // Convert RuntimeValue to string path
@@ -34,13 +30,9 @@ pub extern "C" fn rt_parse_simple_file(path: RuntimeValue) -> RuntimeValue {
         Err(_) => return RuntimeValue::NIL,
     };
 
-    // Convert AST to JSON string
-    let json = match serde_json::to_string_pretty(&module) {
-        Ok(j) => j,
-        Err(_) => return RuntimeValue::NIL,
-    };
-
-    rt_string_from_str(&json)
+    // Convert AST to debug string (since Module doesn't impl Serialize)
+    let debug_str = format!("{:#?}", module);
+    string_to_runtime_value(&debug_str)
 }
 
 /// Extract API surface from a Simple source file
@@ -79,7 +71,7 @@ pub extern "C" fn rt_api_surface_extract(path: RuntimeValue) -> RuntimeValue {
         Err(_) => return RuntimeValue::NIL,
     };
 
-    rt_string_from_str(&json)
+    string_to_runtime_value(&json)
 }
 
 /// Find all symbols used by a target function in a Simple source file
@@ -117,7 +109,7 @@ pub extern "C" fn rt_symbol_usage_find(path: RuntimeValue, target: RuntimeValue)
         Err(_) => return RuntimeValue::NIL,
     };
 
-    rt_string_from_str(&json)
+    string_to_runtime_value(&json)
 }
 
 // Helper: Convert RuntimeValue to Rust String
@@ -128,12 +120,10 @@ fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
 
     unsafe {
         let ptr = val.as_heap_ptr();
-        use simple_runtime::value::heap::{HeapHeader, HeapObjectType};
         if (*ptr).object_type != HeapObjectType::String {
             return None;
         }
 
-        use simple_runtime::value::collections::RuntimeString;
         let str_ptr = ptr as *const RuntimeString;
         let len = (*str_ptr).len as usize;
         let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<RuntimeString>());
@@ -142,10 +132,14 @@ fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
     }
 }
 
+// Helper: Convert Rust String to RuntimeValue
+fn string_to_runtime_value(s: &str) -> RuntimeValue {
+    rt_string_new(s.as_ptr(), s.len() as u64)
+}
+
 // Helper: Find all symbols used by a function
 fn find_used_symbols(module: &simple_parser::ast::Module, target: &str) -> Vec<String> {
     use simple_parser::Node;
-    use simple_parser::Expr;
     let mut symbols = Vec::new();
 
     // Find the target function
@@ -170,7 +164,6 @@ fn find_used_symbols(module: &simple_parser::ast::Module, target: &str) -> Vec<S
 // Helper: Recursively collect symbol references from AST node
 fn collect_symbols_from_node(node: &simple_parser::Node, symbols: &mut Vec<String>) {
     use simple_parser::Node;
-    use simple_parser::Expr;
 
     match node {
         Node::Expression(expr) => {

@@ -157,6 +157,12 @@ impl HasEffects for MirInst {
             | MirInst::ParReduce { .. }
             | MirInst::ParFilter { .. }
             | MirInst::ParForEach { .. } => Effect::Compute,
+
+            // Memory safety instructions
+            // Drop may call destructors which could have I/O effects
+            MirInst::Drop { .. } => Effect::Io,
+            // EndScope is a no-op marker for lifetime analysis
+            MirInst::EndScope { .. } => Effect::Compute,
         }
     }
 }
