@@ -4,12 +4,14 @@
 //! - generate: Generate all Lean files from verification module
 //! - compare:  Compare generated with existing files
 //! - write:    Write generated files to verification/
+//! - verify:   Run Lean on known verification projects
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
 use crate::{Interpreter, RunConfig, RunningType};
+use simple_compiler::codegen::lean::{LeanRunner, VerificationSummary};
 
 /// Options for gen-lean commands
 pub struct GenLeanOptions {
@@ -52,6 +54,7 @@ pub fn run_gen_lean(args: &[String]) -> i32 {
         "generate" => generate_lean_files(&opts),
         "compare" => compare_lean_files(&opts),
         "write" => write_lean_files(&opts),
+        "verify" => verify_lean_files(&opts),
         "memory-safety" => generate_memory_safety_lean(args),
         "help" | "--help" | "-h" => {
             print_gen_lean_help();
@@ -73,6 +76,7 @@ Commands:
   generate           Generate Lean files (output to stdout)
   compare            Compare generated with existing files and check completeness
   write              Write generated files to verification/
+  verify             Run Lean on known verification projects and fail on errors/sorry
   memory-safety      Generate memory safety Lean 4 verification from source file
 
 Options:
@@ -81,6 +85,7 @@ Options:
   --force            Overwrite existing files without confirmation
   --diff             Show detailed diff and missing/new definitions
   --file <path>      Source file for memory-safety command
+  --out <path>       Write memory-safety Lean output to file
 
 Compare Exit Codes:
   0 = All files identical
@@ -90,9 +95,11 @@ Compare Exit Codes:
 Examples:
   simple gen-lean compare                    # Show status of all files
   simple gen-lean compare --diff             # Show differences and missing defs
-  simple gen-lean write --force              # Regenerate all Lean files
-  simple gen-lean generate --project memory  # Generate memory projects only
-  simple gen-lean memory-safety --file src/main.spl  # Generate memory safety verification
+  simple gen-lean write --force                     # Regenerate all Lean files
+  simple gen-lean generate --project memory         # Generate memory projects only
+  simple gen-lean memory-safety --file src/main.spl # Generate memory safety verification
+  simple gen-lean memory-safety --file src/main.spl --out verification/generated/Main/MemorySafety.lean
+  simple gen-lean verify                            # Check known Lean proofs with `lean`
 "#
     );
 }
@@ -120,16 +127,7 @@ fn read_existing_lean_files() -> Result<HashMap<String, String>, String> {
     let mut files = HashMap::new();
 
     // Find project root
-    let mut current = std::env::current_dir().map_err(|e| e.to_string())?;
-    let project_root = loop {
-        let candidate = current.join("verification");
-        if candidate.exists() {
-            break current;
-        }
-        if !current.pop() {
-            return Err("Could not find verification/ directory. Run from project root.".to_string());
-        }
-    };
+    let project_root = find_verification_root()?;
 
     for path in get_known_lean_files() {
         let full_path = project_root.join(path);
@@ -150,6 +148,20 @@ fn read_existing_lean_files() -> Result<HashMap<String, String>, String> {
     }
 
     Ok(files)
+}
+
+/// Find the repository root that contains verification/
+fn find_verification_root() -> Result<PathBuf, String> {
+    let mut current = std::env::current_dir().map_err(|e| e.to_string())?;
+    loop {
+        let candidate = current.join("verification");
+        if candidate.exists() {
+            return Ok(current);
+        }
+        if !current.pop() {
+            return Err("Could not find verification/ directory. Run from project root.".to_string());
+        }
+    }
 }
 
 /// Generate Lean files using the Simple regeneration module
@@ -582,6 +594,13 @@ fn generate_memory_safety_lean(args: &[String]) -> i32 {
         return 1;
     }
 
+    // Optional --out argument
+    let out_path = args
+        .iter()
+        .position(|a| a == "--out")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from);
+
     // Read and parse the source file
     let source = match fs::read_to_string(&file_path) {
         Ok(s) => s,
@@ -610,25 +629,84 @@ fn generate_memory_safety_lean(args: &[String]) -> i32 {
             // showing what violations were detected
             eprintln!("warning: lowering error (showing detected violations): {}", e);
 
-            // Create a basic module for generation
-            let module = simple_compiler::hir::HirModule::new();
-            let warnings = simple_compiler::hir::MemoryWarningCollector::new();
-            let lean = simple_compiler::codegen::lean::generate_memory_safety_lean(&module, None, Some(&warnings));
-            println!("{}", lean);
-            return 0;
+            // Create Lean output that reflects the detected violations so the
+            // proof obligations fail loudly in Lean.
+            match e {
+                simple_compiler::hir::LowerError::MemorySafetyViolation { all_warnings, .. } => {
+                    let module = simple_compiler::hir::HirModule::new();
+                    let lean = simple_compiler::codegen::lean::generate_memory_safety_lean(
+                        &module,
+                        None,
+                        Some(&all_warnings),
+                        None,
+                    );
+                    println!("{}", lean);
+                    return 0;
+                }
+                simple_compiler::hir::LowerError::LifetimeViolation(_) => {
+                    let module = simple_compiler::hir::HirModule::new();
+                    let lean =
+                        simple_compiler::codegen::lean::generate_memory_safety_lean(&module, None, None, Some(1));
+                    println!("{}", lean);
+                    return 0;
+                }
+                simple_compiler::hir::LowerError::LifetimeViolations(v) => {
+                    let module = simple_compiler::hir::HirModule::new();
+                    let lean = simple_compiler::codegen::lean::generate_memory_safety_lean(
+                        &module,
+                        None,
+                        None,
+                        Some(v.len()),
+                    );
+                    println!("{}", lean);
+                    return 0;
+                }
+                _ => {
+                    // Unknown failure - fall back to empty obligations
+                    let module = simple_compiler::hir::HirModule::new();
+                    let warnings = simple_compiler::hir::MemoryWarningCollector::new();
+                    let lean = simple_compiler::codegen::lean::generate_memory_safety_lean(
+                        &module,
+                        None,
+                        Some(&warnings),
+                        None,
+                    );
+                    println!("{}", lean);
+                    return 0;
+                }
+            }
         }
     };
 
     // Generate Lean 4 memory safety verification
-    let lean =
-        simple_compiler::codegen::lean::generate_memory_safety_lean(&output.module, None, Some(&output.warnings));
-
-    println!("{}", lean);
+    let mut lean = simple_compiler::codegen::lean::generate_memory_safety_lean(
+        &output.module,
+        None,
+        Some(&output.warnings),
+        Some(output.lifetime_violation_count()),
+    );
 
     // If we have lifetime-specific Lean 4 code, append it
     if let Some(lifetime_lean) = output.get_lifetime_lean4() {
-        println!("\n-- Lifetime-specific verification code from HIR lowering:");
-        println!("{}", lifetime_lean);
+        lean.push_str("\n-- Lifetime-specific verification code from HIR lowering:\n");
+        lean.push_str(lifetime_lean);
+    }
+
+    // Write to file if requested
+    if let Some(out) = out_path {
+        if let Some(parent) = out.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                eprintln!("error: could not create output directory {}: {}", parent.display(), e);
+                return 1;
+            }
+        }
+        if let Err(e) = fs::write(&out, lean) {
+            eprintln!("error: could not write Lean output to {}: {}", out.display(), e);
+            return 1;
+        }
+        println!("Wrote Lean verification to {}", out.display());
+    } else {
+        println!("{}", lean);
     }
 
     // Print summary
@@ -659,6 +737,79 @@ fn generate_memory_safety_lean(args: &[String]) -> i32 {
     }
 
     0
+}
+
+/// Verify known Lean projects using the Lean binary.
+/// Exits non-zero if Lean fails or if any sorry remain.
+fn verify_lean_files(opts: &GenLeanOptions) -> i32 {
+    let project_root = match find_verification_root() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return 1;
+        }
+    };
+
+    // Allow overriding Lean binary via env; default to `lean` in PATH.
+    let lean_bin = std::env::var("LEAN_BIN").unwrap_or_else(|_| "lean".to_string());
+    let runner = LeanRunner::new(lean_bin, project_root.join("verification/.lean-cache")).with_verbose(false);
+
+    let mut results = Vec::new();
+    let mut checked = 0;
+
+    for path in get_known_lean_files() {
+        if let Some(ref project) = opts.project {
+            if !path.contains(project) {
+                continue;
+            }
+        }
+        let full = project_root.join(path);
+        if !full.exists() {
+            continue;
+        }
+        checked += 1;
+        match runner.check_file(&full) {
+            Ok(res) => {
+                if res.success && res.goals_remaining == 0 {
+                    println!("[ok]     {}", path);
+                } else if res.success {
+                    println!(
+                        "[warn]   {} ({} goals remaining, exit {})",
+                        path,
+                        res.goals_remaining,
+                        res.exit_code.unwrap_or(-1)
+                    );
+                } else {
+                    println!(
+                        "[fail]   {} (exit {})",
+                        path,
+                        res.exit_code.unwrap_or(-1)
+                    );
+                    if !res.stderr.is_empty() {
+                        println!("{}", res.stderr);
+                    }
+                }
+                results.push(res);
+            }
+            Err(e) => {
+                println!("[error]  {} - {}", path, e);
+            }
+        }
+    }
+
+    if checked == 0 {
+        eprintln!("No Lean verification files found (maybe filtered by --project?)");
+        return 1;
+    }
+
+    let summary = VerificationSummary::from_results(&results);
+    println!("{}", summary.format());
+
+    if summary.is_success() && summary.unproven_theorems == 0 {
+        0
+    } else {
+        1
+    }
 }
 
 /// Write generated files to disk

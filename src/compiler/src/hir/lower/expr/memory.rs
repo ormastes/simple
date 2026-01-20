@@ -31,7 +31,7 @@ impl Lowerer {
         let capability = match ptr_kind {
             PointerKind::Unique => ReferenceCapability::Isolated, // Sole owner
             PointerKind::BorrowMut | PointerKind::RawMut => ReferenceCapability::Exclusive, // Mutable
-            _ => ReferenceCapability::Shared, // Shared, Borrow, Weak, Handle, RawConst
+            _ => ReferenceCapability::Shared,                     // Shared, Borrow, Weak, Handle, RawConst
         };
         let ptr_type = HirType::Pointer {
             kind: ptr_kind,

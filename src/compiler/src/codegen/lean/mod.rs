@@ -38,7 +38,7 @@ mod verification_checker;
 mod verification_diagnostics;
 
 pub use contracts::{ContractTranslator, LeanClassInvariant, LeanProp, LeanTheorem};
-pub use emitter::{LeanEmitter, LeanModule};
+pub use emitter::{LeanEmitter, LeanModule, LeanUserBlock};
 pub use expressions::{ExprTranslator, LeanDoStmt, LeanExpr, LeanLit};
 pub use functions::{FunctionTranslator, LeanFunction};
 pub use memory_safety::{generate_memory_safety_lean, MemorySafetyLeanGen};
@@ -48,7 +48,7 @@ pub use types::{LeanType, TypeTranslator};
 pub use verification_checker::{check_module, VerificationChecker};
 pub use verification_diagnostics::{VerificationDiagnostic, VerificationDiagnostics, VerificationErrorCode};
 
-use crate::hir::{HirFunction, HirModule};
+use crate::hir::{HirFunction, HirLeanBlock, HirModule};
 use crate::CompileError;
 use simple_parser::ast::{ImplBlock, TraitDef};
 
@@ -117,6 +117,16 @@ impl LeanCodegen {
                         emitter.emit_theorem(&theorem, self.generate_stubs);
                     }
                 }
+            }
+        }
+
+        // Emit user-provided Lean blocks
+        if !module.lean_blocks.is_empty() {
+            emitter.emit_comment("User-provided Lean code");
+            emitter.emit_blank();
+            for block in &module.lean_blocks {
+                let user_block = hir_lean_block_to_user_block(block);
+                emitter.emit_user_block(&user_block);
             }
         }
 
@@ -284,6 +294,17 @@ impl LeanCodegen {
             }
         }
 
+        // Emit user-provided Lean blocks
+        if !module.lean_blocks.is_empty() {
+            emitter.emit_blank();
+            emitter.emit_comment("User-provided Lean code");
+            emitter.emit_blank();
+            for block in &module.lean_blocks {
+                let user_block = hir_lean_block_to_user_block(block);
+                emitter.emit_user_block(&user_block);
+            }
+        }
+
         emitter.emit_footer(&module_name);
         Ok(emitter.finish())
     }
@@ -292,6 +313,15 @@ impl LeanCodegen {
 impl Default for LeanCodegen {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Convert HIR lean block to emitter's user block format
+fn hir_lean_block_to_user_block(hir_block: &HirLeanBlock) -> LeanUserBlock {
+    LeanUserBlock {
+        import_path: hir_block.import_path.clone(),
+        code: hir_block.code.clone(),
+        context: hir_block.context.clone(),
     }
 }
 

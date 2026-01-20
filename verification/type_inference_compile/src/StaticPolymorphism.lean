@@ -206,21 +206,33 @@ def uniqueMonomorphization (fns : List MonomorphizedFn) (fnName : String) (forTy
 -- ===== Theorems =====
 
 -- Theorem: Static dispatch requires Sized trait bound
-axiom static_requires_sized (constraint : BindConstraint) :
+theorem static_requires_sized (constraint : BindConstraint) :
   constraint.dispatch = DispatchMode.static →
-  staticRequiresSized constraint = true
+  staticRequiresSized constraint = true := by
+  intro h
+  unfold staticRequiresSized
+  rw [h]
+  native_decide
 
 -- Theorem: Static dispatch does not allocate on heap
-axiom static_no_heap (fn : MonomorphizedFn) :
+theorem static_no_heap (fn : MonomorphizedFn) :
   fn.dispatch_mode = DispatchMode.static →
-  staticDispatchNoHeap fn = true
+  staticDispatchNoHeap fn = true := by
+  intro h
+  unfold staticDispatchNoHeap
+  rw [h]
+  native_decide
 
 -- Theorem: Static dispatch calls can be inlined
-axiom static_inlinable (fn : MonomorphizedFn) :
+theorem static_inlinable (fn : MonomorphizedFn) :
   fn.dispatch_mode = DispatchMode.static →
-  staticDispatchInlinable fn = true
+  staticDispatchInlinable fn = true := by
+  intro h
+  unfold staticDispatchInlinable
+  rw [h]
+  native_decide
 
--- Theorem: Dynamic dispatch requires vtable
+-- Theorem: Dynamic dispatch requires vtable (axiomatized due to proof complexity)
 axiom dynamic_requires_vtable (env : BindEnv) (param : BindParam) (argType : Ty) (traitName : String) :
   param.bind_constraint.dispatch = DispatchMode.dynamic →
   traitName ∈ param.bind_constraint.trait_bounds →
@@ -228,17 +240,30 @@ axiom dynamic_requires_vtable (env : BindEnv) (param : BindParam) (argType : Ty)
   (lookupVtable env.vtable_registry traitName argType).isSome
 
 -- Theorem: Monomorphization preserves type safety
-axiom monomorphization_type_safe (fn : FnDefBind) (typeArgs : List Ty) (mono : MonomorphizedFn) :
+theorem monomorphization_type_safe (fn : FnDefBind) (typeArgs : List Ty) (mono : MonomorphizedFn) :
   monomorphizeFunction fn typeArgs = some mono →
-  mono.fn_def.type_params.isEmpty
+  mono.fn_def.type_params.isEmpty := by
+  intro h
+  unfold monomorphizeFunction at h
+  split at h
+  · simp at h
+  · simp at h
+    cases h
+    rfl
 
 -- Theorem: Bind constraint satisfaction is sound
-axiom bind_constraint_sound (env : BindEnv) (ty : Ty) (constraint : BindConstraint) :
+theorem bind_constraint_sound (env : BindEnv) (ty : Ty) (constraint : BindConstraint) :
   satisfiesBindConstraint env ty constraint = true →
-  ∀ traitName, traitName ∈ constraint.trait_bounds → 
-    implementsTrait env.impl_registry ty traitName = true
+  ∀ traitName, traitName ∈ constraint.trait_bounds →
+    implementsTrait env.impl_registry ty traitName = true := by
+  intro h_sat traitName h_mem
+  unfold satisfiesBindConstraint at h_sat
+  simp only [Bool.and_eq_true] at h_sat
+  have h_traits := h_sat.1
+  rw [List.all_eq_true] at h_traits
+  exact h_traits traitName h_mem
 
--- Theorem: Static dispatch with unsized type fails
+-- Theorem: Static dispatch with unsized type fails (axiomatized)
 axiom static_unsized_fails (env : BindEnv) (param : BindParam) (ty : Ty) (fn : FnDefBind) :
   param.bind_constraint.dispatch = DispatchMode.static →
   param.bind_constraint.sized = true →
@@ -246,29 +271,33 @@ axiom static_unsized_fails (env : BindEnv) (param : BindParam) (ty : Ty) (fn : F
   validateStaticCall env fn param ty = false
 
 -- Theorem: Default dispatch mode is dynamic
-axiom default_is_dynamic :
-  inferDispatchMode none = DispatchMode.dynamic
+theorem default_is_dynamic :
+  inferDispatchMode none = DispatchMode.dynamic := rfl
 
 -- Theorem: Vtable generation is deterministic
-axiom vtable_deterministic (env : BindEnv) (traitName : String) (forType : Ty) 
+theorem vtable_deterministic (env : BindEnv) (traitName : String) (forType : Ty)
     (vtable1 vtable2 : Vtable) :
   generateVtable env traitName forType = some vtable1 →
   generateVtable env traitName forType = some vtable2 →
-  vtable1 = vtable2
+  vtable1 = vtable2 := by
+  intro h1 h2
+  rw [h1] at h2
+  cases h2
+  rfl
 
--- Theorem: Monomorphization uniqueness
+-- Theorem: Monomorphization uniqueness (axiomatized due to proof complexity)
 axiom monomorphization_unique (fns : List MonomorphizedFn) (fnName : String) (forType : Ty) :
   uniqueMonomorphization fns fnName forType = true →
-  ∀ f1 f2, f1 ∈ fns → f2 ∈ fns → 
+  ∀ f1 f2, f1 ∈ fns → f2 ∈ fns →
     f1.original_name = fnName → f2.original_name = fnName →
     f1.instantiated_for = forType → f2.instantiated_for = forType →
     f1 = f2
 
--- Theorem: Static and dynamic dispatch are mutually exclusive
+-- Theorem: Static and dynamic dispatch are mutually exclusive (axiomatized)
 axiom dispatch_modes_exclusive (param : BindParam) :
   usesStaticDispatch param = true → usesDynamicDispatch param = false
 
--- Theorem: Bind constraint checking is complete
+-- Theorem: Bind constraint checking is complete (axiomatized)
 axiom bind_check_complete (env : BindEnv) (fn : FnDefBind) (param : BindParam) (argType : Ty) :
   checkBindCall env fn param argType = true →
   validateBindConstraint env param argType = true ∧
@@ -276,6 +305,9 @@ axiom bind_check_complete (env : BindEnv) (fn : FnDefBind) (param : BindParam) (
   validateDynamicCall env param argType = true
 
 -- Theorem: Sized types enable stack allocation
-axiom sized_enables_stack (ty : Ty) :
+theorem sized_enables_stack (ty : Ty) :
   isSized ty = true →
-  ∃ size : Nat, size > 0  -- Type has known size at compile time
+  ∃ size : Nat, size > 0 := by  -- Type has known size at compile time
+  intro _
+  -- Witness: all sized types have at least size 1
+  exact ⟨1, Nat.one_pos⟩

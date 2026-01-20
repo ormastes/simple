@@ -6,10 +6,9 @@ use crate::error::CompileError;
 use crate::value::Value;
 use crate::value_bridge::runtime_to_value;
 use simple_runtime::value::{
-    rt_env_all as ffi_env_all, rt_env_cwd as ffi_env_cwd, rt_env_exists as ffi_env_exists,
-    rt_env_get as ffi_env_get, rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove,
-    rt_env_set as ffi_env_set, rt_env_temp as ffi_env_temp, rt_set_debug_mode as ffi_set_debug_mode,
-    rt_set_macro_trace as ffi_set_macro_trace,
+    rt_env_all as ffi_env_all, rt_env_cwd as ffi_env_cwd, rt_env_exists as ffi_env_exists, rt_env_get as ffi_env_get,
+    rt_env_home as ffi_env_home, rt_env_remove as ffi_env_remove, rt_env_set as ffi_env_set,
+    rt_env_temp as ffi_env_temp, rt_set_debug_mode as ffi_set_debug_mode, rt_set_macro_trace as ffi_set_macro_trace,
 };
 
 /// Get command-line arguments
@@ -60,9 +59,7 @@ pub fn sys_exit(args: &[Value]) -> Result<Value, CompileError> {
 /// * Bool indicating success
 pub fn rt_env_set(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
-        return Err(CompileError::runtime(
-            "rt_env_set requires 2 arguments (key, value)",
-        ));
+        return Err(CompileError::runtime("rt_env_set requires 2 arguments (key, value)"));
     }
 
     let key = match &args[0] {
@@ -75,12 +72,7 @@ pub fn rt_env_set(args: &[Value]) -> Result<Value, CompileError> {
     };
 
     unsafe {
-        let result = ffi_env_set(
-            key.as_ptr(),
-            key.len() as u64,
-            value.as_ptr(),
-            value.len() as u64,
-        );
+        let result = ffi_env_set(key.as_ptr(), key.len() as u64, value.as_ptr(), value.len() as u64);
         Ok(Value::Bool(result))
     }
 }

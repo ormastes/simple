@@ -335,7 +335,7 @@ main = classify(-10)
 fn interpreter_match_guard_uses_binding() {
     // Guard can use the bound variable
     let code = r#"
-fn check(pair):
+fn verify(pair):
     match pair:
         (a, b) if a + b > 10 =>
             return 1
@@ -345,7 +345,7 @@ fn check(pair):
             return -1
     return -99
 
-main = check((7, 5))  # 7 + 5 = 12 > 10
+main = verify((7, 5))  # 7 + 5 = 12 > 10
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 1);
@@ -481,14 +481,14 @@ main = classify(5)
 #[test]
 fn interpreter_or_pattern_with_wildcard() {
     let code = r#"
-fn check(x):
+fn verify(x):
     match x:
         0 | 1 =>
             return 10
         _ =>
             return 99
 
-main = check(99)
+main = verify(99)
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 99);

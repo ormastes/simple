@@ -204,6 +204,14 @@ impl Lowerer {
             Node::Break(_) => Ok(vec![HirStmt::Break]),
             Node::Continue(_) => Ok(vec![HirStmt::Continue]),
 
+            Node::Assert(assert_stmt) => {
+                let condition = self.lower_expr(&assert_stmt.condition, ctx)?;
+                Ok(vec![HirStmt::Assert {
+                    condition,
+                    message: assert_stmt.message.clone(),
+                }])
+            }
+
             Node::Expression(expr) => {
                 let hir_expr = self.lower_expr(expr, ctx)?;
                 Ok(vec![HirStmt::Expr(hir_expr)])

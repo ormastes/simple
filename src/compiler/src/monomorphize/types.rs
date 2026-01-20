@@ -124,7 +124,11 @@ impl std::fmt::Display for ConcreteType {
                 write!(f, "Fn_{}_{}", p, ret)
             }
             ConcreteType::Optional(inner) => write!(f, "Opt_{}", inner),
-            ConcreteType::Pointer { kind, capability, inner } => {
+            ConcreteType::Pointer {
+                kind,
+                capability,
+                inner,
+            } => {
                 let k = match kind {
                     PointerKind::Unique => "Unique",
                     PointerKind::Shared => "Shared",

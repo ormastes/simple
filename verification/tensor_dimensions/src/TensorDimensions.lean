@@ -171,11 +171,11 @@ theorem unifyDim_success_eq (d1 d2 d : Dim) :
   intro h
   -- Proof by exhaustive case analysis, handling unifyDim's pattern matching
   cases d1 <;> cases d2 <;> simp_all [unifyDim, dimEq]
-  all_goals (try (subst_vars; simp [dimEq]))
-  all_goals (try (split at h; try (injection h with h_eq; subst_vars; simp [dimEq]); try contradiction))
+  all_goals (try (subst_vars; simp))
+  all_goals (try (split at h; try (injection h with h_eq; subst_vars; simp); try contradiction))
   all_goals (try contradiction)
   -- Handle remaining injection cases
-  all_goals (try (injection h with h_eq; subst h_eq; simp_all [dimEq]))
+  all_goals (try (injection h with h_eq; subst h_eq; simp_all))
 
 /-- Matmul shape inference is deterministic. -/
 theorem matmulShape_deterministic (l r s1 s2 : TensorShape) :

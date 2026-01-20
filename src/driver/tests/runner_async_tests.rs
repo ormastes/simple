@@ -571,14 +571,14 @@ fn parity_boolean_logic() {
     // Boolean operations in both modes
     run_expect(
         r#"
-fn check(a: i64, b: i64) -> i64:
+fn verify(a: i64, b: i64) -> i64:
     if a > 0 and b > 0:
         return 1
     if a > 0 or b > 0:
         return 2
     return 0
 
-main = check(1, 1) * 100 + check(1, 0) * 10 + check(0, 0)
+main = verify(1, 1) * 100 + verify(1, 0) * 10 + verify(0, 0)
 "#,
         120, // 1*100 + 2*10 + 0 = 120
     );

@@ -4,9 +4,7 @@
 //! Uses a builder-style approach with a global config that can be modified
 //! piece by piece before being applied.
 
-use crate::sandbox::{
-    apply_sandbox, cleanup_network_rules, FilesystemMode, NetworkMode, SandboxConfig,
-};
+use crate::sandbox::{apply_sandbox, cleanup_network_rules, FilesystemMode, NetworkMode, SandboxConfig};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;

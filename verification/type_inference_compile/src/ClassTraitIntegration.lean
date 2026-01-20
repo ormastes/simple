@@ -120,16 +120,23 @@ def checkGenericClassBounds (env : TypeEnv) (className : String) (typeArgs : Lis
 --==============================================================================
 
 -- Theorem: Method resolution is deterministic
-axiom methodResolution_deterministic (env : TypeEnv) (className methodName : String) (src1 src2 : MethodSource) :
+theorem methodResolution_deterministic (env : TypeEnv) (className methodName : String) (src1 src2 : MethodSource) :
   resolveMethodSource env className methodName = some src1 →
   resolveMethodSource env className methodName = some src2 →
-  src1 = src2
+  src1 = src2 := by
+  intro h1 h2
+  rw [h1] at h2
+  cases h2
+  rfl
 
 -- Theorem: Class methods take priority over trait methods
-axiom classMethod_priority (env : TypeEnv) (className methodName : String) (classMethod : MethodDef) :
+theorem classMethod_priority (env : TypeEnv) (className methodName : String) (classMethod : MethodDef) :
   (∃ cls, lookupClass env.classes className = some cls ∧
     lookupMethod cls methodName = some classMethod) →
-  resolveMethodSource env className methodName = some (MethodSource.classMethod className classMethod)
+  resolveMethodSource env className methodName = some (MethodSource.classMethod className classMethod) := by
+  intro ⟨cls, h_class, h_method⟩
+  unfold resolveMethodSource
+  simp [h_class, h_method]
 
 -- Theorem: Coherence ensures unique trait implementations per class
 axiom coherence_unique_impls (env : TypeEnv) (className traitName : String) (impl1 impl2 : TraitImpl) :
@@ -147,10 +154,9 @@ axiom validImpl_complete (env : TypeEnv) (impl : TraitImpl) (trait : TraitDef) :
   trait.methods.length ≤ impl.method_impls.length
 
 -- Theorem: Type conversion preserves structure (since types are now unified, this is trivial)
-axiom tyConversion_roundtrip (ty : Ty) :
-  ty = ty
+theorem tyConversion_roundtrip (ty : Ty) :
+  ty = ty := rfl
 
--- Theorem: Generic class bounds are sound
-axiom genericBounds_sound (env : TypeEnv) (className : String) (typeArgs : List Ty)
-    (bounds : List (Ty × String)) :
-  checkGenericClassBounds env className typeArgs bounds = true
+-- Note: genericBounds_sound removed - the statement had no preconditions and was incorrect.
+-- A proper soundness theorem would require preconditions about the bounds being
+-- derivable from the class definition and the type arguments satisfying them.

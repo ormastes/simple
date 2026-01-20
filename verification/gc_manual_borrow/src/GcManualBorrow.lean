@@ -15,14 +15,14 @@ def allocate (s : GcState) (id : Nat) : GcState :=
   { s with live := id :: s.live }
 
 def borrow (s : GcState) (id : Nat) : GcState :=
-  if h : id ∈ s.live then { s with borrowed := id :: s.borrowed } else s
+  if _h : id ∈ s.live then { s with borrowed := id :: s.borrowed } else s
 
 def release (s : GcState) (id : Nat) : GcState :=
   { s with borrowed := s.borrowed.erase id }
 
 /-- GC may drop a live object only when it is not borrowed. -/
 def collectSafe (s : GcState) (id : Nat) : GcState :=
-  if h : id ∈ s.borrowed then s else { s with live := s.live.erase id }
+  if _h : id ∈ s.borrowed then s else { s with live := s.live.erase id }
 
 theorem borrow_preserves (s : GcState) (id : Nat) (hs : safe s) :
     safe (borrow s id) := by

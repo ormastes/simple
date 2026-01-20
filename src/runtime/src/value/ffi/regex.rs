@@ -48,9 +48,7 @@ fn get_string(val: &RuntimeValue) -> Option<String> {
 
 /// Create a RuntimeValue string from Rust &str
 fn create_string(s: &str) -> RuntimeValue {
-    unsafe {
-        rt_string_new(s.as_ptr(), s.len() as u64)
-    }
+    unsafe { rt_string_new(s.as_ptr(), s.len() as u64) }
 }
 
 /// Compile a regex pattern
@@ -234,7 +232,11 @@ pub extern "C" fn ffi_regex_captures(pattern: RuntimeValue, text: RuntimeValue) 
 ///
 /// FFI signature: regex_replace(pattern: text, text: text, replacement: text) -> text
 #[no_mangle]
-pub extern "C" fn ffi_regex_replace(pattern: RuntimeValue, text: RuntimeValue, replacement: RuntimeValue) -> RuntimeValue {
+pub extern "C" fn ffi_regex_replace(
+    pattern: RuntimeValue,
+    text: RuntimeValue,
+    replacement: RuntimeValue,
+) -> RuntimeValue {
     let Some(pattern_str) = get_string(&pattern) else {
         return text;
     };
@@ -259,7 +261,11 @@ pub extern "C" fn ffi_regex_replace(pattern: RuntimeValue, text: RuntimeValue, r
 ///
 /// FFI signature: regex_replace_all(pattern: text, text: text, replacement: text) -> text
 #[no_mangle]
-pub extern "C" fn ffi_regex_replace_all(pattern: RuntimeValue, text: RuntimeValue, replacement: RuntimeValue) -> RuntimeValue {
+pub extern "C" fn ffi_regex_replace_all(
+    pattern: RuntimeValue,
+    text: RuntimeValue,
+    replacement: RuntimeValue,
+) -> RuntimeValue {
     let Some(pattern_str) = get_string(&pattern) else {
         return text;
     };

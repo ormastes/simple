@@ -152,10 +152,7 @@ pub extern "C" fn rt_btreeset_to_array(handle: RuntimeValue) -> RuntimeValue {
 /// Get the first (smallest) element
 #[no_mangle]
 pub extern "C" fn rt_btreeset_first(handle: RuntimeValue) -> RuntimeValue {
-    with_btreeset(handle, |set| {
-        set.iter().next().copied().unwrap_or(RuntimeValue::NIL)
-    })
-    .unwrap_or(RuntimeValue::NIL)
+    with_btreeset(handle, |set| set.iter().next().copied().unwrap_or(RuntimeValue::NIL)).unwrap_or(RuntimeValue::NIL)
 }
 
 /// Get the last (largest) element
@@ -190,10 +187,7 @@ pub extern "C" fn rt_btreeset_union(handle1: RuntimeValue, handle2: RuntimeValue
 
 /// Intersection of two sets (returns new set)
 #[no_mangle]
-pub extern "C" fn rt_btreeset_intersection(
-    handle1: RuntimeValue,
-    handle2: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_btreeset_intersection(handle1: RuntimeValue, handle2: RuntimeValue) -> RuntimeValue {
     let new_set = rt_btreeset_new();
     if new_set.is_nil() {
         return RuntimeValue::NIL;
@@ -214,10 +208,7 @@ pub extern "C" fn rt_btreeset_intersection(
 
 /// Difference of two sets (elements in first but not second)
 #[no_mangle]
-pub extern "C" fn rt_btreeset_difference(
-    handle1: RuntimeValue,
-    handle2: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_btreeset_difference(handle1: RuntimeValue, handle2: RuntimeValue) -> RuntimeValue {
     let new_set = rt_btreeset_new();
     if new_set.is_nil() {
         return RuntimeValue::NIL;
@@ -238,10 +229,7 @@ pub extern "C" fn rt_btreeset_difference(
 
 /// Symmetric difference of two sets (elements in either but not both)
 #[no_mangle]
-pub extern "C" fn rt_btreeset_symmetric_difference(
-    handle1: RuntimeValue,
-    handle2: RuntimeValue,
-) -> RuntimeValue {
+pub extern "C" fn rt_btreeset_symmetric_difference(handle1: RuntimeValue, handle2: RuntimeValue) -> RuntimeValue {
     let new_set = rt_btreeset_new();
     if new_set.is_nil() {
         return RuntimeValue::NIL;

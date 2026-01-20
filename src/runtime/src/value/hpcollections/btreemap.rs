@@ -104,22 +104,14 @@ where
 
 /// Insert a key-value pair, returning true if inserted (false if key was already present and was updated)
 #[no_mangle]
-pub extern "C" fn rt_btreemap_insert(
-    handle: RuntimeValue,
-    key: RuntimeValue,
-    value: RuntimeValue,
-) -> bool {
-    with_btreemap_mut(handle, |map| {
-        map.insert(key, value).is_none()
-    })
-    .unwrap_or(false)
+pub extern "C" fn rt_btreemap_insert(handle: RuntimeValue, key: RuntimeValue, value: RuntimeValue) -> bool {
+    with_btreemap_mut(handle, |map| map.insert(key, value).is_none()).unwrap_or(false)
 }
 
 /// Get a value by key, returns NIL if not found
 #[no_mangle]
 pub extern "C" fn rt_btreemap_get(handle: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
-    with_btreemap(handle, |map| map.get(&key).copied().unwrap_or(RuntimeValue::NIL))
-        .unwrap_or(RuntimeValue::NIL)
+    with_btreemap(handle, |map| map.get(&key).copied().unwrap_or(RuntimeValue::NIL)).unwrap_or(RuntimeValue::NIL)
 }
 
 /// Check if a key exists
@@ -131,8 +123,7 @@ pub extern "C" fn rt_btreemap_contains_key(handle: RuntimeValue, key: RuntimeVal
 /// Remove a key-value pair, returning the value (or NIL if not found)
 #[no_mangle]
 pub extern "C" fn rt_btreemap_remove(handle: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
-    with_btreemap_mut(handle, |map| map.remove(&key).unwrap_or(RuntimeValue::NIL))
-        .unwrap_or(RuntimeValue::NIL)
+    with_btreemap_mut(handle, |map| map.remove(&key).unwrap_or(RuntimeValue::NIL)).unwrap_or(RuntimeValue::NIL)
 }
 
 /// Get the number of entries
@@ -208,10 +199,7 @@ pub extern "C" fn rt_btreemap_entries(handle: RuntimeValue) -> RuntimeValue {
 /// Get the first (smallest) key
 #[no_mangle]
 pub extern "C" fn rt_btreemap_first_key(handle: RuntimeValue) -> RuntimeValue {
-    with_btreemap(handle, |map| {
-        map.keys().next().copied().unwrap_or(RuntimeValue::NIL)
-    })
-    .unwrap_or(RuntimeValue::NIL)
+    with_btreemap(handle, |map| map.keys().next().copied().unwrap_or(RuntimeValue::NIL)).unwrap_or(RuntimeValue::NIL)
 }
 
 /// Get the last (largest) key

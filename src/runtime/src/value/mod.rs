@@ -73,7 +73,9 @@ pub use collections::{
 };
 
 // Re-export dict FFI functions
-pub use dict::{rt_dict_clear, rt_dict_get, rt_dict_keys, rt_dict_len, rt_dict_new, rt_dict_remove, rt_dict_set, rt_dict_values};
+pub use dict::{
+    rt_dict_clear, rt_dict_get, rt_dict_keys, rt_dict_len, rt_dict_new, rt_dict_remove, rt_dict_set, rt_dict_values,
+};
 
 // Re-export high-performance collection FFI functions (Rust std::collections)
 pub use hpcollections::{
@@ -254,15 +256,31 @@ pub use ffi::{rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_set_debug_
 // Re-export file I/O FFI functions
 pub use ffi::{
     // Metadata
-    rt_file_exists, rt_file_stat,
+    rt_file_exists,
+    rt_file_stat,
     // File ops
-    rt_file_canonicalize, rt_file_read_text, rt_file_write_text, rt_file_copy, rt_file_remove, rt_file_rename,
+    rt_file_canonicalize,
+    rt_file_read_text,
+    rt_file_write_text,
+    rt_file_copy,
+    rt_file_remove,
+    rt_file_rename,
     // Directory ops
-    rt_dir_create, rt_dir_list, rt_dir_remove, rt_file_find, rt_dir_glob,
+    rt_dir_create,
+    rt_dir_list,
+    rt_dir_remove,
+    rt_file_find,
+    rt_dir_glob,
     // Descriptor ops
-    rt_file_open, rt_file_get_size, rt_file_close,
+    rt_file_open,
+    rt_file_get_size,
+    rt_file_close,
     // Path ops
-    rt_path_basename, rt_path_dirname, rt_path_ext, rt_path_absolute, rt_path_separator,
+    rt_path_basename,
+    rt_path_dirname,
+    rt_path_ext,
+    rt_path_absolute,
+    rt_path_separator,
 };
 
 // Re-export atomic operations FFI functions
@@ -710,13 +728,12 @@ pub use ffi::regex::{
 
 // Re-export sandbox FFI functions
 pub use ffi::sandbox::{
-    rt_sandbox_add_allowed_domain, rt_sandbox_add_blocked_domain, rt_sandbox_add_read_path,
-    rt_sandbox_add_write_path, rt_sandbox_apply, rt_sandbox_cleanup, rt_sandbox_disable_network,
-    rt_sandbox_get_cpu_time, rt_sandbox_get_fs_mode, rt_sandbox_get_memory, rt_sandbox_get_network_mode,
-    rt_sandbox_is_configured, rt_sandbox_reset, rt_sandbox_set_cpu_time, rt_sandbox_set_fd_limit,
-    rt_sandbox_set_fs_overlay, rt_sandbox_set_fs_readonly, rt_sandbox_set_fs_restricted,
-    rt_sandbox_set_memory, rt_sandbox_set_network_allowlist, rt_sandbox_set_network_blocklist,
-    rt_sandbox_set_thread_limit,
+    rt_sandbox_add_allowed_domain, rt_sandbox_add_blocked_domain, rt_sandbox_add_read_path, rt_sandbox_add_write_path,
+    rt_sandbox_apply, rt_sandbox_cleanup, rt_sandbox_disable_network, rt_sandbox_get_cpu_time, rt_sandbox_get_fs_mode,
+    rt_sandbox_get_memory, rt_sandbox_get_network_mode, rt_sandbox_is_configured, rt_sandbox_reset,
+    rt_sandbox_set_cpu_time, rt_sandbox_set_fd_limit, rt_sandbox_set_fs_overlay, rt_sandbox_set_fs_readonly,
+    rt_sandbox_set_fs_restricted, rt_sandbox_set_memory, rt_sandbox_set_network_allowlist,
+    rt_sandbox_set_network_blocklist, rt_sandbox_set_thread_limit,
 };
 
 // Re-export diagram FFI functions (for spec framework)

@@ -180,7 +180,12 @@ fn simple():
     let result = lower_with_warnings(source).expect("Should lower successfully");
 
     // Generate Lean 4 verification
-    let lean = crate::codegen::lean::generate_memory_safety_lean(&result.module, None, Some(&result.warnings));
+    let lean = crate::codegen::lean::generate_memory_safety_lean(
+        &result.module,
+        None,
+        Some(&result.warnings),
+        Some(result.lifetime_violation_count()),
+    );
 
     // Check basic structure
     assert!(lean.contains("namespace"), "Should have namespace");
@@ -201,7 +206,12 @@ fn has_var():
     let result = lower_with_warnings(source).expect("Should lower successfully");
 
     // Generate Lean 4 verification
-    let lean = crate::codegen::lean::generate_memory_safety_lean(&result.module, None, Some(&result.warnings));
+    let lean = crate::codegen::lean::generate_memory_safety_lean(
+        &result.module,
+        None,
+        Some(&result.warnings),
+        Some(result.lifetime_violation_count()),
+    );
 
     // Should still generate valid Lean code
     assert!(lean.contains("namespace"), "Should have namespace");
@@ -224,7 +234,10 @@ fn lower_strict(source: &str) -> Result<crate::hir::LoweringOutput, crate::hir::
 
 /// Helper to count warnings of a specific code
 fn count_warnings(result: &crate::hir::LoweringOutput, code_prefix: &str) -> usize {
-    result.warnings.warnings().iter()
+    result
+        .warnings
+        .warnings()
+        .iter()
         .filter(|w| w.code.to_string().starts_with(code_prefix))
         .count()
 }
@@ -263,7 +276,10 @@ fn test_immutable_shared():
 
     let result = lower_with_warnings(source).expect("Should lower successfully");
     // No memory warnings for proper immutable usage
-    assert!(!result.has_warnings(), "Immutable shared pointer should have no warnings");
+    assert!(
+        !result.has_warnings(),
+        "Immutable shared pointer should have no warnings"
+    );
 }
 
 #[test]
@@ -566,7 +582,11 @@ fn shared_aliasing():
 "#;
 
     let result = lower_with_warnings(source);
-    assert!(result.is_ok(), "Multiple shared references should be allowed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Multiple shared references should be allowed: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -585,7 +605,11 @@ fn test_mutation():
 "#;
 
     let result = lower_with_warnings(source);
-    assert!(result.is_ok(), "Mutable var should allow field mutation: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Mutable var should allow field mutation: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -609,7 +633,10 @@ fn test_immutable_mutation():
     if let Ok(ref output) = result {
         // Count W1006 warnings
         let w1006_count = count_warnings(output, "W1006");
-        assert!(w1006_count > 0, "Should have W1006 warning for mutation without capability");
+        assert!(
+            w1006_count > 0,
+            "Should have W1006 warning for mutation without capability"
+        );
     }
 }
 
@@ -646,7 +673,11 @@ fn test():
     let mut parser = simple_parser::Parser::new(source);
     let module = parser.parse().expect("parse failed");
     let result = Lowerer::with_lenient_mode().lower_module_with_warnings(&module);
-    assert!(result.is_ok(), "Lenient mode should compile with warnings: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Lenient mode should compile with warnings: {:?}",
+        result.err()
+    );
 }
 
 // ============================================================================
@@ -815,18 +846,19 @@ fn test_generic_pointer_type_preserves_capability_after_substitution() {
 
     let concrete = ast_type_to_concrete(&generic_borrow_mut, &bindings);
 
-    if let ConcreteType::Pointer { capability, kind, inner } = &concrete {
+    if let ConcreteType::Pointer {
+        capability,
+        kind,
+        inner,
+    } = &concrete
+    {
         assert_eq!(*kind, PointerKind::BorrowMut);
         assert_eq!(
             *capability,
             ReferenceCapability::Exclusive,
             "Generic &mut T should preserve Exclusive capability after substitution"
         );
-        assert_eq!(
-            **inner,
-            ConcreteType::Int,
-            "Inner type should be substituted to Int"
-        );
+        assert_eq!(**inner, ConcreteType::Int, "Inner type should be substituted to Int");
     } else {
         panic!("Expected Pointer type after substitution");
     }

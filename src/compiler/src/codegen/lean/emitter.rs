@@ -12,6 +12,17 @@ use super::functions::LeanFunction;
 use super::traits::{LeanBinding, LeanClass, LeanInstance};
 use super::types::LeanType;
 
+/// User-provided Lean 4 block (from lean{} syntax in Simple source)
+#[derive(Debug, Clone)]
+pub struct LeanUserBlock {
+    /// Optional import path for external Lean file
+    pub import_path: Option<String>,
+    /// Inline Lean 4 code
+    pub code: String,
+    /// Context where the block was defined (e.g., "module", "fn:factorial")
+    pub context: String,
+}
+
 /// A complete Lean module
 #[derive(Debug, Clone)]
 pub struct LeanModule {
@@ -33,6 +44,8 @@ pub struct LeanModule {
     pub instances: Vec<LeanInstance>,
     /// Interface bindings (static dispatch)
     pub bindings: Vec<LeanBinding>,
+    /// User-provided Lean blocks (from lean{} syntax)
+    pub user_blocks: Vec<LeanUserBlock>,
 }
 
 /// Lean code emitter
@@ -163,6 +176,30 @@ impl LeanEmitter {
     pub fn emit_binding_theorem(&mut self, binding: &LeanBinding) {
         self.output.push_str(&binding.to_validity_theorem());
         self.output.push('\n');
+    }
+
+    /// Emit a user-provided Lean block
+    pub fn emit_user_block(&mut self, block: &LeanUserBlock) {
+        // Emit context as a comment
+        self.emit_comment(&format!("User-provided Lean code (context: {})", block.context));
+
+        // Emit import if present
+        if let Some(ref import_path) = block.import_path {
+            // Convert path to Lean import format
+            let lean_import = import_path
+                .trim_end_matches(".lean")
+                .replace('/', ".");
+            self.emit_line(&format!("-- import «{}»", lean_import));
+        }
+
+        // Emit inline code if present
+        if !block.code.is_empty() {
+            // Emit code with proper indentation
+            for line in block.code.lines() {
+                self.emit_line(line);
+            }
+        }
+        self.emit_blank();
     }
 
     /// Emit a raw string
@@ -298,6 +335,15 @@ impl LeanEmitter {
             self.emit_comment("Theorems");
             for theorem in &module.theorems {
                 self.emit_theorem(theorem, use_sorry);
+            }
+            self.emit_blank();
+        }
+
+        // Emit user-provided Lean blocks (from lean{} syntax)
+        if !module.user_blocks.is_empty() {
+            self.emit_comment("User-provided Lean code");
+            for block in &module.user_blocks {
+                self.emit_user_block(block);
             }
         }
 
@@ -437,6 +483,7 @@ mod tests {
             classes: vec![],
             instances: vec![],
             bindings: vec![],
+            user_blocks: vec![],
         };
 
         let mut emitter = LeanEmitter::new();

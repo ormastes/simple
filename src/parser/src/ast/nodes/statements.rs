@@ -134,6 +134,19 @@ pub struct ContinueStmt {
     pub span: Span,
 }
 
+/// Assert statement for inline contract checks
+/// assert condition
+/// assert condition, "message"
+/// check condition  (alias for assert)
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssertStmt {
+    pub span: Span,
+    /// The boolean condition to check
+    pub condition: Expr,
+    /// Optional error message for assertion failure
+    pub message: Option<String>,
+}
+
 /// Context block for DSL support
 /// context expr:
 ///     statements
@@ -153,4 +166,21 @@ pub struct WithStmt {
     pub resource: Expr,       // The resource expression
     pub name: Option<String>, // Optional binding name (as name)
     pub body: Block,
+}
+
+/// Lean 4 block for embedding formal verification code
+///
+/// Supports three forms:
+/// 1. Inline: `lean { -- Lean 4 code }`
+/// 2. Import: `lean import "proofs/module.lean"`
+/// 3. Combined: `lean import "base.lean" { -- extensions }`
+///
+/// Lean files are generated beside Simple source files.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LeanBlock {
+    pub span: Span,
+    /// Optional import path (relative to source file or absolute from project root)
+    pub import_path: Option<String>,
+    /// Inline Lean 4 code (may be empty if import-only)
+    pub code: String,
 }

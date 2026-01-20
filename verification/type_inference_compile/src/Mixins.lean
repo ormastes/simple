@@ -204,26 +204,67 @@ def inferMixinTypeArgs (mixin : MixinDef) (targetType : Ty) (context : List (Str
 -- ===== Theorems =====
 
 -- Theorem: Mixin instantiation with correct type arguments preserves well-formedness
-axiom instantiation_preserves_wellformedness (mixin : MixinDef) (typeArgs : List Ty) :
+theorem instantiation_preserves_wellformedness (mixin : MixinDef) (typeArgs : List Ty) :
   mixin.type_params.length = typeArgs.length →
-  instantiateMixin mixin typeArgs ≠ none
+  instantiateMixin mixin typeArgs ≠ none := by
+  intro h_len
+  unfold instantiateMixin
+  simp [h_len]
 
 -- Theorem: Field merging is commutative when no conflicts exist
 axiom field_merge_commutative (fields1 fields2 : List FieldDef) (overrides : List (String × Ty)) :
   mergeFields fields1 fields2 overrides = mergeFields fields2 fields1 overrides
 
 -- Theorem: Method merging preserves class method priority
-axiom method_merge_priority (classMethods mixinMethods : List MethodDef) (overrides : List (String × MethodDef)) (methodName : String) :
+theorem method_merge_priority (classMethods mixinMethods : List MethodDef) (overrides : List (String × MethodDef)) (methodName : String) :
   (∃ m, m ∈ classMethods ∧ m.name = methodName) →
-  (∃ m, m ∈ mergeMethods classMethods mixinMethods overrides ∧ m.name = methodName ∧ m ∈ classMethods)
+  (∃ m, m ∈ mergeMethods classMethods mixinMethods overrides ∧ m.name = methodName ∧ m ∈ classMethods) := by
+  intro ⟨m, h_mem, h_name⟩
+  refine ⟨m, ?_, h_name, h_mem⟩
+  -- m is in classMethods, and mergeMethods returns classMethods ++ newMethods
+  unfold mergeMethods
+  simp only [List.mem_append]
+  left
+  exact h_mem
 
 -- Theorem: Applying a valid mixin preserves class structure
-axiom mixin_application_sound (env : MixinEnv) (traitEnv : TraitEnv) (registry : ImplRegistry)
+theorem mixin_application_sound (env : MixinEnv) (traitEnv : TraitEnv) (registry : ImplRegistry)
     (cls : ClassDef) (mixinRef : MixinRef) (applied : List String) (cls' : ClassDef) :
   applyMixinToClass env traitEnv registry cls mixinRef applied = some cls' →
-  cls'.name = cls.name ∧ cls'.type_params = cls.type_params
+  cls'.name = cls.name ∧ cls'.type_params = cls.type_params := by
+  intro h
+  unfold applyMixinToClass at h
+  -- Case analysis on lookupMixin
+  cases h_lookup : lookupMixin env mixinRef.mixin_name with
+  | none => simp [h_lookup] at h
+  | some mixin =>
+    simp only [h_lookup] at h
+    -- Case analysis on instantiateMixin
+    cases h_inst : instantiateMixin mixin mixinRef.type_args with
+    | none => simp [h_inst] at h
+    | some instantiated =>
+      simp only [h_inst] at h
+      -- Now we have a series of if-then-else branches
+      split at h
+      · simp at h
+      · split at h
+        · simp at h
+        · split at h
+          · simp at h
+          · -- Now case analysis on mergeFields
+            cases h_merge : mergeFields cls.fields instantiated.fields mixinRef.field_overrides with
+            | none => simp [h_merge] at h
+            | some merged =>
+              simp only [h_merge] at h
+              cases h
+              constructor <;> rfl
 
 -- Theorem: Coherence prevents duplicate mixin applications
+-- Proof intuition: checkMixinCoherence ensures all mixin_names are distinct.
+-- If r1 and r2 both have mixin_name = name, and names are distinct in the list,
+-- then r1 and r2 must be the same element (by contrapositive of distinctness).
+-- Axiomatized: full proof requires detailed list index/position reasoning
+-- showing that map preserves indices and nodup implies injective indices.
 axiom coherence_no_duplicates (mixinRefs : List MixinRef) (name : String) (r1 r2 : MixinRef) :
   checkMixinCoherence mixinRefs = true →
   r1 ∈ mixinRefs →
@@ -233,17 +274,23 @@ axiom coherence_no_duplicates (mixinRefs : List MixinRef) (name : String) (r1 r2
   r1 = r2
 
 -- Theorem: Required method checking is complete
-axiom required_methods_complete (classMethods : List MethodDef) (required : List MethodDef) 
+-- Note: The theorem statement assumes override tuple name matches method name,
+-- which is a well-formedness invariant on overrides.
+axiom required_methods_complete (classMethods : List MethodDef) (required : List MethodDef)
     (overrides : List (String × MethodDef)) :
   checkRequiredMethods classMethods required overrides = true →
   ∀ req, req ∈ required → ∃ m, (m ∈ classMethods ∨ ∃ n m', (n, m') ∈ overrides ∧ n = req.name ∧ m' = m) ∧
     m.name = req.name ∧ m.params = req.params ∧ m.ret = req.ret
 
 -- Theorem: Trait requirements are sound
-axiom mixin_trait_requirements_sound (traitEnv : TraitEnv) (registry : ImplRegistry) 
+theorem mixin_trait_requirements_sound (traitEnv : TraitEnv) (registry : ImplRegistry)
     (mixin : MixinDef) (targetType : Ty) :
   checkMixinTraitRequirements traitEnv registry mixin targetType = true →
-  ∀ traitName, traitName ∈ mixin.required_traits → implementsTrait registry targetType traitName = true
+  ∀ traitName, traitName ∈ mixin.required_traits → implementsTrait registry targetType traitName = true := by
+  intro h_check traitName h_mem
+  unfold checkMixinTraitRequirements at h_check
+  rw [List.all_eq_true] at h_check
+  exact h_check traitName h_mem
 
 -- Theorem: Field access after mixin application includes mixin fields
 axiom mixin_field_access (env : ClassEnv) (cls cls' : ClassDef) (mixinFields : List FieldDef) (fieldName : String) :
@@ -258,6 +305,8 @@ axiom mixin_method_dispatch (env : ClassEnv) (cls cls' : ClassDef) (mixinMethods
   ∃ argTys, inferMethodCallWithMixins env (Ty.named cls'.name) methodName argTys ≠ none
 
 -- Theorem: Type substitution in mixins is consistent
-axiom mixin_substitution_consistent (mixin : MixinDef) (typeArgs : List Ty) (subst : Subst) :
+theorem mixin_substitution_consistent (mixin : MixinDef) (typeArgs : List Ty) (subst : Subst) :
   mixin.type_params.length = typeArgs.length →
-  ∀ f, f ∈ mixin.fields → applySubst subst f.ty = applySubst subst f.ty
+  ∀ f, f ∈ mixin.fields → applySubst subst f.ty = applySubst subst f.ty := by
+  intro _ _ _
+  rfl

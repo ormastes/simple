@@ -32,3 +32,5 @@ lean_lib MixinVerificationGenerated
 lean_lib StaticPolymorphism
 
 lean_lib StaticPolymorphismTest
+
+lean_lib UnificationDecidability

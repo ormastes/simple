@@ -2,7 +2,7 @@ use simple_parser::{self as ast, Module, Node};
 
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
-use crate::hir::types::{HirAopAdvice, HirArchRule, HirDiBinding, HirMockDecl, HirModule, HirType, TypeId};
+use crate::hir::types::{HirAopAdvice, HirArchRule, HirDiBinding, HirLeanBlock, HirMockDecl, HirModule, HirType, TypeId};
 
 impl Lowerer {
     /// Helper: Register type and function declarations from an AST node
@@ -57,6 +57,32 @@ impl Lowerer {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Lower Lean 4 blocks from AST to HIR.
+    ///
+    /// This collects all lean blocks (inline code and imports) for later
+    /// emission during Lean code generation.
+    fn lower_lean_blocks(&mut self, ast_module: &Module) {
+        let module_name = ast_module.name.clone().unwrap_or_else(|| "module".to_string());
+
+        for item in &ast_module.items {
+            if let Node::LeanBlock(lean_block) = item {
+                let context = module_name.clone();
+
+                let hir_lean_block = if let Some(ref import_path) = lean_block.import_path {
+                    if lean_block.code.is_empty() {
+                        HirLeanBlock::import(import_path.clone(), context)
+                    } else {
+                        HirLeanBlock::import_with_code(import_path.clone(), lean_block.code.clone(), context)
+                    }
+                } else {
+                    HirLeanBlock::inline(lean_block.code.clone(), context)
+                };
+
+                self.module.lean_blocks.push(hir_lean_block);
+            }
+        }
     }
 
     /// Lower AOP constructs (advice, DI bindings, architecture rules, mocks) from AST to HIR.
@@ -153,6 +179,7 @@ impl Lowerer {
                 | Node::Loop(_)
                 | Node::Break(_)
                 | Node::Continue(_)
+                | Node::Assert(_)
                 | Node::Context(_)
                 | Node::With(_)
                 | Node::Expression(_) => {}
@@ -167,7 +194,8 @@ impl Lowerer {
                 | Node::AopAdvice(_)
                 | Node::DiBinding(_)
                 | Node::ArchitectureRule(_)
-                | Node::MockDecl(_) => {}
+                | Node::MockDecl(_)
+                | Node::LeanBlock(_) => {}
             }
         }
 
@@ -220,6 +248,9 @@ impl Lowerer {
         // Third pass: lower AOP constructs (#1000-1050)
         self.lower_aop_constructs(ast_module)?;
 
+        // New pass: collect Lean 4 blocks for verification
+        self.lower_lean_blocks(ast_module);
+
         // Fourth pass: lower import statements for dependency tracking AND load types
         for item in &ast_module.items {
             if let Node::UseStmt(use_stmt) = item {
@@ -258,8 +289,16 @@ impl Lowerer {
                 message: format!(
                     "{}{}{}",
                     first_warning.code.description(),
-                    first_warning.name.as_ref().map(|n| format!(" ({})", n)).unwrap_or_default(),
-                    first_warning.context.as_ref().map(|c| format!(": {}", c)).unwrap_or_default()
+                    first_warning
+                        .name
+                        .as_ref()
+                        .map(|n| format!(" ({})", n))
+                        .unwrap_or_default(),
+                    first_warning
+                        .context
+                        .as_ref()
+                        .map(|c| format!(": {}", c))
+                        .unwrap_or_default()
                 ),
                 span: first_warning.span,
                 all_warnings: std::mem::take(&mut self.memory_warnings),
@@ -323,6 +362,9 @@ impl Lowerer {
         // Third pass: lower AOP constructs
         self.lower_aop_constructs(ast_module)?;
 
+        // Lean pass: collect Lean 4 blocks for verification
+        self.lower_lean_blocks(ast_module);
+
         // Fourth pass: lower imports
         for item in &ast_module.items {
             if let Node::UseStmt(use_stmt) = item {
@@ -368,8 +410,16 @@ impl Lowerer {
                 message: format!(
                     "{}{}{}",
                     first_warning.code.description(),
-                    first_warning.name.as_ref().map(|n| format!(" ({})", n)).unwrap_or_default(),
-                    first_warning.context.as_ref().map(|c| format!(": {}", c)).unwrap_or_default()
+                    first_warning
+                        .name
+                        .as_ref()
+                        .map(|n| format!(" ({})", n))
+                        .unwrap_or_default(),
+                    first_warning
+                        .context
+                        .as_ref()
+                        .map(|c| format!(": {}", c))
+                        .unwrap_or_default()
                 ),
                 span: first_warning.span,
                 all_warnings: warnings,
