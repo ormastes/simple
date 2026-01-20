@@ -14,6 +14,55 @@ use std::collections::HashMap;
 type Enums = HashMap<String, EnumDef>;
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
+/// Execute a function body with bound arguments in a local environment.
+///
+/// This helper consolidates the common pattern of:
+/// 1. Inserting bound arguments into local environment
+/// 2. Executing the function body
+/// 3. Validating the return type
+/// 4. Wrapping in Promise if async
+fn execute_function_body(
+    func: &FunctionDef,
+    bound_args: HashMap<String, Value>,
+    local_env: &mut Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    wrap_async: bool,
+) -> Result<Value, CompileError> {
+    // Insert bound arguments into environment
+    for (name, val) in bound_args {
+        local_env.insert(name, val);
+    }
+
+    // Execute function body
+    let result = extract_block_result!(exec_block_fn(
+        &func.body,
+        local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods
+    ));
+
+    // Validate return type
+    validate_unit!(
+        &result,
+        func.return_type.as_ref(),
+        format!("return type mismatch in '{}'", func.name)
+    );
+
+    // Wrap in Promise if async and requested
+    let result = if wrap_async && is_async_function(func) {
+        wrap_in_promise(result)
+    } else {
+        result
+    };
+
+    Ok(result)
+}
+
 pub(crate) fn exec_function(
     func: &FunctionDef,
     args: &[Argument],
@@ -91,25 +140,8 @@ pub(crate) fn exec_function_with_values_and_self(
             impl_methods,
             self_mode,
         )?;
-        for (name, val) in bound {
-            local_env.insert(name, val);
-        }
 
-        let result = extract_block_result!(exec_block_fn(
-            &func.body,
-            &mut local_env,
-            functions,
-            classes,
-            enums,
-            impl_methods
-        ));
-        validate_unit!(
-            &result,
-            func.return_type.as_ref(),
-            format!("return type mismatch in '{}'", func.name)
-        );
-
-        Ok(result)
+        execute_function_body(func, bound, &mut local_env, functions, classes, enums, impl_methods, false)
     })
 }
 
@@ -137,25 +169,8 @@ pub(crate) fn exec_function_with_captured_env(
             impl_methods,
             self_mode,
         )?;
-        for (name, value) in bound_args {
-            local_env.insert(name, value);
-        }
 
-        let result = extract_block_result!(exec_block_fn(
-            &func.body,
-            &mut local_env,
-            functions,
-            classes,
-            enums,
-            impl_methods
-        ));
-        validate_unit!(
-            &result,
-            func.return_type.as_ref(),
-            format!("return type mismatch in '{}'", func.name)
-        );
-
-        Ok(result)
+        execute_function_body(func, bound_args, &mut local_env, functions, classes, enums, impl_methods, false)
     })
 }
 
@@ -222,34 +237,11 @@ fn exec_function_inner(
         impl_methods,
         self_mode,
     )?;
-    for (name, val) in bound {
-        local_env.insert(name, val);
-    }
-    let result = extract_block_result!(exec_block_fn(
-        &func.body,
-        &mut local_env,
-        functions,
-        classes,
-        enums,
-        impl_methods
-    ));
-    validate_unit!(
-        &result,
-        func.return_type.as_ref(),
-        format!("return type mismatch in '{}'", func.name)
-    );
 
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
 
-    // Wrap result in Promise for async functions (async fn returns Promise<T>)
-    let result = if is_async_function(func) {
-        wrap_in_promise(result)
-    } else {
-        result
-    };
-
-    Ok(result)
+    execute_function_body(func, bound, &mut local_env, functions, classes, enums, impl_methods, true)
 }
 
 fn exec_function_with_values_inner(
@@ -286,32 +278,9 @@ fn exec_function_with_values_inner(
         impl_methods,
         self_mode,
     )?;
-    for (name, val) in bound {
-        local_env.insert(name, val);
-    }
-    let result = extract_block_result!(exec_block_fn(
-        &func.body,
-        &mut local_env,
-        functions,
-        classes,
-        enums,
-        impl_methods
-    ));
-    validate_unit!(
-        &result,
-        func.return_type.as_ref(),
-        format!("return type mismatch in '{}'", func.name)
-    );
 
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
 
-    // Wrap result in Promise for async functions (async fn returns Promise<T>)
-    let result = if is_async_function(func) {
-        wrap_in_promise(result)
-    } else {
-        result
-    };
-
-    Ok(result)
+    execute_function_body(func, bound, &mut local_env, functions, classes, enums, impl_methods, true)
 }
