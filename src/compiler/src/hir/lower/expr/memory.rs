@@ -14,7 +14,10 @@ impl Lowerer {
     ///
     /// Creates a heap-allocated value and returns a pointer to it.
     /// Pointer kind can be: owned, borrowed, or mutable borrowed.
-    /// Default capability is Shared.
+    /// Capability is determined by pointer kind:
+    /// - Unique (&T) → Isolated (sole owner, transferable)
+    /// - Shared (*T) → Shared (reference counted)
+    /// - BorrowMut (&mut T) → Exclusive (mutable borrow)
     pub(super) fn lower_new(
         &mut self,
         kind: &ast::PointerKind,
@@ -24,9 +27,15 @@ impl Lowerer {
         let value_hir = Box::new(self.lower_expr(expr, ctx)?);
         let inner_ty = value_hir.ty;
         let ptr_kind: PointerKind = (*kind).into();
+        // Determine capability based on pointer kind
+        let capability = match ptr_kind {
+            PointerKind::Unique => ReferenceCapability::Isolated, // Sole owner
+            PointerKind::BorrowMut | PointerKind::RawMut => ReferenceCapability::Exclusive, // Mutable
+            _ => ReferenceCapability::Shared, // Shared, Borrow, Weak, Handle, RawConst
+        };
         let ptr_type = HirType::Pointer {
             kind: ptr_kind,
-            capability: ReferenceCapability::Shared, // Default capability
+            capability,
             inner: inner_ty,
         };
         let ptr_ty = self.module.types.register(ptr_type);

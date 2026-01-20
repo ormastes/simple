@@ -78,9 +78,15 @@ impl Lowerer {
                 } else {
                     PointerKind::Borrow
                 };
+                // RefMut (&mut) requires Exclusive capability, Ref (&) uses Shared
+                let capability = if *op == ast::UnaryOp::RefMut {
+                    ReferenceCapability::Exclusive
+                } else {
+                    ReferenceCapability::Shared
+                };
                 let ptr_type = HirType::Pointer {
                     kind,
-                    capability: ReferenceCapability::Shared, // Default capability
+                    capability,
                     inner: operand_hir.ty,
                 };
                 self.module.types.register(ptr_type)

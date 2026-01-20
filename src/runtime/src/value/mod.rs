@@ -708,6 +708,17 @@ pub use ffi::regex::{
     ffi_regex_replace_all, ffi_regex_split, ffi_regex_split_n,
 };
 
+// Re-export sandbox FFI functions
+pub use ffi::sandbox::{
+    rt_sandbox_add_allowed_domain, rt_sandbox_add_blocked_domain, rt_sandbox_add_read_path,
+    rt_sandbox_add_write_path, rt_sandbox_apply, rt_sandbox_cleanup, rt_sandbox_disable_network,
+    rt_sandbox_get_cpu_time, rt_sandbox_get_fs_mode, rt_sandbox_get_memory, rt_sandbox_get_network_mode,
+    rt_sandbox_is_configured, rt_sandbox_reset, rt_sandbox_set_cpu_time, rt_sandbox_set_fd_limit,
+    rt_sandbox_set_fs_overlay, rt_sandbox_set_fs_readonly, rt_sandbox_set_fs_restricted,
+    rt_sandbox_set_memory, rt_sandbox_set_network_allowlist, rt_sandbox_set_network_blocklist,
+    rt_sandbox_set_thread_limit,
+};
+
 // Re-export diagram FFI functions (for spec framework)
 pub use diagram_ffi::{
     rt_diagram_clear, rt_diagram_disable, rt_diagram_enable, rt_diagram_free_string, rt_diagram_generate_arch,
