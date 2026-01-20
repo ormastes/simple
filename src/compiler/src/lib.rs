@@ -21,6 +21,7 @@ pub mod effects;
 pub mod effects_cache;
 pub mod elf_utils;
 pub mod error;
+pub mod ffi_bridge;
 pub mod error_explanations;
 pub mod formatter;
 pub mod hir;

@@ -244,3 +244,82 @@ pub extern "C" fn rt_dict_keys(dict: RuntimeValue) -> RuntimeValue {
 pub extern "C" fn rt_dict_values(dict: RuntimeValue) -> RuntimeValue {
     dict_collect(dict, |data_ptr, i| unsafe { *data_ptr.add(i * 2 + 1) })
 }
+
+/// Remove a key from a dictionary and return its value
+#[no_mangle]
+pub extern "C" fn rt_dict_remove(dict: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
+    if !dict.is_heap() || key.is_nil() {
+        return RuntimeValue::NIL;
+    }
+    let ptr = dict.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Dict {
+            return RuntimeValue::NIL;
+        }
+        let d = ptr as *mut RuntimeDict;
+        let capacity = (*d).capacity;
+        if capacity == 0 {
+            return RuntimeValue::NIL;
+        }
+
+        let hash = hash_value(key);
+        let data_ptr = (d.add(1)) as *mut RuntimeValue;
+
+        // Find the key using linear probing
+        for i in 0..capacity {
+            let idx = ((hash + i) % capacity) as usize;
+            let k = *data_ptr.add(idx * 2);
+            if k.is_nil() {
+                // Key not found
+                return RuntimeValue::NIL;
+            }
+            if keys_equal(k, key) {
+                // Found the key - get the value to return
+                let value = *data_ptr.add(idx * 2 + 1);
+
+                // Mark this slot as empty
+                *data_ptr.add(idx * 2) = RuntimeValue::NIL;
+                *data_ptr.add(idx * 2 + 1) = RuntimeValue::NIL;
+                (*d).len -= 1;
+
+                // Rehash all subsequent entries in the probe chain
+                // This maintains the correctness of linear probing
+                let mut current_idx = idx;
+                loop {
+                    // Move to next slot
+                    current_idx = ((current_idx as u64 + 1) % capacity) as usize;
+
+                    let rehash_key = *data_ptr.add(current_idx * 2);
+
+                    // Stop when we hit an empty slot (end of probe chain)
+                    if rehash_key.is_nil() {
+                        break;
+                    }
+
+                    let rehash_value = *data_ptr.add(current_idx * 2 + 1);
+
+                    // Remove this entry temporarily
+                    *data_ptr.add(current_idx * 2) = RuntimeValue::NIL;
+                    *data_ptr.add(current_idx * 2 + 1) = RuntimeValue::NIL;
+                    (*d).len -= 1;
+
+                    // Re-insert it (will find correct position via linear probing)
+                    let rehash_hash = hash_value(rehash_key);
+                    for probe in 0..capacity {
+                        let probe_idx = ((rehash_hash + probe) % capacity) as usize;
+                        let probe_key = *data_ptr.add(probe_idx * 2);
+                        if probe_key.is_nil() {
+                            *data_ptr.add(probe_idx * 2) = rehash_key;
+                            *data_ptr.add(probe_idx * 2 + 1) = rehash_value;
+                            (*d).len += 1;
+                            break;
+                        }
+                    }
+                }
+
+                return value;
+            }
+        }
+        RuntimeValue::NIL
+    }
+}

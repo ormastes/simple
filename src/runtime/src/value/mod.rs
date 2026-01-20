@@ -73,7 +73,7 @@ pub use collections::{
 };
 
 // Re-export dict FFI functions
-pub use dict::{rt_dict_clear, rt_dict_get, rt_dict_keys, rt_dict_len, rt_dict_new, rt_dict_set, rt_dict_values};
+pub use dict::{rt_dict_clear, rt_dict_get, rt_dict_keys, rt_dict_len, rt_dict_new, rt_dict_remove, rt_dict_set, rt_dict_values};
 
 // Re-export high-performance collection FFI functions (Rust std::collections)
 pub use hpcollections::{

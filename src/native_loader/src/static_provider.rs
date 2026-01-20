@@ -39,7 +39,7 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
     fn get_symbol(&self, name: &str) -> Option<*const u8> {
         use simple_runtime::value::{
             rt_array_clear, rt_capture_stderr_start, rt_capture_stdout_start, rt_condition_probe, rt_contains,
-            rt_decision_probe, rt_dict_clear, rt_dict_keys, rt_dict_values, rt_env_all, rt_env_cwd, rt_env_exists,
+            rt_decision_probe, rt_dict_clear, rt_dict_keys, rt_dict_remove, rt_dict_values, rt_env_all, rt_env_cwd, rt_env_exists,
             rt_env_get, rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_eprint_str,
             rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_exit, rt_function_not_found, rt_get_env,
             rt_interp_call, rt_interp_eval, rt_is_debug_mode_enabled, rt_is_macro_trace_enabled,
@@ -93,6 +93,10 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_sandbox_cleanup, rt_sandbox_is_configured, rt_sandbox_get_cpu_time,
             rt_sandbox_get_memory, rt_sandbox_get_network_mode, rt_sandbox_get_fs_mode,
         };
+        // Parser and compiler operations
+        use simple_compiler::ffi_bridge::{
+            rt_parse_simple_file, rt_api_surface_extract, rt_symbol_usage_find,
+        };
         use simple_runtime::*;
 
         match_runtime_symbol!(
@@ -120,6 +124,7 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_dict_len,
             rt_dict_clear,
             rt_dict_keys,
+            rt_dict_remove,
             rt_dict_values,
             // Index/slice operations
             rt_index_get,
@@ -340,6 +345,10 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
             rt_sandbox_get_memory,
             rt_sandbox_get_network_mode,
             rt_sandbox_get_fs_mode,
+            // Parser and compiler operations
+            rt_parse_simple_file,
+            rt_api_surface_extract,
+            rt_symbol_usage_find,
         )
     }
 
