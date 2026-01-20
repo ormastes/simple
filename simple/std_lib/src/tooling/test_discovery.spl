@@ -1,0 +1,241 @@
+# Test discovery and tag matching
+# Migrated from: src/driver/src/cli/test_discovery.rs
+# Purpose: Discover test files and handle tag filtering
+
+import test_args::TestLevel
+
+# Discover test files in a directory
+fn discover_tests(dir: text, level: TestLevel) -> List<text>:
+    var tests = []
+
+    if not is_directory(dir):
+        if is_test_file(dir):
+            tests.push(dir)
+        return tests
+
+    # Walk directory recursively
+    val entries = read_directory(dir)
+    for entry in entries:
+        if is_directory(entry):
+            val dir_name = get_dir_name(entry)
+
+            # Filter by test level based on directory name
+            val should_include = match level:
+                TestLevel::All => true
+                TestLevel::Unit => dir_name == "unit" or not ["integration", "system"].contains(dir_name)
+                TestLevel::Integration => dir_name == "integration"
+                TestLevel::System => dir_name == "system"
+
+            if should_include:
+                tests = tests.merge(discover_tests(entry, level))
+
+        elif is_test_file(entry):
+            tests.push(entry)
+
+    tests.sort()
+    tests
+
+# Check if a file is a test file
+fn is_test_file(path: text) -> bool:
+    val name = get_filename(path)
+    val is_simple_ext = name.ends_with(".spl") or name.ends_with(".simple") or name.ends_with(".sscript")
+    val is_test = name.contains("_spec.") or name.contains("_test.")
+    is_simple_ext and is_test
+
+# Extract tags from a test file
+#
+# Tags can be specified in the file using:
+# - `#[tag("name")]` decorator
+# - `@tag name` comment
+# - `#tag: name` comment
+# - `@name` shorthand for common tags (gui, slow, skip, wip)
+#
+# Also checks:
+# - File name tags (e.g., `slow_spec.spl` matches tag "slow")
+# - `__init__.spl` in parent directories for inherited tags
+fn extract_tags(path: text) -> List<text>:
+    var tags = []
+
+    # Check file name for tag patterns
+    val name = get_filename(path)
+    val stem = name
+        .trim_end(".spl")
+        .trim_end("_spec")
+        .trim_end("_test")
+
+    if stem.len() > 0:
+        # Split by underscore and take potential tag prefixes
+        for part in stem.split("_"):
+            if part.len() > 0:
+                tags.push(part.to_lowercase())
+
+    # Check __init__.spl in parent directories for inherited tags
+    val parent = get_parent_dir(path)
+    if parent.len() > 0:
+        tags = tags.merge(extract_directory_tags(parent))
+
+    # Try to read file content for tag decorators/comments
+    match read_file_content(path):
+        Ok(content) =>
+            tags = tags.merge(extract_tags_from_content(content))
+        Err(_) =>
+            {}
+
+    # Deduplicate
+    tags.sort()
+    tags.dedup()
+    tags
+
+# Known shorthand tags that can be used with @name syntax
+val SHORTHAND_TAGS = ["gui", "slow", "skip", "wip", "fast", "flaky", "screenshot"]
+
+# Extract tags from file content
+fn extract_tags_from_content(content: text) -> List<text>:
+    var tags = []
+
+    for line in content.lines():
+        val trimmed = line.trim()
+
+        # Match #[tag("name")]
+        if trimmed.starts_with("#[tag(\""):
+            val rest = trimmed.trim_start("#[tag(\"")
+            if rest.contains("\")]"):
+                val end_idx = rest.find("\")]")
+                val tag = rest.substring(0, end_idx)
+                tags.push(tag.to_lowercase())
+
+        # Match @tag name (in comments like # @tag slow)
+        if trimmed.contains("@tag "):
+            val idx = trimmed.find("@tag ")
+            val after = trimmed.substring(idx + 5, trimmed.len())
+            var tag = ""
+            for ch in after.chars():
+                if ch.is_alphanumeric() or ch == "_":
+                    tag = tag + ch
+                else:
+                    break
+            if tag.len() > 0:
+                tags.push(tag.to_lowercase())
+
+        # Match @name shorthand for known tags (e.g., # @gui, # @slow)
+        for shorthand in SHORTHAND_TAGS:
+            val pattern = "@{shorthand}"
+            if trimmed.contains(pattern):
+                # Make sure it's not part of a longer word
+                val idx = trimmed.find(pattern)
+                val after_idx = idx + pattern.len()
+                val is_end = after_idx >= trimmed.len()
+                val is_word_boundary = if is_end:
+                    true
+                else:
+                    val next_ch = trimmed.chars()[after_idx]
+                    not (next_ch.is_alphanumeric() or next_ch == "_")
+
+                if is_word_boundary:
+                    tags.push(shorthand)
+
+        # Match #tag: name
+        if trimmed.starts_with("#tag:"):
+            val rest = trimmed.trim_start("#tag:").trim()
+            var tag = ""
+            for ch in rest.chars():
+                if ch.is_alphanumeric() or ch == "_":
+                    tag = tag + ch
+                else:
+                    break
+            if tag.len() > 0:
+                tags.push(tag.to_lowercase())
+
+    tags
+
+# Extract directory-level tags from __init__.spl files
+# Walks up the directory tree to collect inherited tags
+fn extract_directory_tags(dir: text) -> List<text>:
+    var tags = []
+    var current = Some(dir)
+
+    while current.is_some():
+        val path = current.unwrap()
+        val init_file = join_path(path, "__init__.spl")
+
+        if file_exists(init_file):
+            match read_file_content(init_file):
+                Ok(content) =>
+                    tags = tags.merge(extract_tags_from_content(content))
+                Err(_) =>
+                    {}
+
+        current = get_parent_dir_option(path)
+
+    tags
+
+# Check if a test has the @gui tag
+fn is_gui_test(path: text) -> bool:
+    val tags = extract_tags(path)
+    tags.contains("gui") or tags.contains("screenshot")
+
+# Check if a file matches the tag filter
+#
+# Returns true if:
+# - No tag filter is specified (tag is None)
+# - The file's tags contain the filter tag
+fn matches_tag(path: text, tag_filter: Option<text>) -> bool:
+    match tag_filter:
+        None => true
+        Some(filter) =>
+            val filter_lower = filter.to_lowercase()
+            val tags = extract_tags(path)
+            tags.iter().any(\t: t == filter_lower)
+
+
+# ===================================================================
+# Stub functions - These need actual implementations or FFI bindings
+# ===================================================================
+
+fn is_directory(path: text) -> bool:
+    # Stub: would check if path is a directory
+    not path.contains(".")
+
+fn read_directory(path: text) -> List<text>:
+    # Stub: would read directory entries
+    []
+
+fn get_dir_name(path: text) -> text:
+    # Stub: would extract directory name from path
+    val parts = path.split("/")
+    if parts.len() > 0:
+        parts[parts.len() - 1]
+    else:
+        ""
+
+fn get_filename(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() > 0:
+        parts[parts.len() - 1]
+    else:
+        path
+
+fn get_parent_dir(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() > 1:
+        parts[0..parts.len()-1].join("/")
+    else:
+        ""
+
+fn get_parent_dir_option(path: text) -> Option<text>:
+    val parent = get_parent_dir(path)
+    if parent.len() > 0:
+        Some(parent)
+    else:
+        None
+
+fn read_file_content(path: text) -> Result<text, text>:
+    # Stub: would read file content
+    Err("File I/O not yet implemented")
+
+fn file_exists(path: text) -> bool:
+    # Stub: would check if file exists
+    false
+
+fn join_path(dir: text, file: text) -> text:
+    "{dir}/{file}"
