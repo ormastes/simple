@@ -693,6 +693,7 @@ impl LintChecker {
             match pattern {
                 Pattern::Identifier(name) => Some(name),
                 Pattern::MutIdentifier(name) => Some(name),
+                Pattern::MoveIdentifier(name) => Some(name),
                 _ => None,
             }
         }

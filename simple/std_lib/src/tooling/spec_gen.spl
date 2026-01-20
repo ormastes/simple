@@ -240,8 +240,7 @@ fn scan_code_for_symbols(code: text) -> List<text>:
             val method_name = caps[1]
             if not symbols.contains(method_name):
                 symbols.push(method_name)
-                    None: pass
-            None: pass
+        j = j + 1
 
     # Find type usage: Type::variant or Type.method
     val type_refs = find_all(r"\b([A-Z][a-zA-Z0-9_]*)::", code)
@@ -377,12 +376,9 @@ fn generate_markdown(spec: SpecFile, current_time: text) -> text:
 # Helper: Extract title from header docstring or generate from filename
 fn extract_title_or_default(header: text, path: text) -> text:
     # Try to extract title from header: # Title
-    match regex_captures(r"^#\s+(.+)", header):
-        Some(caps):
-            match caps.groups[0]:
-                Some(title): return title.trim()
-                None: pass
-        None: pass
+    val title_caps = captures(r"^#\s+(.+)", header)
+    if title_caps.len() > 1:
+        return title_caps[1].trim()
 
     # Fallback: generate from filename
     val parts = path.split("/")
@@ -417,16 +413,38 @@ fn write_markdown_file(markdown: text, output_path: text) -> Result<(), text>:
         Ok(_): Ok(())
         Err(e): Err("Failed to write markdown: {e}")
 
-# TODO: [stdlib][P1] Add glob/directory listing
 # Generate markdown for all _spec.spl files in directory
 fn generate_all(specs_dir: text, output_dir: text) -> Result<(u64, u64), text>:
-    # Stub: Needs directory listing and file operations
-    # Would:
-    # 1. List all *_spec.spl files in specs_dir
-    # 2. For each file: parse_spec_file() and generate_markdown()
-    # 3. Write to output_dir
-    # 4. Return (success_count, total_count)
-    Err("batch processing not yet implemented")
+    var success_count: u64 = 0
+    var total_count: u64 = 0
+
+    # List all files in directory
+    match list_dir(specs_dir):
+        Ok(files):
+            for file in files:
+                # Only process _spec.spl files
+                if file.ends_with("_spec.spl"):
+                    total_count = total_count + 1
+                    val input_path = "{specs_dir}/{file}"
+                    val output_file = file.replace("_spec.spl", "_spec.md")
+                    val output_path = "{output_dir}/{output_file}"
+
+                    # Parse and generate
+                    match parse_spec_file(input_path):
+                        Ok(spec):
+                            val md = generate_markdown(spec, current_timestamp_string())
+                            match write_markdown_file(md, output_path):
+                                Ok(_):
+                                    success_count = success_count + 1
+                                    print "Generated: {output_path}"
+                                Err(e):
+                                    print "Error writing {output_path}: {e}"
+                        Err(e):
+                            print "Error parsing {input_path}: {e}"
+
+            Ok((success_count, total_count))
+        Err(e):
+            Err("Failed to list directory: {e}")
 
 # Statistics about spec generation
 struct SpecStats:
@@ -466,13 +484,76 @@ impl SpecStats:
         report = report + "  Total Tests: {self.total_tests}\n"
         report
 
-# TODO: [stdlib][P1] Add command-line argument parsing
-# Main entry point (would be called from CLI)
+# Main entry point
 fn main_spec_gen(args: List<text>) -> Result<(), text>:
-    # Stub: Needs argument parsing, file I/O, etc.
-    # Would handle:
-    # --input <file.spl>      Generate from single file
-    # --output <file.md>      Output file
-    # --all                   Generate all specs
-    # --index                 Generate root TOC
-    Err("CLI not yet implemented - use as library instead")
+    var input_file: Option<text> = None
+    var output_file: Option<text> = None
+    var all_mode = false
+    var specs_dir = "tests/specs"
+    var output_dir = "doc/specs"
+    var show_help = false
+
+    # Parse arguments
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--input" or arg == "-i":
+            if i + 1 < args.len():
+                i = i + 1
+                input_file = Some(args[i])
+        elif arg == "--output" or arg == "-o":
+            if i + 1 < args.len():
+                i = i + 1
+                output_file = Some(args[i])
+        elif arg == "--specs-dir":
+            if i + 1 < args.len():
+                i = i + 1
+                specs_dir = args[i]
+        elif arg == "--output-dir":
+            if i + 1 < args.len():
+                i = i + 1
+                output_dir = args[i]
+        elif arg == "--all" or arg == "-a":
+            all_mode = true
+        elif arg == "--help" or arg == "-h":
+            show_help = true
+        elif not arg.starts_with("-"):
+            input_file = Some(arg)
+        i = i + 1
+
+    if show_help:
+        print "spec-gen: Generate markdown from _spec.spl files"
+        print "Usage: simple spec-gen [OPTIONS] [INPUT_FILE]"
+        print "Options:"
+        print "  -i, --input <FILE>   Input _spec.spl file"
+        print "  -o, --output <FILE>  Output .md file"
+        print "  -a, --all            Generate all specs in directory"
+        print "  --specs-dir <DIR>    Specs directory (default: tests/specs)"
+        print "  --output-dir <DIR>   Output directory (default: doc/specs)"
+        print "  -h, --help           Show this help"
+        return Ok(())
+
+    if all_mode:
+        print "Generating all specs from {specs_dir} to {output_dir}..."
+        match generate_all(specs_dir, output_dir):
+            Ok((success, total)):
+                print "Generated {success}/{total} spec files"
+                Ok(())
+            Err(e): Err(e)
+    else:
+        match input_file:
+            Some(input):
+                match parse_spec_file(input):
+                    Ok(spec):
+                        val md = generate_markdown(spec, current_timestamp_string())
+                        val output = match output_file:
+                            Some(o): o
+                            None: input.replace("_spec.spl", "_spec.md")
+                        match write_markdown_file(md, output):
+                            Ok(_):
+                                print "Generated: {output}"
+                                Ok(())
+                            Err(e): Err(e)
+                    Err(e): Err(e)
+            None:
+                Err("No input file. Use --input <file> or --all")

@@ -92,6 +92,7 @@ impl Lowerer {
         match pattern {
             Pattern::Identifier(n) => Some(n.clone()),
             Pattern::MutIdentifier(n) => Some(n.clone()),
+            Pattern::MoveIdentifier(n) => Some(n.clone()),
             Pattern::Typed { pattern: inner, .. } => Self::extract_pattern_name(inner),
             _ => None,
         }

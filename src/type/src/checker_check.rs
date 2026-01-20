@@ -492,6 +492,11 @@ impl TypeChecker {
                 let ty = self.fresh_var();
                 self.env.insert(name.clone(), ty);
             }
+            Pattern::MoveIdentifier(name) => {
+                // Move pattern - binds name with move semantics (ownership transfer)
+                let ty = self.fresh_var();
+                self.env.insert(name.clone(), ty);
+            }
             Pattern::Tuple(patterns) | Pattern::Array(patterns) => {
                 for p in patterns {
                     self.bind_pattern(p);
