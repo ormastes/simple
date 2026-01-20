@@ -1,0 +1,268 @@
+# ConfigEnv - Unified Configuration Interface
+#
+# A dictionary-like interface for configuration, environment variables, and arguments.
+# Provides a consistent way to access configuration from multiple sources:
+# - Direct key-value pairs
+# - Environment variables
+# - Command-line arguments (--key=value or --key value format)
+#
+# Migrated from Rust src/common/src/config_env.rs
+
+use core.*
+
+# =========================================================================
+# ConfigEnv Class
+# =========================================================================
+
+class ConfigEnv:
+    data: Dict<text, text>
+
+    # Create a new empty ConfigEnv
+    static fn new() -> ConfigEnv:
+        return ConfigEnv { data: {} }
+
+    # Create a ConfigEnv from command-line arguments
+    #
+    # Supports formats:
+    # - `--key=value`
+    # - `--key value`
+    # - `-k value`
+    # - Positional args stored as `_0`, `_1`, etc.
+    static fn from_args(args: List<text>) -> ConfigEnv:
+        var config = ConfigEnv::new()
+        var positional_idx = 0
+        var i = 0
+
+        while i < args.len():
+            val arg = args[i]
+
+            if arg.starts_with("--"):
+                # Long option
+                val key_value = arg.slice(2, arg.len())
+
+                match key_value.find("="):
+                    Some(eq_pos) =>
+                        # --key=value format
+                        val key = key_value.slice(0, eq_pos)
+                        val value = key_value.slice(eq_pos + 1, key_value.len())
+                        config = config.set(key, value)
+                    None =>
+                        # Check if next arg is a value
+                        if i + 1 < args.len() and not args[i + 1].starts_with("-"):
+                            # --key value format
+                            config = config.set(key_value, args[i + 1])
+                            i = i + 1
+                        else:
+                            # --flag (boolean)
+                            config = config.set(key_value, "true")
+
+            elif arg.starts_with("-") and arg.len() == 2:
+                # Short option: -k value
+                val key = arg.slice(1, 2)
+
+                if i + 1 < args.len() and not args[i + 1].starts_with("-"):
+                    config = config.set(key, args[i + 1])
+                    i = i + 1
+                else:
+                    config = config.set(key, "true")
+
+            else:
+                # Positional argument
+                config = config.set("_{positional_idx}", arg)
+                positional_idx = positional_idx + 1
+
+            i = i + 1
+
+        return config
+
+    # Create a ConfigEnv from all environment variables
+    static fn from_env() -> ConfigEnv:
+        var config = ConfigEnv::new()
+        val env_vars = get_env_vars()
+        for entry in env_vars:
+            config = config.set(entry.key, entry.value)
+        return config
+
+    # Create a ConfigEnv from environment variables with a specific prefix
+    #
+    # The prefix is stripped from the key names.
+    # Example: with prefix "SIMPLE_", env var "SIMPLE_DEBUG" becomes key "DEBUG".
+    static fn from_env_with_prefix(prefix: text) -> ConfigEnv:
+        var config = ConfigEnv::new()
+        val env_vars = get_env_vars()
+        for entry in env_vars:
+            if entry.key.starts_with(prefix):
+                val stripped_key = entry.key.slice(prefix.len(), entry.key.len())
+                config = config.set(stripped_key, entry.value)
+        return config
+
+    # Get a value by key
+    fn get(key: text) -> Option<text>:
+        return self.data.get(key)
+
+    # Get a value by key, or return a default
+    fn get_or(key: text, default: text) -> text:
+        match self.data.get(key):
+            Some(value) => return value
+            None => return default
+
+    # Set a key-value pair (returns new ConfigEnv for immutability)
+    fn set(key: text, value: text) -> ConfigEnv:
+        var new_data = self.data.clone()
+        new_data.insert(key, value)
+        return ConfigEnv { data: new_data }
+
+    # Set a key-value pair (mutating version)
+    me set_mut(key: text, value: text):
+        self.data.insert(key, value)
+
+    # Check if a key exists
+    fn contains(key: text) -> bool:
+        return self.data.contains_key(key)
+
+    # Remove a key and return its value
+    fn remove(key: text) -> Option<text>:
+        return self.data.remove(key)
+
+    # Get a value as an integer
+    fn get_int(key: text) -> Option<i64>:
+        match self.data.get(key):
+            Some(value) => return value.parse_int()
+            None => return None
+
+    # Get a value as an integer with a default
+    fn get_int_or(key: text, default: i64) -> i64:
+        match self.get_int(key):
+            Some(value) => return value
+            None => return default
+
+    # Get a value as a boolean
+    #
+    # Returns true for "true", "1", "yes", "on" (case-insensitive)
+    # Returns false for "false", "0", "no", "off" (case-insensitive)
+    # Returns None for other values or missing keys
+    fn get_bool(key: text) -> Option<bool>:
+        match self.data.get(key):
+            Some(value) =>
+                val lower = value.to_lowercase()
+                if lower == "true" or lower == "1" or lower == "yes" or lower == "on":
+                    return Some(true)
+                elif lower == "false" or lower == "0" or lower == "no" or lower == "off":
+                    return Some(false)
+                else:
+                    return None
+            None =>
+                return None
+
+    # Get a value as a boolean with a default
+    fn get_bool_or(key: text, default: bool) -> bool:
+        match self.get_bool(key):
+            Some(value) => return value
+            None => return default
+
+    # Get all keys
+    fn keys() -> List<text>:
+        return self.data.keys()
+
+    # Iterate over all key-value pairs
+    fn entries() -> List<KeyValue>:
+        var result: List<KeyValue> = []
+        for key in self.data.keys():
+            match self.data.get(key):
+                Some(value) =>
+                    result.append(KeyValue { key: key, value: value })
+                None =>
+                    pass
+        return result
+
+    # Get the number of entries
+    fn len() -> i32:
+        return self.data.len()
+
+    # Check if empty
+    fn is_empty() -> bool:
+        return self.data.len() == 0
+
+    # Merge another ConfigEnv into this one
+    #
+    # Values from `other` override existing values.
+    fn merge(other: ConfigEnv) -> ConfigEnv:
+        var new_data = self.data.clone()
+        for entry in other.entries():
+            new_data.insert(entry.key, entry.value)
+        return ConfigEnv { data: new_data }
+
+    # Add environment variables to this config
+    #
+    # Environment values override existing config values.
+    fn with_env() -> ConfigEnv:
+        var result = self
+        val env_vars = get_env_vars()
+        for entry in env_vars:
+            result = result.set(entry.key, entry.value)
+        return result
+
+    # Add environment variables with a prefix to this config
+    fn with_env_prefix(prefix: text) -> ConfigEnv:
+        var result = self
+        val env_vars = get_env_vars()
+        for entry in env_vars:
+            if entry.key.starts_with(prefix):
+                val stripped_key = entry.key.slice(prefix.len(), entry.key.len())
+                result = result.set(stripped_key, entry.value)
+        return result
+
+    # Add command-line arguments to this config
+    #
+    # Argument values override existing config values.
+    fn with_args(args: List<text>) -> ConfigEnv:
+        val args_config = ConfigEnv::from_args(args)
+        return self.merge(args_config)
+
+    # Convert to string representation
+    fn to_string() -> text:
+        var parts: List<text> = []
+        for entry in self.entries():
+            parts.append("{entry.key}={entry.value}")
+        return "ConfigEnv{" + parts.join(", ") + "}"
+
+# =========================================================================
+# Helper Types
+# =========================================================================
+
+# Key-value pair for iteration
+class KeyValue:
+    key: text
+    value: text
+
+    static fn new(key: text, value: text) -> KeyValue:
+        return KeyValue { key: key, value: value }
+
+# =========================================================================
+# FFI Functions
+# =========================================================================
+
+# Get all environment variables
+fn get_env_vars() -> List<KeyValue>:
+    @extern("runtime", "rt_get_env_vars")
+    fn _rt_get_env_vars() -> List<KeyValue>
+    return _rt_get_env_vars()
+
+# Get a specific environment variable
+fn get_env(key: text) -> Option<text>:
+    @extern("runtime", "rt_get_env")
+    fn _rt_get_env(key_ptr: &u8, key_len: u64) -> Option<text>
+    return _rt_get_env(key.ptr(), key.len())
+
+# Set an environment variable
+fn set_env(key: text, value: text):
+    @extern("runtime", "rt_set_env")
+    fn _rt_set_env(key_ptr: &u8, key_len: u64, value_ptr: &u8, value_len: u64)
+    _rt_set_env(key.ptr(), key.len(), value.ptr(), value.len())
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export ConfigEnv, KeyValue
+export get_env_vars, get_env, set_env
