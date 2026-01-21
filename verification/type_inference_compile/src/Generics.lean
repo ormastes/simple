@@ -439,7 +439,7 @@ theorem applySubst_noOccurs (v : TyVar) (t ty : Ty) :
     simp only [occurs] at h_noOccurs
     -- h_noOccurs : (v == v') = false
     simp only [applySubst, singleSubst, substLookup]
-    rw [h_noOccurs]
+    simp only [h_noOccurs, ↓reduceIte]
   | nat => rfl
   | bool => rfl
   | str => rfl
@@ -454,9 +454,48 @@ theorem applySubst_noOccurs (v : TyVar) (t ty : Ty) :
     simp only [occurs, Bool.or_eq_false_iff] at h_noOccurs
     simp only [applySubst, ih1 h_noOccurs.1, ih2 h_noOccurs.2]
 
-/-- Substitution composition correctness (axiomatized due to complexity) -/
-axiom composeSubst_correct (s1 s2 : Subst) (t : Ty) :
-    applySubst (composeSubst s1 s2) t = applySubst s1 (applySubst s2 t)
+/-- Lookup in appended substitution -/
+theorem substLookup_appendSubst (s1 s2 : Subst) (v : TyVar) :
+    substLookup (appendSubst s1 s2) v =
+    match substLookup s1 v with
+    | some t => some t
+    | none => substLookup s2 v := by
+  induction s1 with
+  | nil => simp [appendSubst, substLookup]
+  | cons e rest ih =>
+    simp only [appendSubst, substLookup]
+    split
+    · rfl
+    · exact ih
+
+/-- Lookup in mapped substitution -/
+theorem substLookup_map (s : Subst) (f : Ty → Ty) (v : TyVar) :
+    substLookup (s.map (fun e => { e with ty := f e.ty })) v =
+    (substLookup s v).map f := by
+  induction s with
+  | nil => simp [substLookup]
+  | cons e rest ih =>
+    simp only [List.map, substLookup]
+    split <;> simp_all
+
+/-- Substitution composition correctness -/
+theorem composeSubst_correct (s1 s2 : Subst) (t : Ty) :
+    applySubst (composeSubst s1 s2) t = applySubst s1 (applySubst s2 t) := by
+  induction t with
+  | var v =>
+    simp only [applySubst, composeSubst]
+    rw [substLookup_appendSubst]
+    rw [substLookup_map]
+    cases h : substLookup s2 v with
+    | none => simp [Option.map]
+    | some t' => simp [Option.map]
+  | nat => rfl
+  | bool => rfl
+  | str => rfl
+  | arrow a b iha ihb => simp only [applySubst, iha, ihb]
+  | generic0 _ => rfl
+  | generic1 _ arg ih => simp only [applySubst, ih]
+  | generic2 _ arg1 arg2 ih1 ih2 => simp only [applySubst, ih1, ih2]
 
 /-- Substitution lookup in singleton -/
 theorem substLookup_singleSubst (v : TyVar) (t : Ty) :
