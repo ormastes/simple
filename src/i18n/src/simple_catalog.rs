@@ -178,7 +178,7 @@ impl SimpleCatalogParser {
             Expr::String(s) => Some(s.clone()),
             Expr::Identifier(s) => Some(s.clone()),
             // Handle f-strings that contain only literal parts (no interpolation)
-            Expr::FString(parts) if parts.len() == 1 => {
+            Expr::FString { parts, .. } if parts.len() == 1 => {
                 if let FStringPart::Literal(s) = &parts[0] {
                     Some(s.clone())
                 } else {

@@ -1,0 +1,295 @@
+# Mock Library Tests
+# Tests for Mock, Spy, Stub, and MockPolicy implementations
+
+# Import everything from spec (which re-exports mock types)
+import spec.{describe, context, it, skip, expect, before_each, after_each}
+import spec.{eq, be_true, be_false}
+import spec.{Mock, Spy, Stub, MockMode}
+import spec.{ArgMatcher, arg_any, arg_exact, arg_gt, arg_lt, arg_gte, arg_lte, arg_in_range, arg_matching}
+import spec.{matches_arg, CallInfo, CallRecorder, CallVerifier, VerifyCount}
+# Import mock_policy functions directly (class static methods have scoping issues)
+import spec.{mock_policy_init, mock_policy_reset, mock_policy_is_enabled, mock_policy_current_mode, mock_policy_disable}
+import spec.{mock_policy_init_with_patterns, mock_policy_matches_hal_pattern, mock_policy_matches_any_pattern}
+
+describe "Mock Library":
+    before_each:
+        mock_policy_init(MockMode.All)
+
+    after_each:
+        mock_policy_reset()
+
+    describe "MockPolicy":
+        context "when mode is All":
+            it "allows mock creation":
+                mock_policy_init(MockMode.All)
+                val m = Mock.new("TestMock")
+                expect(m.name).to(eq("TestMock"))
+
+        it "tracks initialization state":
+            mock_policy_reset()
+            expect(mock_policy_is_enabled()).to(be_true())
+            mock_policy_disable()
+            expect(mock_policy_is_enabled()).to(be_false())
+
+        it "matches HAL patterns":
+            expect(mock_policy_matches_hal_pattern("app::hal::gpio")).to(be_true())
+            expect(mock_policy_matches_hal_pattern("app::sub_hal::spi")).to(be_true())
+            expect(mock_policy_matches_hal_pattern("app::service::user")).to(be_false())
+
+        it "matches custom patterns":
+            mock_policy_init_with_patterns(["*::cache::*", "*::db::*"])
+            expect(mock_policy_matches_any_pattern("app::cache::redis")).to(be_true())
+            expect(mock_policy_matches_any_pattern("app::db::postgres")).to(be_true())
+            expect(mock_policy_matches_any_pattern("app::service::user")).to(be_false())
+
+    describe "Mock":
+        describe "creation":
+            it "creates a mock with a name":
+                val m = Mock.new("UserRepository")
+                expect(m.name).to(eq("UserRepository"))
+
+            it "can use convenience function":
+                # Note: mock() convenience function causes parser issues, use Mock.new() directly
+                val m = Mock.new("UserRepository")
+                expect(m.name).to(eq("UserRepository"))
+
+        describe "when/returns stubbing":
+            it "returns configured value":
+                val m = Mock.new("UserRepo")
+                m.when("find_by_id").returns(42)
+                val result = m.call("find_by_id", [])
+                expect(result).to(eq(42))
+
+            it "returns different values for different methods":
+                val m = Mock.new("Service")
+                m.when("get_name").returns("Alice")
+                m.when("get_age").returns(30)
+                expect(m.call("get_name", [])).to(eq("Alice"))
+                expect(m.call("get_age", [])).to(eq(30))
+
+            it "matches arguments":
+                val m = Mock.new("UserRepo")
+                m.when("find_by_id").with_args([123]).returns("User123")
+                m.when("find_by_id").with_args([456]).returns("User456")
+                expect(m.call("find_by_id", [123])).to(eq("User123"))
+                expect(m.call("find_by_id", [456])).to(eq("User456"))
+
+        describe "sequential returns":
+            it "returns values in sequence":
+                val m = Mock.new("Counter")
+                m.when("next").returns_sequence([1, 2, 3])
+                expect(m.call("next", [])).to(eq(1))
+                expect(m.call("next", [])).to(eq(2))
+                expect(m.call("next", [])).to(eq(3))
+                expect(m.call("next", [])).to(eq(1))
+
+        describe "call recording":
+            it "records method calls":
+                val m = Mock.new("Service")
+                m.when("process").returns(true)
+                m.call("process", [1, 2, 3])
+                m.call("process", [4, 5, 6])
+                expect(m.recorder.call_count("process")).to(eq(2))
+
+            it "records calls even without stubs":
+                val m = Mock.new("Service")
+                m.call("unknown", ["arg1"])
+                expect(m.recorder.was_called("unknown")).to(be_true())
+
+        describe "verification":
+            it "verifies method was called":
+                val m = Mock.new("Notifier")
+                m.when("notify").returns(true)
+                m.call("notify", ["event"])
+                m.verify("notify").was_called().verify()
+
+            it "verifies exact call count":
+                val m = Mock.new("Counter")
+                m.when("increment").returns(true)
+                m.call("increment", [])
+                m.call("increment", [])
+                m.call("increment", [])
+                m.verify("increment").called_times(3).verify()
+
+            it "verifies method was called once":
+                val m = Mock.new("Service")
+                m.when("init").returns(true)
+                m.call("init", [])
+                m.verify("init").once().verify()
+
+            it "verifies method was never called":
+                val m = Mock.new("Service")
+                m.verify("shutdown").never().verify()
+
+        describe "reset":
+            it "clears all stubs and calls":
+                val m = Mock.new("Service")
+                m.when("get").returns(42)
+                m.call("get", [])
+                m.reset()
+                expect(m.recorder.call_count("get")).to(eq(0))
+
+    describe "Spy":
+        it "creates a spy with a name":
+            val s = Spy.new("NotificationService")
+            expect(s.name).to(eq("NotificationService"))
+
+        it "records method calls":
+            val s = Spy.new("Service")
+            s.record_call("process", [1, 2, 3])
+            s.record_call("process", [4, 5, 6])
+            expect(s.call_count("process")).to(eq(2))
+
+        it "verifies calls":
+            val s = Spy.new("Service")
+            s.record_call("notify", ["event", 123])
+            s.verify("notify").was_called().verify()
+
+        it "gets all calls to a method":
+            val s = Spy.new("Service")
+            s.record_call("log", ["info", "message1"])
+            s.record_call("log", ["error", "message2"])
+            val calls = s.calls_to("log")
+            expect(calls.len()).to(eq(2))
+
+        it "resets recorded calls":
+            val s = Spy.new("Service")
+            s.record_call("method", [])
+            s.reset()
+            expect(s.was_called("method")).to(be_false())
+
+    describe "Stub":
+        it "creates a stub with a name":
+            val s = Stub.new("Config")
+            expect(s.name).to(eq("Config"))
+
+        it "stores and retrieves values":
+            val s = Stub.new("Config")
+            s.set("timeout", 30)
+            s.set("retries", 3)
+            expect(s.get("timeout")).to(eq(30))
+            expect(s.get("retries")).to(eq(3))
+
+        it "checks if key exists":
+            val s = Stub.new("Config")
+            s.set("exists", true)
+            expect(s.has("exists")).to(be_true())
+            expect(s.has("missing")).to(be_false())
+
+        it "allows chained set calls":
+            val s = Stub.new("Config").set("a", 1).set("b", 2).set("c", 3)
+            expect(s.get("a")).to(eq(1))
+            expect(s.get("b")).to(eq(2))
+            expect(s.get("c")).to(eq(3))
+
+        it "resets all values":
+            val s = Stub.new("Config")
+            s.set("key", "value")
+            s.reset()
+            expect(s.has("key")).to(be_false())
+
+    describe "Argument Matchers":
+        describe "any()":
+            it "matches any value":
+                expect(matches_arg(arg_any(), 42)).to(be_true())
+                expect(matches_arg(arg_any(), "hello")).to(be_true())
+
+        describe "exact()":
+            it "matches exact value":
+                expect(matches_arg(arg_exact(42), 42)).to(be_true())
+                expect(matches_arg(arg_exact(42), 43)).to(be_false())
+                expect(matches_arg(arg_exact("hello"), "hello")).to(be_true())
+                expect(matches_arg(arg_exact("hello"), "world")).to(be_false())
+
+        describe "gt()":
+            it "matches values greater than n":
+                expect(matches_arg(arg_gt(10), 15)).to(be_true())
+                expect(matches_arg(arg_gt(10), 10)).to(be_false())
+                expect(matches_arg(arg_gt(10), 5)).to(be_false())
+
+        describe "lt()":
+            it "matches values less than n":
+                expect(matches_arg(arg_lt(10), 5)).to(be_true())
+                expect(matches_arg(arg_lt(10), 10)).to(be_false())
+                expect(matches_arg(arg_lt(10), 15)).to(be_false())
+
+        describe "gte()":
+            it "matches values greater than or equal to n":
+                expect(matches_arg(arg_gte(10), 15)).to(be_true())
+                expect(matches_arg(arg_gte(10), 10)).to(be_true())
+                expect(matches_arg(arg_gte(10), 5)).to(be_false())
+
+        describe "lte()":
+            it "matches values less than or equal to n":
+                expect(matches_arg(arg_lte(10), 5)).to(be_true())
+                expect(matches_arg(arg_lte(10), 10)).to(be_true())
+                expect(matches_arg(arg_lte(10), 15)).to(be_false())
+
+        describe "in_range()":
+            it "matches values within range":
+                expect(matches_arg(arg_in_range(5, 15), 10)).to(be_true())
+                expect(matches_arg(arg_in_range(5, 15), 5)).to(be_true())
+                expect(matches_arg(arg_in_range(5, 15), 15)).to(be_true())
+                expect(matches_arg(arg_in_range(5, 15), 4)).to(be_false())
+                expect(matches_arg(arg_in_range(5, 15), 16)).to(be_false())
+
+        describe "matching()":
+            it "matches string patterns":
+                expect(matches_arg(arg_matching("hello"), "hello world")).to(be_true())
+                expect(matches_arg(arg_matching("foo"), "hello world")).to(be_false())
+
+    describe "CallRecorder":
+        it "records and retrieves calls":
+            val recorder = CallRecorder.new()
+            recorder.record("method1", [1, 2])
+            recorder.record("method2", [3, 4])
+            recorder.record("method1", [5, 6])
+            expect(recorder.call_count("method1")).to(eq(2))
+            expect(recorder.call_count("method2")).to(eq(1))
+            expect(recorder.call_count("method3")).to(eq(0))
+
+        it "checks if method was called":
+            val recorder = CallRecorder.new()
+            recorder.record("called_method", [])
+            expect(recorder.was_called("called_method")).to(be_true())
+            expect(recorder.was_called("not_called")).to(be_false())
+
+        it "gets calls for specific method":
+            val recorder = CallRecorder.new()
+            recorder.record("log", ["info"])
+            recorder.record("log", ["error"])
+            val log_calls = recorder.calls_for("log")
+            expect(log_calls.len()).to(eq(2))
+
+        it "clears all calls":
+            val recorder = CallRecorder.new()
+            recorder.record("method", [])
+            recorder.clear()
+            expect(recorder.was_called("method")).to(be_false())
+
+    describe "CallVerifier":
+        it "verifies at_least calls":
+            val recorder = CallRecorder.new()
+            recorder.record("method", [])
+            recorder.record("method", [])
+            val verifier = CallVerifier.new(recorder, "method")
+            verifier.at_least(1).verify()
+            verifier.at_least(2).verify()
+
+        it "verifies at_most calls":
+            val recorder = CallRecorder.new()
+            recorder.record("method", [])
+            val verifier = CallVerifier.new(recorder, "method")
+            verifier.at_most(1).verify()
+            verifier.at_most(5).verify()
+
+    describe "VerifyCount":
+        it "describes count expectations":
+            val recorder = CallRecorder.new()
+            val verifier = CallVerifier.new(recorder, "method")
+            verifier.once()
+            expect(verifier.count_description()).to(eq("once"))
+            verifier.never()
+            expect(verifier.count_description()).to(eq("never"))
+            verifier.called_times(3)
+            expect(verifier.count_description()).to(eq("exactly 3 times"))

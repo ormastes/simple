@@ -16,6 +16,7 @@
         coverage-extended coverage-extended-system coverage-extended-integration coverage-extended-service coverage-extended-all coverage-extended-check \
         duplication duplication-simple lint lint-fix fmt fmt-check \
         check check-full unused-deps outdated audit build build-release \
+        link-bins link-bins-linux link-bins-mac link-bins-windows \
         clean clean-coverage clean-duplication install-tools help \
         arch-test arch-test-visualize \
         check-todos gen-todos todos todos-p0 \
@@ -452,6 +453,24 @@ build:
 
 build-release:
 	cargo build --workspace --release
+
+# Link binaries (cross-platform)
+link-bins:
+ifeq ($(OS),Windows_NT)
+	@powershell -ExecutionPolicy Bypass -File scripts/link-bins.ps1
+else
+	@bash scripts/link-bins.sh
+endif
+
+# Platform-specific link targets
+link-bins-linux:
+	@bash scripts/link-bins.sh
+
+link-bins-mac:
+	@bash scripts/link-bins.sh
+
+link-bins-windows:
+	@powershell -ExecutionPolicy Bypass -File scripts/link-bins.ps1
 
 # ============================================================================
 # Cleanup

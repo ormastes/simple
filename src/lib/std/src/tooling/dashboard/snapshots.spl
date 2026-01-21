@@ -1,0 +1,335 @@
+# Dashboard Historical Snapshots
+#
+# Manages daily snapshots of dashboard data for trend analysis and historical tracking.
+# Snapshots are stored in doc/dashboard/history/YYYY-MM/YYYY-MM-DD.sdn
+
+use io.fs_helpers.{write_text_file, read_text_file, ensure_dir, file_exists, delete_file, list_directory}
+use core.time.{now_iso8601, parse_date, date_diff_days}
+use tooling.dashboard.types.{DashboardData}
+use tooling.dashboard.database.{DashboardDatabase}
+
+# =========================================================================
+# Constants
+# =========================================================================
+
+val HISTORY_DIR: text = "doc/dashboard/history"
+val RETENTION_DAYS: i32 = 90
+
+# =========================================================================
+# Snapshot Manager
+# =========================================================================
+
+class SnapshotManager:
+    history_dir: text
+    retention_days: i32
+
+    static fn new() -> SnapshotManager:
+        return SnapshotManager {
+            history_dir: HISTORY_DIR,
+            retention_days: RETENTION_DAYS
+        }
+
+    static fn with_retention(days: i32) -> SnapshotManager:
+        return SnapshotManager {
+            history_dir: HISTORY_DIR,
+            retention_days: days
+        }
+
+    # Create a daily snapshot
+    fn create_snapshot(data: DashboardData) -> Result<text, text>:
+        val timestamp = now_iso8601()
+        val date = extract_date(timestamp)  # YYYY-MM-DD
+        val year_month = extract_year_month(date)  # YYYY-MM
+
+        # Create directory structure
+        val month_dir = "{self.history_dir}/{year_month}"
+        match ensure_dir(month_dir):
+            Err(e) => Err("Failed to create month directory: {e}")
+            Ok(_) => pass
+
+        # Create snapshot file
+        val snapshot_file = "{month_dir}/{date}.sdn"
+        match self.write_snapshot(snapshot_file, data):
+            Err(e) => Err("Failed to write snapshot: {e}")
+            Ok(_) => pass
+
+        print "Created snapshot: {snapshot_file}"
+        return Ok(snapshot_file)
+
+    # Write snapshot to file
+    fn write_snapshot(file: text, data: DashboardData) -> Result<(), text>:
+        var content = "# Dashboard Snapshot\n"
+        content = "{content}# Timestamp: {data.timestamp}\n\n"
+
+        # Summary section
+        content = "{content}[summary]\n"
+        content = "{content}features_total: {data.total_features()}\n"
+        content = "{content}features_complete: {data.completed_features()}\n"
+        content = "{content}todos_total: {data.total_todos()}\n"
+        content = "{content}todos_critical: {data.critical_todos()}\n"
+        content = "{content}coverage_percent: {data.overall_coverage()}\n"
+        content = "{content}sspec_tests: {data.sspec_tests.len()}\n"
+        content = "{content}plans_total: {data.plans.len()}\n\n"
+
+        # Features section
+        content = "{content}[features]\n"
+        for feature in data.features:
+            content = "{content}{feature.id},{feature.category},{feature.name},{feature.status}\n"
+        content = "{content}\n"
+
+        # TODOs section
+        content = "{content}[todos]\n"
+        for todo in data.todos:
+            content = "{content}{todo.id},{todo.priority},{todo.area},{todo.status}\n"
+        content = "{content}\n"
+
+        # Coverage section
+        content = "{content}[coverage]\n"
+        for cov in data.coverage:
+            content = "{content}{cov.level},{cov.lines_percent}\n"
+        content = "{content}\n"
+
+        # Plans section
+        content = "{content}[plans]\n"
+        for plan in data.plans:
+            content = "{content}{plan.id},{plan.status},{plan.progress_percent()}\n"
+        content = "{content}\n"
+
+        return write_text_file(file, content)
+
+    # Load a specific snapshot
+    fn load_snapshot(date: text) -> Result<SnapshotData, text>:
+        val year_month = extract_year_month(date)
+        val snapshot_file = "{self.history_dir}/{year_month}/{date}.sdn"
+
+        if not file_exists(snapshot_file):
+            return Err("Snapshot not found: {snapshot_file}")
+
+        match read_text_file(snapshot_file):
+            Err(e) => Err("Failed to read snapshot: {e}")
+            Ok(content) => parse_snapshot(content, date)
+
+    # Load snapshots for date range
+    fn load_range(start_date: text, end_date: text) -> Result<List<SnapshotData>, text>:
+        var snapshots: List<SnapshotData> = []
+        val days = date_diff_days(start_date, end_date)
+
+        for i in 0..=days:
+            val date = add_days(start_date, i)
+            match self.load_snapshot(date):
+                Ok(snapshot) => snapshots.append(snapshot)
+                Err(_) => pass  # Skip missing days
+
+        return Ok(snapshots)
+
+    # Load last N days of snapshots
+    fn load_last_days(days: i32) -> Result<List<SnapshotData>, text>:
+        val today = get_today()
+        val start_date = subtract_days(today, days)
+        return self.load_range(start_date, today)
+
+    # Cleanup old snapshots
+    fn cleanup_old_snapshots() -> Result<i32, text>:
+        var deleted_count = 0
+        val today = get_today()
+
+        # List all month directories
+        match list_directory(self.history_dir):
+            Err(e) => Err("Failed to list history directory: {e}")
+            Ok(months) =>
+                for month_dir in months:
+                    # List snapshots in month
+                    match list_directory("{self.history_dir}/{month_dir}"):
+                        Ok(snapshots) =>
+                            for snapshot in snapshots:
+                                if snapshot.ends_with(".sdn"):
+                                    val date = snapshot.replace(".sdn", "")
+                                    val age = date_diff_days(date, today)
+
+                                    if age > self.retention_days:
+                                        val file_path = "{self.history_dir}/{month_dir}/{snapshot}"
+                                        match delete_file(file_path):
+                                            Ok(_) =>
+                                                print "Deleted old snapshot: {file_path}"
+                                                deleted_count = deleted_count + 1
+                                            Err(e) =>
+                                                print "Warning: Failed to delete {file_path}: {e}"
+                        Err(_) => pass
+
+        return Ok(deleted_count)
+
+# =========================================================================
+# Snapshot Data Structure
+# =========================================================================
+
+class SnapshotData:
+    date: text
+    features_total: i32
+    features_complete: i32
+    todos_total: i32
+    todos_critical: i32
+    coverage_percent: f64
+    sspec_tests: i32
+    plans_total: i32
+
+    static fn new(
+        date: text,
+        features_total: i32,
+        features_complete: i32,
+        todos_total: i32,
+        todos_critical: i32,
+        coverage_percent: f64,
+        sspec_tests: i32,
+        plans_total: i32
+    ) -> SnapshotData:
+        return SnapshotData {
+            date: date,
+            features_total: features_total,
+            features_complete: features_complete,
+            todos_total: todos_total,
+            todos_critical: todos_critical,
+            coverage_percent: coverage_percent,
+            sspec_tests: sspec_tests,
+            plans_total: plans_total
+        }
+
+    fn feature_completion_percent() -> f64:
+        if self.features_total == 0:
+            return 0.0
+        return ((self.features_complete as f64) / (self.features_total as f64)) * 100.0
+
+# =========================================================================
+# Parsing Functions
+# =========================================================================
+
+# Parse snapshot file content
+fn parse_snapshot(content: text, date: text) -> Result<SnapshotData, text>:
+    var features_total = 0
+    var features_complete = 0
+    var todos_total = 0
+    var todos_critical = 0
+    var coverage_percent = 0.0
+    var sspec_tests = 0
+    var plans_total = 0
+
+    val lines = content.split("\n")
+    var in_summary = false
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        if trimmed == "[summary]":
+            in_summary = true
+            continue
+        elif trimmed.starts_with("["):
+            in_summary = false
+            continue
+
+        if in_summary and trimmed.contains(":"):
+            val parts = trimmed.split(":")
+            if parts.len() < 2:
+                continue
+
+            val key = parts[0].trim()
+            val value = parts[1].trim()
+
+            match key:
+                "features_total" => features_total = parse_i32(value)
+                "features_complete" => features_complete = parse_i32(value)
+                "todos_total" => todos_total = parse_i32(value)
+                "todos_critical" => todos_critical = parse_i32(value)
+                "coverage_percent" => coverage_percent = parse_f64(value)
+                "sspec_tests" => sspec_tests = parse_i32(value)
+                "plans_total" => plans_total = parse_i32(value)
+                _ => pass
+
+    return Ok(SnapshotData.new(
+        date,
+        features_total,
+        features_complete,
+        todos_total,
+        todos_critical,
+        coverage_percent,
+        sspec_tests,
+        plans_total
+    ))
+
+# =========================================================================
+# Date Helper Functions
+# =========================================================================
+
+# Extract YYYY-MM-DD from ISO8601 timestamp
+fn extract_date(timestamp: text) -> text:
+    # timestamp format: 2026-01-21T10:30:00Z
+    if timestamp.len() >= 10:
+        return timestamp.slice(0, 10)
+    return timestamp
+
+# Extract YYYY-MM from date
+fn extract_year_month(date: text) -> text:
+    # date format: YYYY-MM-DD
+    if date.len() >= 7:
+        return date.slice(0, 7)
+    return date
+
+# Get today's date (YYYY-MM-DD)
+fn get_today() -> text:
+    val timestamp = now_iso8601()
+    return extract_date(timestamp)
+
+# Add days to date (simplified)
+fn add_days(date: text, days: i32) -> text:
+    # TODO: Implement proper date arithmetic
+    return date
+
+# Subtract days from date (simplified)
+fn subtract_days(date: text, days: i32) -> text:
+    # TODO: Implement proper date arithmetic
+    return date
+
+# Simple integer parser
+fn parse_i32(s: text) -> i32:
+    # Simplified integer parsing
+    var result = 0
+    var negative = false
+    var start = 0
+
+    if s.starts_with("-"):
+        negative = true
+        start = 1
+
+    for i in start..s.len():
+        val ch = s.char_at(i)
+        if ch >= '0' and ch <= '9':
+            result = result * 10 + (ch - '0')
+
+    return if negative: -result else: result
+
+# Simple float parser (placeholder)
+fn parse_f64(s: text) -> f64:
+    # TODO: Implement proper float parsing
+    return 0.0
+
+# =========================================================================
+# Convenience Functions
+# =========================================================================
+
+# Create snapshot from current data
+fn create_daily_snapshot(data: DashboardData) -> Result<text, text>:
+    val manager = SnapshotManager.new()
+    return manager.create_snapshot(data)
+
+# Load last N days
+fn load_recent_snapshots(days: i32) -> Result<List<SnapshotData>, text>:
+    val manager = SnapshotManager.new()
+    return manager.load_last_days(days)
+
+# Cleanup old snapshots
+fn cleanup_snapshots() -> Result<i32, text>:
+    val manager = SnapshotManager.new()
+    return manager.cleanup_old_snapshots()
+
+# =========================================================================
+# Exports
+# =========================================================================
+

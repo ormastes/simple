@@ -1,0 +1,326 @@
+# Performance Benchmarking Library
+# Statistical benchmarking with warmup, outlier detection, and comparison
+
+import time
+import math
+import map
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct BenchmarkConfig:
+    warmup_iterations: i32        # Warmup runs before measurement
+    measurement_iterations: i32   # Iterations per sample
+    measurement_time_secs: f64    # Max time for measurements
+    sample_size: i32              # Number of samples to collect
+    outlier_threshold: f64        # Standard deviations for outliers
+    confidence_level: f64         # Confidence level (0.95 = 95%)
+
+    static fn default() -> BenchmarkConfig:
+        """Create default benchmark configuration.
+
+        Defaults:
+            warmup_iterations: 3
+            measurement_iterations: 100
+            measurement_time_secs: 5.0
+            sample_size: 10
+            outlier_threshold: 3.0
+            confidence_level: 0.95
+
+        Example:
+            val config = BenchmarkConfig.default()
+        """
+        BenchmarkConfig(
+            warmup_iterations: 3,
+            measurement_iterations: 100,
+            measurement_time_secs: 5.0,
+            sample_size: 10,
+            outlier_threshold: 3.0,
+            confidence_level: 0.95
+        )
+
+    static fn quick() -> BenchmarkConfig:
+        """Create quick benchmark configuration for fast iteration.
+
+        Uses fewer samples and iterations for rapid feedback.
+
+        Example:
+            val config = BenchmarkConfig.quick()
+        """
+        BenchmarkConfig(
+            warmup_iterations: 1,
+            measurement_iterations: 50,
+            measurement_time_secs: 2.0,
+            sample_size: 3,
+            outlier_threshold: 3.0,
+            confidence_level: 0.95
+        )
+
+# ============================================================================
+# Statistics
+# ============================================================================
+
+struct BenchmarkStats:
+    mean_ns: f64
+    median_ns: f64
+    std_dev_ns: f64
+    min_ns: f64
+    max_ns: f64
+    outliers_low: i32
+    outliers_high: i32
+    samples: List<f64>
+
+    static fn format_time(ns: f64) -> text:
+        """Format nanoseconds to human-readable time.
+
+        Args:
+            ns: Time in nanoseconds
+
+        Returns:
+            Formatted string (e.g., "1.23 ms")
+
+        Example:
+            BenchmarkStats.format_time(1500000.0)  # → "1.50 ms"
+        """
+        if ns < 1000.0:
+            "{ns:.2f} ns"
+        elif ns < 1000000.0:
+            val us = ns / 1000.0
+            "{us:.2f} μs"
+        elif ns < 1000000000.0:
+            val ms = ns / 1000000.0
+            "{ms:.2f} ms"
+        else:
+            val s = ns / 1000000000.0
+            "{s:.2f} s"
+
+    fn summary() -> text:
+        """Generate human-readable summary.
+
+        Returns:
+            Multi-line summary with statistics
+
+        Example:
+            print stats.summary()
+        """
+        val mean_str = BenchmarkStats.format_time(self.mean_ns)
+        val median_str = BenchmarkStats.format_time(self.median_ns)
+        val std_dev_str = BenchmarkStats.format_time(self.std_dev_ns)
+        val min_str = BenchmarkStats.format_time(self.min_ns)
+        val max_str = BenchmarkStats.format_time(self.max_ns)
+
+        """
+Mean:     {mean_str} ± {std_dev_str}
+Median:   {median_str}
+Range:    [{min_str} .. {max_str}]
+Outliers: {self.outliers_low} low, {self.outliers_high} high
+Samples:  {self.samples.len()}
+"""
+
+# ============================================================================
+# Core Benchmarking
+# ============================================================================
+
+pub fn benchmark(
+    name: text,
+    func: fn(),
+    config: BenchmarkConfig
+) -> BenchmarkStats:
+    """Benchmark a function with statistical analysis.
+
+    Performs warmup iterations, then collects multiple samples with
+    outlier detection and statistical calculations.
+
+    Args:
+        name: Benchmark name for reporting
+        func: Function to benchmark (no arguments)
+        config: Benchmark configuration
+
+    Returns:
+        Statistical results
+
+    Example:
+        val stats = benchmark("fibonacci",
+            \: fibonacci(20),
+            BenchmarkConfig.default()
+        )
+        print stats.summary()
+    """
+    # Warmup phase
+    for _ in 0..config.warmup_iterations:
+        func()
+
+    # Measurement phase
+    var samples = []
+    for _ in 0..config.sample_size:
+        var sample_times = []
+
+        val sample_start = time.now_nanos()
+        var elapsed_ns = 0.0
+
+        # Collect measurements until time limit or iteration limit
+        while sample_times.len() < config.measurement_iterations and
+              elapsed_ns < config.measurement_time_secs * 1_000_000_000.0:
+
+            val start = time.now_nanos()
+            func()
+            val end = time.now_nanos()
+
+            val duration = end - start
+            sample_times.append(duration)
+            elapsed_ns = end - sample_start
+
+        # Calculate median for this sample
+        sample_times.sort()
+        val median_idx = sample_times.len() / 2
+        val median = sample_times[median_idx]
+        samples.append(median)
+
+    # Calculate statistics
+    calculate_stats(samples, config.outlier_threshold)
+
+pub fn benchmark_default(name: text, func: fn()) -> BenchmarkStats:
+    """Benchmark with default configuration.
+
+    Convenience function using BenchmarkConfig.default().
+
+    Args:
+        name: Benchmark name
+        func: Function to benchmark
+
+    Returns:
+        Statistical results
+
+    Example:
+        val stats = benchmark_default("sort", \: sort(data))
+    """
+    benchmark(name, func, BenchmarkConfig.default())
+
+# ============================================================================
+# Comparison
+# ============================================================================
+
+pub fn compare(
+    benchmarks: Map<text, fn()>,
+    config: BenchmarkConfig
+) -> Map<text, BenchmarkStats>:
+    """Compare multiple implementations.
+
+    Runs benchmarks for each implementation and returns results.
+
+    Args:
+        benchmarks: Map of name to function
+        config: Benchmark configuration
+
+    Returns:
+        Map of name to statistics
+
+    Example:
+        val bench_map = Map.new()
+        bench_map.insert("quicksort", \: quicksort(data.clone()))
+        bench_map.insert("mergesort", \: mergesort(data.clone()))
+        val results = compare(bench_map, BenchmarkConfig.default())
+
+        for (name, stats) in results.entries():
+            print "{name}: {stats.summary()}"
+    """
+    var results = Map.new()
+    for (name, func) in benchmarks.entries():
+        results.insert(name, benchmark(name, func, config))
+    results
+
+pub fn compare_default(benchmarks: Map<text, fn()>) -> Map<text, BenchmarkStats>:
+    """Compare with default configuration.
+
+    Convenience function using BenchmarkConfig.default().
+
+    Args:
+        benchmarks: Map of name to function
+
+    Returns:
+        Map of name to statistics
+
+    Example:
+        val bench_map = Map.new()
+        bench_map.insert("impl_a", \: impl_a())
+        bench_map.insert("impl_b", \: impl_b())
+        val results = compare_default(bench_map)
+    """
+    compare(benchmarks, BenchmarkConfig.default())
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn calculate_stats(samples: List<f64>, outlier_threshold: f64) -> BenchmarkStats:
+    """Calculate statistics from samples.
+
+    Computes mean, median, standard deviation, and detects outliers.
+
+    Args:
+        samples: List of sample times in nanoseconds
+        outlier_threshold: Standard deviations for outlier detection
+
+    Returns:
+        Statistics struct
+    """
+    val n = samples.len() as f64
+
+    # Mean
+    var sum = 0.0
+    for sample in samples:
+        sum = sum + sample
+    val mean = sum / n
+
+    # Variance and standard deviation
+    var variance_sum = 0.0
+    for sample in samples:
+        val diff = sample - mean
+        variance_sum = variance_sum + (diff * diff)
+    val variance = variance_sum / n
+    val std_dev = math.sqrt(variance)
+
+    # Detect outliers
+    var outliers_low = 0
+    var outliers_high = 0
+    val lower_bound = mean - outlier_threshold * std_dev
+    val upper_bound = mean + outlier_threshold * std_dev
+
+    for sample in samples:
+        if sample < lower_bound:
+            outliers_low = outliers_low + 1
+        elif sample > upper_bound:
+            outliers_high = outliers_high + 1
+
+    # Median
+    var sorted = samples.clone()
+    sorted.sort()
+    val median_idx = sorted.len() / 2
+    val median = sorted[median_idx]
+
+    # Min and max
+    val min_val = sorted[0]
+    val max_val = sorted[sorted.len() - 1]
+
+    BenchmarkStats(
+        mean_ns: mean,
+        median_ns: median,
+        std_dev_ns: std_dev,
+        min_ns: min_val,
+        max_ns: max_val,
+        outliers_low: outliers_low,
+        outliers_high: outliers_high,
+        samples: samples
+    )
+
+# ============================================================================
+# Export
+# ============================================================================
+
+export benchmark
+export benchmark_default
+export compare
+export compare_default
+export BenchmarkConfig
+export BenchmarkStats

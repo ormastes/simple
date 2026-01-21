@@ -1,0 +1,111 @@
+# TODO Collector
+#
+# Collects TODO/FIXME comments from codebase and converts them to dashboard format.
+# Extends the existing todo_parser module with age tracking and status management.
+
+use core.time.{now_iso8601, now_timestamp}
+use tooling.todo_parser.{TodoParser, TodoItem as ParserTodoItem}
+use tooling.dashboard.types.{TodoItem}
+
+# =========================================================================
+# TODO Collector
+# =========================================================================
+
+class TodoCollector:
+    root_path: text
+    parser: TodoParser
+
+    static fn new(root_path: text) -> TodoCollector:
+        return TodoCollector {
+            root_path: root_path,
+            parser: TodoParser.new()
+        }
+
+    # Collect all TODOs from codebase
+    fn collect() -> List<TodoItem>:
+        print "  Scanning for TODOs..."
+
+        match self.parser.scan_directory(self.root_path):
+            Err(e) =>
+                print "    Error: {e}"
+                []
+            Ok(result) =>
+                print "    Found {result.todos.len()} TODOs, {result.errors.len()} errors"
+
+                # Convert parser TODOs to dashboard TODOs
+                var dashboard_todos: List<TodoItem> = []
+                for i in 0..result.todos.len():
+                    val parser_todo = result.todos[i]
+                    val dashboard_todo = convert_to_dashboard_todo(parser_todo, i)
+                    dashboard_todos.append(dashboard_todo)
+
+                dashboard_todos
+
+# =========================================================================
+# Conversion Functions
+# =========================================================================
+
+# Convert parser TODO to dashboard TODO with extended fields
+fn convert_to_dashboard_todo(parser_todo: ParserTodoItem, id: i32) -> TodoItem:
+    # Calculate age (placeholder - would need file git history)
+    val age_days = 0  # TODO: Implement age calculation from git
+
+    # Convert issue option to string
+    val issue_str = match parser_todo.issue:
+        Some(num) => num
+        nil => ""
+
+    # Convert blocked list to comma-separated string
+    val blocked_str = parser_todo.blocked.join(",")
+
+    # Determine status
+    val status = infer_todo_status(parser_todo)
+
+    # Get timestamp
+    val timestamp = now_iso8601()
+
+    return TodoItem.new(
+        id,
+        parser_todo.keyword,
+        parser_todo.area,
+        parser_todo.priority,
+        parser_todo.description,
+        parser_todo.file,
+        parser_todo.line,
+        issue_str,
+        blocked_str,
+        status,
+        age_days,
+        "",  # assigned - TODO: Extract from TODO comment or git blame
+        timestamp
+    )
+
+# Infer TODO status based on metadata
+fn infer_todo_status(todo: ParserTodoItem) -> text:
+    # If blocked, mark as blocked
+    if todo.blocked.len() > 0:
+        return "blocked"
+
+    # If has issue number, assume in progress
+    match todo.issue:
+        Some(_) => "in_progress"
+        nil => "open"
+
+# =========================================================================
+# Convenience Functions
+# =========================================================================
+
+# Collect TODOs from default location
+fn collect_todos() -> List<TodoItem>:
+    val collector = TodoCollector.new(".")
+    return collector.collect()
+
+# Collect TODOs from custom path
+fn collect_todos_from(path: text) -> List<TodoItem>:
+    val collector = TodoCollector.new(path)
+    return collector.collect()
+
+# =========================================================================
+# Exports
+# =========================================================================
+
