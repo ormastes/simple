@@ -1,0 +1,206 @@
+# Dashboard Configuration
+#
+# Loads and manages dashboard configuration from .simple/dashboard.toml
+
+use core.io.fs.{read_text_file, file_exists}
+use tooling.dashboard.alerts.{AlertConfig}
+
+# =========================================================================
+# Configuration
+# =========================================================================
+
+class DashboardConfig:
+    alerts: AlertConfig
+    trends_history_days: i32
+    snapshot_frequency: text
+    web_port: i32
+    web_auto_refresh_seconds: i32
+    web_dark_mode: bool
+
+    static fn default() -> DashboardConfig:
+        return DashboardConfig {
+            alerts: AlertConfig.default(),
+            trends_history_days: 90,
+            snapshot_frequency: "daily",
+            web_port: 3000,
+            web_auto_refresh_seconds: 30,
+            web_dark_mode: false
+        }
+
+    # Load from file
+    static fn from_file(path: text) -> Result<DashboardConfig, text>:
+        if not file_exists(path):
+            return Ok(DashboardConfig.default())
+
+        match read_text_file(path):
+            Err(e) => return Err("Failed to read config file: {e}")
+            Ok(content) => return parse_toml_config(content)
+
+    # Load from default location
+    static fn load() -> DashboardConfig:
+        match DashboardConfig.from_file(".simple/dashboard.toml"):
+            Ok(config) => return config
+            Err(_) => return DashboardConfig.default()
+
+# =========================================================================
+# TOML Parser (Simplified)
+# =========================================================================
+
+fn parse_toml_config(content: text) -> Result<DashboardConfig, text>:
+    var config = DashboardConfig.default()
+    val lines = content.split("\n")
+
+    var current_section = ""
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Skip comments and empty lines
+        if trimmed.starts_with("#") or trimmed.len() == 0:
+            continue
+
+        # Section headers
+        if trimmed.starts_with("[") and trimmed.ends_with("]"):
+            current_section = trimmed.slice(1, trimmed.len() - 1)
+            continue
+
+        # Key-value pairs
+        if trimmed.contains("="):
+            val parts = trimmed.split("=")
+            if parts.len() < 2:
+                continue
+
+            val key = parts[0].trim()
+            val value = parts[1].trim()
+
+            match current_section:
+                "alerts" => parse_alert_config(key, value, config.alerts)
+                "trends" => parse_trends_config(key, value, config)
+                "web" => parse_web_config(key, value, config)
+                _ => pass
+
+    return Ok(config)
+
+# Parse alert configuration
+fn parse_alert_config(key: text, value: text, alerts: AlertConfig):
+    match key:
+        "coverage_threshold" =>
+            alerts.coverage_min = parse_float(value)
+        "coverage_regression" =>
+            alerts.coverage_regression = parse_float(value)
+        "p0_todo_max" =>
+            alerts.todo_p0_max = parse_int(value)
+        "todo_increase" =>
+            alerts.todo_increase = parse_int(value)
+        "build_time_regression" =>
+            alerts.build_time_regression = parse_float(value)
+        _ => pass
+
+# Parse trends configuration
+fn parse_trends_config(key: text, value: text, config: DashboardConfig):
+    match key:
+        "history_days" =>
+            config.trends_history_days = parse_int(value)
+        "snapshot_frequency" =>
+            config.snapshot_frequency = unquote(value)
+        _ => pass
+
+# Parse web configuration
+fn parse_web_config(key: text, value: text, config: DashboardConfig):
+    match key:
+        "port" =>
+            config.web_port = parse_int(value)
+        "auto_refresh_seconds" =>
+            config.web_auto_refresh_seconds = parse_int(value)
+        "dark_mode" =>
+            config.web_dark_mode = parse_bool(value)
+        _ => pass
+
+# =========================================================================
+# Helper Functions
+# =========================================================================
+
+# Parse integer
+fn parse_int(s: text) -> i32:
+    var result = 0
+    var start = 0
+
+    for i in start..s.len():
+        val ch = s.char_at(i)
+        if ch >= '0' and ch <= '9':
+            result = result * 10 + (ch - '0')
+
+    return result
+
+# Parse float (simplified)
+fn parse_float(s: text) -> f64:
+    # TODO: Implement proper float parsing
+    return (parse_int(s) as f64)
+
+# Parse boolean
+fn parse_bool(s: text) -> bool:
+    val lower = s.to_lowercase()
+    return lower == "true" or lower == "1" or lower == "yes"
+
+# Remove quotes from string
+fn unquote(s: text) -> text:
+    var result = s.trim()
+    if result.starts_with("\"") and result.ends_with("\""):
+        result = result.slice(1, result.len() - 1)
+    return result
+
+# =========================================================================
+# Configuration Template
+# =========================================================================
+
+fn generate_config_template() -> text:
+    var toml = "# Simple Dashboard Configuration\n\n"
+
+    toml = "{toml}[alerts]\n"
+    toml = "{toml}# Coverage threshold (minimum percentage)\n"
+    toml = "{toml}coverage_threshold = 80.0\n\n"
+    toml = "{toml}# Coverage regression threshold (percentage drop)\n"
+    toml = "{toml}coverage_regression = 1.0\n\n"
+    toml = "{toml}# Maximum P0 TODOs before alert\n"
+    toml = "{toml}p0_todo_max = 5\n\n"
+    toml = "{toml}# TODO increase threshold\n"
+    toml = "{toml}todo_increase = 10\n\n"
+    toml = "{toml}# Build time regression threshold (percentage)\n"
+    toml = "{toml}build_time_regression = 10.0\n\n"
+
+    toml = "{toml}[trends]\n"
+    toml = "{toml}# Number of days to retain historical data\n"
+    toml = "{toml}history_days = 90\n\n"
+    toml = "{toml}# Snapshot frequency: daily, hourly\n"
+    toml = "{toml}snapshot_frequency = \"daily\"\n\n"
+
+    toml = "{toml}[web]\n"
+    toml = "{toml}# Web dashboard port\n"
+    toml = "{toml}port = 3000\n\n"
+    toml = "{toml}# Auto-refresh interval (seconds)\n"
+    toml = "{toml}auto_refresh_seconds = 30\n\n"
+    toml = "{toml}# Enable dark mode\n"
+    toml = "{toml}dark_mode = false\n"
+
+    return toml
+
+# =========================================================================
+# Convenience Functions
+# =========================================================================
+
+# Load configuration with fallback to defaults
+fn load_config() -> DashboardConfig:
+    return DashboardConfig.load()
+
+# Create default configuration file
+fn create_default_config(path: text) -> Result<(), text>:
+    val content = generate_config_template()
+    return write_text_file(path, content)
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export DashboardConfig
+export parse_toml_config, generate_config_template
+export load_config, create_default_config

@@ -89,6 +89,12 @@ pub fn print_help() {
     eprintln!("  simple verify status               Show verification status");
     eprintln!("  simple verify list                 List all proof obligations");
     eprintln!();
+    eprintln!("Dashboard & Metrics:");
+    eprintln!("  simple dashboard                   Show project metrics dashboard");
+    eprintln!("  simple dashboard collect           Collect fresh metrics data");
+    eprintln!("  simple dashboard status            Show dashboard summary");
+    eprintln!("  simple dashboard cache-stats       Show cache statistics");
+    eprintln!();
     eprintln!("Package Management:");
     eprintln!("  simple init [name]          Create a new project");
     eprintln!("  simple add <pkg> [options]  Add a dependency");

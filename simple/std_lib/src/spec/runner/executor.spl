@@ -1,0 +1,340 @@
+# Test Execution Engine
+# Executes registered tests with hook support and result capture
+
+import spec.registry.{ExampleGroup, Example, Hook, get_all_groups}
+import spec.runtime.{Runtime, ExampleState}
+import time.{Timer}
+
+# Test result status
+enum TestStatus:
+    Passed
+    Failed(message: text)
+    Pending
+    Skipped
+
+# Individual test result
+class TestResult:
+    example: Example
+    group: ExampleGroup
+    status: TestStatus
+    duration_ms: f64
+    failure_message: Option<text>
+
+impl TestResult:
+    fn new(example: Example, group: ExampleGroup) -> TestResult:
+        return TestResult {
+            example: example,
+            group: group,
+            status: TestStatus.Pending,
+            duration_ms: 0.0,
+            failure_message: None
+        }
+
+    fn mark_passed(duration_ms: f64) -> void:
+        """Mark this test as passed."""
+        self.status = TestStatus.Passed
+        self.duration_ms = duration_ms
+
+    fn mark_failed(message: text, duration_ms: f64) -> void:
+        """Mark this test as failed with error message."""
+        self.status = TestStatus.Failed(message)
+        self.failure_message = Some(message)
+        self.duration_ms = duration_ms
+
+    fn mark_pending() -> void:
+        """Mark this test as pending/skipped."""
+        self.status = TestStatus.Pending
+
+    fn mark_skipped() -> void:
+        """Mark this test as skipped."""
+        self.status = TestStatus.Skipped
+
+    fn is_passed() -> bool:
+        """Check if test passed."""
+        match self.status:
+            case TestStatus.Passed:
+                return true
+            case _:
+                return false
+
+    fn is_failed() -> bool:
+        """Check if test failed."""
+        match self.status:
+            case TestStatus.Failed(_):
+                return true
+            case _:
+                return false
+
+    fn is_pending() -> bool:
+        """Check if test is pending."""
+        match self.status:
+            case TestStatus.Pending:
+                return true
+            case _:
+                return false
+
+    fn is_skipped() -> bool:
+        """Check if test is skipped."""
+        match self.status:
+            case TestStatus.Skipped:
+                return true
+            case _:
+                return false
+
+    fn full_description() -> text:
+        """Get the full hierarchical test description."""
+        return self.group.full_description() + " " + self.example.description
+
+# Test suite execution results
+class ExecutionResults:
+    results: List<TestResult>
+    total_duration_ms: f64
+    start_time: f64
+
+impl ExecutionResults:
+    fn new() -> ExecutionResults:
+        return ExecutionResults {
+            results: [],
+            total_duration_ms: 0.0,
+            start_time: 0.0
+        }
+
+    fn add_result(result: TestResult) -> void:
+        """Add a test result."""
+        self.results.push(result)
+
+    fn passed_count() -> i32:
+        """Count passed tests."""
+        return self.results.filter(\r: r.is_passed()).len()
+
+    fn failed_count() -> i32:
+        """Count failed tests."""
+        return self.results.filter(\r: r.is_failed()).len()
+
+    fn pending_count() -> i32:
+        """Count pending tests."""
+        return self.results.filter(\r: r.is_pending()).len()
+
+    fn skipped_count() -> i32:
+        """Count skipped tests."""
+        return self.results.filter(\r: r.is_skipped()).len()
+
+    fn total_count() -> i32:
+        """Count total tests."""
+        return self.results.len()
+
+    fn success_rate() -> f64:
+        """Calculate success rate (0.0 to 1.0)."""
+        if self.total_count() == 0:
+            return 1.0
+        return self.passed_count() as f64 / self.total_count() as f64
+
+    fn all_passed() -> bool:
+        """Check if all tests passed."""
+        return self.failed_count() == 0 and self.pending_count() == 0
+
+    fn has_failures() -> bool:
+        """Check if there are any failures."""
+        return self.failed_count() > 0
+
+    fn failures() -> List<TestResult>:
+        """Get all failed test results."""
+        return self.results.filter(\r: r.is_failed())
+
+    fn summary() -> text:
+        """Get summary string."""
+        val total = self.total_count()
+        val passed = self.passed_count()
+        val failed = self.failed_count()
+        val pending = self.pending_count()
+        val duration = self.total_duration_ms / 1000.0
+
+        return "Finished in {duration}s\n{total} examples, {failed} failures, {pending} pending"
+
+# Test executor - runs tests and captures results
+class TestExecutor:
+    runtime: Runtime
+    run_slow_tests: bool
+    filter_tags: List<text>
+    filter_pattern: Option<text>
+
+impl TestExecutor:
+    fn new() -> TestExecutor:
+        return TestExecutor {
+            runtime: Runtime.new(),
+            run_slow_tests: false,
+            filter_tags: [],
+            filter_pattern: None
+        }
+
+    fn with_slow_tests(run_slow: bool) -> TestExecutor:
+        """Enable/disable slow test execution."""
+        self.run_slow_tests = run_slow
+        return self
+
+    fn with_tags(tags: List<text>) -> TestExecutor:
+        """Filter tests by tags."""
+        self.filter_tags = tags
+        return self
+
+    fn with_pattern(pattern: text) -> TestExecutor:
+        """Filter tests by description pattern."""
+        self.filter_pattern = Some(pattern)
+        return self
+
+    fn should_run_example(example: Example, group: ExampleGroup) -> bool:
+        """Check if example should run based on filters."""
+        # Check if example should run (not skipped, slow test handling)
+        if not example.should_run(self.run_slow_tests):
+            return false
+
+        # Check tag filters
+        if not self.filter_tags.is_empty():
+            var has_matching_tag = false
+            for tag in self.filter_tags:
+                if example.has_tag(tag):
+                    has_matching_tag = true
+                    break
+            if not has_matching_tag:
+                return false
+
+        # Check pattern filter
+        match self.filter_pattern:
+            case Some(pattern):
+                val full_desc = group.full_description() + " " + example.description
+                if not full_desc.contains(pattern):
+                    return false
+            case None:
+                pass
+
+        return true
+
+    fn execute_hooks(hooks: List<Any>) -> void:
+        """Execute a list of hooks."""
+        for hook_block in hooks:
+            # Call the hook block
+            hook_block()
+
+    fn execute_example(example: Example, group: ExampleGroup) -> TestResult:
+        """Execute a single test example."""
+        val result = TestResult.new(example, group)
+
+        # Check if should run
+        if not self.should_run_example(example, group):
+            result.mark_skipped()
+            return result
+
+        # Check if pending
+        if example.is_pending():
+            result.mark_pending()
+            return result
+
+        # Collect all before_each hooks from hierarchy
+        val before_hooks = self.collect_before_each_hooks(group)
+        val after_hooks = self.collect_after_each_hooks(group)
+
+        # Start timer
+        val timer = Timer.start()
+
+        try:
+            # Reset example state
+            self.runtime.reset_example_state()
+
+            # Execute before_each hooks
+            self.execute_hooks(before_hooks)
+
+            # Execute the test
+            example.run()
+
+            # Mark as passed
+            val duration = timer.elapsed_ms()
+            result.mark_passed(duration)
+
+        catch error:
+            # Mark as failed with error message
+            val duration = timer.elapsed_ms()
+            result.mark_failed(error.message, duration)
+
+        finally:
+            # Execute after_each hooks (always run)
+            self.execute_hooks(after_hooks)
+
+        return result
+
+    fn collect_before_each_hooks(group: ExampleGroup) -> List<Any>:
+        """Collect before_each hooks from group hierarchy."""
+        var hooks: List<Any> = []
+
+        # Collect from parent chain (bottom-up)
+        match group.parent:
+            case Some(parent):
+                hooks = self.collect_before_each_hooks(parent)
+            case None:
+                pass
+
+        # Add this group's hooks
+        hooks.extend(group.get_before_each_hooks())
+
+        return hooks
+
+    fn collect_after_each_hooks(group: ExampleGroup) -> List<Any>:
+        """Collect after_each hooks from group hierarchy."""
+        var hooks: List<Any> = []
+
+        # Add this group's hooks first
+        hooks.extend(group.get_after_each_hooks())
+
+        # Then parent's hooks (top-down for cleanup)
+        match group.parent:
+            case Some(parent):
+                hooks.extend(self.collect_after_each_hooks(parent))
+            case None:
+                pass
+
+        return hooks
+
+    fn execute_group(group: ExampleGroup, results: ExecutionResults) -> void:
+        """Execute all examples in a group and its children."""
+        # Execute before_all hooks
+        self.execute_hooks(group.get_before_all_hooks())
+
+        # Execute examples in this group
+        for example in group.test_examples:
+            val result = self.execute_example(example, group)
+            results.add_result(result)
+
+        # Execute child groups recursively
+        for child in group.children:
+            self.execute_group(child, results)
+
+        # Execute after_all hooks
+        self.execute_hooks(group.get_after_all_hooks())
+
+    fn run() -> ExecutionResults:
+        """Execute all registered tests and return results."""
+        val results = ExecutionResults.new()
+        results.start_time = Timer.now()
+
+        val groups = get_all_groups()
+
+        for group in groups:
+            self.execute_group(group, results)
+
+        results.total_duration_ms = Timer.now() - results.start_time
+
+        return results
+
+# Convenience function to run all tests
+fn run_tests() -> ExecutionResults:
+    """Run all registered tests with default settings."""
+    val executor = TestExecutor.new()
+    return executor.run()
+
+# Run tests with slow tests enabled
+fn run_all_tests() -> ExecutionResults:
+    """Run all tests including slow tests."""
+    val executor = TestExecutor.new().with_slow_tests(true)
+    return executor.run()
+
+export TestStatus, TestResult, ExecutionResults, TestExecutor
+export run_tests, run_all_tests

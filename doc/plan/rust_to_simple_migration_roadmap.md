@@ -1,7 +1,7 @@
 # Rust to Simple Migration Roadmap
 
-**Date:** 2026-01-21
-**Status:** Phase 2 Complete
+**Date:** 2026-01-21 (Updated)
+**Status:** Phase 3-6 Complete + 2 Additional
 **Goal:** Build formally verified compiler core in Simple
 
 ---
@@ -19,22 +19,28 @@
 | **env_commands.rs** | 69 | Subcommand | +54% | ⭐⭐⭐⭐ | 23 |
 | **startup.rs** | 86 | State return | +205% | ⭐⭐⭐ | 18 |
 
-**Total:** 8 files, 822 Rust LOC → 1,340 Simple LOC, 206 tests
+**Total:** 16 files, ~1,600 Rust LOC → ~2,570 Simple LOC, 460+ tests
 
 ---
 
 ## Priority 1: Pure Functional Utilities (Perfect for Lean) 🔥
 
-### Very High Priority (Next Session)
+### ✅ COMPLETED
 
-| File | LOC | Pattern | Predicted | Why Migrate |
-|------|-----|---------|-----------|-------------|
-| **hir/types/layout.rs** | ~80 | Layout calculations | +80% | Memory layout proofs |
-| **mir/inst_info.rs** | ~120 | Instruction metadata | +70% | Opcode correctness |
-| **codegen/types_util.rs** | 93 | Type conversion | ✅ Done | ✅ Complete |
-| **error_utils.rs** | 61 | Error messages | ✅ Done | ✅ Complete |
+| File | LOC | Status | Tests | Notes |
+|------|-----|--------|-------|-------|
+| **hir/types/layout.rs** | ~80 | ✅ Done | (existing) | layout.spl - C ABI alignment |
+| **codegen/types_util.rs** | 93 | ✅ Done | 35 | Phase 2 complete |
+| **error_utils.rs** | 61 | ✅ Done | 46 | Phase 2 complete |
+| **diagnostics/severity.rs** | 98 | ✅ Done | 28 | severity.spl |
+| **mir/inst_types.rs** | 180 | ✅ Done | 36 | mir_types.spl - 9 enums |
+| **mir/effects.rs** | 140 | ✅ Done | 48 | effects_core.spl - Lean-aligned |
+| **lexer/escapes.rs** | 51 | ✅ Done | 32 | string_escape.spl |
+| **symbol_hash** | 66 | ✅ Done | 30 | symbol_hash.spl |
+| **symbol_analysis** | 71 | ✅ Done | 38 | symbol_analysis.spl |
+| **tensor/broadcast.rs** | 95 | ✅ Done | 40 | tensor_broadcast.spl |
 
-**Estimated:** ~200 Rust LOC → ~340 Simple LOC, 60+ tests
+**Completed:** ~1,035 Rust LOC → ~1,650 Simple LOC, 333+ tests
 
 ### High Priority (This Week)
 
@@ -355,8 +361,27 @@
 
 ---
 
-**Current Status:** 8 files migrated, 206 tests, 2 patterns established
+**Current Status:** 16 files migrated, 460+ tests, 12+ patterns established
 
-**Next Milestone:** Prove first Lean theorem for types_util.spl
+**Next Milestone:** Prove Lean theorems for effects_core.spl and tensor_broadcast.spl
 
 **Long-Term Goal:** Formally verified Simple compiler core
+
+---
+
+## Recent Progress (2026-01-21)
+
+### Session 1: Phases 3-6
+- ✅ 6 modules migrated (layout, string_escape, severity, symbol_hash, symbol_analysis, effects_core)
+- ✅ 176+ tests, 100% coverage
+- ✅ effects_core.spl: Perfect 1:1 Lean alignment
+
+### Session 2: Continuation
+- ✅ 2 modules migrated (tensor_broadcast, mir_types)
+- ✅ 76 tests, 100% coverage
+- ✅ NumPy broadcasting semantics
+- ✅ 9 MIR enum types with utilities
+
+**See Reports:**
+- `doc/report/rust_to_simple_migration_phases3-6_2026-01-21.md`
+- `doc/report/rust_to_simple_migration_continuation_2026-01-21.md`

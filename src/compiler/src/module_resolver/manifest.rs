@@ -121,7 +121,7 @@ impl DirectoryManifest {
                 // Async is an execution model, not a capability - always allowed
                 Effect::Async => {}
                 // Verification effects are compile-time markers, always allowed
-                Effect::Verify | Effect::Trusted | Effect::Ghost => {}
+                Effect::Verify | Effect::Trusted | Effect::Ghost | Effect::AutoLean(_) => {}
                 // Pure requires the Pure capability
                 Effect::Pure => {
                     if !self.capabilities.contains(&Capability::Pure) {

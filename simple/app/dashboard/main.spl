@@ -1,0 +1,218 @@
+# Dashboard CLI Application
+#
+# Command-line interface for the Simple compiler dashboard.
+# Provides various views and commands for inspecting project metrics.
+
+use tooling.dashboard.collector.{collect_dashboard_data, collect_quick, collect_full}
+use tooling.dashboard.cache.{get_cached_data, cache_stats}
+use tooling.dashboard.snapshots.{create_daily_snapshot, cleanup_snapshots}
+use tooling.dashboard.trends.{analyze_weekly_trends, analyze_monthly_trends, format_trend_chart}
+use tooling.dashboard.alerts.{check_alerts, check_alerts_with_trends, format_alerts, should_block_build}
+use dashboard.views.status.{render_status}
+use web_dashboard.server.{DashboardServer}
+
+# =========================================================================
+# Main Entry Point
+# =========================================================================
+
+fn main(args: List<text>):
+    # Parse command
+    val command = if args.len() > 0:
+        args[0]
+    else:
+        "status"
+
+    match command:
+        "collect" => run_collect(args.slice(1, args.len()))
+        "status" => run_status()
+        "snapshot" => run_snapshot()
+        "trends" => run_trends(args.slice(1, args.len()))
+        "check-alerts" => run_check_alerts()
+        "cleanup" => run_cleanup()
+        "serve" => run_serve(args.slice(1, args.len()))
+        "cache-stats" => run_cache_stats()
+        "help" => print_help()
+        _ =>
+            print "Unknown command: {command}"
+            print "Run 'simple dashboard help' for usage"
+
+# =========================================================================
+# Commands
+# =========================================================================
+
+# Run data collection
+fn run_collect(args: List<text>):
+    val mode = if args.len() > 0 and args[0] == "--mode=quick":
+        "quick"
+    elif args.len() > 0 and args[0] == "--mode=full":
+        "full"
+    else:
+        "full"
+
+    print "Collecting dashboard data ({mode} mode)...\n"
+
+    val result = if mode == "quick":
+        collect_quick()
+    else:
+        collect_full()
+
+    match result:
+        Ok(data) =>
+            print "\nCollection complete!"
+            print "  Features: {data.features.len()}"
+            print "  SSpec tests: {data.sspec_tests.len()}"
+            print "  TODOs: {data.todos.len()}"
+            print "  Coverage metrics: {data.coverage.len()}"
+            print "  Plans: {data.plans.len()}"
+        Err(e) =>
+            print "Error: {e}"
+
+# Run status view
+fn run_status():
+    # Try to use cached data first
+    match get_cached_data():
+        Ok(data) =>
+            print render_status(data)
+        Err(e) =>
+            print "No cached data, collecting...\n"
+            match collect_full():
+                Ok(data) =>
+                    print render_status(data)
+                Err(err) =>
+                    print "Error: {err}"
+
+# Show cache statistics
+fn run_cache_stats():
+    val stats = cache_stats()
+    print stats.to_string()
+
+# Create daily snapshot
+fn run_snapshot():
+    print "Creating snapshot...\n"
+
+    match collect_full():
+        Ok(data) =>
+            match create_daily_snapshot(data):
+                Ok(file) =>
+                    print "Snapshot created: {file}"
+                Err(e) =>
+                    print "Error: {e}"
+        Err(e) =>
+            print "Error collecting data: {e}"
+
+# Show trends
+fn run_trends(args: List<text>):
+    val days = if args.len() > 0 and args[0] == "--weekly":
+        7
+    elif args.len() > 0 and args[0] == "--monthly":
+        30
+    else:
+        7
+
+    print "Analyzing trends (last {days} days)...\n"
+
+    val result = if days == 7:
+        analyze_weekly_trends()
+    else:
+        analyze_monthly_trends()
+
+    match result:
+        Ok(report) =>
+            print report.summary()
+            print "\nDetailed Trends:\n"
+            print format_trend_chart(report.coverage, 40)
+            print format_trend_chart(report.features, 40)
+            print format_trend_chart(report.todos, 40)
+            print format_trend_chart(report.tests, 40)
+        Err(e) =>
+            print "Error: {e}"
+
+# Check for alerts
+fn run_check_alerts():
+    print "Checking for alerts...\n"
+
+    match collect_full():
+        Ok(data) =>
+            match analyze_weekly_trends():
+                Ok(trends) =>
+                    val alerts = check_alerts_with_trends(data, trends)
+                    print format_alerts(alerts)
+
+                    if should_block_build(alerts):
+                        print "\n⚠️  Critical alerts detected - build should be blocked"
+                        return 1
+                    else:
+                        print "\n✓ No critical alerts"
+                        return 0
+                Err(_) =>
+                    print "Warning: Could not load trends, checking current data only\n"
+                    val alerts = check_alerts(data)
+                    print format_alerts(alerts)
+                    return 0
+        Err(e) =>
+            print "Error: {e}"
+            return 1
+
+# Cleanup old snapshots
+fn run_cleanup():
+    print "Cleaning up old snapshots...\n"
+
+    match cleanup_snapshots():
+        Ok(count) =>
+            print "Deleted {count} old snapshots"
+        Err(e) =>
+            print "Error: {e}"
+
+# Start web server
+fn run_serve(args: List<text>):
+    val port = if args.len() > 0 and args[0].starts_with("--port="):
+        parse_port(args[0].replace("--port=", ""))
+    else:
+        3000
+
+    val server = DashboardServer.new(port)
+    server.start()
+
+# Parse port from string
+fn parse_port(s: text) -> i32:
+    # Simple integer parsing
+    var result = 0
+    for i in 0..s.len():
+        val ch = s.char_at(i)
+        if ch >= '0' and ch <= '9':
+            result = result * 10 + (ch - '0')
+    return if result > 0: result else: 3000
+
+# Print help
+fn print_help():
+    print "Simple Dashboard CLI\n"
+    print "Usage: simple dashboard [command] [options]\n"
+    print "\nCommands:"
+    print "  status          Show dashboard summary (default)"
+    print "  collect         Collect fresh data"
+    print "    --mode=quick    Quick collection (minimal data)"
+    print "    --mode=full     Full collection (all data)"
+    print "  snapshot        Create daily snapshot"
+    print "  trends          Show trend analysis"
+    print "    --weekly        Last 7 days (default)"
+    print "    --monthly       Last 30 days"
+    print "  check-alerts    Check for critical alerts"
+    print "  cleanup         Remove old snapshots (>90 days)"
+    print "  serve           Start web dashboard server"
+    print "    --port=N        Server port (default: 3000)"
+    print "  cache-stats     Show cache statistics"
+    print "  help            Show this help\n"
+    print "\nExamples:"
+    print "  simple dashboard"
+    print "  simple dashboard collect --mode=full"
+    print "  simple dashboard trends --monthly"
+    print "  simple dashboard check-alerts"
+    print "  simple dashboard serve --port=8080"
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export main
+export run_collect, run_status, run_snapshot, run_trends, run_check_alerts, run_cleanup, run_serve
+export run_cache_stats, print_help, parse_port

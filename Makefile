@@ -18,7 +18,8 @@
         check check-full unused-deps outdated audit build build-release \
         clean clean-coverage clean-duplication install-tools help \
         arch-test arch-test-visualize \
-        check-todos gen-todos todos todos-p0
+        check-todos gen-todos todos todos-p0 \
+        dashboard dashboard-collect dashboard-snapshot dashboard-trends dashboard-alerts
 
 # Default target
 all: check
@@ -534,6 +535,31 @@ todos-p0:
 	@grep -A 5 "## P0 Critical TODOs" doc/TODO.md | tail -n +2 || echo "✓ No P0 TODOs found!"
 
 # ============================================================================
+# Dashboard & Metrics
+# ============================================================================
+
+# Show dashboard summary
+dashboard:
+	@./target/debug/simple dashboard status
+
+# Collect fresh metrics
+dashboard-collect:
+	@./target/debug/simple dashboard collect --mode=full
+
+# Create daily snapshot
+dashboard-snapshot:
+	@./target/debug/simple dashboard snapshot
+	@./target/debug/simple dashboard cleanup
+
+# Show trend analysis
+dashboard-trends:
+	@./target/debug/simple dashboard trends --monthly
+
+# Check for critical alerts
+dashboard-alerts:
+	@./target/debug/simple dashboard check-alerts
+
+# ============================================================================
 # Help
 # ============================================================================
 
@@ -595,6 +621,13 @@ help:
 	@echo "  make todos         - Generate and show recent TODOs"
 	@echo "  make todos-p0      - Show critical (P0) TODOs only"
 	@echo "  make check-todos   - Validate TODO format"
+	@echo ""
+	@echo "Dashboard & Metrics:"
+	@echo "  make dashboard         - Show dashboard summary"
+	@echo "  make dashboard-collect - Collect fresh metrics"
+	@echo "  make dashboard-snapshot- Create daily snapshot"
+	@echo "  make dashboard-trends  - Show trend analysis"
+	@echo "  make dashboard-alerts  - Check for critical alerts"
 	@echo ""
 	@echo "Other:"
 	@echo "  make install-tools - Install required tools"

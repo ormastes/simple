@@ -27,6 +27,25 @@ pub enum Effect {
     /// Ghost declaration - exists only for verification, erased at runtime
     /// Ghost functions/classes are included in Lean output but not in compiled code
     Ghost,
+    /// Auto-generate Lean scaffolding (structures, lookups, BEq, theorems)
+    /// Mode: full (default) - generates all scaffolding
+    /// Mode: structure_only - only generates structure/inductive definitions
+    /// Mode: skip - excludes from generation
+    AutoLean(AutoLeanMode),
+}
+
+/// Mode for @auto_lean attribute controlling what gets generated
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AutoLeanMode {
+    /// Full auto-generation: structure + lookups + BEq + reflexivity theorems
+    #[default]
+    Full,
+    /// Only generate structure/inductive definitions
+    StructureOnly,
+    /// Skip this item from Lean generation
+    Skip,
+    /// Generate determinism theorems for Option-returning functions
+    Determinism,
 }
 
 impl Effect {
@@ -43,7 +62,26 @@ impl Effect {
             "verify" => Some(Effect::Verify),
             "trusted" => Some(Effect::Trusted),
             "ghost" => Some(Effect::Ghost),
+            "auto_lean" => Some(Effect::AutoLean(AutoLeanMode::Full)),
             _ => None,
+        }
+    }
+
+    /// Parse an effect from a decorator name with an optional argument.
+    /// For @auto_lean(mode), parses the mode argument.
+    pub fn from_decorator_name_with_arg(name: &str, arg: Option<&str>) -> Option<Self> {
+        match name {
+            "auto_lean" => {
+                let mode = match arg {
+                    Some("full") | None => AutoLeanMode::Full,
+                    Some("structure_only") => AutoLeanMode::StructureOnly,
+                    Some("skip") => AutoLeanMode::Skip,
+                    Some("determinism") => AutoLeanMode::Determinism,
+                    _ => return None,
+                };
+                Some(Effect::AutoLean(mode))
+            }
+            _ => Self::from_decorator_name(name),
         }
     }
 
@@ -59,12 +97,64 @@ impl Effect {
             Effect::Verify => "verify",
             Effect::Trusted => "trusted",
             Effect::Ghost => "ghost",
+            Effect::AutoLean(_) => "auto_lean",
         }
     }
 
     /// Check if this is a verification-related effect.
     pub fn is_verification(&self) -> bool {
-        matches!(self, Effect::Verify | Effect::Trusted | Effect::Ghost)
+        matches!(self, Effect::Verify | Effect::Trusted | Effect::Ghost | Effect::AutoLean(_))
+    }
+
+    /// Get the auto_lean mode if this is an AutoLean effect.
+    pub fn auto_lean_mode(&self) -> Option<AutoLeanMode> {
+        match self {
+            Effect::AutoLean(mode) => Some(*mode),
+            _ => None,
+        }
+    }
+}
+
+impl AutoLeanMode {
+    /// Parse mode from string argument.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "full" => Some(AutoLeanMode::Full),
+            "structure_only" => Some(AutoLeanMode::StructureOnly),
+            "skip" => Some(AutoLeanMode::Skip),
+            "determinism" => Some(AutoLeanMode::Determinism),
+            _ => None,
+        }
+    }
+
+    /// Get the string representation of this mode.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AutoLeanMode::Full => "full",
+            AutoLeanMode::StructureOnly => "structure_only",
+            AutoLeanMode::Skip => "skip",
+            AutoLeanMode::Determinism => "determinism",
+        }
+    }
+
+    /// Check if this mode generates structures.
+    pub fn generates_structures(&self) -> bool {
+        matches!(self, AutoLeanMode::Full | AutoLeanMode::StructureOnly)
+    }
+
+    /// Check if this mode generates lookups.
+    pub fn generates_lookups(&self) -> bool {
+        matches!(self, AutoLeanMode::Full)
+    }
+
+    /// Check if this mode generates BEq instances.
+    pub fn generates_beq(&self) -> bool {
+        matches!(self, AutoLeanMode::Full)
+    }
+
+    /// Check if this mode generates theorems.
+    pub fn generates_theorems(&self) -> bool {
+        matches!(self, AutoLeanMode::Full | AutoLeanMode::Determinism)
     }
 }
 
@@ -135,10 +225,11 @@ impl Capability {
             Effect::Net => Some(Capability::Net),
             Effect::Fs => Some(Capability::Fs),
             Effect::Unsafe => Some(Capability::Unsafe),
-            Effect::Async => None,   // Async is execution model, not capability
-            Effect::Verify => None,  // Verify is verification mode marker
-            Effect::Trusted => None, // Trusted is verification boundary marker
-            Effect::Ghost => None,   // Ghost is verification-only marker
+            Effect::Async => None,    // Async is execution model, not capability
+            Effect::Verify => None,   // Verify is verification mode marker
+            Effect::Trusted => None,  // Trusted is verification boundary marker
+            Effect::Ghost => None,    // Ghost is verification-only marker
+            Effect::AutoLean(_) => None, // AutoLean is Lean code generation marker
         }
     }
 }
