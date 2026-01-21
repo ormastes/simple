@@ -1,17 +1,159 @@
 # Lean Type Translation
 #
-# Translates Simple types to Lean 4 syntax.
+# Translates Simple types to Lean 4 syntax:
 # - class -> structure
 # - enum -> inductive
+# - primitive types -> Lean builtins (Int, Bool, String)
+# - mixin -> structure with methods
+# - subtype -> refinement type
 
-import verification.lean.emitter as emit
+import verification.lean.naming as naming
+import verification.lean.emitter as emitter
 
-# Simple type representation for translation
+# Lean type representation
+enum LeanType:
+    # Primitive Lean type (Int, Nat, Bool, String)
+    Primitive(name: text)
+    # Named type reference
+    Named(name: text)
+    # Structure definition
+    Structure(name: text, fields: List<(text, LeanType)>, deriving: List<text>)
+    # Inductive type definition (enum)
+    Inductive(name: text, variants: List<(text, List<LeanType>)>, deriving: List<text>)
+    # Function type (A -> B)
+    Function(params: List<LeanType>, result: LeanType)
+    # Optional type (Option A)
+    Optional(inner: LeanType)
+    # List type (List A)
+    ListType(inner: LeanType)
+    # Tuple type (A x B)
+    Tuple(elems: List<LeanType>)
+    # Mixin definition (reusable structure extension)
+    Mixin(name: text, fields: List<(text, LeanType)>, methods: List<(text, LeanType)>, type_params: List<text>)
+    # Subtype/Refinement type (e.g., {x : Int // x > 0})
+    Subtype(name: text, base_type: LeanType, predicate: text)
+
+impl LeanType:
+    # Convert to Lean syntax string
+    fn to_lean() -> text:
+        match self:
+            case Primitive(name): name
+            case Named(name): name
+            case Structure(name, _, _): name
+            case Inductive(name, _, _): name
+            case Mixin(name, _, _, _): name
+            case Subtype(name, _, _): name
+            case Function(params, result):
+                var parts: List<text> = []
+                for p in params:
+                    parts = parts + [p.to_lean()]
+                parts = parts + [result.to_lean()]
+                parts.join(" -> ")
+            case Optional(inner):
+                "Option {inner.to_lean()}"
+            case ListType(inner):
+                "List {inner.to_lean()}"
+            case Tuple(elems):
+                var parts: List<text> = []
+                for e in elems:
+                    parts = parts + [e.to_lean()]
+                "(" + parts.join(" x ") + ")"
+
+    # Emit structure definition
+    fn emit_structure() -> Option<text>:
+        match self:
+            case Structure(name, fields, deriving):
+                var out = "structure {name} where\n"
+                for (field_name, field_type) in fields:
+                    out = out + "  {field_name} : {field_type.to_lean()}\n"
+                if deriving.len() > 0:
+                    out = out + "deriving {deriving.join(\", \")}\n"
+                Some(out)
+            case _:
+                nil
+
+    # Emit inductive definition
+    fn emit_inductive() -> Option<text>:
+        match self:
+            case Inductive(name, variants, deriving):
+                var out = "inductive {name} where\n"
+                for (variant_name, variant_types) in variants:
+                    if variant_types.len() == 0:
+                        out = out + "  | {variant_name} : {name}\n"
+                    else:
+                        var types_str: List<text> = []
+                        for t in variant_types:
+                            types_str = types_str + [t.to_lean()]
+                        out = out + "  | {variant_name} : {types_str.join(\" -> \")} -> {name}\n"
+                if deriving.len() > 0:
+                    out = out + "deriving {deriving.join(\", \")}\n"
+                Some(out)
+            case _:
+                nil
+
+    # Emit mixin definition
+    fn emit_mixin() -> Option<text>:
+        match self:
+            case Mixin(name, fields, methods, type_params):
+                var out = ""
+                # Generate type parameter list
+                var params = ""
+                if type_params.len() > 0:
+                    var param_strs: List<text> = []
+                    for p in type_params:
+                        param_strs = param_strs + ["({p} : Type)"]
+                    params = " " + param_strs.join(" ")
+
+                out = out + "/-- Mixin: {name} --/\n"
+                out = out + "structure {name}{params} where\n"
+
+                # Emit fields
+                for (field_name, field_type) in fields:
+                    out = out + "  {field_name} : {field_type.to_lean()}\n"
+
+                # Emit method signatures as function fields
+                for (method_name, method_type) in methods:
+                    out = out + "  {method_name} : {method_type.to_lean()}\n"
+
+                out = out + "deriving Repr\n"
+                Some(out)
+            case _:
+                nil
+
+    # Emit subtype definition
+    fn emit_subtype() -> Option<text>:
+        match self:
+            case Subtype(name, base_type, predicate):
+                Some("/-- Refinement type: {name} --/\ndef {name} : Type := \{x : {base_type.to_lean()} // {predicate}\}\n")
+            case _:
+                nil
+
+    # Check if this is a primitive type
+    fn is_primitive() -> bool:
+        match self:
+            case Primitive(_): true
+            case _: false
+
+    # Check if this is a structure
+    fn is_structure() -> bool:
+        match self:
+            case Structure(_, _, _): true
+            case _: false
+
+    # Check if this is an inductive
+    fn is_inductive() -> bool:
+        match self:
+            case Inductive(_, _, _): true
+            case _: false
+
+# Simple type representation for translation (high-level)
 enum SimpleType:
     IntType
     BoolType
     StringType
     UnitType
+    NatType
+    FloatType
     ListType(elem: SimpleType)
     OptionType(inner: SimpleType)
     TupleType(elems: List<SimpleType>)
@@ -19,33 +161,50 @@ enum SimpleType:
     NamedType(name: text)
 
 impl SimpleType:
-    me to_lean() -> text:
+    fn to_lean() -> text:
         match self:
-            case IntType:
-                return "i32"
-            case BoolType:
-                return "bool"
-            case StringType:
-                return "text"
-            case UnitType:
-                return "Unit"
-            case ListType(e):
-                return "List (" + e.to_lean() + ")"
-            case OptionType(i):
-                return "Option (" + i.to_lean() + ")"
+            case IntType: "Int"
+            case BoolType: "Bool"
+            case StringType: "String"
+            case UnitType: "Unit"
+            case NatType: "Nat"
+            case FloatType: "Float"
+            case ListType(e): "List ({e.to_lean()})"
+            case OptionType(i): "Option ({i.to_lean()})"
             case TupleType(es):
-                var parts = []
+                var parts: List<text> = []
                 for e in es:
-                    parts.append(e.to_lean())
-                "(" + parts.join(" × ") + ")"
+                    parts = parts + [e.to_lean()]
+                "(" + parts.join(" x ") + ")"
             case FunctionType(ps, r):
-                var p_strs = []
+                var p_strs: List<text> = []
                 for p in ps:
-                    p_strs.append(p.to_lean())
-                p_strs.append(r.to_lean())
-                p_strs.join(" → ")
-            case NamedType(n):
-                return n
+                    p_strs = p_strs + [p.to_lean()]
+                p_strs = p_strs + [r.to_lean()]
+                p_strs.join(" -> ")
+            case NamedType(n): n
+
+    fn to_lean_type() -> LeanType:
+        match self:
+            case IntType: LeanType.Primitive("Int")
+            case BoolType: LeanType.Primitive("Bool")
+            case StringType: LeanType.Primitive("String")
+            case UnitType: LeanType.Primitive("Unit")
+            case NatType: LeanType.Primitive("Nat")
+            case FloatType: LeanType.Primitive("Float")
+            case ListType(e): LeanType.ListType(e.to_lean_type())
+            case OptionType(i): LeanType.Optional(i.to_lean_type())
+            case TupleType(es):
+                var lean_elems: List<LeanType> = []
+                for e in es:
+                    lean_elems = lean_elems + [e.to_lean_type()]
+                LeanType.Tuple(lean_elems)
+            case FunctionType(ps, r):
+                var lean_params: List<LeanType> = []
+                for p in ps:
+                    lean_params = lean_params + [p.to_lean_type()]
+                LeanType.Function(lean_params, r.to_lean_type())
+            case NamedType(n): LeanType.Named(n)
 
 # Field definition
 class FieldDef:
@@ -53,11 +212,14 @@ class FieldDef:
     field_type: SimpleType
     default_value: Option<text>
 
-    fn create(name: text, field_type: SimpleType, default_value: Option<text> = None) -> FieldDef:
-        return FieldDef(name, field_type, default_value)
+    static fn create(name: text, field_type: SimpleType, default_value: Option<text>) -> FieldDef:
+        FieldDef(name: name, field_type: field_type, default_value: default_value)
 
-    me to_lean_decl() -> text:
-        return self.name + " : " + self.field_type.to_lean()
+    fn to_lean_decl() -> text:
+        "{self.name} : {self.field_type.to_lean()}"
+
+    fn to_lean_pair() -> (text, text):
+        (self.name, self.field_type.to_lean())
 
 # Class definition (translates to structure)
 class ClassDef:
@@ -65,34 +227,53 @@ class ClassDef:
     fields: List<FieldDef>
     deriving: List<text>
 
-    fn create(name: text, fields: List<FieldDef> = [], deriving: List<text> = ["Repr"]) -> ClassDef:
-        return ClassDef(name, fields, deriving)
+    static fn create(name: text, fields: List<FieldDef>, deriving: List<text>) -> ClassDef:
+        ClassDef(name: name, fields: fields, deriving: deriving)
+
+    static fn new(name: text) -> ClassDef:
+        ClassDef(name: name, fields: [], deriving: ["Repr"])
 
     me add_field(field: FieldDef) -> ClassDef:
-        new_fields = self.fields.append(field)
-        return ClassDef(self.name, new_fields, self.deriving)
+        self.fields = self.fields + [field]
+        self
 
-    me with_deriving(deriving: List<text>) -> ClassDef:
-        return ClassDef(self.name, self.fields, deriving)
+    me with_deriving(derives: List<text>) -> ClassDef:
+        self.deriving = derives
+        self
 
-    me emit(builder: emit.LeanBuilder) -> emit.LeanBuilder:
-        var field_pairs = []
+    fn to_lean_type() -> LeanType:
+        var field_pairs: List<(text, LeanType)> = []
         for f in self.fields:
-            field_pairs.append((f.name, f.field_type.to_lean()))
-        emit.emit_structure_full(builder, self.name, field_pairs, self.deriving)
+            field_pairs = field_pairs + [(f.name, f.field_type.to_lean_type())]
+        LeanType.Structure(naming.to_pascal_case(self.name), field_pairs, self.deriving)
+
+    fn emit(emit: emitter.LeanEmitter):
+        var field_pairs: List<(text, text)> = []
+        for f in self.fields:
+            field_pairs = field_pairs + [f.to_lean_pair()]
+        emit.emit_structure_data(naming.to_pascal_case(self.name), field_pairs, self.deriving)
 
 # Enum variant
 class EnumVariant:
     name: text
     params: List<(text, SimpleType)>
 
-    fn create(name: text, params: List<(text, SimpleType)> = []) -> EnumVariant:
-        return EnumVariant(name, params)
+    static fn create(name: text, params: List<(text, SimpleType)>) -> EnumVariant:
+        EnumVariant(name: name, params: params)
 
-    me to_lean_params() -> List<(text, text)>:
-        var result = []
+    static fn unit(name: text) -> EnumVariant:
+        EnumVariant(name: name, params: [])
+
+    fn to_lean_params() -> List<(text, text)>:
+        var result: List<(text, text)> = []
         for (n, t) in self.params:
-            result.append((n, t.to_lean()))
+            result = result + [(n, t.to_lean())]
+        result
+
+    fn to_lean_types() -> List<LeanType>:
+        var result: List<LeanType> = []
+        for (_, t) in self.params:
+            result = result + [t.to_lean_type()]
         result
 
 # Enum definition (translates to inductive)
@@ -101,32 +282,48 @@ class EnumDef:
     variants: List<EnumVariant>
     deriving: List<text>
 
-    fn create(name: text, variants: List<EnumVariant> = [], deriving: List<text> = ["DecidableEq", "Repr"]) -> EnumDef:
-        return EnumDef(name, variants, deriving)
+    static fn create(name: text, variants: List<EnumVariant>, deriving: List<text>) -> EnumDef:
+        EnumDef(name: name, variants: variants, deriving: deriving)
+
+    static fn new(name: text) -> EnumDef:
+        EnumDef(name: name, variants: [], deriving: ["DecidableEq", "Repr"])
 
     me add_variant(variant: EnumVariant) -> EnumDef:
-        new_variants = self.variants.append(variant)
-        return EnumDef(self.name, new_variants, self.deriving)
+        self.variants = self.variants + [variant]
+        self
 
-    me with_deriving(deriving: List<text>) -> EnumDef:
-        return EnumDef(self.name, self.variants, deriving)
+    me with_deriving(derives: List<text>) -> EnumDef:
+        self.deriving = derives
+        self
 
-    me emit(builder: emit.LeanBuilder) -> emit.LeanBuilder:
-        var constructors = []
+    fn to_lean_type() -> LeanType:
+        var lean_variants: List<(text, List<LeanType>)> = []
         for v in self.variants:
-            constructors.append((v.name, v.to_lean_params()))
-        return emit.emit_inductive_full(builder, self.name, constructors, self.deriving)
+            lean_variants = lean_variants + [(naming.to_pascal_case(v.name), v.to_lean_types())]
+        LeanType.Inductive(naming.to_pascal_case(self.name), lean_variants, self.deriving)
+
+    fn emit(emit: emitter.LeanEmitter):
+        var constructors: List<(text, List<text>)> = []
+        for v in self.variants:
+            var type_strs: List<text> = []
+            for (_, t) in v.params:
+                type_strs = type_strs + [t.to_lean()]
+            constructors = constructors + [(naming.to_pascal_case(v.name), type_strs)]
+        emit.emit_inductive_data(naming.to_pascal_case(self.name), constructors, self.deriving)
 
 # Function parameter
 class ParamDef:
     name: text
     param_type: SimpleType
 
-    fn create(name: text, param_type: SimpleType) -> ParamDef:
-        return ParamDef(name, param_type)
+    static fn create(name: text, param_type: SimpleType) -> ParamDef:
+        ParamDef(name: name, param_type: param_type)
 
     fn to_lean() -> (text, text):
-        return (self.name, self.param_type.to_lean())
+        (self.name, self.param_type.to_lean())
+
+    fn to_lean_type_pair() -> (text, LeanType):
+        (self.name, self.param_type.to_lean_type())
 
 # Function definition
 class FunctionDef:
@@ -136,77 +333,98 @@ class FunctionDef:
     body: text
     is_partial: bool
 
-    fn create(name: text, params: List<ParamDef>, return_type: SimpleType, body: text, is_partial: bool = false) -> FunctionDef:
-        return FunctionDef(name, params, return_type, body, is_partial)
+    static fn create(name: text, params: List<ParamDef>, return_type: SimpleType, body: text, is_partial: bool) -> FunctionDef:
+        FunctionDef(name: name, params: params, return_type: return_type, body: body, is_partial: is_partial)
 
-    me emit(builder: emit.LeanBuilder) -> emit.LeanBuilder:
-        var param_pairs = []
+    fn emit(emit: emitter.LeanEmitter):
+        var param_pairs: List<(text, text)> = []
         for p in self.params:
-            param_pairs.append(p.to_lean())
-        prefix = ""
-        if self.is_partial:
-            prefix = "partial "
-        # Build manually since we need partial prefix
-        var param_strs = []
-        for (n, t) in param_pairs:
-            param_strs.append("(" + n + " : " + t + ")")
-        params_str = param_strs.join(" ")
-        sig = prefix + "def " + self.name
-        if self.params.len() > 0:
-            sig = sig + " " + params_str
-        sig = sig + " : " + self.return_type.to_lean() + " :="
-        b = builder.line(sig)
-        b = b.push_indent()
-        for line in self.body.split("\n"):
-            b = b.line(line)
-        b = b.pop_indent()
-        return b
+            param_pairs = param_pairs + [p.to_lean()]
+        emit.emit_function_data(
+            naming.to_camel_case(self.name),
+            param_pairs,
+            self.return_type.to_lean(),
+            self.body,
+            self.is_partial,
+            nil,
+            true
+        )
 
 # Type abbreviation
 class AbbrevDef:
     name: text
     type_expr: text
 
-    fn create(name: text, type_expr: text) -> AbbrevDef:
-        return AbbrevDef(name, type_expr)
+    static fn create(name: text, type_expr: text) -> AbbrevDef:
+        AbbrevDef(name: name, type_expr: type_expr)
 
-    me emit(builder: emit.LeanBuilder) -> emit.LeanBuilder:
-        return emit.emit_abbrev(builder, self.name, self.type_expr)
+    fn to_lean() -> text:
+        "abbrev {naming.to_pascal_case(self.name)} := {self.type_expr}"
 
-# Emit structure from ClassDef
-fn emit_class_as_structure(builder: emit.LeanBuilder, cls: ClassDef) -> emit.LeanBuilder:
-    return cls.emit(builder)
+# Type translator for Simple -> Lean conversion
+class TypeTranslator:
+    # Type mappings from Simple primitives to Lean
+    static fn translate_primitive(type_name: text) -> LeanType:
+        match type_name:
+            case "i32": LeanType.Primitive("Int")
+            case "i64": LeanType.Primitive("Int")
+            case "u32": LeanType.Primitive("Nat")
+            case "u64": LeanType.Primitive("Nat")
+            case "f32": LeanType.Primitive("Float")
+            case "f64": LeanType.Primitive("Float")
+            case "bool": LeanType.Primitive("Bool")
+            case "text": LeanType.Primitive("String")
+            case "String": LeanType.Primitive("String")
+            case "()": LeanType.Primitive("Unit")
+            case "Nil": LeanType.Primitive("Unit")
+            case _: LeanType.Named(naming.to_pascal_case(type_name))
 
-# Emit inductive from EnumDef
-fn emit_enum_as_inductive(builder: emit.LeanBuilder, enum_def: EnumDef) -> emit.LeanBuilder:
-    return enum_def.emit(builder)
+    # Convert a Simple name to Lean naming convention (PascalCase for types)
+    static fn to_lean_name(name: text) -> text:
+        naming.to_pascal_case(name)
 
-# Emit function definition
-fn emit_function(builder: emit.LeanBuilder, func: FunctionDef) -> emit.LeanBuilder:
-    return func.emit(builder)
+    # Convert a Simple function name to Lean naming convention (camelCase)
+    static fn to_lean_func_name(name: text) -> text:
+        naming.to_camel_case(name)
 
 # Convenience functions for creating SimpleType instances
-# (These are in types.spl so they can access SimpleType enum variants directly)
-
 fn make_simple_type(name: text) -> SimpleType:
-    return SimpleType.NamedType(name)
+    SimpleType.NamedType(name)
 
 fn make_int_type() -> SimpleType:
-    return SimpleType.IntType
+    SimpleType.IntType
+
+fn make_nat_type() -> SimpleType:
+    SimpleType.NatType
 
 fn make_bool_type() -> SimpleType:
-    return SimpleType.BoolType
+    SimpleType.BoolType
 
 fn make_string_type() -> SimpleType:
-    return SimpleType.StringType
+    SimpleType.StringType
+
+fn make_unit_type() -> SimpleType:
+    SimpleType.UnitType
+
+fn make_float_type() -> SimpleType:
+    SimpleType.FloatType
 
 fn make_list_type(elem: SimpleType) -> SimpleType:
-    return SimpleType.ListType(elem)
+    SimpleType.ListType(elem)
 
 fn make_option_type(inner: SimpleType) -> SimpleType:
-    return SimpleType.OptionType(inner)
+    SimpleType.OptionType(inner)
+
+fn make_tuple_type(elems: List<SimpleType>) -> SimpleType:
+    SimpleType.TupleType(elems)
+
+fn make_function_type(params: List<SimpleType>, ret: SimpleType) -> SimpleType:
+    SimpleType.FunctionType(params, ret)
 
 # Export public API
-export SimpleType, FieldDef, ClassDef, EnumVariant, EnumDef, ParamDef, FunctionDef, AbbrevDef
-export emit_class_as_structure, emit_enum_as_inductive, emit_function
-export make_simple_type, make_int_type, make_bool_type, make_string_type, make_list_type, make_option_type
+export LeanType, SimpleType
+export FieldDef, ClassDef, EnumVariant, EnumDef, ParamDef, FunctionDef, AbbrevDef
+export TypeTranslator
+export make_simple_type, make_int_type, make_nat_type, make_bool_type
+export make_string_type, make_unit_type, make_float_type
+export make_list_type, make_option_type, make_tuple_type, make_function_type
