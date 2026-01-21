@@ -612,6 +612,11 @@ fn format_type(ty: &Type) -> String {
         }
         Type::SelfType => "self".to_string(),
         Type::TypeBinding { name, value } => format!("{}={}", name, format_type(value)),
+        Type::ConstKeySet { keys } => format!(
+            "const_keys({})",
+            keys.iter().map(|k| format!("\"{}\"", k)).collect::<Vec<_>>().join(", ")
+        ),
+        Type::DependentKeys { source } => format!("{}.keys", source),
     }
 }
 

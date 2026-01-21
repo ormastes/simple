@@ -273,7 +273,17 @@ impl TypeChecker {
         match node {
             Node::Let(let_stmt) => {
                 if let Some(expr) = &let_stmt.value {
-                    let _ty = self.infer_expr(expr)?;
+                    let inferred_ty = self.infer_expr(expr)?;
+
+                    // If there's a type annotation, check for ConstKeySet validation
+                    if let Some(ref ast_ty) = let_stmt.ty {
+                        let expected_ty = self.ast_type_to_type(ast_ty);
+                        // Validate dict keys against ConstKeySet if applicable
+                        self.validate_dict_const_keys(expr, &expected_ty)?;
+                        // Unify inferred type with expected type
+                        let _ = self.unify(&inferred_ty, &expected_ty);
+                    }
+
                     // Bind all identifiers in the pattern
                     self.bind_pattern(&let_stmt.pattern);
                 }
@@ -532,5 +542,86 @@ impl TypeChecker {
                 // These patterns don't bind any names
             }
         }
+    }
+
+    /// Validate dict literal keys against ConstKeySet type annotation
+    ///
+    /// If the expected type is Dict<ConstKeySet, V>, extract literal string keys
+    /// from the dict expression and validate they match the expected keys.
+    fn validate_dict_const_keys(&self, expr: &Expr, expected_ty: &Type) -> Result<(), TypeError> {
+        // Check if expected type is Dict with ConstKeySet key type
+        let expected_keys: Vec<String> = match expected_ty {
+            Type::Dict { key, .. } => {
+                if let Type::ConstKeySet { keys } = key.as_ref() {
+                    keys.clone()
+                } else {
+                    return Ok(()); // Not a ConstKeySet, skip validation
+                }
+            }
+            Type::Generic { name, args } if name == "Dict" && !args.is_empty() => {
+                if let Type::ConstKeySet { keys } = &args[0] {
+                    keys.clone()
+                } else {
+                    return Ok(());
+                }
+            }
+            _ => return Ok(()), // Not a Dict type, skip validation
+        };
+
+        // Extract literal keys from dict expression
+        let dict_entries = match expr {
+            Expr::Dict(entries) => entries,
+            _ => return Ok(()), // Not a dict literal, skip validation
+        };
+
+        let mut literal_keys: Vec<String> = Vec::new();
+        let mut has_non_literal = false;
+
+        for (key_expr, _) in dict_entries {
+            match key_expr {
+                Expr::String(s) => literal_keys.push(s.clone()),
+                Expr::DictSpread(_) => {
+                    // Spread expressions add unknown keys at runtime
+                    has_non_literal = true;
+                }
+                _ => {
+                    // Non-literal key expression
+                    has_non_literal = true;
+                }
+            }
+        }
+
+        // If there are non-literal keys, we can't fully validate at compile time
+        // but we can still check that literal keys are valid
+        if has_non_literal && literal_keys.is_empty() {
+            // All keys are runtime-determined, can't validate
+            return Ok(());
+        }
+
+        // Validate literal keys against expected ConstKeySet
+        let validation = crate::validate_dict_keys_against_const_set(
+            &literal_keys.iter().map(|k| Some(k.clone())).collect::<Vec<_>>(),
+            &expected_keys,
+        );
+
+        // Report errors for unknown keys
+        for unknown in &validation.unknown_keys {
+            return Err(TypeError::ConstKeyNotFound {
+                key: unknown.clone(),
+                expected_keys: expected_keys.clone(),
+            });
+        }
+
+        // If all keys are literal, check for missing required keys
+        if !has_non_literal {
+            for missing in &validation.missing_keys {
+                return Err(TypeError::ConstKeyMissing {
+                    key: missing.clone(),
+                    provided_keys: literal_keys.clone(),
+                });
+            }
+        }
+
+        Ok(())
     }
 }

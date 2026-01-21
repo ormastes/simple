@@ -322,6 +322,10 @@ pub enum Type {
     },
     /// Dynamic trait object: dyn Trait
     DynTrait(String),
+    /// Const key set: compile-time known string keys
+    ConstKeySet { keys: Vec<String> },
+    /// Dependent keys: reference to another value's const keys
+    DependentKeys { source: String },
 }
 
 impl Type {
@@ -489,6 +493,69 @@ pub enum TypeError {
     Undefined(String),
     OccursCheck { var_id: usize, ty: Type },
     Other(String),
+    /// Key in dict literal is not in the expected ConstKeySet
+    ConstKeyNotFound {
+        key: String,
+        expected_keys: Vec<String>,
+    },
+    /// Required key from ConstKeySet is missing in dict literal
+    ConstKeyMissing {
+        key: String,
+        provided_keys: Vec<String>,
+    },
+    /// Dict key must be a string literal when assigned to Dict<ConstKeySet, V>
+    ConstKeyMustBeLiteral { found: String },
+}
+
+/// Result of validating dict literal keys against a ConstKeySet
+#[derive(Debug)]
+pub struct ConstKeyValidation {
+    pub unknown_keys: Vec<String>,
+    pub missing_keys: Vec<String>,
+    pub non_literal_keys: bool,
+}
+
+impl ConstKeyValidation {
+    pub fn is_valid(&self) -> bool {
+        self.unknown_keys.is_empty() && self.missing_keys.is_empty() && !self.non_literal_keys
+    }
+}
+
+/// Validate dict literal keys against an expected ConstKeySet.
+/// Returns validation result with unknown and missing keys.
+pub fn validate_dict_keys_against_const_set(
+    dict_keys: &[Option<String>], // None if key is not a string literal
+    expected_keys: &[String],
+) -> ConstKeyValidation {
+    let mut unknown_keys = Vec::new();
+    let mut provided_keys = Vec::new();
+    let mut non_literal_keys = false;
+
+    for key in dict_keys {
+        match key {
+            Some(k) => {
+                provided_keys.push(k.clone());
+                if !expected_keys.contains(k) {
+                    unknown_keys.push(k.clone());
+                }
+            }
+            None => {
+                non_literal_keys = true;
+            }
+        }
+    }
+
+    let missing_keys: Vec<String> = expected_keys
+        .iter()
+        .filter(|k| !provided_keys.contains(k))
+        .cloned()
+        .collect();
+
+    ConstKeyValidation {
+        unknown_keys,
+        missing_keys,
+        non_literal_keys,
+    }
 }
 
 #[derive(Default, Debug)]

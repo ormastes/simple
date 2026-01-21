@@ -100,6 +100,31 @@ impl TypeChecker {
             // &mut T can coerce to &T (mutable borrow is subtype of immutable borrow)
             (Type::Borrow(i1), Type::BorrowMut(i2)) => self.unify(i1, i2),
 
+            // Const key sets unify if they have the same keys (order-independent)
+            (Type::ConstKeySet { keys: k1 }, Type::ConstKeySet { keys: k2 }) => {
+                let mut s1: Vec<_> = k1.clone();
+                let mut s2: Vec<_> = k2.clone();
+                s1.sort();
+                s2.sort();
+                if s1 == s2 {
+                    Ok(())
+                } else {
+                    Err(TypeError::Mismatch {
+                        expected: t1.clone(),
+                        found: t2.clone(),
+                    })
+                }
+            }
+
+            // Dependent keys cannot be unified directly - they need resolution first
+            // For now, treat as compatible (actual validation happens elsewhere)
+            (Type::DependentKeys { .. }, Type::ConstKeySet { .. })
+            | (Type::ConstKeySet { .. }, Type::DependentKeys { .. }) => {
+                // TODO: Resolve dependent keys to const key set and validate
+                Ok(())
+            }
+            (Type::DependentKeys { source: s1 }, Type::DependentKeys { source: s2 }) if s1 == s2 => Ok(()),
+
             // Mismatch
             _ => Err(TypeError::Mismatch {
                 expected: t1.clone(),
@@ -208,6 +233,8 @@ impl TypeChecker {
                 // The binding name is used for constraint checking elsewhere
                 self.ast_type_to_type(value)
             }
+            AstType::ConstKeySet { keys } => Type::ConstKeySet { keys: keys.clone() },
+            AstType::DependentKeys { source } => Type::DependentKeys { source: source.clone() },
         }
     }
 
@@ -294,6 +321,18 @@ impl TypeChecker {
             (Type::Borrow(inner1), Type::BorrowMut(inner2)) => {
                 self.types_compatible(inner1, inner2)
             }
+            // Const key sets are compatible if they have the same keys
+            (Type::ConstKeySet { keys: k1 }, Type::ConstKeySet { keys: k2 }) => {
+                let mut s1: Vec<_> = k1.clone();
+                let mut s2: Vec<_> = k2.clone();
+                s1.sort();
+                s2.sort();
+                s1 == s2
+            }
+            // ConstKeySet is compatible with DependentKeys (deferred validation)
+            (Type::DependentKeys { .. }, Type::ConstKeySet { .. })
+            | (Type::ConstKeySet { .. }, Type::DependentKeys { .. }) => true,
+            (Type::DependentKeys { source: s1 }, Type::DependentKeys { source: s2 }) => s1 == s2,
             _ => false,
         }
     }

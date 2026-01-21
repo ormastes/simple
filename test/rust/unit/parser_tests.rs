@@ -52,7 +52,7 @@ fn test_parse_float_literal() {
 #[test]
 fn test_parse_string_literal() {
     let module = parse(r#""hello""#).unwrap();
-    if let Node::Expression(Expr::FString(parts)) = &module.items[0] {
+    if let Node::Expression(Expr::FString { parts, .. }) = &module.items[0] {
         assert_eq!(parts.len(), 1);
         if let FStringPart::Literal(s) = &parts[0] {
             assert_eq!(s, "hello");

@@ -1,11 +1,11 @@
 # Mocking Guide
 
-**Status:** Implemented (Phase 3 - Basic version)
+**Status:** Implemented (Phases 1-7 Complete)
 **Library:** `std.testing.mock`
 
 ## Overview
 
-The mock library provides test doubles for verifying interactions with dependencies. This basic implementation tracks function calls and return values without requiring trait objects.
+The mock library provides comprehensive test doubles for verifying interactions with dependencies. It includes call tracking, verification, advanced analysis, trait-based mocking patterns, async mocking, and advanced scheduling.
 
 ## Quick Start
 
@@ -512,3 +512,429 @@ See `simple/std_lib/examples/testing/mock_example.spl` for complete examples.
 - `create_mock(name)` - Create simple mock
 - `verify_called(mock, times)` - Verify call count
 - `verify_called_with(mock, args)` - Verify arguments
+
+---
+
+## Phase 4: Advanced Patterns
+
+### Conditional Returns
+
+Return different values based on arguments:
+
+```simple
+val cond = mock.ConditionalReturns.new()
+cond.add_condition(\args: args[0] == "admin", "admin_data")
+cond.add_condition(\args: args[0] == "user", "user_data")
+cond.set_default("guest_data")
+
+val result = cond.evaluate(["admin"])  # → "admin_data"
+```
+
+### Behavior Sequences (State Machines)
+
+Simulate stateful behavior:
+
+```simple
+val seq = mock.BehaviorSequence.new("disconnected")
+seq.add_state("disconnected", "connecting...", Some("connecting"))
+seq.add_state("connecting", "connected!", Some("connected"))
+seq.add_state("connected", "ready", nil)
+
+val r1 = seq.transition()  # → "connecting..."
+val r2 = seq.transition()  # → "connected!"
+val r3 = seq.transition()  # → "ready"
+```
+
+### Mock Snapshots
+
+Capture mock state for comparison:
+
+```simple
+val mock = mock.create_mock("service")
+mock.record_call(["data"])
+
+val snapshot = mock.MockSnapshot.from_mock(mock)
+print snapshot.call_count      # → 1
+print snapshot.expectations_met  # → true
+```
+
+### Mock Composition
+
+Manage related mocks together:
+
+```simple
+val comp = mock.MockComposition.new()
+comp.add_mock(db_mock)
+comp.add_mock(cache_mock)
+comp.add_mock(api_mock)
+
+# Verify all mocks
+if comp.verify_all():
+    print "All expectations met"
+
+# Get statistics
+print comp.get_total_calls()
+comp.reset_all()
+```
+
+---
+
+## Phase 5: Trait-Based Mocking
+
+### Fluent Expectations
+
+Chainable when/returns API:
+
+```simple
+val mockfn = mock.MockFunction.new("api")
+val fluent = mock.FluentExpectation.new(mockfn)
+fluent.when_called_with(["GET", "/users"]).returns("user_data")
+```
+
+### When Builder
+
+Predicate-based conditions:
+
+```simple
+val when_builder = mock.WhenBuilder.new(mockfn)
+when_builder
+    .when(\args: args[0] == "valid")
+    .returns("OK")
+```
+
+### Protocol Mock
+
+Simulate trait-like interfaces without trait objects:
+
+```simple
+val proto = mock.ProtocolMock.new()
+proto.mock_method("authenticate", ["user", "pass"], "token_123")
+proto.mock_method("authorize", ["token"], "granted")
+
+val token = proto.record_method_call("authenticate", ["user", "pass"])
+expect token == "token_123"
+expect proto.verify_method_called("authenticate")
+```
+
+### Auto Mock
+
+Automatic mock generation:
+
+```simple
+val auto = mock.AutoMock.new("Database")
+auto.add_property("connection_string")
+auto.setup_method("connect", ["host"], "connected")
+auto.setup_method("query", ["sql"], "rows")
+
+expect auto.call_method("connect", ["host"]) == "connected"
+print auto.summary()
+```
+
+---
+
+## Phase 6: Async/Await Mocking
+
+### AsyncMock
+
+Mock asynchronous operations with delay simulation:
+
+```simple
+val async_mock = mock.AsyncMock.new("api_call")
+async_mock.set_delay(100)  # Simulate 100ms latency
+async_mock.set_return_values(["response1", "response2"])
+
+val result = async_mock.record_async_call(["request"])
+expect result == "response1"
+expect async_mock.get_total_delay() == 100
+```
+
+### Error Simulation
+
+```simple
+val failing_mock = mock.AsyncMock.new("failing_api")
+failing_mock.set_error("Network timeout")
+
+failing_mock.record_async_call(["request"])
+val errors = failing_mock.get_calls_with_errors()
+expect errors.len() == 1
+```
+
+### Promise Sequences
+
+Sequential async returns with timing:
+
+```simple
+val seq = mock.PromiseSequence.new()
+seq.add_promise("success", 50)      # 50ms delay
+seq.add_promise_error("timeout", 100)  # Error after 100ms
+seq.add_promise("retry_success", 25)
+
+while seq.remaining() > 0:
+    match seq.next_promise():
+        Some(p):
+            if p.is_error:
+                print "Error: {p.value}"
+            else:
+                print "Result: {p.value} ({p.delay_ms}ms)"
+        nil: break
+```
+
+### AsyncSpy
+
+Track async calls with timing statistics:
+
+```simple
+val spy = mock.AsyncSpy.new("performance_spy")
+spy.record_async_call("fetch", ["url1"], 45)
+spy.record_async_call("fetch", ["url2"], 55)
+spy.record_async_call("fetch", ["url3"], 50)
+
+val stats = spy.get_call_timing_stats("fetch")
+expect stats.min_ms == 45
+expect stats.max_ms == 55
+expect stats.avg_ms == 50
+expect stats.count == 3
+```
+
+### AsyncProtocolMock
+
+Async trait simulation:
+
+```simple
+val proto = mock.AsyncProtocolMock.new()
+proto.mock_async_method("fetchUser", ["id"], 50, "user_data")
+proto.mock_async_method("saveUser", ["data"], 100, "saved")
+
+val result = proto.record_async_method_call("fetchUser", ["id"])
+expect result == "user_data"
+expect proto.get_total_delay() == 50
+```
+
+### AsyncMockComposition
+
+Orchestrate multiple async mocks:
+
+```simple
+val comp = mock.AsyncMockComposition.new()
+val auth = mock.AsyncMock.new("auth")
+val db = mock.AsyncMock.new("database")
+
+auth.set_delay(50)
+db.set_delay(100)
+auth.set_return_values(["token"])
+db.set_return_values(["data"])
+
+comp.add_async_mock("auth", auth)
+comp.add_async_mock("db", db)
+
+auth.record_async_call([])
+db.record_async_call([])
+
+expect comp.verify_all_called()
+expect comp.get_total_delay() == 150
+```
+
+### Timing Matchers
+
+Assert on execution timing:
+
+```simple
+val matcher = mock.AsyncTimingMatcher.within_ms(100)
+expect matcher.matches(75)  # true
+expect matcher.matches(150) # false
+
+val range_matcher = mock.AsyncTimingMatcher.between_ms(50, 100)
+expect range_matcher.matches(75)  # true
+
+# Verify mock timing
+expect mock.verify_async_timing(async_mock, matcher)
+```
+
+---
+
+## Phase 7: Advanced Scheduling
+
+### Task Scheduler
+
+Priority-based task execution:
+
+```simple
+val scheduler = mock.TaskScheduler.new()
+
+# Schedule tasks with priorities
+val id1 = scheduler.schedule("critical", mock.TaskPriority.Critical, 10)
+val id2 = scheduler.schedule("normal", mock.TaskPriority.Normal, 10)
+val id3 = scheduler.schedule("high", mock.TaskPriority.High, 10)
+
+# Execute in priority order
+scheduler.execute_all()
+expect scheduler.verify_execution_order([id1, id3, id2])
+
+# Convenience methods
+scheduler.schedule_immediate("urgent")      # High priority, no delay
+scheduler.schedule_delayed("later", 500)    # Normal priority
+scheduler.schedule_background("bg", 1000)   # Background priority
+```
+
+### Retry Policy
+
+Configurable retry with backoff strategies:
+
+```simple
+# Exponential backoff
+val retry = mock.RetryPolicy.with_exponential_backoff(5, 100)
+# Delays: 100ms, 200ms, 400ms, 800ms, 1600ms
+
+# Linear backoff
+val linear = mock.RetryPolicy.with_linear_backoff(5, 100)
+# Delays: 100ms, 200ms, 300ms, 400ms, 500ms
+
+# Track attempts
+while retry.should_retry():
+    val success = attempt_operation()
+    if success:
+        retry.record_attempt(true, nil)
+    else:
+        retry.record_attempt(false, Some("Failed"))
+
+print retry.get_attempt_count()
+print retry.get_total_delay()
+print retry.was_successful()
+```
+
+### Rate Limiter
+
+Simulate API rate limiting:
+
+```simple
+val limiter = mock.RateLimiter.per_second(10)  # 10 requests/second
+
+# Try to make requests
+if limiter.try_acquire():
+    print "Request allowed"
+else:
+    print "Rate limited, wait {limiter.get_wait_time()}ms"
+
+# Advance time and cleanup
+limiter.advance_time(1000)
+expect limiter.can_proceed()
+
+print limiter.get_remaining_requests()
+```
+
+### Timeout Controller
+
+Handle async operation timeouts:
+
+```simple
+val timeout = mock.TimeoutController.new(5000)  # 5 second timeout
+timeout.start()
+
+# Simulate work
+timeout.advance(3000)
+print timeout.remaining_time()  # → 2000
+
+# Complete or timeout
+val result = timeout.complete()
+if result.completed:
+    print "Finished in {result.duration_ms}ms"
+else:
+    print "Operation timed out"
+```
+
+### Execution Order Tracker
+
+Verify concurrent execution order:
+
+```simple
+val tracker = mock.ExecutionOrderTracker.new()
+
+tracker.record_start("task1")
+tracker.advance_time(10)
+tracker.record_start("task2")
+tracker.advance_time(50)
+tracker.record_end("task1")
+tracker.advance_time(50)
+tracker.record_end("task2")
+
+# Verify ordering
+expect tracker.verify_started_before("task1", "task2")
+expect tracker.verify_completed_before("task1", "task2")
+
+# Get concurrent tasks at a point in time
+val concurrent = tracker.get_concurrent_at(30)
+expect concurrent.len() == 2
+```
+
+### Concurrency Controller
+
+Control concurrent execution limits:
+
+```simple
+val controller = mock.ConcurrencyController.new(2)  # Max 2 concurrent
+
+expect controller.try_start("task1")  # true
+expect controller.try_start("task2")  # true
+expect controller.try_start("task3")  # false (queued)
+
+expect controller.get_active_count() == 2
+expect controller.get_waiting_count() == 1
+
+# Complete a task, queued task starts automatically
+controller.complete("task1")
+expect controller.get_active_tasks() == ["task2", "task3"]
+```
+
+### Debouncer
+
+Debounce rapid calls:
+
+```simple
+val debouncer = mock.Debouncer.new(100)  # 100ms debounce
+
+debouncer.call("first")
+debouncer.advance_time(50)
+debouncer.call("second")   # Resets timer
+debouncer.advance_time(50)
+debouncer.call("third")    # Resets timer
+debouncer.advance_time(150)
+
+# Only last value executed
+val executed = debouncer.get_executed_values()
+expect executed.len() == 1
+expect executed[0] == "third"
+```
+
+### Throttler
+
+Throttle execution rate:
+
+```simple
+val throttler = mock.Throttler.new(100)  # Allow once per 100ms
+
+expect throttler.call("first")   # true - allowed
+expect throttler.call("second")  # false - dropped
+expect throttler.call("third")   # false - dropped
+
+throttler.advance_time(150)
+expect throttler.call("fourth")  # true - allowed
+
+print throttler.get_execution_count()  # → 2
+print throttler.get_dropped_count()    # → 2
+```
+
+---
+
+## Complete Phase Summary
+
+| Phase | Features | Status |
+|-------|----------|--------|
+| 1 | Call tracking, MockFunction, MockBuilder, MockRegistry | ✅ Complete |
+| 2 | Verification system, Matcher, Expectation | ✅ Complete |
+| 3 | CallAnalyzer, SequentialReturns, Spy | ✅ Complete |
+| 4 | ConditionalReturns, BehaviorSequence, MockSnapshot, MockComposition | ✅ Complete |
+| 5 | FluentExpectation, WhenBuilder, ProtocolMock, AutoMock | ✅ Complete |
+| 6 | AsyncMock, PromiseSequence, AsyncSpy, AsyncProtocolMock, AsyncTimingMatcher | ✅ Complete |
+| 7 | TaskScheduler, RetryPolicy, RateLimiter, TimeoutController, Debouncer, Throttler | ✅ Complete |
+
+**Total:** ~1,900 LOC implementation, 70+ APIs, 300+ test cases
