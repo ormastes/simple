@@ -1,0 +1,308 @@
+# Dashboard Alert System
+#
+# Detects regressions and issues based on configurable thresholds and
+# generates alerts for critical problems.
+
+use core.time.{now_iso8601}
+use tooling.dashboard.types.{DashboardData, Alert}
+use tooling.dashboard.trends.{TrendReport, TrendStatus}
+
+# =========================================================================
+# Alert Thresholds
+# =========================================================================
+
+# Default thresholds
+val COVERAGE_MIN_THRESHOLD: f64 = 80.0
+val COVERAGE_REGRESSION_THRESHOLD: f64 = 1.0  # 1% drop is critical
+val TODO_P0_MAX_THRESHOLD: i32 = 5
+val TODO_INCREASE_THRESHOLD: i32 = 10
+val BUILD_TIME_REGRESSION_THRESHOLD: f64 = 10.0  # 10% increase
+
+# =========================================================================
+# Alert Configuration
+# =========================================================================
+
+class AlertConfig:
+    coverage_min: f64
+    coverage_regression: f64
+    todo_p0_max: i32
+    todo_increase: i32
+    build_time_regression: f64
+
+    static fn default() -> AlertConfig:
+        return AlertConfig {
+            coverage_min: COVERAGE_MIN_THRESHOLD,
+            coverage_regression: COVERAGE_REGRESSION_THRESHOLD,
+            todo_p0_max: TODO_P0_MAX_THRESHOLD,
+            todo_increase: TODO_INCREASE_THRESHOLD,
+            build_time_regression: BUILD_TIME_REGRESSION_THRESHOLD
+        }
+
+    static fn from_file(path: text) -> Result<AlertConfig, text>:
+        # TODO: Load from .simple/dashboard.toml
+        return Ok(AlertConfig.default())
+
+# =========================================================================
+# Alert Manager
+# =========================================================================
+
+class AlertManager:
+    config: AlertConfig
+
+    static fn new() -> AlertManager:
+        return AlertManager {
+            config: AlertConfig.default()
+        }
+
+    static fn with_config(config: AlertConfig) -> AlertManager:
+        return AlertManager { config: config }
+
+    # Check all alerts for current data
+    fn check_all(data: DashboardData, trends: Option<TrendReport>) -> List<Alert>:
+        var alerts: List<Alert> = []
+
+        # Coverage alerts
+        alerts = alerts.merge(self.check_coverage(data, trends))
+
+        # TODO alerts
+        alerts = alerts.merge(self.check_todos(data, trends))
+
+        # VCS alerts
+        alerts = alerts.merge(self.check_vcs(data))
+
+        # Test alerts
+        alerts = alerts.merge(self.check_tests(data))
+
+        return alerts
+
+    # Check coverage alerts
+    fn check_coverage(data: DashboardData, trends: Option<TrendReport>) -> List<Alert>:
+        var alerts: List<Alert> = []
+        val coverage = data.overall_coverage()
+
+        # Low coverage
+        if coverage < self.config.coverage_min:
+            alerts.append(Alert.new(
+                "critical",
+                "coverage",
+                "Code coverage below threshold ({coverage}% < {self.config.coverage_min}%)",
+                coverage,
+                self.config.coverage_min,
+                now_iso8601()
+            ))
+
+        # Coverage regression
+        match trends:
+            Some(trend_report) =>
+                if trend_report.coverage.status == TrendStatus::Degrading:
+                    val change = abs(trend_report.coverage.change_percent)
+                    if change >= self.config.coverage_regression:
+                        alerts.append(Alert.new(
+                            "warning",
+                            "coverage_trend",
+                            "Coverage dropped by {change}%",
+                            trend_report.coverage.current,
+                            trend_report.coverage.previous,
+                            now_iso8601()
+                        ))
+            nil => pass
+
+        return alerts
+
+    # Check TODO alerts
+    fn check_todos(data: DashboardData, trends: Option<TrendReport>) -> List<Alert>:
+        var alerts: List<Alert> = []
+
+        # Critical TODOs
+        val p0_count = data.critical_todos()
+        if p0_count > self.config.todo_p0_max:
+            alerts.append(Alert.new(
+                "critical",
+                "todos_p0",
+                "{p0_count} critical (P0) TODOs need immediate attention",
+                p0_count as f64,
+                self.config.todo_p0_max as f64,
+                now_iso8601()
+            ))
+
+        # TODO trend increase
+        match trends:
+            Some(trend_report) =>
+                if trend_report.todos.status == TrendStatus::Degrading:
+                    val increase = trend_report.todos.current - trend_report.todos.previous
+                    if increase >= (self.config.todo_increase as f64):
+                        alerts.append(Alert.new(
+                            "warning",
+                            "todos_trend",
+                            "TODO count increased by {increase}",
+                            trend_report.todos.current,
+                            trend_report.todos.previous,
+                            now_iso8601()
+                        ))
+            nil => pass
+
+        return alerts
+
+    # Check VCS alerts
+    fn check_vcs(data: DashboardData) -> List<Alert>:
+        var alerts: List<Alert> = []
+
+        # Uncommitted changes
+        if data.vcs_state.uncommitted_files > 50:
+            alerts.append(Alert.new(
+                "info",
+                "vcs_uncommitted",
+                "{data.vcs_state.uncommitted_files} uncommitted files",
+                data.vcs_state.uncommitted_files as f64,
+                50.0,
+                now_iso8601()
+            ))
+
+        return alerts
+
+    # Check test alerts
+    fn check_tests(data: DashboardData) -> List<Alert>:
+        var alerts: List<Alert> = []
+
+        # Failing tests
+        var failing_count = 0
+        for test in data.sspec_tests:
+            if test.failed > 0:
+                failing_count = failing_count + 1
+
+        if failing_count > 0:
+            alerts.append(Alert.new(
+                "critical",
+                "tests_failing",
+                "{failing_count} test suites have failures",
+                failing_count as f64,
+                0.0,
+                now_iso8601()
+            ))
+
+        return alerts
+
+# =========================================================================
+# Alert Filtering and Formatting
+# =========================================================================
+
+# Filter alerts by level
+fn filter_by_level(alerts: List<Alert>, level: text) -> List<Alert>:
+    var filtered: List<Alert> = []
+
+    for alert in alerts:
+        if alert.level == level:
+            filtered.append(alert)
+
+    return filtered
+
+# Get critical alerts only
+fn get_critical_alerts(alerts: List<Alert>) -> List<Alert>:
+    return filter_by_level(alerts, "critical")
+
+# Get warning alerts only
+fn get_warning_alerts(alerts: List<Alert>) -> List<Alert>:
+    return filter_by_level(alerts, "warning")
+
+# Format alerts for display
+fn format_alerts(alerts: List<Alert>) -> text:
+    if alerts.len() == 0:
+        return "No alerts"
+
+    var output = ""
+
+    val critical = get_critical_alerts(alerts)
+    val warnings = get_warning_alerts(alerts)
+
+    if critical.len() > 0:
+        output = "{output}CRITICAL ALERTS ({critical.len()}):\n"
+        for alert in critical:
+            output = "{output}  [!] {alert.message}\n"
+        output = "{output}\n"
+
+    if warnings.len() > 0:
+        output = "{output}WARNINGS ({warnings.len()}):\n"
+        for alert in warnings:
+            output = "{output}  [*] {alert.message}\n"
+        output = "{output}\n"
+
+    return output
+
+# =========================================================================
+# Alert Summary
+# =========================================================================
+
+class AlertSummary:
+    total: i32
+    critical: i32
+    warnings: i32
+    info: i32
+
+    static fn from_alerts(alerts: List<Alert>) -> AlertSummary:
+        var critical_count = 0
+        var warning_count = 0
+        var info_count = 0
+
+        for alert in alerts:
+            match alert.level:
+                "critical" => critical_count = critical_count + 1
+                "warning" => warning_count = warning_count + 1
+                "info" => info_count = info_count + 1
+                _ => pass
+
+        return AlertSummary {
+            total: alerts.len(),
+            critical: critical_count,
+            warnings: warning_count,
+            info: info_count
+        }
+
+    fn has_critical() -> bool:
+        return self.critical > 0
+
+    fn has_warnings() -> bool:
+        return self.warnings > 0
+
+    fn to_string() -> text:
+        return "Alerts: {self.total} total ({self.critical} critical, {self.warnings} warnings, {self.info} info)"
+
+# =========================================================================
+# Helper Functions
+# =========================================================================
+
+# Merge alert lists
+fn merge_alerts(list1: List<Alert>, list2: List<Alert>) -> List<Alert>:
+    var merged = list1
+    for alert in list2:
+        merged.append(alert)
+    return merged
+
+# Absolute value
+fn abs(x: f64) -> f64:
+    if x < 0.0:
+        return -x
+    return x
+
+# =========================================================================
+# Convenience Functions
+# =========================================================================
+
+# Check alerts with default config
+fn check_alerts(data: DashboardData) -> List<Alert>:
+    val manager = AlertManager.new()
+    return manager.check_all(data, nil)
+
+# Check alerts with trends
+fn check_alerts_with_trends(data: DashboardData, trends: TrendReport) -> List<Alert>:
+    val manager = AlertManager.new()
+    return manager.check_all(data, Some(trends))
+
+# Should block build?
+fn should_block_build(alerts: List<Alert>) -> bool:
+    val critical = get_critical_alerts(alerts)
+    return critical.len() > 0
+
+# =========================================================================
+# Exports
+# =========================================================================
+

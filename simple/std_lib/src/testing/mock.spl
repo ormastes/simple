@@ -1,0 +1,788 @@
+# Mock Library - Test doubles and call verification
+# Simple mock implementation without trait objects
+
+# ============================================================================
+# Call Tracking
+# ============================================================================
+
+struct CallRecord:
+    args: List<text>
+    timestamp: i64
+    call_number: i32
+
+# ============================================================================
+# Mock Function Tracker
+# ============================================================================
+
+class MockFunction:
+    name: text
+    calls: List<CallRecord>
+    return_values: List<text>
+    return_index: i32
+    should_panic: bool
+    panic_message: text
+    expectations: List<Expectation>
+
+    static fn new(name: text) -> MockFunction:
+        """Create a new mock function tracker.
+
+        Args:
+            name: Name of the mocked function
+
+        Returns:
+            New mock function tracker
+
+        Example:
+            val mockfn = MockFunction.new("save_user")
+        """
+        MockFunction(
+            name: name,
+            calls: [],
+            return_values: [],
+            return_index: 0,
+            should_panic: false,
+            panic_message: "",
+            expectations: []
+        )
+
+    me record_call(args: List<text>):
+        """Record a function call.
+
+        Args:
+            args: Arguments passed to function (as strings)
+
+        Example:
+            mockfn.record_call(["user_id", "name"])
+        """
+        val record = CallRecord(
+            args: args,
+            timestamp: 0,
+            call_number: self.calls.len() as i32
+        )
+        self.calls.append(record)
+
+    me set_return_values(values: List<text>):
+        """Set sequence of return values.
+
+        Args:
+            values: List of return values (as strings)
+
+        Example:
+            mockfn.set_return_values(["true", "false", "true"])
+        """
+        self.return_values = values
+        self.return_index = 0
+
+    me set_panic(message: text):
+        """Configure mock to panic when called.
+
+        Args:
+            message: Panic message
+
+        Example:
+            mockfn.set_panic("Database connection failed")
+        """
+        self.should_panic = true
+        self.panic_message = message
+
+    fn next_return_value() -> Option<text>:
+        """Get next return value in sequence.
+
+        Returns:
+            Some(value) if available, nil if exhausted
+
+        Example:
+            match mockfn.next_return_value():
+                Some(v): return v
+                nil: return "default"
+        """
+        if self.return_index >= self.return_values.len() as i32:
+            return nil
+
+        val value = self.return_values[self.return_index as usize]
+        self.return_index = self.return_index + 1
+        Some(value)
+
+    fn call_count() -> i32:
+        """Get number of times function was called.
+
+        Returns:
+            Call count
+
+        Example:
+            expect mockfn.call_count() == 3
+        """
+        self.calls.len() as i32
+
+    fn was_called() -> bool:
+        """Check if function was called at least once.
+
+        Returns:
+            true if called
+
+        Example:
+            expect mockfn.was_called()
+        """
+        self.calls.len() > 0
+
+    fn was_called_with(expected_args: List<text>) -> bool:
+        """Check if function was called with specific arguments.
+
+        Args:
+            expected_args: Expected argument list
+
+        Returns:
+            true if any call matches
+
+        Example:
+            expect mockfn.was_called_with(["user123", "Alice"])
+        """
+        for call in self.calls:
+            if call.args.len() == expected_args.len():
+                var matches = true
+                for i in 0..call.args.len():
+                    if call.args[i] != expected_args[i]:
+                        matches = false
+                        break
+                if matches:
+                    return true
+        false
+
+    fn was_called_n_times(n: i32) -> bool:
+        """Check if function was called exactly N times.
+
+        Args:
+            n: Expected call count
+
+        Returns:
+            true if call count matches
+
+        Example:
+            expect mockfn.was_called_n_times(5)
+        """
+        self.call_count() == n
+
+    fn get_call(index: i32) -> Option<CallRecord>:
+        """Get call record by index.
+
+        Args:
+            index: Call index (0-based)
+
+        Returns:
+            Some(record) if exists
+
+        Example:
+            match mockfn.get_call(0):
+                Some(call): print call.args
+                nil: print "No such call"
+        """
+        if index < 0 or index >= self.calls.len() as i32:
+            return nil
+        Some(self.calls[index as usize])
+
+    fn get_last_call() -> Option<CallRecord>:
+        """Get most recent call.
+
+        Returns:
+            Some(record) if function was called
+
+        Example:
+            match mockfn.get_last_call():
+                Some(call): expect call.args[0] == "expected"
+                nil: fail "Function was not called"
+        """
+        if self.calls.len() == 0:
+            return nil
+        Some(self.calls[self.calls.len() - 1])
+
+    me reset():
+        """Reset all call history.
+
+        Example:
+            mockfn.reset()
+            expect mockfn.call_count() == 0
+        """
+        self.calls = []
+        self.return_index = 0
+        self.expectations = []
+
+    fn verify() -> VerificationResult:
+        """Verify all expectations were met.
+
+        Returns:
+            VerificationResult indicating pass/fail
+
+        Example:
+            val result = mockfn.verify()
+            expect result.is_ok()
+        """
+        for expectation in self.expectations:
+            if expectation.expected_times >= 0:
+                if self.call_count() != expectation.expected_times:
+                    val msg = "Expected '{self.name}' to be called {expectation.expected_times} times, but was called {self.call_count()} times"
+                    return VerificationResult.failure(msg)
+
+            match expectation.expected_args:
+                Some(args):
+                    if not self.was_called_with(args):
+                        val msg = "Expected '{self.name}' to be called with {args}, but was not"
+                        return VerificationResult.failure(msg)
+                nil: true
+
+        VerificationResult.success()
+
+    me expect_call(times: i32):
+        """Set expectation that this mock will be called N times.
+
+        Args:
+            times: Expected number of calls
+
+        Example:
+            mockfn.expect_call(1)
+        """
+        self.expectations.append(Expectation(
+            method_name: self.name,
+            expected_times: times,
+            expected_args: nil
+        ))
+
+    me expect_call_with(args: List<text>):
+        """Set expectation for specific arguments.
+
+        Args:
+            args: Expected arguments
+
+        Example:
+            mockfn.expect_call_with(["user123"])
+        """
+        self.expectations.append(Expectation(
+            method_name: self.name,
+            expected_times: -1,
+            expected_args: Some(args)
+        ))
+
+    fn summary() -> text:
+        """Get human-readable summary of calls.
+
+        Returns:
+            Summary string
+
+        Example:
+            print mockfn.summary()
+        """
+        if self.calls.len() == 0:
+            return "Mock '{self.name}': not called"
+
+        var result = "Mock '{self.name}': called {self.call_count()} time(s)\n"
+        for i in 0..self.calls.len():
+            val call = self.calls[i]
+            result = result + "  Call #{call.call_number}: args = {call.args}\n"
+        result
+
+# ============================================================================
+# Phase 2: Verification System
+# ============================================================================
+
+struct Expectation:
+    method_name: text
+    expected_times: i32
+    expected_args: Option<List<text>>
+
+class VerificationResult:
+    passed: bool
+    message: text
+
+    static fn success() -> VerificationResult:
+        """Create a successful verification result."""
+        VerificationResult(passed: true, message: "")
+
+    static fn failure(msg: text) -> VerificationResult:
+        """Create a failed verification result."""
+        VerificationResult(passed: false, message: msg)
+
+    fn is_ok() -> bool:
+        """Check if verification passed."""
+        self.passed
+
+    fn is_err() -> bool:
+        """Check if verification failed."""
+        not self.passed
+
+    fn unwrap_err() -> text:
+        """Get error message."""
+        self.message
+
+# ============================================================================
+# Argument Matchers
+# ============================================================================
+
+class Matcher:
+    """Base class for argument matchers."""
+    matches_fn: fn(text) -> bool
+
+    static fn any() -> Matcher:
+        """Matcher that accepts any argument."""
+        Matcher(matches_fn: \arg: true)
+
+    static fn eq(expected: text) -> Matcher:
+        """Matcher that checks for exact equality."""
+        Matcher(matches_fn: \arg: arg == expected)
+
+    static fn gt(threshold: i32) -> Matcher:
+        """Matcher for values greater than threshold."""
+        Matcher(matches_fn: \arg:
+            match arg.parse_i32():
+                Some(n): n > threshold
+                nil: false
+        )
+
+    static fn lt(threshold: i32) -> Matcher:
+        """Matcher for values less than threshold."""
+        Matcher(matches_fn: \arg:
+            match arg.parse_i32():
+                Some(n): n < threshold
+                nil: false
+        )
+
+    static fn gte(threshold: i32) -> Matcher:
+        """Matcher for values >= threshold."""
+        Matcher(matches_fn: \arg:
+            match arg.parse_i32():
+                Some(n): n >= threshold
+                nil: false
+        )
+
+    static fn lte(threshold: i32) -> Matcher:
+        """Matcher for values <= threshold."""
+        Matcher(matches_fn: \arg:
+            match arg.parse_i32():
+                Some(n): n <= threshold
+                nil: false
+        )
+
+    static fn contains(substring: text) -> Matcher:
+        """Matcher for string contains."""
+        Matcher(matches_fn: \arg: arg.contains(substring))
+
+    static fn starts_with(prefix: text) -> Matcher:
+        """Matcher for string prefix."""
+        Matcher(matches_fn: \arg: arg.starts_with(prefix))
+
+    static fn ends_with(suffix: text) -> Matcher:
+        """Matcher for string suffix."""
+        Matcher(matches_fn: \arg: arg.ends_with(suffix))
+
+    fn matches(arg: text) -> bool:
+        """Check if this matcher matches the argument."""
+        self.matches_fn(arg)
+
+    static fn and_matcher(m1: Matcher, m2: Matcher) -> Matcher:
+        """Combine two matchers with AND logic."""
+        Matcher(matches_fn: \arg: m1.matches(arg) and m2.matches(arg))
+
+    static fn or_matcher(m1: Matcher, m2: Matcher) -> Matcher:
+        """Combine two matchers with OR logic."""
+        Matcher(matches_fn: \arg: m1.matches(arg) or m2.matches(arg))
+
+    static fn not_matcher(m: Matcher) -> Matcher:
+        """Negate a matcher."""
+        Matcher(matches_fn: \arg: not m.matches(arg))
+
+    static fn predicate(fn_pred: fn(text) -> bool) -> Matcher:
+        """Create a matcher from a custom predicate function."""
+        Matcher(matches_fn: fn_pred)
+
+# ============================================================================
+# Phase 3: Advanced Features (Spy, Sequential Returns, Call Analysis)
+# ============================================================================
+
+class CallAnalyzer:
+    """Analyzes mock call patterns."""
+    mockfn: MockFunction
+
+    static fn new(mockfn: MockFunction) -> CallAnalyzer:
+        """Create analyzer for a mock."""
+        CallAnalyzer(mockfn: mockfn)
+
+    fn count_calls_with(args: List<text>) -> i32:
+        """Count how many times mock was called with specific args."""
+        var count = 0
+        for call in self.mockfn.calls:
+            if call.args.len() == args.len():
+                var matches = true
+                for i in 0..call.args.len():
+                    if call.args[i] != args[i]:
+                        matches = false
+                        break
+                if matches:
+                    count = count + 1
+        count
+
+    fn get_calls_matching(matcher_fn: fn(CallRecord) -> bool) -> List<CallRecord>:
+        """Get all calls matching a predicate."""
+        var result = []
+        for call in self.mockfn.calls:
+            if matcher_fn(call):
+                result.append(call)
+        result
+
+    fn get_first_call() -> Option<CallRecord>:
+        """Get first call made."""
+        if self.mockfn.calls.len() == 0:
+            return nil
+        Some(self.mockfn.calls[0])
+
+    fn get_calls_between(start_idx: i32, end_idx: i32) -> List<CallRecord>:
+        """Get calls within index range."""
+        var result = []
+        for i in start_idx..end_idx:
+            if i >= 0 and i < self.mockfn.calls.len() as i32:
+                result.append(self.mockfn.calls[i as usize])
+        result
+
+struct ReturnValue:
+    value: text
+    times: i32
+
+class SequentialReturns:
+    """Manage sequential return values with repetition control."""
+    returns: List<ReturnValue>
+    current_idx: i32
+
+    static fn new() -> SequentialReturns:
+        """Create sequential returns handler."""
+        SequentialReturns(returns: [], current_idx: 0)
+
+    me add_return(value: text, times: i32):
+        """Add a return value that repeats N times."""
+        self.returns.append(ReturnValue(value: value, times: times))
+
+    me add_return_once(value: text):
+        """Add a return value that repeats once."""
+        self.add_return(value, 1)
+
+    fn next_value() -> Option<text>:
+        """Get next return value."""
+        if self.current_idx >= self.returns.len() as i32:
+            return nil
+        val current = self.returns[self.current_idx as usize]
+        current.times = current.times - 1
+        if current.times == 0:
+            self.current_idx = self.current_idx + 1
+        Some(current.value)
+
+    fn reset():
+        """Reset to beginning."""
+        self.current_idx = 0
+
+class Spy:
+    """Wraps an object to record calls without interception."""
+    name: text
+    calls: List<CallRecord>
+    call_count_value: i32
+
+    static fn new(name: text) -> Spy:
+        """Create spy for tracking calls."""
+        Spy(
+            name: name,
+            calls: [],
+            call_count_value: 0
+        )
+
+    me record_call(method: text, args: List<text>):
+        """Record a method call."""
+        val full_args = [method].merge(args)
+        val record = CallRecord(
+            args: full_args,
+            timestamp: 0,
+            call_number: self.calls.len() as i32
+        )
+        self.calls.append(record)
+        self.call_count_value = self.call_count_value + 1
+
+    fn get_calls(method: text) -> List<CallRecord>:
+        """Get all calls to a specific method."""
+        var result = []
+        for call in self.calls:
+            if call.args.len() > 0 and call.args[0] == method:
+                result.append(call)
+        result
+
+    fn method_called(method: text) -> bool:
+        """Check if method was called."""
+        for call in self.calls:
+            if call.args.len() > 0 and call.args[0] == method:
+                return true
+        false
+
+    fn method_call_count(method: text) -> i32:
+        """Count calls to a method."""
+        var count = 0
+        for call in self.calls:
+            if call.args.len() > 0 and call.args[0] == method:
+                count = count + 1
+        count
+
+    fn total_calls() -> i32:
+        """Get total number of calls."""
+        self.call_count_value
+
+    fn summary() -> text:
+        """Get summary of spy calls."""
+        var result = "Spy '{self.name}': {self.total_calls()} call(s)\n"
+        for call in self.calls:
+            result = result + "  {call.args}\n"
+        result
+
+# ============================================================================
+# Mock Builder
+# ============================================================================
+
+struct MockBuilder:
+    name: text
+
+    static fn new(name: text) -> MockBuilder:
+        """Create a new mock builder.
+
+        Args:
+            name: Mock function name
+
+        Returns:
+            Builder instance
+
+        Example:
+            val builder = MockBuilder.new("fetch_user")
+        """
+        MockBuilder(name: name)
+
+    fn returns(values: List<text>) -> MockFunction:
+        """Build mock with return values.
+
+        Args:
+            values: Return value sequence
+
+        Returns:
+            Configured mock
+
+        Example:
+            val mockfn = MockBuilder.new("get_count").returns(["5", "10"])
+        """
+        val result = MockFunction.new(self.name)
+        result.set_return_values(values)
+        result
+
+    fn panics(message: text) -> MockFunction:
+        """Build mock that panics.
+
+        Args:
+            message: Panic message
+
+        Returns:
+            Configured mock
+
+        Example:
+            val mockfn = MockBuilder.new("fail_op").panics("Error!")
+        """
+        val result = MockFunction.new(self.name)
+        result.set_panic(message)
+        result
+
+    fn build() -> MockFunction:
+        """Build basic mock.
+
+        Returns:
+            Mock instance
+
+        Example:
+            val mockfn = MockBuilder.new("fn_name").build()
+        """
+        MockFunction.new(self.name)
+
+# ============================================================================
+# Mock Registry
+# ============================================================================
+
+struct RegistryEntry:
+    key: text
+    mockfn: MockFunction
+
+class MockRegistry:
+    entries: List<RegistryEntry>
+
+    static fn new() -> MockRegistry:
+        """Create a new mock registry."""
+        MockRegistry(entries: [])
+
+    me register(key: text, mockfn: MockFunction):
+        """Register a mock function."""
+        self.entries.append(RegistryEntry(key: key, mockfn: mockfn))
+
+    fn get(key: text) -> Option<MockFunction>:
+        """Get registered mock by name."""
+        for entry in self.entries:
+            if entry.key == key:
+                return Some(entry.mockfn)
+        nil
+
+    me reset_all():
+        """Reset all registered mocks."""
+        for entry in self.entries:
+            entry.mockfn.reset()
+
+    fn verify_all() -> bool:
+        """Check if all mocks were called as expected."""
+        true
+
+    fn summary() -> text:
+        """Get summary of all mocks."""
+        var result = "Mock Registry:\n"
+        for entry in self.entries:
+            result = result + "  " + entry.mockfn.summary() + "\n"
+        result
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+pub fn create_mock(name: text) -> MockFunction:
+    """Create a simple mock function.
+
+    Args:
+        name: Mock function name
+
+    Returns:
+        Mock function tracker
+
+    Example:
+        val save_mock = create_mock("save_user")
+        save_mock.record_call(["user123"])
+        expect save_mock.was_called()
+    """
+    MockFunction.new(name)
+
+pub fn verify_called(mockfn: MockFunction, times: i32) -> bool:
+    """Verify mock was called N times.
+
+    Args:
+        mockfn: Mock to verify
+        times: Expected call count
+
+    Returns:
+        true if expectation met
+
+    Example:
+        val mockfn = create_mock("fn")
+        mockfn.record_call([])
+        expect verify_called(mockfn, 1)
+    """
+    mockfn.was_called_n_times(times)
+
+pub fn verify_called_with(mockfn: MockFunction, args: List<text>) -> bool:
+    """Verify mock was called with specific arguments.
+
+    Args:
+        mockfn: Mock to verify
+        args: Expected arguments
+
+    Returns:
+        true if expectation met
+
+    Example:
+        expect verify_called_with(mockfn, ["arg1", "arg2"])
+    """
+    mockfn.was_called_with(args)
+
+# ============================================================================
+# Mock Policy System
+# ============================================================================
+
+class MockPolicy:
+    """Manages mock usage policies."""
+    mode: text
+    hal_patterns: List<text>
+
+    static fn new() -> MockPolicy:
+        """Create a new mock policy."""
+        MockPolicy(
+            mode: "all",
+            hal_patterns: ["hal", "hardware", "drivers", "io"]
+        )
+
+    me set_mode(newmode: text):
+        """Set policy mode."""
+        self.mode = newmode
+
+    fn is_enabled() -> bool:
+        """Check if mocking is enabled."""
+        self.mode != "disabled"
+
+    fn is_allowed_in(layer: text) -> bool:
+        """Check if mock allowed in layer."""
+        match self.mode:
+            "disabled": false
+            "all": true
+            "hal_only": self.matches_hal(layer)
+            _: false
+
+    fn matches_hal(layer: text) -> bool:
+        """Check if layer matches HAL patterns."""
+        for pattern in self.hal_patterns:
+            if layer.contains(pattern):
+                return true
+        false
+
+# Global policy instance
+val _global_mock_policy = MockPolicy.new()
+
+pub fn mock_policy_init(mode: text):
+    """Initialize mock policy."""
+    _global_mock_policy.set_mode(mode)
+
+pub fn mock_policy_is_enabled() -> bool:
+    """Check if mocking is enabled."""
+    _global_mock_policy.is_enabled()
+
+pub fn mock_policy_allow_in_layer(layer: text) -> bool:
+    """Check if mock allowed in layer."""
+    _global_mock_policy.is_allowed_in(layer)
+
+pub fn mock_policy_disable():
+    """Disable all mocks."""
+    _global_mock_policy.set_mode("disabled")
+
+pub fn mock_policy_reset():
+    """Reset to allow all mocks."""
+    _global_mock_policy.set_mode("all")
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+# Phase 1: Core Types
+export CallRecord
+export MockFunction
+export MockBuilder
+export RegistryEntry
+export MockRegistry
+export create_mock
+export verify_called
+export verify_called_with
+
+# Phase 2: Verification System
+export Expectation
+export VerificationResult
+export Matcher
+
+# Phase 3: Advanced Features
+export CallAnalyzer
+export ReturnValue
+export SequentialReturns
+export Spy
+
+# Policy System
+export MockPolicy
+export mock_policy_init
+export mock_policy_is_enabled
+export mock_policy_allow_in_layer
+export mock_policy_disable
+export mock_policy_reset

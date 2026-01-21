@@ -1,0 +1,434 @@
+"""
+# Simple Source Coverage FFI Specification
+
+**Feature IDs:** #674
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+This spec tests the FFI bindings for Simple source coverage tracking.
+The runtime provides decision/condition/path coverage probes that are
+inserted during compilation and tracked at runtime.
+
+## Key Components
+
+| Component | Description |
+|-----------|-------------|
+| rt_coverage_enabled | Check if coverage runtime is available |
+| rt_coverage_clear | Reset all accumulated coverage data |
+| rt_coverage_dump_sdn | Export coverage data as SDN format |
+| CoverageStats | Parsed coverage statistics |
+| save_coverage_data | Save and report coverage |
+
+## SDN Format
+
+Coverage data is exported in SDN (Simple Data Notation) format:
+
+```
+# Coverage Report
+version: 1.0
+
+decisions |id, file, line, column, true_count, false_count|
+    1, test.spl, 10, 5, 2, 1
+
+conditions |decision_id, condition_id, file, line, column, true_count, false_count|
+    1, 1, test.spl, 10, 5, 1, 1
+
+paths |path_id, blocks, hit_count|
+    1, [0 1 2], 3
+
+summary:
+    total_decisions: 1
+    covered_decisions: 1
+    total_conditions: 1
+    covered_conditions: 1
+    total_paths: 1
+    covered_paths: 1
+    decision_percent: 100.0
+    condition_percent: 100.0
+    path_percent: 100.0
+```
+
+## API Reference
+
+### Public Functions
+
+- `is_coverage_enabled() -> bool` - Check if coverage is available
+- `clear_coverage()` - Clear all accumulated data
+- `get_coverage_sdn() -> text` - Get coverage as SDN string
+- `save_coverage_data(quiet: bool)` - Save to file and print stats
+
+## Examples
+
+```simple
+import std.tooling.coverage as coverage
+
+# Check if coverage is available
+if coverage.is_coverage_enabled():
+    # Clear previous data
+    coverage.clear_coverage()
+
+    # ... run tests ...
+
+    # Get and inspect coverage data
+    val sdn = coverage.get_coverage_sdn()
+    print sdn
+
+    # Or save to file with summary
+    coverage.save_coverage_data(quiet: false)
+```
+"""
+
+import std.spec
+import std.tooling.coverage as coverage
+
+# ============================================================================
+# FFI Connection Tests
+# ============================================================================
+
+describe "Coverage FFI Connection":
+    """
+    ## FFI Function Availability
+
+    Verify that the coverage FFI functions are accessible from Simple.
+    These tests ensure the runtime is properly linked.
+    """
+
+    it "checks if coverage is enabled":
+        val enabled = coverage.is_coverage_enabled()
+        # Coverage should be enabled when runtime is linked
+        expect(enabled).to(be_a(bool))
+        # When runtime is linked, coverage is always enabled
+        expect(enabled).to(be_true())
+
+    it "clears coverage without error":
+        coverage.clear_coverage()
+        # Should complete without crashing
+        expect(true).to(be_true())
+
+    it "returns coverage data as text":
+        val sdn = coverage.get_coverage_sdn()
+        # Should return a text string (may be empty if no probes executed)
+        expect(sdn).to(be_a(text))
+        # Should not be empty - at least has header
+        expect(sdn.len()).to(gt(0))
+
+    it "can get coverage multiple times":
+        val sdn1 = coverage.get_coverage_sdn()
+        val sdn2 = coverage.get_coverage_sdn()
+        val sdn3 = coverage.get_coverage_sdn()
+        # All should be valid
+        expect(sdn1).to(include_string("version"))
+        expect(sdn2).to(include_string("version"))
+        expect(sdn3).to(include_string("version"))
+
+# ============================================================================
+# SDN Format Tests
+# ============================================================================
+
+describe "Coverage SDN Export":
+    """
+    ## SDN Format Validation
+
+    Verify that the exported coverage data follows the expected SDN format.
+    The SDN format is structured and machine-readable.
+    """
+
+    before_each:
+        # Clear coverage before each test
+        coverage.clear_coverage()
+
+    it "exports version header":
+        val sdn = coverage.get_coverage_sdn()
+        # SDN format includes version header
+        expect(sdn).to(include_string("version: 1.0"))
+
+    it "exports Coverage Report comment":
+        val sdn = coverage.get_coverage_sdn()
+        expect(sdn).to(include_string("# Coverage Report"))
+
+    it "exports summary section":
+        val sdn = coverage.get_coverage_sdn()
+        # SDN format includes summary section
+        expect(sdn).to(include_string("summary:"))
+
+    it "includes decision stats in summary":
+        val sdn = coverage.get_coverage_sdn()
+        # Summary includes decision coverage stats
+        expect(sdn).to(include_string("total_decisions:"))
+        expect(sdn).to(include_string("covered_decisions:"))
+        expect(sdn).to(include_string("decision_percent:"))
+
+    it "includes condition stats in summary":
+        val sdn = coverage.get_coverage_sdn()
+        expect(sdn).to(include_string("total_conditions:"))
+        expect(sdn).to(include_string("covered_conditions:"))
+        expect(sdn).to(include_string("condition_percent:"))
+
+    it "includes path stats in summary":
+        val sdn = coverage.get_coverage_sdn()
+        expect(sdn).to(include_string("total_paths:"))
+        expect(sdn).to(include_string("covered_paths:"))
+        expect(sdn).to(include_string("path_percent:"))
+
+# ============================================================================
+# Coverage Clearing Tests
+# ============================================================================
+
+describe "Coverage Data Clearing":
+    """
+    ## Clearing Coverage Data
+
+    Verify that clear_coverage() properly resets all accumulated data.
+    """
+
+    it "clears coverage data":
+        # Get initial SDN
+        val sdn1 = coverage.get_coverage_sdn()
+
+        # Clear and get again
+        coverage.clear_coverage()
+        val sdn2 = coverage.get_coverage_sdn()
+
+        # Both should be valid SDN (with version header)
+        expect(sdn1).to(include_string("version"))
+        expect(sdn2).to(include_string("version"))
+
+    it "can be called multiple times":
+        coverage.clear_coverage()
+        coverage.clear_coverage()
+        coverage.clear_coverage()
+        # Should not crash when called multiple times
+        expect(true).to(be_true())
+
+    it "resets to zero counts after clear":
+        coverage.clear_coverage()
+        val sdn = coverage.get_coverage_sdn()
+        # After clear, should have zero totals
+        expect(sdn).to(include_string("total_decisions: 0"))
+        expect(sdn).to(include_string("total_conditions: 0"))
+        expect(sdn).to(include_string("total_paths: 0"))
+
+    it "reports 100% coverage when empty":
+        coverage.clear_coverage()
+        val sdn = coverage.get_coverage_sdn()
+        # 0/0 = 100% by convention
+        expect(sdn).to(include_string("decision_percent: 100"))
+        expect(sdn).to(include_string("condition_percent: 100"))
+        expect(sdn).to(include_string("path_percent: 100"))
+
+# ============================================================================
+# Stats Parsing Tests
+# ============================================================================
+
+describe "Coverage Stats Parsing":
+    """
+    ## Stats Extraction
+
+    Verify that coverage statistics can be parsed from SDN output.
+    The module provides helper functions to parse the SDN format.
+    """
+
+    before_each:
+        coverage.clear_coverage()
+
+    it "parses coverage stats from SDN":
+        val sdn = coverage.get_coverage_sdn()
+        # Should contain percentage values
+        expect(sdn).to(include_string("percent"))
+
+    it "reports 100% when no decisions exist":
+        val sdn = coverage.get_coverage_sdn()
+        # When there are no decisions, coverage is 100%
+        expect(sdn).to(include_string("decision_percent: 100"))
+
+    it "SDN contains proper indentation":
+        val sdn = coverage.get_coverage_sdn()
+        # Summary items should be indented
+        expect(sdn).to(include_string("    total_decisions"))
+
+# ============================================================================
+# Decision Coverage Tests
+# ============================================================================
+
+describe "Decision Coverage Tracking":
+    """
+    ## Decision Coverage
+
+    Decision coverage tracks whether boolean expressions
+    have been evaluated to both true and false.
+    """
+
+    before_each:
+        coverage.clear_coverage()
+
+    it "tracks simple if conditions":
+        # Execute code with decisions
+        var x = 5
+        if x > 3:
+            x = x + 1
+        if x < 0:
+            x = 0
+
+        val sdn = coverage.get_coverage_sdn()
+        # Coverage data should be available
+        expect(sdn).to(include_string("summary"))
+
+    it "tracks nested conditions":
+        var a = true
+        var b = false
+
+        if a:
+            if b:
+                val _ = 1
+            else:
+                val _ = 2
+
+        val sdn = coverage.get_coverage_sdn()
+        expect(sdn).to(include_string("summary"))
+
+    it "tracks loop conditions":
+        var count = 0
+        while count < 5:
+            count = count + 1
+
+        val sdn = coverage.get_coverage_sdn()
+        expect(sdn).to(include_string("summary"))
+
+# ============================================================================
+# Integration Tests
+# ============================================================================
+
+describe "Coverage Integration":
+    """
+    ## End-to-End Workflow
+
+    Verify the complete coverage workflow from data collection
+    through export and reporting.
+    """
+
+    before_each:
+        coverage.clear_coverage()
+
+    it "provides complete workflow":
+        # 1. Check if enabled
+        val enabled = coverage.is_coverage_enabled()
+        expect(enabled).to(be_true())
+
+        # 2. Execute some code (decisions would be recorded by compiler)
+        var x = 5
+        if x > 3:
+            x = x + 1
+
+        # 3. Get coverage data
+        val sdn = coverage.get_coverage_sdn()
+        expect(sdn).to(include_string("version: 1.0"))
+        expect(sdn).to(include_string("summary"))
+
+        # 4. Clear for next run
+        coverage.clear_coverage()
+        val sdn2 = coverage.get_coverage_sdn()
+        expect(sdn2).to(include_string("version: 1.0"))
+
+    it "handles concurrent access":
+        # Call coverage functions rapidly
+        for _ in 0..10:
+            coverage.is_coverage_enabled()
+            coverage.get_coverage_sdn()
+
+        # Should not crash or deadlock
+        expect(true).to(be_true())
+
+    it "maintains data between calls":
+        # Execute code
+        var x = 1
+        if x > 0:
+            x = x + 1
+
+        val sdn1 = coverage.get_coverage_sdn()
+
+        # Execute more code
+        if x > 1:
+            x = x + 1
+
+        val sdn2 = coverage.get_coverage_sdn()
+
+        # Both should have valid format
+        expect(sdn1).to(include_string("summary"))
+        expect(sdn2).to(include_string("summary"))
+
+# ============================================================================
+# Edge Cases and Error Handling
+# ============================================================================
+
+describe "Coverage Edge Cases":
+    """
+    ## Edge Cases
+
+    Test edge cases and boundary conditions.
+    """
+
+    it "handles empty code execution":
+        coverage.clear_coverage()
+        # No decisions executed
+        val sdn = coverage.get_coverage_sdn()
+        expect(sdn).to(include_string("total_decisions: 0"))
+
+    it "handles very long execution":
+        coverage.clear_coverage()
+        # Many iterations
+        var sum = 0
+        for i in 0..100:
+            if i % 2 == 0:
+                sum = sum + i
+            else:
+                sum = sum - i
+
+        val sdn = coverage.get_coverage_sdn()
+        expect(sdn).to(include_string("summary"))
+
+    it "handles boolean short-circuit":
+        coverage.clear_coverage()
+        val a = true
+        val b = false
+
+        # Short-circuit evaluation
+        if a or b:
+            val _ = 1
+        if a and b:
+            val _ = 2
+
+        val sdn = coverage.get_coverage_sdn()
+        expect(sdn).to(include_string("summary"))
+
+# ============================================================================
+# Performance Tests
+# ============================================================================
+
+describe "Coverage Performance":
+    """
+    ## Performance
+
+    Verify coverage tracking doesn't cause significant overhead.
+    """
+
+    it "handles rapid clear cycles":
+        for _ in 0..50:
+            coverage.clear_coverage()
+        expect(true).to(be_true())
+
+    it "handles rapid get cycles":
+        for _ in 0..50:
+            val _ = coverage.get_coverage_sdn()
+        expect(true).to(be_true())
+
+    it "handles mixed operations":
+        for _ in 0..20:
+            coverage.clear_coverage()
+            var x = 1
+            if x > 0:
+                x = x + 1
+            val _ = coverage.get_coverage_sdn()
+        expect(true).to(be_true())

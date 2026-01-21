@@ -1,0 +1,206 @@
+# Coverage tracking utilities
+# Purpose: Handle coverage data saving and reporting
+#
+# This module provides FFI bindings to the Rust runtime coverage infrastructure.
+# The runtime tracks:
+# - Decision coverage (true/false outcomes of boolean decisions)
+# - Condition coverage (individual conditions within decisions)
+# - Path coverage (execution paths through functions)
+
+import io.fs
+
+# ============================================================================
+# FFI Declarations
+# ============================================================================
+
+# Check if coverage is enabled (always true when runtime is linked)
+extern "C" fn rt_coverage_enabled() -> bool
+
+# Clear all coverage data
+extern "C" fn rt_coverage_clear()
+
+# Get coverage data as SDN format string (caller must free with rt_coverage_free_sdn)
+extern "C" fn rt_coverage_dump_sdn() -> *mut i8
+
+# Free SDN string returned by rt_coverage_dump_sdn
+extern "C" fn rt_coverage_free_sdn(ptr: *mut i8)
+
+# Convert C string to Simple text
+extern "C" fn rt_cstring_to_text(cstr: *const i8) -> text
+
+# ============================================================================
+# Coverage Stats
+# ============================================================================
+
+struct CoverageStats:
+    total_decisions: i32
+    covered_decisions: i32
+    total_conditions: i32
+    covered_conditions: i32
+    total_paths: i32
+    covered_paths: i32
+    decision_percent: f64
+    condition_percent: f64
+    path_percent: f64
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+# Check if coverage collection is enabled
+pub fn is_coverage_enabled() -> bool:
+    rt_coverage_enabled()
+
+# Clear all accumulated coverage data
+pub fn clear_coverage():
+    rt_coverage_clear()
+
+# Get coverage data in SDN format
+pub fn get_coverage_sdn() -> text:
+    val ptr = rt_coverage_dump_sdn()
+    if ptr == 0 as *mut i8:
+        return ""
+    val result = rt_cstring_to_text(ptr as *const i8)
+    rt_coverage_free_sdn(ptr)
+    result
+
+# Save coverage data and print statistics
+pub fn save_coverage_data(quiet: bool):
+    if not is_coverage_enabled():
+        return
+
+    val sdn = get_coverage_sdn()
+    if sdn.is_empty():
+        if not quiet:
+            print_err("Warning: No coverage data collected")
+        return
+
+    # Save to file
+    val path = get_coverage_output_path()
+    match save_sdn_to_file(sdn, path):
+        Err(e) =>
+            if not quiet:
+                print_err("Warning: Failed to save coverage data: {e}")
+            return
+        Ok(_) =>
+            {}
+
+    if quiet:
+        return
+
+    print "Coverage data saved to: {path}"
+
+    # Parse and print stats
+    val stats = parse_coverage_stats(sdn)
+    print "  Decisions: {stats.covered_decisions}/{stats.total_decisions} ({stats.decision_percent:.1}%)"
+    print "  Conditions: {stats.covered_conditions}/{stats.total_conditions} ({stats.condition_percent:.1}%)"
+    print "  Paths: {stats.covered_paths}/{stats.total_paths} ({stats.path_percent:.1}%)"
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+# Get default coverage output path
+fn get_coverage_output_path() -> text:
+    ".coverage/coverage.sdn"
+
+# Save SDN content to file
+fn save_sdn_to_file(sdn: text, path: text) -> Result<text, text>:
+    # Extract directory from path and ensure it exists
+    val dir = get_parent_dir(path)
+    if not dir.is_empty():
+        if not fs.create_dir_all(dir):
+            return Err("Failed to create directory: {dir}")
+
+    # Write the SDN content to file
+    if fs.write_text(path, sdn):
+        Ok(path)
+    else:
+        Err("Failed to write file: {path}")
+
+# Get parent directory from a path
+fn get_parent_dir(path: text) -> text:
+    val last_slash = path.rfind("/")
+    if last_slash >= 0:
+        path.slice(0, last_slash)
+    else:
+        ""
+
+# Parse coverage stats from SDN string
+fn parse_coverage_stats(sdn: text) -> CoverageStats:
+    # Parse the SDN format to extract stats
+    # SDN format has a summary section at the end:
+    #   summary:
+    #       total_decisions: N
+    #       covered_decisions: N
+    #       ...
+
+    var total_decisions = 0
+    var covered_decisions = 0
+    var total_conditions = 0
+    var covered_conditions = 0
+    var total_paths = 0
+    var covered_paths = 0
+    var decision_percent = 100.0
+    var condition_percent = 100.0
+    var path_percent = 100.0
+
+    # Simple parsing: look for key: value patterns
+    for line in sdn.lines():
+        val trimmed = line.trim()
+        if trimmed.starts_with("total_decisions:"):
+            total_decisions = parse_int_from_line(trimmed)
+        elif trimmed.starts_with("covered_decisions:"):
+            covered_decisions = parse_int_from_line(trimmed)
+        elif trimmed.starts_with("total_conditions:"):
+            total_conditions = parse_int_from_line(trimmed)
+        elif trimmed.starts_with("covered_conditions:"):
+            covered_conditions = parse_int_from_line(trimmed)
+        elif trimmed.starts_with("total_paths:"):
+            total_paths = parse_int_from_line(trimmed)
+        elif trimmed.starts_with("covered_paths:"):
+            covered_paths = parse_int_from_line(trimmed)
+        elif trimmed.starts_with("decision_percent:"):
+            decision_percent = parse_float_from_line(trimmed)
+        elif trimmed.starts_with("condition_percent:"):
+            condition_percent = parse_float_from_line(trimmed)
+        elif trimmed.starts_with("path_percent:"):
+            path_percent = parse_float_from_line(trimmed)
+
+    CoverageStats(
+        total_decisions: total_decisions,
+        covered_decisions: covered_decisions,
+        total_conditions: total_conditions,
+        covered_conditions: covered_conditions,
+        total_paths: total_paths,
+        covered_paths: covered_paths,
+        decision_percent: decision_percent,
+        condition_percent: condition_percent,
+        path_percent: path_percent
+    )
+
+# Parse integer from "key: value" line
+fn parse_int_from_line(line: text) -> i32:
+    val parts = line.split(":")
+    if parts.len() >= 2:
+        val value_str = parts[1].trim()
+        match value_str.parse_int():
+            Some(v) => v as i32
+            None => 0
+    else:
+        0
+
+# Parse float from "key: value" line
+fn parse_float_from_line(line: text) -> f64:
+    val parts = line.split(":")
+    if parts.len() >= 2:
+        val value_str = parts[1].trim()
+        match value_str.parse_float():
+            Some(v) => v
+            None => 0.0
+    else:
+        0.0
+
+# Helper for stderr output
+fn print_err(msg: text):
+    eprint msg

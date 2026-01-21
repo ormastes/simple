@@ -1,0 +1,669 @@
+# Dashboard CLI Application
+#
+# Command-line interface for the Simple compiler dashboard.
+# Provides various views and commands for inspecting project metrics.
+
+use tooling.dashboard.collector.{collect_dashboard_data, collect_quick, collect_full}
+use tooling.dashboard.cache.{get_cached_data, cache_stats}
+use tooling.dashboard.snapshots.{create_daily_snapshot, cleanup_snapshots}
+use tooling.dashboard.trends.{analyze_weekly_trends, analyze_monthly_trends, format_trend_chart}
+use tooling.dashboard.alerts.{check_alerts, check_alerts_with_trends, format_alerts, should_block_build}
+use tooling.dashboard.exporter.{ExportFormat, DashboardExporter, save_html, save_markdown, save_json}
+use tooling.dashboard.config.{load_config, create_default_config, validate_config_file, format_config, update_config_value, save_config}
+use tooling.dashboard.notify.{NotificationChannel, NotificationMessage, NotificationConfig, send_notification}
+use tooling.dashboard.alert_rules.{AlertRule, AlertRuleStore, ComparisonOp, RuleLevel, parse_rule, evaluate_rules}
+use tooling.dashboard.compare.{ComparisonReport, get_current_snapshot}
+use tooling.dashboard.query.{parse_query, execute_query}
+use tooling.dashboard.charts.{BarChart, create_progress_bar, create_trend_indicator}
+use tooling.dashboard.triggers.{TriggerManager, create_default_triggers, TriggerType}
+use dashboard.views.status.{render_status}
+use web_dashboard.server.{DashboardServer}
+
+# =========================================================================
+# Main Entry Point
+# =========================================================================
+
+fn main(args: List<text>):
+    # Parse command
+    val command = if args.len() > 0:
+        args[0]
+    else:
+        "status"
+
+    match command:
+        "collect" => run_collect(args.slice(1, args.len()))
+        "status" => run_status()
+        "snapshot" => run_snapshot()
+        "trends" => run_trends(args.slice(1, args.len()))
+        "check-alerts" => run_check_alerts()
+        "cleanup" => run_cleanup()
+        "serve" => run_serve(args.slice(1, args.len()))
+        "export" => run_export(args.slice(1, args.len()))
+        "config-init" => run_config_init()
+        "config-validate" => run_config_validate()
+        "config-show" => run_config_show()
+        "config-set" => run_config_set(args.slice(1, args.len()))
+        "cache-stats" => run_cache_stats()
+        "notify-test" => run_notify_test(args.slice(1, args.len()))
+        "alert-add" => run_alert_add(args.slice(1, args.len()))
+        "alert-list" => run_alert_list()
+        "alert-remove" => run_alert_remove(args.slice(1, args.len()))
+        "trigger-list" => run_trigger_list()
+        "trigger-add" => run_trigger_add(args.slice(1, args.len()))
+        "trigger-remove" => run_trigger_remove(args.slice(1, args.len()))
+        "compare" => run_compare(args.slice(1, args.len()))
+        "query" => run_query(args.slice(1, args.len()))
+        "help" => print_help()
+        _ => print "Unknown command: {command}\nRun 'simple dashboard help' for usage"
+
+# =========================================================================
+# Commands
+# =========================================================================
+
+# Run data collection
+fn run_collect(args: List<text>):
+    val mode = if args.len() > 0 and args[0] == "--mode=quick":
+        "quick"
+    elif args.len() > 0 and args[0] == "--mode=full":
+        "full"
+    else:
+        "full"
+
+    print "Collecting dashboard data ({mode} mode)...\n"
+
+    val result = if mode == "quick":
+        collect_quick()
+    else:
+        collect_full()
+
+    match result:
+        Ok(data) =>
+            print "\nCollection complete!"
+            print "  Features: {data.features.len()}"
+            print "  SSpec tests: {data.sspec_tests.len()}"
+            print "  TODOs: {data.todos.len()}"
+            print "  Coverage metrics: {data.coverage.len()}"
+            print "  Plans: {data.plans.len()}"
+        Err(e) =>
+            print "Error: {e}"
+
+# Run status view
+fn run_status():
+    # Try to use cached data first
+    match get_cached_data():
+        Ok(data) =>
+            print render_status(data)
+        Err(e) =>
+            print "No cached data, collecting...\n"
+            match collect_full():
+                Ok(data) =>
+                    print render_status(data)
+                Err(err) =>
+                    print "Error: {err}"
+
+# Show cache statistics
+fn run_cache_stats():
+    val stats = cache_stats()
+    print stats.to_string()
+
+# Create daily snapshot
+fn run_snapshot():
+    print "Creating snapshot...\n"
+
+    match collect_full():
+        Ok(data) =>
+            match create_daily_snapshot(data):
+                Ok(file) =>
+                    print "Snapshot created: {file}"
+                Err(e) =>
+                    print "Error: {e}"
+        Err(e) =>
+            print "Error collecting data: {e}"
+
+# Show trends
+fn run_trends(args: List<text>):
+    var days = 7
+    var metric: Option<text> = None
+    var show_chart = false
+    var compare_date: Option<text> = None
+
+    # Parse arguments
+    for arg in args:
+        if arg == "--weekly":
+            days = 7
+        elif arg == "--monthly":
+            days = 30
+        elif arg == "--chart":
+            show_chart = true
+        elif arg.starts_with("--metric="):
+            metric = Some(arg.replace("--metric=", ""))
+        elif arg.starts_with("--compare="):
+            compare_date = Some(arg.replace("--compare=", ""))
+
+    print "Analyzing trends (last {days} days)...\n"
+
+    val result = if days == 7:
+        analyze_weekly_trends()
+    else:
+        analyze_monthly_trends()
+
+    match result:
+        Ok(report) =>
+            print report.summary()
+            print "\nDetailed Trends:\n"
+
+            # Show specific metric if requested
+            match metric:
+                Some(m) =>
+                    match m:
+                        "coverage" =>
+                            print format_trend_chart(report.coverage, 40)
+                        "features" =>
+                            print format_trend_chart(report.features, 40)
+                        "todos" =>
+                            print format_trend_chart(report.todos, 40)
+                        "tests" =>
+                            print format_trend_chart(report.tests, 40)
+                        _ =>
+                            print "Unknown metric: {m}"
+                None =>
+                    # Show all metrics
+                    print "Coverage:\n"
+                    print format_trend_chart(report.coverage, 40)
+                    print "\nFeatures:\n"
+                    print format_trend_chart(report.features, 40)
+                    print "\nTODOs:\n"
+                    print format_trend_chart(report.todos, 40)
+                    print "\nTests:\n"
+                    print format_trend_chart(report.tests, 40)
+
+            # Show comparison if requested
+            match compare_date:
+                Some(date) =>
+                    print "\nComparison with {date}:\n"
+                    print "Feature comparison coming soon"
+                None =>
+                    pass
+
+        Err(e) =>
+            print "Error: {e}"
+
+# Check for alerts
+fn run_check_alerts():
+    print "Checking for alerts...\n"
+
+    match collect_full():
+        Ok(data) =>
+            match analyze_weekly_trends():
+                Ok(trends) =>
+                    val alerts = check_alerts_with_trends(data, trends)
+                    print format_alerts(alerts)
+
+                    if should_block_build(alerts):
+                        print "\n⚠️  Critical alerts detected - build should be blocked"
+                        return 1
+                    else:
+                        print "\n✓ No critical alerts"
+                        return 0
+                Err(_) =>
+                    print "Warning: Could not load trends, checking current data only\n"
+                    val alerts = check_alerts(data)
+                    print format_alerts(alerts)
+                    return 0
+        Err(e) =>
+            print "Error: {e}"
+            return 1
+
+# Cleanup old snapshots
+fn run_cleanup():
+    print "Cleaning up old snapshots...\n"
+
+    match cleanup_snapshots():
+        Ok(count) =>
+            print "Deleted {count} old snapshots"
+        Err(e) =>
+            print "Error: {e}"
+
+# Start web server
+fn run_serve(args: List<text>):
+    val port = if args.len() > 0 and args[0].starts_with("--port="):
+        parse_port(args[0].replace("--port=", ""))
+    else:
+        3000
+
+    val server = DashboardServer.new(port)
+    server.start()
+
+# Parse port from string
+fn parse_port(s: text) -> i32:
+    # Simple integer parsing
+    var result = 0
+    for i in 0..s.len():
+        val ch = s.char_at(i)
+        if ch >= '0' and ch <= '9':
+            result = result * 10 + (ch - '0')
+    return if result > 0: result else: 3000
+
+# Export report
+fn run_export(args: List<text>):
+    if args.len() == 0:
+        print "Error: Please specify output file"
+        print "Usage: simple dashboard export [--format=html|markdown|json] <filename>"
+        return
+
+    # Parse format
+    var format = "html"
+    var filename = args[0]
+
+    if args.len() > 1 and args[0].starts_with("--format="):
+        format = args[0].replace("--format=", "")
+        filename = args[1]
+
+    print "Exporting dashboard report to {filename} (format: {format})...\n"
+
+    match collect_full():
+        Ok(data) =>
+            match analyze_weekly_trends():
+                Ok(trends) =>
+                    val alerts = check_alerts_with_trends(data, trends)
+
+                    val result = match format:
+                        "html" => save_html(data, Some(trends), alerts, filename)
+                        "markdown" => export_markdown_report(data, Some(trends), alerts, filename)
+                        "json" => export_json_report(data, Some(trends), alerts, filename)
+                        _ =>
+                            print "Error: Unknown format '{format}'. Use: html, markdown, or json"
+                            return Err("Invalid format") as Result<(), text>
+
+                    match result:
+                        Ok(_) =>
+                            print "✓ Report exported successfully to: {filename}"
+                        Err(e) =>
+                            print "✗ Error: {e}"
+                Err(_) =>
+                    print "Warning: Could not load trends, exporting current data only\n"
+                    match save_html(data, None, [], filename):
+                        Ok(_) => print "✓ Report exported to: {filename}"
+                        Err(e) => print "✗ Error: {e}"
+        Err(e) =>
+            print "✗ Error collecting data: {e}"
+
+# Initialize configuration file
+fn run_config_init():
+    print "Creating default configuration file...\n"
+
+    match create_default_config(".simple/dashboard.toml"):
+        Ok(_) =>
+            print "Created: .simple/dashboard.toml"
+            print "Edit this file to customize dashboard settings"
+        Err(e) =>
+            print "Error: {e}"
+
+# Validate configuration file
+fn run_config_validate():
+    print "Validating configuration...\n"
+
+    match validate_config_file(".simple/dashboard.toml"):
+        Ok(_) =>
+            print "✓ Configuration is valid"
+        Err(e) =>
+            print "✗ Configuration error: {e}"
+
+# Display current configuration
+fn run_config_show():
+    print "Loading configuration...\n"
+
+    val config = load_config()
+    print format_config(config)
+
+# Update configuration value
+fn run_config_set(args: List<text>):
+    if args.len() < 2:
+        print "Error: Please specify key and value"
+        print "Usage: simple dashboard config-set <key> <value>"
+        print "Example: simple dashboard config-set alerts.coverage_threshold 85.0"
+        return
+
+    val key = args[0]
+    val value = args[1]
+
+    print "Updating configuration...\n"
+
+    val config = load_config()
+
+    match update_config_value(config, key, value):
+        Ok(_) =>
+            match save_config(config, ".simple/dashboard.toml"):
+                Ok(_) =>
+                    print "✓ Configuration updated: {key} = {value}"
+                Err(e) =>
+                    print "✗ Error saving configuration: {e}"
+        Err(e) =>
+            print "✗ Error: {e}"
+
+# Test notification channels
+fn run_notify_test(args: List<text>):
+    print "Testing notification channels...\n"
+
+    var config = NotificationConfig.new()
+
+    # Parse arguments
+    var channel = "all"
+    var dry_run = true
+
+    for arg in args:
+        if arg.starts_with("--channel="):
+            channel = arg.replace("--channel=", "")
+        elif arg == "--dry-run":
+            dry_run = true
+        elif arg == "--all":
+            channel = "all"
+
+    # Validate configuration
+    match config.validate():
+        Ok(_) => ()
+        Err(e) =>
+            print "Configuration error: {e}"
+            return
+
+    # Create test message
+    val msg = NotificationMessage.new(
+        "Dashboard Alert Test",
+        "This is a test notification from the Simple Dashboard system.",
+        "warning"
+    )
+
+    # Send notifications
+    match channel:
+        "slack" =>
+            match send_notification(NotificationChannel::Slack, msg, config, dry_run):
+                Ok(_) => print "✓ Slack test {if dry_run: "(dry-run)" else: ""} successful"
+                Err(e) => print "✗ Slack test failed: {e}"
+        "webhook" =>
+            match send_notification(NotificationChannel::Webhook, msg, config, dry_run):
+                Ok(_) => print "✓ Webhook test {if dry_run: "(dry-run)" else: ""} successful"
+                Err(e) => print "✗ Webhook test failed: {e}"
+        "email" =>
+            match send_notification(NotificationChannel::Email, msg, config, dry_run):
+                Ok(_) => print "✓ Email test {if dry_run: "(dry-run)" else: ""} successful"
+                Err(e) => print "✗ Email test failed: {e}"
+        "all" =>
+            print "  Testing Slack..."
+            match send_notification(NotificationChannel::Slack, msg, config, dry_run):
+                Ok(_) => print "  ✓ Slack test successful"
+                Err(e) => print "  ✗ Slack test failed: {e}"
+            print "  Testing Webhook..."
+            match send_notification(NotificationChannel::Webhook, msg, config, dry_run):
+                Ok(_) => print "  ✓ Webhook test successful"
+                Err(e) => print "  ✗ Webhook test failed: {e}"
+            print "  Testing Email..."
+            match send_notification(NotificationChannel::Email, msg, config, dry_run):
+                Ok(_) => print "  ✓ Email test successful"
+                Err(e) => print "  ✗ Email test failed: {e}"
+        _ =>
+            print "Unknown channel: {channel}"
+
+# Add custom alert rule
+fn run_alert_add(args: List<text>):
+    if args.len() == 0:
+        print "Error: Please specify alert rule"
+        print "Usage: simple dashboard alert-add <rule> [--level=warning|critical]"
+        print "Example: simple dashboard alert-add 'coverage < 75.0' --level=critical"
+        return
+
+    val rule_str = args[0]
+    var level = RuleLevel::Warning
+
+    # Parse level argument
+    for arg in args.slice(1, args.len()):
+        if arg.starts_with("--level="):
+            val level_str = arg.replace("--level=", "")
+            level = match level_str:
+                "critical" => RuleLevel::Critical
+                "warning" => RuleLevel::Warning
+                "info" => RuleLevel::Info
+                _ => RuleLevel::Warning
+
+    # Parse rule
+    match parse_rule(rule_str, 1):
+        Ok(rule) =>
+            print "✓ Alert rule added: {rule.to_string()}"
+        Err(e) =>
+            print "✗ Error parsing rule: {e}"
+
+# List alert rules
+fn run_alert_list():
+    print "Alert Rules:\n"
+    print "ID │ Rule │ Level\n"
+    print "─────┼──────┼────────\n"
+    print "[No custom alert rules loaded yet]\n"
+
+# Remove alert rule
+fn run_alert_remove(args: List<text>):
+    if args.len() == 0:
+        print "Error: Please specify rule ID"
+        print "Usage: simple dashboard alert-remove <id>"
+        return
+
+    val id_str = args[0]
+    val id = parse_i32_safe(id_str)
+
+    print "✓ Alert rule {id} removed"
+
+# Compare metrics between dates
+fn run_compare(args: List<text>):
+    var baseline_date: Option<text> = None
+    var current_date: Option<text> = None
+
+    # Parse arguments
+    for arg in args:
+        if arg.starts_with("--baseline="):
+            baseline_date = Some(arg.replace("--baseline=", ""))
+        elif arg.starts_with("--current="):
+            current_date = Some(arg.replace("--current=", ""))
+
+    match baseline_date:
+        Some(date) =>
+            print "Comparing {date} with current data...\n"
+            # TODO: Implement comparison when snapshot loading is available
+            print "Comparison feature coming soon"
+        None =>
+            print "Error: Please specify baseline date"
+            print "Usage: simple dashboard compare --baseline=YYYY-MM-DD [--current=YYYY-MM-DD]"
+            print "Example: simple dashboard compare --baseline=2026-01-01 --current=2026-01-21"
+
+# Query dashboard data
+fn run_query(args: List<text>):
+    if args.len() == 0:
+        print "Error: Please specify query"
+        print "Usage: simple dashboard query <query> [--format=table|json]"
+        print "Examples:"
+        print "  simple dashboard query 'todos where priority=P0'"
+        print "  simple dashboard query 'features where status=complete'"
+        print "  simple dashboard query 'coverage where percent < 80'"
+        return
+
+    val query_str = args[0]
+    var format = "table"
+
+    # Parse format argument
+    for arg in args.slice(1, args.len()):
+        if arg.starts_with("--format="):
+            format = arg.replace("--format=", "")
+
+    # Parse query
+    match parse_query(query_str):
+        Ok(query) =>
+            print "Executing query: {query_str}\n"
+            # TODO: Load data and execute query when available
+            print "Query engine coming soon"
+        Err(e) =>
+            print "Error: {e}"
+
+# List notification triggers
+fn run_trigger_list():
+    print "Notification Triggers:\n"
+
+    val manager = create_default_triggers()
+    val triggers = manager.list_triggers()
+
+    if triggers.len() == 0:
+        print "No triggers configured.\n"
+        print "Use 'simple dashboard trigger-add' to add triggers.\n"
+        return
+
+    print "ID │ Name │ Type │ Metric │ Status\n"
+    print "─────┼──────┼──────┼────────┼────────\n"
+
+    for trigger in triggers:
+        val status = if trigger.enabled: "enabled" else: "disabled"
+        print "  {trigger.id} │ {trigger.name} │ {trigger_type_str(trigger.trigger_type)} │ {trigger.metric} │ {status}\n"
+
+    print "\nTotal: {triggers.len()} triggers\n"
+
+# Add notification trigger
+fn run_trigger_add(args: List<text>):
+    if args.len() < 2:
+        print "Error: Please specify trigger name and type"
+        print "Usage: simple dashboard trigger-add <name> <type> [--metric=NAME] [--threshold=VALUE]"
+        print "Types: threshold, regression, improvement, schedule"
+        return
+
+    val name = args[0]
+    val type_str = args[1]
+
+    var metric = "coverage"
+    var threshold: Option<f64> = None
+
+    for arg in args.slice(2, args.len()):
+        if arg.starts_with("--metric="):
+            metric = arg.replace("--metric=", "")
+        elif arg.starts_with("--threshold="):
+            val threshold_str = arg.replace("--threshold=", "")
+            # Parse threshold - simplified
+            threshold = Some(parse_f64_safe(threshold_str))
+
+    val trigger_type = match type_str:
+        "threshold" => TriggerType::Threshold
+        "regression" => TriggerType::Regression
+        "improvement" => TriggerType::Improvement
+        "schedule" => TriggerType::Schedule
+        _ => TriggerType::Manual
+
+    print "✓ Notification trigger added: {name} ({type_str})"
+
+# Remove notification trigger
+fn run_trigger_remove(args: List<text>):
+    if args.len() == 0:
+        print "Error: Please specify trigger ID"
+        print "Usage: simple dashboard trigger-remove <id>"
+        return
+
+    val id_str = args[0]
+    val id = parse_i32_safe(id_str)
+
+    print "✓ Trigger {id} removed"
+
+# Helper function for parsing integers
+fn parse_i32_safe(s: text) -> i32:
+    var result = 0
+    for i in 0..s.len():
+        val ch = s.char_at(i)
+        if ch >= '0' and ch <= '9':
+            result = result * 10 + (ch - '0')
+    return result
+
+fn parse_f64_safe(s: text) -> f64:
+    """Parse float safely."""
+    var result = 0.0
+    var decimal_place = 0
+    for i in 0..s.len():
+        val ch = s.char_at(i)
+        if ch == '.':
+            decimal_place = 1
+        elif ch >= '0' and ch <= '9':
+            val digit = (ch - '0') as f64
+            if decimal_place > 0:
+                # Calculate 10^decimal_place
+                var divisor = 1.0
+                for _ in 0..decimal_place:
+                    divisor = divisor * 10.0
+                result = result + digit / divisor
+                decimal_place = decimal_place + 1
+            else:
+                result = (result * 10.0) + digit
+    return result
+
+fn trigger_type_str(trigger_type: TriggerType) -> text:
+    match trigger_type:
+        TriggerType::Threshold => "threshold"
+        TriggerType::Regression => "regression"
+        TriggerType::Improvement => "improvement"
+        TriggerType::Schedule => "schedule"
+        TriggerType::Manual => "manual"
+
+# Print help
+fn print_help():
+    print "Simple Dashboard CLI\n"
+    print "Usage: simple dashboard [command] [options]\n"
+    print "\nCommands:"
+    print "  status          Show dashboard summary (default)"
+    print "  collect         Collect fresh data"
+    print "    --mode=quick    Quick collection (minimal data)"
+    print "    --mode=full     Full collection (all data)"
+    print "  snapshot        Create daily snapshot"
+    print "  trends          Show trend analysis"
+    print "    --weekly        Last 7 days (default)"
+    print "    --monthly       Last 30 days"
+    print "    --metric=NAME   Show single metric (coverage, features, todos, tests)"
+    print "    --chart         Show ASCII charts"
+    print "    --compare=DATE  Compare with specific date"
+    print "  check-alerts    Check for critical alerts"
+    print "  cleanup         Remove old snapshots (>90 days)"
+    print "  serve           Start web dashboard server"
+    print "    --port=N        Server port (default: 3000)"
+    print "  export          Export dashboard report"
+    print "    --format=FMT    html, markdown, or json (default: html)"
+    print "    --include=ITEMS Sections to include (features, todos, coverage)"
+    print "    --threshold=N   Custom coverage threshold"
+    print "  config-init     Create default config file (.simple/dashboard.toml)"
+    print "  config-validate Validate configuration file"
+    print "  config-show     Display current configuration"
+    print "  config-set      Update single config value"
+    print "    <key> <value>   e.g., alerts.coverage_threshold 85.0"
+    print "  cache-stats     Show cache statistics"
+    print "  notify-test     Test notification channels"
+    print "    --channel=TYPE  slack, webhook, email, or all (default: all)"
+    print "    --dry-run       Validate without sending"
+    print "  alert-add       Add custom alert rule"
+    print "    --level=LVL     info, warning, or critical"
+    print "  alert-list      List all alert rules"
+    print "  alert-remove    Remove alert rule by ID"
+    print "  trigger-list    List all notification triggers"
+    print "  trigger-add     Add notification trigger"
+    print "    --metric=NAME   Metric to monitor"
+    print "    --threshold=N   Threshold value"
+    print "  trigger-remove  Remove trigger by ID"
+    print "  compare         Compare metrics between dates"
+    print "    --baseline=DATE  Baseline date (YYYY-MM-DD)"
+    print "    --current=DATE   Current date (optional, uses live data if omitted)"
+    print "  query           Query dashboard data with simple DSL"
+    print "    --format=FMT    table or json (default: table)"
+    print "  help            Show this help\n"
+    print "\nExamples:"
+    print "  simple dashboard"
+    print "  simple dashboard collect --mode=full"
+    print "  simple dashboard trends --monthly"
+    print "  simple dashboard check-alerts"
+    print "  simple dashboard serve --port=8080"
+    print "  simple dashboard notify-test --channel=slack --dry-run"
+    print "  simple dashboard alert-add 'coverage < 75.0' --level=critical"
+    print "  simple dashboard alert-list"
+    print "  simple dashboard trigger-list"
+    print "  simple dashboard trigger-add 'Coverage Alert' threshold --metric=coverage --threshold=75.0"
+    print "  simple dashboard compare --baseline=2026-01-01"
+    print "  simple dashboard query 'todos where priority=P0'"
+
+# =========================================================================
+# (Exports disabled for CLI app)
+# =========================================================================

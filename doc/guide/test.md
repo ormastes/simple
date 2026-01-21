@@ -743,8 +743,49 @@ All coverage thresholds met!
 
 ---
 
+## Simple Source Coverage Limitation
+
+**Important:** All coverage metrics described in this document apply to **Rust code** (.rs files) only.
+
+### Current State
+
+Coverage for Simple language source files (`.spl`) is **not yet implemented**. The `cargo llvm-cov` tool tracks only Rust code because LLVM instrumentation operates at the Rust compiler level, before Simple code is executed.
+
+### Why Simple Coverage Doesn't Exist
+
+| Aspect | Rust Coverage | Simple Coverage |
+|--------|---------------|-----------------|
+| **Tool** | `cargo llvm-cov` | Not implemented |
+| **Instrumentation** | LLVM source-based | Would require MIR instrumentation |
+| **Status** | Working | Planned |
+
+Simple tests (`.spl` files) are executed but their coverage is not tracked because:
+1. LLVM coverage instruments Rust code at compile time
+2. Simple source is interpreted/JIT-compiled by the Simple runtime
+3. The runtime currently doesn't instrument Simple source locations
+
+### Planned Implementation
+
+The implementation plan is documented in `doc/plan/testing_roadmap_2026.md` (Section 2.2):
+1. **MIR Instrumentation**: Add coverage probes during MIR generation
+2. **Runtime Collection**: Track probe hits during execution
+3. **LCOV Export**: Export coverage data in standard format
+4. **HTML Reports**: Merge with Rust coverage in unified reports
+
+See also: `doc/research/unified_coverage_plan.md` for the unified coverage strategy.
+
+### What This Means for Testing
+
+- **Rust tests** (`cargo test`): Full coverage metrics (line, branch, condition)
+- **Simple tests** (`.spl` specs): Tests run and pass/fail, but no coverage metrics
+
+When `make coverage-*` commands run, they report coverage only for the Rust code paths exercised by both Rust and Simple tests, not for the Simple source files themselves.
+
+---
+
 ## See Also
 
 - `doc/system_test.md` - System test framework guide (SDN config, BDD patterns)
 - `doc/spec/testing/testing_bdd_framework.md` - BDD spec framework specification (describe/context/it)
 - `doc/spec/sdn.md` - SDN (Simple Data Notation) format specification
+- `doc/plan/testing_roadmap_2026.md` - Testing roadmap including Simple coverage implementation plan

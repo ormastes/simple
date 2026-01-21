@@ -1,0 +1,525 @@
+"""
+# Mock Library Specification
+
+**Feature IDs:** Testing Infrastructure - Mocking
+**Category:** Testing
+**Status:** Planned (Blocked on trait objects)
+**Priority:** Medium
+
+## Overview
+
+Mock library for creating test doubles (mocks, stubs, spies) to isolate
+units under test. Provides fluent API for stubbing methods and verifying
+behavior.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Mock | Pre-programmed with expectations, verifies behavior |
+| Stub | Provides canned answers, no verification |
+| Spy | Records calls on real object |
+| Fake | Working implementation for testing |
+
+## Related Specifications
+
+- [Test Doubles - Martin Fowler](https://martinfowler.com/bliki/TestDouble.html)
+
+## Examples
+
+Mocking, stubbing, and verification examples.
+"""
+
+import std.spec
+import mock
+
+describe "Mock Library - Phase 1 (Call Tracking)":
+    context "MockFunction Creation":
+        it "creates mock with name":
+            val m = mock.MockFunction.new("save_user")
+            expect m.call_count() == 0
+
+        it "initializes empty call history":
+            val m = mock.MockFunction.new("test_fn")
+            expect m.was_called() == false
+
+    context "Call Recording":
+        it "records function calls":
+            val fn = mock.MockFunction.new("fetch_data")
+            fn.record_call(["user_id", "123"])
+            expect fn.was_called() == true
+
+        it "tracks call count":
+            val fn = mock.MockFunction.new("process")
+            fn.record_call([])
+            fn.record_call([])
+            fn.record_call([])
+            expect fn.call_count() == 3
+
+        it "tracks multiple calls with different arguments":
+            val fn = mock.MockFunction.new("send_message")
+            fn.record_call(["email", "user@test.com"])
+            fn.record_call(["sms", "555-1234"])
+            expect fn.call_count() == 2
+            expect fn.was_called_with(["email", "user@test.com"])
+            expect fn.was_called_with(["sms", "555-1234"])
+
+    context "Argument Verification":
+        it "verifies call with specific arguments":
+            val fn = mock.MockFunction.new("update_user")
+            fn.record_call(["user_123", "Alice"])
+            expect fn.was_called_with(["user_123", "Alice"])
+
+        it "returns false for unmatched arguments":
+            val fn = mock.MockFunction.new("delete_record")
+            fn.record_call(["record_456"])
+            expect fn.was_called_with(["record_123"]) == false
+
+        it "finds argument match in multiple calls":
+            val fn = mock.MockFunction.new("log")
+            fn.record_call(["info", "Application started"])
+            fn.record_call(["error", "Connection failed"])
+            fn.record_call(["info", "Application stopped"])
+            expect fn.was_called_with(["error", "Connection failed"])
+
+    context "Call Inspection":
+        it "retrieves specific call by index":
+            val fn = mock.MockFunction.new("api_call")
+            fn.record_call(["GET", "/users"])
+            fn.record_call(["POST", "/users"])
+            val first_call = fn.get_call(0)
+            expect first_call.is_some()
+            match first_call:
+                Some(call): expect call.args[0] == "GET"
+                None: fail "Call should exist"
+
+        it "returns none for out of bounds call":
+            val fn = mock.MockFunction.new("fn")
+            fn.record_call(["arg"])
+            expect fn.get_call(5).is_none()
+
+        it "retrieves last call":
+            val fn = mock.MockFunction.new("sequence")
+            fn.record_call(["first"])
+            fn.record_call(["second"])
+            fn.record_call(["third"])
+            val last = fn.get_last_call()
+            expect last.is_some()
+            match last:
+                Some(call): expect call.args[0] == "third"
+                None: fail "Should have last call"
+
+    context "Call Count Verification":
+        it "verifies exact call count":
+            val fn = mock.MockFunction.new("handler")
+            fn.record_call([])
+            fn.record_call([])
+            expect fn.was_called_n_times(2)
+
+        it "returns false for mismatched count":
+            val fn = mock.MockFunction.new("processor")
+            fn.record_call([])
+            expect fn.was_called_n_times(5) == false
+
+    context "Return Values":
+        it "provides sequential return values":
+            val fn = mock.MockFunction.new("fetch_config")
+            fn.set_return_values(["config_v1", "config_v2", "config_v3"])
+
+            val r1 = fn.next_return_value()
+            val r2 = fn.next_return_value()
+            val r3 = fn.next_return_value()
+
+            expect r1 == Some("config_v1")
+            expect r2 == Some("config_v2")
+            expect r3 == Some("config_v3")
+
+        it "returns none when return values exhausted":
+            val fn = mock.MockFunction.new("limited")
+            fn.set_return_values(["one", "two"])
+
+            fn.next_return_value()
+            fn.next_return_value()
+            val third = fn.next_return_value()
+
+            expect third.is_none()
+
+        it "resets return value index on reset":
+            val fn = mock.MockFunction.new("reusable")
+            fn.set_return_values(["value"])
+
+            fn.next_return_value()
+            fn.reset()
+
+            val after_reset = fn.next_return_value()
+            expect after_reset == Some("value")
+
+    context "Reset Functionality":
+        it "clears call history":
+            val fn = mock.MockFunction.new("clearable")
+            fn.record_call(["arg1"])
+            fn.record_call(["arg2"])
+
+            fn.reset()
+            expect fn.call_count() == 0
+            expect fn.was_called() == false
+
+        it "clears return value state":
+            val fn = mock.MockFunction.new("return_reset")
+            fn.set_return_values(["a", "b"])
+            fn.next_return_value()
+
+            fn.reset()
+            val value = fn.next_return_value()
+            expect value == Some("a")
+
+    context "MockBuilder":
+        it "builds mock with return values":
+            val builder_mock = mock.MockBuilder.new("get_user").returns(["user_data"])
+            expect builder_mock.call_count() == 0
+            val value = builder_mock.next_return_value()
+            expect value == Some("user_data")
+
+        it "builds mock that panics":
+            val panic_mock = mock.MockBuilder.new("fail_op").panics("Error occurred")
+            expect panic_mock.should_panic == true
+            expect panic_mock.panic_message == "Error occurred"
+
+        it "builds basic mock":
+            val basic_mock = mock.MockBuilder.new("simple").build()
+            expect basic_mock.call_count() == 0
+
+    context "MockRegistry":
+        it "registers and retrieves mocks":
+            val registry = mock.MockRegistry.new()
+            val fn = mock.MockFunction.new("save_data")
+
+            registry.register("save", fn)
+            val retrieved = registry.get("save")
+            expect retrieved.is_some()
+
+        it "returns none for unregistered mock":
+            val registry = mock.MockRegistry.new()
+            expect registry.get("nonexistent").is_none()
+
+        it "resets all mocks":
+            val registry = mock.MockRegistry.new()
+            val fn1 = mock.MockFunction.new("fn1")
+            val fn2 = mock.MockFunction.new("fn2")
+
+            fn1.record_call(["data"])
+            fn2.record_call(["info"])
+
+            registry.register("fn1", fn1)
+            registry.register("fn2", fn2)
+
+            registry.reset_all()
+
+            expect fn1.was_called() == false
+            expect fn2.was_called() == false
+
+    context "Helper Functions":
+        it "creates mock with helper":
+            val fn = mock.create_mock("fetch_user")
+            expect fn.was_called() == false
+
+        it "verifies call count with helper":
+            val fn = mock.create_mock("process")
+            fn.record_call(["item1"])
+            fn.record_call(["item2"])
+            expect mock.verify_called(fn, 2)
+
+        it "verifies arguments with helper":
+            val fn = mock.create_mock("save")
+            fn.record_call(["id_123", "data"])
+            expect mock.verify_called_with(fn, ["id_123", "data"])
+
+    context "Summary Output":
+        it "generates summary for uncalled mock":
+            val fn = mock.MockFunction.new("unused")
+            val summary = fn.summary()
+            expect summary.contains("unused")
+            expect summary.contains("not called")
+
+        it "generates summary for called mock":
+            val fn = mock.MockFunction.new("active")
+            fn.record_call(["arg1"])
+            val summary = fn.summary()
+            expect summary.contains("active")
+            expect summary.contains("1")
+
+# ============================================================================
+# Phase 2+ Features (Blocked on Trait Objects)
+# ============================================================================
+
+describe "Mock Library - Phase 2+ (Trait-based Mocking)":
+    context "MockBuilder":
+        skip "creates mock for trait":
+            # trait Database:
+            #     fn get_user(id: i32) -> Option<User>
+            #
+            # val mock_db = mock!(Database)
+            # expect mock_db.is_some()
+            pass
+
+        skip "allows method chaining":
+            # val mock_db = mock!(Database)
+            #     .when("get_user").returns(None)
+            #     .when("save_user").returns(Ok(()))
+            #
+            # expect mock_db.stubs.len() == 2
+            pass
+
+    context "Stubbing (when/returns)":
+        skip "stubs method to return value":
+            # val mock_db = mock!(Database)
+            # mock_db.when("get_user").returns(Some(user))
+            #
+            # val result = mock_db.get_user(123)
+            # expect result.is_some()
+            # expect result.unwrap().id == 123
+            pass
+
+        skip "stubs different methods independently":
+            # val mock = mock!(Service)
+            # mock.when("method_a").returns(42)
+            # mock.when("method_b").returns("hello")
+            #
+            # expect mock.method_a() == 42
+            # expect mock.method_b() == "hello"
+            pass
+
+        skip "supports returns_once for one-time stub":
+            # val mock = mock!(Service)
+            # mock.when("fetch").returns_once(Some(data))
+            #
+            # expect mock.fetch().is_some()
+            # expect mock.fetch().is_none()  # Second call returns None
+            pass
+
+        skip "supports throws for error simulation":
+            # val mock = mock!(Service)
+            # mock.when("dangerous").throws("Simulated error")
+            #
+            # try:
+            #     mock.dangerous()
+            #     expect false, "Should have thrown"
+            # catch e:
+            #     expect e.message == "Simulated error"
+            pass
+
+    context "Expectations (expect/verify)":
+        skip "verifies method was called":
+            # val mock = mock!(Service)
+            # mock.expect("send").once()
+            #
+            # mock.send("test")
+            #
+            # val result = mock.verify()
+            # expect result.is_ok()
+            pass
+
+        skip "verifies method was not called":
+            # val mock = mock!(Service)
+            # mock.expect("send").never()
+            #
+            # # Don't call send()
+            #
+            # val result = mock.verify()
+            # expect result.is_ok()
+            pass
+
+        skip "verifies method called specific times":
+            # val mock = mock!(Service)
+            # mock.expect("process").times(3)
+            #
+            # mock.process()
+            # mock.process()
+            # mock.process()
+            #
+            # expect mock.verify().is_ok()
+            pass
+
+        skip "fails verification when expectation not met":
+            # val mock = mock!(Service)
+            # mock.expect("send").once()
+            #
+            # # Don't call send()
+            #
+            # val result = mock.verify()
+            # expect result.is_err()
+            pass
+
+    context "Argument matching":
+        skip "verifies with specific arguments":
+            # val mock = mock!(Service)
+            # mock.expect("send")
+            #     .with_args([42, "test"])
+            #     .once()
+            #
+            # mock.send(42, "test")
+            # expect mock.verify().is_ok()
+            pass
+
+        skip "supports any() matcher":
+            # val mock = mock!(Service)
+            # mock.expect("send")
+            #     .with_args([any(), eq("test")])
+            #     .once()
+            #
+            # mock.send(999, "test")  # Any number accepted
+            # expect mock.verify().is_ok()
+            pass
+
+        skip "supports gt() matcher":
+            # val mock = mock!(Service)
+            # mock.expect("process")
+            #     .with_args([gt(10)])
+            #
+            # mock.process(15)
+            # expect mock.verify().is_ok()
+            pass
+
+        skip "supports contains() matcher for strings":
+            # val mock = mock!(Service)
+            # mock.expect("log")
+            #     .with_args([contains("error")])
+            #
+            # mock.log("Fatal error occurred")
+            # expect mock.verify().is_ok()
+            pass
+
+        skip "supports custom predicate matcher":
+            # val mock = mock!(Service)
+            # mock.expect("validate")
+            #     .with_args([predicate(\x: x % 2 == 0)])  # Even numbers
+            #
+            # mock.validate(42)
+            # expect mock.verify().is_ok()
+            pass
+
+    context "Call recording":
+        skip "records all method calls":
+            # val mock = mock!(Service)
+            #
+            # mock.method_a(1)
+            # mock.method_b("test")
+            # mock.method_a(2)
+            #
+            # expect mock.calls.len() == 3
+            # expect mock.calls[0].method == "method_a"
+            # expect mock.calls[1].method == "method_b"
+            pass
+
+        skip "provides call count per method":
+            # val mock = mock!(Service)
+            #
+            # mock.process(1)
+            # mock.process(2)
+            # mock.send("test")
+            #
+            # expect mock.call_count("process") == 2
+            # expect mock.call_count("send") == 1
+            pass
+
+        skip "provides was_called() helper":
+            # val mock = mock!(Service)
+            #
+            # mock.send("test")
+            #
+            # expect mock.was_called("send")
+            # expect not mock.was_called("process")
+            pass
+
+    context "Reset functionality":
+        skip "clears call history":
+            # val mock = mock!(Service)
+            # mock.send("test")
+            # expect mock.calls.len() == 1
+            #
+            # mock.reset()
+            # expect mock.calls.len() == 0
+            pass
+
+        skip "clears expectations":
+            # val mock = mock!(Service)
+            # mock.expect("send").once()
+            #
+            # mock.reset()
+            # expect mock.expectations.is_empty()
+            pass
+
+        skip "clears stubs":
+            # val mock = mock!(Service)
+            # mock.when("get").returns(42)
+            #
+            # mock.reset()
+            # expect mock.stubs.is_empty()
+            pass
+
+    context "Spy functionality":
+        skip "wraps real object":
+            # val real = RealService.new()
+            # val spy = spy!(real)
+            #
+            # # Calls real implementation + records
+            # val result = spy.compute(5)
+            # expect result == real.compute(5)
+            # expect spy.was_called("compute")
+            pass
+
+        skip "allows partial stubbing":
+            # val real = RealService.new()
+            # val spy = spy!(real)
+            # spy.when("fetch").returns(Some(fake_data))
+            #
+            # # fetch() uses stub, other methods use real
+            # expect spy.fetch() == Some(fake_data)
+            # expect spy.compute(5) == real.compute(5)
+            pass
+
+    context "Integration with SSpec":
+        skip "works in test context":
+            # describe "UserService":
+            #     it "fetches user from database":
+            #         val mock_db = mock!(Database)
+            #         mock_db.when("get_user").returns(Some(user))
+            #
+            #         val service = UserService(db: mock_db)
+            #         val result = service.find_user(123)
+            #
+            #         expect result.is_some()
+            pass
+
+        skip "verifies expectations in test":
+            # describe "EmailService":
+            #     it "sends email on registration":
+            #         val mock_email = mock!(EmailService)
+            #         mock_email.expect("send").once()
+            #
+            #         register_user(mock_email)
+            #
+            #         expect mock_email.verify().is_ok()
+            pass
+
+    context "Error cases":
+        skip "reports which expectation failed":
+            # val mock = mock!(Service)
+            # mock.expect("send").times(2)
+            # mock.send("once")
+            #
+            # val result = mock.verify()
+            # expect result.is_err()
+            # expect result.unwrap_err().contains("send")
+            # expect result.unwrap_err().contains("expected 2")
+            pass
+
+        skip "reports unexpected calls":
+            # val mock = mock!(Service)
+            # mock.expect("allowed").once()
+            #
+            # mock.allowed()
+            # mock.unexpected()  # Not in expectations
+            #
+            # # Strict mode would fail here
+            pass

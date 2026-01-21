@@ -1,0 +1,195 @@
+# Property-Based Fuzzing for Simple
+# Lightweight fuzzing library for testing Simple programs
+
+import std.random as random
+
+# ============================================================================
+# Generators - Produce random test inputs
+# ============================================================================
+
+# Integer generator
+struct IntGen:
+    min: i32
+    max: i32
+
+    fn generate(rng: random.RandomState) -> i32:
+        val range = self.max - self.min + 1
+        val rand_val = rng.next()
+        self.min + (rand_val % range)
+
+# Text generator
+struct TextGen:
+    min_len: i32
+    max_len: i32
+
+    fn generate(rng: random.RandomState) -> text:
+        val len_range = self.max_len - self.min_len + 1
+        val len = self.min_len + (rng.next() % len_range)
+
+        var result = ""
+        for _ in 0..len:
+            # Printable ASCII (32-126)
+            val ch_code = 32 + (rng.next() % 95)
+            val ch = String.from_char_code(ch_code)
+            result = result + ch
+
+        result
+
+# Boolean generator
+struct BoolGen:
+    fn generate(rng: random.RandomState) -> bool:
+        (rng.next() % 2) == 1
+
+# List generator
+struct ListGen:
+    item_gen: any  # Generator for items
+    min_len: i32
+    max_len: i32
+
+    fn generate(rng: random.RandomState) -> List:
+        val len_range = self.max_len - self.min_len + 1
+        val len = self.min_len + (rng.next() % len_range)
+
+        var result = []
+        for _ in 0..len:
+            val item = self.item_gen.generate(rng)
+            result.append(item)
+
+        result
+
+# ============================================================================
+# Fuzzing Results
+# ============================================================================
+
+enum FuzzResult:
+    Pass(iterations: i32)
+    Fail(input: text, error: text, iteration: i32)
+
+# ============================================================================
+# Main Fuzzing API
+# ============================================================================
+
+pub fn fuzz(
+    property: fn(any) -> bool,
+    gen: any,
+    iterations: i32
+) -> FuzzResult:
+    """
+    Run property-based fuzzing.
+
+    Args:
+        property: Function that returns true if property holds
+        gen: Generator for random inputs
+        iterations: Number of test cases
+
+    Returns:
+        FuzzResult with pass/fail status
+
+    Example:
+        # Test that reverse(reverse(x)) == x
+        fn prop_reverse(xs: List<i32>) -> bool:
+            xs.reverse().reverse() == xs
+
+        val gen = fuzz.list(fuzz.int(-100, 100), 0, 20)
+        val result = fuzz.fuzz(prop_reverse, gen, 100)
+    """
+    # Create RNG with time-based seed
+    val rng = random.RandomState.new(
+        (random.rt_time_now_seconds() * 1000000.0) as i32
+    )
+
+    for i in 0..iterations:
+        val input = gen.generate(rng)
+
+        val passed = property(input)
+        if not passed:
+            return FuzzResult::Fail(
+                input: input.to_string(),
+                error: "Property returned false",
+                iteration: i + 1
+            )
+
+    FuzzResult::Pass(iterations: iterations)
+
+# ============================================================================
+# Convenience Constructors
+# ============================================================================
+
+pub fn int(min: i32, max: i32) -> IntGen:
+    """Create integer generator.
+
+    Example:
+        val gen = fuzz.int(-100, 100)
+    """
+    IntGen(min: min, max: max)
+
+pub fn text(min_len: i32, max_len: i32) -> TextGen:
+    """Create text generator.
+
+    Example:
+        val gen = fuzz.text(0, 50)
+    """
+    TextGen(min_len: min_len, max_len: max_len)
+
+pub fn bool() -> BoolGen:
+    """Create boolean generator.
+
+    Example:
+        val gen = fuzz.bool()
+    """
+    BoolGen()
+
+pub fn list(item_gen: any, min_len: i32, max_len: i32) -> ListGen:
+    """Create list generator.
+
+    Example:
+        val gen = fuzz.list(fuzz.int(0, 100), 5, 20)
+    """
+    ListGen(
+        item_gen: item_gen,
+        min_len: min_len,
+        max_len: max_len
+    )
+
+# ============================================================================
+# Result Helpers
+# ============================================================================
+
+impl FuzzResult:
+    fn is_pass() -> bool:
+        match self:
+            Pass(_): true
+            _: false
+
+    fn is_fail() -> bool:
+        not self.is_pass()
+
+    fn unwrap():
+        """Get number of iterations if Pass, panic if Fail."""
+        match self:
+            Pass(iters): iters
+            Fail(input, error, iter):
+                panic("Fuzz failed at iteration {iter}: {error}\nInput: {input}")
+
+    fn summary() -> text:
+        """Human-readable summary."""
+        match self:
+            Pass(iters):
+                "✓ Passed {iters} iterations"
+            Fail(input, error, iter):
+                "✗ Failed at iteration {iter}\nError: {error}\nInput: {input}"
+
+# ============================================================================
+# Export Public API
+# ============================================================================
+
+export fuzz
+export int
+export text
+export bool
+export list
+export FuzzResult
+export IntGen
+export TextGen
+export BoolGen
+export ListGen

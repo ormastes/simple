@@ -1,0 +1,302 @@
+# Dashboard Notification Triggers
+#
+# Automatically triggers notifications based on alerts, thresholds, or schedules.
+# Supports periodic checks, regression detection, and threshold-based alerts.
+
+use tooling.dashboard.types.{DashboardData}
+use tooling.dashboard.alerts.{Alert}
+use tooling.dashboard.notify.{NotificationMessage, NotificationChannel, send_notification, NotificationConfig}
+use tooling.dashboard.snapshots.{SnapshotData}
+use core.time.{now_iso8601}
+
+# =========================================================================
+# Trigger Types
+# =========================================================================
+
+enum TriggerType:
+    Threshold      # Alert when metric crosses threshold
+    Regression     # Alert when metric gets worse
+    Improvement    # Alert when metric gets better
+    Schedule       # Alert at specific times
+    Manual         # Triggered manually
+
+class NotificationTrigger:
+    """Automated notification trigger."""
+    id: i32
+    name: text
+    trigger_type: TriggerType
+    metric: text
+    threshold: Option<f64>
+    enabled: bool
+    channels: List<NotificationChannel>
+    last_fired: Option<text>
+
+    static fn new(id: i32, name: text, trigger_type: TriggerType, metric: text) -> NotificationTrigger:
+        return NotificationTrigger {
+            id: id,
+            name: name,
+            trigger_type: trigger_type,
+            metric: metric,
+            threshold: nil,
+            enabled: true,
+            channels: [],
+            last_fired: nil
+        }
+
+    fn with_threshold(threshold: f64) -> NotificationTrigger:
+        self.threshold = Some(threshold)
+        return self
+
+    fn with_channel(channel: NotificationChannel) -> NotificationTrigger:
+        self.channels.append(channel)
+        return self
+
+    fn should_fire(current_value: f64, previous_value: f64) -> bool:
+        """Check if trigger should fire based on current values."""
+        if not self.enabled:
+            return false
+
+        match self.trigger_type:
+            TriggerType::Threshold =>
+                match self.threshold:
+                    Some(threshold) =>
+                        # For some metrics, fire when below; for others, above
+                        current_value < threshold
+                    nil => false
+            TriggerType::Regression =>
+                # Fire when metric gets worse (lower for coverage/features, higher for TODOs)
+                current_value < previous_value
+            TriggerType::Improvement =>
+                # Fire when metric gets better
+                current_value > previous_value
+            TriggerType::Schedule =>
+                # TODO: Implement schedule-based triggering
+                false
+            TriggerType::Manual => false
+
+    fn to_string() -> text:
+        var s = "#{self.id}: {self.name} ({trigger_type_to_string(self.trigger_type)})"
+        match self.threshold:
+            Some(t) => s = "{s} - Threshold: {t}"
+            nil => pass
+        return s
+
+# =========================================================================
+# Trigger Manager
+# =========================================================================
+
+class TriggerManager:
+    """Manages notification triggers."""
+    triggers: List<NotificationTrigger>
+    next_id: i32
+
+    static fn new() -> TriggerManager:
+        return TriggerManager {
+            triggers: [],
+            next_id: 1
+        }
+
+    fn add_trigger(trigger: NotificationTrigger) -> NotificationTrigger:
+        """Add a new trigger."""
+        self.triggers.append(trigger)
+        self.next_id = self.next_id + 1
+        return trigger
+
+    fn remove_trigger(id: i32) -> Result<(), text>:
+        """Remove a trigger by ID."""
+        for i in 0..self.triggers.len():
+            if self.triggers[i].id == id:
+                self.triggers.remove(i)
+                Ok(())
+        return Err("Trigger not found: {id}")
+
+    fn get_trigger(id: i32) -> Option<NotificationTrigger>:
+        """Get a trigger by ID."""
+        for trigger in self.triggers:
+            if trigger.id == id:
+                Some(trigger)
+        return nil
+
+    fn list_triggers() -> List<NotificationTrigger>:
+        """Get all triggers."""
+        return self.triggers
+
+    fn enable_trigger(id: i32) -> Result<(), text>:
+        """Enable a trigger."""
+        match self.get_trigger(id):
+            Some(trigger) =>
+                trigger.enabled = true
+                Ok(())
+            nil => Err("Trigger not found: {id}")
+
+    fn disable_trigger(id: i32) -> Result<(), text>:
+        """Disable a trigger."""
+        match self.get_trigger(id):
+            Some(trigger) =>
+                trigger.enabled = false
+                Ok(())
+            nil => Err("Trigger not found: {id}")
+
+# =========================================================================
+# Trigger Evaluation
+# =========================================================================
+
+fn evaluate_triggers(
+    triggers: List<NotificationTrigger>,
+    current_data: DashboardData,
+    previous_snapshot: Option<SnapshotData>,
+    config: NotificationConfig
+) -> List<tuple<NotificationTrigger, NotificationMessage>>:
+    """Evaluate all triggers and return messages for those that fired.
+
+    Args:
+        triggers: List of triggers to evaluate
+        current_data: Current dashboard data
+        previous_snapshot: Previous snapshot for comparison (nil = no comparison)
+        config: Notification configuration
+
+    Returns:
+        List of (trigger, message) tuples for fired triggers
+    """
+    var fired: List<tuple<NotificationTrigger, NotificationMessage>> = []
+
+    for trigger in triggers:
+        if not trigger.enabled:
+            continue
+
+        # Get metric values
+        val current_value = get_trigger_metric_value(trigger.metric, current_data)
+        val previous_value = match previous_snapshot:
+            Some(snapshot) => get_snapshot_metric_value(trigger.metric, snapshot)
+            nil => current_value
+
+        # Check if trigger should fire
+        if trigger.should_fire(current_value, previous_value):
+            # Create notification message
+            val msg = create_trigger_message(trigger, current_value, previous_value)
+            fired.append((trigger, msg))
+
+    return fired
+
+# =========================================================================
+# Helper Functions
+# =========================================================================
+
+fn get_trigger_metric_value(metric: text, data: DashboardData) -> f64:
+    """Extract metric value from dashboard data."""
+    match metric:
+        "coverage" => data.overall_coverage()
+        "features" => (data.completed_features() as f64) / (data.total_features() as f64) * 100.0
+        "todos" => data.total_todos() as f64
+        "todos.p0" => data.critical_todos() as f64
+        "tests" => data.sspec_tests.len() as f64
+        _ => 0.0
+
+fn get_snapshot_metric_value(metric: text, snapshot: SnapshotData) -> f64:
+    """Extract metric value from snapshot data."""
+    match metric:
+        "coverage" => snapshot.coverage_percent
+        "features" => snapshot.feature_completion_percent()
+        "todos" => snapshot.todos_total as f64
+        "todos.p0" => snapshot.todos_critical as f64
+        "tests" => snapshot.sspec_tests as f64
+        _ => 0.0
+
+fn create_trigger_message(
+    trigger: NotificationTrigger,
+    current_value: f64,
+    previous_value: f64
+) -> NotificationMessage:
+    """Create a notification message for a fired trigger."""
+    val change = current_value - previous_value
+    val change_percent = if previous_value != 0.0:
+        (change / previous_value) * 100.0
+    else:
+        0.0
+
+    var title = "{trigger.name}"
+    var body = "Metric '{trigger.metric}' changed from {previous_value:.1f} to {current_value:.1f}"
+
+    match trigger.trigger_type:
+        TriggerType::Threshold =>
+            title = "Alert: {trigger.name}"
+            body = "{body}\nValue crossed threshold"
+        TriggerType::Regression =>
+            title = "Regression: {trigger.name}"
+            body = "{body}\nMetric degraded ({change_percent:.1f}%)"
+        TriggerType::Improvement =>
+            title = "Improvement: {trigger.name}"
+            body = "{body}\nMetric improved (+{change_percent:.1f}%)"
+        _ =>
+            pass
+
+    val severity = match trigger.trigger_type:
+        TriggerType::Threshold => "warning"
+        TriggerType::Regression => "critical"
+        TriggerType::Improvement => "info"
+        _ => "info"
+
+    return NotificationMessage.new(title, body, severity)
+
+fn trigger_type_to_string(trigger_type: TriggerType) -> text:
+    match trigger_type:
+        TriggerType::Threshold => "threshold"
+        TriggerType::Regression => "regression"
+        TriggerType::Improvement => "improvement"
+        TriggerType::Schedule => "schedule"
+        TriggerType::Manual => "manual"
+
+# =========================================================================
+# Preset Triggers
+# =========================================================================
+
+fn create_default_triggers() -> TriggerManager:
+    """Create default notification triggers."""
+    var manager = TriggerManager.new()
+
+    # Coverage regression alert
+    var coverage_regression = NotificationTrigger.new(
+        manager.next_id,
+        "Coverage Regression",
+        TriggerType::Regression,
+        "coverage"
+    )
+    coverage_regression.with_channel(NotificationChannel::Slack)
+    manager.add_trigger(coverage_regression)
+
+    # Critical coverage threshold
+    var coverage_threshold = NotificationTrigger.new(
+        manager.next_id,
+        "Low Coverage",
+        TriggerType::Threshold,
+        "coverage"
+    ).with_threshold(75.0)
+    coverage_threshold.with_channel(NotificationChannel::Slack)
+    manager.add_trigger(coverage_threshold)
+
+    # Features regression
+    var features_regression = NotificationTrigger.new(
+        manager.next_id,
+        "Features Regression",
+        TriggerType::Regression,
+        "features"
+    )
+    features_regression.with_channel(NotificationChannel::Webhook)
+    manager.add_trigger(features_regression)
+
+    # P0 TODO threshold
+    var todos_alert = NotificationTrigger.new(
+        manager.next_id,
+        "Critical TODOs",
+        TriggerType::Threshold,
+        "todos.p0"
+    ).with_threshold(10.0)
+    todos_alert.with_channel(NotificationChannel::Slack)
+    manager.add_trigger(todos_alert)
+
+    return manager
+
+# =========================================================================
+# Exports
+# =========================================================================
+
