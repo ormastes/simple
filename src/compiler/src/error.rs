@@ -1465,6 +1465,9 @@ pub enum CompileError {
     /// Execution was interrupted by user (Ctrl-C)
     #[error("interrupted: execution stopped by user request")]
     InterruptedByUser,
+    /// Ghost code verification error (VER-001)
+    #[error("ghost: {0}")]
+    GhostError(String),
 
     // Rich variants with context (new API)
     #[error("io: {message}")]
@@ -1582,6 +1585,7 @@ impl CompileError {
             Self::RuntimeWithContext { message, .. } => message,
             Self::TryError(_) => "try: early return",
             Self::InterruptedByUser => "interrupted: execution stopped by user request",
+            Self::GhostError(msg) => msg,
         }
     }
 

@@ -1,9 +1,21 @@
 # Lean Code Generator
 # Main entry point for generating Lean 4 code from Simple.
+#
+# This module provides the main orchestration for Lean codegen:
+# - LeanCodegen class for building Lean modules
+# - Helper functions for regeneration scripts
+# - Integration with all submodules (types, expressions, traits, etc.)
 
 import verification.lean.emitter as emitter
 import verification.lean.types as types
 import verification.lean.expressions as expressions
+import verification.lean.naming as naming
+import verification.lean.functions as functions
+import verification.lean.traits as traits
+import verification.lean.memory_safety as memory_safety
+import verification.lean.verification_checker as checker
+import verification.lean.verification_diagnostics as diagnostics
+import verification.lean.runner as runner
 import verification.models.contracts as models_contracts
 import io.fs as fs
 
@@ -323,39 +335,52 @@ class LeanCodegen:
         # Module header
         emit.emit_line("-- Auto-generated Lean 4 code from Simple")
         emit.emit_line("-- Module: {self.options.module_name}")
-        emit.emit_line("")
+        emit.emit_blank()
 
         # Imports
         for import_path in self.imports:
             emit.emit_line("import {import_path}")
-        emit.emit_line("")
+        emit.emit_blank()
 
         # Namespace
-        emit.emit_line("namespace {self.options.module_name}")
-        emit.emit_line("")
+        emit.emit_namespace(self.options.module_name)
 
         # Structures
         for structure in self.structures:
-            emit.emit_structure(structure)
-            emit.emit_line("")
+            emit.emit_structure_data(structure.name, structure.fields, structure.deriving)
+            emit.emit_blank()
 
         # Inductives
         for inductive in self.inductives:
-            emit.emit_inductive(inductive)
-            emit.emit_line("")
+            emit.emit_inductive_data(inductive.name, inductive.constructors, inductive.deriving)
+            emit.emit_blank()
 
         # Functions
         for func in self.functions:
-            emit.emit_function(func, self.options.generate_stubs)
-            emit.emit_line("")
+            emit.emit_function_data(
+                func.name,
+                func.params,
+                func.return_type,
+                func.body,
+                func.is_partial,
+                func.termination_measure,
+                self.options.generate_stubs
+            )
+            emit.emit_blank()
 
         # Theorems
         for theorem in self.theorems:
-            emit.emit_theorem(theorem, self.options.generate_stubs)
-            emit.emit_line("")
+            emit.emit_theorem_data(
+                theorem.name,
+                theorem.params,
+                theorem.statement,
+                theorem.proof,
+                self.options.generate_stubs
+            )
+            emit.emit_blank()
 
         # Close namespace
-        emit.emit_line("end {self.options.module_name}")
+        emit.emit_end_namespace(self.options.module_name)
 
         emit.finish()
 
@@ -474,8 +499,115 @@ fn build_theorem_implicit(name: text, impl_params: List<(text, text)>, expl_para
 fn build_abbrev(name: text, ty: text) -> LeanAbbrev:
     LeanAbbrev.new(name, ty)
 
+# =============================================================================
+# Integration Functions
+# =============================================================================
+
+# Generate Lean code with full verification pipeline
+fn generate_verified_module(
+    module_name: text,
+    output_dir: text,
+    include_memory_safety: bool
+) -> text:
+    var options = LeanCodegenOptions.new()
+    options = options.with_module_name(module_name)
+    options = options.with_output_dir(output_dir)
+    var codegen = LeanCodegen.new(options)
+
+    # Add memory safety section if requested
+    if include_memory_safety:
+        val mem_code = memory_safety.generate_memory_safety_lean(module_name)
+        codegen = codegen.add_raw_line("-- Memory Safety Verification")
+        codegen = codegen.add_raw_line(mem_code)
+
+    codegen.emit()
+
+# Check verification constraints before codegen
+fn check_for_violations(
+    func_name: text,
+    is_recursive: bool,
+    has_termination: bool,
+    called_io_functions: List<text>,
+    has_unsafe_ops: bool
+) -> checker.CheckResult:
+    checker.validate_verified_function(
+        func_name,
+        is_recursive,
+        has_termination,
+        called_io_functions,
+        has_unsafe_ops
+    )
+
+# Run Lean to check generated code
+fn verify_lean_file(file_path: text) -> runner.LeanCheckResult:
+    runner.check_lean_file(file_path)
+
+# Check if Lean toolchain is available
+fn is_lean_available() -> bool:
+    runner.is_lean_installed()
+
+# Generate and verify a complete module
+fn generate_and_verify(
+    module_name: text,
+    output_dir: text,
+    content_builder: fn(LeanCodegen) -> LeanCodegen
+) -> (text, Option<runner.LeanCheckResult>):
+    var options = LeanCodegenOptions.new()
+    options = options.with_module_name(module_name)
+    options = options.with_output_dir(output_dir)
+    var codegen = LeanCodegen.new(options)
+
+    # Let the builder add content
+    codegen = content_builder(codegen)
+
+    # Generate the Lean code
+    val lean_code = codegen.emit()
+
+    # Write to file
+    val file_path = "{output_dir}/{module_name}.lean"
+    fs.create_dir_all(output_dir)
+    fs.write_text(file_path, lean_code)
+
+    # Try to verify if Lean is available
+    if is_lean_available():
+        val result = verify_lean_file(file_path)
+        (lean_code, Some(result))
+    else:
+        (lean_code, nil)
+
+# =============================================================================
+# Type Class Integration
+# =============================================================================
+
+# Build a type class from trait definition
+fn build_type_class(name: text, type_param: text, methods: List<(text, List<text>, text)>) -> traits.LeanClass:
+    var cls = traits.LeanClass.new(name)
+    cls = cls.with_type_param(type_param)
+    for (method_name, param_types, ret_type) in methods:
+        var params: List<types.LeanType> = []
+        for pt in param_types:
+            params = params + [types.TypeTranslator.translate_primitive(pt)]
+        val ret = types.TypeTranslator.translate_primitive(ret_type)
+        cls = cls.add_method(traits.LeanMethodSig.create(method_name, params, ret))
+    cls
+
+# Build an instance
+fn build_instance(class_name: text, for_type: text, methods: List<(text, text)>) -> traits.LeanInstance:
+    val ty = types.TypeTranslator.translate_primitive(for_type)
+    var inst = traits.LeanInstance.new(class_name, ty)
+    for (name, body) in methods:
+        inst = inst.add_method(name, body)
+    inst
+
+# Build a binding for static dispatch
+fn build_binding(interface_name: text, impl_type: text) -> traits.LeanBinding:
+    val ty = types.TypeTranslator.translate_primitive(impl_type)
+    traits.LeanBinding.new(interface_name, ty)
+
 # Export all public classes and functions
 export LeanCodegenOptions, LeanFunction, LeanTheorem, LeanStructure, LeanInductive, LeanAbbrev, LeanCodegen
 export build_enum, build_enum_with_deriving, build_class, build_class_with_deriving
 export build_function, build_theorem, build_theorem_implicit, build_abbrev
 export make_simple_type, make_list_type, make_string_type, make_int_type, make_bool_type, make_option_type, make_nat_type
+export generate_verified_module, check_for_violations, verify_lean_file, is_lean_available
+export generate_and_verify, build_type_class, build_instance, build_binding

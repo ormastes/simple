@@ -1,6 +1,7 @@
 //! Statement AST nodes (let, const, static, if, match, for, while, etc.)
 
 use super::super::enums::*;
+use super::contracts::ContractClause;
 use super::core::*;
 use crate::token::Span;
 
@@ -104,6 +105,13 @@ pub struct ForStmt {
     pub is_suspend: bool,
     /// Enumerate shorthand: `for i, item in items:` auto-wraps items with indices
     pub auto_enumerate: bool,
+    /// Loop invariants for verification
+    /// ```simple
+    /// for i in 0..n:
+    ///     invariant: sum == partial_sum(i)
+    ///     sum = sum + arr[i]
+    /// ```
+    pub invariants: Vec<ContractClause>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -115,6 +123,14 @@ pub struct WhileStmt {
     pub body: Block,
     /// Suspension while loop (while~) for explicit suspension points in async-by-default
     pub is_suspend: bool,
+    /// Loop invariants for verification
+    /// ```simple
+    /// while x > 0:
+    ///     invariant: x * y == original
+    ///     x = x - 1
+    ///     y = y + 1
+    /// ```
+    pub invariants: Vec<ContractClause>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

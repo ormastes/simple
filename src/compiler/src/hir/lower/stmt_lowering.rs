@@ -1,4 +1,4 @@
-use simple_parser::{self as ast, Node};
+use simple_parser::{self as ast, ast::ContractClause, Node};
 
 use super::super::lifetime::{ReferenceOrigin, ScopeKind};
 use super::super::types::*;
@@ -7,6 +7,23 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
 impl Lowerer {
+    /// Lower a list of contract clauses to HIR contract clauses
+    fn lower_contract_clauses(
+        &mut self,
+        clauses: &[ContractClause],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Vec<HirContractClause>> {
+        let mut result = Vec::new();
+        for clause in clauses {
+            let condition = self.lower_expr(&clause.condition, ctx)?;
+            result.push(HirContractClause {
+                condition,
+                message: clause.message.clone(),
+            });
+        }
+        Ok(result)
+    }
+
     /// Check if an AST expression is a move expression
     fn is_move_expr(expr: &ast::Expr) -> bool {
         matches!(
@@ -193,7 +210,18 @@ impl Lowerer {
             Node::While(while_stmt) => {
                 let condition = self.lower_expr(&while_stmt.condition, ctx)?;
                 let body = self.lower_block(&while_stmt.body, ctx)?;
-                Ok(vec![HirStmt::While { condition, body }])
+                let invariants = self.lower_contract_clauses(&while_stmt.invariants, ctx)?;
+                Ok(vec![HirStmt::While { condition, body, invariants }])
+            }
+
+            Node::For(for_stmt) => {
+                // Extract pattern name (simple case: single identifier)
+                let pattern = Self::extract_pattern_name(&for_stmt.pattern)
+                    .unwrap_or_else(|| "item".to_string());
+                let iterable = self.lower_expr(&for_stmt.iterable, ctx)?;
+                let body = self.lower_block(&for_stmt.body, ctx)?;
+                let invariants = self.lower_contract_clauses(&for_stmt.invariants, ctx)?;
+                Ok(vec![HirStmt::For { pattern, iterable, body, invariants }])
             }
 
             Node::Loop(loop_stmt) => {
@@ -209,6 +237,22 @@ impl Lowerer {
                 Ok(vec![HirStmt::Assert {
                     condition,
                     message: assert_stmt.message.clone(),
+                }])
+            }
+
+            Node::Assume(assume_stmt) => {
+                let condition = self.lower_expr(&assume_stmt.condition, ctx)?;
+                Ok(vec![HirStmt::Assume {
+                    condition,
+                    message: assume_stmt.message.clone(),
+                }])
+            }
+
+            Node::Admit(admit_stmt) => {
+                let condition = self.lower_expr(&admit_stmt.condition, ctx)?;
+                Ok(vec![HirStmt::Admit {
+                    condition,
+                    message: admit_stmt.message.clone(),
                 }])
             }
 

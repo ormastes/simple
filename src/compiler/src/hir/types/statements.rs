@@ -1,3 +1,4 @@
+use super::contracts::HirContractClause;
 use super::*;
 use simple_parser::ast::Mutability;
 
@@ -23,6 +24,20 @@ pub enum HirStmt {
     While {
         condition: HirExpr,
         body: Vec<HirStmt>,
+        /// Loop invariants for verification
+        invariants: Vec<HirContractClause>,
+    },
+    /// For loop (lowered from ForStmt)
+    /// Note: for loops can have invariants for verification
+    For {
+        /// Pattern binding for the loop variable
+        pattern: String,
+        /// The iterator expression
+        iterable: HirExpr,
+        /// Loop body
+        body: Vec<HirStmt>,
+        /// Loop invariants for verification
+        invariants: Vec<HirContractClause>,
     },
     Loop {
         body: Vec<HirStmt>,
@@ -32,6 +47,22 @@ pub enum HirStmt {
     /// Assert statement for inline contract checks
     /// assert condition, "message"
     Assert {
+        condition: HirExpr,
+        message: Option<String>,
+    },
+    /// Assume statement for verification assumptions
+    /// assume condition, "message"
+    /// In verification: creates hypothesis without proof (axiom-like)
+    /// At runtime: behaves like assert (debug) or erased (release)
+    Assume {
+        condition: HirExpr,
+        message: Option<String>,
+    },
+    /// Admit statement for skipping proofs (tracked)
+    /// admit condition, "reason"
+    /// In verification: marks as axiom, requires tracking
+    /// At runtime: behaves like assert
+    Admit {
         condition: HirExpr,
         message: Option<String>,
     },
