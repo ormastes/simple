@@ -120,6 +120,15 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                     options.capture_screenshots = true;
                 }
             }
+            // Test listing and filtering
+            "--list" => options.list = true,
+            "--list-ignored" => {
+                options.list = true;
+                options.list_ignored = true;
+            }
+            "--only-slow" => options.only_slow = true,
+            "--only-skipped" => options.only_skipped = true,
+            "--show-tags" => options.show_tags = true,
             arg if !arg.starts_with("-") && options.path.is_none() => {
                 options.path = Some(PathBuf::from(arg));
             }

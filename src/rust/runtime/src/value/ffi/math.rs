@@ -282,6 +282,62 @@ pub extern "C" fn rt_math_ceil(x: f64) -> f64 {
     x.ceil()
 }
 
+// ============================================================================
+// Special Values
+// ============================================================================
+
+/// Returns IEEE 754 NaN (Not a Number)
+///
+/// # Examples
+/// - rt_math_nan() returns NaN
+/// - is_nan(rt_math_nan()) returns true
+#[no_mangle]
+pub extern "C" fn rt_math_nan() -> f64 {
+    f64::NAN
+}
+
+/// Returns IEEE 754 positive infinity
+///
+/// # Examples
+/// - rt_math_inf() returns +∞
+/// - is_inf(rt_math_inf()) returns true
+#[no_mangle]
+pub extern "C" fn rt_math_inf() -> f64 {
+    f64::INFINITY
+}
+
+/// Check if value is NaN
+///
+/// # Examples
+/// - is_nan(NaN) returns true
+/// - is_nan(1.0) returns false
+#[no_mangle]
+pub extern "C" fn rt_math_is_nan(x: f64) -> bool {
+    x.is_nan()
+}
+
+/// Check if value is infinite (positive or negative)
+///
+/// # Examples
+/// - is_inf(∞) returns true
+/// - is_inf(-∞) returns true
+/// - is_inf(1.0) returns false
+#[no_mangle]
+pub extern "C" fn rt_math_is_inf(x: f64) -> bool {
+    x.is_infinite()
+}
+
+/// Check if value is finite (not NaN or infinite)
+///
+/// # Examples
+/// - is_finite(1.0) returns true
+/// - is_finite(NaN) returns false
+/// - is_finite(∞) returns false
+#[no_mangle]
+pub extern "C" fn rt_math_is_finite(x: f64) -> bool {
+    x.is_finite()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -43,6 +43,7 @@ pub mod conversion;
 pub mod process;
 pub mod time;
 pub mod math;
+pub mod random;
 pub mod layout;
 pub mod system;
 pub mod io;
@@ -67,7 +68,7 @@ use simple_runtime::value::diagram_ffi;
 /// Central extern function dispatcher
 ///
 /// Routes extern function calls to the appropriate module based on function name.
-/// All 129 extern functions are dispatched from this central location.
+/// All 134 extern functions are dispatched from this central location.
 ///
 /// # Arguments
 /// * `name` - The extern function name
@@ -121,8 +122,9 @@ pub(crate) fn call_extern_function(
         "stderr_flush" => io::stderr_flush(&evaluated),
 
         // ====================================================================
-        // Math Operations (7 functions)
+        // Math Operations (7 integer + 18 float FFI + 5 special = 30 functions)
         // ====================================================================
+        // Integer math operations
         "abs" => math::abs(&evaluated),
         "min" => math::min(&evaluated),
         "max" => math::max(&evaluated),
@@ -131,10 +133,50 @@ pub(crate) fn call_extern_function(
         "ceil" => math::ceil(&evaluated),
         "pow" => math::pow(&evaluated),
 
+        // Float math FFI operations
+        "rt_math_pow" => math::rt_math_pow_fn(&evaluated),
+        "rt_math_log" => math::rt_math_log_fn(&evaluated),
+        "rt_math_log10" => math::rt_math_log10_fn(&evaluated),
+        "rt_math_log2" => math::rt_math_log2_fn(&evaluated),
+        "rt_math_exp" => math::rt_math_exp_fn(&evaluated),
+        "rt_math_sqrt" => math::rt_math_sqrt_fn(&evaluated),
+        "rt_math_cbrt" => math::rt_math_cbrt_fn(&evaluated),
+        "rt_math_sin" => math::rt_math_sin_fn(&evaluated),
+        "rt_math_cos" => math::rt_math_cos_fn(&evaluated),
+        "rt_math_tan" => math::rt_math_tan_fn(&evaluated),
+        "rt_math_asin" => math::rt_math_asin_fn(&evaluated),
+        "rt_math_acos" => math::rt_math_acos_fn(&evaluated),
+        "rt_math_atan" => math::rt_math_atan_fn(&evaluated),
+        "rt_math_atan2" => math::rt_math_atan2_fn(&evaluated),
+        "rt_math_sinh" => math::rt_math_sinh_fn(&evaluated),
+        "rt_math_cosh" => math::rt_math_cosh_fn(&evaluated),
+        "rt_math_tanh" => math::rt_math_tanh_fn(&evaluated),
+        "rt_math_floor" => math::rt_math_floor_fn(&evaluated),
+        "rt_math_ceil" => math::rt_math_ceil_fn(&evaluated),
+
+        // Special value operations
+        "rt_math_nan" => math::rt_math_nan_fn(&evaluated),
+        "rt_math_inf" => math::rt_math_inf_fn(&evaluated),
+        "rt_math_is_nan" => math::rt_math_is_nan_fn(&evaluated),
+        "rt_math_is_inf" => math::rt_math_is_inf_fn(&evaluated),
+        "rt_math_is_finite" => math::rt_math_is_finite_fn(&evaluated),
+
         // ====================================================================
-        // Time Operations (1 function)
+        // Time Operations (2 functions)
         // ====================================================================
         "rt_time_now_seconds" => time::rt_time_now_seconds(&evaluated),
+        "_current_time_unix" => time::_current_time_unix(&evaluated),
+
+        // ====================================================================
+        // Random Number Generation (7 functions)
+        // ====================================================================
+        "rt_random_seed" => random::rt_random_seed_fn(&evaluated),
+        "rt_random_getstate" => random::rt_random_getstate_fn(&evaluated),
+        "rt_random_setstate" => random::rt_random_setstate_fn(&evaluated),
+        "rt_random_next" => random::rt_random_next_fn(&evaluated),
+        "rt_random_randint" => random::rt_random_randint_fn(&evaluated),
+        "rt_random_random" => random::rt_random_random_fn(&evaluated),
+        "rt_random_uniform" => random::rt_random_uniform_fn(&evaluated),
 
         // ====================================================================
         // Atomic Operations (15 functions)
@@ -164,6 +206,34 @@ pub(crate) fn call_extern_function(
         "rt_atomic_flag_test_and_set" => atomic::rt_atomic_flag_test_and_set(&evaluated),
         "rt_atomic_flag_clear" => atomic::rt_atomic_flag_clear(&evaluated),
         "rt_atomic_flag_free" => atomic::rt_atomic_flag_free(&evaluated),
+
+        // ====================================================================
+        // Synchronization Primitives (28 functions)
+        // ====================================================================
+        // Atomic (10 functions)
+        "rt_atomic_new" => atomic::rt_atomic_new_fn(&evaluated),
+        "rt_atomic_load" => atomic::rt_atomic_load_fn(&evaluated),
+        "rt_atomic_store" => atomic::rt_atomic_store_fn(&evaluated),
+        "rt_atomic_swap" => atomic::rt_atomic_swap_fn(&evaluated),
+        "rt_atomic_compare_exchange" => atomic::rt_atomic_compare_exchange_fn(&evaluated),
+        "rt_atomic_fetch_add" => atomic::rt_atomic_fetch_add_fn(&evaluated),
+        "rt_atomic_fetch_sub" => atomic::rt_atomic_fetch_sub_fn(&evaluated),
+        "rt_atomic_fetch_and" => atomic::rt_atomic_fetch_and_fn(&evaluated),
+        "rt_atomic_fetch_or" => atomic::rt_atomic_fetch_or_fn(&evaluated),
+
+        // Mutex (4 functions)
+        "rt_mutex_new" => atomic::rt_mutex_new_fn(&evaluated),
+        "rt_mutex_lock" => atomic::rt_mutex_lock_fn(&evaluated),
+        "rt_mutex_try_lock" => atomic::rt_mutex_try_lock_fn(&evaluated),
+        "rt_mutex_unlock" => atomic::rt_mutex_unlock_fn(&evaluated),
+
+        // RwLock (6 functions)
+        "rt_rwlock_new" => atomic::rt_rwlock_new_fn(&evaluated),
+        "rt_rwlock_read" => atomic::rt_rwlock_read_fn(&evaluated),
+        "rt_rwlock_write" => atomic::rt_rwlock_write_fn(&evaluated),
+        "rt_rwlock_try_read" => atomic::rt_rwlock_try_read_fn(&evaluated),
+        "rt_rwlock_try_write" => atomic::rt_rwlock_try_write_fn(&evaluated),
+        "rt_rwlock_set" => atomic::rt_rwlock_set_fn(&evaluated),
 
         // ====================================================================
         // Conversion Functions (2 functions)

@@ -419,7 +419,7 @@ impl Default for Interpreter {
 /// * `Err(String)` - Error message if compilation or execution failed
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
 /// use simple_driver::run_code;
 ///
 /// let result = run_code("main = 42", &[], "").unwrap();
@@ -450,7 +450,7 @@ pub fn run_code(code: &str, args: &[String], stdin: &str) -> Result<RunResult, S
 /// * `Err(String)` - Error message if compilation or execution failed
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
 /// use simple_driver::run_jit;
 ///
 /// let result = run_jit("fn main() -> i64:\n    return 42\n").unwrap();

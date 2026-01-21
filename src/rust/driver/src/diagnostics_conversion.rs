@@ -16,10 +16,25 @@ use simple_diagnostics::{
 ///
 /// # Examples
 ///
-/// ```ignore
-/// let parser_diag = parser_error.to_diagnostic();
-/// let i18n_diag = convert_parser_diagnostic(parser_diag);
-/// eprintln!("{}", i18n_diag.format(source_code, true));
+/// ```
+/// use simple_common::{Diagnostic, Severity, Span, Label};
+/// use simple_driver::diagnostics_conversion::convert_parser_diagnostic;
+///
+/// // Create a parser diagnostic
+/// let span = Span::new(10, 15, 1, 10);
+/// let diag = Diagnostic {
+///     severity: Severity::Error,
+///     code: Some("E0002".to_string()),
+///     message: "unexpected token: expected identifier, found +".to_string(),
+///     labels: vec![Label::primary(span, "unexpected token")],
+///     notes: vec![],
+///     help: vec![],
+///     file: None,
+/// };
+///
+/// // Convert to i18n diagnostic
+/// let i18n_diag = convert_parser_diagnostic(diag);
+/// assert_eq!(i18n_diag.code, Some("E0002".to_string()));
 /// ```
 pub fn convert_parser_diagnostic(diag: ParserDiagnostic) -> I18nDiagnostic {
     // Get primary span from first label (parser diagnostics put span in labels)

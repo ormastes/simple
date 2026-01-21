@@ -4,16 +4,21 @@
 //!
 //! ## Example
 //!
-//! ```rust,ignore
-//! use arch_test::{Architecture, visualize};
+//! ```
+//! use arch_test::{Layer, ModuleTree, to_dot};
+//! use std::collections::HashMap;
 //!
-//! let arch = Architecture::new()
-//!     .layer("ui", &["src/ui/**"])
-//!     .layer("service", &["src/service/**"])
-//!     .layer("data", &["src/data/**"]);
+//! let mut layers = HashMap::new();
+//! layers.insert("ui".to_string(), Layer::new("ui", vec!["src/ui/**".to_string()]));
+//! layers.insert("service".to_string(), Layer::new("service", vec!["src/service/**".to_string()]));
+//! layers.insert("data".to_string(), Layer::new("data", vec!["src/data/**".to_string()]));
 //!
-//! let dot = visualize::to_dot(&arch, &module_tree);
-//! println!("{}", dot);
+//! let mut module_tree = ModuleTree::new();
+//! module_tree.add_dependency("src/ui/view", "src/service/user_service");
+//! module_tree.add_dependency("src/service/user_service", "src/data/user_repo");
+//!
+//! let dot = to_dot(&layers, &module_tree);
+//! assert!(dot.contains("digraph architecture"));
 //! ```
 
 use crate::{Layer, ModuleTree};

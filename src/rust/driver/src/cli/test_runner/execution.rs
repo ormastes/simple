@@ -32,6 +32,11 @@ pub fn parse_test_output(output: &str) -> (usize, usize) {
     (passed, failed)
 }
 
+/// Run a single test file with options (wrapper for compatibility)
+pub fn run_test_file_with_options(runner: &Runner, path: &Path, _options: &super::types::TestOptions) -> TestFileResult {
+    run_test_file(runner, path)
+}
+
 /// Run a single test file
 pub fn run_test_file(runner: &Runner, path: &Path) -> TestFileResult {
     let start = Instant::now();
@@ -52,6 +57,8 @@ pub fn run_test_file(runner: &Runner, path: &Path) -> TestFileResult {
                 path: path.to_path_buf(),
                 passed,
                 failed,
+                skipped: 0,
+                ignored: 0,
                 duration_ms,
                 error: None,
             }
@@ -63,6 +70,8 @@ pub fn run_test_file(runner: &Runner, path: &Path) -> TestFileResult {
                 path: path.to_path_buf(),
                 passed: 0,
                 failed: 1,
+                skipped: 0,
+                ignored: 0,
                 duration_ms,
                 error: Some(error_msg),
             }

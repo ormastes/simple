@@ -12,9 +12,42 @@
 use crate::db_lock::FileLock;
 use crate::test_stats::{compute_statistics, detect_outliers, has_significant_change, OutlierMethod};
 use serde::{Deserialize, Serialize};
+use simple_sdn::{parse_document, SdnValue};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+
+/// Debug logging level for test database
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DebugLevel {
+    None,
+    Basic,
+    Detailed,
+    Trace,
+}
+
+impl DebugLevel {
+    pub fn from_env() -> Self {
+        match std::env::var("SIMPLE_TEST_DEBUG").as_deref() {
+            Ok("trace") | Ok("TRACE") => DebugLevel::Trace,
+            Ok("detailed") | Ok("DETAILED") => DebugLevel::Detailed,
+            Ok("basic") | Ok("BASIC") => DebugLevel::Basic,
+            _ => DebugLevel::None,
+        }
+    }
+
+    pub fn is_enabled(level: DebugLevel) -> bool {
+        Self::from_env() >= level
+    }
+}
+
+macro_rules! debug_log {
+    ($level:expr, $phase:expr, $($arg:tt)*) => {
+        if DebugLevel::is_enabled($level) {
+            eprintln!("[DEBUG:{}] {}", $phase, format!($($arg)*));
+        }
+    };
+}
 
 /// Test database
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,23 +274,179 @@ pub fn load_test_db(path: &Path) -> Result<TestDb, String> {
         return Ok(TestDb::new());
     }
 
+    let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&content).map_err(|e| e.to_string())
+
+    // Try SDN format first, fall back to JSON for backward compatibility
+    if let Ok(doc) = parse_document(&content) {
+        parse_test_db_sdn(&doc)
+    } else {
+        // Fallback to JSON format for existing databases
+        serde_json::from_str(&content).map_err(|e| e.to_string())
+    }
+}
+
+/// Parse test database from SDN document
+fn parse_test_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<TestDb, String> {
+    let root = doc.root();
+    let tests_table = match root {
+        SdnValue::Table { .. } => Some(root),
+        SdnValue::Dict(dict) => dict.get("tests"),
+        _ => None,
+    };
+
+    let mut db = TestDb::new();
+
+    if let Some(SdnValue::Table { fields: Some(fields), rows, .. }) = tests_table {
+        for row in rows {
+            if row.len() < fields.len() {
+                continue; // Skip malformed rows
+            }
+
+            // Helper to get field value
+            let get_field = |name: &str| -> String {
+                fields.iter().position(|f| f == name)
+                    .and_then(|idx| row.get(idx))
+                    .map(|v| match v {
+                        SdnValue::String(s) => s.clone(),
+                        SdnValue::Int(n) => n.to_string(),
+                        SdnValue::Float(f) => f.to_string(),
+                        SdnValue::Bool(b) => b.to_string(),
+                        _ => String::new(),
+                    })
+                    .unwrap_or_default()
+            };
+
+            let test_id = get_field("test_id");
+            if test_id.is_empty() { continue; }
+
+            let status_str = get_field("status");
+            let status = match status_str.as_str() {
+                "passed" => TestStatus::Passed,
+                "failed" => TestStatus::Failed,
+                "skipped" => TestStatus::Skipped,
+                "ignored" => TestStatus::Ignored,
+                _ => TestStatus::Passed,
+            };
+
+            // Parse JSON-encoded complex fields
+            let failure: Option<TestFailure> = {
+                let s = get_field("failure");
+                if s.is_empty() { None } else { serde_json::from_str(&s).ok() }
+            };
+
+            let execution_history: ExecutionHistory = {
+                let s = get_field("execution_history");
+                if s.is_empty() { ExecutionHistory::default() } else { serde_json::from_str(&s).unwrap_or_default() }
+            };
+
+            let timing: TimingData = {
+                let s = get_field("timing");
+                if s.is_empty() { TimingData::default() } else { serde_json::from_str(&s).unwrap_or_default() }
+            };
+
+            let timing_config: Option<TimingConfig> = {
+                let s = get_field("timing_config");
+                if s.is_empty() { None } else { serde_json::from_str(&s).ok() }
+            };
+
+            let related_bugs: Vec<String> = get_field("related_bugs")
+                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let related_features: Vec<String> = get_field("related_features")
+                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let tags: Vec<String> = get_field("tags")
+                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+
+            let record = TestRecord {
+                test_id: test_id.clone(),
+                test_name: get_field("test_name"),
+                test_file: get_field("test_file"),
+                category: get_field("category"),
+                status,
+                last_run: get_field("last_run"),
+                failure,
+                execution_history,
+                timing,
+                timing_config,
+                related_bugs,
+                related_features,
+                tags,
+                description: get_field("description"),
+                valid: get_field("valid") == "true",
+            };
+
+            db.records.insert(test_id, record);
+        }
+    }
+
+    Ok(db)
 }
 
 /// Save test database to SDN file (with file locking)
 pub fn save_test_db(path: &Path, db: &TestDb) -> Result<(), String> {
-    // Create directory if it doesn't exist
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    // Acquire exclusive lock
     let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
 
-    // Serialize and write
-    let content = serde_json::to_string_pretty(db).map_err(|e| e.to_string())?;
-    fs::write(path, content).map_err(|e| e.to_string())?;
+    let mut content = String::new();
+    content.push_str("tests |test_id, test_name, test_file, category, status, last_run, failure, execution_history, timing, timing_config, related_bugs, related_features, tags, description, valid|\n");
+
+    let mut sorted_records: Vec<_> = db.records.values().collect();
+    sorted_records.sort_by(|a, b| a.test_id.cmp(&b.test_id));
+
+    for record in sorted_records {
+        let status_str = match record.status {
+            TestStatus::Passed => "passed",
+            TestStatus::Failed => "failed",
+            TestStatus::Skipped => "skipped",
+            TestStatus::Ignored => "ignored",
+        };
+
+        let failure_json = record.failure.as_ref()
+            .map(|f| serde_json::to_string(f).unwrap_or_default())
+            .unwrap_or_default();
+        let history_json = serde_json::to_string(&record.execution_history).unwrap_or_default();
+        let timing_json = serde_json::to_string(&record.timing).unwrap_or_default();
+        let timing_config_json = record.timing_config.as_ref()
+            .map(|c| serde_json::to_string(c).unwrap_or_default())
+            .unwrap_or_default();
+
+        let quote = |s: &str| {
+            if s.is_empty() || s.contains(',') || s.contains('"') || s.contains('\n') {
+                format!("\"{}\"", s.replace("\"", "\\\"").replace("\n", "\\n"))
+            } else {
+                s.to_string()
+            }
+        };
+
+        let row = vec![
+            quote(&record.test_id),
+            quote(&record.test_name),
+            quote(&record.test_file),
+            quote(&record.category),
+            quote(status_str),
+            quote(&record.last_run),
+            quote(&failure_json),
+            quote(&history_json),
+            quote(&timing_json),
+            quote(&timing_config_json),
+            quote(&record.related_bugs.join(",")),
+            quote(&record.related_features.join(",")),
+            quote(&record.tags.join(",")),
+            quote(&record.description),
+            record.valid.to_string(),
+        ];
+
+        content.push_str("    ");
+        content.push_str(&row.join(", "));
+        content.push('\n');
+    }
+
+    let temp_path = path.with_extension("sdn.tmp");
+    fs::write(&temp_path, &content).map_err(|e| e.to_string())?;
+    fs::rename(&temp_path, path).map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -274,6 +463,11 @@ pub fn update_test_result(
     failure: Option<TestFailure>,
     all_tests_run: bool,
 ) {
+    let is_new = !db.records.contains_key(test_id);
+
+    debug_log!(DebugLevel::Trace, "TestDB", "    Record: {} ({})",
+        test_id, if is_new { "NEW" } else { "UPDATE" });
+
     let test = db.records.entry(test_id.to_string()).or_insert_with(|| {
         TestRecord {
             test_id: test_id.to_string(),
@@ -294,10 +488,17 @@ pub fn update_test_result(
         }
     });
 
+    let old_status = test.status;
+
     // Update execution status
     test.status = status;
     test.last_run = chrono::Utc::now().to_rfc3339();
     test.failure = failure;
+
+    if old_status != status {
+        debug_log!(DebugLevel::Trace, "TestDB", "      Status transition: {:?} -> {:?}",
+            old_status, status);
+    }
 
     // Update execution history
     test.execution_history.total_runs += 1;
@@ -324,11 +525,29 @@ pub fn update_test_result(
             (test.execution_history.failed as f64 / test.execution_history.total_runs as f64) * 100.0;
     }
 
+    debug_log!(DebugLevel::Trace, "TestDB", "      Execution history: {} runs, {} passed, {} failed ({:.1}% failure rate)",
+        test.execution_history.total_runs,
+        test.execution_history.passed,
+        test.execution_history.failed,
+        test.execution_history.failure_rate_pct);
+
     // Detect flaky tests (intermittent failures)
+    let was_flaky = test.execution_history.flaky;
     test.execution_history.flaky = detect_flaky_test(&test.execution_history);
 
+    if !was_flaky && test.execution_history.flaky {
+        debug_log!(DebugLevel::Detailed, "TestDB", "      Flaky test detected: {}", test_id);
+    }
+
     // Update timing
+    let old_baseline = test.timing.baseline_median;
     update_test_timing(test, duration_ms, all_tests_run, &db.config);
+
+    if test.timing.baseline_median != old_baseline && old_baseline > 0.0 {
+        let change_pct = ((test.timing.baseline_median - old_baseline) / old_baseline) * 100.0;
+        debug_log!(DebugLevel::Trace, "TestDB", "      Timing: {}ms (baseline: {}ms, {:+.1}%)",
+            duration_ms, test.timing.baseline_median, change_pct);
+    }
 
     test.valid = true;
 }

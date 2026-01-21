@@ -116,6 +116,8 @@ pub fn run_doctests(options: &TestOptions, quiet: bool) -> Vec<TestFileResult> {
                         path: source_path,
                         passed,
                         failed,
+                        skipped: 0,
+                        ignored: 0,
                         duration_ms: duration_ms / (results.len() as u64 + 1).max(1),
                         error,
                     });
@@ -220,6 +222,8 @@ pub fn run_md_doctests(options: &TestOptions, quiet: bool) -> Vec<TestFileResult
                     path: source_path,
                     passed,
                     failed,
+                    skipped: 0,
+                    ignored: 0,
                     duration_ms: duration_ms / (results.len() as u64 + 1).max(1),
                     error,
                 });

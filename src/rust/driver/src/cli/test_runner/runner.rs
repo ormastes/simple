@@ -9,7 +9,7 @@ use simple_compiler::{init_coverage, is_coverage_enabled};
 
 use crate::runner::Runner;
 use super::test_discovery::{discover_tests, matches_tag};
-use super::types::{TestFileResult, TestLevel, TestOptions, TestRunResult, OutputFormat};
+use super::types::{TestFileResult, TestLevel, TestOptions, TestRunResult, OutputFormat, DebugLevel, debug_log};
 use super::execution::run_test_file;
 use super::doctest::{run_doctests, run_md_doctests};
 use super::diagrams::generate_test_diagrams;
@@ -21,48 +21,83 @@ use super::test_db_update::update_test_database;
 /// Run tests with the given options
 pub fn run_tests(options: TestOptions) -> TestRunResult {
     let quiet = matches!(options.format, OutputFormat::Json);
+    let list_mode = options.list || options.list_ignored;
 
-    // Initialize subsystems
-    initialize_diagrams(&options, quiet);
-    initialize_coverage(quiet);
+    // CRITICAL: Set environment variables BEFORE creating runner/interpreter
+    // This ensures the Simple spec framework sees them when it loads
+    if list_mode {
+        std::env::set_var("SIMPLE_TEST_MODE", "list");
+    } else {
+        std::env::remove_var("SIMPLE_TEST_MODE");
+    }
+
+    if options.only_slow {
+        std::env::set_var("SIMPLE_TEST_FILTER", "slow");
+    } else if options.only_skipped {
+        std::env::set_var("SIMPLE_TEST_FILTER", "skipped");
+    } else {
+        std::env::remove_var("SIMPLE_TEST_FILTER");
+    }
+
+    if options.show_tags {
+        std::env::set_var("SIMPLE_TEST_SHOW_TAGS", "1");
+    } else {
+        std::env::remove_var("SIMPLE_TEST_SHOW_TAGS");
+    }
+
+    // Skip initialization for list mode
+    if !list_mode {
+        initialize_diagrams(&options, quiet);
+        initialize_coverage(quiet);
+    }
 
     let runner = create_runner(&options);
     let test_path = determine_test_path(&options);
     let test_files = discover_and_filter_tests(&test_path, &options);
 
     // Print discovery summary
-    print_discovery_summary(&test_files, &options, quiet);
-
-    // Execute tests
-    let (mut results, mut total_passed, mut total_failed) = execute_test_files(&runner, &test_files, &options, quiet);
-
-    // Determine if all tests were run (no filters applied)
-    let all_tests_run = options.path.is_none() && options.tag.is_none() && options.level == TestLevel::All;
-
-    // Update feature database
-    update_feature_database(&test_files, &mut results, &mut total_failed);
-
-    // Update test database
-    if let Err(e) = update_test_database(&test_files, &results, all_tests_run) {
-        if !quiet {
-            eprintln!("Warning: Failed to update test database: {}", e);
-        }
+    if !list_mode {
+        print_discovery_summary(&test_files, &options, quiet);
     }
 
-    // Run doctests
-    run_all_doctests(&options, &mut results, &mut total_passed, &mut total_failed, quiet);
+    // Execute tests (or list them)
+    let (mut results, mut total_passed, mut total_failed, mut total_skipped, mut total_ignored) =
+        execute_test_files(&runner, &test_files, &options, quiet);
+
+    // Determine if all tests were run (no filters applied)
+    let all_tests_run = options.path.is_none() && options.tag.is_none() && options.level == TestLevel::All && !list_mode;
+
+    // Skip database updates in list mode
+    if !list_mode {
+        // Update feature database
+        update_feature_database(&test_files, &mut results, &mut total_failed);
+
+        // Update test database
+        if let Err(e) = update_test_database(&test_files, &results, all_tests_run) {
+            if !quiet {
+                eprintln!("Warning: Failed to update test database: {}", e);
+            }
+        }
+
+        // Run doctests
+        run_all_doctests(&options, &mut results, &mut total_passed, &mut total_failed, quiet);
+    }
 
     let start = Instant::now();
     let result = TestRunResult {
         files: results,
         total_passed,
         total_failed,
+        total_skipped,
+        total_ignored,
         total_duration_ms: start.elapsed().as_millis() as u64,
     };
 
-    // Post-processing
-    generate_diagrams_if_enabled(&options, &result, quiet);
-    save_coverage_data(quiet);
+    // Post-processing (skip in list mode)
+    if !list_mode {
+        generate_diagrams_if_enabled(&options, &result, quiet);
+        save_coverage_data(quiet);
+    }
 
     result
 }
@@ -117,17 +152,27 @@ fn determine_test_path(options: &TestOptions) -> PathBuf {
 
 /// Discover and filter test files
 fn discover_and_filter_tests(test_path: &PathBuf, options: &TestOptions) -> Vec<PathBuf> {
+    debug_log!(DebugLevel::Basic, "Discovery", "Finding tests in: {}", test_path.display());
+
     let mut test_files = discover_tests(test_path, options.level);
 
+    debug_log!(DebugLevel::Basic, "Discovery", "Found {} test files", test_files.len());
+
     // Apply tag filter
-    if options.tag.is_some() {
+    if let Some(ref tag) = options.tag {
+        let before_count = test_files.len();
         test_files.retain(|path| matches_tag(path, &options.tag));
+        debug_log!(DebugLevel::Detailed, "Discovery", "Tag filter '{}': {} -> {} files",
+            tag, before_count, test_files.len());
     }
 
     // Apply seed for shuffling
     if let Some(seed) = options.seed {
         shuffle_tests(&mut test_files, seed);
+        debug_log!(DebugLevel::Detailed, "Discovery", "Shuffled tests with seed: {}", seed);
     }
+
+    debug_log!(DebugLevel::Basic, "Discovery", "Final test count: {}", test_files.len());
 
     test_files
 }
@@ -158,32 +203,50 @@ fn execute_test_files(
     test_files: &[PathBuf],
     options: &TestOptions,
     quiet: bool,
-) -> (Vec<TestFileResult>, usize, usize) {
+) -> (Vec<TestFileResult>, usize, usize, usize, usize) {
+    debug_log!(DebugLevel::Basic, "Execution", "Executing {} test files", test_files.len());
+
     let mut results = Vec::new();
     let mut total_passed = 0;
     let mut total_failed = 0;
+    let mut total_skipped = 0;
+    let mut total_ignored = 0;
 
-    for path in test_files {
-        if !quiet {
+    for (idx, path) in test_files.iter().enumerate() {
+        if !quiet && !options.list && !options.list_ignored {
             println!("Running: {}", path.display());
         }
 
-        let result = run_test_file(runner, path);
+        debug_log!(DebugLevel::Detailed, "Execution", "Test {}/{}: {}",
+            idx + 1, test_files.len(), path.display());
+
+        let result = super::execution::run_test_file_with_options(runner, path, options);
         total_passed += result.passed;
         total_failed += result.failed;
+        total_skipped += result.skipped;
+        total_ignored += result.ignored;
 
-        print_result(&result, quiet);
+        debug_log!(DebugLevel::Trace, "Execution", "  Running totals: passed={}, failed={}, skipped={}, ignored={}",
+            total_passed, total_failed, total_skipped, total_ignored);
+
+        if !options.list && !options.list_ignored {
+            print_result(&result, quiet);
+        }
 
         let failed = result.failed > 0 || result.error.is_some();
         results.push(result);
 
         // Stop on first failure if fail-fast
         if options.fail_fast && failed {
+            debug_log!(DebugLevel::Detailed, "Execution", "Stopping on first failure (fail-fast mode)");
             break;
         }
     }
 
-    (results, total_passed, total_failed)
+    debug_log!(DebugLevel::Basic, "Collection", "Aggregated results: passed={}, failed={}, skipped={}, ignored={}",
+        total_passed, total_failed, total_skipped, total_ignored);
+
+    (results, total_passed, total_failed, total_skipped, total_ignored)
 }
 
 /// Print individual test result
