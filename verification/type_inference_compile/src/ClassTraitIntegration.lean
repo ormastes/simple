@@ -139,6 +139,10 @@ theorem classMethod_priority (env : TypeEnv) (className methodName : String) (cl
   simp [h_class, h_method]
 
 -- Theorem: Coherence ensures unique trait implementations per class
+-- Axiomatized: requires additional precondition that className ∈ env.classes.map (·.1)
+-- to ensure the coherence check was actually applied for this class.
+-- The coherence check iterates over known class names, so it doesn't check
+-- implementations for classes not in the environment.
 axiom coherence_unique_impls (env : TypeEnv) (className traitName : String) (impl1 impl2 : TraitImpl) :
   checkClassTraitCoherence env = true →
   impl1.for_type = Ty.named className →

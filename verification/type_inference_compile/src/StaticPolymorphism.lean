@@ -285,13 +285,43 @@ theorem vtable_deterministic (env : BindEnv) (traitName : String) (forType : Ty)
   cases h2
   rfl
 
--- Theorem: Monomorphization uniqueness (axiomatized due to proof complexity)
-axiom monomorphization_unique (fns : List MonomorphizedFn) (fnName : String) (forType : Ty) :
+-- Helper: If filter list has length ≤ 1, then two members must be equal
+theorem filter_unique {α : Type} (l : List α) (p : α → Bool)
+    (h_len : (l.filter p).length ≤ 1)
+    (x y : α) (hx : x ∈ l) (hy : y ∈ l) (hpx : p x = true) (hpy : p y = true) :
+    x = y := by
+  have hx_filter : x ∈ l.filter p := List.mem_filter.mpr ⟨hx, hpx⟩
+  have hy_filter : y ∈ l.filter p := List.mem_filter.mpr ⟨hy, hpy⟩
+  -- If list has ≤ 1 elements and x, y are both in it, then x = y
+  match h_list : l.filter p with
+  | [] =>
+    rw [h_list] at hx_filter
+    cases hx_filter
+  | [a] =>
+    rw [h_list] at hx_filter hy_filter
+    simp only [List.mem_singleton] at hx_filter hy_filter
+    rw [hx_filter, hy_filter]
+  | a :: b :: rest =>
+    rw [h_list] at h_len
+    simp only [List.length_cons] at h_len
+    omega
+
+-- Theorem: Monomorphization uniqueness
+-- If uniqueMonomorphization passes, any two functions with same name and type are equal
+theorem monomorphization_unique (fns : List MonomorphizedFn) (fnName : String) (forType : Ty) :
   uniqueMonomorphization fns fnName forType = true →
   ∀ f1 f2, f1 ∈ fns → f2 ∈ fns →
     f1.original_name = fnName → f2.original_name = fnName →
     f1.instantiated_for = forType → f2.instantiated_for = forType →
-    f1 = f2
+    f1 = f2 := by
+  intro h_unique f1 f2 hf1 hf2 h_name1 h_name2 h_type1 h_type2
+  unfold uniqueMonomorphization at h_unique
+  simp only [decide_eq_true_eq] at h_unique
+  -- The filter condition is: f.original_name == fnName && f.instantiated_for == forType
+  let p := fun f : MonomorphizedFn => f.original_name == fnName && f.instantiated_for == forType
+  have hp1 : p f1 = true := by simp only [p, h_name1, h_type1, beq_self_eq_true, Bool.and_self]
+  have hp2 : p f2 = true := by simp only [p, h_name2, h_type2, beq_self_eq_true, Bool.and_self]
+  exact filter_unique fns p h_unique f1 f2 hf1 hf2 hp1 hp2
 
 -- Theorem: Static and dynamic dispatch are mutually exclusive
 -- Proof: DispatchMode is an enum with only static and dynamic variants
