@@ -83,6 +83,12 @@ pub fn print_help() {
     eprintln!("  simple gen-lean write --force      Overwrite existing Lean files");
     eprintln!("  simple gen-lean --project <name>   Generate specific project only");
     eprintln!();
+    eprintln!("Verification Management:");
+    eprintln!("  simple verify regenerate           Regenerate Lean files from verification models");
+    eprintln!("  simple verify check                Check all proof obligations");
+    eprintln!("  simple verify status               Show verification status");
+    eprintln!("  simple verify list                 List all proof obligations");
+    eprintln!();
     eprintln!("Package Management:");
     eprintln!("  simple init [name]          Create a new project");
     eprintln!("  simple add <pkg> [options]  Add a dependency");

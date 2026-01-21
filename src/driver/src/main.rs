@@ -22,6 +22,7 @@ use simple_driver::cli::migrate::run_migrate;
 use simple_driver::cli::repl::run_repl;
 use simple_driver::cli::sandbox::{apply_sandbox, parse_sandbox_config};
 use simple_driver::cli::test_runner;
+use simple_driver::cli::verify::run_verify;
 #[cfg(feature = "tui")]
 use simple_driver::cli::tui::run_tui_repl;
 use simple_driver::cli::doc_gen::{run_feature_gen, run_spec_gen, run_task_gen, run_todo_gen, run_todo_scan};
@@ -160,6 +161,9 @@ fn main() {
         "spec-gen" => run_spec_gen(&args),
         "todo-scan" => run_todo_scan(&args),
         "todo-gen" => run_todo_gen(&args),
+
+        // Verification
+        "verify" => run_verify(&args, global_flags.gc_log, global_flags.gc_off),
 
         // Diagram generation
         "diagram" => handle_diagram(&args),
