@@ -1,4 +1,4 @@
-//! Tests for assert/check statement support
+//! Tests for assert statement support
 //!
 //! These tests verify that inline assertion statements work correctly
 //! in both interpreter and native compilation modes.
@@ -76,13 +76,13 @@ fn main() -> i64:
 }
 
 #[test]
-fn test_check_alias() {
-    // Test check as alias for assert
+fn test_assert_multiple_conditions() {
+    // Test multiple assert conditions in sequence
     let source = r#"
 fn main() -> i64:
     val x = 5
-    check x < 100
-    check x >= 0, "x must be non-negative"
+    assert x < 100
+    assert x >= 0, "x must be non-negative"
     return x
 "#;
 
@@ -228,13 +228,13 @@ fn helper(y: i64) -> i64:
 }
 
 #[test]
-fn test_native_check_alias() {
-    // Test check keyword in native codegen
+fn test_native_assert_multiple() {
+    // Test multiple assert in native codegen
     let source = r#"
 fn main() -> i64:
     val x = 5
-    check x > 0
-    check x < 100, "must be under 100"
+    assert x > 0
+    assert x < 100, "must be under 100"
     return x
 "#;
 

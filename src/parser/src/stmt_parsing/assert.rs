@@ -1,10 +1,8 @@
 //! Assert statement parsing
 //!
-//! This module handles parsing of assert/check statements:
+//! This module handles parsing of assert statements:
 //! - assert condition
 //! - assert condition, "message"
-//! - check condition  (alias for assert)
-//! - check condition, "message"
 
 use crate::ast::*;
 use crate::error::ParseError;
@@ -12,20 +10,18 @@ use crate::parser_impl::core::Parser;
 use crate::token::{Span, TokenKind};
 
 impl<'a> Parser<'a> {
-    /// Parse an assert or check statement
+    /// Parse an assert statement
     /// assert condition
     /// assert condition, "message"
     pub(crate) fn parse_assert(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
 
-        // Consume 'assert' or 'check' keyword
+        // Consume 'assert' keyword
         if self.check(&TokenKind::Assert) {
-            self.advance();
-        } else if self.check(&TokenKind::Check) {
             self.advance();
         } else {
             return Err(ParseError::syntax_error_with_span(
-                "expected 'assert' or 'check'",
+                "expected 'assert'",
                 self.current.span,
             ));
         }
