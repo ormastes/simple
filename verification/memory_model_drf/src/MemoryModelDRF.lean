@@ -432,6 +432,49 @@ theorem capability_prevents_unsafe_write :
   intros op h_write
   cases op <;> simp [capabilityAllows] at *
 
+-- Theorem: Read is always allowed with any capability
+theorem read_always_allowed (loc : LocationId) (tid : ThreadId) (cap : RefCapability) :
+    capabilityAllows cap (MemoryOperation.Read loc tid) = true := by
+  cases cap <;> simp [capabilityAllows]
+
+-- Theorem: Write requires Exclusive or Isolated
+theorem write_requires_exclusive_or_isolated (loc : LocationId) (tid : ThreadId) (cap : RefCapability) :
+    capabilityAllows cap (MemoryOperation.Write loc tid) = true →
+    cap = RefCapability.Exclusive ∨ cap = RefCapability.Isolated := by
+  intro h
+  cases cap <;> simp [capabilityAllows] at h
+  · left; rfl
+  · right; rfl
+
+-- Theorem: AtomicRMW requires Exclusive or Isolated
+theorem atomic_requires_exclusive_or_isolated (loc : LocationId) (tid : ThreadId) (ord : MemoryOrdering) (cap : RefCapability) :
+    capabilityAllows cap (MemoryOperation.AtomicRMW loc tid ord) = true →
+    cap = RefCapability.Exclusive ∨ cap = RefCapability.Isolated := by
+  intro h
+  cases cap <;> simp [capabilityAllows] at h
+  · left; rfl
+  · right; rfl
+
+-- Theorem: Exclusive capability allows read/write operations
+theorem exclusive_allows_read_write (loc : LocationId) (tid : ThreadId) :
+    capabilityAllows RefCapability.Exclusive (MemoryOperation.Read loc tid) = true ∧
+    capabilityAllows RefCapability.Exclusive (MemoryOperation.Write loc tid) = true := by
+  constructor <;> simp [capabilityAllows]
+
+-- Theorem: Isolated capability allows read/write operations
+theorem isolated_allows_read_write (loc : LocationId) (tid : ThreadId) :
+    capabilityAllows RefCapability.Isolated (MemoryOperation.Read loc tid) = true ∧
+    capabilityAllows RefCapability.Isolated (MemoryOperation.Write loc tid) = true := by
+  constructor <;> simp [capabilityAllows]
+
+-- Theorem: Required capability for read is Shared
+theorem required_read_is_shared (loc : LocationId) (tid : ThreadId) :
+    requiredCapability (MemoryOperation.Read loc tid) = RefCapability.Shared := rfl
+
+-- Theorem: Required capability for write is Exclusive
+theorem required_write_is_exclusive (loc : LocationId) (tid : ThreadId) :
+    requiredCapability (MemoryOperation.Write loc tid) = RefCapability.Exclusive := rfl
+
 -- Execution with capability annotations
 structure CapabilityExecution where
   toExecution : Execution
