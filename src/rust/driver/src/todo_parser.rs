@@ -9,6 +9,8 @@
 //! TODO: [area][priority] description [#issue] [blocked:#issue,#issue]
 //! FIXME: [area][priority] description [#issue] [blocked:#issue,#issue]
 //! ```
+//!
+//! #![skip_todo]
 
 use regex::Regex;
 use std::fs;
@@ -139,10 +141,42 @@ impl TodoParser {
         }
     }
 
+    /// Check if file has #![skip_todo] at the top
+    fn has_file_level_skip(content: &str) -> bool {
+        // Check first 20 lines for skip markers
+        for line in content.lines().take(20) {
+            let trimmed = line.trim();
+            // Primary pattern: #![skip_todo]
+            if trimmed.contains("#![skip_todo]") {
+                return true;
+            }
+            // Also support: #![allow(todo_format)] for lint consistency
+            if trimmed.contains("#![allow(todo_format)]") {
+                return true;
+            }
+            // Markdown HTML comments: <!-- skip_todo -->
+            if trimmed.contains("skip_todo") && trimmed.starts_with("<!--") {
+                return true;
+            }
+            // Comment-based alternatives
+            // Rust: // skip_todo
+            // Simple: # skip_todo
+            if trimmed.contains("skip_todo") && (trimmed.starts_with("//") || trimmed.starts_with('#')) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Parse TODOs from Rust source code
     fn parse_rust(&self, content: &str, path: &Path) -> Result<ParseResult, String> {
         let mut todos = Vec::new();
         let mut errors = Vec::new();
+
+        // Check for file-level skip attribute
+        if Self::has_file_level_skip(content) {
+            return Ok(ParseResult { todos, errors });
+        }
 
         for (line_num, line) in content.lines().enumerate() {
             let line_num = line_num + 1; // 1-indexed
@@ -206,6 +240,11 @@ impl TodoParser {
         let mut todos = Vec::new();
         let mut errors = Vec::new();
 
+        // Check for file-level skip attribute
+        if Self::has_file_level_skip(content) {
+            return Ok(ParseResult { todos, errors });
+        }
+
         for (line_num, line) in content.lines().enumerate() {
             let line_num = line_num + 1; // 1-indexed
             let trimmed = line.trim();
@@ -263,6 +302,11 @@ impl TodoParser {
     fn parse_markdown(&self, content: &str, path: &Path) -> Result<ParseResult, String> {
         let mut todos = Vec::new();
         let mut errors = Vec::new();
+
+        // Check for file-level skip attribute
+        if Self::has_file_level_skip(content) {
+            return Ok(ParseResult { todos, errors });
+        }
 
         // Pattern for HTML comments: <!-- TODO: ... -->
         let html_comment_pattern = Regex::new(r"<!--\s*(.+?)\s*-->").unwrap();
@@ -350,9 +394,7 @@ impl TodoParser {
                 raw_text,
             }))
         } else {
-            Err(format!(
-                "TODO/FIXME missing [area][priority] format. Expected: TODO: [area][priority] description"
-            ))
+            Err("TODO/FIXME missing [area][priority] format. Expected: TODO: [area][priority] description".to_string())
         }
     }
 

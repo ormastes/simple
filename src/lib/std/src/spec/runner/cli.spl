@@ -1,7 +1,7 @@
 # CLI Entry Point - Command-line interface for running tests
 # Usage: simple test [options]
 
-import spec.runner.executor.{TestExecutor, ExecutionResults}
+import spec.runner.executor.{TestExecutor, ExecutionResults, TestInfo}
 import spec.runner.filter.{TestFilter}
 import spec.formatters.progress.{ProgressFormatter, print_progress_results}
 import spec.formatters.doc.{DocFormatter, print_doc_results}
@@ -13,6 +13,11 @@ import io.{println, eprintln}
 class TestCli:
     formatter: text  # "progress", "doc", "json"
     run_slow: bool
+    only_slow: bool
+    only_skipped: bool
+    list_mode: bool
+    list_ignored: bool
+    show_tags: bool
     filter: TestFilter
     output_file: Option<text>
     show_help: bool
@@ -24,6 +29,11 @@ impl TestCli:
         return TestCli {
             formatter: "progress",
             run_slow: false,
+            only_slow: false,
+            only_skipped: false,
+            list_mode: false,
+            list_ignored: false,
+            show_tags: false,
             filter: TestFilter.new(),
             output_file: None,
             show_help: false,
@@ -51,6 +61,28 @@ impl TestCli:
 
                 case "--slow":
                     self.run_slow = true
+
+                case "--only-slow":
+                    self.only_slow = true
+                    self.filter.with_tag("slow")
+
+                case "--only-skipped":
+                    self.only_skipped = true
+                    self.filter.with_tag("skip")
+
+                case "--list":
+                    self.list_mode = true
+
+                case "-l":
+                    self.list_mode = true
+
+                case "--list-ignored":
+                    self.list_mode = true
+                    self.list_ignored = true
+                    self.filter.with_tag("slow")
+
+                case "--show-tags":
+                    self.show_tags = true
 
                 case "--tag":
                     i = i + 1
@@ -117,7 +149,12 @@ impl TestCli:
         println("")
         println("Options:")
         println("  -f, --format FORMAT      Output format: progress, doc, json (default: progress)")
-        println("  --slow                   Run slow tests (default: skip slow tests)")
+        println("  -l, --list               List tests without running them")
+        println("  --list-ignored           List tests that will be ignored (Rust #[ignore])")
+        println("  --show-tags              Show tags in list output")
+        println("  --slow                   Include slow tests (default: skip slow tests)")
+        println("  --only-slow              Run only slow tests")
+        println("  --only-skipped           Run only skipped tests")
         println("  -t, --tag TAG            Run only tests with this tag")
         println("  --exclude-tag TAG        Skip tests with this tag")
         println("  -p, --pattern PATTERN    Run only tests matching pattern")
@@ -128,9 +165,15 @@ impl TestCli:
         println("")
         println("Examples:")
         println("  simple test                          # Run all tests")
+        println("  simple test --list                   # List all tests")
+        println("  simple test --list --show-tags       # List tests with tags")
+        println("  simple test --list-ignored           # List tests marked with #[ignore]")
+        println("  simple test --list --only-slow       # List only slow tests")
         println("  simple test --format doc             # Hierarchical output")
         println("  simple test --tag unit               # Run only unit tests")
         println("  simple test --slow                   # Include slow tests")
+        println("  simple test --only-slow              # Run only slow tests")
+        println("  simple test --only-skipped           # Run only skipped tests")
         println("  simple test Calculator               # Run tests matching 'Calculator'")
         println("  simple test --format json -o results.json  # JSON output to file")
 
@@ -144,11 +187,29 @@ impl TestCli:
         # Configure executor
         var executor = TestExecutor.new()
 
-        if self.run_slow:
+        # Handle slow test options
+        if self.run_slow or self.only_slow:
             executor.with_slow_tests(true)
 
-        # TODO: Apply filters to executor
-        # This requires updating TestExecutor to accept TestFilter
+        # Apply filters to executor
+        if not self.filter.is_empty():
+            executor.with_filter(self.filter)
+
+        # List mode - show tests without running
+        if self.list_mode:
+            val test_list = executor.list_tests()
+
+            println("Tests:")
+            for test_info in test_list:
+                val tags_str = if test_info.tags.is_empty():
+                    ""
+                else:
+                    " [" + test_info.tags.join(", ") + "]"
+                println("  {test_info.full_description}{tags_str}")
+
+            println("")
+            println("Total: {test_list.len()} tests")
+            return 0
 
         # Run tests
         if self.verbose:

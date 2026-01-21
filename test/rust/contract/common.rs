@@ -2,10 +2,10 @@
 
 use simple_compiler::di::parse_di_config;
 use simple_compiler::hir::{self, BinOp};
-use simple_compiler::mir::function::MirModule;
-use simple_compiler::mir::{BlockId, ContractKind, ContractMode, MirInst, Terminator};
-use simple_compiler::mir::lower::{lower_to_mir, lower_to_mir_with_mode, lower_to_mir_with_mode_and_di, MirLowerResult};
+use simple_compiler::mir::{BlockId, ContractKind, ContractMode, MirInst, MirModule, Terminator};
+use simple_compiler::mir::{lower_to_mir, lower_to_mir_with_mode, lower_to_mir_with_mode_and_di, MirLowerResult};
 use simple_parser::Parser;
+use toml::Value;
 
 pub(crate) fn compile_to_mir(source: &str) -> MirLowerResult<MirModule> {
     let mut parser = Parser::new(source);
@@ -18,7 +18,7 @@ pub(crate) fn compile_to_mir_with_di(source: &str, di_toml: &str) -> MirLowerRes
     let mut parser = Parser::new(source);
     let ast = parser.parse().expect("parse failed");
     let hir_module = hir::lower(&ast).expect("hir lower failed");
-    let di_value: toml::Value = di_toml.parse().expect("parse di toml");
+    let di_value: Value = di_toml.parse().expect("parse di toml");
     let di_config = parse_di_config(&di_value)
         .expect("di config parse")
         .expect("di config present");

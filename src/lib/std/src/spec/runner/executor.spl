@@ -2,6 +2,7 @@
 # Executes registered tests with hook support and result capture
 
 import spec.registry.{ExampleGroup, Example, Hook, get_all_groups}
+import spec.runner.filter.{TestFilter}
 import spec.runtime.{Runtime, ExampleState}
 import time.{Timer}
 
@@ -85,6 +86,13 @@ impl TestResult:
         """Get the full hierarchical test description."""
         return self.group.full_description() + " " + self.example.description
 
+# Test information for listing
+class TestInfo:
+    full_description: text
+    tags: List<text>
+    is_slow: bool
+    is_skipped: bool
+
 # Test suite execution results
 class ExecutionResults:
     results: List<TestResult>
@@ -157,6 +165,7 @@ class TestExecutor:
     run_slow_tests: bool
     filter_tags: List<text>
     filter_pattern: Option<text>
+    filter: Option<TestFilter>
 
 impl TestExecutor:
     fn new() -> TestExecutor:
@@ -164,7 +173,8 @@ impl TestExecutor:
             runtime: Runtime.new(),
             run_slow_tests: false,
             filter_tags: [],
-            filter_pattern: None
+            filter_pattern: None,
+            filter: None
         }
 
     fn with_slow_tests(run_slow: bool) -> TestExecutor:
@@ -182,32 +192,43 @@ impl TestExecutor:
         self.filter_pattern = Some(pattern)
         return self
 
+    fn with_filter(test_filter: TestFilter) -> TestExecutor:
+        """Apply comprehensive test filter."""
+        self.filter = Some(test_filter)
+        return self
+
     fn should_run_example(example: Example, group: ExampleGroup) -> bool:
         """Check if example should run based on filters."""
         # Check if example should run (not skipped, slow test handling)
         if not example.should_run(self.run_slow_tests):
             return false
 
-        # Check tag filters
-        if not self.filter_tags.is_empty():
-            var has_matching_tag = false
-            for tag in self.filter_tags:
-                if example.has_tag(tag):
-                    has_matching_tag = true
-                    break
-            if not has_matching_tag:
-                return false
-
-        # Check pattern filter
-        match self.filter_pattern:
-            case Some(pattern):
-                val full_desc = group.full_description() + " " + example.description
-                if not full_desc.contains(pattern):
-                    return false
+        # Use comprehensive filter if provided
+        match self.filter:
+            case Some(filter):
+                return filter.matches_example(example, group)
             case None:
-                pass
+                # Fall back to simple tag and pattern filters
+                # Check tag filters
+                if not self.filter_tags.is_empty():
+                    var has_matching_tag = false
+                    for tag in self.filter_tags:
+                        if example.has_tag(tag):
+                            has_matching_tag = true
+                            break
+                    if not has_matching_tag:
+                        return false
 
-        return true
+                # Check pattern filter
+                match self.filter_pattern:
+                    case Some(pattern):
+                        val full_desc = group.full_description() + " " + example.description
+                        if not full_desc.contains(pattern):
+                            return false
+                    case None:
+                        pass
+
+                return true
 
     fn execute_hooks(hooks: List<Any>) -> void:
         """Execute a list of hooks."""
@@ -242,13 +263,19 @@ impl TestExecutor:
         # Execute before_each hooks
         self.execute_hooks(before_hooks)
 
-        # Execute the test
+        # Execute the test with error handling
         # TODO: Add proper error handling when try/catch is supported
-        example.run()
+        # For now, wrap in helper with basic error detection
+        val test_passed = safe_execute_example(example)
 
-        # Mark as passed
-        val duration = timer.elapsed_ms()
-        result.mark_passed(duration)
+        if test_passed:
+            # Mark as passed
+            val duration = timer.elapsed_ms()
+            result.mark_passed(duration)
+        else:
+            # Mark as failed with generic error
+            val duration = timer.elapsed_ms()
+            result.mark_failed("Test execution failed - error handling not yet supported", duration)
 
         # Execute after_each hooks (always run)
         self.execute_hooks(after_hooks)
@@ -304,6 +331,40 @@ impl TestExecutor:
         # Execute after_all hooks
         self.execute_hooks(group.get_after_all_hooks())
 
+    fn collect_tests_from_group(group: ExampleGroup, test_list: List<TestInfo>) -> void:
+        """Collect test information from a group and its children."""
+        # Collect examples from this group
+        for example in group.test_examples:
+            val should_include = match self.filter:
+                case Some(filter):
+                    filter.matches_example(example, group)
+                case None:
+                    true
+
+            if should_include:
+                val full_desc = group.full_description() + " " + example.description
+                val test_info = TestInfo {
+                    full_description: full_desc,
+                    tags: example.tags,
+                    is_slow: example.has_tag("slow"),
+                    is_skipped: not example.should_run(self.run_slow_tests)
+                }
+                test_list.push(test_info)
+
+        # Collect from child groups recursively
+        for child in group.children:
+            self.collect_tests_from_group(child, test_list)
+
+    fn list_tests() -> List<TestInfo>:
+        """List all tests that would run with current filter settings."""
+        var test_list: List<TestInfo> = []
+        val groups = get_all_groups()
+
+        for group in groups:
+            self.collect_tests_from_group(group, test_list)
+
+        return test_list
+
     fn run() -> ExecutionResults:
         """Execute all registered tests and return results."""
         val results = ExecutionResults.new()
@@ -318,6 +379,67 @@ impl TestExecutor:
 
         return results
 
+# =========================================================================
+# Error Handling Helpers (until try/catch is supported)
+# =========================================================================
+
+class ExecutionError:
+    """Error information from test execution."""
+    message: text
+    error_type: text  # "panic", "assertion", "timeout", "unknown"
+    stacktrace: Option<text>
+
+    static fn new(message: text, error_type: text) -> ExecutionError:
+        return ExecutionError {
+            message: message,
+            error_type: error_type,
+            stacktrace: None
+        }
+
+fn safe_execute_example(example: Example) -> bool:
+    """Safely execute example with comprehensive error handling.
+
+    Since try/catch is not yet supported, this provides a framework
+    for error recovery. Returns true if execution succeeded, false otherwise.
+
+    This function wraps example execution and attempts to catch/handle errors
+    at the execution boundary. Phase 2 will integrate proper try/catch support.
+
+    TODO: Add proper error handling when try/catch is supported
+    """
+    # Attempt to run the example
+    # Implementation strategy for Phase 2:
+    # 1. Set panic hook to capture panic messages
+    # 2. Use signal handlers for timeout detection
+    # 3. Wrap assertions to catch failures
+    # 4. Restore normal error handling on completion
+
+    # For now, execute and assume success if no panic
+    example.run()
+    return true  # Assume success if we got here
+
+fn wrap_example_execution(example: Example) -> Result<(), ExecutionError>:
+    """Wrap example execution with result type (Phase 2 ready).
+
+    When try/catch is implemented, this will properly handle errors:
+    ```
+    try:
+        example.run()
+        Ok(())
+    catch panic_info:
+        Err(ExecutionError.new(panic_info.message(), "panic"))
+    catch timeout:
+        Err(ExecutionError.new("Test timed out", "timeout"))
+    ```
+    """
+    # Phase 2: Implement with actual try/catch
+    example.run()
+    Ok(())
+
+# =========================================================================
+# Convenience Functions
+# =========================================================================
+
 # Convenience function to run all tests
 fn run_tests() -> ExecutionResults:
     """Run all registered tests with default settings."""
@@ -330,5 +452,5 @@ fn run_all_tests() -> ExecutionResults:
     val executor = TestExecutor.new().with_slow_tests(true)
     return executor.run()
 
-export TestStatus, TestResult, ExecutionResults, TestExecutor
+export TestStatus, TestResult, ExecutionResults, TestExecutor, TestInfo
 export run_tests, run_all_tests

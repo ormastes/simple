@@ -1,4 +1,6 @@
 //! Lint type definitions and enumerations.
+//!
+//! #![skip_todo]
 
 /// Lint severity level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

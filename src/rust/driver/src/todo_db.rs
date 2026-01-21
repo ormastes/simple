@@ -4,7 +4,9 @@
 //! and generating documentation. It integrates with the `todo_parser` module to automatically
 //! scan and update TODOs from both Rust and Simple source files.
 
+use crate::db_lock::FileLock;
 use crate::todo_parser::{ParseError, TodoItem, TodoParser};
+use crate::unified_db::Record;
 use indexmap::IndexMap;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -44,6 +46,57 @@ pub struct TodoDb {
     pub records: BTreeMap<String, TodoRecord>,
     pub file_cache: BTreeMap<String, FileCache>,
     next_id: usize,
+}
+
+/// Implement Record trait for unified database access
+impl Record for TodoRecord {
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn table_name() -> &'static str {
+        "todos"
+    }
+
+    fn from_sdn_row(row: &[String]) -> Result<Self, String> {
+        Ok(TodoRecord {
+            id: row.get(0).cloned().unwrap_or_default(),
+            keyword: row.get(1).cloned().unwrap_or_else(|| "TODO".to_string()),
+            area: row.get(2).cloned().unwrap_or_default(),
+            priority: row.get(3).cloned().unwrap_or_else(|| "P2".to_string()),
+            description: row.get(4).cloned().unwrap_or_default(),
+            file: row.get(5).cloned().unwrap_or_default(),
+            line: row.get(6).and_then(|s| s.parse().ok()).unwrap_or(0),
+            issue: row.get(7).cloned().filter(|s| !s.is_empty()),
+            blocked: row
+                .get(8)
+                .map(|s| {
+                    s.split(',')
+                        .map(|x| x.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            status: row.get(9).cloned().unwrap_or_else(|| "open".to_string()),
+            valid: row.get(10).map(|s| s == "true").unwrap_or(true),
+        })
+    }
+
+    fn to_sdn_row(&self) -> Vec<String> {
+        vec![
+            self.id.clone(),
+            self.keyword.clone(),
+            self.area.clone(),
+            self.priority.clone(),
+            self.description.clone(),
+            self.file.clone(),
+            self.line.to_string(),
+            self.issue.clone().unwrap_or_default(),
+            self.blocked.join(","),
+            self.status.clone(),
+            self.valid.to_string(),
+        ]
+    }
 }
 
 impl TodoDb {
@@ -90,6 +143,10 @@ impl TodoDb {
 /// Load TODO database from SDN file
 pub fn load_todo_db(path: &Path) -> Result<TodoDb, String> {
     eprintln!("DEBUG: load_todo_db called for path: {}", path.display());
+
+    // Acquire lock before reading
+    let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
+
     if !path.exists() {
         eprintln!("DEBUG: Database file does not exist, creating new");
         return Ok(TodoDb::new());
@@ -248,6 +305,10 @@ fn parse_todo_db(doc: &SdnDocument, path: &Path) -> Result<TodoDb, String> {
 
 /// Save TODO database to SDN file
 pub fn save_todo_db(path: &Path, db: &TodoDb) -> Result<(), std::io::Error> {
+    // Acquire lock before writing
+    let _lock =
+        FileLock::acquire(path, 10).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+
     let fields = vec![
         "id".to_string(),
         "keyword".to_string(),
@@ -322,11 +383,15 @@ pub fn save_todo_db(path: &Path, db: &TodoDb) -> Result<(), std::io::Error> {
         content.push('\n');
     }
 
-    // Save main todo database
+    // Save main todo database with atomic write
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, content)?;
+    // Write to temporary file first
+    let temp_path = path.with_extension("sdn.tmp");
+    fs::write(&temp_path, content)?;
+    // Atomically rename to target path
+    fs::rename(&temp_path, path)?;
 
     // Save file cache separately to avoid SDN multi-table parsing issues
     let cache_path = path.with_extension("cache.sdn");
@@ -347,7 +412,10 @@ pub fn save_todo_db(path: &Path, db: &TodoDb) -> Result<(), std::io::Error> {
         cache_content.push_str(&format!("\"{}\"", cache.todo_ids.join(";")));
         cache_content.push('\n');
     }
-    fs::write(cache_path, cache_content)?;
+    // Atomic write for cache file
+    let cache_temp_path = cache_path.with_extension("tmp");
+    fs::write(&cache_temp_path, cache_content)?;
+    fs::rename(&cache_temp_path, cache_path)?;
 
     Ok(())
 }
@@ -380,7 +448,7 @@ pub fn update_todo_db_incremental_parallel(
     let mut skipped = 0;
 
     eprintln!("DEBUG: File cache has {} entries", db.file_cache.len());
-    if incremental && db.file_cache.len() > 0 {
+    if incremental && !db.file_cache.is_empty() {
         eprintln!("DEBUG: First cache entry: {:?}", db.file_cache.iter().next());
     }
 
@@ -763,13 +831,13 @@ fn generate_todo_section(md: &mut String, todos: &[&&TodoRecord]) {
             if !todo.blocked.is_empty() {
                 md.push_str(&format!(" [blocked:{}]", todo.blocked.join(",")));
             }
-            md.push_str("\n");
+            md.push('\n');
             md.push_str(&format!("  - File: `{}:{}`\n", todo.file, todo.line));
             md.push_str(&format!("  - Status: {}\n", todo.status));
             if !todo.blocked.is_empty() {
                 md.push_str(&format!("  - Blocked by: {}\n", todo.blocked.join(", ")));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
     }
 }

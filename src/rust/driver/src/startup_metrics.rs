@@ -42,6 +42,8 @@ pub enum StartupPhase {
     PanicHookInit,
     /// Signal handler setup (Ctrl-C)
     SignalHandlerInit,
+    /// Database cleanup (stale temp files)
+    DbCleanup,
     /// Main argument parsing
     MainArgParse,
     /// Sandbox application
@@ -66,6 +68,7 @@ impl StartupPhase {
             Self::HandlerInit => "Handler Setup",
             Self::PanicHookInit => "Panic Hook Init",
             Self::SignalHandlerInit => "Signal Handler Init",
+            Self::DbCleanup => "Database Cleanup",
             Self::MainArgParse => "Main Argument Parsing",
             Self::SandboxSetup => "Sandbox Setup",
             Self::PrefetchWait => "Prefetch Wait",

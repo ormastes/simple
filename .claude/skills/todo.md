@@ -1,3 +1,5 @@
+<!-- skip_todo -->
+
 # TODO Skill - Comment Format Specification
 
 ## Format
@@ -51,7 +53,6 @@ FIXME: [area][priority] description [#issue] [blocked:#issue,#issue]
 
 ```markdown
 <!-- TODO: [doc][P1] Add examples section [#234] -->
-<!-- FIXME: [doc][P0] Fix broken links [#567] [blocked:#123] -->
 
 > **TODO** [stdlib][P2]: Document variant selection API
 
@@ -171,6 +172,118 @@ Run linter:
 ./target/debug/simple simple/app/lint/main.spl <file.spl>
 ```
 
+### Skipping TODO Checks
+
+For files that discuss, parse, or process TODOs (like parsers, collectors, migration scripts, or documentation), you can skip TODO format checking using the `#![skip_todo]` attribute at the top of the file:
+
+**Rust files:**
+```rust
+//! Module documentation
+//!
+//! #![skip_todo]
+
+use std::...
+```
+
+**Simple files:**
+```simple
+# Module documentation
+#
+# #![skip_todo]
+
+use core...
+```
+
+**Markdown files:**
+```markdown
+<!-- skip_todo -->
+
+# Document Title
+
+Documentation with example TODOs...
+```
+
+**Also supported (for flexibility):**
+- Rust: `#![allow(todo_format)]` - Standard lint attribute syntax
+- Rust/Simple: `// skip_todo` or `# skip_todo` - Comment-based skip
+- Markdown: `<!-- #![skip_todo] -->` or `<!-- #![allow(todo_format)] -->` - HTML comment variants
+
+**When to use:**
+- TODO parser implementations
+- TODO collector/scanner tools
+- Migration scripts that process TODOs
+- Documentation files with TODO format examples
+- Test files that test TODO parsing
+
+**Files already using skip_todo:**
+
+Rust/Simple code:
+- `src/rust/driver/src/todo_parser.rs`
+- `src/rust/compiler/src/lint/checker.rs`
+- `src/rust/compiler/src/lint/types.rs`
+- `src/rust/compiler/src/lint/mod.rs`
+- `src/lib/std/src/tooling/todo_parser.spl`
+- `src/lib/std/src/tooling/dashboard/collectors/todo_collector.spl`
+- `scripts/simple/migrate_todo.spl`
+
+Markdown documentation:
+- `.claude/skills/todo.md`
+- `doc/design/IMPLEMENTATION_SUMMARY.md`
+- `doc/design/TODO_CONTRIBUTING_UPDATE.md`
+- `doc/design/TODO_QUICKSTART.md`
+- `doc/design/TODO_SYSTEM_COMPLETE.md`
+- `doc/design/dual_language_parsing_summary.md`
+- `doc/design/dual_language_todo_parsing.md`
+
+## TODO Documentation Generation
+
+The TODO system automatically generates documentation when scanning:
+
+**Command:** `simple todo-scan`
+
+**Generated Files:**
+1. `doc/todo/todo_db.sdn` - TODO database (SDN format)
+2. `doc/TODO.md` - Human-readable TODO documentation (NEW: auto-generated)
+
+**Workflow:**
+```bash
+# Scan codebase and generate docs (both files updated automatically)
+simple todo-scan
+
+# Output:
+# Scanning TODOs from .
+# Scan complete:
+#   Added:   5 TODOs
+#   Updated: 2 TODOs
+#   Removed: 1 TODOs
+#   Total:   71 TODOs
+# Database saved to doc/todo/todo_db.sdn
+# Generated docs to doc/TODO.md  ← Automatic!
+```
+
+**Legacy workflow (still works):**
+```bash
+# Old two-step process (still supported)
+simple todo-scan   # Only update database
+simple todo-gen    # Only generate docs
+```
+
+**doc/TODO.md Contents:**
+- Statistics (total, open, blocked, stale)
+- By Area table
+- By Priority table
+- P0 Critical TODOs section
+- P1 High Priority TODOs section
+- Blocked TODOs section
+- Stale TODOs section
+
+**Comparison with Feature System:**
+
+| System | Command | Database | Docs | Updated |
+|--------|---------|----------|------|---------|
+| **TODO** | `simple todo-scan` | `doc/todo/todo_db.sdn` | `doc/TODO.md` | Manual command |
+| **Feature** | `simple test` | `doc/feature/feature_db.sdn` | `doc/feature/*.md` | **Every test run** |
+
 ## Migration
 
 **Script:** `scripts/simple/migrate_todo.spl`
@@ -197,6 +310,6 @@ Run linter:
 
 ## See Also
 
-- `simple/TODO.md` - Project TODO list
-- `doc/status/` - Feature implementation status
+- `doc/TODO.md` - Project TODO list
+- `doc/feature/` - Feature implementation status
 - `.claude/skills/debug.md` - Debugging skill

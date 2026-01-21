@@ -53,20 +53,45 @@ fn parse_coverage_json(content: text) -> Result<List<CoverageMetric>, text>:
     var metrics: List<CoverageMetric> = []
     val timestamp = now_iso8601()
 
-    # For now, create a single workspace-level metric as placeholder
-    # TODO: Implement full JSON parsing when JSON library is available
+    # Extract top-level coverage percentage
+    match extract_json_number(content, "coverage"):
+        case Some(coverage):
+            # Extract lines covered/total
+            match extract_json_number(content, "lines_valid"):
+                case Some(lines_total):
+                    match extract_json_number(content, "lines_covered"):
+                        case Some(lines_covered):
+                            metrics.append(CoverageMetric.new(
+                                0,
+                                "workspace",
+                                "simple",
+                                "",
+                                lines_total as i32,
+                                lines_covered as i32,
+                                coverage,
+                                0,  # branches_total (not always available)
+                                coverage,  # branch coverage estimate
+                                timestamp
+                            ))
+                            return Ok(metrics)
+                        case None: pass
+                case None: pass
+        case None: pass
+
+    # Fallback: create placeholder if parsing fails
     metrics.append(CoverageMetric.new(
         0,
         "workspace",
         "simple",
         "",
-        1000,  # Placeholder
-        800,   # Placeholder
-        80.0,  # Placeholder
-        500,   # Placeholder
-        75.0,  # Placeholder
+        1000,
+        800,
+        80.0,
+        0,
+        75.0,
         timestamp
     ))
+    return Ok(metrics)
 
     return Ok(metrics)
 
@@ -125,9 +150,106 @@ fn parse_coverage_line(line: text, id: i32, timestamp: text) -> Result<CoverageM
 
 # Parse percentage string to float
 fn parse_percentage(s: text) -> f64:
-    # Simplified - would use proper float parsing
-    # For now, return fixed value
-    return 80.0  # Placeholder
+    """Parse percentage string to float (e.g., "80.5" -> 80.5)."""
+    if s.is_empty():
+        return 0.0
+
+    var result: f64 = 0.0
+    var has_dot = false
+    var decimal_places = 0.0
+
+    for i in 0..s.len():
+        val ch = s[i]
+
+        if ch == ".":
+            if has_dot:
+                break
+            has_dot = true
+        elif ch >= "0" and ch <= "9":
+            val digit = ch.to_i32() - "0".to_i32()
+            if has_dot:
+                decimal_places = decimal_places + 1.0
+                result = result + (digit as f64) / (10.0 ** decimal_places)
+            else:
+                result = result * 10.0 + (digit as f64)
+
+    return result
+
+# =========================================================================
+# JSON Extraction Helpers
+# =========================================================================
+
+fn extract_json_number(json: text, key: text) -> Option<f64>:
+    """Extract a numeric value from JSON by key (simple parser).
+
+    Example: extract_json_number({"coverage": 85.5}, "coverage") -> Some(85.5)
+    """
+    # Look for pattern: "key": number
+    val pattern = "\"{key}\":"
+    val start_pos = json.find(pattern)
+
+    if start_pos < 0:
+        return None
+
+    # Start after the colon
+    var pos = start_pos + pattern.len()
+
+    # Skip whitespace
+    while pos < json.len() and (json[pos] == " " or json[pos] == "\t"):
+        pos = pos + 1
+
+    # Extract number string
+    var num_str = ""
+    var has_bracket = false
+
+    if pos < json.len():
+        if json[pos] == "[":
+            has_bracket = true
+            pos = pos + 1
+
+        # Read until comma, closing bracket, or end
+        while pos < json.len():
+            val ch = json[pos]
+            if ch == "," or ch == "}" or ch == "]" or ch == "\n":
+                break
+            num_str = "{num_str}{ch}"
+            pos = pos + 1
+
+    # Parse extracted number
+    val num_str_trimmed = num_str.trim()
+    if num_str_trimmed.is_empty():
+        return None
+
+    # Try to parse as float
+    match parse_json_number(num_str_trimmed):
+        case Some(n): Some(n)
+        case None: None
+
+fn parse_json_number(s: text) -> Option<f64>:
+    """Parse JSON number format (integer or float)."""
+    if s.is_empty():
+        return None
+
+    var result: f64 = 0.0
+    var has_dot = false
+    var is_negative = false
+
+    for i in 0..s.len():
+        val ch = s[i]
+
+        if ch == "-" and i == 0:
+            is_negative = true
+        elif ch == ".":
+            if has_dot:
+                return None  # Multiple dots invalid
+            has_dot = true
+        elif ch >= "0" and ch <= "9":
+            val digit = ch.to_i32() - "0".to_i32()
+            result = result * 10.0 + (digit as f64)
+        else:
+            return None  # Invalid character
+
+    return Some(if is_negative: -result else: result)
 
 # =========================================================================
 # Convenience Functions

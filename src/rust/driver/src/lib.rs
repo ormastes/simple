@@ -1,5 +1,7 @@
+pub mod bug_db;
 pub mod cli;
 pub mod compile_options;
+pub mod db_lock;
 pub mod dependency_cache;
 pub mod diagnostics_conversion;
 pub mod doctest;
@@ -18,8 +20,11 @@ pub mod runner;
 pub mod simple_test;
 pub mod startup_metrics;
 pub mod task_db;
+pub mod test_db;
+pub mod test_stats;
 pub mod todo_db;
 pub mod todo_parser;
+pub mod unified_db;
 pub mod watcher;
 
 pub use compile_options::{CompileOptions, CompileProfiler};

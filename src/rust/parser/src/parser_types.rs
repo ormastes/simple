@@ -244,6 +244,20 @@ impl<'a> Parser<'a> {
                         keys.push(s.clone());
                         self.advance();
                     }
+                    // Handle FString that is a pure literal (no interpolation)
+                    TokenKind::FString(parts) if parts.len() == 1 => {
+                        use crate::token::FStringToken;
+                        if let FStringToken::Literal(s) = &parts[0] {
+                            keys.push(s.clone());
+                            self.advance();
+                        } else {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "string literal for const key".to_string(),
+                                found: format!("{:?}", self.current.kind),
+                                span: self.current.span.clone(),
+                            });
+                        }
+                    }
                     _ => {
                         return Err(ParseError::UnexpectedToken {
                             expected: "string literal for const key".to_string(),

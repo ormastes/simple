@@ -8,7 +8,17 @@ impl TypeChecker {
                 use simple_parser::ast::FStringPart;
                 for part in parts {
                     if let FStringPart::Expr(e) = part {
-                        let _ = self.infer_expr(&e)?;
+                        // For template strings, allow undefined identifiers in placeholders
+                        // This enables template.with {...} pattern where placeholders are
+                        // names, not variable references
+                        match self.infer_expr(e) {
+                            Ok(_) => {}
+                            Err(TypeError::Undefined(_)) => {
+                                // Ignore undefined identifier errors in FString placeholders
+                                // These will be provided via .with method
+                            }
+                            Err(other) => return Err(other),
+                        }
                     }
                 }
                 Ok(Type::Str)
@@ -226,11 +236,31 @@ impl TypeChecker {
                 let _ = self.infer_expr(receiver)?;
                 Ok(self.fresh_var())
             }
-            Expr::MethodCall { receiver, args, .. } => {
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+            } => {
                 let _ = self.infer_expr(receiver)?;
                 for arg in args {
                     let _ = self.infer_expr(&arg.value)?;
                 }
+
+                // Handle .with for FString literals and tracked variables
+                if method == "with" {
+                    if let Some(const_keys) = self.get_fstring_keys_from_expr(receiver) {
+                        // Validate dict argument against const_keys
+                        if let Some(arg) = args.first() {
+                            let expected_ty = Type::Dict {
+                                key: Box::new(Type::ConstKeySet { keys: const_keys }),
+                                value: Box::new(Type::Str),
+                            };
+                            self.validate_dict_const_keys(&arg.value, &expected_ty)?;
+                        }
+                        return Ok(Type::Str);
+                    }
+                }
+
                 Ok(self.fresh_var())
             }
             Expr::StructInit { fields, .. } => {

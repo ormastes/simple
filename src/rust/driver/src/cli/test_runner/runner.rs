@@ -9,13 +9,14 @@ use simple_compiler::{init_coverage, is_coverage_enabled};
 
 use crate::runner::Runner;
 use super::test_discovery::{discover_tests, matches_tag};
-use super::types::{TestFileResult, TestOptions, TestRunResult, OutputFormat};
+use super::types::{TestFileResult, TestLevel, TestOptions, TestRunResult, OutputFormat};
 use super::execution::run_test_file;
 use super::doctest::{run_doctests, run_md_doctests};
 use super::diagrams::generate_test_diagrams;
 use super::discovery::print_discovery_summary;
 use super::coverage::save_coverage_data;
 use super::feature_db::update_feature_database;
+use super::test_db_update::update_test_database;
 
 /// Run tests with the given options
 pub fn run_tests(options: TestOptions) -> TestRunResult {
@@ -35,8 +36,18 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
     // Execute tests
     let (mut results, mut total_passed, mut total_failed) = execute_test_files(&runner, &test_files, &options, quiet);
 
+    // Determine if all tests were run (no filters applied)
+    let all_tests_run = options.path.is_none() && options.tag.is_none() && options.level == TestLevel::All;
+
     // Update feature database
     update_feature_database(&test_files, &mut results, &mut total_failed);
+
+    // Update test database
+    if let Err(e) = update_test_database(&test_files, &results, all_tests_run) {
+        if !quiet {
+            eprintln!("Warning: Failed to update test database: {}", e);
+        }
+    }
 
     // Run doctests
     run_all_doctests(&options, &mut results, &mut total_passed, &mut total_failed, quiet);

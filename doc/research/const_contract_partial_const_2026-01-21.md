@@ -1,7 +1,7 @@
 # Research: Const Contract, Partial Const, and Meta Const Data
 
 **Date:** 2026-01-21
-**Status:** Research Complete
+**Status:** Implementation Complete (Phases 1-3)
 
 ## 1. Problem Statement
 
@@ -399,19 +399,25 @@ pub fn eval_const_expr(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
 
 5. Updated all match handlers in:
    - `doc_gen.rs` (format_type)
-   - `checker_unify.rs` (ast_type_to_type)
+   - `checker_unify.rs` (ast_type_to_type, types_compatible, unify)
    - `monomorphize/util.rs` (ast_type_to_concrete)
    - `monomorphize/engine.rs` (substitute_ast_type)
 
-6. **Remaining:** Compile-time dict key validation (type checker integration)
+6. Added compile-time dict key validation:
+   - `TypeError::ConstKeyNotFound` for unknown keys
+   - `TypeError::ConstKeyMissing` for missing required keys
+   - `validate_dict_keys_against_const_set()` validation function
+   - `validate_dict_const_keys()` in checker_check.rs
 
-### Phase 3: Dependent Keys & FString Integration - PARTIALLY IMPLEMENTED
+### Phase 3: Dependent Keys & FString Integration - IMPLEMENTED
 
-**Status: Syntax parsing complete**
+**Status: Complete (2026-01-21)**
 
 1. `value.keys` syntax added to type parser
-2. **Remaining:** Type checker resolution of dependent keys to FString const_keys
-3. **Remaining:** Dict key validation against FString placeholders
+2. Added `fstring_const_keys: HashMap<String, Vec<String>>` to TypeChecker to track FString const_keys
+3. Let statement handler extracts and stores FString const_keys when binding variables
+4. `resolve_dependent_keys()` method resolves `template.keys` to the FString's const_keys
+5. Dict key validation works with resolved dependent keys
 
 ### Phase 4: Instantiation Sugar - ALREADY IMPLEMENTED
 

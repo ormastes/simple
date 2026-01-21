@@ -8,6 +8,8 @@
 
 use crate::StartupMetrics;
 use std::path::PathBuf;
+use std::fs;
+use walkdir::WalkDir;
 
 /// Initialize logging system based on build mode
 ///
@@ -102,9 +104,54 @@ pub fn init_signal_handlers(metrics: &mut StartupMetrics) {
     metrics.record(crate::StartupPhase::SignalHandlerInit, signal_start.elapsed());
 }
 
+/// Clean up stale temporary database files from crashed writes
+/// This removes any .sdn.tmp and .cache.tmp files left over from interrupted atomic writes
+pub fn cleanup_stale_db_files(metrics: &mut StartupMetrics) {
+    let cleanup_start = std::time::Instant::now();
+
+    // Check for stale .sdn.tmp and .cache.tmp files in common database locations
+    let db_locations = vec![
+        PathBuf::from("doc/todo"),
+        PathBuf::from("doc/feature"),
+        PathBuf::from("doc/task"),
+        PathBuf::from(".simple"),
+    ];
+
+    for location in db_locations {
+        if !location.exists() {
+            continue;
+        }
+
+        // Search for .tmp files (atomic write artifacts)
+        if let Ok(entries) = fs::read_dir(&location) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "tmp") {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+
+        // Also check subdirectories recursively (for nested database files)
+        WalkDir::new(&location)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .for_each(|entry| {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "tmp") {
+                    let _ = fs::remove_file(path);
+                }
+            });
+    }
+
+    metrics.record(crate::StartupPhase::DbCleanup, cleanup_start.elapsed());
+}
+
 /// Run all initialization phases in sequence
 pub fn init_runtime(metrics: &mut StartupMetrics) {
     init_logging(metrics);
+    cleanup_stale_db_files(metrics);
     init_interpreter_handlers(metrics);
     init_panic_hook(metrics);
     init_signal_handlers(metrics);

@@ -17,12 +17,14 @@
 //!          └─ run_test_file() - compile, execute, parse results
 //! ```
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use walkdir::WalkDir;
 
 use crate::{Interpreter, RunConfig};
+use crate::test_db::{self, TestStatus, TestFailure as DbTestFailure};
 use simple_compiler::interpreter::clear_module_cache;
 
 /// Category of test based on location in test directory.
@@ -416,6 +418,56 @@ fn parse_test_output(
     }
 }
 
+/// Convert SimpleTestResult to test_db types for database recording.
+fn convert_to_db_result(result: &SimpleTestResult) -> (TestStatus, f64, Option<DbTestFailure>) {
+    match result {
+        SimpleTestResult::Pass { duration_ms, .. } => {
+            (TestStatus::Passed, *duration_ms as f64, None)
+        }
+        SimpleTestResult::Fail {
+            duration_ms,
+            failures,
+            ..
+        } => {
+            let failure = if let Some(first_failure) = failures.first() {
+                Some(DbTestFailure {
+                    error_message: first_failure.message.clone(),
+                    assertion_failed: Some(first_failure.test_name.clone()),
+                    location: first_failure.location.clone(),
+                    stack_trace: None,
+                })
+            } else {
+                Some(DbTestFailure {
+                    error_message: "Test failed with no specific failure message".to_string(),
+                    assertion_failed: None,
+                    location: None,
+                    stack_trace: None,
+                })
+            };
+            (TestStatus::Failed, *duration_ms as f64, failure)
+        }
+        SimpleTestResult::CompileError { error, .. } => {
+            let failure = DbTestFailure {
+                error_message: format!("Compile error: {}", error),
+                assertion_failed: None,
+                location: None,
+                stack_trace: None,
+            };
+            (TestStatus::Failed, 0.0, Some(failure))
+        }
+        SimpleTestResult::RuntimeError { error, .. } => {
+            let failure = DbTestFailure {
+                error_message: format!("Runtime error: {}", error),
+                assertion_failed: None,
+                location: None,
+                stack_trace: None,
+            };
+            (TestStatus::Failed, 0.0, Some(failure))
+        }
+        SimpleTestResult::Skipped { .. } => (TestStatus::Skipped, 0.0, None),
+    }
+}
+
 /// Run all discovered tests and return results.
 ///
 /// # Arguments
@@ -427,7 +479,14 @@ fn parse_test_output(
 pub fn run_all_tests(test_root: &Path, filter: Option<&str>) -> Vec<(SimpleTestFile, SimpleTestResult)> {
     let tests = discover_tests(test_root);
 
-    tests
+    // Determine if we're running all tests (for timing baseline updates)
+    let all_tests_run = filter.is_none();
+
+    // Load test database (create if doesn't exist)
+    let db_path = Path::new("doc/test/test_db.sdn");
+    let mut test_db = test_db::load_test_db(db_path).unwrap_or_else(|_| test_db::TestDb::new());
+
+    let results: Vec<(SimpleTestFile, SimpleTestResult)> = tests
         .into_iter()
         .filter(|t| {
             if let Some(pattern) = filter {
@@ -438,9 +497,39 @@ pub fn run_all_tests(test_root: &Path, filter: Option<&str>) -> Vec<(SimpleTestF
         })
         .map(|test_file| {
             let result = run_test_file(&test_file.path);
+
+            // Update test database with result
+            let test_id = test_file.relative_path.clone();
+            let test_name = test_file.module_path.clone();
+            let test_file_path = test_file.relative_path.clone();
+            let category = format!("{:?}", test_file.category);
+            let (status, duration_ms, failure) = convert_to_db_result(&result);
+
+            // Update the database (ignore errors to not break test runs)
+            test_db::update_test_result(
+                &mut test_db,
+                &test_id,
+                &test_name,
+                &test_file_path,
+                &category,
+                status,
+                duration_ms,
+                failure,
+                all_tests_run,
+            );
+
             (test_file, result)
         })
-        .collect()
+        .collect();
+
+    // Save updated database (ignore errors to not break test runs)
+    let _ = test_db::save_test_db(db_path, &test_db);
+
+    // Generate test result documentation
+    let doc_dir = Path::new("doc/test");
+    let _ = test_db::generate_test_result_docs(&test_db, doc_dir);
+
+    results
 }
 
 #[cfg(test)]

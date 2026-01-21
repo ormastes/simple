@@ -150,9 +150,7 @@ pub struct TypeMeta {
 impl TypeMeta {
     /// Create empty type metadata
     pub fn new() -> Self {
-        Self {
-            meta: ConstMeta::new(),
-        }
+        Self { meta: ConstMeta::new() }
     }
 
     /// Create type metadata with const_keys
@@ -241,8 +239,7 @@ impl MetaResolver {
         type_meta: Option<&'a TypeMeta>,
         default_meta: Option<&'a ConstMeta>,
     ) -> Option<&'a Vec<String>> {
-        Self::resolve("const_keys", obj_meta, type_meta, default_meta)
-            .and_then(|v| v.as_string_set())
+        Self::resolve("const_keys", obj_meta, type_meta, default_meta).and_then(|v| v.as_string_set())
     }
 }
 
@@ -321,10 +318,7 @@ mod tests {
     #[test]
     fn test_meta_resolver() {
         let type_meta = TypeMeta::with_const_keys(vec!["a".to_string(), "b".to_string()]);
-        let obj_meta = ObjMeta::with_meta(ConstMeta::with_const_keys(vec![
-            "x".to_string(),
-            "y".to_string(),
-        ]));
+        let obj_meta = ObjMeta::with_meta(ConstMeta::with_const_keys(vec!["x".to_string(), "y".to_string()]));
 
         // Obj meta takes precedence
         let keys = MetaResolver::resolve_const_keys(Some(&obj_meta), Some(&type_meta), None);
