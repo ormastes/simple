@@ -303,6 +303,7 @@ pub fn check_import_compatibility(
             Effect::Verify => None,  // Verification mode marker, no capability
             Effect::Trusted => None, // Trusted boundary marker, no capability
             Effect::Ghost => None,   // Ghost is compile-time only, no capability
+            Effect::AutoLean(_) => None, // AutoLean is compile-time only, no capability
         };
 
         if let Some(cap) = required_cap {

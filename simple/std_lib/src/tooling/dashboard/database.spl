@@ -1,0 +1,520 @@
+# Dashboard Database - SDN Operations
+#
+# This module handles reading and writing dashboard data to SDN (Simple Data Notation)
+# format files. All database tables are stored in doc/dashboard/tables/.
+
+use core.io.fs.{read_text_file, write_text_file, ensure_dir, file_exists}
+use core.time.{now_iso8601}
+use tooling.dashboard.types.{
+    DashboardData, Feature, SspecTest, TodoItem, CoverageMetric,
+    DuplicationMetric, TestExecution, VerificationStatus, VcsState,
+    BuildTime, Dependency, Plan, Status, TestStatus, TrendStatus
+}
+
+# =========================================================================
+# Constants
+# =========================================================================
+
+val DB_ROOT: text = "doc/dashboard"
+val TABLES_DIR: text = "doc/dashboard/tables"
+val HISTORY_DIR: text = "doc/dashboard/history"
+val CACHE_FILE: text = "doc/dashboard/dashboard_db.cache.sdn"
+
+# =========================================================================
+# Database Manager
+# =========================================================================
+
+class DashboardDatabase:
+    root_path: text
+    tables_path: text
+    history_path: text
+
+    static fn new() -> DashboardDatabase:
+        return DashboardDatabase {
+            root_path: DB_ROOT,
+            tables_path: TABLES_DIR,
+            history_path: HISTORY_DIR
+        }
+
+    # Initialize database directories
+    fn initialize() -> Result<(), text>:
+        match ensure_dir(self.root_path):
+            Err(e) => return Err("Failed to create {self.root_path}: {e}")
+            Ok(_) => pass
+
+        match ensure_dir(self.tables_path):
+            Err(e) => return Err("Failed to create {self.tables_path}: {e}")
+            Ok(_) => pass
+
+        match ensure_dir(self.history_path):
+            Err(e) => return Err("Failed to create {self.history_path}: {e}")
+            Ok(_) => pass
+
+        return Ok(())
+
+    # =========================================================================
+    # Write Operations
+    # =========================================================================
+
+    # Write complete dashboard data to all tables
+    fn write_all(data: DashboardData) -> Result<(), text>:
+        match self.initialize():
+            Err(e) => return Err(e)
+            Ok(_) => pass
+
+        match self.write_features(data.features):
+            Err(e) => return Err("Failed to write features: {e}")
+            Ok(_) => pass
+
+        match self.write_sspec_tests(data.sspec_tests):
+            Err(e) => return Err("Failed to write sspec_tests: {e}")
+            Ok(_) => pass
+
+        match self.write_todos(data.todos):
+            Err(e) => return Err("Failed to write todos: {e}")
+            Ok(_) => pass
+
+        match self.write_coverage(data.coverage):
+            Err(e) => return Err("Failed to write coverage: {e}")
+            Ok(_) => pass
+
+        match self.write_duplication(data.duplication):
+            Err(e) => return Err("Failed to write duplication: {e}")
+            Ok(_) => pass
+
+        match self.write_test_executions(data.test_executions):
+            Err(e) => return Err("Failed to write test_executions: {e}")
+            Ok(_) => pass
+
+        match self.write_verification(data.verification):
+            Err(e) => return Err("Failed to write verification: {e}")
+            Ok(_) => pass
+
+        match self.write_vcs_state(data.vcs_state):
+            Err(e) => return Err("Failed to write vcs_state: {e}")
+            Ok(_) => pass
+
+        match self.write_build_times(data.build_times):
+            Err(e) => return Err("Failed to write build_times: {e}")
+            Ok(_) => pass
+
+        match self.write_dependencies(data.dependencies):
+            Err(e) => return Err("Failed to write dependencies: {e}")
+            Ok(_) => pass
+
+        match self.write_plans(data.plans):
+            Err(e) => return Err("Failed to write plans: {e}")
+            Ok(_) => pass
+
+        return Ok(())
+
+    # Write features table
+    fn write_features(features: List<Feature>) -> Result<(), text>:
+        val path = "{self.tables_path}/features.sdn"
+        var content = "features |id, category, name, status, test_coverage, last_updated|\n"
+
+        for feature in features:
+            val status_str = status_to_string(feature.status)
+            val updated = now_iso8601()
+            content = "{content}    {feature.id}, {feature.category}, {quote(feature.name)}, {status_str}, 0, {updated}\n"
+
+        return write_text_file(path, content)
+
+    # Write sspec_tests table
+    fn write_sspec_tests(tests: List<SspecTest>) -> Result<(), text>:
+        val path = "{self.tables_path}/sspec_tests.sdn"
+        var content = "sspec_tests |id, file, title, category, difficulty, status, total_tests, passed, failed, duration_ms, has_docs, last_run|\n"
+
+        for test in tests:
+            val status_str = status_to_string(test.status)
+            val has_docs_str = if test.has_docs: "true" else: "false"
+            content = "{content}    {test.id}, {quote(test.file)}, {quote(test.title)}, {quote(test.category)}, {quote(test.difficulty)}, {status_str}, {test.total_tests}, {test.passed}, {test.failed}, {test.duration_ms}, {has_docs_str}, {quote(test.last_run)}\n"
+
+        return write_text_file(path, content)
+
+    # Write todos table
+    fn write_todos(todos: List<TodoItem>) -> Result<(), text>:
+        val path = "{self.tables_path}/todos.sdn"
+        var content = "todos |id, keyword, area, priority, description, file, line, issue, blocked, status, age_days, assigned, last_updated|\n"
+
+        for todo in todos:
+            content = "{content}    {todo.id}, {todo.keyword}, {todo.area}, {todo.priority}, {quote(todo.description)}, {quote(todo.file)}, {todo.line}, {quote(todo.issue)}, {quote(todo.blocked)}, {todo.status}, {todo.age_days}, {quote(todo.assigned)}, {quote(todo.last_updated)}\n"
+
+        return write_text_file(path, content)
+
+    # Write coverage table
+    fn write_coverage(metrics: List<CoverageMetric>) -> Result<(), text>:
+        val path = "{self.tables_path}/coverage.sdn"
+        var content = "coverage |id, level, crate, file, lines_total, lines_covered, lines_percent, branches_covered, branches_percent, timestamp|\n"
+
+        for metric in metrics:
+            content = "{content}    {metric.id}, {metric.level}, {quote(metric.crate)}, {quote(metric.file)}, {metric.lines_total}, {metric.lines_covered}, {metric.lines_percent}, {metric.branches_covered}, {metric.branches_percent}, {quote(metric.timestamp)}\n"
+
+        return write_text_file(path, content)
+
+    # Write duplication table
+    fn write_duplication(metrics: List<DuplicationMetric>) -> Result<(), text>:
+        val path = "{self.tables_path}/duplication.sdn"
+        var content = "duplication |id, file1, file2, lines, tokens, percentage, timestamp|\n"
+
+        for metric in metrics:
+            content = "{content}    {metric.id}, {quote(metric.file1)}, {quote(metric.file2)}, {metric.lines}, {metric.tokens}, {metric.percentage}, {quote(metric.timestamp)}\n"
+
+        return write_text_file(path, content)
+
+    # Write test_executions table
+    fn write_test_executions(executions: List<TestExecution>) -> Result<(), text>:
+        val path = "{self.tables_path}/test_status.sdn"
+        var content = "test_status |id, mode, suite, total, passed, failed, skipped, duration_ms, timestamp|\n"
+
+        for exec in executions:
+            content = "{content}    {exec.id}, {quote(exec.mode)}, {quote(exec.suite)}, {exec.total}, {exec.passed}, {exec.failed}, {exec.skipped}, {exec.duration_ms}, {quote(exec.timestamp)}\n"
+
+        return write_text_file(path, content)
+
+    # Write verification table
+    fn write_verification(statuses: List<VerificationStatus>) -> Result<(), text>:
+        val path = "{self.tables_path}/verification.sdn"
+        var content = "verification |id, module, property, status, proof_lines, timestamp|\n"
+
+        for status in statuses:
+            content = "{content}    {status.id}, {quote(status.module)}, {quote(status.property)}, {quote(status.status)}, {status.proof_lines}, {quote(status.timestamp)}\n"
+
+        return write_text_file(path, content)
+
+    # Write vcs_state table
+    fn write_vcs_state(state: VcsState) -> Result<(), text>:
+        val path = "{self.tables_path}/vcs_state.sdn"
+        var content = "vcs_state |bookmark, commit_id, commit_message, uncommitted_files, untracked_files, timestamp|\n"
+        content = "{content}    {quote(state.bookmark)}, {quote(state.commit_id)}, {quote(state.commit_message)}, {state.uncommitted_files}, {state.untracked_files}, {quote(state.timestamp)}\n"
+
+        return write_text_file(path, content)
+
+    # Write build_times table
+    fn write_build_times(times: List<BuildTime>) -> Result<(), text>:
+        val path = "{self.tables_path}/build_times.sdn"
+        var content = "build_times |id, timestamp, target, mode, duration_ms, crates_compiled, incremental, commit_id|\n"
+
+        for time in times:
+            val incr_str = if time.incremental: "true" else: "false"
+            content = "{content}    {time.id}, {quote(time.timestamp)}, {quote(time.target)}, {quote(time.mode)}, {time.duration_ms}, {time.crates_compiled}, {incr_str}, {quote(time.commit_id)}\n"
+
+        return write_text_file(path, content)
+
+    # Write dependencies table
+    fn write_dependencies(deps: List<Dependency>) -> Result<(), text>:
+        val path = "{self.tables_path}/dependencies.sdn"
+        var content = "dependencies |id, crate_name, current_version, latest_version, outdated, has_security_issue, last_checked|\n"
+
+        for dep in deps:
+            val outdated_str = if dep.outdated: "true" else: "false"
+            val security_str = if dep.has_security_issue: "true" else: "false"
+            content = "{content}    {dep.id}, {quote(dep.crate_name)}, {quote(dep.current_version)}, {quote(dep.latest_version)}, {outdated_str}, {security_str}, {quote(dep.last_checked)}\n"
+
+        return write_text_file(path, content)
+
+    # Write plans table
+    fn write_plans(plans: List<Plan>) -> Result<(), text>:
+        val path = "{self.tables_path}/plans.sdn"
+        var content = "plans |id, file, title, status, created, last_updated, total_steps, completed_steps, blocked|\n"
+
+        for plan in plans:
+            val blocked_str = if plan.blocked: "true" else: "false"
+            content = "{content}    {plan.id}, {quote(plan.file)}, {quote(plan.title)}, {quote(plan.status)}, {quote(plan.created)}, {quote(plan.last_updated)}, {plan.total_steps}, {plan.completed_steps}, {blocked_str}\n"
+
+        return write_text_file(path, content)
+
+    # =========================================================================
+    # Read Operations
+    # =========================================================================
+
+    # Read features table
+    fn read_features() -> Result<List<Feature>, text>:
+        val path = "{self.tables_path}/features.sdn"
+        if not file_exists(path):
+            return Ok([])
+
+        match read_text_file(path):
+            Err(e) => return Err("Failed to read features: {e}")
+            Ok(content) =>
+                match parse_features_sdn(content):
+                    Err(e) => return Err("Failed to parse features: {e}")
+                    Ok(features) => return Ok(features)
+
+    # Read sspec_tests table
+    fn read_sspec_tests() -> Result<List<SspecTest>, text>:
+        val path = "{self.tables_path}/sspec_tests.sdn"
+        if not file_exists(path):
+            return Ok([])
+
+        match read_text_file(path):
+            Err(e) => return Err("Failed to read sspec_tests: {e}")
+            Ok(content) =>
+                match parse_sspec_tests_sdn(content):
+                    Err(e) => return Err("Failed to parse sspec_tests: {e}")
+                    Ok(tests) => return Ok(tests)
+
+    # Read todos table
+    fn read_todos() -> Result<List<TodoItem>, text>:
+        val path = "{self.tables_path}/todos.sdn"
+        if not file_exists(path):
+            return Ok([])
+
+        match read_text_file(path):
+            Err(e) => return Err("Failed to read todos: {e}")
+            Ok(content) =>
+                match parse_todos_sdn(content):
+                    Err(e) => return Err("Failed to parse todos: {e}")
+                    Ok(todos) => return Ok(todos)
+
+    # Read coverage table
+    fn read_coverage() -> Result<List<CoverageMetric>, text>:
+        val path = "{self.tables_path}/coverage.sdn"
+        if not file_exists(path):
+            return Ok([])
+
+        match read_text_file(path):
+            Err(e) => return Err("Failed to read coverage: {e}")
+            Ok(content) =>
+                match parse_coverage_sdn(content):
+                    Err(e) => return Err("Failed to parse coverage: {e}")
+                    Ok(metrics) => return Ok(metrics)
+
+    # Read all data
+    fn read_all() -> Result<DashboardData, text>:
+        val features = match self.read_features():
+            Err(e) => return Err(e)
+            Ok(f) => f
+
+        val sspec_tests = match self.read_sspec_tests():
+            Err(e) => return Err(e)
+            Ok(t) => t
+
+        val todos = match self.read_todos():
+            Err(e) => return Err(e)
+            Ok(t) => t
+
+        val coverage = match self.read_coverage():
+            Err(e) => return Err(e)
+            Ok(c) => c
+
+        # For now, initialize empty lists for not-yet-implemented parsers
+        val vcs_state = VcsState.new("", "", "", 0, 0, now_iso8601())
+
+        return Ok(DashboardData.new(
+            features,
+            sspec_tests,
+            todos,
+            coverage,
+            [],  # duplication
+            [],  # test_executions
+            [],  # verification
+            vcs_state,
+            [],  # build_times
+            [],  # dependencies
+            [],  # plans
+            now_iso8601()
+        ))
+
+# =========================================================================
+# SDN Parsing Functions
+# =========================================================================
+
+# Parse features from SDN format
+fn parse_features_sdn(content: text) -> Result<List<Feature>, text>:
+    var features: List<Feature> = []
+    val lines = content.split("\n")
+
+    # Skip header line
+    for i in 1..lines.len():
+        val line = lines[i].trim()
+        if line.len() == 0:
+            continue
+
+        val parts = line.split(",")
+        if parts.len() < 6:
+            continue
+
+        val id = parse_i32(parts[0].trim())
+        val category = unquote(parts[1].trim())
+        val name = unquote(parts[2].trim())
+        val status = string_to_status(parts[3].trim())
+
+        features.append(Feature.new(
+            id, category, name, "", "",
+            status, status, status, status,
+            "", status
+        ))
+
+    return Ok(features)
+
+# Parse sspec_tests from SDN format
+fn parse_sspec_tests_sdn(content: text) -> Result<List<SspecTest>, text>:
+    var tests: List<SspecTest> = []
+    val lines = content.split("\n")
+
+    for i in 1..lines.len():
+        val line = lines[i].trim()
+        if line.len() == 0:
+            continue
+
+        val parts = line.split(",")
+        if parts.len() < 12:
+            continue
+
+        val id = parse_i32(parts[0].trim())
+        val file = unquote(parts[1].trim())
+        val title = unquote(parts[2].trim())
+        val category = unquote(parts[3].trim())
+        val difficulty = unquote(parts[4].trim())
+        val status = string_to_status(parts[5].trim())
+        val total_tests = parse_i32(parts[6].trim())
+        val passed = parse_i32(parts[7].trim())
+        val failed = parse_i32(parts[8].trim())
+        val duration_ms = parse_i32(parts[9].trim())
+        val has_docs = parts[10].trim() == "true"
+        val last_run = unquote(parts[11].trim())
+
+        tests.append(SspecTest.new(
+            id, file, title, category, difficulty,
+            status, total_tests, passed, failed,
+            duration_ms, has_docs, last_run
+        ))
+
+    return Ok(tests)
+
+# Parse todos from SDN format
+fn parse_todos_sdn(content: text) -> Result<List<TodoItem>, text>:
+    var todos: List<TodoItem> = []
+    val lines = content.split("\n")
+
+    for i in 1..lines.len():
+        val line = lines[i].trim()
+        if line.len() == 0:
+            continue
+
+        val parts = line.split(",")
+        if parts.len() < 13:
+            continue
+
+        val id = parse_i32(parts[0].trim())
+        val keyword = parts[1].trim()
+        val area = parts[2].trim()
+        val priority = parts[3].trim()
+        val description = unquote(parts[4].trim())
+        val file = unquote(parts[5].trim())
+        val line_num = parse_i32(parts[6].trim())
+        val issue = unquote(parts[7].trim())
+        val blocked = unquote(parts[8].trim())
+        val status = parts[9].trim()
+        val age_days = parse_i32(parts[10].trim())
+        val assigned = unquote(parts[11].trim())
+        val last_updated = unquote(parts[12].trim())
+
+        todos.append(TodoItem.new(
+            id, keyword, area, priority, description,
+            file, line_num, issue, blocked, status,
+            age_days, assigned, last_updated
+        ))
+
+    return Ok(todos)
+
+# Parse coverage from SDN format
+fn parse_coverage_sdn(content: text) -> Result<List<CoverageMetric>, text>:
+    var metrics: List<CoverageMetric> = []
+    val lines = content.split("\n")
+
+    for i in 1..lines.len():
+        val line = lines[i].trim()
+        if line.len() == 0:
+            continue
+
+        val parts = line.split(",")
+        if parts.len() < 10:
+            continue
+
+        val id = parse_i32(parts[0].trim())
+        val level = parts[1].trim()
+        val crate = unquote(parts[2].trim())
+        val file = unquote(parts[3].trim())
+        val lines_total = parse_i32(parts[4].trim())
+        val lines_covered = parse_i32(parts[5].trim())
+        val lines_percent = parse_f64(parts[6].trim())
+        val branches_covered = parse_i32(parts[7].trim())
+        val branches_percent = parse_f64(parts[8].trim())
+        val timestamp = unquote(parts[9].trim())
+
+        metrics.append(CoverageMetric.new(
+            id, level, crate, file, lines_total, lines_covered,
+            lines_percent, branches_covered, branches_percent, timestamp
+        ))
+
+    return Ok(metrics)
+
+# =========================================================================
+# Helper Functions
+# =========================================================================
+
+# Quote string for SDN format
+fn quote(s: text) -> text:
+    if s.contains(",") or s.contains("\"") or s.contains("\n"):
+        val escaped = s.replace("\"", "\\\"")
+        return "\"{escaped}\""
+    return s
+
+# Unquote string from SDN format
+fn unquote(s: text) -> text:
+    if s.starts_with("\"") and s.ends_with("\""):
+        return s.slice(1, s.len() - 1).replace("\\\"", "\"")
+    return s
+
+# Parse integer from string
+fn parse_i32(s: text) -> i32:
+    # Simple integer parsing
+    var result = 0
+    var negative = false
+    var start = 0
+
+    if s.starts_with("-"):
+        negative = true
+        start = 1
+
+    for i in start..s.len():
+        val ch = s.char_at(i)
+        if ch >= '0' and ch <= '9':
+            result = result * 10 + (ch - '0')
+
+    return if negative: -result else: result
+
+# Parse float from string
+fn parse_f64(s: text) -> f64:
+    # Simplified float parsing - TODO: implement proper parsing
+    return 0.0  # Placeholder
+
+# Convert Status enum to string
+fn status_to_string(status: Status) -> text:
+    match status:
+        Status::Complete => "complete"
+        Status::InProgress => "in_progress"
+        Status::Planned => "planned"
+        Status::Blocked => "blocked"
+        Status::NotSupported => "not_supported"
+
+# Convert string to Status enum
+fn string_to_status(s: text) -> Status:
+    match s:
+        "complete" => Status::Complete
+        "in_progress" => Status::InProgress
+        "planned" => Status::Planned
+        "blocked" => Status::Blocked
+        "not_supported" => Status::NotSupported
+        _ => Status::Planned
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export DashboardDatabase
+export parse_features_sdn, parse_sspec_tests_sdn, parse_todos_sdn, parse_coverage_sdn
+export quote, unquote, parse_i32, parse_f64
+export status_to_string, string_to_status

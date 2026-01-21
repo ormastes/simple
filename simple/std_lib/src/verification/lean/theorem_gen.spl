@@ -1,0 +1,198 @@
+# Theorem Generator for Lean Code Generation
+#
+# Generates Lean theorems for functions and types.
+# Part of Phase 7.4: Auto-generation of determinism and other theorems.
+#
+# Patterns supported:
+#   - Determinism: f x = some r1 -> f x = some r2 -> r1 = r2
+#   - Empty list: f [] = default_value
+#   - Lookup empty: lookup [] name = none
+#
+# Key principle: Generate scaffolding, not proofs. Never introduce `sorry` or `axiom`.
+# Generated proofs are structural and don't require sorry.
+
+import verification.lean.naming as naming
+
+# Function parameter for theorem generation
+class TheoremParam:
+    name: text
+    param_type: text
+    is_implicit: bool  # Use {} instead of () in Lean
+
+    static fn explicit(name: text, ty: text) -> TheoremParam:
+        TheoremParam(name, ty, false)
+
+    static fn implicit(name: text, ty: text) -> TheoremParam:
+        TheoremParam(name, ty, true)
+
+# Function definition for theorem generation
+class FunctionDef:
+    name: text
+    params: List<TheoremParam>
+    return_type: text
+    returns_option: bool  # True if return type is Option<T>
+    inner_type: text      # The T in Option<T>
+
+    static fn new(name: text) -> FunctionDef:
+        FunctionDef(name, [], "Unit", false, "")
+
+    me add_param(param: TheoremParam) -> FunctionDef:
+        self.params = self.params + [param]
+        self
+
+    me with_return_type(ty: text) -> FunctionDef:
+        self.return_type = ty
+        # Check if it's an Option type
+        if ty.starts_with("Option"):
+            self.returns_option = true
+            # Extract inner type (simplistic parsing)
+            val inner = ty[7..].trim()
+            if inner.starts_with("(") and inner.ends_with(")"):
+                self.inner_type = inner[1..inner.len()-1]
+            else:
+                self.inner_type = inner
+        self
+
+    me with_option_return(inner_type: text) -> FunctionDef:
+        self.return_type = "Option {inner_type}"
+        self.returns_option = true
+        self.inner_type = inner_type
+        self
+
+# Theorem generator
+class TheoremGenerator:
+    generated_theorems: List<text>
+
+    static fn new() -> TheoremGenerator:
+        TheoremGenerator([])
+
+    # Generate determinism theorem
+    # Pattern: For any function f : A -> Option B
+    # theorem f_deterministic (a : A) (b1 b2 : B) :
+    #     f a = some b1 -> f a = some b2 -> b1 = b2 := by
+    #   intro h1 h2; rw [h1] at h2; cases h2; rfl
+    me generate_determinism(func: FunctionDef) -> text:
+        if not func.returns_option:
+            ""
+        else:
+            val func_name = naming.to_camel_case(func.name)
+            val theorem_name = "{func_name}_deterministic"
+            self.generated_theorems = self.generated_theorems + [theorem_name]
+
+            var out = "theorem {theorem_name}"
+
+            # Add function parameters (as implicit or explicit)
+            for param in func.params:
+                if param.is_implicit:
+                    out = out + " \{{param.name} : {param.param_type}\}"
+                else:
+                    out = out + " ({param.name} : {param.param_type})"
+
+            # Add result parameters
+            out = out + " (r1 r2 : {func.inner_type})"
+
+            # Build the function call
+            var call_args: List<text> = []
+            for param in func.params:
+                call_args = call_args + [param.name]
+            val call = "{func_name} " + call_args.join(" ")
+
+            # Add the theorem statement
+            out = out + " :\n"
+            out = out + "    {call} = some r1 ->\n"
+            out = out + "    {call} = some r2 ->\n"
+            out = out + "    r1 = r2 := by\n"
+            out = out + "  intro h1 h2\n"
+            out = out + "  rw [h1] at h2\n"
+            out = out + "  cases h2\n"
+            out = out + "  rfl\n"
+            out
+
+    # Generate lookup empty theorem
+    # Pattern: For any lookup function
+    # theorem lookupX_empty (name : String) : lookupX [] name = none := rfl
+    me generate_lookup_empty(type_name: text) -> text:
+        val pascal_name = naming.to_pascal_case(type_name)
+        val func_name = "lookup{pascal_name}"
+        val theorem_name = "{func_name}_empty"
+        self.generated_theorems = self.generated_theorems + [theorem_name]
+
+        var out = "theorem {theorem_name} (name : String) :\n"
+        out = out + "    {func_name} [] name = none := rfl\n"
+        out
+
+    # Generate find empty theorem
+    me generate_find_empty(type_name: text) -> text:
+        val pascal_name = naming.to_pascal_case(type_name)
+        val func_name = "find{pascal_name}"
+        val theorem_name = "{func_name}_empty"
+        self.generated_theorems = self.generated_theorems + [theorem_name]
+
+        var out = "theorem {theorem_name} (pred : {pascal_name}Def -> Bool) :\n"
+        out = out + "    {func_name} [] pred = none := rfl\n"
+        out
+
+    # Generate contains empty theorem
+    me generate_contains_empty(type_name: text) -> text:
+        val pascal_name = naming.to_pascal_case(type_name)
+        val func_name = "contains{pascal_name}"
+        val theorem_name = "{func_name}_empty"
+        self.generated_theorems = self.generated_theorems + [theorem_name]
+
+        var out = "theorem {theorem_name} (name : String) :\n"
+        out = out + "    {func_name} [] name = false := rfl\n"
+        out
+
+    # Generate all standard theorems for a lookup-based type
+    me generate_lookup_theorems(type_name: text) -> text:
+        var out = "-- Lookup theorems for {type_name}\n"
+        out = out + self.generate_lookup_empty(type_name)
+        out = out + self.generate_find_empty(type_name)
+        out = out + self.generate_contains_empty(type_name)
+        out = out + "\n"
+        out
+
+    # Generate determinism theorems for multiple functions
+    me generate_all_determinism(funcs: List<FunctionDef>) -> text:
+        var out = "-- Auto-generated determinism theorems\n"
+        out = out + "-- Generated by theorem_gen.spl\n\n"
+
+        for func in funcs:
+            val theorem = self.generate_determinism(func)
+            if theorem.len() > 0:
+                out = out + theorem + "\n"
+
+        out
+
+    # Generate all lookup theorems for multiple types
+    me generate_all_lookup_theorems(type_names: List<text>) -> text:
+        var out = "-- Auto-generated lookup theorems\n"
+        out = out + "-- Generated by theorem_gen.spl\n\n"
+
+        for name in type_names:
+            out = out + self.generate_lookup_theorems(name)
+
+        out
+
+    # Get generated theorem names
+    fn get_generated_theorems() -> List<text>:
+        self.generated_theorems
+
+# Convenience function to generate determinism theorem for a function signature
+fn generate_determinism_theorem(func_name: text, params: List<(text, text)>, result_type: text) -> text:
+    var func = FunctionDef.new(func_name)
+    for (name, ty) in params:
+        func = func.add_param(TheoremParam.explicit(name, ty))
+    func = func.with_option_return(result_type)
+
+    var gen = TheoremGenerator.new()
+    gen.generate_determinism(func)
+
+# Convenience function to generate all standard lookup theorems
+fn generate_standard_lookup_theorems(type_names: List<text>) -> text:
+    var gen = TheoremGenerator.new()
+    gen.generate_all_lookup_theorems(type_names)
+
+# Export public API
+export TheoremParam, FunctionDef, TheoremGenerator
+export generate_determinism_theorem, generate_standard_lookup_theorems

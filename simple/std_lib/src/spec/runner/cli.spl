@@ -1,0 +1,217 @@
+# CLI Entry Point - Command-line interface for running tests
+# Usage: simple test [options]
+
+import spec.runner.executor.{TestExecutor, ExecutionResults}
+import spec.runner.filter.{TestFilter}
+import spec.formatters.progress.{ProgressFormatter, print_progress_results}
+import spec.formatters.doc.{DocFormatter, print_doc_results}
+import spec.formatters.json.{JsonFormatter, print_json_results, write_json_results}
+import shell.{args, env, exit}
+import io.{println, eprintln}
+
+# CLI configuration
+class TestCli:
+    formatter: text  # "progress", "doc", "json"
+    run_slow: bool
+    filter: TestFilter
+    output_file: Option<text>
+    show_help: bool
+    verbose: bool
+    fail_fast: bool
+
+impl TestCli:
+    fn new() -> TestCli:
+        return TestCli {
+            formatter: "progress",
+            run_slow: false,
+            filter: TestFilter.new(),
+            output_file: None,
+            show_help: false,
+            verbose: false,
+            fail_fast: false
+        }
+
+    fn parse_args(args: List<text>) -> TestCli:
+        """Parse command-line arguments."""
+        var i = 0
+
+        while i < args.len():
+            val arg = args[i]
+
+            match arg:
+                case "--format":
+                    i = i + 1
+                    if i < args.len():
+                        self.formatter = args[i]
+
+                case "-f":
+                    i = i + 1
+                    if i < args.len():
+                        self.formatter = args[i]
+
+                case "--slow":
+                    self.run_slow = true
+
+                case "--tag":
+                    i = i + 1
+                    if i < args.len():
+                        self.filter.with_tag(args[i])
+
+                case "-t":
+                    i = i + 1
+                    if i < args.len():
+                        self.filter.with_tag(args[i])
+
+                case "--exclude-tag":
+                    i = i + 1
+                    if i < args.len():
+                        self.filter.without_tag(args[i])
+
+                case "--pattern":
+                    i = i + 1
+                    if i < args.len():
+                        self.filter.matching(args[i])
+
+                case "-p":
+                    i = i + 1
+                    if i < args.len():
+                        self.filter.matching(args[i])
+
+                case "--output":
+                    i = i + 1
+                    if i < args.len():
+                        self.output_file = Some(args[i])
+
+                case "-o":
+                    i = i + 1
+                    if i < args.len():
+                        self.output_file = Some(args[i])
+
+                case "--verbose":
+                    self.verbose = true
+
+                case "-v":
+                    self.verbose = true
+
+                case "--fail-fast":
+                    self.fail_fast = true
+
+                case "--help":
+                    self.show_help = true
+
+                case "-h":
+                    self.show_help = true
+
+                case _:
+                    # Treat unknown args as pattern filters
+                    if not arg.starts_with("-"):
+                        self.filter.matching(arg)
+
+            i = i + 1
+
+        return self
+
+    fn print_help() -> void:
+        """Print usage help."""
+        println("Usage: simple test [options] [pattern]")
+        println("")
+        println("Options:")
+        println("  -f, --format FORMAT      Output format: progress, doc, json (default: progress)")
+        println("  --slow                   Run slow tests (default: skip slow tests)")
+        println("  -t, --tag TAG            Run only tests with this tag")
+        println("  --exclude-tag TAG        Skip tests with this tag")
+        println("  -p, --pattern PATTERN    Run only tests matching pattern")
+        println("  -o, --output FILE        Write output to file (JSON format only)")
+        println("  -v, --verbose            Verbose output")
+        println("  --fail-fast              Stop on first failure")
+        println("  -h, --help               Show this help message")
+        println("")
+        println("Examples:")
+        println("  simple test                          # Run all tests")
+        println("  simple test --format doc             # Hierarchical output")
+        println("  simple test --tag unit               # Run only unit tests")
+        println("  simple test --slow                   # Include slow tests")
+        println("  simple test Calculator               # Run tests matching 'Calculator'")
+        println("  simple test --format json -o results.json  # JSON output to file")
+
+    fn run() -> i32:
+        """Run tests and return exit code (0 = success, 1 = failure)."""
+        # Show help if requested
+        if self.show_help:
+            self.print_help()
+            return 0
+
+        # Configure executor
+        var executor = TestExecutor.new()
+
+        if self.run_slow:
+            executor.with_slow_tests(true)
+
+        # TODO: Apply filters to executor
+        # This requires updating TestExecutor to accept TestFilter
+
+        # Run tests
+        if self.verbose:
+            println("Running tests...")
+
+        val results = executor.run()
+
+        # Format and output results
+        match self.formatter:
+            case "progress":
+                print_progress_results(results)
+
+            case "doc":
+                print_doc_results(results)
+
+            case "json":
+                match self.output_file:
+                    case Some(path):
+                        write_json_results(results, path)
+                        if self.verbose:
+                            println("Results written to {path}")
+                    case None:
+                        print_json_results(results)
+
+            case _:
+                eprintln("Unknown format: {self.formatter}")
+                eprintln("Valid formats: progress, doc, json")
+                return 1
+
+        # Return exit code based on results
+        if results.all_passed():
+            return 0
+        else:
+            return 1
+
+# Main entry point
+fn main() -> i32:
+    """Main entry point for test runner."""
+    val cli_args = args()
+
+    # Create CLI and parse arguments
+    var cli = TestCli.new()
+    cli.parse_args(cli_args)
+
+    # Run tests
+    return cli.run()
+
+# Convenience function for running tests programmatically
+fn run_tests_with_format(formatter: text) -> ExecutionResults:
+    """Run tests with specified formatter."""
+    val executor = TestExecutor.new()
+    val results = executor.run()
+
+    match formatter:
+        case "progress":
+            print_progress_results(results)
+        case "doc":
+            print_doc_results(results)
+        case "json":
+            print_json_results(results)
+        case _:
+            print_progress_results(results)
+
+    return results
+
+export TestCli, main, run_tests_with_format

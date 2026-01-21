@@ -187,6 +187,54 @@ src/
 │       └── arithmetic.lean # External proofs
 ```
 
+## File Colocation
+
+Lean files can live alongside Simple source files in the same directory. This enables verification to be co-located with implementation.
+
+### Directory Structure
+
+```
+src/
+├── collections/
+│   ├── btree.spl           # Implementation
+│   ├── btree.lean          # Verification proofs (same folder)
+│   ├── hashmap.spl
+│   └── hashmap.lean
+├── memory/
+│   ├── gc.spl
+│   ├── gc.lean             # Companion verification file
+│   └── proofs/
+│       ├── gc_safety.lean  # Extended proofs (subfolder)
+│       └── gc_liveness.lean
+```
+
+### Colocation Patterns
+
+**Pattern 1: Companion File**
+```
+foo.spl  →  foo.lean  (same directory)
+```
+
+**Pattern 2: Proofs Subdirectory**
+```
+foo.spl  →  proofs/foo_correctness.lean
+```
+
+**Pattern 3: Import from Companion**
+```simple
+# In foo.spl
+lean import "foo.lean"  # Imports from same directory
+
+fn bar():
+    # implementation
+```
+
+### Benefits
+
+- **Discoverability**: Proofs are easy to find next to implementation
+- **Maintenance**: Changes to code and proofs happen together
+- **Simple Imports**: Relative paths work naturally
+
 ## Compatibility Notes
 
 - **Module Paths**: The word `lean` can still be used in module paths (e.g., `import verification.lean.codegen`)

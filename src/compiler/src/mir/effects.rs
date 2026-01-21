@@ -226,6 +226,7 @@ impl Effect {
             AstEffect::Verify => Effect::Compute,
             AstEffect::Trusted => Effect::Compute,
             AstEffect::Ghost => Effect::Compute, // Ghost is compile-time only
+            AstEffect::AutoLean(_) => Effect::Compute, // AutoLean is compile-time only
         }
     }
 

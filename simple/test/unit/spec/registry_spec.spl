@@ -1,0 +1,291 @@
+# Unit tests for BDD Registry module
+# Tests ExampleGroup, Example, Hook, and registry functions
+
+import spec.registry.{
+    ExampleGroup, Example, Hook, Given,
+    ContextDefinition, SharedExampleDefinition,
+    register_group, get_all_groups, clear_groups,
+    register_context, get_context, clear_contexts,
+    register_shared_examples, get_shared_examples, clear_shared_examples,
+    reset_registry
+}
+import spec.{describe, context, it, expect, before_each, after_each}
+import spec.matchers.{eq, be_nil, be_empty, include}
+
+describe "BDD Registry":
+    # Reset registry before each test to ensure isolation
+    before_each:
+        reset_registry()
+
+    context "Example":
+        it "creates a new example with description and block":
+            val example = Example.new("test description", \: pass)
+            expect(example.description).to eq("test description")
+            expect(example.is_skipped).to eq(false)
+            expect(example.tags).to be_empty()
+
+        it "can be marked as skipped":
+            val example = Example.new("test", \: pass).skip()
+            expect(example.is_skipped).to eq(true)
+            expect(example.is_pending()).to eq(true)
+
+        it "can be marked as slow":
+            val example = Example.new("test", \: pass).slow()
+            expect(example.has_tag("slow")).to eq(true)
+
+        it "can have a timeout set":
+            val example = Example.new("test", \: pass).with_timeout(30)
+            match example.timeout_seconds:
+                case Some(timeout):
+                    expect(timeout).to eq(30)
+                case None:
+                    fail("Expected timeout to be set")
+
+        it "can have tags added":
+            val example = Example.new("test", \: pass)
+                .with_tag("integration")
+                .with_tag("database")
+            expect(example.has_tag("integration")).to eq(true)
+            expect(example.has_tag("database")).to eq(true)
+            expect(example.has_tag("nonexistent")).to eq(false)
+
+        it "should_run returns false for skipped examples":
+            val example = Example.new("test", \: pass).skip()
+            expect(example.should_run(true)).to eq(false)
+
+        it "should_run returns false for slow examples when run_slow is false":
+            val example = Example.new("test", \: pass).slow()
+            expect(example.should_run(false)).to eq(false)
+
+        it "should_run returns true for slow examples when run_slow is true":
+            val example = Example.new("test", \: pass).slow()
+            expect(example.should_run(true)).to eq(true)
+
+        it "should_run returns true for normal examples":
+            val example = Example.new("test", \: pass)
+            expect(example.should_run(false)).to eq(true)
+
+    context "ExampleGroup":
+        it "creates a new group with description":
+            val group = ExampleGroup.new("MyClass", None)
+            expect(group.description).to eq("MyClass")
+            expect(group.children).to be_empty()
+            expect(group.test_examples).to be_empty()
+            expect(group.hooks).to be_empty()
+
+        it "creates a group with parent reference":
+            val parent = ExampleGroup.new("Parent", None)
+            val child = ExampleGroup.new("Child", Some(parent))
+            match child.parent:
+                case Some(p):
+                    expect(p.description).to eq("Parent")
+                case None:
+                    fail("Expected parent to be set")
+
+        it "can add child groups":
+            val parent = ExampleGroup.new("Parent", None)
+            val child = ExampleGroup.new("Child", Some(parent))
+            parent.add_child(child)
+            expect(parent.children.len()).to eq(1)
+            expect(parent.children[0].description).to eq("Child")
+
+        it "can add examples":
+            val group = ExampleGroup.new("Test", None)
+            val example = Example.new("does something", \: pass)
+            group.add_example(example)
+            expect(group.test_examples.len()).to eq(1)
+            expect(group.test_examples[0].description).to eq("does something")
+
+        it "can add hooks":
+            val group = ExampleGroup.new("Test", None)
+            val before_hook = Hook.BeforeEach(\: pass)
+            val after_hook = Hook.AfterEach(\: pass)
+            group.add_hook(before_hook)
+            group.add_hook(after_hook)
+            expect(group.hooks.len()).to eq(2)
+
+        it "get_before_each_hooks extracts only BeforeEach hooks":
+            val group = ExampleGroup.new("Test", None)
+            group.add_hook(Hook.BeforeEach(\: pass))
+            group.add_hook(Hook.AfterEach(\: pass))
+            group.add_hook(Hook.BeforeEach(\: pass))
+            group.add_hook(Hook.BeforeAll(\: pass))
+
+            val before_each = group.get_before_each_hooks()
+            expect(before_each.len()).to eq(2)
+
+        it "get_after_each_hooks extracts only AfterEach hooks":
+            val group = ExampleGroup.new("Test", None)
+            group.add_hook(Hook.BeforeEach(\: pass))
+            group.add_hook(Hook.AfterEach(\: pass))
+            group.add_hook(Hook.AfterEach(\: pass))
+
+            val after_each = group.get_after_each_hooks()
+            expect(after_each.len()).to eq(2)
+
+        it "get_before_all_hooks extracts only BeforeAll hooks":
+            val group = ExampleGroup.new("Test", None)
+            group.add_hook(Hook.BeforeAll(\: pass))
+            group.add_hook(Hook.BeforeEach(\: pass))
+            group.add_hook(Hook.BeforeAll(\: pass))
+
+            val before_all = group.get_before_all_hooks()
+            expect(before_all.len()).to eq(2)
+
+        it "get_after_all_hooks extracts only AfterAll hooks":
+            val group = ExampleGroup.new("Test", None)
+            group.add_hook(Hook.AfterAll(\: pass))
+            group.add_hook(Hook.BeforeEach(\: pass))
+
+            val after_all = group.get_after_all_hooks()
+            expect(after_all.len()).to eq(1)
+
+        it "full_description returns description for top-level group":
+            val group = ExampleGroup.new("Calculator", None)
+            expect(group.full_description()).to eq("Calculator")
+
+        it "full_description returns hierarchical path for nested groups":
+            val parent = ExampleGroup.new("Calculator", None)
+            val child = ExampleGroup.new("addition", Some(parent))
+            expect(child.full_description()).to eq("Calculator addition")
+
+        it "example_count returns count of direct examples":
+            val group = ExampleGroup.new("Test", None)
+            group.add_example(Example.new("test 1", \: pass))
+            group.add_example(Example.new("test 2", \: pass))
+            expect(group.example_count()).to eq(2)
+
+        it "example_count returns total count including children":
+            val parent = ExampleGroup.new("Parent", None)
+            parent.add_example(Example.new("test 1", \: pass))
+
+            val child = ExampleGroup.new("Child", Some(parent))
+            child.add_example(Example.new("test 2", \: pass))
+            child.add_example(Example.new("test 3", \: pass))
+            parent.add_child(child)
+
+            expect(parent.example_count()).to eq(3)
+
+    context "ContextDefinition":
+        it "creates a context definition with name":
+            val ctx_def = ContextDefinition.new(:admin_user)
+            expect(ctx_def.name.to_string()).to eq("admin_user")
+            expect(ctx_def.givens).to be_empty()
+
+        it "can add givens":
+            val ctx_def = ContextDefinition.new(:test_context)
+            ctx_def.add_given(Given.Eager(\: pass))
+            ctx_def.add_given(Given.Lazy(:data, \: "test data"))
+            expect(ctx_def.givens.len()).to eq(2)
+
+    context "SharedExampleDefinition":
+        it "creates a shared example with name and block":
+            val shared_def = SharedExampleDefinition.new("stack-like", \: pass)
+            expect(shared_def.name).to eq("stack-like")
+            match shared_def.description:
+                case None:
+                    pass  # Expected
+                case Some(_):
+                    fail("Expected description to be None initially")
+
+        it "can have description added":
+            val shared_def = SharedExampleDefinition.new("stack-like", \: pass)
+                .with_description("A container that supports push/pop")
+            match shared_def.description:
+                case Some(desc):
+                    expect(desc).to eq("A container that supports push/pop")
+                case None:
+                    fail("Expected description to be set")
+
+    context "Registry - Groups":
+        it "can register example groups":
+            val group = ExampleGroup.new("Test", None)
+            register_group(group)
+            val groups = get_all_groups()
+            expect(groups.len()).to eq(1)
+            expect(groups[0].description).to eq("Test")
+
+        it "can register multiple groups":
+            register_group(ExampleGroup.new("Test 1", None))
+            register_group(ExampleGroup.new("Test 2", None))
+            expect(get_all_groups().len()).to eq(2)
+
+        it "can clear all groups":
+            register_group(ExampleGroup.new("Test", None))
+            clear_groups()
+            expect(get_all_groups()).to be_empty()
+
+    context "Registry - Contexts":
+        it "can register context definitions":
+            val ctx_def = ContextDefinition.new(:admin_user)
+            register_context(:admin_user, ctx_def)
+            match get_context(:admin_user):
+                case Some(def):
+                    expect(def.name.to_string()).to eq("admin_user")
+                case None:
+                    fail("Expected context to be registered")
+
+        it "returns None for unregistered context":
+            match get_context(:nonexistent):
+                case None:
+                    pass  # Expected
+                case Some(_):
+                    fail("Expected None for unregistered context")
+
+        it "can clear all contexts":
+            register_context(:test, ContextDefinition.new(:test))
+            clear_contexts()
+            match get_context(:test):
+                case None:
+                    pass  # Expected
+                case Some(_):
+                    fail("Expected context to be cleared")
+
+    context "Registry - Shared Examples":
+        it "can register shared examples":
+            val shared_def = SharedExampleDefinition.new("stack-like", \: pass)
+            register_shared_examples("stack-like", shared_def)
+            match get_shared_examples("stack-like"):
+                case Some(def):
+                    expect(def.name).to eq("stack-like")
+                case None:
+                    fail("Expected shared example to be registered")
+
+        it "returns None for unregistered shared examples":
+            match get_shared_examples("nonexistent"):
+                case None:
+                    pass  # Expected
+                case Some(_):
+                    fail("Expected None for unregistered shared example")
+
+        it "can clear all shared examples":
+            register_shared_examples("test", SharedExampleDefinition.new("test", \: pass))
+            clear_shared_examples()
+            match get_shared_examples("test"):
+                case None:
+                    pass  # Expected
+                case Some(_):
+                    fail("Expected shared example to be cleared")
+
+    context "Registry - reset_registry":
+        it "clears all registry state":
+            # Register some data
+            register_group(ExampleGroup.new("Test", None))
+            register_context(:test, ContextDefinition.new(:test))
+            register_shared_examples("test", SharedExampleDefinition.new("test", \: pass))
+
+            # Reset
+            reset_registry()
+
+            # Verify everything is cleared
+            expect(get_all_groups()).to be_empty()
+            match get_context(:test):
+                case None:
+                    pass
+                case Some(_):
+                    fail("Expected context to be cleared")
+            match get_shared_examples("test"):
+                case None:
+                    pass
+                case Some(_):
+                    fail("Expected shared example to be cleared")

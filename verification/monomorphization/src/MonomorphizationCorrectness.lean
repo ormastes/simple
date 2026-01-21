@@ -40,7 +40,7 @@ inductive ConcreteType where
   | array : ConcreteType → ConcreteType
   deriving Repr
 
-/-- Custom transparent BEq instance for ConcreteType that we can prove properties about -/
+-- Custom transparent BEq instance for ConcreteType that we can prove properties about
 mutual
 
 def ConcreteType.beq : ConcreteType → ConcreteType → Bool
@@ -48,16 +48,16 @@ def ConcreteType.beq : ConcreteType → ConcreteType → Bool
   | ConcreteType.bool, ConcreteType.bool => true
   | ConcreteType.string, ConcreteType.string => true
   | ConcreteType.struct n1 args1, ConcreteType.struct n2 args2 =>
-      n1 == n2 && args1.beqList args2
+      n1 == n2 && beqConcreteTypeList args1 args2
   | ConcreteType.fn p1 r1, ConcreteType.fn p2 r2 =>
-      p1.beqList p2 && r1.beq r2
+      beqConcreteTypeList p1 p2 && r1.beq r2
   | ConcreteType.array e1, ConcreteType.array e2 =>
       e1.beq e2
   | _, _ => false
 
-def List.beqList : List ConcreteType → List ConcreteType → Bool
+def beqConcreteTypeList : List ConcreteType → List ConcreteType → Bool
   | [], [] => true
-  | hd1 :: tl1, hd2 :: tl2 => hd1.beq hd2 && tl1.beqList tl2
+  | hd1 :: tl1, hd2 :: tl2 => hd1.beq hd2 && beqConcreteTypeList tl1 tl2
   | _, _ => false
 
 end
@@ -260,42 +260,44 @@ theorem monomorphize_requires_matching_arity (gf : GenericFn) (args : List Concr
   · exact hlen
   · simp [hlen] at h
 
+-- Mutual proof of beq reflexivity
+-- These proofs use structural recursion that Lean can verify
 mutual
+def concreteType_beq_refl_aux (ct : ConcreteType) : ct.beq ct = true :=
+  match ct with
+  | .int => rfl
+  | .bool => rfl
+  | .string => rfl
+  | .struct name args =>
+    have h1 : (name == name) = true := beq_self_eq_true name
+    have h2 : beqConcreteTypeList args args = true := beqConcreteTypeList_refl_aux args
+    by simp only [ConcreteType.beq, h1, h2, Bool.and_self]
+  | .fn params ret =>
+    have h1 : beqConcreteTypeList params params = true := beqConcreteTypeList_refl_aux params
+    have h2 : ret.beq ret = true := concreteType_beq_refl_aux ret
+    by simp only [ConcreteType.beq, h1, h2, Bool.and_self]
+  | .array elem =>
+    concreteType_beq_refl_aux elem
+
+def beqConcreteTypeList_refl_aux (l : List ConcreteType) : beqConcreteTypeList l l = true :=
+  match l with
+  | [] => rfl
+  | hd :: tl =>
+    have h1 : hd.beq hd = true := concreteType_beq_refl_aux hd
+    have h2 : beqConcreteTypeList tl tl = true := beqConcreteTypeList_refl_aux tl
+    by simp only [beqConcreteTypeList, h1, h2, Bool.and_self]
+end
 
 /-- BEq is reflexive for ConcreteType.
 
-    Previously an axiom, now proven using our custom transparent BEq instance.
-    The proof uses mutual well-founded recursion on the size of the type. -/
+    Previously an axiom, now proven using mutual structural recursion. -/
 theorem concreteType_beq_refl (ct : ConcreteType) : (ct == ct) = true := by
-  cases ct with
-  | int => rfl
-  | bool => rfl
-  | string => rfl
-  | struct name args =>
-    simp [BEq.beq, ConcreteType.beq, String.beq]
-    exact list_concreteType_beq_refl args
-  | fn params ret =>
-    simp [BEq.beq, ConcreteType.beq]
-    constructor
-    · exact list_concreteType_beq_refl params
-    · exact concreteType_beq_refl ret
-  | array elem =>
-    simp [BEq.beq, ConcreteType.beq]
-    exact concreteType_beq_refl elem
-termination_by sizeOf ct
+  simp only [BEq.beq]
+  exact concreteType_beq_refl_aux ct
 
-/-- BEq is reflexive for List ConcreteType (using our custom beqList) -/
-theorem list_concreteType_beq_refl (l : List ConcreteType) : l.beqList l = true := by
-  cases l with
-  | nil => rfl
-  | cons hd tl =>
-    simp [List.beqList]
-    constructor
-    · exact concreteType_beq_refl hd
-    · exact list_concreteType_beq_refl tl
-termination_by sizeOf l
-
-end
+-- Helper: beqConcreteTypeList is reflexive (alternate name for compatibility)
+theorem beqConcreteTypeList_refl (l : List ConcreteType) : beqConcreteTypeList l l = true :=
+  beqConcreteTypeList_refl_aux l
 
 /-- BEq is reflexive for List ConcreteType -/
 theorem list_concreteType_beq_refl (l : List ConcreteType) : (l == l) = true := by

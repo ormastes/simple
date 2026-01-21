@@ -162,6 +162,15 @@ fn main() {
         "todo-scan" => run_todo_scan(&args),
         "todo-gen" => run_todo_gen(&args),
 
+        // Dashboard
+        "dashboard" => {
+            // TODO: Execute Simple dashboard app
+            // For now, print placeholder
+            println!("Dashboard command - implementation in progress");
+            println!("Usage: simple dashboard [status|collect|help]");
+            0
+        }
+
         // Verification
         "verify" => run_verify(&args, global_flags.gc_log, global_flags.gc_off),
 

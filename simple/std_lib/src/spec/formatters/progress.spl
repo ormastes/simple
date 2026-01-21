@@ -1,0 +1,134 @@
+# Progress Formatter - RSpec-style progress dots
+# Outputs: . (pass), F (fail), * (pending), S (skipped)
+
+import spec.runner.executor.{TestResult, ExecutionResults, TestStatus}
+import io.{print, println}
+import text.color.{green, red, yellow, cyan}
+
+# Progress formatter - shows dots as tests run
+class ProgressFormatter:
+    show_colors: bool
+    dots_per_line: i32
+
+impl ProgressFormatter:
+    fn new() -> ProgressFormatter:
+        return ProgressFormatter {
+            show_colors: true,
+            dots_per_line: 80
+        }
+
+    fn without_colors() -> ProgressFormatter:
+        """Disable colored output."""
+        self.show_colors = false
+        return self
+
+    fn with_line_width(width: i32) -> ProgressFormatter:
+        """Set number of dots per line."""
+        self.dots_per_line = width
+        return self
+
+    fn format_dot(result: TestResult) -> text:
+        """Get the character for a single test result."""
+        match result.status:
+            case TestStatus.Passed:
+                return if self.show_colors: green(".") else: "."
+            case TestStatus.Failed(_):
+                return if self.show_colors: red("F") else: "F"
+            case TestStatus.Pending:
+                return if self.show_colors: yellow("*") else: "*"
+            case TestStatus.Skipped:
+                return if self.show_colors: cyan("S") else: "S"
+
+    fn on_example_complete(result: TestResult, index: i32) -> void:
+        """Called when an example completes."""
+        print(self.format_dot(result))
+
+        # Line break every N dots
+        if (index + 1) % self.dots_per_line == 0:
+            println("")
+
+    fn format_failure(result: TestResult, index: i32) -> text:
+        """Format a failure message."""
+        val number = index + 1
+        val desc = result.full_description()
+
+        match result.failure_message:
+            case Some(message):
+                return "  {number}) {desc}\n     {message}"
+            case None:
+                return "  {number}) {desc}\n     Test failed"
+
+    fn format_failures(results: ExecutionResults) -> text:
+        """Format all failures."""
+        val failures = results.failures()
+
+        if failures.is_empty():
+            return ""
+
+        var output = "\n\nFailures:\n\n"
+
+        var index = 0
+        for failure in failures:
+            output = output + self.format_failure(failure, index) + "\n\n"
+            index = index + 1
+
+        return output
+
+    fn format_summary(results: ExecutionResults) -> text:
+        """Format the summary line."""
+        val total = results.total_count()
+        val failed = results.failed_count()
+        val pending = results.pending_count()
+        val duration = results.total_duration_ms / 1000.0
+
+        var summary = "Finished in {duration}s\n"
+        summary = summary + "{total} examples, {failed} failures"
+
+        if pending > 0:
+            summary = summary + ", {pending} pending"
+
+        return summary
+
+    fn format_results(results: ExecutionResults) -> text:
+        """Format complete test results."""
+        var output = ""
+
+        # Add newline after dots if needed
+        val total = results.total_count()
+        if total % self.dots_per_line != 0:
+            output = output + "\n"
+
+        # Add failures section
+        output = output + self.format_failures(results)
+
+        # Add summary
+        output = output + self.format_summary(results)
+
+        # Color the summary based on results
+        if self.show_colors:
+            if results.all_passed():
+                output = green(output)
+            else if results.has_failures():
+                output = red(output)
+            else:
+                output = yellow(output)
+
+        return output
+
+    fn print_results(results: ExecutionResults) -> void:
+        """Print formatted results to stdout."""
+        println(self.format_results(results))
+
+# Convenience function to format and print results
+fn print_progress_results(results: ExecutionResults) -> void:
+    """Format results with progress formatter and print."""
+    val formatter = ProgressFormatter.new()
+    formatter.print_results(results)
+
+fn print_progress_results_no_color(results: ExecutionResults) -> void:
+    """Format results without colors and print."""
+    val formatter = ProgressFormatter.new().without_colors()
+    formatter.print_results(results)
+
+export ProgressFormatter
+export print_progress_results, print_progress_results_no_color

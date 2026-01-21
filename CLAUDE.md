@@ -151,6 +151,9 @@ See `/coding` skill for full details.
 - ✅ Only delete TODO comment when code implementing that feature is complete
 - 📊 **Status**: See `doc/report/todo_status_2026-01-16.md`
 
+### Report
+- **DO NOT ADD REPORT TO JJ** unless request it. See `doc/report/` for more details.
+
 ---
 
 ## Documentation
