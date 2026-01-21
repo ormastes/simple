@@ -26,6 +26,20 @@ inductive Ty where
   | generic (name : String) (args : List Ty)  -- Generic type: Class[T, U]
   deriving BEq, Repr
 
+/-- Size of a type (for termination proofs) -/
+def Ty.size : Ty → Nat
+  | int => 1
+  | bool => 1
+  | str => 1
+  | var _ => 1
+  | named _ => 1
+  | arrow params ret => 1 + params.foldl (fun acc t => acc + t.size) 0 + ret.size
+  | generic _ args => 1 + args.foldl (fun acc t => acc + t.size) 0
+
+/-- Size of a list of types -/
+def Ty.listSize (tys : List Ty) : Nat :=
+  tys.foldl (fun acc t => acc + t.size) 0
+
 -- Field definition in a class
 structure FieldDef where
   name : String

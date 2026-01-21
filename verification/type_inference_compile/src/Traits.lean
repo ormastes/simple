@@ -75,24 +75,44 @@ def implementsTrait (registry : ImplRegistry) (ty : Ty) (traitName : String) : B
 def resolveAssocType (impl : TraitImpl) (assocName : String) : Option Ty :=
   impl.assoc_type_bindings.find? (fun a => a.name == assocName) |>.map (·.ty)
 
+-- Default fuel for unification based on type sizes
+def unifyDefaultFuel (ty1 ty2 : Ty) : Nat := 2 * (ty1.size + ty2.size) + 10
+
+-- Check if two type lists unify pairwise (fuel-based)
+def unifyListFuel (fuel : Nat) (tys1 tys2 : List Ty) : Bool :=
+  match fuel with
+  | 0 => false
+  | fuel' + 1 =>
+    match tys1, tys2 with
+    | [], [] => true
+    | t1 :: rest1, t2 :: rest2 =>
+      unifyFuel fuel' t1 t2 && unifyListFuel fuel' rest1 rest2
+    | _, _ => false
+
+-- Check if two types unify (fuel-based for termination)
+def unifyFuel (fuel : Nat) (ty1 ty2 : Ty) : Bool :=
+  match fuel with
+  | 0 => false
+  | fuel' + 1 =>
+    match ty1, ty2 with
+    | Ty.var _, _ => true
+    | _, Ty.var _ => true
+    | Ty.int, Ty.int => true
+    | Ty.bool, Ty.bool => true
+    | Ty.str, Ty.str => true
+    | Ty.named n1, Ty.named n2 => n1 == n2
+    | Ty.arrow p1 r1, Ty.arrow p2 r2 =>
+        p1.length == p2.length &&
+        unifyListFuel fuel' p1 p2 &&
+        unifyFuel fuel' r1 r2
+    | Ty.generic n1 a1, Ty.generic n2 a2 =>
+        n1 == n2 &&
+        a1.length == a2.length &&
+        unifyListFuel fuel' a1 a2
+    | _, _ => false
+
 -- Check if two types unify (simplified unification)
-partial def unify (ty1 ty2 : Ty) : Bool :=
-  match ty1, ty2 with
-  | Ty.var _, _ => true
-  | _, Ty.var _ => true
-  | Ty.int, Ty.int => true
-  | Ty.bool, Ty.bool => true
-  | Ty.str, Ty.str => true
-  | Ty.named n1, Ty.named n2 => n1 == n2
-  | Ty.arrow p1 r1, Ty.arrow p2 r2 =>
-      p1.length == p2.length &&
-      List.all (p1.zip p2) (fun (a, b) => unify a b) &&
-      unify r1 r2
-  | Ty.generic n1 a1, Ty.generic n2 a2 =>
-      n1 == n2 &&
-      a1.length == a2.length &&
-      List.all (a1.zip a2) (fun (a, b) => unify a b)
-  | _, _ => false
+def unify (ty1 ty2 : Ty) : Bool := unifyFuel (unifyDefaultFuel ty1 ty2) ty1 ty2
 
 -- Check if two implementations overlap
 def implsOverlap (impl1 impl2 : TraitImpl) : Bool :=
@@ -190,9 +210,81 @@ theorem assocType_deterministic (impl : TraitImpl) (assocName : String) (ty1 ty2
   cases h2
   rfl
 
+-- Helper: List unification is symmetric (given unifyFuel symmetry at lower fuel)
+theorem unifyListFuel_symmetric (fuel : Nat) (tys1 tys2 : List Ty)
+    (h_sym : ∀ f t1 t2, f < fuel → unifyFuel f t1 t2 = unifyFuel f t2 t1) :
+    unifyListFuel fuel tys1 tys2 = unifyListFuel fuel tys2 tys1 := by
+  induction tys1 generalizing tys2 with
+  | nil =>
+    cases tys2 with
+    | nil => rfl
+    | cons _ _ => simp [unifyListFuel]
+  | cons t1 rest1 ih =>
+    cases tys2 with
+    | nil => simp [unifyListFuel]
+    | cons t2 rest2 =>
+      simp only [unifyListFuel]
+      cases fuel with
+      | zero => rfl
+      | succ fuel' =>
+        have h_lower : ∀ f t1 t2, f < fuel' → unifyFuel f t1 t2 = unifyFuel f t2 t1 := by
+          intro f t1' t2' hf
+          exact h_sym f t1' t2' (Nat.lt_trans hf (Nat.lt_succ_self fuel'))
+        rw [h_sym fuel' t1 t2 (Nat.lt_succ_self fuel')]
+        rw [ih rest2 h_lower]
+
+-- Helper: unifyFuel is symmetric
+theorem unifyFuel_symmetric (fuel : Nat) (ty1 ty2 : Ty) :
+    unifyFuel fuel ty1 ty2 = unifyFuel fuel ty2 ty1 := by
+  induction fuel generalizing ty1 ty2 with
+  | zero => simp [unifyFuel]
+  | succ fuel' ih =>
+    simp only [unifyFuel]
+    cases ty1 with
+    | var _ =>
+      cases ty2 <;> simp
+    | int =>
+      cases ty2 <;> simp
+    | bool =>
+      cases ty2 <;> simp
+    | str =>
+      cases ty2 <;> simp
+    | named n1 =>
+      cases ty2 with
+      | var _ => simp
+      | named n2 =>
+        simp only [beq_comm]
+      | _ => simp
+    | arrow p1 r1 =>
+      cases ty2 with
+      | var _ => simp
+      | arrow p2 r2 =>
+        simp only [beq_comm]
+        have h_list := unifyListFuel_symmetric fuel' p1 p2 ih
+        have h_ret := ih r1 r2
+        rw [h_list, h_ret]
+      | _ => simp
+    | generic n1 a1 =>
+      cases ty2 with
+      | var _ => simp
+      | generic n2 a2 =>
+        simp only [beq_comm]
+        have h_list := unifyListFuel_symmetric fuel' a1 a2 ih
+        rw [h_list]
+      | _ => simp
+
+-- Helper: unifyDefaultFuel is symmetric
+theorem unifyDefaultFuel_symmetric (ty1 ty2 : Ty) :
+    unifyDefaultFuel ty1 ty2 = unifyDefaultFuel ty2 ty1 := by
+  simp only [unifyDefaultFuel]
+  omega
+
 -- Theorem: Unification is symmetric
-axiom unify_symmetric (ty1 ty2 : Ty) :
-  unify ty1 ty2 = unify ty2 ty1
+theorem unify_symmetric (ty1 ty2 : Ty) :
+    unify ty1 ty2 = unify ty2 ty1 := by
+  simp only [unify]
+  rw [unifyDefaultFuel_symmetric ty1 ty2]
+  exact unifyFuel_symmetric (unifyDefaultFuel ty2 ty1) ty1 ty2
 
 -- Theorem: Overlapping implementations violate coherence
 axiom overlap_violates_coherence (registry : ImplRegistry) (impl1 impl2 : TraitImpl) :
