@@ -96,9 +96,33 @@ impl LeanCodegen {
 
         // Generate type definitions from structs and enums in functions
         let type_translator = TypeTranslator::new(&module.types);
+        let expr_translator = ExprTranslator::new(&type_translator);
 
         // Emit type definitions for types used by verified functions
         // (A more complete implementation would track all named types)
+
+        // Emit refinement types (VER-010)
+        if !module.refined_types.is_empty() {
+            emitter.emit_comment("Refinement types");
+            for (name, refined_type) in &module.refined_types {
+                // Translate base type to Lean
+                let base_lean_type = type_translator.translate(refined_type.base_type)?;
+
+                // Translate predicate to Lean expression
+                // The predicate uses 'self' (local index 0) to refer to the value
+                let predicate_lean = expr_translator.translate(&refined_type.predicate)?;
+                // Convert Local(0) references to 'x' for the subtype definition
+                let predicate_str = predicate_lean.to_lean().replace("_local_0", "x");
+
+                let subtype = LeanType::Subtype {
+                    name: naming::to_pascal_case(name),
+                    base_type: Box::new(base_lean_type),
+                    predicate: predicate_str,
+                };
+                emitter.emit_type(&subtype);
+            }
+            emitter.emit_blank();
+        }
 
         // Generate function definitions (only verified ones)
         let func_translator = FunctionTranslator::new(&type_translator);
@@ -211,7 +235,26 @@ impl LeanCodegen {
 
         // Generate type definitions from structs and enums
         let type_translator = TypeTranslator::new(&module.types);
+        let expr_translator = ExprTranslator::new(&type_translator);
         let trait_translator = TraitTranslator::new(&type_translator);
+
+        // Emit refinement types (VER-010)
+        if !module.refined_types.is_empty() {
+            emitter.emit_comment("Refinement types");
+            for (name, refined_type) in &module.refined_types {
+                let base_lean_type = type_translator.translate(refined_type.base_type)?;
+                let predicate_lean = expr_translator.translate(&refined_type.predicate)?;
+                let predicate_str = predicate_lean.to_lean().replace("_local_0", "x");
+
+                let subtype = LeanType::Subtype {
+                    name: naming::to_pascal_case(name),
+                    base_type: Box::new(base_lean_type),
+                    predicate: predicate_str,
+                };
+                emitter.emit_type(&subtype);
+            }
+            emitter.emit_blank();
+        }
 
         // Emit type classes from traits
         if !traits.is_empty() {

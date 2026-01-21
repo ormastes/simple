@@ -7,6 +7,8 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_primary_control(&mut self) -> Result<Expr, ParseError> {
         match &self.current.kind {
             TokenKind::Old => self.parse_contract_old(),
+            TokenKind::Forall => self.parse_forall(),
+            TokenKind::Exists => self.parse_exists(),
             TokenKind::If | TokenKind::Elif => {
                 self.advance();
                 self.parse_if_expr()
@@ -30,6 +32,58 @@ impl<'a> Parser<'a> {
         let expr = self.parse_expression()?;
         self.expect(&TokenKind::RParen)?;
         Ok(Expr::ContractOld(Box::new(expr)))
+    }
+
+    /// Parse universal quantifier: forall x in range: predicate (VER-030)
+    fn parse_forall(&mut self) -> Result<Expr, ParseError> {
+        self.advance(); // consume 'forall'
+
+        // Parse pattern (variable binding)
+        let pattern = self.parse_pattern()?;
+
+        // Expect 'in'
+        self.expect(&TokenKind::In)?;
+
+        // Parse range expression
+        let range = Box::new(self.parse_expression()?);
+
+        // Expect colon
+        self.expect(&TokenKind::Colon)?;
+
+        // Parse predicate
+        let predicate = Box::new(self.parse_expression()?);
+
+        Ok(Expr::Forall {
+            pattern,
+            range,
+            predicate,
+        })
+    }
+
+    /// Parse existential quantifier: exists x in range: predicate (VER-030)
+    fn parse_exists(&mut self) -> Result<Expr, ParseError> {
+        self.advance(); // consume 'exists'
+
+        // Parse pattern (variable binding)
+        let pattern = self.parse_pattern()?;
+
+        // Expect 'in'
+        self.expect(&TokenKind::In)?;
+
+        // Parse range expression
+        let range = Box::new(self.parse_expression()?);
+
+        // Expect colon
+        self.expect(&TokenKind::Colon)?;
+
+        // Parse predicate
+        let predicate = Box::new(self.parse_expression()?);
+
+        Ok(Expr::Exists {
+            pattern,
+            range,
+            predicate,
+        })
     }
 
     fn parse_match_expr(&mut self) -> Result<Expr, ParseError> {

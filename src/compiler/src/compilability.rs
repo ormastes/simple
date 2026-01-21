@@ -535,6 +535,16 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             analyze_expr(inner, reasons);
             add_reason(reasons, FallbackReason::NotYetImplemented("contract old()".into()));
         }
+        Expr::Forall { range, predicate, .. } => {
+            analyze_expr(range, reasons);
+            analyze_expr(predicate, reasons);
+            add_reason(reasons, FallbackReason::NotYetImplemented("forall quantifier (verification only)".into()));
+        }
+        Expr::Exists { range, predicate, .. } => {
+            analyze_expr(range, reasons);
+            analyze_expr(predicate, reasons);
+            add_reason(reasons, FallbackReason::NotYetImplemented("exists quantifier (verification only)".into()));
+        }
 
         // DoBlock - a sequence of statements (used for BDD DSL colon-blocks)
         Expr::DoBlock(nodes) => {

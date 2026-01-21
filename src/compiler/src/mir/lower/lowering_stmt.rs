@@ -358,6 +358,18 @@ impl<'a> MirLowerer<'a> {
                 let _ = message;
                 Ok(())
             }
+
+            HirStmt::ProofHint { hint: _ } => {
+                // Proof hints are verification-only statements that provide tactic hints to Lean
+                // At runtime, this is a no-op
+                Ok(())
+            }
+
+            HirStmt::Calc { steps: _ } => {
+                // Calculational proofs are verification-only statements for Lean calc blocks
+                // At runtime, this is a no-op
+                Ok(())
+            }
         }
     }
 

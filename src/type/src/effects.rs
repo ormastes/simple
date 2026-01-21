@@ -840,6 +840,7 @@ mod tests {
             is_sync: false,
             is_me_method: false,
             bounds_block: None,
+            return_constraint: None,
         };
 
         let env = HashMap::new();
@@ -869,6 +870,7 @@ mod tests {
             is_sync: true, // Explicitly marked as sync
             is_me_method: false,
             bounds_block: None,
+            return_constraint: None,
         };
 
         let env = HashMap::new();
@@ -900,6 +902,7 @@ mod tests {
             is_sync: true,
             is_me_method: false,
             bounds_block: None,
+            return_constraint: None,
         };
 
         let env = HashMap::new();
@@ -931,6 +934,7 @@ mod tests {
             is_sync: false,
             is_me_method: false,
             bounds_block: None,
+            return_constraint: None,
         };
 
         let env = HashMap::new();
@@ -963,6 +967,7 @@ mod tests {
             is_sync: false,
             is_me_method: false,
             bounds_block: None,
+            return_constraint: None,
         };
 
         let env = HashMap::new();
@@ -1068,6 +1073,7 @@ mod tests {
             is_sync: true, // Marked as sync but contains suspension
             bounds_block: None,
             is_me_method: false,
+            return_constraint: None,
         };
 
         let env = HashMap::new();
@@ -1154,6 +1160,7 @@ mod tests {
             is_sync: false,
             is_me_method: false,
             bounds_block: None,
+            return_constraint: None,
         }
     }
 
@@ -1182,6 +1189,7 @@ mod tests {
             is_sync: false,
             is_me_method: false,
             bounds_block: None,
+            return_constraint: None,
         }
     }
 
@@ -1207,6 +1215,7 @@ mod tests {
             is_sync: false,
             is_me_method: false,
             bounds_block: None,
+            return_constraint: None,
         }
     }
 
@@ -1291,6 +1300,7 @@ mod tests {
             is_sync: true,
             is_me_method: false,
             bounds_block: None,
+            return_constraint: None,
         };
 
         let env = HashMap::new();

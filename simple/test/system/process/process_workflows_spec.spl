@@ -1,0 +1,323 @@
+# Process Execution System Tests
+"""
+## System Test: Process Execution Workflows
+
+**Integration Scope:** Process + System calls + Error handling
+**Complexity:** Medium-High
+**Coverage Impact:** process.rs (0%→85%), sys module
+
+Tests end-to-end process execution workflows: running commands,
+capturing output, handling errors, timeouts, and environment setup.
+"""
+
+import std.spec
+import sys.process as process
+
+describe "Process execution workflows":
+    """
+    ### Command Pipeline
+
+    Execute external commands and capture output.
+    Exercises: run, output, stdout, stderr, exit_code.
+    """
+
+    context "Command pipeline":
+        it "runs simple command successfully":
+            val result = process.run("echo", ["Hello from process"])
+
+            expect(result.exit_code).to(eq(0))
+            expect(result.success).to(be_true())
+
+        it "captures stdout from command":
+            val result = process.output("echo", ["test output"])
+
+            expect(result.stdout).to(include("test output"))
+            expect(result.exit_code).to(eq(0))
+
+        it "captures multiple lines of output":
+            val result = process.output("printf", ["line1\\nline2\\nline3"])
+
+            expect(result.stdout).to(include("line1"))
+            expect(result.stdout).to(include("line2"))
+            expect(result.stdout).to(include("line3"))
+
+        it "runs command with multiple arguments":
+            val result = process.output("printf", ["%s %s", "hello", "world"])
+
+            expect(result.stdout).to(include("hello world"))
+
+        it "handles empty output":
+            val result = process.output("true", [])
+
+            expect(result.stdout).to(eq(""))
+            expect(result.exit_code).to(eq(0))
+
+    """
+    ### Error Handling
+
+    Handle command failures and error output.
+    Exercises: stderr, non-zero exit codes, error detection.
+    """
+
+    context "Error handling":
+        it "captures stderr on command failure":
+            val result = process.output("ls", ["/nonexistent_directory_12345"])
+
+            expect(result.exit_code).not_to(eq(0))
+            expect(result.success).to(be_false())
+            expect(result.stderr).to(include("No such file"))
+
+        it "handles non-zero exit codes":
+            val result = process.run("false", [])
+
+            expect(result.exit_code).not_to(eq(0))
+            expect(result.success).to(be_false())
+
+        it "distinguishes between stdout and stderr":
+            # Command that writes to both stdout and stderr
+            val result = process.output("sh", ["-c", "echo 'out' && echo 'err' >&2"])
+
+            expect(result.stdout).to(include("out"))
+            expect(result.stderr).to(include("err"))
+
+        it "handles command not found error":
+            val result = process.run("nonexistent_command_xyz", [])
+
+            expect(result.exit_code).not_to(eq(0))
+            expect(result.success).to(be_false())
+
+        it "captures exit code from failing command":
+            val result = process.run("sh", ["-c", "exit 42"])
+
+            expect(result.exit_code).to(eq(42))
+            expect(result.success).to(be_false())
+
+    """
+    ### Process Timeout
+
+    Terminate long-running processes after timeout.
+    Exercises: run_timeout, timeout handling, process termination.
+    """
+
+    context "Process timeout":
+        it "terminates long-running process after timeout":
+            val start_time = time.now()
+            val result = process.run_timeout("sleep", ["5"], timeout_ms: 100)
+            val elapsed = time.now() - start_time
+
+            expect(elapsed).to(be_less_than(200))
+            expect(result.timed_out).to(be_true())
+            expect(result.exit_code).not_to(eq(0))
+
+        it "completes fast command before timeout":
+            val result = process.run_timeout("echo", ["quick"], timeout_ms: 5000)
+
+            expect(result.timed_out).to(be_false())
+            expect(result.success).to(be_true())
+            expect(result.stdout).to(include("quick"))
+
+        it "allows configurable timeout duration":
+            # Short timeout
+            val result1 = process.run_timeout("sleep", ["2"], timeout_ms: 50)
+            expect(result1.timed_out).to(be_true())
+
+            # Longer timeout
+            val result2 = process.run_timeout("sleep", ["0.1"], timeout_ms: 500)
+            expect(result2.timed_out).to(be_false())
+
+    """
+    ### Environment Variables
+
+    Pass custom environment to subprocess.
+    Exercises: env variables, environment setup.
+    """
+
+    context "Environment variables":
+        it "passes custom environment to subprocess":
+            val env = {
+                "CUSTOM_VAR": "test_value",
+                "ANOTHER_VAR": "123"
+            }
+
+            val result = process.output_with_env("sh", ["-c", "echo $CUSTOM_VAR"], env)
+
+            expect(result.stdout).to(include("test_value"))
+
+        it "inherits parent environment by default":
+            # Should have access to standard env vars
+            val result = process.output("sh", ["-c", "echo $PATH"])
+
+            expect(result.stdout).not_to(eq(""))
+
+        it "overrides environment variables":
+            val env = {
+                "TEST_VAR": "original"
+            }
+
+            val result1 = process.output_with_env("sh", ["-c", "echo $TEST_VAR"], env)
+            expect(result1.stdout).to(include("original"))
+
+            # Override
+            env["TEST_VAR"] = "modified"
+            val result2 = process.output_with_env("sh", ["-c", "echo $TEST_VAR"], env)
+            expect(result2.stdout).to(include("modified"))
+
+    """
+    ### Working Directory
+
+    Run process in specified directory.
+    Exercises: working directory, path handling.
+    """
+
+    context "Working directory":
+        it "runs command in specified directory":
+            val result = process.output_in_dir("pwd", [], "/tmp")
+
+            expect(result.stdout).to(include("/tmp"))
+
+        it "uses current directory by default":
+            val cwd = process.current_dir()
+            val result = process.output("pwd", [])
+
+            expect(result.stdout).to(include(cwd))
+
+        it "handles relative paths from working directory":
+            # Create test file in /tmp
+            file.write("/tmp/test_file.txt", "content")
+
+            val result = process.output_in_dir("cat", ["test_file.txt"], "/tmp")
+
+            expect(result.stdout).to(include("content"))
+
+    """
+    ### Input/Output Piping
+
+    Pipe data to/from processes.
+    Exercises: stdin, stdout piping, data flow.
+    """
+
+    context "Input/Output piping":
+        it "pipes input to command stdin":
+            val input_data = "hello\nworld\ntest"
+
+            val result = process.output_with_stdin("cat", [], input_data)
+
+            expect(result.stdout).to(eq(input_data))
+
+        it "processes piped input with grep":
+            val input_data = "apple\nbanana\napricot\norange"
+
+            val result = process.output_with_stdin("grep", ["ap"], input_data)
+
+            expect(result.stdout).to(include("apple"))
+            expect(result.stdout).to(include("apricot"))
+            expect(result.stdout).not_to(include("banana"))
+
+        it "pipes data through wc for line counting":
+            val input_data = "line1\nline2\nline3\nline4\nline5"
+
+            val result = process.output_with_stdin("wc", ["-l"], input_data)
+
+            expect(result.stdout.trim()).to(eq("5"))
+
+        it "processes stdin and produces stdout":
+            val result = process.output_with_stdin("tr", ["a-z", "A-Z"], "hello world")
+
+            expect(result.stdout).to(include("HELLO WORLD"))
+
+    """
+    ### Command Chaining
+
+    Chain multiple commands together.
+    Exercises: sequential execution, output chaining.
+    """
+
+    context "Command chaining":
+        it "runs commands sequentially":
+            val result1 = process.output("echo", ["first"])
+            val result2 = process.output("echo", ["second"])
+
+            expect(result1.stdout).to(include("first"))
+            expect(result2.stdout).to(include("second"))
+
+        it "chains command output as next input":
+            val result1 = process.output("echo", ["hello world"])
+            val result2 = process.output_with_stdin("tr", ["a-z", "A-Z"], result1.stdout)
+
+            expect(result2.stdout).to(include("HELLO WORLD"))
+
+        it "implements simple pipeline":
+            # echo -> grep -> wc
+            val step1 = process.output("echo", ["apple\nbanana\napricot"])
+            val step2 = process.output_with_stdin("grep", ["ap"], step1.stdout)
+            val step3 = process.output_with_stdin("wc", ["-l"], step2.stdout)
+
+            expect(step3.stdout.trim()).to(eq("2"))
+
+    """
+    ### Performance and Scale
+
+    Handle multiple processes and process management.
+    """
+
+    context "Performance benchmarking":
+        it "handles multiple sequential processes":
+            for i in 0..10:
+                val result = process.output("echo", ["{i}"])
+                expect(result.success).to(be_true())
+
+        it "processes data efficiently":
+            val large_input = "line\n" * 1000
+
+            val result = process.output_with_stdin("wc", ["-l"], large_input)
+
+            expect(result.stdout.trim()).to(eq("1000"))
+
+        it "handles rapid process spawning":
+            var success_count = 0
+
+            for i in 0..20:
+                val result = process.run("true", [])
+                if result.success:
+                    success_count = success_count + 1
+
+            expect(success_count).to(eq(20))
+
+    """
+    ### Edge Cases
+
+    Process behavior with edge cases.
+    """
+
+    context "Edge cases":
+        it "handles empty command arguments":
+            val result = process.run("echo", [])
+
+            expect(result.success).to(be_true())
+
+        it "handles very long argument":
+            val long_arg = "x" * 1000
+
+            val result = process.output("echo", [long_arg])
+
+            expect(result.stdout).to(include(long_arg))
+
+        it "handles special characters in arguments":
+            val result = process.output("echo", ["test$var", "path/to/file"])
+
+            expect(result.stdout).to(include("test$var"))
+            expect(result.stdout).to(include("path/to/file"))
+
+        it "handles newlines in output correctly":
+            val result = process.output("printf", ["line1\\nline2\\n"])
+
+            val lines = result.stdout.split("\n")
+            expect(lines.len()).to(be_greater_than(1))
+
+        it "provides process metadata":
+            val result = process.output("echo", ["test"])
+
+            expect(result.exit_code).to(be_a(Integer))
+            expect(result.stdout).to(be_a(String))
+            expect(result.stderr).to(be_a(String))
+            expect(result.success).to(be_a(Boolean))

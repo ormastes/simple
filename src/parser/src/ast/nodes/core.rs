@@ -70,6 +70,8 @@ pub enum Node {
     Assert(AssertStmt),
     Assume(AssumeStmt),
     Admit(AdmitStmt),
+    ProofHint(ProofHintStmt),
+    Calc(CalcStmt),
     Context(ContextStmt),
     With(WithStmt),
     Expression(Expr),
@@ -560,6 +562,26 @@ pub enum Expr {
     ContractResult,
     /// old(expr) in ensures block - refers to value before function execution
     ContractOld(Box<Expr>),
+    /// forall x in range: predicate (VER-030: Quantifier Syntax)
+    /// Universal quantifier for contract specifications
+    Forall {
+        /// Pattern binding for the quantified variable(s)
+        pattern: Pattern,
+        /// Range expression to quantify over
+        range: Box<Expr>,
+        /// Predicate that must be true for all values
+        predicate: Box<Expr>,
+    },
+    /// exists x in range: predicate (VER-030: Quantifier Syntax)
+    /// Existential quantifier for contract specifications
+    Exists {
+        /// Pattern binding for the quantified variable(s)
+        pattern: Pattern,
+        /// Range expression to quantify over
+        range: Box<Expr>,
+        /// Predicate that must be true for at least one value
+        predicate: Box<Expr>,
+    },
 
     /// Do block - a sequence of statements that evaluate to () (unit)
     /// Used for colon-block syntax in BDD DSL: `describe "name": body`

@@ -11,69 +11,76 @@ import verification.lean.types as types
 
 # Lean expression for function bodies (simplified)
 enum LeanExpr:
-    Var(name: text)
-    Lit(value: text)
-    BinOp(op: text, left: LeanExpr, right: LeanExpr)
-    UnaryOp(op: text, operand: LeanExpr)
-    App(func: text, args: List<LeanExpr>)
-    Lambda(params: List<text>, body: LeanExpr)
-    Let(name: text, value: LeanExpr, body: LeanExpr)
-    If(cond: LeanExpr, then_branch: LeanExpr, else_branch: LeanExpr)
-    Match(scrutinee: LeanExpr, arms: List<(text, LeanExpr)>)
-    Field(obj: LeanExpr, field: text)
-    StructInit(type_name: text, fields: List<(text, LeanExpr)>)
-    ListLit(elems: List<LeanExpr>)
-    TupleLit(elems: List<LeanExpr>)
+    Var(text)
+    Lit(text)
+    BinOp(text, LeanExpr, LeanExpr)
+    UnaryOp(text, LeanExpr)
+    App(text, List<LeanExpr>)
+    Lambda(List<text>, LeanExpr)
+    Let(text, LeanExpr, LeanExpr)
+    If(LeanExpr, LeanExpr, LeanExpr)
+    Match(LeanExpr, List<(text, LeanExpr)>)
+    Field(LeanExpr, text)
+    StructInit(text, List<(text, LeanExpr)>)
+    ListLit(List<LeanExpr>)
+    TupleLit(List<LeanExpr>)
     Sorry
     Unit
 
 impl LeanExpr:
     fn to_lean() -> text:
         match self:
-            case Var(name): name
-            case Lit(value): value
-            case BinOp(op, left, right):
+            case LeanExpr.Var(name): name
+            case LeanExpr.Lit(value): value
+            case LeanExpr.BinOp(op, left, right):
                 "({left.to_lean()} {op} {right.to_lean()})"
-            case UnaryOp(op, operand):
+            case LeanExpr.UnaryOp(op, operand):
                 "({op}{operand.to_lean()})"
-            case App(func, args):
+            case LeanExpr.App(func, args):
                 var args_str: List<text> = []
                 for a in args:
                     args_str = args_str + [a.to_lean()]
                 if args_str.len() == 0:
                     func
                 else:
-                    "({func} {args_str.join(\" \")})"
-            case Lambda(params, body):
-                "fun {params.join(\" \")} => {body.to_lean()}"
-            case Let(name, value, body):
+                    val space = " "
+                    "({func} " + args_str.join(space) + ")"
+            case LeanExpr.Lambda(params, body):
+                val space = " "
+                "fun " + params.join(space) + " => {body.to_lean()}"
+            case LeanExpr.Let(name, value, body):
                 "let {name} := {value.to_lean()}\n  {body.to_lean()}"
-            case If(cond, then_b, else_b):
+            case LeanExpr.If(cond, then_b, else_b):
                 "if {cond.to_lean()} then {then_b.to_lean()} else {else_b.to_lean()}"
-            case Match(scrutinee, arms):
+            case LeanExpr.Match(scrutinee, arms):
                 var result = "match {scrutinee.to_lean()} with\n"
                 for (pattern, expr) in arms:
                     result = result + "  | {pattern} => {expr.to_lean()}\n"
                 result
-            case Field(obj, field):
+            case LeanExpr.Field(obj, field):
                 "{obj.to_lean()}.{field}"
-            case StructInit(type_name, fields):
+            case LeanExpr.StructInit(type_name, fields):
                 var field_strs: List<text> = []
                 for (name, expr) in fields:
                     field_strs = field_strs + ["{name} := {expr.to_lean()}"]
-                "\{{ {field_strs.join(\", \")} \}}"
-            case ListLit(elems):
+                val comma = ", "
+                val lbrace = String.from_char_code(123)
+                val rbrace = String.from_char_code(125)
+                lbrace + " " + field_strs.join(comma) + " " + rbrace
+            case LeanExpr.ListLit(elems):
                 var elem_strs: List<text> = []
                 for e in elems:
                     elem_strs = elem_strs + [e.to_lean()]
-                "[{elem_strs.join(\", \")}]"
-            case TupleLit(elems):
+                val comma = ", "
+                "[" + elem_strs.join(comma) + "]"
+            case LeanExpr.TupleLit(elems):
                 var elem_strs: List<text> = []
                 for e in elems:
                     elem_strs = elem_strs + [e.to_lean()]
-                "({elem_strs.join(\", \")})"
-            case Sorry: "sorry"
-            case Unit: "()"
+                val comma = ", "
+                "(" + elem_strs.join(comma) + ")"
+            case LeanExpr.Sorry: "sorry"
+            case LeanExpr.Unit: "()"
 
 # A Lean function definition
 class LeanFunction:
@@ -87,16 +94,7 @@ class LeanFunction:
     termination_by: Option<LeanExpr>
 
     static fn new(name: text) -> LeanFunction:
-        LeanFunction(
-            name: name,
-            type_params: [],
-            params: [],
-            return_type: types.LeanType.Primitive("Unit"),
-            body: nil,
-            is_partial: false,
-            doc: nil,
-            termination_by: nil
-        )
+        LeanFunction(name: name, type_params: [], params: [], return_type: types.LeanType.Primitive("Unit"), body: nil, is_partial: false, doc: nil, termination_by: nil)
 
     me with_params(params: List<(text, types.LeanType)>) -> LeanFunction:
         self.params = params
@@ -129,11 +127,15 @@ class LeanFunction:
     # Emit as Lean definition
     fn to_lean() -> text:
         var out = ""
+        val newline = "\n"
+        val space = " "
+        val lbrace = String.from_char_code(123)
+        val rbrace = String.from_char_code(125)
 
         # Doc comment
         match self.doc:
             case Some(doc):
-                for line in doc.split("\n"):
+                for line in doc.split(newline):
                     out = out + "/-- {line} -/\n"
             case nil:
                 pass
@@ -147,7 +149,7 @@ class LeanFunction:
 
         # Type parameters
         if self.type_params.len() > 0:
-            out = out + " \{{self.type_params.join(\" \")}\}"
+            out = out + " " + lbrace + self.type_params.join(space) + rbrace
 
         # Parameters
         for (param_name, param_type) in self.params:
@@ -175,11 +177,15 @@ class LeanFunction:
     # Emit as axiom (for external/native functions)
     fn to_axiom() -> text:
         var out = ""
+        val newline = "\n"
+        val space = " "
+        val lbrace = String.from_char_code(123)
+        val rbrace = String.from_char_code(125)
 
         # Doc comment
         match self.doc:
             case Some(doc):
-                for line in doc.split("\n"):
+                for line in doc.split(newline):
                     out = out + "/-- {line} -/\n"
             case nil:
                 pass
@@ -188,7 +194,7 @@ class LeanFunction:
 
         # Type parameters
         if self.type_params.len() > 0:
-            out = out + " \{{self.type_params.join(\" \")}\}"
+            out = out + " " + lbrace + self.type_params.join(space) + rbrace
 
         # Parameters as function type
         for (_, param_type) in self.params:
@@ -216,8 +222,10 @@ class LeanParam:
         LeanParam(name: name, ty: ty, is_implicit: false, is_instance: true)
 
     fn to_lean() -> text:
+        val lbrace = String.from_char_code(123)
+        val rbrace = String.from_char_code(125)
         if self.is_implicit:
-            "\{{self.name} : {self.ty.to_lean()}\}"
+            lbrace + "{self.name} : {self.ty.to_lean()}" + rbrace
         else if self.is_instance:
             "[{self.name} : {self.ty.to_lean()}]"
         else:
@@ -287,7 +295,8 @@ fn bool_lit(b: bool) -> LeanExpr:
         LeanExpr.Lit("false")
 
 fn string_lit(s: text) -> LeanExpr:
-    LeanExpr.Lit("\"{s}\"")
+    val quote = "\""
+    LeanExpr.Lit(quote + s + quote)
 
 fn binop(op: text, left: LeanExpr, right: LeanExpr) -> LeanExpr:
     LeanExpr.BinOp(op, left, right)

@@ -227,6 +227,8 @@ impl TypeChecker {
                 | Node::Assert(_)
                 | Node::Assume(_)
                 | Node::Admit(_)
+                | Node::ProofHint(_)
+                | Node::Calc(_)
                 | Node::Context(_)
                 | Node::With(_)
                 | Node::Expression(_) => {

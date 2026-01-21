@@ -185,23 +185,59 @@ theorem traitMethod_deterministic (env : TraitEnv) (registry : ImplRegistry)
   cases h2
   rfl
 
--- Theorem: Implementation completeness
--- If a type implements a trait, all required methods must have implementations
--- REMAINS AXIOM: This statement is semantically incorrect - it claims the length inequality
--- holds just from lookupTrait succeeding, without any validation that impl actually
--- correctly implements the trait. A correct statement would require a validation hypothesis
--- (e.g., from a type checker that verified the implementation).
-axiom impl_complete (env : TraitEnv) (impl : TraitImpl) (trait : TraitDef) :
-  lookupTrait env impl.trait_name = some trait →
-  trait.methods.length ≤ impl.method_impls.length
+/-- An implementation is complete if it has a method for each trait method -/
+def TraitImpl.isComplete (impl : TraitImpl) (trait : TraitDef) : Prop :=
+  ∀ m ∈ trait.methods, ∃ (name : String) (ty : Ty), (name, ty) ∈ impl.method_impls ∧ name = m.name
 
--- Theorem: Coherence implies no overlapping implementations
--- REMAINS AXIOM: The current checkCoherence function is simplified to always return true.
--- This makes the theorem vacuously impossible to use meaningfully.
--- A real implementation would check for overlapping for_type values with unification.
-axiom coherence_no_overlap (registry : ImplRegistry) (impl1 impl2 : TraitImpl) :
-  checkCoherence registry = true →
-  impl1 ≠ impl2 → !implsOverlap impl1 impl2
+-- Theorem: Implementation completeness
+-- If an implementation is complete, length inequality holds with uniqueness
+theorem impl_complete (env : TraitEnv) (impl : TraitImpl) (trait : TraitDef)
+    (h_trait_nodup : (trait.methods.map TraitMethod.name).Nodup)
+    (h_impl_nodup : (impl.method_impls.map Prod.fst).Nodup)
+    (h_complete : impl.isComplete trait)
+    (h_lookup : lookupTrait env impl.trait_name = some trait) :
+    trait.methods.length ≤ impl.method_impls.length := by
+  unfold TraitImpl.isComplete at h_complete
+  -- Each trait method name maps to an impl method name
+  have h_subset : ∀ n ∈ trait.methods.map TraitMethod.name, n ∈ impl.method_impls.map Prod.fst := by
+    intro n h_mem
+    rw [List.mem_map] at h_mem
+    obtain ⟨tm, h_tm_mem, h_eq⟩ := h_mem
+    specialize h_complete tm h_tm_mem
+    obtain ⟨name, ty, h_impl_mem, h_name_eq⟩ := h_complete
+    rw [← h_eq, h_name_eq]
+    exact List.mem_map_of_mem Prod.fst h_impl_mem
+  have h_map_len1 : trait.methods.length = (trait.methods.map TraitMethod.name).length :=
+    (List.length_map trait.methods TraitMethod.name).symm
+  have h_map_len2 : impl.method_impls.length = (impl.method_impls.map Prod.fst).length :=
+    (List.length_map impl.method_impls Prod.fst).symm
+  rw [h_map_len1, h_map_len2]
+  exact List.Nodup.length_le_of_subset h_trait_nodup h_subset
+
+/-- Proper coherence check: no two distinct implementations overlap -/
+def checkCoherenceProper (registry : ImplRegistry) : Bool :=
+  registry.all (fun impl1 =>
+    registry.all (fun impl2 =>
+      impl1 == impl2 || !implsOverlap impl1 impl2
+    )
+  )
+
+-- Theorem: Proper coherence implies no overlapping implementations
+theorem coherence_no_overlap (registry : ImplRegistry) (impl1 impl2 : TraitImpl)
+    (h_coherence : checkCoherenceProper registry = true)
+    (h_impl1 : impl1 ∈ registry)
+    (h_impl2 : impl2 ∈ registry)
+    (h_neq : impl1 ≠ impl2) :
+    !implsOverlap impl1 impl2 = true := by
+  unfold checkCoherenceProper at h_coherence
+  rw [List.all_eq_true] at h_coherence
+  specialize h_coherence impl1 h_impl1
+  rw [List.all_eq_true] at h_coherence
+  specialize h_coherence impl2 h_impl2
+  simp only [Bool.or_eq_true, beq_iff_eq, Bool.not_eq_eq_eq_not, Bool.not_false] at h_coherence
+  cases h_coherence with
+  | inl h_eq => exact absurd h_eq h_neq
+  | inr h_no_overlap => exact h_no_overlap
 
 -- Note: bounds_monotonic removed - the statement had no preconditions and was incorrect.
 -- A proper monotonicity theorem would state that adding implementations to the registry
@@ -293,14 +329,25 @@ theorem unify_symmetric (ty1 ty2 : Ty) :
   rw [unifyDefaultFuel_symmetric ty1 ty2]
   exact unifyFuel_symmetric (unifyDefaultFuel ty2 ty1) ty1 ty2
 
--- Theorem: Overlapping implementations violate coherence
--- REMAINS AXIOM: The current checkCoherence function always returns true (simplified),
--- so this theorem cannot be proven. The statement is semantically correct but requires
--- a proper implementation of checkCoherence that actually detects overlaps.
-axiom overlap_violates_coherence (registry : ImplRegistry) (impl1 impl2 : TraitImpl) :
-  impl1 ≠ impl2 →
-  implsOverlap impl1 impl2 = true →
-  checkCoherence registry = false
+-- Theorem: Overlapping implementations violate proper coherence
+theorem overlap_violates_coherence (registry : ImplRegistry) (impl1 impl2 : TraitImpl)
+    (h_impl1 : impl1 ∈ registry)
+    (h_impl2 : impl2 ∈ registry)
+    (h_neq : impl1 ≠ impl2)
+    (h_overlap : implsOverlap impl1 impl2 = true) :
+    checkCoherenceProper registry = false := by
+  unfold checkCoherenceProper
+  rw [List.all_eq_false]
+  use impl1
+  constructor
+  · exact h_impl1
+  · rw [List.all_eq_false]
+    use impl2
+    constructor
+    · exact h_impl2
+    · simp only [Bool.or_eq_true, beq_iff_eq, Bool.not_eq_eq_eq_not, Bool.not_false,
+                 Bool.not_eq_false, Bool.and_eq_true, bne_iff_ne]
+      exact ⟨h_neq, h_overlap⟩
 
 --==============================================================================
 -- Static Polymorphism: Interface Bindings
@@ -433,17 +480,49 @@ theorem valid_binding_impl_exists (implRegistry : ImplRegistry) (binding : Inter
   unfold isValidBinding at h
   exact h
 
--- Theorem: Static dispatch preserves type safety
--- If a binding is valid, the bound type satisfies all trait requirements
--- REMAINS AXIOM: The quantifier "∀ methodName : String" is too strong - it claims that
--- ANY string is a valid method name that can be inferred. A correct statement would be:
--- "∀ methodName ∈ trait.methods.map (·.name), inferTraitMethodCall ... ≠ none"
--- This would also require the trait to be looked up successfully.
-axiom static_dispatch_safe (env : TraitEnv) (implRegistry : ImplRegistry)
-    (binding : InterfaceBinding) :
-  isValidBinding implRegistry binding = true →
-  ∀ methodName : String,
-    inferTraitMethodCall env implRegistry binding.trait_name methodName binding.impl_type [] ≠ none
+/-- Helper: find? on unique list returns the element with matching predicate -/
+theorem find_unique_by_name {α : Type} (l : List α) (name : α → String) (x : α)
+    (h_mem : x ∈ l)
+    (h_nodup : (l.map name).Nodup) :
+    l.find? (fun a => name a == name x) = some x := by
+  induction l with
+  | nil => cases h_mem
+  | cons a rest ih =>
+    simp only [List.map, List.nodup_cons] at h_nodup
+    simp only [List.find?]
+    cases h_mem with
+    | head =>
+      simp [beq_self_eq_true]
+    | tail _ h_rest =>
+      by_cases h_eq : name a == name x
+      · -- a has same name as x, but x is in rest
+        have h_name_eq : name a = name x := beq_eq_true_iff_eq.mp h_eq
+        have h_x_in_names : name x ∈ rest.map name := List.mem_map_of_mem name h_rest
+        rw [← h_name_eq] at h_x_in_names
+        exact absurd h_x_in_names h_nodup.1
+      · simp [h_eq, ih h_rest h_nodup.2]
+
+-- Theorem: Static dispatch preserves type safety for trait methods
+-- If a binding is valid and trait is found, the bound type can invoke trait methods
+theorem static_dispatch_safe (env : TraitEnv) (implRegistry : ImplRegistry)
+    (binding : InterfaceBinding) (trait : TraitDef) (method : TraitMethod)
+    (h_nodup : (trait.methods.map TraitMethod.name).Nodup)
+    (h_valid : isValidBinding implRegistry binding = true)
+    (h_lookup : lookupTrait env binding.trait_name = some trait)
+    (h_method : method ∈ trait.methods)
+    (h_params : method.params = []) :
+    inferTraitMethodCall env implRegistry binding.trait_name method.name binding.impl_type [] ≠ none := by
+  unfold inferTraitMethodCall
+  simp only [h_lookup]
+  -- With unique names, lookupTraitMethod returns exactly 'method'
+  have h_method_found : lookupTraitMethod trait method.name = some method := by
+    unfold lookupTraitMethod
+    exact find_unique_by_name trait.methods TraitMethod.name method h_method h_nodup
+  simp only [h_method_found]
+  -- Now show the condition passes
+  unfold isValidBinding at h_valid
+  simp only [h_valid, h_params, List.nil_eq, beq_self_eq_true, Bool.and_self, ↓reduceIte,
+             ne_eq, not_true_eq_false, not_false_eq_true]
 
 -- Theorem: Dispatch resolution is consistent
 -- Once resolved, the same binding always produces the same implementation type

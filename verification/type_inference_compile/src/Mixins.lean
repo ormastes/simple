@@ -435,14 +435,66 @@ theorem mixin_field_access (env : ClassEnv) (cls cls' : ClassDef) (mixinFields :
           exact ih h_tail
   exact h_find h_none
 
+-- Helper: find? succeeds returns a matching element
+theorem find_some_mem {α : Type} (l : List α) (p : α → Bool) (x : α) :
+    l.find? p = some x → x ∈ l ∧ p x = true := by
+  intro h
+  induction l with
+  | nil => simp at h
+  | cons a as ih =>
+    simp only [List.find?] at h
+    by_cases h_eq : p a
+    · simp only [h_eq, ↓reduceIte] at h
+      injection h with h_x
+      exact ⟨h_x ▸ List.Mem.head as, h_x ▸ h_eq⟩
+    · simp only [h_eq, Bool.false_eq_true, ↓reduceIte] at h
+      have ⟨h_mem, h_p⟩ := ih h
+      exact ⟨List.Mem.tail a h_mem, h_p⟩
+
 -- Theorem: Method dispatch after mixin application includes mixin methods
--- REMAINS AXIOM: Same issue as mixin_field_access - the function requires cls'.name to be
--- in the ClassEnv. Additionally, the existential "∃ argTys" doesn't specify which argument
--- types would work. A correct statement would need the class in env and specify the method's params.
-axiom mixin_method_dispatch (env : ClassEnv) (cls cls' : ClassDef) (mixinMethods : List MethodDef) (methodName : String) :
+-- Converted from axiom: Added proper preconditions for class membership and self-type subtyping
+-- Note: The existential provides the found method's params, which always works
+theorem mixin_method_dispatch (env : ClassEnv) (cls cls' : ClassDef) (mixinMethods : List MethodDef) (methodName : String) :
+  lookupClass env cls'.name = some cls' →  -- Class must be in environment
   cls'.methods = cls.methods ++ mixinMethods →
   (∃ m, m ∈ mixinMethods ∧ m.name = methodName) →
-  ∃ argTys, inferMethodCallWithMixins env (Ty.named cls'.name) methodName argTys ≠ none
+  -- For any method with name methodName in cls'.methods that has compatible self_ty
+  (∀ m' ∈ cls'.methods, m'.name = methodName → isSubtype env (Ty.named cls'.name) m'.self_ty = true) →
+  ∃ argTys, inferMethodCallWithMixins env (Ty.named cls'.name) methodName argTys ≠ none := by
+  intro h_lookup h_methods ⟨m, h_m_mem, h_m_name⟩ h_subtype_all
+  unfold inferMethodCallWithMixins inferMethodCall
+  simp only [h_lookup, ne_eq]
+  -- m is in mixinMethods, so m is in cls'.methods
+  have h_m_in_cls' : m ∈ cls'.methods := by
+    rw [h_methods]
+    exact List.mem_append_right cls.methods h_m_mem
+  -- Show find? succeeds
+  have h_find : ∃ method, cls'.methods.find? (fun m' => m'.name == methodName) = some method := by
+    induction cls'.methods with
+    | nil => cases h_m_in_cls'
+    | cons a as ih =>
+      cases h_m_in_cls' with
+      | head =>
+        use m
+        simp only [List.find?, ← h_m_name, beq_self_eq_true, ↓reduceIte]
+      | tail _ h_tail =>
+        by_cases h_eq : a.name == methodName
+        · use a
+          simp only [List.find?, h_eq, ↓reduceIte]
+        · simp only [List.find?, h_eq, Bool.false_eq_true, ↓reduceIte]
+          exact ih h_tail
+  obtain ⟨method, h_find_eq⟩ := h_find
+  -- Use the found method's params
+  use method.params
+  unfold lookupMethod
+  simp only [h_find_eq]
+  -- method is in cls'.methods and method.name = methodName
+  have ⟨h_method_mem, h_method_name⟩ := find_some_mem _ _ _ h_find_eq
+  have h_method_name' : method.name = methodName := beq_eq_true_iff_eq.mp h_method_name
+  -- Get subtype for this method
+  have h_subtype := h_subtype_all method h_method_mem h_method_name'
+  simp only [h_subtype, beq_self_eq_true, and_self, ↓reduceIte]
+  exact fun h => Option.noConfusion h
 
 -- Theorem: Type substitution in mixins is consistent
 theorem mixin_substitution_consistent (mixin : MixinDef) (typeArgs : List Ty) (subst : Subst) :

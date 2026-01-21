@@ -66,6 +66,32 @@ pub enum HirStmt {
         condition: HirExpr,
         message: Option<String>,
     },
+    /// Proof hint for guiding Lean proof tactics (VER-020)
+    /// lean hint: "simp"
+    /// In verification: provides tactic hint for Lean prover
+    /// At runtime: no-op (erased)
+    ProofHint {
+        hint: String,
+    },
+    /// Calculational proof block for step-by-step equational reasoning (VER-021)
+    /// calc:
+    ///     sum(0..=n)
+    ///     == sum(0..n) + n        by: "definition"
+    ///     == n * (n + 1) / 2      by: "factor"
+    /// In verification: generates Lean calc proof
+    /// At runtime: no-op (erased)
+    Calc {
+        steps: Vec<HirCalcStep>,
+    },
+}
+
+/// A single step in a calculational proof
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirCalcStep {
+    /// The expression in this step
+    pub expr: HirExpr,
+    /// Optional justification string (by: "reason")
+    pub justification: Option<String>,
 }
 
 /// Local variable info

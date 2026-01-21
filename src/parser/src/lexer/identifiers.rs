@@ -177,6 +177,8 @@ impl<'a> super::Lexer<'a> {
             "old" => TokenKind::Old,
             "result" => TokenKind::Result,
             "decreases" => TokenKind::Decreases,
+            "forall" => TokenKind::Forall,
+            "exists" => TokenKind::Exists,
             // Inline assertion keyword
             // Note: assert!/check! are macro calls, and assert()/check() are function calls
             // If '!' or '(' follows, treat as identifier (for macro/function calls)
@@ -184,6 +186,8 @@ impl<'a> super::Lexer<'a> {
             "assert" if self.peek() != Some('!') && self.peek() != Some('(') => TokenKind::Assert,
             "assume" if self.peek() != Some('!') && self.peek() != Some('(') => TokenKind::Assume,
             "admit" if self.peek() != Some('!') && self.peek() != Some('(') => TokenKind::Admit,
+            // Note: "calc" is NOT a keyword - it's parsed contextually to avoid breaking
+            // existing variable names like "calc" or "calculator"
             // Infix keywords (for BDD spec framework)
             "to" => TokenKind::To,
             "not_to" => TokenKind::NotTo,

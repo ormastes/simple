@@ -271,6 +271,17 @@ impl Lowerer {
             }
         }
 
+        // VER-011: Handle return constraint for dependent function types
+        // Convert `fn f(x: T) -> U where result.len() == x.len():` to a postcondition
+        if let Some(ref constraint_expr) = f.return_constraint {
+            let constraint_hir = self.lower_expr(constraint_expr, &mut ctx)?;
+            let contract = contract.get_or_insert_with(HirContract::default);
+            contract.postconditions.push(crate::hir::types::HirContractClause {
+                condition: constraint_hir,
+                message: Some("Return constraint".to_string()),
+            });
+        }
+
         // Extract attributes for AOP predicate matching
         let attributes: Vec<String> = f.attributes.iter().map(|attr| attr.name.clone()).collect();
 

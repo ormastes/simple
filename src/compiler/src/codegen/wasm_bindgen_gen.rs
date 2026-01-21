@@ -360,6 +360,7 @@ mod tests {
             is_sync: false,
             is_me_method: false,
             bounds_block: None,
+            return_constraint: None,
         }
     }
 

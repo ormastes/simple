@@ -1,4 +1,5 @@
 # Simple Language Compiler - Development Guide
+Impl in simple unless it has big performance differences.
 
 ## Skills Reference
 
