@@ -305,3 +305,55 @@ axiom generic_method_instantiation (env : ClassEnv) (cls : ClassDef)
     instantiateClass cls typeArgs = some instantiated →
     inferMethodCall env (Ty.generic cls.name typeArgs) methodName argTys = some retTy →
     ∃ method, lookupMethod instantiated methodName = some method ∧ method.ret = retTy
+
+--==============================================================================
+-- Lookup Function Properties (Provable)
+--==============================================================================
+
+/-- lookupClass returns None for empty environment -/
+theorem lookupClass_empty (name : String) :
+    lookupClass [] name = none := rfl
+
+/-- lookupField returns None for empty fields -/
+theorem lookupField_empty (cls : ClassDef) (fieldName : String) :
+    cls.fields = [] →
+    lookupField cls fieldName = none := by
+  intro h
+  unfold lookupField
+  simp [h]
+
+/-- lookupMethod returns None for empty methods -/
+theorem lookupMethod_empty (cls : ClassDef) (methodName : String) :
+    cls.methods = [] →
+    lookupMethod cls methodName = none := by
+  intro h
+  unfold lookupMethod
+  simp [h]
+
+/-- inferFieldAccess returns None for non-class types -/
+theorem inferFieldAccess_non_class (env : ClassEnv) (fieldName : String) :
+    inferFieldAccess env Ty.int fieldName = none := rfl
+
+/-- inferFieldAccess returns None for unknown class -/
+theorem inferFieldAccess_unknown_class (env : ClassEnv) (className : String) (fieldName : String) :
+    lookupClass env className = none →
+    inferFieldAccess env (Ty.named className) fieldName = none := by
+  intro h
+  unfold inferFieldAccess
+  simp [h]
+
+/-- checkConstructor returns None for unknown class -/
+theorem checkConstructor_unknown_class (env : ClassEnv) (className : String) (fieldAssigns : List (String × Ty)) :
+    lookupClass env className = none →
+    checkConstructor env className fieldAssigns = none := by
+  intro h
+  unfold checkConstructor
+  simp [h]
+
+/-- instantiateClass with empty type args returns class unchanged (if no type params) -/
+theorem instantiateClass_no_params (cls : ClassDef) :
+    cls.type_params = [] →
+    instantiateClass cls [] = some cls := by
+  intro h
+  unfold instantiateClass
+  simp [h]

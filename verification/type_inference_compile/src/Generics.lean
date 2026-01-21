@@ -429,9 +429,30 @@ theorem infer_deterministic (env : TypeEnv) (e : Expr) (st : FreshState)
 
 /-! ## Auxiliary lemmas for unification soundness -/
 
-/-- Non-occurrence means substitution is identity (axiomatized) -/
-axiom applySubst_noOccurs (v : TyVar) (t ty : Ty) :
-    occurs v ty = false → applySubst (singleSubst v t) ty = ty
+/-- Non-occurrence means substitution is identity -/
+theorem applySubst_noOccurs (v : TyVar) (t ty : Ty) :
+    occurs v ty = false → applySubst (singleSubst v t) ty = ty := by
+  intro h_noOccurs
+  induction ty with
+  | var v' =>
+    -- occurs v (Ty.var v') = false means v ≠ v'
+    simp only [occurs] at h_noOccurs
+    -- h_noOccurs : (v == v') = false
+    simp only [applySubst, singleSubst, substLookup]
+    rw [h_noOccurs]
+  | nat => rfl
+  | bool => rfl
+  | str => rfl
+  | arrow a b iha ihb =>
+    simp only [occurs, Bool.or_eq_false_iff] at h_noOccurs
+    simp only [applySubst, iha h_noOccurs.1, ihb h_noOccurs.2]
+  | generic0 _ => rfl
+  | generic1 _ arg ih =>
+    simp only [occurs] at h_noOccurs
+    simp only [applySubst, ih h_noOccurs]
+  | generic2 _ arg1 arg2 ih1 ih2 =>
+    simp only [occurs, Bool.or_eq_false_iff] at h_noOccurs
+    simp only [applySubst, ih1 h_noOccurs.1, ih2 h_noOccurs.2]
 
 /-- Substitution composition correctness (axiomatized due to complexity) -/
 axiom composeSubst_correct (s1 s2 : Subst) (t : Ty) :
@@ -487,6 +508,58 @@ axiom unify_sound (t1 t2 : Ty) (s : Subst) :
 /-- Principal type property (informal statement) -/
 theorem principal_type_informal (_env : TypeEnv) (_e : Expr) (_st : FreshState) :
     True := trivial
+
+/-! ## Substitution Properties (Provable) -/
+
+/-- Empty substitution is identity -/
+theorem applySubst_empty (t : Ty) :
+    applySubst emptySubst t = t := by
+  induction t with
+  | var v => simp [applySubst, emptySubst, substLookup]
+  | nat => rfl
+  | bool => rfl
+  | arrow p r ih_p ih_r =>
+    simp [applySubst, ih_p, ih_r]
+  | generic1 n arg ih =>
+    simp [applySubst, ih]
+  | generic2 n a b ih_a ih_b =>
+    simp [applySubst, ih_a, ih_b]
+
+/-- Applying substitution to nat returns nat -/
+theorem applySubst_nat (s : Subst) :
+    applySubst s Ty.nat = Ty.nat := rfl
+
+/-- Applying substitution to bool returns bool -/
+theorem applySubst_bool (s : Subst) :
+    applySubst s Ty.bool = Ty.bool := rfl
+
+/-- Fresh variable generation produces unique variable -/
+theorem freshVar_unique (st : FreshState) :
+    let (v, st') := freshVar st
+    st'.counter = st.counter + 1 ∧ v.name = s!"T{st.counter}" := by
+  simp [freshVar]
+
+/-- Two fresh variables from same state are equal -/
+theorem freshVar_deterministic (st : FreshState) :
+    freshVar st = freshVar st := rfl
+
+/-- Occurs check is false for different variable -/
+theorem occurs_different_var (v1 v2 : TyVar) (h : v1 ≠ v2) :
+    occurs v1 (Ty.var v2) = false := by
+  simp [occurs, h]
+
+/-- Occurs check is true for same variable -/
+theorem occurs_same_var (v : TyVar) :
+    occurs v (Ty.var v) = true := by
+  simp [occurs]
+
+/-- Occurs check is false for nat -/
+theorem occurs_nat (v : TyVar) :
+    occurs v Ty.nat = false := rfl
+
+/-- Occurs check is false for bool -/
+theorem occurs_bool (v : TyVar) :
+    occurs v Ty.bool = false := rfl
 
 /-! ## Example Generic Types -/
 
