@@ -26,5 +26,6 @@ pub mod test_output;
 pub mod test_runner;
 #[cfg(feature = "tui")]
 pub mod tui;
+pub mod verify;
 pub mod vscode;
 pub mod web;

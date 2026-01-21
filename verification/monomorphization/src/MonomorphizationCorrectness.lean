@@ -38,7 +38,32 @@ inductive ConcreteType where
   | struct : String → List ConcreteType → ConcreteType
   | fn : List ConcreteType → ConcreteType → ConcreteType
   | array : ConcreteType → ConcreteType
-  deriving Repr, BEq
+  deriving Repr
+
+/-- Custom transparent BEq instance for ConcreteType that we can prove properties about -/
+mutual
+
+def ConcreteType.beq : ConcreteType → ConcreteType → Bool
+  | ConcreteType.int, ConcreteType.int => true
+  | ConcreteType.bool, ConcreteType.bool => true
+  | ConcreteType.string, ConcreteType.string => true
+  | ConcreteType.struct n1 args1, ConcreteType.struct n2 args2 =>
+      n1 == n2 && args1.beqList args2
+  | ConcreteType.fn p1 r1, ConcreteType.fn p2 r2 =>
+      p1.beqList p2 && r1.beq r2
+  | ConcreteType.array e1, ConcreteType.array e2 =>
+      e1.beq e2
+  | _, _ => false
+
+def List.beqList : List ConcreteType → List ConcreteType → Bool
+  | [], [] => true
+  | hd1 :: tl1, hd2 :: tl2 => hd1.beq hd2 && tl1.beqList tl2
+  | _, _ => false
+
+end
+
+instance : BEq ConcreteType where
+  beq := ConcreteType.beq
 
 /-- Type (may contain type variables) -/
 inductive Ty where
@@ -235,33 +260,52 @@ theorem monomorphize_requires_matching_arity (gf : GenericFn) (args : List Concr
   · exact hlen
   · simp [hlen] at h
 
+mutual
+
 /-- BEq is reflexive for ConcreteType.
 
-    This axiom states that BEq is reflexive for the derived BEq instance on ConcreteType.
+    Previously an axiom, now proven using our custom transparent BEq instance.
+    The proof uses mutual well-founded recursion on the size of the type. -/
+theorem concreteType_beq_refl (ct : ConcreteType) : (ct == ct) = true := by
+  cases ct with
+  | int => rfl
+  | bool => rfl
+  | string => rfl
+  | struct name args =>
+    simp [BEq.beq, ConcreteType.beq, String.beq]
+    exact list_concreteType_beq_refl args
+  | fn params ret =>
+    simp [BEq.beq, ConcreteType.beq]
+    constructor
+    · exact list_concreteType_beq_refl params
+    · exact concreteType_beq_refl ret
+  | array elem =>
+    simp [BEq.beq, ConcreteType.beq]
+    exact concreteType_beq_refl elem
+termination_by sizeOf ct
 
-    ConcreteType is a nested inductive type (contains List ConcreteType), which prevents:
-    1. Automatic derivation of DecidableEq (required for decision procedures)
-    2. Simple structural induction (Lean's induction tactic doesn't support nested inductives)
-    3. Direct proof of BEq properties through unfolding (derived instances are opaque)
+/-- BEq is reflexive for List ConcreteType (using our custom beqList) -/
+theorem list_concreteType_beq_refl (l : List ConcreteType) : l.beqList l = true := by
+  cases l with
+  | nil => rfl
+  | cons hd tl =>
+    simp [List.beqList]
+    constructor
+    · exact concreteType_beq_refl hd
+    · exact list_concreteType_beq_refl tl
+termination_by sizeOf l
 
-    While this property is mathematically sound and holds by construction of the derived BEq,
-    proving it formally would require either:
-    - Manual implementation of DecidableEq using well-founded recursion
-    - Custom induction principles for nested inductives
-    - Significant boilerplate that provides little verification value
-
-    This is one of the few remaining axioms in the codebase. All other axioms in this
-    module have been successfully converted to proven theorems. -/
-axiom concreteType_beq_refl (ct : ConcreteType) : (ct == ct) = true
+end
 
 /-- BEq is reflexive for List ConcreteType -/
 theorem list_concreteType_beq_refl (l : List ConcreteType) : (l == l) = true := by
   induction l with
   | nil => rfl
   | cons hd tl ih =>
-    show List.beq (hd :: tl) (hd :: tl) = true
-    simp only [List.beq, concreteType_beq_refl hd, Bool.true_and]
-    exact ih
+    simp [BEq.beq, List.beq]
+    apply And.intro
+    · exact concreteType_beq_refl hd
+    · exact ih
 
 /-- BEq is reflexive for MonoFn.id -/
 theorem monoFn_id_beq_refl (mf : MonoFn) : (mf.id == mf.id) = true := by
