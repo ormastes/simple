@@ -1,5 +1,6 @@
 use crate::ast::{Argument, Expr, LambdaParam, MoveMode};
 use crate::error::ParseError;
+use crate::error_recovery::{ErrorHint, ErrorHintLevel};
 use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
 
@@ -32,6 +33,19 @@ impl<'a> Parser<'a> {
                 "Expected path expression (identifier or field access)".to_string(),
                 self.current.span,
             )),
+        }
+    }
+
+    /// Check if an expression is a simple type identifier (starting with uppercase)
+    /// Used to detect static method calls like `Duration.new()` vs instance calls like `obj.method()`
+    /// Note: This only returns true for simple identifiers, NOT field accesses like `module.Type`
+    /// Field accesses are handled differently - they remain as MethodCall and the interpreter
+    /// resolves the type from the module.
+    fn is_type_path(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Identifier(name) => name.chars().next().map_or(false, |c| c.is_uppercase()),
+            // Don't convert field accesses to paths - let the interpreter handle module.Type.method()
+            _ => false,
         }
     }
 
@@ -162,11 +176,23 @@ impl<'a> Parser<'a> {
                                     value: trailing_lambda,
                                 });
                             }
-                            expr = Expr::MethodCall {
-                                receiver: Box::new(expr),
-                                method: field,
-                                args,
-                            };
+                            // Check if this is a static method call: Type.method()
+                            // Indicated by receiver being a type name (uppercase first letter)
+                            if self.is_type_path(&expr) {
+                                // Static method call: convert to Path + Call
+                                let mut path_segments = self.field_access_to_path_segments(&expr)?;
+                                path_segments.push(field);
+                                expr = Expr::Call {
+                                    callee: Box::new(Expr::Path(path_segments)),
+                                    args,
+                                };
+                            } else {
+                                expr = Expr::MethodCall {
+                                    receiver: Box::new(expr),
+                                    method: field,
+                                    args,
+                                };
+                            }
                         } else if self.check(&TokenKind::Backslash) {
                             // Method call with only trailing block: obj.method \x: body
                             let trailing_lambda = self.parse_trailing_lambda()?;
@@ -247,7 +273,19 @@ impl<'a> Parser<'a> {
 
                         // Check for :: after field access (e.g., torch.Device::CPU)
                         // Convert FieldAccess to Path for static method calls
+                        // DEPRECATED: Use dot syntax instead (torch.Device.CPU)
                         if self.check(&TokenKind::DoubleColon) {
+                            // Emit deprecation warning for :: syntax
+                            let colon_span = self.current.span;
+                            let warning = ErrorHint {
+                                level: ErrorHintLevel::Warning,
+                                message: "Deprecated syntax for static method/variant access".to_string(),
+                                span: colon_span,
+                                suggestion: Some("Use dot syntax (.) instead of double colon (::)".to_string()),
+                                help: Some("Example: Type.new() instead of Type::new()".to_string()),
+                            };
+                            self.error_hints.push(warning);
+
                             // Convert expr (which is now a FieldAccess) to a path
                             let path_segments = self.field_access_to_path_segments(&expr)?;
                             let mut segments = path_segments;

@@ -13,6 +13,14 @@ use crate::token::TokenKind;
 
 use super::super::Parser;
 
+/// Check if a function name follows constructor naming patterns
+/// These names are implicitly treated as static methods
+fn is_constructor_name(name: &str) -> bool {
+    matches!(name, "new" | "create" | "default" | "init")
+        || name.starts_with("from_")
+        || name.starts_with("with_")
+}
+
 impl<'a> Parser<'a> {
     // === Trait ===
 
@@ -210,7 +218,7 @@ impl<'a> Parser<'a> {
                     crate::ast::Visibility::Private
                 };
                 // Handle optional `static` keyword for static methods
-                let is_static = if self.check(&TokenKind::Static) {
+                let mut is_static = if self.check(&TokenKind::Static) {
                     self.advance();
                     true
                 } else {
@@ -227,6 +235,13 @@ impl<'a> Parser<'a> {
                     f.visibility = visibility;
                     // Add parsed decorators to the function
                     f.decorators.extend(decorators);
+
+                    // Implicit static: constructor-like names are automatically static
+                    // unless explicitly marked with 'static' (which was already handled above)
+                    if !is_static && is_constructor_name(&f.name) {
+                        is_static = true;
+                    }
+
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present
                     if !is_static && (f.params.is_empty() || f.params[0].name != "self") {
                         // Inject implicit self parameter at the beginning

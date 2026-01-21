@@ -9,63 +9,78 @@ pub struct ParsedArgs:
     flags: Dict<text, bool>
     options: Dict<text, text>
     positionals: Array<text>
-    files: file.StagedFiles  # Automatically staged files
+    files: file.StagedFiles
+    subcommand: Option<text>
+    subcommand_args: Array<text>
 
     # =========================================================================
     # Helper Methods
     # =========================================================================
 
+    # Check if any flags are present
     pub fn has_flags(self) -> bool:
-        """Check if any flags are present."""
         return self.flags.len() > 0
 
+    # Check if any options are present
     pub fn has_options(self) -> bool:
-        """Check if any options are present."""
         return self.options.len() > 0
 
+    # Check if any positional arguments are present
     pub fn has_positionals(self) -> bool:
-        """Check if any positional arguments are present."""
         return self.positionals.len() > 0
 
+    # Check if any files are staged
     pub fn has_files(self) -> bool:
-        """Check if any files are staged."""
         return self.files.staged().len() > 0
 
+    # Check if a subcommand was specified
+    pub fn has_subcommand(self) -> bool:
+        return self.subcommand.is_some()
+
+    # Get the subcommand name if specified
+    pub fn get_subcommand(self) -> Option<text>:
+        return self.subcommand
+
+    # Get arguments that follow the subcommand
+    pub fn get_subcommand_args(self) -> Array<text>:
+        return self.subcommand_args
+
+    # Get number of flags
     pub fn flag_count(self) -> usize:
-        """Get number of flags."""
         return self.flags.len()
 
+    # Get number of options
     pub fn option_count(self) -> usize:
-        """Get number of options."""
         return self.options.len()
 
+    # Get number of positional arguments
     pub fn positional_count(self) -> usize:
-        """Get number of positional arguments."""
         return self.positionals.len()
 
+    # Get number of staged files
     pub fn file_count(self) -> usize:
-        """Get number of staged files."""
         return self.files.staged().len()
 
+    # Check if no arguments are present
     pub fn is_empty(self) -> bool:
-        """Check if no arguments are present."""
         return not self.has_flags() and not self.has_options() and not self.has_positionals()
 
+    # Check if an option is present
     pub fn has_option(self, name: text) -> bool:
-        """Check if an option is present."""
         return self.options.contains_key(name)
 
+    # Get all flag names
     pub fn get_flag_names(self) -> Array<text>:
-        """Get all flag names."""
         return self.flags.keys()
 
+    # Get all option names
     pub fn get_option_names(self) -> Array<text>:
-        """Get all option names."""
         return self.options.keys()
 
+    # Get summary of parsed arguments
     pub fn summary(self) -> text:
-        """Get summary of parsed arguments."""
-        return "ParsedArgs: {self.flag_count()} flags, {self.option_count()} options, {self.positional_count()} positionals, {self.file_count()} files"
+        val subcmd_str = if self.has_subcommand(): ", subcommand: " + self.subcommand.unwrap() else: ""
+        return "ParsedArgs: {self.flag_count()} flags, {self.option_count()} options, {self.positional_count()} positionals, {self.file_count()} files{subcmd_str}"
 
     # =========================================================================
     # Existing Methods
@@ -98,36 +113,16 @@ pub struct ParsedArgs:
         return result
 
     # Get an option value as an integer
+    # Returns Some(value) if option exists and can be parsed, None otherwise
     pub fn get_option_int(self, name: text) -> Option<i64>:
-        """Get an option value parsed as an integer.
-
-        Args:
-            name: Option name
-
-        Returns:
-            Some(value) if option exists and can be parsed as integer, None otherwise
-
-        Example:
-            val count = args.get_option_int("count").unwrap_or(10)
-        """
         if self.options.contains_key(name):
             val s = self.options.get(name).unwrap()
             return Some(parse_int_safe(s))
         return None
 
     # Get an option value as a float
+    # Returns Some(value) if option exists and can be parsed, None otherwise
     pub fn get_option_float(self, name: text) -> Option<f64>:
-        """Get an option value parsed as a float.
-
-        Args:
-            name: Option name
-
-        Returns:
-            Some(value) if option exists and can be parsed as float, None otherwise
-
-        Example:
-            val rate = args.get_option_float("rate").unwrap_or(0.01)
-        """
         if self.options.contains_key(name):
             val s = self.options.get(name).unwrap()
             return Some(parse_float_safe(s))
@@ -135,30 +130,12 @@ pub struct ParsedArgs:
 
     # Get an option value as integer with default
     pub fn get_option_int_or(self, name: text, default_val: i64) -> i64:
-        """Get an option value as integer, with a default.
-
-        Args:
-            name: Option name
-            default_val: Value to return if option missing or invalid
-
-        Returns:
-            Parsed integer or the default value
-        """
         match self.get_option_int(name):
             case Some(v): return v
             case None: return default_val
 
     # Get an option value as float with default
     pub fn get_option_float_or(self, name: text, default_val: f64) -> f64:
-        """Get an option value as float, with a default.
-
-        Args:
-            name: Option name
-            default_val: Value to return if option missing or invalid
-
-        Returns:
-            Parsed float or the default value
-        """
         match self.get_option_float(name):
             case Some(v): return v
             case None: return default_val
@@ -177,20 +154,11 @@ pub struct ParsedArgs:
     pub fn get_staged_files(self) -> Array<file.FileInfo>:
         return self.files.staged()
 
-    # Get file by option name
-    pub fn get_file(self, name: text) -> Option<file.FileInfo>:
-        # Find file matching this option name using source_arg tracking
+    # Get file by path (searches staged files by path)
+    pub fn get_file(self, path: text) -> Option<file.FileInfo>:
         for f in self.files.staged():
-            # Check if file came from matching argument
-            if f.source_arg == name or f.source_arg == "--" + name:
+            if f.path == path or f.absolute_path == path:
                 return Some(f)
-
-        # Fallback: check if name was a positional that resolves to a file
-        if self.positional_sources.contains_key(name):
-            val index = self.positional_sources.get(name).unwrap_or(-1)
-            if index >= 0 and index < self.files.staged().len():
-                return Some(self.files.staged()[index])
-
         return None
 
 
@@ -199,19 +167,7 @@ pub struct ParsedArgs:
 # ============================================================================
 
 fn parse_int_safe(s: text) -> i64:
-    """Parse a string as an integer, returning 0 for invalid input.
-
-    Supports:
-    - Positive and negative integers
-    - Leading whitespace is trimmed
-    - Invalid characters stop parsing
-
-    Args:
-        s: String to parse
-
-    Returns:
-        Parsed integer or 0 if invalid
-    """
+    # Parse a string as an integer, returning 0 for invalid input
     val trimmed = s.trim()
     if trimmed.len() == 0:
         return 0
@@ -240,20 +196,7 @@ fn parse_int_safe(s: text) -> i64:
 
 
 fn parse_float_safe(s: text) -> f64:
-    """Parse a string as a float, returning 0.0 for invalid input.
-
-    Supports:
-    - Positive and negative numbers
-    - Decimal points
-    - Scientific notation (e.g., 1.5e-3)
-    - Leading whitespace is trimmed
-
-    Args:
-        s: String to parse
-
-    Returns:
-        Parsed float or 0.0 if invalid
-    """
+    # Parse a string as a float, returning 0.0 for invalid input
     val trimmed = s.trim()
     if trimmed.len() == 0:
         return 0.0

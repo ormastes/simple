@@ -1,3 +1,5 @@
+import concurrency.channels.BoundedChannel
+
 describe "Concurrency":
     describe "Generators":
         describe "Basic generator operations":
@@ -192,25 +194,25 @@ describe "Concurrency":
         # which is implemented at the runtime level. These tests are
         # placeholders until the interpreter can call rt_thread_* functions.
         describe "Basic thread operations":
-            skip "reports available parallelism":
+            it "reports available parallelism":
                 # Requires FFI: rt_thread_available_parallelism
                 val cores = available_parallelism()
                 expect cores >= 1
 
-            skip "can sleep thread":
+            it "can sleep thread":
                 # Requires FFI: rt_thread_sleep
                 val start = time_now()
                 sleep(10)
                 val elapsed = time_now() - start
                 expect elapsed >= 5
 
-            skip "can yield thread":
+            it "can yield thread":
                 # Requires FFI: rt_thread_yield
                 yield_thread()
                 expect true
 
         describe "Thread spawning":
-            skip "spawns isolated thread and joins":
+            it "spawns isolated thread and joins":
                 # Requires FFI: rt_thread_spawn_isolated2, rt_thread_join
                 val ch = Channel.new()
                 val handle = spawn_isolated2([1, 2, 3], ch) \data, result_ch:
@@ -226,24 +228,24 @@ describe "Concurrency":
 
         describe "Channel FFI":
             # Channel tests using runtime FFI
-            skip "creates channel":
+            it "creates channel":
                 # Requires FFI: rt_channel_new
                 val ch = Channel.new()
                 expect ch != nil
 
-            skip "sends and receives on channel":
+            it "sends and receives on channel":
                 # Requires FFI: rt_channel_send, rt_channel_try_recv
                 val ch = Channel.new()
                 ch.send(42)
                 val result = ch.try_recv()
                 expect result == 42
 
-            skip "try_recv returns nil on empty channel":
+            it "try_recv returns nil on empty channel":
                 val ch = Channel.new()
                 val result = ch.try_recv()
                 expect result == nil
 
-            skip "sends multiple values":
+            it "sends multiple values":
                 val ch = Channel.new()
                 ch.send(1)
                 ch.send(2)
@@ -252,9 +254,51 @@ describe "Concurrency":
                 expect ch.try_recv() == 2
                 expect ch.try_recv() == 3
 
-            skip "closes channel":
+            it "closes channel":
                 # Requires FFI: rt_channel_close, rt_channel_is_closed
                 val ch = Channel.new()
                 ch.send(42)
                 ch.close()
                 expect ch.is_closed()
+
+    describe "BoundedChannel (Pure Simple)":
+        # BoundedChannel tests - these don't require FFI
+        describe "Basic operations":
+            it "creates channel with capacity":
+                val ch = BoundedChannel::new(10)
+                expect ch.capacity == 10
+                expect ch.is_empty()
+
+            it "sends and receives values":
+                val ch = BoundedChannel::new(10)
+                ch.send(42)
+                expect ch.len() == 1
+                val result = ch.recv()
+                expect result == Some(42)
+
+            it "handles empty channel recv":
+                val ch = BoundedChannel::new(10)
+                val result = ch.recv()
+                expect result == nil
+
+            it "respects capacity limit":
+                val ch = BoundedChannel::new(2)
+                expect ch.send(1)
+                expect ch.send(2)
+                expect not ch.send(3)  # Should fail, at capacity
+
+            it "tracks channel state":
+                val ch = BoundedChannel::new(5)
+                ch.send(1)
+                ch.send(2)
+                expect ch.len() == 2
+                expect ch.available() == 3
+                expect not ch.is_full()
+                expect ch.can_send()
+
+            it "closes channel":
+                val ch = BoundedChannel::new(10)
+                ch.send(42)
+                ch.close()
+                expect ch.is_closed()
+                expect not ch.send(99)  # Should fail, closed

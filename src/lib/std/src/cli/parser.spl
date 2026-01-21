@@ -2,9 +2,9 @@
 
 export ArgParser, simple_parser
 
-use file::{OpenOptions, AsyncFileHandle}
+use file::{OpenOptions, AsyncFileHandle, MmapMode, MmapAdvice}
 import cli.file as file
-import types.{ArgType, ArgSpec}
+import types.{ArgType, ArgSpec, SubcommandSpec}
 import parsed_args.ParsedArgs
 
 # Main argument parser
@@ -12,77 +12,110 @@ pub struct ArgParser:
     program_name: text
     description: text
     args: Array<ArgSpec>
-    auto_stage_files: bool  # Global auto-staging toggle
-    async_loading: bool     # Enable background file loading during parse
-    mmap_options: OpenOptions  # Options for memory-mapped file I/O
+    subcommands: Array<SubcommandSpec>
+    auto_stage_files: bool
+    async_loading: bool
+    mmap_options: Option<OpenOptions>
 
     # =========================================================================
     # Helper Methods
     # =========================================================================
 
+    # Check if parser has any argument specs
     pub fn has_args(self) -> bool:
-        """Check if parser has any argument specs."""
         return self.args.len() > 0
 
+    # Check if parser has no argument specs
     pub fn is_empty(self) -> bool:
-        """Check if parser has no argument specs."""
         return self.args.len() == 0
 
+    # Get number of argument specs
     pub fn arg_count(self) -> usize:
-        """Get number of argument specs."""
         return self.args.len()
 
+    # Check if auto-staging is enabled
     pub fn is_auto_stage_enabled(self) -> bool:
-        """Check if auto-staging is enabled."""
         return self.auto_stage_files
 
+    # Check if async loading is enabled
     pub fn is_async_loading_enabled(self) -> bool:
-        """Check if async loading is enabled."""
         return self.async_loading
 
+    # Get program name
     pub fn get_program_name(self) -> text:
-        """Get program name."""
         return self.program_name
 
+    # Get program description
     pub fn get_description(self) -> text:
-        """Get program description."""
         return self.description
 
+    # Check if parser has any required arguments
     pub fn has_required_args(self) -> bool:
-        """Check if parser has any required arguments."""
         for arg in &self.args:
             if arg.required:
                 return true
         return false
 
+    # Get count of required arguments
     pub fn required_arg_count(self) -> usize:
-        """Get count of required arguments."""
         var count: usize = 0
         for arg in &self.args:
             if arg.required:
                 count = count + 1
         return count
 
+    # Check if parser has any subcommands
+    pub fn has_subcommands(self) -> bool:
+        return self.subcommands.len() > 0
+
+    # Get number of subcommands
+    pub fn subcommand_count(self) -> usize:
+        return self.subcommands.len()
+
+    # Get summary of argument parser state
     pub fn summary(self) -> text:
-        """Get summary of argument parser state."""
-        val auto = if self.auto_stage_files: "auto-stage on" else: "auto-stage off"
+        val auto_status = if self.auto_stage_files: "auto-stage on" else: "auto-stage off"
         val async_mode = if self.async_loading: "async" else: "sync"
-        return "ArgParser: '{self.program_name}', {self.arg_count()} args, {auto}, {async_mode}"
+        val subcmd_str = if self.has_subcommands(): ", {self.subcommand_count()} subcommands" else: ""
+        return "ArgParser: '{self.program_name}', {self.arg_count()} args{subcmd_str}, {auto_status}, {async_mode}"
 
     # =========================================================================
     # Constructor
     # =========================================================================
 
     # Create a new argument parser
-    pub fn new(program_name: text, description: text) -> ArgParser:
+    static fn new(program_name: text, description: text) -> ArgParser:
         return ArgParser {
             program_name: program_name,
             description: description,
             args: [],
-            auto_stage_files: true,  # Default: auto-stage enabled
-            async_loading: false,    # Default: sync validation only
-            mmap_options: OpenOptions::new()  # Default options
+            subcommands: [],
+            auto_stage_files: true,
+            async_loading: false,
+            mmap_options: nil
         }
+
+    # Add a subcommand
+    pub fn subcommand(mut self, name: text, description: text) -> ArgParser:
+        val spec = SubcommandSpec {
+            name: name,
+            description: description,
+            aliases: []
+        }
+        self.subcommands.push(spec)
+        return self
+
+    # Add a subcommand with aliases
+    pub fn subcommand_with_aliases(mut self, name: text, description: text, aliases: Array<text>) -> ArgParser:
+        var spec = SubcommandSpec {
+            name: name,
+            description: description,
+            aliases: []
+        }
+        for alias in aliases:
+            spec = spec.with_alias(alias)
+        self.subcommands.push(spec)
+        return self
 
     # Disable automatic file staging globally
     pub fn no_auto_stage(mut self) -> ArgParser:
@@ -96,7 +129,7 @@ pub struct ArgParser:
 
     # Configure memory-mapped I/O options
     pub fn with_mmap_options(mut self, opts: OpenOptions) -> ArgParser:
-        self.mmap_options = opts
+        self.mmap_options = Some(opts)
         return self
 
     # Add a boolean flag
@@ -119,14 +152,14 @@ pub struct ArgParser:
         return self
 
     # Add a string option
-    pub fn option(mut self, name: text, short: text, help: text, required: bool, default: Option<text>) -> ArgParser:
+    pub fn option(mut self, name: text, short: text, help: text, required: bool, default_opt: Option<text>) -> ArgParser:
         val spec = ArgSpec {
             name: name,
             short: Some(short),
             long: name,
             help: help,
             required: required,
-            default_value: default,
+            default_value: default_opt,
             arg_type: ArgType::Option,
             auto_stage: false,
             must_exist: false,
@@ -142,8 +175,8 @@ pub struct ArgParser:
         return self.option(name, short, help, true, None)
 
     # Add an optional option with default
-    pub fn optional_option(mut self, name: text, short: text, help: text, default: text) -> ArgParser:
-        return self.option(name, short, help, false, Some(default))
+    pub fn optional_option(mut self, name: text, short: text, help: text, default_val: text) -> ArgParser:
+        return self.option(name, short, help, false, Some(default_val))
 
     # Add a FILE option (automatically staged)
     pub fn file_option(mut self, name: text, short: text, help: text, required: bool, must_exist: bool) -> ArgParser:
@@ -233,6 +266,9 @@ pub struct ArgParser:
         var options: Dict<text, text> = {}
         var positionals: Array<text> = []
         var file_paths: Array<text> = []
+        var subcommand: Option<text> = None
+        var subcommand_args: Array<text> = []
+        var found_subcommand = false
 
         var i = 0
         while i < args.len():
@@ -244,7 +280,9 @@ pub struct ArgParser:
                     flags: flags,
                     options: options,
                     positionals: positionals,
-                    files: file.StagedFiles { files: [], handles: [], errors: [] }
+                    files: file.StagedFiles { files: [], handles: [], errors: [] },
+                    subcommand: None,
+                    subcommand_args: []
                 })
 
             if arg.starts_with("--"):
@@ -312,41 +350,74 @@ pub struct ArgParser:
 
             else:
                 if arg.starts_with("-") and arg.len() > 1:
-                    val short = arg[1..2]
-                    var found = false
+                    # Handle combined short flags (e.g., -abc = -a -b -c)
+                    val short_chars = arg[1..]
+                    var char_idx = 0
 
-                    for spec in self.args:
-                        if spec.short.is_some() and spec.short.unwrap() == short:
-                            match spec.arg_type:
-                                case ArgType::Flag:
-                                    flags.insert(spec.name, true)
-                                    found = true
-                                case ArgType::Option:
-                                    if i + 1 < args.len():
-                                        i = i + 1
-                                        options.insert(spec.name, args[i])
-                                        found = true
-                                    else:
-                                        return Err("Option -{short} requires a value")
-                                case ArgType::FileOption:
-                                    if i + 1 < args.len():
-                                        i = i + 1
-                                        val value = args[i]
-                                        options.insert(spec.name, value)
-                                        if spec.auto_stage and self.auto_stage_files:
-                                            file_paths.push(value)
-                                        found = true
-                                    else:
-                                        return Err("Option -{short} requires a value")
-                                case _:
-                                    pass
+                    while char_idx < short_chars.len():
+                        val short = short_chars[char_idx..char_idx + 1]
+                        var found = false
 
-                    if not found:
-                        return Err("Unknown option: -{short}")
+                        for spec in self.args:
+                            if spec.short.is_some() and spec.short.unwrap() == short:
+                                match spec.arg_type:
+                                    case ArgType::Flag:
+                                        flags.insert(spec.name, true)
+                                        found = true
+                                    case ArgType::Option:
+                                        if char_idx + 1 < short_chars.len():
+                                            val value = short_chars[char_idx + 1..]
+                                            options.insert(spec.name, value)
+                                            char_idx = short_chars.len()
+                                            found = true
+                                        else:
+                                            if i + 1 < args.len():
+                                                i = i + 1
+                                                options.insert(spec.name, args[i])
+                                                found = true
+                                            else:
+                                                return Err("Option -{short} requires a value")
+                                    case ArgType::FileOption:
+                                        if char_idx + 1 < short_chars.len():
+                                            val value = short_chars[char_idx + 1..]
+                                            options.insert(spec.name, value)
+                                            if spec.auto_stage and self.auto_stage_files:
+                                                file_paths.push(value)
+                                            char_idx = short_chars.len()
+                                            found = true
+                                        else:
+                                            if i + 1 < args.len():
+                                                i = i + 1
+                                                val value = args[i]
+                                                options.insert(spec.name, value)
+                                                if spec.auto_stage and self.auto_stage_files:
+                                                    file_paths.push(value)
+                                                found = true
+                                            else:
+                                                return Err("Option -{short} requires a value")
+                                    case _:
+                                        pass
+
+                        if not found:
+                            return Err("Unknown option: -{short}")
+
+                        char_idx = char_idx + 1
                 else:
-                    positionals.push(arg)
-                    if self.auto_stage_files:
-                        file_paths.push(arg)
+                    # Check for subcommand if we haven't found one yet
+                    if not found_subcommand and self.has_subcommands():
+                        for subcmd in self.subcommands:
+                            if subcmd.matches(arg):
+                                subcommand = Some(subcmd.name)
+                                found_subcommand = true
+                                i = i + 1
+                                while i < args.len():
+                                    subcommand_args.push(args[i])
+                                    i = i + 1
+
+                    if not found_subcommand:
+                        positionals.push(arg)
+                        if self.auto_stage_files:
+                            file_paths.push(arg)
 
             i = i + 1
 
@@ -391,7 +462,9 @@ pub struct ArgParser:
             flags: flags,
             options: options,
             positionals: positionals,
-            files: staged_files
+            files: staged_files,
+            subcommand: subcommand,
+            subcommand_args: subcommand_args
         })
 
     # Stage files with validation
@@ -406,8 +479,8 @@ pub struct ArgParser:
             match validator.validate(path):
                 case Ok(info):
                     all_files.push(info)
-                    if self.async_loading:
-                        val handle = AsyncFileHandle::with_options(info.path, self.mmap_options)
+                    if self.async_loading and self.mmap_options.is_some():
+                        val handle = AsyncFileHandle::with_options(info.path, self.mmap_options.unwrap())
                         handle.start_loading()
                         all_handles.push(handle)
                 case Err(error):
@@ -424,7 +497,13 @@ pub struct ArgParser:
         for spec in self.args:
             match spec.arg_type:
                 case ArgType::FileOption:
-                    var validator = file.FileValidator::new()
+                    var validator = file.FileValidator {
+                        must_exist: false,
+                        must_be_file: true,
+                        must_be_readable: false,
+                        must_be_writable: false,
+                        allowed_extensions: []
+                    }
                     if spec.must_exist:
                         validator = validator.require_exists()
                     if spec.must_be_readable:
@@ -436,7 +515,13 @@ pub struct ArgParser:
                     return validator
 
                 case ArgType::FilePositional:
-                    var validator = file.FileValidator::new()
+                    var validator = file.FileValidator {
+                        must_exist: false,
+                        must_be_file: true,
+                        must_be_readable: false,
+                        must_be_writable: false,
+                        allowed_extensions: []
+                    }
                     if spec.must_exist:
                         validator = validator.require_exists()
                     if spec.must_be_readable:
@@ -446,7 +531,14 @@ pub struct ArgParser:
                 case _:
                     pass
 
-        return file.FileValidator::new().require_exists()
+        val default_validator = file.FileValidator {
+            must_exist: false,
+            must_be_file: true,
+            must_be_readable: false,
+            must_be_writable: false,
+            allowed_extensions: []
+        }
+        return default_validator.require_exists()
 
     # Print help message
     pub fn print_help(self):
@@ -571,4 +663,12 @@ pub struct ArgParser:
 
 # Helper function
 pub fn simple_parser(program_name: text, description: text) -> ArgParser:
-    return ArgParser::new(program_name, description)
+    return ArgParser {
+        program_name: program_name,
+        description: description,
+        args: [],
+        subcommands: [],
+        auto_stage_files: true,
+        async_loading: false,
+        mmap_options: nil
+    }

@@ -3,7 +3,33 @@
 # Expression rules: binary, unary, call, index, literals, etc.
 
 import parser.treesitter.{Grammar}
-import tokens.{TokenKind, token, ref, seq, choice, optional, field, repeat, prec_left, prec_right}
+import tokens.{
+    TokenKind, token, ref, seq, choice, optional, field, repeat, prec_left, prec_right,
+    # Core keywords
+    Fn, If, Then, Else, Match, True, False, Nil, And, Or, Not, To, NotTo,
+    # Operators - Arithmetic
+    Plus, Minus, Star, Slash, Percent, DoubleStar, DoubleSlash,
+    # Operators - Comparison
+    DoubleEq, NotEq, Lt, Gt, LtEq, GtEq,
+    # Operators - Assignment
+    Assign, PlusAssign, MinusAssign, StarAssign, SlashAssign,
+    TildeAssign, TildePlusAssign, TildeMinusAssign, TildeStarAssign, TildeSlashAssign,
+    # Operators - Bitwise
+    Pipe, Ampersand, Caret, Tilde, LtLt, GtGt, DoublePipe, DoubleAmp,
+    # Operators - Special
+    DoubleDot, DoubleDotEq, FatArrow, ChannelArrow, DoubleColon,
+    # Suspension
+    AndSuspend, OrSuspend,
+    # Delimiters
+    LParen, RParen, LBracket, RBracket, LBrace, RBrace,
+    Comma, Colon, Dot, Backslash,
+    # Literals
+    Integer, Float, TypedInteger, TypedFloat,
+    text, RawString, Symbol, TypedString, TypedRawString,
+    FStringStart, FStringText, FStringEnd, FStringFormatSpec,
+    # Special tokens
+    CustomBlock, Pointcut
+}
 
 export add_expression_rules
 
@@ -14,11 +40,14 @@ fn add_expression_rules(grammar: Grammar):
         ref("binary_expr"),
         ref("unary_expr"),
         ref("call_expr"),
+        ref("static_call_expr"),
         ref("index_expr"),
         ref("field_expr"),
         ref("lambda_expr"),
         ref("if_expr"),
         ref("match_expr"),
+        ref("custom_block_expr"),
+        ref("pointcut_expr"),
         ref("primary_expr")
     ]))
 
@@ -26,13 +55,30 @@ fn add_expression_rules(grammar: Grammar):
     grammar.add_rule("binary_expr", prec_left(1, seq([
         field("left", ref("expression")),
         field("operator", choice([
+            # Arithmetic
             token(Plus), token(Minus), token(Star), token(Slash),
-            token(Percent), token(DoubleStar),
+            token(Percent), token(DoubleStar), token(DoubleSlash),
+            # Comparison
             token(DoubleEq), token(NotEq),
             token(Lt), token(Gt), token(LtEq), token(GtEq),
-            token(And), token(Or),
+            # Logical
+            token(And), token(Or), token(DoublePipe), token(DoubleAmp),
+            # Bitwise
             token(Pipe), token(Ampersand), token(Caret),
-            token(LtLt), token(GtGt)
+            token(LtLt), token(GtGt),
+            # Range
+            token(DoubleDot), token(DoubleDotEq),
+            # Assignment
+            token(Assign),
+            token(PlusAssign), token(MinusAssign), token(StarAssign), token(SlashAssign),
+            token(TildeAssign), token(TildePlusAssign), token(TildeMinusAssign),
+            token(TildeStarAssign), token(TildeSlashAssign),
+            # Suspension
+            token(AndSuspend), token(OrSuspend),
+            # Special
+            token(FatArrow), token(ChannelArrow),
+            # Infix keywords
+            token(To), token(NotTo)
         ])),
         field("right", ref("expression"))
     ])))
@@ -48,6 +94,16 @@ fn add_expression_rules(grammar: Grammar):
     # Call expression
     grammar.add_rule("call_expr", prec_left(3, seq([
         field("callee", ref("expression")),
+        token(LParen),
+        optional(ref("argument_list")),
+        token(RParen)
+    ]))
+
+    # Static method call: Type::method() or Type.method() (dot preferred)
+    grammar.add_rule("static_call_expr", prec_left(3, seq([
+        field("type", ref("type_identifier")),
+        choice([token(DoubleColon), token(Dot)]),
+        field("method", ref("identifier")),
         token(LParen),
         optional(ref("argument_list")),
         token(RParen)
@@ -74,8 +130,39 @@ fn add_expression_rules(grammar: Grammar):
         field("field", ref("identifier"))
     ])))
 
-    # Lambda expression
-    grammar.add_rule("lambda_expr", seq([
+    # Lambda expressions (multiple syntaxes)
+    grammar.add_rule("lambda_expr", choice([
+        ref("fn_lambda"),      # fn(): expr or fn(x, y): expr
+        ref("backslash_lambda"),  # \x: expr or \x, y: expr
+        ref("pipe_lambda")     # |x| expr (Ruby/Rust style)
+    ]))
+
+    # Fn lambda: fn(): expr or fn(x, y): expr
+    grammar.add_rule("fn_lambda", seq([
+        token(Fn),
+        token(LParen),
+        optional(ref("parameter_list")),
+        token(RParen),
+        token(Colon),
+        choice([
+            ref("expression"),
+            ref("block")
+        ])
+    ]))
+
+    # Backslash lambda: \x: expr or \x, y: expr or \: expr
+    grammar.add_rule("backslash_lambda", seq([
+        token(Backslash),
+        optional(ref("parameter_list")),
+        token(Colon),
+        choice([
+            ref("expression"),
+            ref("block")
+        ])
+    ]))
+
+    # Pipe lambda: |x| expr or |x, y| expr
+    grammar.add_rule("pipe_lambda", seq([
         token(Pipe),
         optional(ref("parameter_list")),
         token(Pipe),
@@ -112,6 +199,12 @@ fn add_expression_rules(grammar: Grammar):
         token(RBrace)
     ]))
 
+    # Custom block expression: m{...}, sh{...}, sql{...}, etc.
+    grammar.add_rule("custom_block_expr", token(CustomBlock))
+
+    # Pointcut expression: pc{...}
+    grammar.add_rule("pointcut_expr", token(Pointcut))
+
     # Primary expressions
     grammar.add_rule("primary_expr", choice([
         ref("literal"),
@@ -138,16 +231,28 @@ fn add_literal_rules(grammar: Grammar):
     # Literals
     grammar.add_rule("literal", choice([
         ref("integer_literal"),
+        ref("typed_integer_literal"),
         ref("float_literal"),
+        ref("typed_float_literal"),
         ref("string_literal"),
+        ref("raw_string_literal"),
+        ref("symbol_literal"),
+        ref("typed_string_literal"),
+        ref("typed_raw_string_literal"),
         ref("fstring_literal"),
         ref("boolean_literal"),
         ref("nil_literal")
     ]))
 
     grammar.add_rule("integer_literal", token(Integer))
-    grammar.add_rule("float_literal", token(f32))
+    grammar.add_rule("typed_integer_literal", token(TypedInteger))
+    grammar.add_rule("float_literal", token(Float))
+    grammar.add_rule("typed_float_literal", token(TypedFloat))
     grammar.add_rule("string_literal", token(text))
+    grammar.add_rule("raw_string_literal", token(RawString))
+    grammar.add_rule("symbol_literal", token(Symbol))
+    grammar.add_rule("typed_string_literal", token(TypedString))
+    grammar.add_rule("typed_raw_string_literal", token(TypedRawString))
 
     # F-string literal
     grammar.add_rule("fstring_literal", seq([

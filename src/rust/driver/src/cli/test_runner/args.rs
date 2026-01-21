@@ -129,6 +129,13 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
             "--only-slow" => options.only_slow = true,
             "--only-skipped" => options.only_skipped = true,
             "--show-tags" => options.show_tags = true,
+            "--safe-mode" | "--safe" => options.safe_mode = true,
+            "--timeout" => {
+                i += 1;
+                if i < args.len() {
+                    options.safe_mode_timeout = args[i].parse().unwrap_or(30);
+                }
+            }
             arg if !arg.starts_with("-") && options.path.is_none() => {
                 options.path = Some(PathBuf::from(arg));
             }

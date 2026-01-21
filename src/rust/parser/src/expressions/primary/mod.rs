@@ -49,6 +49,32 @@ impl<'a> Parser<'a> {
             | TokenKind::Slice
             | TokenKind::Flat => self.parse_primary_identifier(),
             TokenKind::Backslash | TokenKind::Pipe | TokenKind::Move => self.parse_primary_lambda(),
+            // fn(): lambda syntax (alias for \:) - only in expression context
+            // Check if fn is IMMEDIATELY followed by ( (no identifier) to distinguish from function definitions
+            // fn(): ... => lambda
+            // fn name(): ... => function definition (not allowed in expression position)
+            TokenKind::Fn => {
+                // Peek at next token to see if it's immediately LParen
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
+
+                // Only treat as lambda if IMMEDIATELY followed by (
+                // This distinguishes fn(): from fn name():
+                if matches!(next.kind, TokenKind::LParen) {
+                    // Check that current and next tokens are adjacent (no whitespace/identifier between)
+                    // In Simple, fn( is lambda, but fn foo( is function definition
+                    self.parse_primary_lambda()
+                } else {
+                    return Err(ParseError::unexpected_token(
+                        "expression",
+                        "fn (function definitions are not expressions - use fn(): for lambdas)",
+                        self.current.span,
+                    ));
+                }
+            }
             TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => self.parse_primary_collection(),
             TokenKind::Old
             | TokenKind::Spawn

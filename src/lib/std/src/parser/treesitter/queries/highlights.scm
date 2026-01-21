@@ -8,53 +8,75 @@
 ; Core keywords
 [
   "fn"
+  "me"
   "let"
+  "mut"
+  "val"
+  "var"
   "class"
+  "struct"
   "enum"
+  "union"
   "trait"
   "impl"
+  "mixin"
+  "extends"
   "type"
+  "unit"
+  "const"
+  "static"
+  "extern"
   "import"
   "export"
   "from"
   "as"
+  "mod"
+  "use"
+  "common"
+  "auto"
+  "crate"
   "pub"
+  "priv"
+  "self"
+  "super"
+  "new"
+  "context"
+  "with"
+  "ghost"
+  "macro"
+  "dyn"
+  "repr"
 ] @keyword
 
 ; Control flow
 [
   "if"
+  "if~"
   "else"
   "elif"
   "match"
   "case"
   "for"
+  "for~"
   "while"
+  "while~"
   "loop"
   "break"
   "continue"
   "return"
+  "then"
 ] @keyword.control
 
 ; Async/concurrency
 [
   "async"
   "await"
+  "sync"
   "actor"
   "spawn"
-  "send"
-  "recv"
+  "go"
   "yield"
 ] @keyword.async
-
-; Effects
-[
-  "effect"
-  "io"
-  "file"
-  "net"
-  "unsafe"
-] @keyword.effect
 
 ; Memory modifiers
 [
@@ -63,6 +85,52 @@
   "ref"
   "move"
 ] @keyword.modifier
+
+; GPU/SIMD keywords
+[
+  "vec"
+  "shared"
+  "gpu"
+  "bounds"
+] @keyword.special
+
+; AOP keywords
+[
+  "on"
+  "bind"
+  "forbid"
+  "allow"
+  "mock"
+] @keyword.aop
+
+; BDD/Testing keywords (Gherkin DSL)
+[
+  "feature"
+  "scenario"
+  "outline"
+  "examples"
+  "given"
+  "when"
+  "then"
+  "and_then"
+  "to"
+  "not_to"
+] @keyword.test
+
+; Math keywords
+[
+  "grid"
+  "tensor"
+  "slice"
+  "flat"
+  "default"
+] @keyword.math
+
+; Special keywords
+[
+  "handle_pool"
+  "in"
+] @keyword.special
 
 ; ============================================================================
 ; Functions - High Priority
@@ -186,7 +254,9 @@
 
 ; Numbers
 (integer_literal) @number
+(typed_integer_literal) @number
 (float_literal) @number
+(typed_float_literal) @number
 (hex_literal) @number
 (binary_literal) @number
 (octal_literal) @number
@@ -194,7 +264,12 @@
 ; Strings
 (string_literal) @string
 (raw_string_literal) @string.special
+(typed_string_literal) @string.special
+(typed_raw_string_literal) @string.special
 (byte_string_literal) @string.special
+
+; Symbols
+(symbol_literal) @symbol
 
 ; F-strings
 (fstring_literal) @string.special
@@ -228,6 +303,7 @@
   "/"
   "%"
   "**"
+  "//"
 ] @operator.arithmetic
 
 ; Comparison
@@ -243,11 +319,12 @@
 ; Logical
 [
   "and"
+  "and~"
   "or"
+  "or~"
   "not"
   "&&"
   "||"
-  "!"
 ] @operator.logical
 
 ; Bitwise
@@ -267,12 +344,11 @@
   "-="
   "*="
   "/="
-  "%="
-  "&="
-  "|="
-  "^="
-  "<<="
-  ">>="
+  "~="
+  "~+="
+  "~-="
+  "~*="
+  "~/="
 ] @operator.assignment
 
 ; Special operators
@@ -351,14 +427,23 @@
 ; Special Constructs
 ; ============================================================================
 
-; Contract keywords
+; Contract & Verification keywords
 [
-  "in"
   "out"
+  "out_err"
+  "where"
+  "requires"
+  "ensures"
   "invariant"
   "old"
-  "ensures"
-  "requires"
+  "result"
+  "decreases"
+  "forall"
+  "exists"
+  "assert"
+  "assume"
+  "admit"
+  "calc"
 ] @keyword.contract
 
 ; Labels

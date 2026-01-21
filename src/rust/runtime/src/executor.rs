@@ -701,6 +701,392 @@ pub extern "C" fn rt_thread_yield() {
     thread::yield_now();
 }
 
+// ============================================================================
+// Resource-Limited Thread Support
+// ============================================================================
+
+use crate::sandbox::limits::apply_resource_limits;
+use crate::sandbox::ResourceLimits as RustResourceLimits;
+
+/// Violation type codes for limited threads
+/// These match the LimitViolation enum in Simple
+const VIOLATION_NONE: i64 = 0;
+const VIOLATION_CPU_TIME: i64 = 1;
+const VIOLATION_MEMORY: i64 = 2;
+const VIOLATION_FILE_DESCRIPTOR: i64 = 3;
+const VIOLATION_THREAD_LIMIT: i64 = 4;
+const VIOLATION_UNKNOWN: i64 = 5;
+
+/// Handle for a resource-limited thread
+#[repr(C)]
+pub struct LimitedThreadHandle {
+    /// Thread join handle
+    join_handle: Option<JoinHandle<RuntimeValue>>,
+    /// Thread ID
+    thread_id: u64,
+    /// Whether the thread has been joined
+    joined: AtomicBool,
+    /// Whether the thread was killed due to resource limit
+    was_killed: AtomicBool,
+    /// The violation type (if killed)
+    violation_type: AtomicU64,
+    /// The violation value (e.g., seconds exceeded, bytes exceeded)
+    violation_value: AtomicU64,
+    /// Resource limits applied to this thread
+    cpu_time_limit: Option<u64>,
+    memory_limit: Option<u64>,
+    fd_limit: Option<u64>,
+    thread_limit: Option<u64>,
+}
+
+/// Spawn a resource-limited isolated thread.
+///
+/// The thread will have resource limits applied via rlimit.
+/// If any limit is -1, that resource is unlimited.
+///
+/// # Arguments
+/// * `closure_ptr` - Function pointer for the closure to execute
+/// * `data` - Data to copy into the thread
+/// * `cpu_seconds` - CPU time limit in seconds (-1 for unlimited)
+/// * `memory_bytes` - Memory limit in bytes (-1 for unlimited)
+/// * `fd_limit` - File descriptor limit (-1 for unlimited)
+/// * `thread_limit` - Thread count limit (-1 for unlimited, platform-specific)
+///
+/// # Returns
+/// A thread handle that can be used to join the thread and check for violations
+#[no_mangle]
+pub extern "C" fn rt_thread_spawn_limited(
+    closure_ptr: u64,
+    data: RuntimeValue,
+    cpu_seconds: i64,
+    memory_bytes: i64,
+    fd_limit: i64,
+    thread_limit: i64,
+) -> u64 {
+    let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
+
+    // Convert closure pointer to a function
+    let func: extern "C" fn(RuntimeValue) -> RuntimeValue =
+        unsafe { std::mem::transmute(closure_ptr) };
+
+    // Clone data for the thread (deep copy for isolation)
+    let copied_data = data.deep_copy();
+
+    // Prepare resource limits
+    let cpu_limit = if cpu_seconds >= 0 {
+        Some(cpu_seconds as u64)
+    } else {
+        None
+    };
+    let mem_limit = if memory_bytes >= 0 {
+        Some(memory_bytes as u64)
+    } else {
+        None
+    };
+    let fd_lim = if fd_limit >= 0 {
+        Some(fd_limit as u64)
+    } else {
+        None
+    };
+    let thread_lim = if thread_limit >= 0 {
+        Some(thread_limit as u64)
+    } else {
+        None
+    };
+
+    // Spawn the OS thread with resource limits
+    let handle = thread::Builder::new()
+        .name(format!("simple-limited-{}", thread_id))
+        .spawn(move || {
+            // Apply resource limits at the start of the thread
+            let limits = RustResourceLimits {
+                cpu_time: cpu_limit.map(Duration::from_secs),
+                memory: mem_limit,
+                file_descriptors: fd_lim,
+                threads: thread_lim,
+            };
+
+            if let Err(e) = apply_resource_limits(&limits) {
+                tracing::error!("Failed to apply resource limits: {}", e);
+                // Continue execution even if limits fail to apply
+            }
+
+            // Execute the closure with copied data
+            func(copied_data)
+        })
+        .expect("Failed to spawn limited thread");
+
+    // Create and box the handle
+    let thread_handle = Box::new(LimitedThreadHandle {
+        join_handle: Some(handle),
+        thread_id,
+        joined: AtomicBool::new(false),
+        was_killed: AtomicBool::new(false),
+        violation_type: AtomicU64::new(VIOLATION_NONE as u64),
+        violation_value: AtomicU64::new(0),
+        cpu_time_limit: cpu_limit,
+        memory_limit: mem_limit,
+        fd_limit: fd_lim,
+        thread_limit: thread_lim,
+    });
+
+    Box::into_raw(thread_handle) as u64
+}
+
+/// Spawn a resource-limited isolated thread with two data arguments.
+#[no_mangle]
+pub extern "C" fn rt_thread_spawn_limited2(
+    closure_ptr: u64,
+    data1: RuntimeValue,
+    data2: RuntimeValue,
+    cpu_seconds: i64,
+    memory_bytes: i64,
+    fd_limit: i64,
+    thread_limit: i64,
+) -> u64 {
+    let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
+
+    // Convert closure pointer to a function
+    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue =
+        unsafe { std::mem::transmute(closure_ptr) };
+
+    // Clone data for the thread
+    let copied_data1 = data1.deep_copy();
+    let copied_data2 = data2; // Channels are already thread-safe
+
+    // Prepare resource limits
+    let cpu_limit = if cpu_seconds >= 0 {
+        Some(cpu_seconds as u64)
+    } else {
+        None
+    };
+    let mem_limit = if memory_bytes >= 0 {
+        Some(memory_bytes as u64)
+    } else {
+        None
+    };
+    let fd_lim = if fd_limit >= 0 {
+        Some(fd_limit as u64)
+    } else {
+        None
+    };
+    let thread_lim = if thread_limit >= 0 {
+        Some(thread_limit as u64)
+    } else {
+        None
+    };
+
+    // Spawn the OS thread with resource limits
+    let handle = thread::Builder::new()
+        .name(format!("simple-limited-{}", thread_id))
+        .spawn(move || {
+            // Apply resource limits at the start of the thread
+            let limits = RustResourceLimits {
+                cpu_time: cpu_limit.map(Duration::from_secs),
+                memory: mem_limit,
+                file_descriptors: fd_lim,
+                threads: thread_lim,
+            };
+
+            if let Err(e) = apply_resource_limits(&limits) {
+                tracing::error!("Failed to apply resource limits: {}", e);
+            }
+
+            // Execute the closure
+            func(copied_data1, copied_data2)
+        })
+        .expect("Failed to spawn limited thread");
+
+    // Create and box the handle
+    let thread_handle = Box::new(LimitedThreadHandle {
+        join_handle: Some(handle),
+        thread_id,
+        joined: AtomicBool::new(false),
+        was_killed: AtomicBool::new(false),
+        violation_type: AtomicU64::new(VIOLATION_NONE as u64),
+        violation_value: AtomicU64::new(0),
+        cpu_time_limit: cpu_limit,
+        memory_limit: mem_limit,
+        fd_limit: fd_lim,
+        thread_limit: thread_lim,
+    });
+
+    Box::into_raw(thread_handle) as u64
+}
+
+/// Join a resource-limited thread and get its result.
+/// This blocks until the thread completes.
+///
+/// # Returns
+/// The result value from the thread, or NIL if the thread was killed/failed
+#[no_mangle]
+pub extern "C" fn rt_thread_join_limited(handle: u64) -> RuntimeValue {
+    if handle == 0 {
+        return RuntimeValue::NIL;
+    }
+
+    let handle_ptr = handle as *mut LimitedThreadHandle;
+
+    unsafe {
+        // Check if already joined
+        if (*handle_ptr).joined.swap(true, Ordering::SeqCst) {
+            return RuntimeValue::NIL;
+        }
+
+        // Take the join handle
+        if let Some(join_handle) = (*handle_ptr).join_handle.take() {
+            match join_handle.join() {
+                Ok(result) => result,
+                Err(panic_info) => {
+                    // Thread panicked - check if it was due to a resource limit
+                    (*handle_ptr).was_killed.store(true, Ordering::SeqCst);
+
+                    // Try to determine the violation type from the panic message
+                    if let Some(msg) = panic_info.downcast_ref::<&str>() {
+                        if msg.contains("SIGXCPU") || msg.contains("CPU time") {
+                            (*handle_ptr)
+                                .violation_type
+                                .store(VIOLATION_CPU_TIME as u64, Ordering::SeqCst);
+                            if let Some(cpu_limit) = (*handle_ptr).cpu_time_limit {
+                                (*handle_ptr)
+                                    .violation_value
+                                    .store(cpu_limit, Ordering::SeqCst);
+                            }
+                        } else if msg.contains("memory") || msg.contains("allocation") {
+                            (*handle_ptr)
+                                .violation_type
+                                .store(VIOLATION_MEMORY as u64, Ordering::SeqCst);
+                            if let Some(mem_limit) = (*handle_ptr).memory_limit {
+                                (*handle_ptr)
+                                    .violation_value
+                                    .store(mem_limit, Ordering::SeqCst);
+                            }
+                        } else {
+                            (*handle_ptr)
+                                .violation_type
+                                .store(VIOLATION_UNKNOWN as u64, Ordering::SeqCst);
+                        }
+                    } else {
+                        (*handle_ptr)
+                            .violation_type
+                            .store(VIOLATION_UNKNOWN as u64, Ordering::SeqCst);
+                    }
+
+                    RuntimeValue::NIL
+                }
+            }
+        } else {
+            RuntimeValue::NIL
+        }
+    }
+}
+
+/// Check if a limited thread was killed due to a resource violation.
+///
+/// # Returns
+/// 1 if the thread was killed, 0 otherwise
+#[no_mangle]
+pub extern "C" fn rt_thread_was_killed(handle: u64) -> i64 {
+    if handle == 0 {
+        return 0;
+    }
+
+    let handle_ptr = handle as *mut LimitedThreadHandle;
+
+    unsafe {
+        if (*handle_ptr).was_killed.load(Ordering::SeqCst) {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+/// Get the violation type for a killed thread.
+///
+/// # Returns
+/// 0 = None, 1 = CPU time, 2 = Memory, 3 = FD, 4 = Thread, 5 = Unknown
+#[no_mangle]
+pub extern "C" fn rt_thread_get_violation_type(handle: u64) -> i64 {
+    if handle == 0 {
+        return VIOLATION_NONE;
+    }
+
+    let handle_ptr = handle as *mut LimitedThreadHandle;
+
+    unsafe { (*handle_ptr).violation_type.load(Ordering::SeqCst) as i64 }
+}
+
+/// Get the violation value for a killed thread (e.g., the limit that was exceeded).
+///
+/// # Returns
+/// The value associated with the violation (seconds, bytes, count, etc.)
+#[no_mangle]
+pub extern "C" fn rt_thread_get_violation_value(handle: u64) -> i64 {
+    if handle == 0 {
+        return 0;
+    }
+
+    let handle_ptr = handle as *mut LimitedThreadHandle;
+
+    unsafe { (*handle_ptr).violation_value.load(Ordering::SeqCst) as i64 }
+}
+
+/// Check if a limited thread has completed without blocking.
+///
+/// # Returns
+/// 1 if completed, 0 if still running
+#[no_mangle]
+pub extern "C" fn rt_thread_is_done_limited(handle: u64) -> i64 {
+    if handle == 0 {
+        return 1;
+    }
+
+    let handle_ptr = handle as *mut LimitedThreadHandle;
+
+    unsafe {
+        if (*handle_ptr).joined.load(Ordering::SeqCst) {
+            return 1;
+        }
+
+        if let Some(ref join_handle) = (*handle_ptr).join_handle {
+            if join_handle.is_finished() {
+                1
+            } else {
+                0
+            }
+        } else {
+            1
+        }
+    }
+}
+
+/// Get the thread ID of a limited thread.
+#[no_mangle]
+pub extern "C" fn rt_thread_id_limited(handle: u64) -> i64 {
+    if handle == 0 {
+        return 0;
+    }
+
+    let handle_ptr = handle as *mut LimitedThreadHandle;
+
+    unsafe { (*handle_ptr).thread_id as i64 }
+}
+
+/// Free a limited thread handle.
+#[no_mangle]
+pub extern "C" fn rt_thread_free_limited(handle: u64) {
+    if handle == 0 {
+        return;
+    }
+
+    let handle_ptr = handle as *mut LimitedThreadHandle;
+
+    unsafe {
+        drop(Box::from_raw(handle_ptr));
+    }
+}
+
 #[cfg(test)]
 #[path = "executor_tests.rs"]
 mod tests;

@@ -1,6 +1,6 @@
 # Test Results
 
-**Generated:** 2026-01-21 18:00:00
+**Generated:** 2026-01-22 06:16:09
 **Total Tests:** 1
 **Status:** ⚠️ 1 FAILED
 
@@ -17,17 +17,17 @@
 
 ## ❌ Failed Tests (1)
 
-### 🔴 file_system_spec
+### 🔴 grammar_tokens_spec
 
-**File:** `test/lib/std/unit/shell/file_system_spec.spl`
+**File:** `test/lib/std/unit/parser/treesitter/grammar_tokens_spec.spl`
 **Category:** Unit
-**Failed:** 2026-01-21T18:00:00.039014491+00:00
+**Failed:** 2026-01-22T06:16:09.330824896+00:00
 **Flaky:** No (100.0% failure rate)
 
 **Error:**
 ```
-parse error: Unexpected token: expected pattern, found Exists
-Location: test/lib/std/unit/shell/file_system_spec.spl
+parse error: Unexpected token: expected identifier, found Assign
+Location: test/lib/std/unit/parser/treesitter/grammar_tokens_spec.spl
 ```
 
 ---
@@ -42,5 +42,5 @@ Location: test/lib/std/unit/shell/file_system_spec.spl
 
 ### Priority 1: Fix Failing Tests (1)
 
-1. **file_system_spec** - parse error: Unexpected token: expected pattern, found Exists
+1. **grammar_tokens_spec** - parse error: Unexpected token: expected identifier, found Assign
 

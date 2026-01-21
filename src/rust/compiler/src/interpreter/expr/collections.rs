@@ -48,8 +48,11 @@ pub(super) fn eval_collection_expr(
                 let v = evaluate_expr(fexpr, env, functions, classes, enums, impl_methods)?;
                 map.insert(fname.clone(), v);
             }
+            // Strip module prefix from class name (e.g., "dt.Duration" -> "Duration")
+            // This ensures method lookup works correctly for imported types
+            let class_name = name.rsplit('.').next().unwrap_or(name).to_string();
             Ok(Some(Value::Object {
-                class: name.clone(),
+                class: class_name,
                 fields: map,
             }))
         }

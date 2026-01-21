@@ -9,6 +9,7 @@
 
 use crate::ast::*;
 use crate::error::ParseError;
+use crate::error_recovery::{ErrorHint, ErrorHintLevel};
 use crate::parser_impl::core::Parser;
 use crate::token::{Span, TokenKind};
 
@@ -51,8 +52,19 @@ impl<'a> Parser<'a> {
             segments.push(self.expect_path_segment()?);
         }
 
-        // Parse dot-separated segments
-        while self.check(&TokenKind::Dot) {
+        // Parse dot-separated segments (also accept :: with deprecation warning)
+        while self.check(&TokenKind::Dot) || self.check(&TokenKind::DoubleColon) {
+            // Emit deprecation warning for '::' syntax
+            if self.check(&TokenKind::DoubleColon) {
+                let warning = ErrorHint {
+                    level: ErrorHintLevel::Warning,
+                    message: "Deprecated: '::' in module paths".to_string(),
+                    span: self.current.span,
+                    suggestion: Some("Use '.' instead of '::'".to_string()),
+                    help: Some("Example: use std.spec.* instead of use std::spec::*".to_string()),
+                };
+                self.error_hints.push(warning);
+            }
             self.advance();
 
             // Check for glob: module.*
@@ -145,10 +157,21 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse import statement (alias for use): import module.Item
-    /// This is syntactic sugar for `use` - both work identically.
+    /// DEPRECATED: Use `use` instead of `import`.
     /// import type module.Item is also supported.
     pub(crate) fn parse_import(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
+
+        // Emit deprecation warning for 'import' keyword
+        let warning = ErrorHint {
+            level: ErrorHintLevel::Warning,
+            message: "Deprecated: 'import' keyword".to_string(),
+            span: start_span,
+            suggestion: Some("Use 'use' instead of 'import'".to_string()),
+            help: Some("Example: use std.spec.* instead of import std.spec".to_string()),
+        };
+        self.error_hints.push(warning);
+
         self.expect(&TokenKind::Import)?;
 
         // Check for 'type' keyword after 'import'
@@ -160,6 +183,79 @@ impl<'a> Parser<'a> {
         };
 
         self.parse_use_or_import_body(start_span, is_type_only)
+    }
+
+    /// Parse Python-style from-import: from module import Name or from module import {Name1, Name2}
+    /// DEPRECATED: Use `use module.{...}` instead.
+    /// Converts to use statement: from mmap import File -> use mmap.File
+    pub(crate) fn parse_from_import(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+
+        // Emit deprecation warning for 'from ... import' syntax
+        let warning = ErrorHint {
+            level: ErrorHintLevel::Warning,
+            message: "Deprecated: 'from ... import' syntax".to_string(),
+            span: start_span,
+            suggestion: Some("Use 'use module.{...}' instead".to_string()),
+            help: Some("Example: use mmap.{File, open} instead of from mmap import {File, open}".to_string()),
+        };
+        self.error_hints.push(warning);
+
+        self.expect(&TokenKind::From)?;
+
+        // Parse the module path (could be a single identifier or dotted path)
+        let path = self.parse_module_path()?;
+
+        // Expect 'import' keyword
+        self.expect(&TokenKind::Import)?;
+
+        // Parse what's being imported: single name, {group}, or *
+        let target = if self.check(&TokenKind::Star) {
+            self.advance();
+            ImportTarget::Glob
+        } else if self.check(&TokenKind::LBrace) {
+            // Group import: from module import {A, B, C}
+            self.advance();
+            let mut items = Vec::new();
+            while !self.check(&TokenKind::RBrace) {
+                // Allow keywords as import names
+                let name = self.expect_path_segment()?;
+                if self.check(&TokenKind::As) {
+                    self.advance();
+                    let alias = self.expect_path_segment()?;
+                    items.push(ImportTarget::Aliased { name, alias });
+                } else {
+                    items.push(ImportTarget::Single(name));
+                }
+                if !self.check(&TokenKind::RBrace) {
+                    self.expect(&TokenKind::Comma)?;
+                }
+            }
+            self.expect(&TokenKind::RBrace)?;
+            ImportTarget::Group(items)
+        } else {
+            // Single import: from module import Name or from module import Name as Alias
+            let name = self.expect_path_segment()?;
+            if self.check(&TokenKind::As) {
+                self.advance();
+                let alias = self.expect_path_segment()?;
+                ImportTarget::Aliased { name, alias }
+            } else {
+                ImportTarget::Single(name)
+            }
+        };
+
+        Ok(Node::UseStmt(UseStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            path,
+            target,
+            is_type_only: false,
+        }))
     }
 
     /// Common body for use/import statements
@@ -230,6 +326,19 @@ impl<'a> Parser<'a> {
             // Traditional: export use X
             self.advance();
             let (path, target) = self.parse_use_path_and_target()?;
+
+            // Warn against glob exports - they expose too many interfaces
+            if matches!(target, ImportTarget::Glob) {
+                let warning = ErrorHint {
+                    level: ErrorHintLevel::Warning,
+                    message: "Avoid 'export use *' - exposes unnecessary interfaces".to_string(),
+                    span: start_span,
+                    suggestion: Some("Use explicit exports instead".to_string()),
+                    help: Some("Example: export use module.{A, B, C} or export A, B from module".to_string()),
+                };
+                self.error_hints.push(warning);
+            }
+
             Ok(Node::ExportUseStmt(ExportUseStmt {
                 span: Span::new(
                     start_span.start,

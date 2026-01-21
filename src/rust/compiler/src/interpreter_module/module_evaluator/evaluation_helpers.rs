@@ -82,19 +82,20 @@ pub(super) fn register_definitions(
             }
             Node::Struct(s) => {
                 // Treat structs like classes for export purposes
+                // Include struct methods so they're available for method calls
                 let class_def = ClassDef {
                     span: s.span.clone(),
                     name: s.name.clone(),
-                    generic_params: vec![],
-                    where_clause: vec![],
+                    generic_params: s.generic_params.clone(),
+                    where_clause: s.where_clause.clone(),
                     fields: s.fields.clone(),
-                    methods: vec![],
+                    methods: s.methods.clone(), // Include struct methods!
                     parent: None,
-                    visibility: simple_parser::ast::Visibility::Public,
+                    visibility: s.visibility.clone(),
                     effects: vec![],
-                    attributes: vec![],
-                    doc_comment: None,
-                    invariant: None,
+                    attributes: s.attributes.clone(),
+                    doc_comment: s.doc_comment.clone(),
+                    invariant: s.invariant.clone(),
                     macro_invocations: vec![],
                     mixins: vec![],
                 };
