@@ -43,7 +43,10 @@ lean_body       ::= '{' lean_code '}'
 lean_code       ::= <any text until matching '}'>
 ```
 
-**Lexer Note**: Inside `lean{}`, the lexer switches to "raw mode" collecting text until the matching closing brace (tracking brace depth for nested Lean structures).
+**Lexer Note**:
+- `lean{...}` (no space) is tokenized as a `CustomBlock { kind: "lean", payload }` token
+- The lexer switches to "raw mode" collecting text until the matching closing brace
+- `lean` followed by `import` is parsed contextually (not as a keyword) to preserve backward compatibility with module paths like `verification.lean.codegen`
 
 ## Placement Contexts
 

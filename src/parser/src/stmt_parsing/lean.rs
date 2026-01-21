@@ -13,25 +13,24 @@ use crate::parser_impl::Parser;
 use crate::token::{Span, TokenKind};
 
 impl<'a> Parser<'a> {
-    /// Parse a lean block statement.
+    /// Parse a lean import block statement.
+    ///
+    /// Called when we've detected "lean" identifier followed by "import".
+    /// Current token is the "lean" identifier.
     ///
     /// This handles:
     /// - `lean import "path"` - import only
     /// - `lean import "path" { code }` - import with extensions
     ///
     /// Note: `lean { code }` is handled as a CustomBlock expression by the lexer.
-    pub(crate) fn parse_lean_block(&mut self) -> Result<Node, ParseError> {
+    pub(crate) fn parse_lean_import_block(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
-        self.expect(&TokenKind::Lean)?;
 
-        // Must have 'import' for statement form
-        if !self.check(&TokenKind::Import) {
-            return Err(ParseError::syntax_error_with_span(
-                "expected 'import' after 'lean' keyword (for inline lean code, use lean{...} without space)",
-                self.current.span,
-            ));
-        }
-        self.advance(); // consume 'import'
+        // Consume "lean" identifier
+        self.advance();
+
+        // Consume 'import' keyword
+        self.expect(&TokenKind::Import)?;
 
         // Expect string literal for import path
         let import_path = match &self.current.kind {

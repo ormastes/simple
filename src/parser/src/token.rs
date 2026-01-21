@@ -200,7 +200,8 @@ pub enum TokenKind {
     Bounds, // bounds (for @simd kernel bounds: clause)
     Dyn,    // dyn (for dynamic trait objects)
     Repr,   // repr (for unit representation constraints)
-    Lean,   // lean (for Lean 4 verification blocks)
+    // Note: "lean" is NOT a keyword - it's parsed contextually as lean{...} custom block
+    // or "lean import" statement to avoid breaking existing module paths
     // Note: 'allow' is parsed as identifier (not a keyword) to avoid conflict with #[allow(...)]
     // Note: 'checked', 'saturate', 'wrap', 'range' are parsed as identifiers in where clauses
 
