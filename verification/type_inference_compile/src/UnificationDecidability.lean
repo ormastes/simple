@@ -241,6 +241,265 @@ theorem applySubst_single_var (v : TyVar) (t : Ty) :
     applySubst (singleSubst v t) (Ty.var v) = t := by
   simp only [applySubst, singleSubst, substLookup, beq_self_eq_true, ↓reduceIte]
 
+/-- Singleton substitution lookup for different variable -/
+theorem substLookup_single_diff (v v' : TyVar) (t : Ty) (h : (v == v') = false) :
+    substLookup (singleSubst v t) v' = none := by
+  simp only [singleSubst, substLookup, h, ↓reduceIte]
+
+/-- Applying singleton substitution to different variable leaves it unchanged -/
+theorem applySubst_single_diff (v v' : TyVar) (t : Ty) (h : (v == v') = false) :
+    applySubst (singleSubst v t) (Ty.var v') = Ty.var v' := by
+  simp only [applySubst, substLookup_single_diff v v' t h]
+
+/-- Substitution distributes over arrow types -/
+theorem applySubst_arrow (s : Subst) (a b : Ty) :
+    applySubst s (Ty.arrow a b) = Ty.arrow (applySubst s a) (applySubst s b) := rfl
+
+/-- Substitution distributes over generic0 -/
+theorem applySubst_generic0 (s : Subst) (name : String) :
+    applySubst s (Ty.generic0 name) = Ty.generic0 name := rfl
+
+/-- Substitution distributes over generic1 -/
+theorem applySubst_generic1 (s : Subst) (name : String) (arg : Ty) :
+    applySubst s (Ty.generic1 name arg) = Ty.generic1 name (applySubst s arg) := rfl
+
+/-- Substitution distributes over generic2 -/
+theorem applySubst_generic2 (s : Subst) (name : String) (arg1 arg2 : Ty) :
+    applySubst s (Ty.generic2 name arg1 arg2) =
+    Ty.generic2 name (applySubst s arg1) (applySubst s arg2) := rfl
+
+/-! ## Substitution Composition -/
+
+/-- Append substitution helper -/
+def appendSubst (s1 s2 : Subst) : Subst :=
+  match s1 with
+  | [] => s2
+  | e :: rest => e :: appendSubst rest s2
+
+/-- Lookup in appended substitution -/
+theorem substLookup_appendSubst (s1 s2 : Subst) (v : TyVar) :
+    substLookup (appendSubst s1 s2) v =
+    match substLookup s1 v with
+    | some t => some t
+    | none => substLookup s2 v := by
+  induction s1 with
+  | nil => simp [appendSubst, substLookup]
+  | cons e rest ih =>
+    simp only [appendSubst, substLookup]
+    split
+    · rfl
+    · exact ih
+
+/-- Lookup in mapped substitution -/
+theorem substLookup_map (s : Subst) (f : Ty → Ty) (v : TyVar) :
+    substLookup (s.map (fun e => { e with ty := f e.ty })) v =
+    (substLookup s v).map f := by
+  induction s with
+  | nil => simp [substLookup]
+  | cons e rest ih =>
+    simp only [List.map, substLookup]
+    split <;> simp_all
+
+/-- composeSubst uses appendSubst internally -/
+theorem composeSubst_eq (s1 s2 : Subst) :
+    composeSubst s1 s2 = appendSubst (s2.map (fun e => { e with ty := applySubst s1 e.ty })) s1 := rfl
+
+/-- Substitution composition correctness -/
+theorem composeSubst_correct (s1 s2 : Subst) (t : Ty) :
+    applySubst (composeSubst s1 s2) t = applySubst s1 (applySubst s2 t) := by
+  induction t with
+  | var v =>
+    simp only [applySubst, composeSubst_eq]
+    rw [substLookup_appendSubst]
+    rw [substLookup_map]
+    cases h : substLookup s2 v with
+    | none => simp [Option.map]
+    | some t' => simp [Option.map]
+  | nat => rfl
+  | bool => rfl
+  | str => rfl
+  | arrow a b iha ihb => simp only [applySubst, iha, ihb]
+  | generic0 _ => rfl
+  | generic1 _ arg ih => simp only [applySubst, ih]
+  | generic2 _ arg1 arg2 ih1 ih2 => simp only [applySubst, ih1, ih2]
+
+/-! ## Soundness Theorem -/
+
+/-- unifyFuel soundness: proven by induction on fuel -/
+theorem unifyFuel_sound (fuel : Nat) (t1 t2 : Ty) (s : Subst) :
+    unifyFuel fuel t1 t2 = UnifyResult.ok s →
+    applySubst s t1 = applySubst s t2 := by
+  induction fuel generalizing t1 t2 s with
+  | zero =>
+    -- fuel = 0: always returns mismatch, so premise is false
+    intro h
+    simp only [unifyFuel] at h
+  | succ fuel' ih =>
+    intro h
+    simp only [unifyFuel] at h
+    -- Case split on t1, t2
+    cases t1 with
+    | var v1 =>
+      cases t2 with
+      | var v2 =>
+        -- var v1 vs var v2
+        simp only at h
+        split at h
+        · -- v1 == v2
+          cases h
+          simp [emptySubst_identity]
+        · -- v1 ≠ v2
+          cases h
+          simp only [applySubst, applySubst_single_var]
+          rename_i heq
+          simp only [substLookup_single_diff v1 v2 (Ty.var v2) heq]
+      | nat =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_single_var, applySubst_nat]
+      | bool =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_single_var, applySubst_bool]
+      | str =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_single_var, applySubst_str]
+      | arrow a b =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_single_var, applySubst_arrow]
+      | generic0 name =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_single_var, applySubst_generic0]
+      | generic1 name arg =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_single_var, applySubst_generic1]
+      | generic2 name arg1 arg2 =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_single_var, applySubst_generic2]
+    | nat =>
+      cases t2 with
+      | var v =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_single_var, applySubst_nat]
+      | nat => cases h; simp [emptySubst_identity]
+      | _ => simp only at h
+    | bool =>
+      cases t2 with
+      | var v =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_single_var, applySubst_bool]
+      | bool => cases h; simp [emptySubst_identity]
+      | _ => simp only at h
+    | str =>
+      cases t2 with
+      | var v =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_single_var, applySubst_str]
+      | str => cases h; simp [emptySubst_identity]
+      | _ => simp only at h
+    | arrow a1 b1 =>
+      cases t2 with
+      | var v =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_single_var, applySubst_arrow]
+      | arrow a2 b2 =>
+        simp only at h
+        -- Recursive case: unify a1 a2, then unify (s1 b1) (s1 b2)
+        split at h
+        · rename_i s1 hs1
+          split at h
+          · rename_i s2 hs2
+            cases h
+            -- Need to show: applySubst (composeSubst s2 s1) (arrow a1 b1) =
+            --               applySubst (composeSubst s2 s1) (arrow a2 b2)
+            simp only [applySubst_arrow, composeSubst_correct]
+            have ih1 := ih a1 a2 s1 hs1
+            have ih2 := ih (applySubst s1 b1) (applySubst s1 b2) s2 hs2
+            constructor
+            · -- applySubst s2 (applySubst s1 a1) = applySubst s2 (applySubst s1 a2)
+              rw [ih1]
+            · -- applySubst s2 (applySubst s1 b1) = applySubst s2 (applySubst s1 b2)
+              exact ih2
+          · contradiction
+        · contradiction
+      | _ => simp only at h
+    | generic0 n1 =>
+      cases t2 with
+      | var v =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_single_var, applySubst_generic0]
+      | generic0 n2 =>
+        simp only at h
+        split at h
+        · cases h; simp [emptySubst_identity]
+        · contradiction
+      | _ => simp only at h
+    | generic1 n1 arg1 =>
+      cases t2 with
+      | var v =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_single_var, applySubst_generic1]
+      | generic1 n2 arg2 =>
+        simp only at h
+        split at h
+        · contradiction
+        · rename_i hname
+          simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hname
+          have ih_arg := ih arg1 arg2 s h
+          simp only [applySubst_generic1, hname, ih_arg]
+      | _ => simp only at h
+    | generic2 n1 a1 b1 =>
+      cases t2 with
+      | var v =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_single_var, applySubst_generic2]
+      | generic2 n2 a2 b2 =>
+        simp only at h
+        split at h
+        · contradiction
+        · rename_i hname
+          simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hname
+          split at h
+          · rename_i s1 hs1
+            split at h
+            · rename_i s2 hs2
+              cases h
+              simp only [applySubst_generic2, composeSubst_correct, hname]
+              have ih1 := ih a1 a2 s1 hs1
+              have ih2 := ih (applySubst s1 b1) (applySubst s1 b2) s2 hs2
+              constructor
+              · rw [ih1]
+              · exact ih2
+            · contradiction
+          · contradiction
+      | _ => simp only at h
+
 /--
   Main soundness theorem: if unification succeeds, applying the resulting
   substitution makes both types equal.
@@ -259,11 +518,14 @@ theorem applySubst_single_var (v : TyVar) (t : Ty) :
   The proof requires showing that composed substitutions preserve equality,
   which follows from standard substitution lemmas.
 
-  Axiomatized due to proof complexity; the algorithm is standard Martelli-Montanari.
+  Proven via unifyFuel_sound since unify = unifyFuel (defaultFuel t1 t2) t1 t2.
 -/
-axiom unify_sound (t1 t2 : Ty) (s : Subst) :
+theorem unify_sound (t1 t2 : Ty) (s : Subst) :
     unify t1 t2 = UnifyResult.ok s →
-    applySubst s t1 = applySubst s t2
+    applySubst s t1 = applySubst s t2 := by
+  intro h
+  simp only [unify] at h
+  exact unifyFuel_sound (defaultFuel t1 t2) t1 t2 s h
 
 /-! ## Completeness -/
 
