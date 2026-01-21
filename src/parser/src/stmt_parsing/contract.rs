@@ -343,6 +343,56 @@ impl Parser<'_> {
             TokenKind::Out | TokenKind::OutErr | TokenKind::Ensures
         )
     }
+
+    /// Parse loop invariant clauses at the start of a loop body.
+    ///
+    /// Syntax:
+    /// ```text
+    /// for i in 0..n:
+    ///     invariant: sum == partial_sum(i)
+    ///     sum = sum + arr[i]
+    ///
+    /// while x > 0:
+    ///     invariant: x * y == original
+    ///     x = x - 1
+    /// ```
+    ///
+    /// Returns the invariant clauses (may be empty if no invariants present).
+    pub(crate) fn parse_loop_invariants(&mut self) -> Result<Vec<ContractClause>, ParseError> {
+        let mut invariants = Vec::new();
+
+        // Check for invariant: keyword
+        while self.check(&TokenKind::Invariant) {
+            self.advance();
+            self.expect(&TokenKind::Colon)?;
+
+            // Parse the invariant expression(s)
+            // Can be inline (same line) or block (indented)
+            if self.check(&TokenKind::Newline) {
+                // Block style: invariant:\n    expr\n    expr
+                self.advance();
+                self.expect(&TokenKind::Indent)?;
+
+                let mut iterations = 0usize;
+                while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                    self.check_loop_limit(iterations, "loop_invariant_block")?;
+                    iterations += 1;
+
+                    let clause = self.parse_contract_clause()?;
+                    invariants.push(clause);
+                    self.skip_newlines();
+                }
+                self.expect(&TokenKind::Dedent)?;
+            } else {
+                // Inline style: invariant: expr
+                let clause = self.parse_contract_clause()?;
+                invariants.push(clause);
+                self.skip_newlines();
+            }
+        }
+
+        Ok(invariants)
+    }
 }
 
 #[cfg(test)]

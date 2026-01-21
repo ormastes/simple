@@ -187,11 +187,18 @@ theorem traitMethod_deterministic (env : TraitEnv) (registry : ImplRegistry)
 
 -- Theorem: Implementation completeness
 -- If a type implements a trait, all required methods must have implementations
+-- REMAINS AXIOM: This statement is semantically incorrect - it claims the length inequality
+-- holds just from lookupTrait succeeding, without any validation that impl actually
+-- correctly implements the trait. A correct statement would require a validation hypothesis
+-- (e.g., from a type checker that verified the implementation).
 axiom impl_complete (env : TraitEnv) (impl : TraitImpl) (trait : TraitDef) :
   lookupTrait env impl.trait_name = some trait →
   trait.methods.length ≤ impl.method_impls.length
 
 -- Theorem: Coherence implies no overlapping implementations
+-- REMAINS AXIOM: The current checkCoherence function is simplified to always return true.
+-- This makes the theorem vacuously impossible to use meaningfully.
+-- A real implementation would check for overlapping for_type values with unification.
 axiom coherence_no_overlap (registry : ImplRegistry) (impl1 impl2 : TraitImpl) :
   checkCoherence registry = true →
   impl1 ≠ impl2 → !implsOverlap impl1 impl2
@@ -287,6 +294,9 @@ theorem unify_symmetric (ty1 ty2 : Ty) :
   exact unifyFuel_symmetric (unifyDefaultFuel ty2 ty1) ty1 ty2
 
 -- Theorem: Overlapping implementations violate coherence
+-- REMAINS AXIOM: The current checkCoherence function always returns true (simplified),
+-- so this theorem cannot be proven. The statement is semantically correct but requires
+-- a proper implementation of checkCoherence that actually detects overlaps.
 axiom overlap_violates_coherence (registry : ImplRegistry) (impl1 impl2 : TraitImpl) :
   impl1 ≠ impl2 →
   implsOverlap impl1 impl2 = true →
@@ -425,6 +435,10 @@ theorem valid_binding_impl_exists (implRegistry : ImplRegistry) (binding : Inter
 
 -- Theorem: Static dispatch preserves type safety
 -- If a binding is valid, the bound type satisfies all trait requirements
+-- REMAINS AXIOM: The quantifier "∀ methodName : String" is too strong - it claims that
+-- ANY string is a valid method name that can be inferred. A correct statement would be:
+-- "∀ methodName ∈ trait.methods.map (·.name), inferTraitMethodCall ... ≠ none"
+-- This would also require the trait to be looked up successfully.
 axiom static_dispatch_safe (env : TraitEnv) (implRegistry : ImplRegistry)
     (binding : InterfaceBinding) :
   isValidBinding implRegistry binding = true →

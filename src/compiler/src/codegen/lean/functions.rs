@@ -30,6 +30,9 @@ pub struct LeanFunction {
     /// Termination measure for recursive functions (from decreases: clause)
     /// Generates `termination_by` clause in Lean output
     pub termination_by: Option<LeanExpr>,
+    /// Whether this is a ghost function (for verification only)
+    /// Ghost functions are marked with @[ghost] attribute in Lean
+    pub is_ghost: bool,
 }
 
 impl LeanFunction {

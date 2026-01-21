@@ -363,11 +363,28 @@ theorem errpost_only_on_error (st : ContractState) (retVal : Val) (contract : Fu
     -- Success exit uses postconditions, not errorPostconditions
     True := trivial
 
-/-- old() snapshots are taken after preconditions (axiomatized due to proof complexity) -/
-axiom old_after_preconditions (env : Env) (contract : FunctionContract) :
+/-- old() snapshots are taken after preconditions -/
+theorem old_after_preconditions (env : Env) (contract : FunctionContract) :
     let (result, st) := checkEntry env contract
     result = CheckResult.ok →
-    st.oldSnapshots = takeSnapshots env (collectOldRefs contract)
+    st.oldSnapshots = takeSnapshots env (collectOldRefs contract) := by
+  intro h
+  simp only at h ⊢
+  unfold checkEntry at h ⊢
+  -- Case analysis on precondition check
+  cases h_pre : checkPreconditions { env := env, oldSnapshots := [], returnValue := none, errorValue := none } contract with
+  | ok =>
+    simp only [h_pre] at h ⊢
+    -- After preconditions pass, snapshots are taken
+    -- Case analysis on invariant entry check
+    cases h_inv : checkInvariantsEntry
+      { env := env
+        oldSnapshots := takeSnapshots env (collectOldRefs contract)
+        returnValue := none
+        errorValue := none } contract with
+    | ok => simp only [h_inv]
+    | violation v => simp only [h_inv] at h
+  | violation v => simp only [h_pre] at h
 
 /-! ## Example Contracts -/
 

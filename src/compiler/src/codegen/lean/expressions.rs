@@ -67,6 +67,39 @@ pub enum LeanExpr {
     Sorry,
     /// Unit value
     Unit,
+    /// Assert - proof obligation with decidable check
+    /// `have h : P := by decide` or `have h : P := by simp`
+    Assert {
+        condition: Box<LeanExpr>,
+        message: Option<String>,
+    },
+    /// Assume - trusted hypothesis without proof
+    /// `have h : P := sorry` (axiom-like)
+    Assume {
+        condition: Box<LeanExpr>,
+        message: Option<String>,
+    },
+    /// Admit - explicitly skipped proof (tracked)
+    /// `admit` with reason tracking
+    Admit {
+        condition: Box<LeanExpr>,
+        message: Option<String>,
+    },
+    /// While loop with invariants
+    /// `while cond do ... invariant: ...`
+    WhileLoop {
+        condition: Box<LeanExpr>,
+        body: Box<LeanExpr>,
+        invariants: Vec<(LeanExpr, Option<String>)>,
+    },
+    /// For loop with invariants
+    /// `for x in iter do ... invariant: ...`
+    ForLoop {
+        pattern: String,
+        iterable: Box<LeanExpr>,
+        body: Box<LeanExpr>,
+        invariants: Vec<(LeanExpr, Option<String>)>,
+    },
 }
 
 /// A Lean literal
@@ -187,6 +220,83 @@ impl LeanExpr {
             }
             LeanExpr::Sorry => "sorry".to_string(),
             LeanExpr::Unit => "()".to_string(),
+            LeanExpr::Assert { condition, message } => {
+                // Assert: proof obligation with decidable check
+                // Generates: have h_assert : cond := by decide
+                let cond_str = condition.to_lean();
+                if let Some(msg) = message {
+                    format!("-- assert: {}\nhave h_assert : {} := by decide", msg, cond_str)
+                } else {
+                    format!("have h_assert : {} := by decide", cond_str)
+                }
+            }
+            LeanExpr::Assume { condition, message } => {
+                // Assume: trusted hypothesis without proof
+                // Generates: have h_assume : cond := sorry
+                let cond_str = condition.to_lean();
+                if let Some(msg) = message {
+                    format!("-- assume: {}\nhave h_assume : {} := sorry", msg, cond_str)
+                } else {
+                    format!("have h_assume : {} := sorry", cond_str)
+                }
+            }
+            LeanExpr::Admit { condition, message } => {
+                // Admit: explicitly skipped proof (tracked)
+                // Generates: sorry with tracking comment
+                let cond_str = condition.to_lean();
+                if let Some(msg) = message {
+                    format!("-- ADMIT: {} (reason: {})\nhave h_admit : {} := sorry", cond_str, msg, cond_str)
+                } else {
+                    format!("-- ADMIT (no reason given)\nhave h_admit : {} := sorry", cond_str)
+                }
+            }
+            LeanExpr::WhileLoop { condition, body, invariants } => {
+                // Generate while loop with invariants as comments/theorems
+                let mut out = String::new();
+
+                // Emit invariants as theorem obligations
+                if !invariants.is_empty() {
+                    out.push_str("-- Loop invariants:\n");
+                    for (i, (inv, msg)) in invariants.iter().enumerate() {
+                        if let Some(m) = msg {
+                            out.push_str(&format!("-- inv{}: {} ({})\n", i, inv.to_lean(), m));
+                        } else {
+                            out.push_str(&format!("-- inv{}: {}\n", i, inv.to_lean()));
+                        }
+                    }
+                }
+
+                // Lean doesn't have direct while, use recursive function pattern
+                out.push_str(&format!("-- while {} do\n", condition.to_lean()));
+                out.push_str(&format!("-- {}\n", body.to_lean()));
+                out.push_str("sorry -- loop translation requires manual verification");
+                out
+            }
+            LeanExpr::ForLoop { pattern, iterable, body, invariants } => {
+                // Generate for loop with invariants
+                let mut out = String::new();
+
+                // Emit invariants as theorem obligations
+                if !invariants.is_empty() {
+                    out.push_str("-- Loop invariants:\n");
+                    for (i, (inv, msg)) in invariants.iter().enumerate() {
+                        if let Some(m) = msg {
+                            out.push_str(&format!("-- inv{}: {} ({})\n", i, inv.to_lean(), m));
+                        } else {
+                            out.push_str(&format!("-- inv{}: {}\n", i, inv.to_lean()));
+                        }
+                    }
+                }
+
+                // Lean for comprehension or List.foldl pattern
+                out.push_str(&format!(
+                    "List.foldl (fun acc {} => {}) default {}",
+                    pattern,
+                    body.to_lean(),
+                    iterable.to_lean()
+                ));
+                out
+            }
         }
     }
 }
@@ -455,6 +565,102 @@ impl<'a> ExprTranslator<'a> {
                         result = Some(body);
                     } else {
                         result = Some(if_expr);
+                    }
+                }
+                HirStmt::Assert { condition, message } => {
+                    let lean_cond = self.translate(condition)?;
+                    let assert_expr = LeanExpr::Assert {
+                        condition: Box::new(lean_cond),
+                        message: message.clone(),
+                    };
+                    if let Some(body) = result {
+                        // Wrap in a sequence (assert then body)
+                        result = Some(LeanExpr::Let {
+                            name: "_assert".to_string(),
+                            value: Box::new(assert_expr),
+                            body: Box::new(body),
+                        });
+                    } else {
+                        result = Some(assert_expr);
+                    }
+                }
+                HirStmt::Assume { condition, message } => {
+                    let lean_cond = self.translate(condition)?;
+                    let assume_expr = LeanExpr::Assume {
+                        condition: Box::new(lean_cond),
+                        message: message.clone(),
+                    };
+                    if let Some(body) = result {
+                        // Wrap in a sequence (assume then body)
+                        result = Some(LeanExpr::Let {
+                            name: "_assume".to_string(),
+                            value: Box::new(assume_expr),
+                            body: Box::new(body),
+                        });
+                    } else {
+                        result = Some(assume_expr);
+                    }
+                }
+                HirStmt::Admit { condition, message } => {
+                    let lean_cond = self.translate(condition)?;
+                    let admit_expr = LeanExpr::Admit {
+                        condition: Box::new(lean_cond),
+                        message: message.clone(),
+                    };
+                    if let Some(body) = result {
+                        // Wrap in a sequence (admit then body)
+                        result = Some(LeanExpr::Let {
+                            name: "_admit".to_string(),
+                            value: Box::new(admit_expr),
+                            body: Box::new(body),
+                        });
+                    } else {
+                        result = Some(admit_expr);
+                    }
+                }
+                HirStmt::While { condition, body, invariants } => {
+                    let lean_cond = self.translate(condition)?;
+                    let lean_body = self.translate_stmts(body, locals)?;
+
+                    // Translate invariants
+                    let mut lean_invariants = Vec::new();
+                    for inv in invariants {
+                        let lean_inv = self.translate(&inv.condition)?;
+                        lean_invariants.push((lean_inv, inv.message.clone()));
+                    }
+
+                    let while_expr = LeanExpr::WhileLoop {
+                        condition: Box::new(lean_cond),
+                        body: Box::new(lean_body),
+                        invariants: lean_invariants,
+                    };
+                    if let Some(body) = result {
+                        result = Some(body);
+                    } else {
+                        result = Some(while_expr);
+                    }
+                }
+                HirStmt::For { pattern, iterable, body, invariants } => {
+                    let lean_iterable = self.translate(iterable)?;
+                    let lean_body = self.translate_stmts(body, locals)?;
+
+                    // Translate invariants
+                    let mut lean_invariants = Vec::new();
+                    for inv in invariants {
+                        let lean_inv = self.translate(&inv.condition)?;
+                        lean_invariants.push((lean_inv, inv.message.clone()));
+                    }
+
+                    let for_expr = LeanExpr::ForLoop {
+                        pattern: pattern.clone(),
+                        iterable: Box::new(lean_iterable),
+                        body: Box::new(lean_body),
+                        invariants: lean_invariants,
+                    };
+                    if let Some(body) = result {
+                        result = Some(body);
+                    } else {
+                        result = Some(for_expr);
                     }
                 }
                 _ => {

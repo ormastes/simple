@@ -1,36 +1,255 @@
 # Lean Code Generation Tests
-# SKIPPED: verification.lean.codegen module not yet implemented.
+#
+# Tests for the verification.lean.codegen module.
 
 import std.spec
+import verification.lean.codegen as codegen
+import verification.lean.emitter as emitter
+import verification.lean.types as types
+import verification.lean.naming as naming
+import verification.lean.functions as functions
+import verification.lean.traits as traits
 
 describe "Lean Code Generation":
-    context "Basic Types":
-        skip "generates i32 type":
-            pass
-        skip "generates bool type":
-            pass
-        skip "generates string type":
-            pass
-        skip "generates list type":
-            pass
-        skip "generates option type":
-            pass
-    context "Enum Generation":
-        skip "generates simple enum":
-            pass
-        skip "generates enum with parameters":
-            pass
-    context "Structure Generation":
-        skip "generates simple structure":
-            pass
-    context "Function Generation":
-        skip "generates simple function":
-            pass
-    context "Theorem Generation":
-        skip "generates theorem stub":
-            pass
-        skip "generates theorem with proof":
-            pass
-    context "Complete Module":
-        skip "generates complete module with all elements":
-            pass
+    """
+    ## Codegen Module Tests
+
+    Tests for generating Lean 4 code from Simple definitions.
+    """
+
+    context "LeanCodegenOptions":
+        """
+        ### Configuration Options
+        """
+
+        it "creates with default values":
+            val opts = codegen.LeanCodegenOptions.new()
+            expect(opts.module_name).to(eq("Main"))
+            expect(opts.generate_stubs).to(be_true())
+            expect(opts.output_dir).to(eq("build/lean"))
+
+        it "allows setting module name":
+            var opts = codegen.LeanCodegenOptions.new()
+            opts = opts.with_module_name("TestModule")
+            expect(opts.module_name).to(eq("TestModule"))
+
+    context "LeanEmitter":
+        """
+        ### Low-Level Emission
+        """
+
+        it "emits structure":
+            var emit = emitter.LeanEmitter.new()
+            emit.emit_structure_data("Point", [("x", "Int"), ("y", "Int")], ["Repr"])
+            val output = emit.finish()
+            expect(output).to(contain("structure Point"))
+            expect(output).to(contain("x : Int"))
+            expect(output).to(contain("deriving Repr"))
+
+        it "emits inductive":
+            var emit = emitter.LeanEmitter.new()
+            emit.emit_inductive_data("Color", [("Red", []), ("Green", []), ("Blue", [])], ["DecidableEq"])
+            val output = emit.finish()
+            expect(output).to(contain("inductive Color"))
+            expect(output).to(contain("| Red"))
+            expect(output).to(contain("deriving DecidableEq"))
+
+        it "emits function":
+            var emit = emitter.LeanEmitter.new()
+            emit.emit_function_data("add", [("a", "Int"), ("b", "Int")], "Int", "a + b", false, nil, false)
+            val output = emit.finish()
+            expect(output).to(contain("def add"))
+            expect(output).to(contain("(a : Int)"))
+            expect(output).to(contain(": Int"))
+
+        it "emits theorem":
+            var emit = emitter.LeanEmitter.new()
+            emit.emit_theorem_data("test_thm", [("n", "Nat")], "n >= 0", Some("simp"), false)
+            val output = emit.finish()
+            expect(output).to(contain("theorem test_thm"))
+            expect(output).to(contain("n >= 0"))
+
+    context "LeanStructure":
+        """
+        ### Structure Building
+        """
+
+        it "creates empty structure":
+            val s = codegen.LeanStructure.new("Empty")
+            expect(s.name).to(eq("Empty"))
+            expect(s.fields.len()).to(eq(0))
+
+        it "adds fields":
+            var s = codegen.LeanStructure.new("Point")
+            s = s.add_field("x", "Int")
+            s = s.add_field("y", "Int")
+            expect(s.fields.len()).to(eq(2))
+
+        it "adds deriving":
+            var s = codegen.LeanStructure.new("Point")
+            s = s.derive("Repr")
+            expect(s.deriving.len()).to(eq(1))
+
+    context "LeanInductive":
+        """
+        ### Inductive Building
+        """
+
+        it "creates empty inductive":
+            val i = codegen.LeanInductive.new("Empty")
+            expect(i.name).to(eq("Empty"))
+            expect(i.constructors.len()).to(eq(0))
+
+        it "adds unit constructor":
+            var i = codegen.LeanInductive.new("Color")
+            i = i.add_constructor("Red", [])
+            i = i.add_constructor("Green", [])
+            expect(i.constructors.len()).to(eq(2))
+
+        it "adds parameterized constructor":
+            var i = codegen.LeanInductive.new("Option")
+            i = i.add_constructor("Some", ["T"])
+            i = i.add_constructor("None", [])
+            expect(i.constructors.len()).to(eq(2))
+
+    context "LeanFunction":
+        """
+        ### Function Building
+        """
+
+        it "creates simple function":
+            var f = codegen.LeanFunction.new("identity")
+            f = f.add_param("x", "Int")
+            f = f.with_return_type("Int")
+            f = f.with_body("x")
+            expect(f.name).to(eq("identity"))
+            expect(f.params.len()).to(eq(1))
+
+        it "marks as partial":
+            var f = codegen.LeanFunction.new("loop")
+            f = f.partial()
+            expect(f.is_partial).to(be_true())
+
+    context "LeanTheorem":
+        """
+        ### Theorem Building
+        """
+
+        it "creates theorem":
+            val t = codegen.LeanTheorem.new("test", "1 + 1 = 2")
+            expect(t.name).to(eq("test"))
+            expect(t.statement).to(eq("1 + 1 = 2"))
+
+        it "adds parameters":
+            var t = codegen.LeanTheorem.new("forall_pos", "n > 0")
+            t = t.add_param("n", "Nat")
+            expect(t.params.len()).to(eq(1))
+
+        it "adds proof":
+            var t = codegen.LeanTheorem.new("trivial", "True")
+            t = t.with_proof("trivial")
+            expect(t.proof).to(eq(Some("trivial")))
+
+    context "LeanCodegen":
+        """
+        ### Full Code Generation
+        """
+
+        it "creates codegen instance":
+            val cg = codegen.LeanCodegen.create("Test")
+            expect(cg.options.module_name).to(eq("Test"))
+
+        it "adds structures":
+            var cg = codegen.LeanCodegen.create("Test")
+            var s = codegen.LeanStructure.new("Point")
+            s = s.add_field("x", "Int")
+            cg = cg.add_structure(s)
+            expect(cg.structures.len()).to(eq(1))
+
+        it "generates module header":
+            val cg = codegen.LeanCodegen.create("TestModule")
+            val output = cg.generate()
+            expect(output).to(contain("namespace TestModule"))
+            expect(output).to(contain("end TestModule"))
+
+        it "generates structures in module":
+            var cg = codegen.LeanCodegen.create("Test")
+            var s = codegen.LeanStructure.new("Point")
+            s = s.add_field("x", "Int").add_field("y", "Int").derive("Repr")
+            cg = cg.add_structure(s)
+            val output = cg.generate()
+            expect(output).to(contain("structure Point"))
+
+    context "Naming Conventions":
+        """
+        ### Identifier Translation
+        """
+
+        it "converts to PascalCase":
+            expect(naming.to_pascal_case("my_type")).to(eq("MyType"))
+
+        it "converts to camelCase":
+            expect(naming.to_camel_case("my_function")).to(eq("myFunction"))
+
+        it "escapes reserved words":
+            val escaped = naming.sanitize_lean_ident("let")
+            expect(escaped).to(contain("let"))
+
+    context "Type Translation":
+        """
+        ### Type System
+        """
+
+        it "translates primitive types":
+            expect(types.SimpleType.IntType.to_lean()).to(eq("Int"))
+            expect(types.SimpleType.BoolType.to_lean()).to(eq("Bool"))
+            expect(types.SimpleType.StringType.to_lean()).to(eq("String"))
+
+        it "translates list type":
+            val list_type = types.SimpleType.ListType(types.SimpleType.IntType)
+            expect(list_type.to_lean()).to(contain("List"))
+
+    context "Functions Module":
+        """
+        ### Function Expressions
+        """
+
+        it "creates variable expression":
+            val v = functions.var("x")
+            expect(v.to_lean()).to(eq("x"))
+
+        it "creates binary operation":
+            val expr = functions.add(functions.var("a"), functions.var("b"))
+            expect(expr.to_lean()).to(contain("+"))
+
+        it "creates if expression":
+            val cond = functions.var("cond")
+            val then_b = functions.var("x")
+            val else_b = functions.var("y")
+            val expr = functions.if_then_else(cond, then_b, else_b)
+            expect(expr.to_lean()).to(contain("if"))
+
+    context "Traits Module":
+        """
+        ### Type Class Generation
+        """
+
+        it "creates type class":
+            var cls = traits.LeanClass.new("Eq")
+            cls = cls.with_type_param("T")
+            expect(cls.name).to(eq("Eq"))
+            expect(cls.type_param).to(eq("T"))
+
+        it "emits class definition":
+            var cls = traits.LeanClass.new("Show")
+            cls = cls.with_type_param("T")
+            val output = cls.to_lean()
+            expect(output).to(contain("class Show"))
+            expect(output).to(contain("(T : Type)"))
+
+        it "creates instance":
+            val ty = types.LeanType.Named("Int")
+            var inst = traits.LeanInstance.new("Show", ty)
+            inst = inst.add_method("show", "fun x => toString x")
+            expect(inst.class_name).to(eq("Show"))
+            expect(inst.methods.len()).to(eq(1))

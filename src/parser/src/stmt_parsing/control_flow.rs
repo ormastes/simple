@@ -163,7 +163,16 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::In)?;
         let iterable = self.parse_expression()?;
         self.expect(&TokenKind::Colon)?;
-        let body = self.parse_block()?;
+
+        // Parse block header (NEWLINE then INDENT)
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+
+        // Parse loop invariants at the start of the block body
+        let invariants = self.parse_loop_invariants()?;
+
+        // Parse rest of block body
+        let body = self.parse_block_body()?;
 
         Ok(Node::For(ForStmt {
             span: Span::new(
@@ -177,6 +186,7 @@ impl<'a> Parser<'a> {
             body,
             is_suspend: false,
             auto_enumerate,
+            invariants,
         }))
     }
 
@@ -215,7 +225,16 @@ impl<'a> Parser<'a> {
 
         let (let_pattern, condition) = self.parse_optional_let_pattern()?;
         self.expect(&TokenKind::Colon)?;
-        let body = self.parse_block()?;
+
+        // Parse block header (NEWLINE then INDENT)
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+
+        // Parse loop invariants at the start of the block body
+        let invariants = self.parse_loop_invariants()?;
+
+        // Parse rest of block body
+        let body = self.parse_block_body()?;
 
         Ok(Node::While(WhileStmt {
             span: Span::new(
@@ -228,6 +247,7 @@ impl<'a> Parser<'a> {
             condition,
             body,
             is_suspend: false,
+            invariants,
         }))
     }
 
@@ -491,7 +511,16 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::In)?;
         let iterable = self.parse_expression()?;
         self.expect(&TokenKind::Colon)?;
-        let body = self.parse_block()?;
+
+        // Parse block header (NEWLINE then INDENT)
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+
+        // Parse loop invariants at the start of the block body
+        let invariants = self.parse_loop_invariants()?;
+
+        // Parse rest of block body
+        let body = self.parse_block_body()?;
 
         Ok(Node::For(ForStmt {
             span: Span::new(
@@ -505,6 +534,7 @@ impl<'a> Parser<'a> {
             body,
             is_suspend: true,
             auto_enumerate,
+            invariants,
         }))
     }
 
@@ -514,7 +544,16 @@ impl<'a> Parser<'a> {
 
         let (let_pattern, condition) = self.parse_optional_let_pattern()?;
         self.expect(&TokenKind::Colon)?;
-        let body = self.parse_block()?;
+
+        // Parse block header (NEWLINE then INDENT)
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+
+        // Parse loop invariants at the start of the block body
+        let invariants = self.parse_loop_invariants()?;
+
+        // Parse rest of block body
+        let body = self.parse_block_body()?;
 
         Ok(Node::While(WhileStmt {
             span: Span::new(
@@ -527,6 +566,7 @@ impl<'a> Parser<'a> {
             condition,
             body,
             is_suspend: true,
+            invariants,
         }))
     }
 }

@@ -225,6 +225,8 @@ impl TypeChecker {
                 | Node::Break(_)
                 | Node::Continue(_)
                 | Node::Assert(_)
+                | Node::Assume(_)
+                | Node::Admit(_)
                 | Node::Context(_)
                 | Node::With(_)
                 | Node::Expression(_) => {

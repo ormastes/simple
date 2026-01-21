@@ -211,9 +211,25 @@ theorem instantiation_preserves_wellformedness (mixin : MixinDef) (typeArgs : Li
   unfold instantiateMixin
   simp [h_len]
 
--- Theorem: Field merging is commutative when no conflicts exist
-axiom field_merge_commutative (fields1 fields2 : List FieldDef) (overrides : List (String × Ty)) :
-  mergeFields fields1 fields2 overrides = mergeFields fields2 fields1 overrides
+-- Note: Field merging is NOT commutative in general.
+-- mergeFields(A, B, _) returns A ++ (B filtered) while mergeFields(B, A, _) returns B ++ (A filtered)
+-- The order determines which fields take priority (first argument = class fields = priority)
+-- The original axiom was incorrect and has been removed.
+-- Property: Field merging preserves the first argument's fields
+theorem field_merge_preserves_first (classFields mixinFields : List FieldDef) (overrides : List (String × Ty))
+    (result : List FieldDef) :
+    mergeFields classFields mixinFields overrides = some result →
+    ∀ f, f ∈ classFields → f ∈ result := by
+  intro h_merge f h_mem
+  unfold mergeFields at h_merge
+  -- The result is classFields ++ newFields, so classFields is a prefix
+  split at h_merge
+  · simp at h_merge
+  · rename_i h_empty
+    simp only at h_merge
+    injection h_merge with h_eq
+    rw [← h_eq]
+    exact List.mem_append_left _ h_mem
 
 -- Theorem: Method merging preserves class method priority
 theorem method_merge_priority (classMethods mixinMethods : List MethodDef) (overrides : List (String × MethodDef)) (methodName : String) :
@@ -360,12 +376,18 @@ theorem mixin_trait_requirements_sound (traitEnv : TraitEnv) (registry : ImplReg
   exact h_check traitName h_mem
 
 -- Theorem: Field access after mixin application includes mixin fields
+-- REMAINS AXIOM: The inferFieldAccessWithMixins function requires cls'.name to be in the
+-- ClassEnv, which isn't guaranteed by the hypotheses. A correct statement would need:
+-- lookupClass env cls'.name = some cls' as a precondition.
 axiom mixin_field_access (env : ClassEnv) (cls cls' : ClassDef) (mixinFields : List FieldDef) (fieldName : String) :
   cls'.fields = cls.fields ++ mixinFields →
   (∃ f, f ∈ mixinFields ∧ f.name = fieldName) →
   inferFieldAccessWithMixins env (Ty.named cls'.name) fieldName ≠ none
 
 -- Theorem: Method dispatch after mixin application includes mixin methods
+-- REMAINS AXIOM: Same issue as mixin_field_access - the function requires cls'.name to be
+-- in the ClassEnv. Additionally, the existential "∃ argTys" doesn't specify which argument
+-- types would work. A correct statement would need the class in env and specify the method's params.
 axiom mixin_method_dispatch (env : ClassEnv) (cls cls' : ClassDef) (mixinMethods : List MethodDef) (methodName : String) :
   cls'.methods = cls.methods ++ mixinMethods →
   (∃ m, m ∈ mixinMethods ∧ m.name = methodName) →
