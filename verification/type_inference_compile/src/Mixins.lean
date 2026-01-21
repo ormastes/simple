@@ -259,28 +259,95 @@ theorem mixin_application_sound (env : MixinEnv) (traitEnv : TraitEnv) (registry
               cases h
               constructor <;> rfl
 
+-- Helper: If length equals eraseDups length, then no duplicates in mapped list
+theorem nodup_of_length_eq_eraseDups {α : Type} [BEq α] [LawfulBEq α] (l : List α) :
+    l.length = l.eraseDups.length → l.Nodup := by
+  intro h
+  induction l with
+  | nil => exact List.Nodup.nil
+  | cons x xs ih =>
+    simp only [List.eraseDups_cons] at h
+    split at h
+    · -- x ∈ xs.eraseDups, contradiction with length equality
+      simp only [List.length_cons] at h
+      omega
+    · -- x ∉ xs.eraseDups
+      simp only [List.length_cons] at h
+      have h_xs := ih (Nat.succ.inj h)
+      constructor
+      · intro h_mem
+        rename_i h_not_mem
+        have : x ∈ xs.eraseDups := List.mem_eraseDups.mpr h_mem
+        contradiction
+      · exact h_xs
+
+-- Helper: Nodup on mapped list means injective on list membership
+theorem nodup_map_injective {α β : Type} [DecidableEq β] (l : List α) (f : α → β)
+    (h_nodup : (l.map f).Nodup) (x y : α) (hx : x ∈ l) (hy : y ∈ l) (heq : f x = f y) :
+    x = y := by
+  induction l with
+  | nil => cases hx
+  | cons a as ih =>
+    simp only [List.map] at h_nodup
+    have ⟨h_not_mem, h_nodup_as⟩ := List.nodup_cons.mp h_nodup
+    cases hx with
+    | head =>
+      cases hy with
+      | head => rfl
+      | tail _ hy' =>
+        -- f a = f y where y ∈ as, but f a ∉ (as.map f) - contradiction
+        have : f a ∈ as.map f := by
+          rw [← heq]
+          exact List.mem_map_of_mem f hy'
+        contradiction
+    | tail _ hx' =>
+      cases hy with
+      | head =>
+        -- f x = f a where x ∈ as, but f a ∉ (as.map f) - contradiction
+        have : f a ∈ as.map f := by
+          rw [heq]
+          exact List.mem_map_of_mem f hx'
+        contradiction
+      | tail _ hy' =>
+        exact ih h_nodup_as hx' hy' heq
+
 -- Theorem: Coherence prevents duplicate mixin applications
--- Proof intuition: checkMixinCoherence ensures all mixin_names are distinct.
--- If r1 and r2 both have mixin_name = name, and names are distinct in the list,
--- then r1 and r2 must be the same element (by contrapositive of distinctness).
--- Axiomatized: full proof requires detailed list index/position reasoning
--- showing that map preserves indices and nodup implies injective indices.
-axiom coherence_no_duplicates (mixinRefs : List MixinRef) (name : String) (r1 r2 : MixinRef) :
+-- If coherence check passes, two refs with the same mixin name must be identical
+theorem coherence_no_duplicates (mixinRefs : List MixinRef) (name : String) (r1 r2 : MixinRef) :
   checkMixinCoherence mixinRefs = true →
   r1 ∈ mixinRefs →
   r2 ∈ mixinRefs →
   r1.mixin_name = name →
   r2.mixin_name = name →
-  r1 = r2
+  r1 = r2 := by
+  intro h_coh h_r1 h_r2 h_name1 h_name2
+  unfold checkMixinCoherence at h_coh
+  simp only [beq_iff_eq] at h_coh
+  have h_nodup : (mixinRefs.map MixinRef.mixin_name).Nodup := nodup_of_length_eq_eraseDups _ h_coh
+  have h_eq : r1.mixin_name = r2.mixin_name := by rw [h_name1, h_name2]
+  exact nodup_map_injective mixinRefs MixinRef.mixin_name h_nodup r1 r2 h_r1 h_r2 h_eq
 
 -- Theorem: Required method checking is complete
--- Note: The theorem statement assumes override tuple name matches method name,
--- which is a well-formedness invariant on overrides.
-axiom required_methods_complete (classMethods : List MethodDef) (required : List MethodDef)
+-- If checkRequiredMethods passes, every required method has a matching implementation
+theorem required_methods_complete (classMethods : List MethodDef) (required : List MethodDef)
     (overrides : List (String × MethodDef)) :
   checkRequiredMethods classMethods required overrides = true →
   ∀ req, req ∈ required → ∃ m, (m ∈ classMethods ∨ ∃ n m', (n, m') ∈ overrides ∧ n = req.name ∧ m' = m) ∧
-    m.name = req.name ∧ m.params = req.params ∧ m.ret = req.ret
+    m.name = req.name ∧ m.params = req.params ∧ m.ret = req.ret := by
+  intro h_check req h_req_mem
+  unfold checkRequiredMethods at h_check
+  rw [List.all_eq_true] at h_check
+  have h_req := h_check req h_req_mem
+  simp only [Bool.or_eq_true, List.any_eq_true, beq_iff_eq, Bool.and_eq_true] at h_req
+  cases h_req with
+  | inl h_class =>
+    -- Found in classMethods
+    obtain ⟨m, h_mem, h_name, h_params, h_ret⟩ := h_class
+    exact ⟨m, Or.inl h_mem, h_name, h_params, h_ret⟩
+  | inr h_override =>
+    -- Found in overrides
+    obtain ⟨⟨n, m'⟩, h_mem, h_name, h_params, h_ret⟩ := h_override
+    exact ⟨m', Or.inr ⟨n, m', h_mem, h_name, rfl⟩, h_name, h_params, h_ret⟩
 
 -- Theorem: Trait requirements are sound
 theorem mixin_trait_requirements_sound (traitEnv : TraitEnv) (registry : ImplRegistry)
