@@ -1,3 +1,5 @@
+<!-- skip_todo -->
+
 # Dual-Language TODO Parsing - Implementation Summary
 
 **Date:** 2026-01-19

@@ -409,6 +409,34 @@ if let Value::Str(ref s) = recv_val {
             let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             return Ok(Value::Int(s.matches(&needle).count() as i64));
         }
+        "with" => {
+            // FString.with method: replace placeholders {key} with values from dict
+            // Example: "Hello {name}".with {"name": "Alice"} -> "Hello Alice"
+            let dict_val = eval_arg(
+                args,
+                0,
+                Value::Dict(std::collections::HashMap::new()),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+
+            if let Value::Dict(data) = dict_val {
+                let mut result = s.clone();
+                for (key, value) in &data {
+                    let placeholder = format!("{{{}}}", key);
+                    let replacement = value.to_display_string();
+                    result = result.replace(&placeholder, &replacement);
+                }
+                return Ok(Value::Str(result));
+            } else {
+                return Err(crate::error::CompileError::semantic(
+                    "FString.with expects a dict argument",
+                ));
+            }
+        }
         _ => {}
     }
 }

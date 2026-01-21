@@ -1,3 +1,5 @@
+<!-- skip_todo -->
+
 # Dual-Language TODO Parsing: Rust + Simple
 
 **Date:** 2026-01-19

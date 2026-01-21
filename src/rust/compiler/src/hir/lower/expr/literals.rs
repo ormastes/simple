@@ -120,11 +120,7 @@ impl Lowerer {
     ///
     /// The `type_meta` contains compile-time metadata including const_keys extracted
     /// from placeholders. This will be used for compile-time key validation in future.
-    pub(super) fn lower_fstring(
-        &self,
-        parts: &[ast::FStringPart],
-        _type_meta: &ast::TypeMeta,
-    ) -> LowerResult<HirExpr> {
+    pub(super) fn lower_fstring(&self, parts: &[ast::FStringPart], _type_meta: &ast::TypeMeta) -> LowerResult<HirExpr> {
         // Check if the FString is a simple literal (no interpolation)
         // If so, convert it to a plain string
         let mut result = String::new();

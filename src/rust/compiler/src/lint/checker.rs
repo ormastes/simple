@@ -1,4 +1,6 @@
 //! Lint checker implementation for AST traversal.
+//!
+//! #![skip_todo]
 
 use super::config::LintConfig;
 use super::diagnostics::LintDiagnostic;
@@ -473,6 +475,29 @@ impl LintChecker {
         }
     }
 
+    /// Check if file has #![skip_todo] at the top
+    fn has_file_level_skip_todo_format(content: &str) -> bool {
+        // Check first 20 lines for skip markers
+        for line in content.lines().take(20) {
+            let trimmed = line.trim();
+            // Primary pattern: #![skip_todo]
+            if trimmed.contains("#![skip_todo]") {
+                return true;
+            }
+            // Also support: #![allow(todo_format)] for lint consistency
+            if trimmed.contains("#![allow(todo_format)]") {
+                return true;
+            }
+            // Comment-based alternatives
+            // Rust: // skip_todo
+            // Simple: # skip_todo
+            if trimmed.contains("skip_todo") && (trimmed.starts_with("//") || trimmed.starts_with('#')) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Check TODO/FIXME comment format
     fn check_todo_format(&mut self, source_file: &std::path::Path) {
         // Read the source file
@@ -480,6 +505,11 @@ impl LintChecker {
             Ok(s) => s,
             Err(_) => return, // Can't read file, skip this lint
         };
+
+        // Check for file-level skip attribute
+        if Self::has_file_level_skip_todo_format(&source) {
+            return;
+        }
 
         // Valid areas and priorities (from .claude/skills/todo.md)
         const TODO_AREAS: &[&str] = &[

@@ -275,8 +275,14 @@ impl TypeChecker {
                 if let Some(expr) = &let_stmt.value {
                     let inferred_ty = self.infer_expr(expr)?;
 
+                    // Extract type annotation from Pattern::Typed or let_stmt.ty
+                    let type_annotation = match &let_stmt.pattern {
+                        Pattern::Typed { ty, .. } => Some(ty),
+                        _ => let_stmt.ty.as_ref(),
+                    };
+
                     // If there's a type annotation, check for ConstKeySet validation
-                    if let Some(ref ast_ty) = let_stmt.ty {
+                    if let Some(ref ast_ty) = type_annotation {
                         let expected_ty = self.ast_type_to_type(ast_ty);
                         // Validate dict keys against ConstKeySet if applicable
                         self.validate_dict_const_keys(expr, &expected_ty)?;
@@ -544,6 +550,17 @@ impl TypeChecker {
         }
     }
 
+    /// Extract const_keys from FString expression
+    ///
+    /// Returns const_keys for direct FString literals (from type_meta)
+    pub fn get_fstring_keys_from_expr(&self, expr: &Expr) -> Option<Vec<String>> {
+        match expr {
+            // Case 1: Direct FString literal - extract keys from type_meta
+            Expr::FString { type_meta, .. } => type_meta.const_keys().cloned(),
+            _ => None,
+        }
+    }
+
     /// Validate dict literal keys against ConstKeySet type annotation
     ///
     /// If the expected type is Dict<ConstKeySet, V>, extract literal string keys
@@ -579,7 +596,17 @@ impl TypeChecker {
 
         for (key_expr, _) in dict_entries {
             match key_expr {
+                // Plain string literal
                 Expr::String(s) => literal_keys.push(s.clone()),
+                // FString that is a pure literal (no interpolation)
+                Expr::FString { parts, .. } if parts.len() == 1 => {
+                    use simple_parser::ast::FStringPart;
+                    if let FStringPart::Literal(s) = &parts[0] {
+                        literal_keys.push(s.clone());
+                    } else {
+                        has_non_literal = true;
+                    }
+                }
                 Expr::DictSpread(_) => {
                     // Spread expressions add unknown keys at runtime
                     has_non_literal = true;
@@ -605,7 +632,7 @@ impl TypeChecker {
         );
 
         // Report errors for unknown keys
-        for unknown in &validation.unknown_keys {
+        if let Some(unknown) = validation.unknown_keys.first() {
             return Err(TypeError::ConstKeyNotFound {
                 key: unknown.clone(),
                 expected_keys: expected_keys.clone(),
@@ -614,7 +641,7 @@ impl TypeChecker {
 
         // If all keys are literal, check for missing required keys
         if !has_non_literal {
-            for missing in &validation.missing_keys {
+            if let Some(missing) = validation.missing_keys.first() {
                 return Err(TypeError::ConstKeyMissing {
                     key: missing.clone(),
                     provided_keys: literal_keys.clone(),

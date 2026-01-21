@@ -118,7 +118,7 @@ where
     let mut rt = RuntimeBuilder::<monoio::FusionDriver>::new()
         .with_entries(entries)
         .build()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create runtime: {}", e)))?;
+        .map_err(|e| std::io::Error::other(format!("Failed to create runtime: {}", e)))?;
 
     // Execute the future
     rt.block_on(future)

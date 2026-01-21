@@ -3,6 +3,8 @@
 //! Similar to feature_db but for non-feature tasks like refactoring,
 //! maintenance, and documentation work.
 
+use crate::db_lock::FileLock;
+use crate::unified_db::Record;
 use indexmap::IndexMap;
 use simple_sdn::{parse_document, SdnDocument, SdnValue};
 use std::collections::BTreeMap;
@@ -25,6 +27,41 @@ pub struct TaskDb {
     pub records: BTreeMap<String, TaskRecord>,
 }
 
+/// Implement Record trait for unified database access
+impl Record for TaskRecord {
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn table_name() -> &'static str {
+        "tasks"
+    }
+
+    fn from_sdn_row(row: &[String]) -> Result<Self, String> {
+        Ok(TaskRecord {
+            id: row.get(0).cloned().unwrap_or_default(),
+            category: row.get(1).cloned().unwrap_or_default(),
+            name: row.get(2).cloned().unwrap_or_default(),
+            description: row.get(3).cloned().unwrap_or_default(),
+            priority: row.get(4).cloned().unwrap_or_else(|| "medium".to_string()),
+            status: row.get(5).cloned().unwrap_or_else(|| "planned".to_string()),
+            valid: row.get(6).map(|s| s == "true").unwrap_or(true),
+        })
+    }
+
+    fn to_sdn_row(&self) -> Vec<String> {
+        vec![
+            self.id.clone(),
+            self.category.clone(),
+            self.name.clone(),
+            self.description.clone(),
+            self.priority.clone(),
+            self.status.clone(),
+            self.valid.to_string(),
+        ]
+    }
+}
+
 impl TaskDb {
     pub fn new() -> Self {
         Self::default()
@@ -32,6 +69,9 @@ impl TaskDb {
 }
 
 pub fn load_task_db(path: &Path) -> Result<TaskDb, String> {
+    // Acquire lock before reading
+    let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
+
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let doc = parse_document(&content).map_err(|e| e.to_string())?;
     parse_task_db(&doc)
@@ -83,6 +123,10 @@ fn parse_task_db(doc: &SdnDocument) -> Result<TaskDb, String> {
 }
 
 pub fn save_task_db(path: &Path, db: &TaskDb) -> Result<(), std::io::Error> {
+    // Acquire lock before writing
+    let _lock =
+        FileLock::acquire(path, 10).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+
     let fields = vec![
         "id".to_string(),
         "category".to_string(),
@@ -116,15 +160,17 @@ pub fn save_task_db(path: &Path, db: &TaskDb) -> Result<(), std::io::Error> {
     let mut dict = IndexMap::new();
     dict.insert("tasks".to_string(), table);
 
-    let mut doc =
-        SdnDocument::parse("tasks |id|").map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    let mut doc = SdnDocument::parse("tasks |id|").map_err(|e| std::io::Error::other(e.to_string()))?;
     *doc.root_mut() = SdnValue::Dict(dict);
 
     let content = doc.to_sdn();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, content)?;
+    // Atomic write: temp file then rename
+    let temp_path = path.with_extension("sdn.tmp");
+    fs::write(&temp_path, content)?;
+    fs::rename(&temp_path, path)?;
     Ok(())
 }
 

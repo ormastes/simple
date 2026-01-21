@@ -226,6 +226,18 @@ impl<'a> Parser<'a> {
                                 name: full_name,
                                 fields,
                             };
+                        } else if self.check(&TokenKind::LBrace) {
+                            // Method call with dict argument: obj.method {...}
+                            // Parse the dict as the single argument
+                            let dict_expr = self.parse_expression()?;
+                            expr = Expr::MethodCall {
+                                receiver: Box::new(expr),
+                                method: field,
+                                args: vec![Argument {
+                                    name: None,
+                                    value: dict_expr,
+                                }],
+                            };
                         } else {
                             expr = Expr::FieldAccess {
                                 receiver: Box::new(expr),

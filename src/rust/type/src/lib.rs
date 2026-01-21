@@ -323,9 +323,13 @@ pub enum Type {
     /// Dynamic trait object: dyn Trait
     DynTrait(String),
     /// Const key set: compile-time known string keys
-    ConstKeySet { keys: Vec<String> },
+    ConstKeySet {
+        keys: Vec<String>,
+    },
     /// Dependent keys: reference to another value's const keys
-    DependentKeys { source: String },
+    DependentKeys {
+        source: String,
+    },
 }
 
 impl Type {
@@ -489,9 +493,15 @@ impl Substitution {
 
 #[derive(Debug)]
 pub enum TypeError {
-    Mismatch { expected: Type, found: Type },
+    Mismatch {
+        expected: Type,
+        found: Type,
+    },
     Undefined(String),
-    OccursCheck { var_id: usize, ty: Type },
+    OccursCheck {
+        var_id: usize,
+        ty: Type,
+    },
     Other(String),
     /// Key in dict literal is not in the expected ConstKeySet
     ConstKeyNotFound {
@@ -504,7 +514,9 @@ pub enum TypeError {
         provided_keys: Vec<String>,
     },
     /// Dict key must be a string literal when assigned to Dict<ConstKeySet, V>
-    ConstKeyMustBeLiteral { found: String },
+    ConstKeyMustBeLiteral {
+        found: String,
+    },
 }
 
 /// Result of validating dict literal keys against a ConstKeySet

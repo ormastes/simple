@@ -300,8 +300,18 @@ fn load_rules() -> Result<AlertRuleStore, text>:
 
 fn delete_rules_file() -> Result<(), text>:
     """Delete the rules database file."""
-    # TODO: Implement when delete_file is available in fs_helpers
-    return Ok(())
+    # Use fs_helpers to delete the file
+    val file_path = get_rules_file_path()
+    match fs_helpers.delete_file(file_path):
+        case Ok(_):
+            print "Deleted alert rules file: {file_path}"
+            Ok(())
+        case Err(e):
+            # If file doesn't exist, that's also ok
+            if e.contains("does not exist") or e.contains("No such file"):
+                Ok(())
+            else:
+                Err("Failed to delete rules file: {e}")
 
 # =========================================================================
 # Helper Functions
@@ -323,23 +333,43 @@ fn level_to_string(level: RuleLevel) -> text:
         case RuleLevel::Critical: "critical"
 
 fn parse_f64(s: text) -> Result<f64, text>:
-    """Parse floating point number."""
-    # TODO: Implement proper float parsing
-    # For now, return a simple integer-based approximation
-    var result = 0.0
-    var negative = false
-    var start = 0
+    """Parse floating point number from string."""
+    if s.is_empty():
+        return Err("Cannot parse empty string as float")
 
-    if s.starts_with("-"):
-        negative = true
-        start = 1
+    var result: f64 = 0.0
+    var has_dot = false
+    var decimal_places = 0.0
+    var is_negative = false
+    var parsed_any = false
 
-    for i in start..s.len():
-        val ch = s.char_at(i)
-        if ch >= '0' and ch <= '9':
-            result = (result * 10.0) + ((ch - '0') as f64)
+    for i in 0..s.len():
+        val ch = s[i]
 
-    return Ok(if negative: -result else: result)
+        if ch == "-" and i == 0:
+            is_negative = true
+        elif ch == ".":
+            if has_dot:
+                return Err("Multiple decimal points in float")
+            has_dot = true
+        elif ch >= "0" and ch <= "9":
+            val digit = ch.to_i32() - "0".to_i32()
+            parsed_any = true
+            if has_dot:
+                decimal_places = decimal_places + 1.0
+                result = result + (digit as f64) / (10.0 ** decimal_places)
+            else:
+                result = result * 10.0 + (digit as f64)
+        elif ch == " " or ch == "\t":
+            # Skip whitespace at start/end
+            pass
+        else:
+            return Err("Invalid character in float: {ch}")
+
+    if not parsed_any:
+        return Err("No digits found in string")
+
+    return Ok(if is_negative: -result else: result)
 
 # =========================================================================
 # Exports

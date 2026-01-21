@@ -1,0 +1,374 @@
+# Core Time Module
+#
+# Provides time and date utilities for the Simple language.
+# Offers current timestamp, date formatting, and conversion functions.
+
+# =========================================================================
+# Timestamp Functions
+# =========================================================================
+
+fn now_iso8601() -> text:
+    """Get current timestamp in ISO 8601 format.
+
+    Returns:
+        Timestamp string in format: YYYY-MM-DDTHH:MM:SSZ
+    """
+    # FFI call to get current time
+    val unix_ts = _current_time_unix()
+    return format_unix_to_iso8601(unix_ts)
+
+fn now_timestamp() -> i64:
+    """Get current Unix timestamp (seconds since epoch).
+
+    Returns:
+        Unix timestamp in seconds
+    """
+    _current_time_unix()
+
+fn now_ms() -> i64:
+    """Get current time in milliseconds since epoch.
+
+    Returns:
+        Milliseconds since Unix epoch
+    """
+    _current_time_unix() * 1000
+
+fn now_ns() -> i64:
+    """Get current time in nanoseconds since epoch.
+
+    Returns:
+        Nanoseconds since Unix epoch
+    """
+    _current_time_unix() * 1_000_000_000
+
+# =========================================================================
+# Date/Time Classes
+# =========================================================================
+
+class DateTime:
+    """Represents a specific point in time."""
+    year: i32
+    month: i32      # 1-12
+    day: i32        # 1-31
+    hour: i32       # 0-23
+    minute: i32     # 0-59
+    second: i32     # 0-59
+
+    static fn now() -> DateTime:
+        """Get current date and time."""
+        val unix_ts = _current_time_unix()
+        return from_unix_timestamp(unix_ts)
+
+    static fn from_iso8601(iso_str: text) -> Result<DateTime, text>:
+        """Parse DateTime from ISO 8601 string.
+
+        Supported formats:
+        - YYYY-MM-DDTHH:MM:SSZ
+        - YYYY-MM-DD HH:MM:SS
+        """
+        if iso_str.len() < 10:
+            return Err("Invalid date format")
+
+        val year = parse_int_substr(iso_str, 0, 4)
+        val month = parse_int_substr(iso_str, 5, 7)
+        val day = parse_int_substr(iso_str, 8, 10)
+        var hour = 0
+        var minute = 0
+        var second = 0
+
+        if iso_str.len() >= 19:
+            hour = parse_int_substr(iso_str, 11, 13)
+            minute = parse_int_substr(iso_str, 14, 16)
+            second = parse_int_substr(iso_str, 17, 19)
+
+        Ok(DateTime {
+            year: year,
+            month: month,
+            day: day,
+            hour: hour,
+            minute: minute,
+            second: second
+        })
+
+    fn to_iso8601() -> text:
+        """Convert to ISO 8601 string format."""
+        format_date_time(self.year, self.month, self.day, self.hour, self.minute, self.second)
+
+    fn to_unix_timestamp() -> i64:
+        """Convert to Unix timestamp."""
+        date_to_unix_timestamp(self.year, self.month, self.day, self.hour, self.minute, self.second)
+
+    fn to_string() -> text:
+        """Convert to human-readable format."""
+        val months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        val month_name = if self.month >= 1 and self.month <= 12:
+            months[self.month - 1]
+        else:
+            "???"
+
+        return "{month_name} {format_with_zero(self.day)}, {self.year} {format_with_zero(self.hour)}:{format_with_zero(self.minute)}:{format_with_zero(self.second)}"
+
+class Duration:
+    """Represents a time duration."""
+    seconds: i64
+    nanoseconds: i32  # 0-999,999,999
+
+    static fn from_seconds(seconds: i64) -> Duration:
+        return Duration {
+            seconds: seconds,
+            nanoseconds: 0
+        }
+
+    static fn from_millis(millis: i64) -> Duration:
+        val seconds = millis / 1000
+        val nanos = ((millis % 1000) * 1_000_000) as i32
+        return Duration {
+            seconds: seconds,
+            nanoseconds: nanos
+        }
+
+    static fn from_micros(micros: i64) -> Duration:
+        val seconds = micros / 1_000_000
+        val nanos = ((micros % 1_000_000) * 1000) as i32
+        return Duration {
+            seconds: seconds,
+            nanoseconds: nanos
+        }
+
+    static fn from_nanos(nanos: i64) -> Duration:
+        return Duration {
+            seconds: nanos / 1_000_000_000,
+            nanoseconds: (nanos % 1_000_000_000) as i32
+        }
+
+    fn to_seconds() -> f64:
+        (self.seconds as f64) + ((self.nanoseconds as f64) / 1_000_000_000.0)
+
+    fn to_millis() -> i64:
+        self.seconds * 1000 + ((self.nanoseconds as i64) / 1_000_000)
+
+    fn to_micros() -> i64:
+        self.seconds * 1_000_000 + ((self.nanoseconds as i64) / 1000)
+
+    fn to_nanos() -> i64:
+        self.seconds * 1_000_000_000 + (self.nanoseconds as i64)
+
+# =========================================================================
+# Time Calculations
+# =========================================================================
+
+fn days_between(date1: text, date2: text) -> i32:
+    """Calculate days between two ISO 8601 dates.
+
+    Args:
+        date1, date2: Dates in YYYY-MM-DD format
+
+    Returns:
+        Number of days between dates (positive or negative)
+    """
+    match DateTime.from_iso8601(date1):
+        case Ok(dt1):
+            match DateTime.from_iso8601(date2):
+                case Ok(dt2):
+                    val ts1 = dt1.to_unix_timestamp()
+                    val ts2 = dt2.to_unix_timestamp()
+                    val diff_seconds = ts2 - ts1
+                    (diff_seconds / 86400) as i32
+                case Err(_):
+                    0
+        case Err(_):
+            0
+
+fn seconds_between(datetime1: text, datetime2: text) -> i64:
+    """Calculate seconds between two ISO 8601 timestamps.
+
+    Args:
+        datetime1, datetime2: Timestamps in ISO 8601 format
+
+    Returns:
+        Number of seconds between timestamps
+    """
+    match DateTime.from_iso8601(datetime1):
+        case Ok(dt1):
+            match DateTime.from_iso8601(datetime2):
+                case Ok(dt2):
+                    dt2.to_unix_timestamp() - dt1.to_unix_timestamp()
+                case Err(_):
+                    0
+        case Err(_):
+            0
+
+# =========================================================================
+# Time Zones
+# =========================================================================
+
+class TimeZone:
+    """Represents a timezone offset."""
+    offset_hours: i32
+    offset_minutes: i32
+    name: text
+
+    static fn utc() -> TimeZone:
+        return TimeZone {
+            offset_hours: 0,
+            offset_minutes: 0,
+            name: "UTC"
+        }
+
+    static fn from_offset(hours: i32, minutes: i32) -> TimeZone:
+        return TimeZone {
+            offset_hours: hours,
+            offset_minutes: minutes,
+            name: "UTC{hours}:{format_with_zero(minutes)}"
+        }
+
+    fn to_offset_string() -> text:
+        val sign = if self.offset_hours < 0: "-" else: "+"
+        val abs_hours = if self.offset_hours < 0: -self.offset_hours else: self.offset_hours
+        return "{sign}{format_with_zero(abs_hours)}:{format_with_zero(self.offset_minutes)}"
+
+# =========================================================================
+# Helper Functions
+# =========================================================================
+
+fn from_unix_timestamp(unix_ts: i64) -> DateTime:
+    """Convert Unix timestamp to DateTime."""
+    # Simplified calculation - works for dates after 1970
+    var remaining_seconds = unix_ts
+    var year = 1970
+
+    # Calculate year
+    loop:
+        val days_in_year = if is_leap_year(year): 366 else: 365
+        val seconds_in_year = (days_in_year * 86400) as i64
+
+        if remaining_seconds >= seconds_in_year:
+            remaining_seconds = remaining_seconds - seconds_in_year
+            year = year + 1
+        else:
+            break
+
+    # Calculate month and day
+    val days_in_months = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    if is_leap_year(year):
+        # Modify for leap year
+        val mut_days = days_in_months
+        mut_days[1] = 29
+        days_in_months = mut_days
+
+    var month = 1
+    var day_of_year = (remaining_seconds / 86400) as i32 + 1
+
+    for m in 0..12:
+        if day_of_year <= days_in_months[m]:
+            month = m + 1
+            break
+        day_of_year = day_of_year - days_in_months[m]
+
+    # Calculate time
+    var seconds_today = remaining_seconds % 86400
+    val hour = (seconds_today / 3600) as i32
+    seconds_today = seconds_today % 3600
+    val minute = (seconds_today / 60) as i32
+    val second = (seconds_today % 60) as i32
+
+    return DateTime {
+        year: year,
+        month: month,
+        day: day_of_year,
+        hour: hour,
+        minute: minute,
+        second: second
+    }
+
+fn date_to_unix_timestamp(year: i32, month: i32, day: i32, hour: i32, minute: i32, second: i32) -> i64:
+    """Convert date/time components to Unix timestamp."""
+    var total_seconds: i64 = 0
+
+    # Add seconds for complete years since 1970
+    for y in 1970..year:
+        val days_in_y = if is_leap_year(y): 366 else: 365
+        total_seconds = total_seconds + ((days_in_y * 86400) as i64)
+
+    # Add seconds for months in current year
+    val days_in_months = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    for m in 1..month:
+        var days = days_in_months[m - 1]
+        if m == 2 and is_leap_year(year):
+            days = 29
+        total_seconds = total_seconds + ((days * 86400) as i64)
+
+    # Add seconds for days in current month
+    total_seconds = total_seconds + (((day - 1) * 86400) as i64)
+
+    # Add remaining seconds
+    total_seconds = total_seconds + ((hour * 3600) as i64)
+    total_seconds = total_seconds + ((minute * 60) as i64)
+    total_seconds = total_seconds + (second as i64)
+
+    total_seconds
+
+fn format_unix_to_iso8601(unix_ts: i64) -> text:
+    """Format Unix timestamp as ISO 8601 string."""
+    val dt = from_unix_timestamp(unix_ts)
+    return dt.to_iso8601()
+
+fn format_date_time(year: i32, month: i32, day: i32, hour: i32, minute: i32, second: i32) -> text:
+    """Format date/time components as ISO 8601 string."""
+    return "{format_with_zero_4(year)}-{format_with_zero(month)}-{format_with_zero(day)}T{format_with_zero(hour)}:{format_with_zero(minute)}:{format_with_zero(second)}Z"
+
+fn format_with_zero(num: i32) -> text:
+    """Format number with leading zero if needed."""
+    if num < 10:
+        "0{num}"
+    else:
+        num.to_string()
+
+fn format_with_zero_4(num: i32) -> text:
+    """Format number with leading zeros to 4 digits."""
+    if num < 10:
+        "000{num}"
+    elif num < 100:
+        "00{num}"
+    elif num < 1000:
+        "0{num}"
+    else:
+        num.to_string()
+
+fn parse_int_substr(s: text, start: i32, end: i32) -> i32:
+    """Parse integer from substring."""
+    var result = 0
+    for i in start..end:
+        if i < s.len():
+            val ch = s[i]
+            if ch >= "0" and ch <= "9":
+                result = result * 10 + (ch.to_i32() - "0".to_i32())
+    result
+
+fn is_leap_year(year: i32) -> bool:
+    """Check if year is a leap year."""
+    if year % 400 == 0:
+        true
+    elif year % 100 == 0:
+        false
+    elif year % 4 == 0:
+        true
+    else:
+        false
+
+# =========================================================================
+# FFI Declarations
+# =========================================================================
+
+extern fn _current_time_unix() -> i64
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export DateTime, Duration, TimeZone
+export now_iso8601, now_timestamp, now_ms, now_ns
+export days_between, seconds_between
+export from_unix_timestamp, date_to_unix_timestamp
+export format_unix_to_iso8601, format_date_time

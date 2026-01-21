@@ -7,6 +7,8 @@
 //! - Lint levels: `allow`, `warn` (default), `deny`
 //! - Attribute-based control: `#[allow(lint)]`, `#[warn(lint)]`, `#[deny(lint)]`
 //! - Module-level inheritance through `__init__.spl`
+//!
+//! #![skip_todo]
 
 mod checker;
 mod config;

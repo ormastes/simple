@@ -4,6 +4,7 @@
 # generates alerts for critical problems.
 
 use core.time.{now_iso8601}
+use io.fs_helpers
 use tooling.dashboard.types.{DashboardData, Alert}
 use tooling.dashboard.trends.{TrendReport, TrendStatus}
 
@@ -39,8 +40,58 @@ class AlertConfig:
         }
 
     static fn from_file(path: text) -> Result<AlertConfig, text>:
-        # TODO: Load from .simple/dashboard.toml
-        return Ok(AlertConfig.default())
+        """Load alert configuration from TOML file."""
+        match fs_helpers.read_file(path):
+            case Ok(content):
+                var config = AlertConfig.default()
+
+                # Parse simple key = value format
+                val lines = content.split("\n")
+                for line in lines:
+                    val trimmed = line.trim()
+
+                    # Skip comments and empty lines
+                    if trimmed.is_empty() or trimmed.starts_with("#"):
+                        continue
+
+                    # Parse key = value
+                    if trimmed.contains("="):
+                        val parts = trimmed.split("=")
+                        if parts.len() >= 2:
+                            val key = parts[0].trim()
+                            val value = parts[1].trim()
+
+                            # Remove quotes if present
+                            val clean_value = value.trim_prefix("\"").trim_suffix("\"")
+
+                            # Parse values
+                            match key:
+                                case "coverage_min":
+                                    match parse_float(clean_value):
+                                        case Some(v): config.coverage_min = v
+                                        case None: pass
+                                case "coverage_regression":
+                                    match parse_float(clean_value):
+                                        case Some(v): config.coverage_regression = v
+                                        case None: pass
+                                case "todo_p0_max":
+                                    match parse_int(clean_value):
+                                        case Some(v): config.todo_p0_max = v
+                                        case None: pass
+                                case "todo_increase":
+                                    match parse_int(clean_value):
+                                        case Some(v): config.todo_increase = v
+                                        case None: pass
+                                case "build_time_regression":
+                                    match parse_float(clean_value):
+                                        case Some(v): config.build_time_regression = v
+                                        case None: pass
+                                case _: pass
+
+                return Ok(config)
+            case Err(e):
+                # File doesn't exist or can't be read - return default config
+                return Ok(AlertConfig.default())
 
 # =========================================================================
 # Alert Manager
@@ -282,6 +333,80 @@ fn abs(x: f64) -> f64:
     if x < 0.0:
         return -x
     return x
+
+# Parse float from string
+fn parse_float(s: text) -> Option<f64>:
+    """Parse a float value from string, returning None if invalid."""
+    # Simple parsing for common formats
+    if s.is_empty():
+        return None
+
+    var result: f64 = 0.0
+    var has_dot = false
+    var decimal_places = 0.0
+    var is_negative = false
+    var parsed_chars = 0
+
+    for i in 0..s.len():
+        val ch = s[i]
+
+        if ch == "-" and i == 0:
+            is_negative = true
+            parsed_chars = parsed_chars + 1
+        elif ch == ".":
+            if has_dot:
+                return None  # Multiple dots invalid
+            has_dot = true
+            parsed_chars = parsed_chars + 1
+        elif ch >= "0" and ch <= "9":
+            val digit = ch.to_i32() - "0".to_i32()
+            if has_dot:
+                decimal_places = decimal_places + 1
+                result = result + (digit as f64) / (10.0 ** decimal_places)
+            else:
+                result = result * 10.0 + (digit as f64)
+            parsed_chars = parsed_chars + 1
+        else:
+            return None  # Invalid character
+
+    if parsed_chars == 0:
+        return None
+
+    if is_negative:
+        result = -result
+
+    return Some(result)
+
+# Parse integer from string
+fn parse_int(s: text) -> Option<i32>:
+    """Parse an integer value from string, returning None if invalid."""
+    if s.is_empty():
+        return None
+
+    var result: i32 = 0
+    var is_negative = false
+    var parsed_chars = 0
+
+    for i in 0..s.len():
+        val ch = s[i]
+
+        if ch == "-" and i == 0:
+            is_negative = true
+            parsed_chars = parsed_chars + 1
+        elif ch >= "0" and ch <= "9":
+            val digit = ch.to_i32() - "0".to_i32()
+            result = result * 10 + digit
+            parsed_chars = parsed_chars + 1
+        else:
+            return None  # Invalid character
+
+    if parsed_chars == 0:
+        return None
+
+    if is_negative:
+        result = -result
+
+    return Some(result)
 
 # =========================================================================
 # Convenience Functions

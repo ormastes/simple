@@ -103,6 +103,19 @@ print "Result: {x + y}"       # Expressions in braces
 print r"regex: \d+{3}"        # Raw string (no interpolation, no escapes)
 ```
 
+**Format String Templates (Future):**
+```simple
+# Template with auto-detected const keys
+val template = "Welcome {user} to {city}"
+
+# Instantiate with dict - keys auto-validated at compile time
+val greeting = template.with {"user": username, "city": current_city}
+
+# Compile errors for wrong keys (no type annotation needed):
+val bad = template.with {"usr": x}   # ERROR: "usr" not in ["user", "city"]
+val missing = template.with {"user": x}  # ERROR: Missing key "city"
+```
+
 **Methods (LL(1)-friendly, implicit self):**
 ```simple
 impl MyStruct:
@@ -164,6 +177,55 @@ See `/coding` skill for full details.
 **Feature Specs:** `simple/std_lib/test/features/` - **Executable SSpec tests (see `/doc` skill)**
 **Research:** `doc/research/` (investigation, design exploration)
 **Guides:** `doc/guide/` (user-facing tutorials)
+
+### Auto-Generated Documentation
+
+Files automatically updated during development:
+
+| File | Updated When | Command | Description |
+|------|-------------|---------|-------------|
+| `doc/TODO.md` | Manual | `simple todo-scan` | TODO/FIXME tracking from source code |
+| `doc/feature/feature_db.sdn` | **Every test run** | `simple test` | Feature database (all features) |
+| `doc/feature/feature.md` | **Every test run** | `simple test` | Feature index by category |
+| `doc/feature/pending_feature.md` | **Every test run** | `simple test` | Incomplete features only (failed/in_progress/planned) |
+| `doc/feature/category/*.md` | **Every test run** | `simple test` | Per-category feature lists |
+| `doc/test/test_db.sdn` | **Every test run** | `simple test` | Test execution database (results + timing) |
+| `doc/test/test_result.md` | **Every test run** | `simple test` | Test results (pass/fail + timing analysis) |
+| `doc/build/build_db.sdn` | **Every build** | `simple build` | Build error/warning database |
+| `doc/build/recent_build.md` | **Every build** | `simple build` | Build errors and warnings report (max 10 per file) |
+| `doc/bug/bug_db.sdn` | Manual | `simple bug-add` | Bug tracking database (must link to test cases) |
+| `doc/bug/bug_report.md` | Manual | `simple bug-gen` | Bug status report |
+
+**Quick Access:**
+- **What needs work?** → `doc/feature/pending_feature.md` (updated every test run)
+- **Test results?** → `doc/test/test_result.md` (pass/fail + timing, updated every test run)
+- **Build status?** → `doc/build/recent_build.md` (updated every build)
+- **All TODOs?** → `doc/TODO.md` (run `simple todo-scan` to update)
+- **All features?** → `doc/feature/feature.md` (updated every test run)
+- **All bugs?** → `doc/bug/bug_report.md` (run `simple bug-gen` to update)
+
+**Workflow:**
+```bash
+# Update TODO tracking (manual)
+simple todo-scan
+# Generates: doc/todo/todo_db.sdn + doc/TODO.md
+
+# Build project (automatic error/warning tracking)
+simple build
+# Generates: doc/build/build_db.sdn + doc/build/recent_build.md
+
+# Run tests (automatic doc generation)
+simple test
+# Generates: doc/feature/*.md + doc/test/test_result.md
+
+# Add bug with required test case link
+simple bug-add --id=bug_042 --reproducible-by=test_name
+# Updates: doc/bug/bug_db.sdn
+
+# Generate bug report
+simple bug-gen
+# Generates: doc/bug/bug_report.md
+```
 
 ---
 

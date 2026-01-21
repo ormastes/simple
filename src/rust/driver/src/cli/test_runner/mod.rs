@@ -15,6 +15,7 @@
 //! - `discovery` - Test discovery and summarization
 //! - `coverage` - Coverage tracking utilities
 //! - `feature_db` - Feature database updates
+//! - `test_db_update` - Test database updates
 
 mod types;
 mod execution;
@@ -26,6 +27,7 @@ mod watch;
 mod discovery;
 mod coverage;
 mod feature_db;
+mod test_db_update;
 
 // Re-export public API for backward compatibility
 pub use types::{TestLevel, OutputFormat, TestOptions, TestFileResult, TestRunResult};

@@ -1,3 +1,5 @@
+<!-- skip_todo -->
+
 # TODO Database System - Quick Start Guide
 
 **Status:** ✅ Code complete, ready to use once binary builds

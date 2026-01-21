@@ -1,5 +1,7 @@
 //! Feature database backed by SDN.
 
+use crate::db_lock::FileLock;
+use crate::unified_db::Record;
 use indexmap::IndexMap;
 use simple_sdn::{parse_document, SdnDocument, SdnValue};
 use std::collections::BTreeMap;
@@ -81,6 +83,84 @@ pub struct SspecItem {
     pub modes: ModeSupport,
     pub platforms: Vec<String>,
     pub ignored: bool,
+}
+
+/// Implement Record trait for unified database access
+impl Record for FeatureRecord {
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn table_name() -> &'static str {
+        "features"
+    }
+
+    fn from_sdn_row(row: &[String]) -> Result<Self, String> {
+        let mut modes = ModeSupport::with_defaults();
+
+        // Parse individual mode support from columns
+        if let Some(val) = row.get(5) {
+            if val == "not_supported" {
+                modes
+                    .modes
+                    .insert("interpreter".to_string(), SupportStatus::NotSupported);
+            }
+        }
+        if let Some(val) = row.get(6) {
+            if val == "not_supported" {
+                modes.modes.insert("jit".to_string(), SupportStatus::NotSupported);
+            }
+        }
+        if let Some(val) = row.get(7) {
+            if val == "not_supported" {
+                modes
+                    .modes
+                    .insert("smf_cranelift".to_string(), SupportStatus::NotSupported);
+            }
+        }
+        if let Some(val) = row.get(8) {
+            if val == "not_supported" {
+                modes.modes.insert("smf_llvm".to_string(), SupportStatus::NotSupported);
+            }
+        }
+
+        Ok(FeatureRecord {
+            id: row.get(0).cloned().unwrap_or_default(),
+            category: row.get(1).cloned().unwrap_or_default(),
+            name: row.get(2).cloned().unwrap_or_default(),
+            description: row.get(3).cloned().unwrap_or_default(),
+            spec: row.get(4).cloned().unwrap_or_default(),
+            modes,
+            platforms: row
+                .get(9)
+                .map(|s| {
+                    s.split(',')
+                        .map(|x| x.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            status: row.get(10).cloned().unwrap_or_else(|| "planned".to_string()),
+            valid: row.get(11).map(|s| s == "true").unwrap_or(true),
+        })
+    }
+
+    fn to_sdn_row(&self) -> Vec<String> {
+        vec![
+            self.id.clone(),
+            self.category.clone(),
+            self.name.clone(),
+            self.description.clone(),
+            self.spec.clone(),
+            mode_status(&self.modes, "interpreter"),
+            mode_status(&self.modes, "jit"),
+            mode_status(&self.modes, "smf_cranelift"),
+            mode_status(&self.modes, "smf_llvm"),
+            self.platforms.join(","),
+            self.status.clone(),
+            self.valid.to_string(),
+        ]
+    }
 }
 
 #[derive(Debug, Default)]
@@ -327,6 +407,9 @@ impl FeatureDb {
 }
 
 pub fn load_feature_db(path: &Path) -> Result<FeatureDb, String> {
+    // Acquire lock before reading
+    let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
+
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let doc = parse_document(&content).map_err(|e| e.to_string())?;
     parse_feature_db(&doc)
@@ -388,6 +471,7 @@ pub fn generate_feature_docs(db: &FeatureDb, output_dir: &Path) -> Result<(), St
 
     generate_feature_index(output_dir, &records, &last_id)?;
     generate_category_docs(output_dir, &records)?;
+    generate_pending_features(output_dir, &records)?;
 
     Ok(())
 }
@@ -498,6 +582,228 @@ fn generate_category_docs(output_dir: &Path, records: &[&FeatureRecord]) -> Resu
     }
 
     Ok(())
+}
+
+fn generate_pending_features(output_dir: &Path, records: &[&FeatureRecord]) -> Result<(), String> {
+    use std::collections::BTreeMap;
+
+    // Separate features by status
+    let mut failed: Vec<&FeatureRecord> = Vec::new();
+    let mut in_progress: Vec<&FeatureRecord> = Vec::new();
+    let mut planned: Vec<&FeatureRecord> = Vec::new();
+    let mut ignored: Vec<&FeatureRecord> = Vec::new();
+    let mut complete: Vec<&FeatureRecord> = Vec::new();
+
+    for record in records {
+        match record.status.as_str() {
+            "failed" => failed.push(record),
+            "in_progress" => in_progress.push(record),
+            "planned" => planned.push(record),
+            "ignored" => ignored.push(record),
+            "complete" => complete.push(record),
+            _ => planned.push(record), // Unknown status -> treat as planned
+        }
+    }
+
+    let total_pending = failed.len() + in_progress.len() + planned.len() + ignored.len();
+    let total_features = records.len();
+    let completion_pct = if total_features > 0 {
+        complete.len() as f64 / total_features as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    let mut md = String::new();
+    md.push_str("# Pending Features\n\n");
+    md.push_str(&format!("**Generated:** {}\n", chrono::Local::now().format("%Y-%m-%d")));
+    md.push_str(&format!("**Total Pending:** {} features\n\n", total_pending));
+
+    // Summary table
+    md.push_str("## Summary\n\n");
+    md.push_str("| Status | Count | Priority |\n");
+    md.push_str("|--------|-------|---------|\n");
+    md.push_str(&format!("| Failed | {} | 🔴 Critical |\n", failed.len()));
+    md.push_str(&format!("| In Progress | {} | 🟡 High |\n", in_progress.len()));
+    md.push_str(&format!("| Planned | {} | 🟢 Medium |\n", planned.len()));
+    md.push_str(&format!("| Ignored | {} | ⚪ Low |\n\n", ignored.len()));
+    md.push_str(&format!(
+        "**Completion:** {:.1}% ({} complete / {} total)\n\n",
+        completion_pct,
+        complete.len(),
+        total_features
+    ));
+    md.push_str("---\n\n");
+
+    // Failed features section
+    if !failed.is_empty() {
+        md.push_str(&format!("## 🔴 Failed Features ({})\n\n", failed.len()));
+        md.push_str("Features with failing tests - **needs immediate attention**\n\n");
+        md.push_str("| ID | Category | Feature | Spec |\n");
+        md.push_str("|----|----------|---------|------|\n");
+        for record in &failed {
+            let spec_link = if !record.spec.is_empty() {
+                format!("[spec]({})", record.spec)
+            } else {
+                "-".to_string()
+            };
+            md.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                record.id, record.category, record.name, spec_link
+            ));
+        }
+        md.push_str("\n---\n\n");
+    }
+
+    // In Progress features section (grouped by category)
+    if !in_progress.is_empty() {
+        md.push_str(&format!("## 🟡 In Progress Features ({})\n\n", in_progress.len()));
+        md.push_str("Features currently being implemented\n\n");
+
+        let grouped = group_by_category(&in_progress);
+        for (category, features) in grouped {
+            md.push_str(&format!("### {} ({})\n\n", category, features.len()));
+            md.push_str("| ID | Feature | Description | Spec |\n");
+            md.push_str("|----|---------|-------------|------|\n");
+            for record in features {
+                let spec_link = if !record.spec.is_empty() {
+                    format!("[spec]({})", record.spec)
+                } else {
+                    "-".to_string()
+                };
+                md.push_str(&format!(
+                    "| {} | {} | {} | {} |\n",
+                    record.id, record.name, record.description, spec_link
+                ));
+            }
+            md.push_str("\n");
+        }
+        md.push_str("---\n\n");
+    }
+
+    // Planned features section (grouped by category)
+    if !planned.is_empty() {
+        md.push_str(&format!("## 🟢 Planned Features ({})\n\n", planned.len()));
+        md.push_str("Features specified but not yet implemented\n\n");
+
+        let grouped = group_by_category(&planned);
+        for (category, features) in grouped {
+            md.push_str(&format!("### {} ({})\n\n", category, features.len()));
+            md.push_str("| ID | Feature | Description | Spec |\n");
+            md.push_str("|----|---------|-------------|------|\n");
+            for record in features {
+                let spec_link = if !record.spec.is_empty() {
+                    format!("[spec]({})", record.spec)
+                } else {
+                    "-".to_string()
+                };
+                md.push_str(&format!(
+                    "| {} | {} | {} | {} |\n",
+                    record.id, record.name, record.description, spec_link
+                ));
+            }
+            md.push_str("\n");
+        }
+        md.push_str("---\n\n");
+    }
+
+    // Ignored features section
+    if !ignored.is_empty() {
+        md.push_str(&format!("## ⚪ Ignored Features ({})\n\n", ignored.len()));
+        md.push_str("Features with tests marked `#[ignore]`\n\n");
+        md.push_str("| ID | Category | Feature | Spec |\n");
+        md.push_str("|----|----------|---------|------|\n");
+        for record in &ignored {
+            let spec_link = if !record.spec.is_empty() {
+                format!("[spec]({})", record.spec)
+            } else {
+                "-".to_string()
+            };
+            md.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                record.id, record.category, record.name, spec_link
+            ));
+        }
+        md.push_str("\n---\n\n");
+    }
+
+    // Progress by category
+    md.push_str("## Progress by Category\n\n");
+    md.push_str("| Category | Total | Complete | Pending | % Complete |\n");
+    md.push_str("|----------|-------|----------|---------|------------|\n");
+
+    let mut category_stats: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for record in records {
+        let cat = if record.category.is_empty() {
+            "Uncategorized".to_string()
+        } else {
+            record.category.clone()
+        };
+        let entry = category_stats.entry(cat).or_insert((0, 0));
+        entry.0 += 1; // total
+        if record.status == "complete" {
+            entry.1 += 1; // complete
+        }
+    }
+
+    for (category, (total, complete_count)) in category_stats {
+        let pending = total - complete_count;
+        let pct = if total > 0 {
+            complete_count as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        };
+        md.push_str(&format!(
+            "| {} | {} | {} | {} | {:.1}% |\n",
+            category, total, complete_count, pending, pct
+        ));
+    }
+
+    md.push_str("\n---\n\n");
+
+    // Implementation priority
+    md.push_str("## Implementation Priority\n\n");
+    md.push_str("### Critical (Do First)\n");
+    if !failed.is_empty() {
+        md.push_str(&format!("1. Fix failed features ({} features)\n", failed.len()));
+    }
+    if !in_progress.is_empty() {
+        md.push_str(&format!(
+            "2. Complete in_progress features ({} features)\n",
+            in_progress.len()
+        ));
+    }
+    md.push_str("\n### High (Next Sprint)\n");
+    md.push_str("3. Planned features with dependencies\n");
+    md.push_str("\n### Medium (Backlog)\n");
+    if !planned.is_empty() {
+        md.push_str(&format!("4. Remaining planned features ({} features)\n", planned.len()));
+    }
+    md.push_str("\n### Low (Future)\n");
+    if !ignored.is_empty() {
+        md.push_str(&format!(
+            "5. Ignored features ({} features) - requires special setup\n",
+            ignored.len()
+        ));
+    }
+
+    let path = output_dir.join("pending_feature.md");
+    fs::write(&path, md).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+// Helper function to group features by category
+fn group_by_category<'a>(features: &[&'a FeatureRecord]) -> BTreeMap<String, Vec<&'a FeatureRecord>> {
+    let mut grouped: BTreeMap<String, Vec<&FeatureRecord>> = BTreeMap::new();
+    for record in features {
+        let cat = if record.category.is_empty() {
+            "Uncategorized".to_string()
+        } else {
+            record.category.clone()
+        };
+        grouped.entry(cat).or_default().push(record);
+    }
+    grouped
 }
 
 #[derive(Default)]
@@ -645,6 +951,10 @@ fn slugify(value: &str) -> String {
 }
 
 pub fn save_feature_db(path: &Path, db: &FeatureDb) -> Result<(), std::io::Error> {
+    // Acquire lock before writing
+    let _lock =
+        FileLock::acquire(path, 10).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+
     let mut fields = vec![
         "id".to_string(),
         "category".to_string(),
@@ -686,8 +996,7 @@ pub fn save_feature_db(path: &Path, db: &FeatureDb) -> Result<(), std::io::Error
 
     let mut root = BTreeMap::new();
     root.insert("features".to_string(), table);
-    let mut doc = SdnDocument::parse("features |id|")
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    let mut doc = SdnDocument::parse("features |id|").map_err(|e| std::io::Error::other(e.to_string()))?;
     let mut dict = IndexMap::new();
     for (key, value) in root {
         dict.insert(key, value);
@@ -698,7 +1007,10 @@ pub fn save_feature_db(path: &Path, db: &FeatureDb) -> Result<(), std::io::Error
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, content)?;
+    // Atomic write: temp file then rename
+    let temp_path = path.with_extension("sdn.tmp");
+    fs::write(&temp_path, content)?;
+    fs::rename(&temp_path, path)?;
     Ok(())
 }
 

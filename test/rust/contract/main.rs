@@ -12,6 +12,7 @@
 //! - old(expr) expressions
 //! - Contract modes (verification levels)
 
+mod common;
 mod parser_tests;
 mod mir_tests;
 mod contract_modes;
