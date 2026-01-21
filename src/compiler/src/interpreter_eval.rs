@@ -799,7 +799,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::Mixin(_)
             | Node::LeanBlock(_)
             | Node::Assume(_)
-            | Node::Admit(_) => {
+            | Node::Admit(_)
+            | Node::ProofHint(_)
+            | Node::Calc(_) => {
                 // Module system is handled by the module resolver
                 // HandlePool is processed at compile time for allocation
                 // Bitfield is processed at compile time for bit-level field access
@@ -807,6 +809,8 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Mixin composition is handled at compile time
                 // LeanBlock is embedded Lean code for verification (not runtime)
                 // Assume/Admit are verification statements (similar to assert)
+                // ProofHint is a tactic hint for Lean (not runtime)
+                // Calc is a calculational proof block for Lean (not runtime)
                 // These are no-ops in the interpreter
             }
         }

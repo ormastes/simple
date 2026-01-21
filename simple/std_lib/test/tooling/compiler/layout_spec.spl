@@ -1,0 +1,348 @@
+//! SSpec tests for layout.spl
+
+use std.testing.sspec
+use tooling.compiler.layout
+use tooling.compiler.types_util
+
+feature "Type Size and Alignment (C ABI)":
+    describe "StructLayout.type_size_align":
+        it "returns (0, 1) for VOID":
+            val (size, align) = StructLayout.type_size_align(TypeId.VOID())
+            assert size == 0, "VOID size should be 0"
+            assert align == 1, "VOID alignment should be 1"
+
+        it "returns (1, 1) for BOOL":
+            val (size, align) = StructLayout.type_size_align(TypeId.BOOL())
+            assert size == 1, "BOOL size should be 1"
+            assert align == 1, "BOOL alignment should be 1"
+
+        it "returns (1, 1) for I8":
+            val (size, align) = StructLayout.type_size_align(TypeId.I8())
+            assert size == 1, "I8 size should be 1"
+            assert align == 1, "I8 alignment should be 1"
+
+        it "returns (1, 1) for U8":
+            val (size, align) = StructLayout.type_size_align(TypeId.U8())
+            assert size == 1, "U8 size should be 1"
+            assert align == 1, "U8 alignment should be 1"
+
+        it "returns (2, 2) for I16":
+            val (size, align) = StructLayout.type_size_align(TypeId.I16())
+            assert size == 2, "I16 size should be 2"
+            assert align == 2, "I16 alignment should be 2"
+
+        it "returns (2, 2) for U16":
+            val (size, align) = StructLayout.type_size_align(TypeId.U16())
+            assert size == 2, "U16 size should be 2"
+            assert align == 2, "U16 alignment should be 2"
+
+        it "returns (4, 4) for I32":
+            val (size, align) = StructLayout.type_size_align(TypeId.I32())
+            assert size == 4, "I32 size should be 4"
+            assert align == 4, "I32 alignment should be 4"
+
+        it "returns (4, 4) for U32":
+            val (size, align) = StructLayout.type_size_align(TypeId.U32())
+            assert size == 4, "U32 size should be 4"
+            assert align == 4, "U32 alignment should be 4"
+
+        it "returns (4, 4) for F32":
+            val (size, align) = StructLayout.type_size_align(TypeId.F32())
+            assert size == 4, "F32 size should be 4"
+            assert align == 4, "F32 alignment should be 4"
+
+        it "returns (8, 8) for I64":
+            val (size, align) = StructLayout.type_size_align(TypeId.I64())
+            assert size == 8, "I64 size should be 8"
+            assert align == 8, "I64 alignment should be 8"
+
+        it "returns (8, 8) for U64":
+            val (size, align) = StructLayout.type_size_align(TypeId.U64())
+            assert size == 8, "U64 size should be 8"
+            assert align == 8, "U64 alignment should be 8"
+
+        it "returns (8, 8) for F64":
+            val (size, align) = StructLayout.type_size_align(TypeId.F64())
+            assert size == 8, "F64 size should be 8"
+            assert align == 8, "F64 alignment should be 8"
+
+        it "returns (8, 8) for STRING (pointer)":
+            val (size, align) = StructLayout.type_size_align(TypeId.STRING())
+            assert size == 8, "STRING size should be 8 (pointer)"
+            assert align == 8, "STRING alignment should be 8"
+
+        it "returns (8, 8) for NIL":
+            val (size, align) = StructLayout.type_size_align(TypeId.NIL())
+            assert size == 8, "NIL size should be 8"
+            assert align == 8, "NIL alignment should be 8"
+
+        it "returns (8, 8) for custom types (default pointer size)":
+            val custom_ty = TypeId(id: 100)
+            val (size, align) = StructLayout.type_size_align(custom_ty)
+            assert size == 8, "Custom type size should be 8"
+            assert align == 8, "Custom type alignment should be 8"
+
+feature "Struct Layout Construction":
+    describe "simple struct without vtable":
+        it "creates layout for single I32 field":
+            val fields = [("value", TypeId.I32())]
+            val layout = StructLayout.new("Simple", fields, false, 1)
+
+            assert layout.name == "Simple", "Name should match"
+            assert layout.size == 4, "Size should be 4 bytes"
+            assert layout.alignment == 4, "Alignment should be 4"
+            assert not layout.has_vtable, "Should not have vtable"
+            assert layout.fields.len() == 1, "Should have 1 field"
+
+        it "computes correct field offset for single field":
+            val fields = [("x", TypeId.I64())]
+            val layout = StructLayout.new("Point", fields, false, 2)
+
+            assert layout.fields[0].offset == 0, "First field offset should be 0"
+            assert layout.fields[0].size == 8, "Field size should be 8"
+
+    describe "struct with padding":
+        it "aligns I32 after I8 with padding":
+            # struct { i8 a; i32 b; } needs 3 bytes padding
+            val fields = [("a", TypeId.I8()), ("b", TypeId.I32())]
+            val layout = StructLayout.new("Padded", fields, false, 3)
+
+            assert layout.fields[0].offset == 0, "I8 at offset 0"
+            assert layout.fields[1].offset == 4, "I32 at offset 4 (aligned)"
+            assert layout.size == 8, "Total size 8 (with padding)"
+
+        it "aligns I64 after I16 with padding":
+            # struct { i16 a; i64 b; } needs 6 bytes padding
+            val fields = [("a", TypeId.I16()), ("b", TypeId.I64())]
+            val layout = StructLayout.new("AlignTest", fields, false, 4)
+
+            assert layout.fields[0].offset == 0, "I16 at offset 0"
+            assert layout.fields[1].offset == 8, "I64 at offset 8 (aligned)"
+            assert layout.size == 16, "Total size 16"
+
+        it "pads struct to alignment":
+            # struct { i64 a; i8 b; } needs 7 bytes padding at end
+            val fields = [("a", TypeId.I64()), ("b", TypeId.I8())]
+            val layout = StructLayout.new("EndPadded", fields, false, 5)
+
+            assert layout.fields[0].offset == 0, "I64 at offset 0"
+            assert layout.fields[1].offset == 8, "I8 at offset 8"
+            assert layout.size == 16, "Total size 16 (padded to 8-byte alignment)"
+
+    describe "struct with vtable":
+        it "reserves 8 bytes for vtable pointer":
+            val fields = [("value", TypeId.I32())]
+            val layout = StructLayout.new("WithVTable", fields, true, 6)
+
+            assert layout.has_vtable, "Should have vtable"
+            assert layout.fields[0].offset == 8, "First field after vtable (8 bytes)"
+            assert layout.size == 12, "Size includes vtable (8) + I32 (4)"
+
+        it "aligns fields after vtable":
+            val fields = [("x", TypeId.I64())]
+            val layout = StructLayout.new("VTableStruct", fields, true, 7)
+
+            assert layout.fields[0].offset == 8, "I64 field after vtable"
+            assert layout.size == 16, "vtable (8) + I64 (8)"
+            assert layout.alignment == 8, "Alignment is 8"
+
+    describe "multi-field structs":
+        it "handles three fields with different alignments":
+            val fields = [
+                ("a", TypeId.I8()),   # 1 byte, align 1
+                ("b", TypeId.I32()),  # 4 bytes, align 4
+                ("c", TypeId.I64())   # 8 bytes, align 8
+            ]
+            val layout = StructLayout.new("Mixed", fields, false, 8)
+
+            assert layout.fields[0].offset == 0, "I8 at 0"
+            assert layout.fields[1].offset == 4, "I32 at 4 (aligned)"
+            assert layout.fields[2].offset == 8, "I64 at 8 (aligned)"
+            assert layout.size == 16, "Total 16 bytes"
+
+        it "computes correct offsets for four I32 fields":
+            val fields = [
+                ("a", TypeId.I32()),
+                ("b", TypeId.I32()),
+                ("c", TypeId.I32()),
+                ("d", TypeId.I32())
+            ]
+            val layout = StructLayout.new("FourInts", fields, false, 9)
+
+            assert layout.fields[0].offset == 0, "First at 0"
+            assert layout.fields[1].offset == 4, "Second at 4"
+            assert layout.fields[2].offset == 8, "Third at 8"
+            assert layout.fields[3].offset == 12, "Fourth at 12"
+            assert layout.size == 16, "Total 16 bytes"
+
+feature "Field Offset Lookups":
+    describe "field_offset by index":
+        it "returns correct offset for valid index":
+            val fields = [("x", TypeId.I32()), ("y", TypeId.I32())]
+            val layout = StructLayout.new("Point", fields, false, 10)
+
+            val offset0 = layout.field_offset(0)
+            val offset1 = layout.field_offset(1)
+
+            assert offset0.is_some(), "Index 0 should exist"
+            assert offset0.unwrap() == 0, "Field 0 at offset 0"
+            assert offset1.is_some(), "Index 1 should exist"
+            assert offset1.unwrap() == 4, "Field 1 at offset 4"
+
+        it "returns None for out-of-bounds index":
+            val fields = [("value", TypeId.I64())]
+            val layout = StructLayout.new("Single", fields, false, 11)
+
+            val offset = layout.field_offset(5)
+            assert offset.is_none(), "Index 5 out of bounds"
+
+    describe "field_offset_by_name":
+        it "finds offset by field name":
+            val fields = [("width", TypeId.I32()), ("height", TypeId.I32())]
+            val layout = StructLayout.new("Rect", fields, false, 12)
+
+            val width_offset = layout.field_offset_by_name("width")
+            val height_offset = layout.field_offset_by_name("height")
+
+            assert width_offset.is_some(), "Should find 'width'"
+            assert width_offset.unwrap() == 0, "width at offset 0"
+            assert height_offset.is_some(), "Should find 'height'"
+            assert height_offset.unwrap() == 4, "height at offset 4"
+
+        it "returns None for non-existent field name":
+            val fields = [("value", TypeId.I32())]
+            val layout = StructLayout.new("Test", fields, false, 13)
+
+            val offset = layout.field_offset_by_name("missing")
+            assert offset.is_none(), "Should not find 'missing'"
+
+    describe "field_index by name":
+        it "returns correct index for field name":
+            val fields = [("a", TypeId.I8()), ("b", TypeId.I32()), ("c", TypeId.I64())]
+            val layout = StructLayout.new("ABC", fields, false, 14)
+
+            val idx_a = layout.field_index("a")
+            val idx_b = layout.field_index("b")
+            val idx_c = layout.field_index("c")
+
+            assert idx_a.unwrap() == 0, "a at index 0"
+            assert idx_b.unwrap() == 1, "b at index 1"
+            assert idx_c.unwrap() == 2, "c at index 2"
+
+        it "returns None for non-existent field":
+            val fields = [("x", TypeId.F64())]
+            val layout = StructLayout.new("Point1D", fields, false, 15)
+
+            val idx = layout.field_index("y")
+            assert idx.is_none(), "Should not find 'y'"
+
+feature "Layout Registry":
+    describe "registry creation":
+        it "creates empty registry":
+            val registry = LayoutRegistry.new()
+            assert registry.count() == 0, "Registry should be empty"
+
+    describe "layout registration":
+        it "registers layout and returns runtime ID":
+            var registry = LayoutRegistry.new()
+            val fields = [("value", TypeId.I32())]
+            val layout = StructLayout.new("Test", fields, false, 100)
+
+            val runtime_id = registry.register(100, layout)
+            assert runtime_id == 0, "First registration gets ID 0"
+            assert registry.count() == 1, "Registry has 1 layout"
+
+        it "increments runtime ID for each registration":
+            var registry = LayoutRegistry.new()
+
+            val layout1 = StructLayout.new("First", [], false, 1)
+            val layout2 = StructLayout.new("Second", [], false, 2)
+
+            val id1 = registry.register(1, layout1)
+            val id2 = registry.register(2, layout2)
+
+            assert id1 == 0, "First ID is 0"
+            assert id2 == 1, "Second ID is 1"
+
+    describe "layout retrieval by type ID":
+        it "retrieves registered layout":
+            var registry = LayoutRegistry.new()
+            val fields = [("x", TypeId.I64())]
+            val layout = StructLayout.new("Point", fields, false, 50)
+
+            registry.register(50, layout)
+            val retrieved = registry.get(50)
+
+            assert retrieved.is_some(), "Should find layout"
+            assert retrieved.unwrap().name == "Point", "Name should match"
+
+        it "returns None for unregistered type ID":
+            val registry = LayoutRegistry.new()
+            val result = registry.get(999)
+            assert result.is_none(), "Should not find unregistered ID"
+
+    describe "layout retrieval by name":
+        it "retrieves layout by struct name":
+            var registry = LayoutRegistry.new()
+            val fields = [("value", TypeId.F32())]
+            val layout = StructLayout.new("MyStruct", fields, false, 42)
+
+            registry.register(42, layout)
+            val retrieved = registry.get_by_name("MyStruct")
+
+            assert retrieved.is_some(), "Should find by name"
+            assert retrieved.unwrap().size == 4, "Size should match"
+
+        it "returns None for unknown struct name":
+            val registry = LayoutRegistry.new()
+            val result = registry.get_by_name("Unknown")
+            assert result.is_none(), "Should not find unknown name"
+
+feature "Edge Cases and Invariants":
+    describe "empty struct":
+        it "handles struct with no fields":
+            val fields = []
+            val layout = StructLayout.new("Empty", fields, false, 20)
+
+            assert layout.size >= 0, "Size should be non-negative"
+            assert layout.fields.len() == 0, "Should have 0 fields"
+
+    describe "alignment invariants":
+        it "alignment is power of 2":
+            val fields = [("a", TypeId.I32()), ("b", TypeId.I64())]
+            val layout = StructLayout.new("Test", fields, false, 21)
+
+            val align = layout.alignment
+            # Check if power of 2: (align & (align - 1)) == 0
+            assert align > 0, "Alignment must be positive"
+            assert (align & (align - 1)) == 0, "Alignment must be power of 2"
+
+        it "size is multiple of alignment":
+            val fields = [("x", TypeId.I8()), ("y", TypeId.I64())]
+            val layout = StructLayout.new("Aligned", fields, false, 22)
+
+            assert layout.size % (layout.alignment as u32) == 0,
+                "Size must be multiple of alignment"
+
+    describe "Lean verification properties":
+        it "demonstrates size calculation correctness":
+            # struct { i8 a; i32 b; i64 c; }
+            # Expected: a@0(1) + pad(3) + b@4(4) + c@8(8) = 16
+            val fields = [
+                ("a", TypeId.I8()),   # offset 0, size 1
+                ("b", TypeId.I32()),  # offset 4, size 4 (aligned)
+                ("c", TypeId.I64())   # offset 8, size 8 (aligned)
+            ]
+            val layout = StructLayout.new("Example", fields, false, 23)
+
+            val expected_size = 16
+            assert layout.size == expected_size, "Size calculation verifiable"
+
+        it "demonstrates vtable offset invariant":
+            # All vtable structs have first field at offset >= 8
+            val fields = [("data", TypeId.I32())]
+            val layout = StructLayout.new("VTable", fields, true, 24)
+
+            if layout.has_vtable and layout.fields.len() > 0:
+                assert layout.fields[0].offset >= 8,
+                    "First field must be after vtable"

@@ -374,6 +374,21 @@ impl<'a> Parser<'a> {
             TokenKind::Assert => self.parse_assert(),
             TokenKind::Assume => self.parse_assume(),
             TokenKind::Admit => self.parse_admit(),
+            // "calc" is parsed contextually - not a reserved keyword
+            TokenKind::Identifier { name, .. } if name == "calc" => {
+                // Check if followed by colon - if so, it's a calc statement
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
+                if matches!(next.kind, TokenKind::Colon) {
+                    self.parse_calc()
+                } else {
+                    // Just an identifier named "calc" - parse as expression
+                    self.parse_expression_or_assignment()
+                }
+            }
             TokenKind::Context => {
                 // Check if this is a context statement (context expr:) or function call (context(...)) or BDD DSL (context "string":)
                 let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
@@ -399,9 +414,9 @@ impl<'a> Parser<'a> {
             // Lean 4 verification blocks
             // Note: lean{...} (no space) is handled as CustomBlock by lexer
             TokenKind::CustomBlock { kind, .. } if kind == "lean" => self.parse_lean_custom_block_as_node(),
-            // lean import "..." needs contextual check since "lean" is also a valid identifier
+            // lean import "..." and lean hint: "..." need contextual check since "lean" is also a valid identifier
             TokenKind::Identifier { name, .. } if name == "lean" => {
-                // Check if this is "lean import" - if so, parse as lean block
+                // Check if this is "lean import" or "lean hint" - if so, parse as lean block/hint
                 let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
                     let tok = self.lexer.next_token();
                     self.pending_tokens.push_back(tok.clone());
@@ -409,6 +424,9 @@ impl<'a> Parser<'a> {
                 });
                 if matches!(next.kind, TokenKind::Import) {
                     self.parse_lean_import_block()
+                } else if matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "hint") {
+                    // VER-020: Parse lean hint: "tactic"
+                    self.parse_lean_hint()
                 } else {
                     // Just an identifier named "lean" - parse as expression
                     self.parse_expression_or_assignment()

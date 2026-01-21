@@ -59,6 +59,36 @@ impl Parser<'_> {
             contract.decreases = Some(self.parse_decreases_clause()?);
         }
 
+        // Parse proof uses: theorem_name (VER-022: Proof Import/Reuse)
+        // References an existing Lean theorem from lean{} blocks
+        if let TokenKind::Identifier { name, .. } = &self.current.kind {
+            if name == "proof" {
+                // Peek ahead to check if next token is "uses"
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
+                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "uses") {
+                    self.advance(); // consume "proof"
+                    self.advance(); // consume "uses"
+                    self.expect(&TokenKind::Colon)?;
+
+                    // Parse the theorem name
+                    if let TokenKind::Identifier { name, .. } = &self.current.kind {
+                        contract.proof_uses = Some(name.clone());
+                        self.advance();
+                        self.skip_newlines();
+                    } else {
+                        return Err(ParseError::syntax_error_with_span(
+                            "expected theorem name after 'proof uses:'",
+                            self.current.span,
+                        ));
+                    }
+                }
+            }
+        }
+
         Ok(contract)
     }
 

@@ -1,0 +1,544 @@
+# TCP Networking Integration Tests
+"""
+## System Test: TCP Client-Server Integration
+
+**Integration Scope:** TCP + Async runtime + Network I/O
+**Complexity:** High
+**Coverage Impact:** net_tcp.rs (7.62%→75%), async runtime, monoio integration
+
+Tests end-to-end TCP networking workflows: server-client communication,
+concurrent connections, error handling, and async I/O operations.
+"""
+
+import std.spec
+import net.tcp as tcp
+import async.runtime as runtime
+
+describe "TCP client-server integration":
+    """
+    ### Echo Server
+
+    Basic TCP echo server implementation.
+    Exercises: TcpListener, accept, read, write, close.
+    """
+
+    context "Echo server":
+        it "starts server and accepts connection":
+            # Start echo server on port
+            val server = tcp.TcpListener.bind("127.0.0.1:9001")
+            expect(server).not_to(be_nil())
+
+            # Server should be listening
+            val addr = server.local_addr()
+            expect(addr).to(include("9001"))
+
+            server.close()
+
+        it "connects client to server":
+            # Start server
+            val server = tcp.TcpListener.bind("127.0.0.1:9002")
+
+            # Launch server task
+            runtime.spawn(async:
+                val connection = await server.accept()
+                connection.close()
+            )
+
+            # Connect client
+            val client = await tcp.TcpStream.connect("127.0.0.1:9002")
+            expect(client).not_to(be_nil())
+
+            client.close()
+            server.close()
+
+        it "echoes data from client to server":
+            val server = tcp.TcpListener.bind("127.0.0.1:9003")
+
+            # Echo server task
+            runtime.spawn(async:
+                val conn = await server.accept()
+                val data = await conn.read(1024)
+                await conn.write(data)
+                conn.close()
+            )
+
+            # Client sends and receives
+            val client = await tcp.TcpStream.connect("127.0.0.1:9003")
+            await client.write("Hello TCP")
+
+            val response = await client.read(1024)
+            expect(response).to(eq("Hello TCP"))
+
+            client.close()
+            server.close()
+
+        it "handles multiple message exchanges":
+            val server = tcp.TcpListener.bind("127.0.0.1:9004")
+
+            runtime.spawn(async:
+                val conn = await server.accept()
+
+                # Echo loop
+                for i in 0..3:
+                    val data = await conn.read(1024)
+                    await conn.write(data)
+
+                conn.close()
+            )
+
+            val client = await tcp.TcpStream.connect("127.0.0.1:9004")
+
+            # Send multiple messages
+            for i in 0..3:
+                await client.write("Message {i}")
+                val response = await client.read(1024)
+                expect(response).to(eq("Message {i}"))
+
+            client.close()
+            server.close()
+
+    """
+    ### Multiple Concurrent Connections
+
+    Handle multiple clients simultaneously.
+    Exercises: concurrent accept, parallel connections.
+    """
+
+    context "Multiple concurrent connections":
+        it "accepts multiple clients sequentially":
+            val server = tcp.TcpListener.bind("127.0.0.1:9005")
+
+            runtime.spawn(async:
+                for i in 0..3:
+                    val conn = await server.accept()
+                    await conn.write("Welcome {i}")
+                    conn.close()
+            )
+
+            # Connect multiple clients
+            val clients = []
+            for i in 0..3:
+                val client = await tcp.TcpStream.connect("127.0.0.1:9005")
+                val greeting = await client.read(1024)
+                expect(greeting).to(include("Welcome"))
+                client.close()
+                clients.append(client)
+
+            server.close()
+
+        it "handles concurrent clients in parallel":
+            val server = tcp.TcpListener.bind("127.0.0.1:9006")
+
+            # Accept and handle clients concurrently
+            runtime.spawn(async:
+                while true:
+                    val conn = await server.accept()
+
+                    # Handle in separate task
+                    runtime.spawn(async:
+                        val data = await conn.read(1024)
+                        await conn.write("Echo: {data}")
+                        conn.close()
+                    )
+            )
+
+            # Connect multiple clients in parallel
+            val tasks = []
+            for i in 0..5:
+                val task = runtime.spawn(async:
+                    val client = await tcp.TcpStream.connect("127.0.0.1:9006")
+                    await client.write("Client {i}")
+                    val response = await client.read(1024)
+                    client.close()
+                    response
+                )
+                tasks.append(task)
+
+            # Wait for all clients
+            for task in tasks:
+                val result = await task
+                expect(result).to(include("Echo:"))
+
+            server.close()
+
+        it "maintains separate state for each connection":
+            val server = tcp.TcpListener.bind("127.0.0.1:9007")
+
+            var conn_count = 0
+
+            runtime.spawn(async:
+                for i in 0..3:
+                    val conn = await server.accept()
+                    conn_count = conn_count + 1
+
+                    await conn.write("Connection #{conn_count}")
+                    conn.close()
+            )
+
+            # Each client gets unique connection number
+            val client1 = await tcp.TcpStream.connect("127.0.0.1:9007")
+            val msg1 = await client1.read(1024)
+            expect(msg1).to(include("#1"))
+            client1.close()
+
+            val client2 = await tcp.TcpStream.connect("127.0.0.1:9007")
+            val msg2 = await client2.read(1024)
+            expect(msg2).to(include("#2"))
+            client2.close()
+
+            server.close()
+
+    """
+    ### Data Transfer
+
+    Transfer data of various sizes.
+    Exercises: read, write, buffer management.
+    """
+
+    context "Data transfer":
+        it "transfers small message":
+            val server = tcp.TcpListener.bind("127.0.0.1:9008")
+
+            runtime.spawn(async:
+                val conn = await server.accept()
+                val data = await conn.read(1024)
+                await conn.write(data)
+                conn.close()
+            )
+
+            val client = await tcp.TcpStream.connect("127.0.0.1:9008")
+            await client.write("Hi")
+
+            val response = await client.read(1024)
+            expect(response).to(eq("Hi"))
+
+            client.close()
+            server.close()
+
+        it "transfers larger data chunk":
+            val server = tcp.TcpListener.bind("127.0.0.1:9009")
+
+            runtime.spawn(async:
+                val conn = await server.accept()
+                val data = await conn.read(8192)
+                await conn.write(data)
+                conn.close()
+            )
+
+            val large_data = "x" * 5000
+
+            val client = await tcp.TcpStream.connect("127.0.0.1:9009")
+            await client.write(large_data)
+
+            val response = await client.read(8192)
+            expect(response.len()).to(eq(5000))
+
+            client.close()
+            server.close()
+
+        it "handles empty write":
+            val server = tcp.TcpListener.bind("127.0.0.1:9010")
+
+            runtime.spawn(async:
+                val conn = await server.accept()
+                await conn.write("")
+                conn.close()
+            )
+
+            val client = await tcp.TcpStream.connect("127.0.0.1:9010")
+            val response = await client.read(1024)
+
+            expect(response).to(eq(""))
+
+            client.close()
+            server.close()
+
+        it "reads data in chunks":
+            val server = tcp.TcpListener.bind("127.0.0.1:9011")
+
+            runtime.spawn(async:
+                val conn = await server.accept()
+                await conn.write("ABCDEFGHIJ")
+                conn.close()
+            )
+
+            val client = await tcp.TcpStream.connect("127.0.0.1:9011")
+
+            # Read in smaller chunks
+            val chunk1 = await client.read(3)
+            val chunk2 = await client.read(3)
+            val chunk3 = await client.read(4)
+
+            expect(chunk1).to(eq("ABC"))
+            expect(chunk2).to(eq("DEF"))
+            expect(chunk3).to(eq("GHIJ"))
+
+            client.close()
+            server.close()
+
+    """
+    ### Connection Management
+
+    Open, close, shutdown connections.
+    Exercises: close, shutdown, connection state.
+    """
+
+    context "Connection management":
+        it "closes connection gracefully":
+            val server = tcp.TcpListener.bind("127.0.0.1:9012")
+
+            runtime.spawn(async:
+                val conn = await server.accept()
+                await conn.write("Goodbye")
+                conn.close()
+            )
+
+            val client = await tcp.TcpStream.connect("127.0.0.1:9012")
+            val msg = await client.read(1024)
+
+            expect(msg).to(eq("Goodbye"))
+
+            client.close()
+            server.close()
+
+        it "handles client disconnect":
+            val server = tcp.TcpListener.bind("127.0.0.1:9013")
+
+            runtime.spawn(async:
+                val conn = await server.accept()
+
+                # Client will disconnect
+                val result = await conn.read(1024)
+
+                # Should detect disconnect
+                conn.close()
+            )
+
+            val client = await tcp.TcpStream.connect("127.0.0.1:9013")
+            client.close()  # Disconnect immediately
+
+            server.close()
+
+        it "shutdown for write":
+            val server = tcp.TcpListener.bind("127.0.0.1:9014")
+
+            runtime.spawn(async:
+                val conn = await server.accept()
+                await conn.write("Data")
+                conn.shutdown_write()
+                conn.close()
+            )
+
+            val client = await tcp.TcpStream.connect("127.0.0.1:9014")
+            val data = await client.read(1024)
+
+            expect(data).to(eq("Data"))
+
+            client.close()
+            server.close()
+
+    """
+    ### Error Handling
+
+    Handle connection errors and edge cases.
+    Exercises: connection refused, timeouts, invalid addresses.
+    """
+
+    context "Error handling":
+        it "handles connection refused":
+            # No server listening on port
+            val result = tcp.TcpStream.try_connect("127.0.0.1:9999")
+
+            expect(result.is_error()).to(be_true())
+            expect(result.error()).to(include("refused"))
+
+        it "handles invalid address":
+            val result = tcp.TcpListener.try_bind("999.999.999.999:9000")
+
+            expect(result.is_error()).to(be_true())
+
+        it "handles port already in use":
+            val server1 = tcp.TcpListener.bind("127.0.0.1:9015")
+
+            # Try to bind same port
+            val result = tcp.TcpListener.try_bind("127.0.0.1:9015")
+
+            expect(result.is_error()).to(be_true())
+            expect(result.error()).to(include("address already in use"))
+
+            server1.close()
+
+        it "handles read timeout":
+            val server = tcp.TcpListener.bind("127.0.0.1:9016")
+
+            runtime.spawn(async:
+                val conn = await server.accept()
+                # Don't send any data
+                time.sleep(2000)
+                conn.close()
+            )
+
+            val client = await tcp.TcpStream.connect("127.0.0.1:9016")
+            client.set_read_timeout(100)
+
+            val result = client.try_read(1024)
+            expect(result.is_error()).to(be_true())
+
+            client.close()
+            server.close()
+
+    """
+    ### TCP Options
+
+    Set TCP socket options.
+    Exercises: TCP_NODELAY, keepalive, buffer sizes.
+    """
+
+    context "TCP options":
+        it "sets TCP_NODELAY option":
+            val server = tcp.TcpListener.bind("127.0.0.1:9017")
+
+            runtime.spawn(async:
+                val conn = await server.accept()
+                conn.set_nodelay(true)
+
+                val data = await conn.read(1024)
+                await conn.write(data)
+                conn.close()
+            )
+
+            val client = await tcp.TcpStream.connect("127.0.0.1:9017")
+            client.set_nodelay(true)
+
+            await client.write("test")
+            val response = await client.read(1024)
+
+            expect(response).to(eq("test"))
+
+            client.close()
+            server.close()
+
+        it "sets keepalive":
+            val server = tcp.TcpListener.bind("127.0.0.1:9018")
+
+            val client = await tcp.TcpStream.connect("127.0.0.1:9018")
+            client.set_keepalive(true)
+
+            # Connection stays alive
+            time.sleep(100)
+
+            expect(client.is_connected()).to(be_true())
+
+            client.close()
+            server.close()
+
+        it "configures buffer sizes":
+            val client = await tcp.TcpStream.connect("127.0.0.1:9019")
+
+            client.set_send_buffer_size(8192)
+            client.set_recv_buffer_size(8192)
+
+            val send_buf = client.get_send_buffer_size()
+            val recv_buf = client.get_recv_buffer_size()
+
+            expect(send_buf).to(be_greater_than(0))
+            expect(recv_buf).to(be_greater_than(0))
+
+            client.close()
+
+    """
+    ### Performance
+
+    TCP performance characteristics.
+    """
+
+    context "Performance benchmarking":
+        it "handles rapid connection cycles":
+            val server = tcp.TcpListener.bind("127.0.0.1:9020")
+
+            runtime.spawn(async:
+                for i in 0..10:
+                    val conn = await server.accept()
+                    conn.close()
+            )
+
+            for i in 0..10:
+                val client = await tcp.TcpStream.connect("127.0.0.1:9020")
+                client.close()
+
+            server.close()
+
+        it "transfers data efficiently":
+            val server = tcp.TcpListener.bind("127.0.0.1:9021")
+
+            runtime.spawn(async:
+                val conn = await server.accept()
+
+                for i in 0..100:
+                    val data = await conn.read(1024)
+                    await conn.write(data)
+
+                conn.close()
+            )
+
+            val client = await tcp.TcpStream.connect("127.0.0.1:9021")
+
+            for i in 0..100:
+                await client.write("msg{i}")
+                val response = await client.read(1024)
+                expect(response).to(include("msg"))
+
+            client.close()
+            server.close()
+
+    """
+    ### Edge Cases
+
+    TCP behavior with edge cases.
+    """
+
+    context "Edge cases":
+        it "handles server shutdown with pending connections":
+            val server = tcp.TcpListener.bind("127.0.0.1:9022")
+
+            # Client connects
+            val client = await tcp.TcpStream.connect("127.0.0.1:9022")
+
+            # Server closes immediately
+            server.close()
+
+            # Client should detect closure eventually
+            client.close()
+
+        it "binds to localhost with port 0 for auto-assignment":
+            val server = tcp.TcpListener.bind("127.0.0.1:0")
+
+            val addr = server.local_addr()
+            expect(addr).to(include("127.0.0.1:"))
+
+            # Port should be assigned
+            val port = server.local_port()
+            expect(port).to(be_greater_than(0))
+
+            server.close()
+
+        it "handles very long message":
+            val server = tcp.TcpListener.bind("127.0.0.1:9023")
+
+            runtime.spawn(async:
+                val conn = await server.accept()
+                val data = await conn.read(100000)
+                await conn.write(data)
+                conn.close()
+            )
+
+            val long_msg = "x" * 50000
+
+            val client = await tcp.TcpStream.connect("127.0.0.1:9023")
+            await client.write(long_msg)
+
+            val response = await client.read(100000)
+            expect(response.len()).to(eq(50000))
+
+            client.close()
+            server.close()

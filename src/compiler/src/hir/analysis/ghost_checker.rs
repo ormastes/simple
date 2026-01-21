@@ -177,6 +177,15 @@ impl<'a> GhostChecker<'a> {
             | HirStmt::Admit { condition, .. } => {
                 self.check_ghost_expr(condition, func_name);
             }
+            HirStmt::ProofHint { .. } => {
+                // Proof hints are verification-only, no side effects
+            }
+            HirStmt::Calc { steps } => {
+                // Calc blocks are verification-only, check each step's expression
+                for step in steps {
+                    self.check_ghost_expr(&step.expr, func_name);
+                }
+            }
             HirStmt::Break | HirStmt::Continue | HirStmt::Return(None) => {}
         }
     }
@@ -333,6 +342,15 @@ impl<'a> GhostChecker<'a> {
             | HirStmt::Assume { condition, .. }
             | HirStmt::Admit { condition, .. } => {
                 self.check_non_ghost_expr(condition, func_name, true);
+            }
+            HirStmt::ProofHint { .. } => {
+                // Proof hints are verification-only, no code execution
+            }
+            HirStmt::Calc { steps } => {
+                // Calc blocks are verification-only, check each step's expression
+                for step in steps {
+                    self.check_non_ghost_expr(&step.expr, func_name, true);
+                }
             }
             HirStmt::Break | HirStmt::Continue | HirStmt::Return(None) => {}
         }

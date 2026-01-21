@@ -264,6 +264,30 @@ impl Lowerer {
                 }])
             }
 
+            Node::ProofHint(proof_hint_stmt) => {
+                // VER-020: Proof hint for Lean
+                // At runtime, this is erased (no-op)
+                // In verification mode, it provides tactic hints to Lean
+                Ok(vec![HirStmt::ProofHint {
+                    hint: proof_hint_stmt.hint.clone(),
+                }])
+            }
+
+            Node::Calc(calc_stmt) => {
+                // VER-021: Calculational proof block for Lean
+                // At runtime, this is erased (no-op)
+                // In verification mode, it generates a Lean calc proof
+                let mut steps = Vec::new();
+                for step in &calc_stmt.steps {
+                    let expr = self.lower_expr(&step.expr, ctx)?;
+                    steps.push(crate::hir::types::HirCalcStep {
+                        expr,
+                        justification: step.justification.clone(),
+                    });
+                }
+                Ok(vec![HirStmt::Calc { steps }])
+            }
+
             Node::Expression(expr) => {
                 let hir_expr = self.lower_expr(expr, ctx)?;
                 Ok(vec![HirStmt::Expr(hir_expr)])

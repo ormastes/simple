@@ -83,6 +83,15 @@ impl Lowerer {
             | HirStmt::Admit { condition, .. } => {
                 self.check_expr_for_async_calls(condition, caller_name, function_suspension)?;
             }
+            HirStmt::ProofHint { .. } => {
+                // Proof hints contain no async calls
+            }
+            HirStmt::Calc { steps } => {
+                // Check each calc step expression for async calls
+                for step in steps {
+                    self.check_expr_for_async_calls(&step.expr, caller_name, function_suspension)?;
+                }
+            }
             HirStmt::Let { value: None, .. } | HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue => {}
         }
         Ok(())

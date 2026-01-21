@@ -1,0 +1,404 @@
+# Multi-Module Integration Tests
+"""
+## System Test: Full Application Workflows
+
+**Integration Scope:** Multiple modules combined (HTTP + HashMap + File + Process)
+**Complexity:** Very High
+**Coverage Impact:** Cross-cutting integration, real-world scenarios
+
+Tests complex end-to-end workflows that combine multiple stdlib modules
+to create realistic application scenarios.
+"""
+
+import std.spec
+import net.http as http
+import collections.hashmap as HashMap
+import io.file as file
+import sys.process as process
+import crypto.hash as hash
+
+describe "Full application workflows":
+    """
+    ### Web Scraper with Persistence
+
+    Fetch data, process, store in HashMap, save to file.
+    Exercises: HTTP + HashMap + JSON + File I/O integration.
+    """
+
+    context "Web scraper with persistence":
+        it "fetches URL, extracts data, stores in HashMap, saves to file":
+            # Step 1: Fetch data from API
+            val response = await http.get("https://jsonplaceholder.typicode.com/posts?userId=1")
+            expect(response.status).to(eq(200))
+
+            # Step 2: Parse JSON
+            val posts = json.parse(response.body)
+
+            # Step 3: Store in HashMap (post id -> title)
+            val post_map = HashMap.new()
+            for post in posts:
+                post_map.insert(post["id"], post["title"])
+
+            expect(post_map.len()).to(be_greater_than(0))
+
+            # Step 4: Save to file
+            val output_data = ""
+            post_map.each(\id, title:
+                output_data = output_data + "{id}: {title}\n"
+            )
+
+            file.write("/tmp/scraped_posts.txt", output_data)
+
+            # Step 5: Verify saved data
+            val saved = file.read("/tmp/scraped_posts.txt")
+            expect(saved).to(include("1:"))
+
+            # Cleanup
+            fs.remove_file("/tmp/scraped_posts.txt")
+
+        it "aggregates data from multiple API endpoints":
+            # Fetch users
+            val users_response = await http.get("https://jsonplaceholder.typicode.com/users")
+            val users = json.parse(users_response.body)
+
+            # Store in HashMap (id -> name)
+            val user_map = HashMap.new()
+            for user in users:
+                user_map.insert(user["id"], user["name"])
+
+            # Fetch posts
+            val posts_response = await http.get("https://jsonplaceholder.typicode.com/posts")
+            val posts = json.parse(posts_response.body)
+
+            # Group posts by user
+            val posts_by_user = HashMap.new()
+            for post in posts:
+                val user_id = post["userId"]
+                val user_posts = posts_by_user.get(user_id) or []
+                user_posts.append(post["title"])
+                posts_by_user.insert(user_id, user_posts)
+
+            # Generate report
+            var report = "User Post Report\n================\n\n"
+            posts_by_user.each(\user_id, posts:
+                val user_name = user_map.get(user_id) or "Unknown"
+                report = report + "{user_name}: {posts.len()} posts\n"
+            )
+
+            file.write("/tmp/user_report.txt", report)
+
+            val saved_report = file.read("/tmp/user_report.txt")
+            expect(saved_report).to(include("User Post Report"))
+
+            fs.remove_file("/tmp/user_report.txt")
+
+    """
+    ### Log Analyzer
+
+    Read log file, aggregate statistics, generate report.
+    Exercises: File I/O + HashMap + String processing + Process.
+    """
+
+    context "Log analyzer":
+        it "reads log file, aggregates stats with HashMap, generates report":
+            # Step 1: Create sample log file
+            val log_data = """
+            [INFO] 2024-01-01 Application started
+            [ERROR] 2024-01-01 Connection failed
+            [INFO] 2024-01-01 Retry attempt
+            [ERROR] 2024-01-01 Connection failed again
+            [WARN] 2024-01-01 Slow query detected
+            [INFO] 2024-01-01 Connection successful
+            [ERROR] 2024-01-01 Disk full
+            """
+
+            file.write("/tmp/app.log", log_data)
+
+            # Step 2: Parse log and aggregate by level
+            val content = file.read("/tmp/app.log")
+            val lines = content.split("\n")
+
+            val level_counts = HashMap.new()
+
+            for line in lines:
+                if line.len() > 0:
+                    # Extract log level
+                    if line.includes("[INFO]"):
+                        val count = level_counts.get("INFO") or 0
+                        level_counts.insert("INFO", count + 1)
+                    else if line.includes("[ERROR]"):
+                        val count = level_counts.get("ERROR") or 0
+                        level_counts.insert("ERROR", count + 1)
+                    else if line.includes("[WARN]"):
+                        val count = level_counts.get("WARN") or 0
+                        level_counts.insert("WARN", count + 1)
+
+            # Step 3: Generate report
+            var report = "Log Analysis Report\n==================\n\n"
+            level_counts.each(\level, count:
+                report = report + "{level}: {count} occurrences\n"
+            )
+
+            file.write("/tmp/log_report.txt", report)
+
+            # Step 4: Verify
+            val saved_report = file.read("/tmp/log_report.txt")
+            expect(saved_report).to(include("ERROR: 3"))
+            expect(saved_report).to(include("INFO: 3"))
+
+            # Cleanup
+            fs.remove_file("/tmp/app.log")
+            fs.remove_file("/tmp/log_report.txt")
+
+        it "filters and processes log entries with grep":
+            # Create log
+            val log_data = "INFO: All good\nERROR: Bad thing\nINFO: More good\nERROR: Another bad"
+            file.write("/tmp/filter.log", log_data)
+
+            # Use grep to extract errors
+            val content = file.read("/tmp/filter.log")
+            val result = process.output_with_stdin("grep", ["ERROR"], content)
+
+            # Parse errors into HashMap
+            val errors = HashMap.new()
+            val error_lines = result.stdout.split("\n")
+
+            for i in 0..error_lines.len():
+                if error_lines[i].len() > 0:
+                    errors.insert(i, error_lines[i])
+
+            expect(errors.len()).to(eq(2))
+
+            fs.remove_file("/tmp/filter.log")
+
+    """
+    ### Data Deduplication Pipeline
+
+    Read files, deduplicate with HashSet, save unique entries.
+    Exercises: File I/O + HashSet + Process integration.
+    """
+
+    context "Data deduplication pipeline":
+        it "deduplicates entries from multiple files":
+            # Create input files
+            file.write("/tmp/file1.txt", "apple\nbanana\napple\norange")
+            file.write("/tmp/file2.txt", "banana\ngrape\napple\nkiwi")
+            file.write("/tmp/file3.txt", "orange\nbanana\nmango")
+
+            # Read and deduplicate
+            val unique_items = HashSet.new()
+
+            for file_num in 1..4:
+                val content = file.read("/tmp/file{file_num}.txt")
+                val items = content.split("\n")
+
+                for item in items:
+                    if item.len() > 0:
+                        unique_items.add(item)
+
+            # Save unique items
+            val unique_list = unique_items.to_array()
+            file.write("/tmp/unique.txt", unique_list.join("\n"))
+
+            val saved = file.read("/tmp/unique.txt")
+            expect(saved).to(include("apple"))
+            expect(saved).to(include("mango"))
+
+            # Should have 6 unique items
+            expect(unique_items.len()).to(eq(6))
+
+            # Cleanup
+            for i in 1..4:
+                fs.remove_file("/tmp/file{i}.txt")
+            fs.remove_file("/tmp/unique.txt")
+
+    """
+    ### Concurrent Data Processing
+
+    Spawn processes, aggregate results with HashMap.
+    Exercises: Process + HashMap + Async integration.
+    """
+
+    context "Concurrent data processing":
+        it "processes data files in parallel and aggregates":
+            # Create data files
+            for i in 0..5:
+                file.write("/tmp/data{i}.txt", "{i}\n{i*10}\n{i*100}")
+
+            # Process files concurrently
+            val results = HashMap.new()
+            val tasks = []
+
+            for i in 0..5:
+                val task = runtime.spawn(async:
+                    val content = file.read("/tmp/data{i}.txt")
+                    val sum_result = process.output_with_stdin("awk", ["{sum+=$1} END {print sum}"], content)
+                    (i, sum_result.stdout.trim())
+                )
+                tasks.append(task)
+
+            # Collect results
+            for task in tasks:
+                val (file_id, sum_str) = await task
+                results.insert(file_id, sum_str)
+
+            expect(results.len()).to(eq(5))
+
+            # Cleanup
+            for i in 0..5:
+                fs.remove_file("/tmp/data{i}.txt")
+
+    """
+    ### Cache with Expiration
+
+    Implement cache with HashMap and timestamps.
+    Exercises: HashMap + Time + Logic integration.
+    """
+
+    context "Cache with expiration":
+        it "implements time-based cache eviction":
+            val cache = HashMap.new()
+            val cache_ttl = 1000  # 1 second TTL
+
+            # Store with timestamp
+            val now = time.now()
+            cache.insert("key1", {value: "data1", timestamp: now})
+
+            time.sleep(500)
+
+            # Check if still valid
+            val entry = cache.get("key1")
+            val age = time.now() - entry["timestamp"]
+
+            expect(age).to(be_less_than(cache_ttl))
+
+            time.sleep(600)
+
+            # Should be expired
+            val expired_entry = cache.get("key1")
+            val expired_age = time.now() - expired_entry["timestamp"]
+
+            expect(expired_age).to(be_greater_than(cache_ttl))
+
+    """
+    ### Data Transformation Pipeline
+
+    Complex multi-stage data transformation.
+    Exercises: File → Process → HashMap → Process → File.
+    """
+
+    context "Data transformation pipeline":
+        it "implements ETL pipeline":
+            # Extract: Read CSV
+            val csv_data = "name,age,city\nAlice,30,NYC\nBob,25,LA\nCarol,35,SF"
+            file.write("/tmp/input.csv", csv_data)
+
+            # Transform: Parse and filter
+            val content = file.read("/tmp/input.csv")
+            val lines = content.split("\n")
+
+            val records = HashMap.new()
+
+            for i in 1..lines.len():  # Skip header
+                val line = lines[i]
+                if line.len() > 0:
+                    val fields = line.split(",")
+                    val name = fields[0]
+                    val age = fields[1].to_int()
+
+                    # Filter: only age > 25
+                    if age > 25:
+                        records.insert(name, age)
+
+            # Load: Save filtered data
+            var output = "name,age\n"
+            records.each(\name, age:
+                output = output + "{name},{age}\n"
+            )
+
+            file.write("/tmp/output.csv", output)
+
+            val result = file.read("/tmp/output.csv")
+            expect(result).to(include("Alice,30"))
+            expect(result).to(include("Carol,35"))
+            expect(result).not_to(include("Bob,25"))
+
+            fs.remove_file("/tmp/input.csv")
+            fs.remove_file("/tmp/output.csv")
+
+    """
+    ### Checksum Verification Workflow
+
+    Compute checksums, store in HashMap, verify files.
+    Exercises: Hash + HashMap + File I/O integration.
+    """
+
+    context "Checksum verification workflow":
+        it "computes and verifies file checksums":
+            # Create files
+            file.write("/tmp/file_a.txt", "Content A")
+            file.write("/tmp/file_b.txt", "Content B")
+            file.write("/tmp/file_c.txt", "Content C")
+
+            # Compute checksums
+            val checksums = HashMap.new()
+
+            for suffix in ["a", "b", "c"]:
+                val file_path = "/tmp/file_{suffix}.txt"
+                val content = file.read(file_path)
+                val checksum = hash.sha256().update(content).finalize()
+                checksums.insert(file_path, checksum)
+
+            expect(checksums.len()).to(eq(3))
+
+            # Verify files
+            var all_valid = true
+
+            checksums.each(\file_path, expected_checksum:
+                val content = file.read(file_path)
+                val actual_checksum = hash.sha256().update(content).finalize()
+
+                if actual_checksum != expected_checksum:
+                    all_valid = false
+            )
+
+            expect(all_valid).to(be_true())
+
+            # Cleanup
+            for suffix in ["a", "b", "c"]:
+                fs.remove_file("/tmp/file_{suffix}.txt")
+
+    """
+    ### Performance: Complex Pipeline
+
+    Test performance of complex multi-module workflows.
+    """
+
+    context "Performance of complex workflows":
+        it "processes 100 records through full pipeline":
+            # Generate data
+            var csv = "id,value\n"
+            for i in 0..100:
+                csv = csv + "{i},{i * 10}\n"
+
+            file.write("/tmp/large.csv", csv)
+
+            # Process
+            val content = file.read("/tmp/large.csv")
+            val lines = content.split("\n")
+
+            val data = HashMap.new()
+            for i in 1..lines.len():
+                if lines[i].len() > 0:
+                    val fields = lines[i].split(",")
+                    data.insert(fields[0], fields[1])
+
+            # Aggregate
+            var total = 0
+            data.each(\id, value:
+                total = total + value.to_int()
+            )
+
+            expect(data.len()).to(eq(100))
+
+            fs.remove_file("/tmp/large.csv")

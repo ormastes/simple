@@ -307,11 +307,6 @@ theorem isolated_ne_exclusive : RefCapability.Isolated ≠ RefCapability.Exclusi
 -- The key insight is that canCreateRef returns true only when adding the
 -- reference would not violate wellFormedness.
 --
--- Axiomatized due to proof complexity involving:
--- 1. Case analysis on capabilities (Shared/Exclusive/Isolated)
--- 2. Reasoning about list membership after addRef
--- 3. Tracking capability counts through mutations
---
 -- Proof sketch:
 -- Case loc = ref.location:
 --   - Shared: canCreateRef=true → no Exclusive/Isolated exist → adding Shared keeps counts at 0
@@ -319,10 +314,131 @@ theorem isolated_ne_exclusive : RefCapability.Isolated ≠ RefCapability.Exclusi
 --   - Isolated: canCreateRef=true → empty refs → result is [ref] with counts (0,1)
 -- Case loc ≠ ref.location:
 --   - Original wellFormed applies since (loc, refs) unchanged
-axiom create_ref_preserves_wellformed (env : RefEnv) (ref : Reference) :
+-- Helper: not isEmpty means list is empty when it's false
+theorem not_isEmpty_false_means_empty {α : Type} (l : List α) :
+    (!l.isEmpty) = false → l = [] := by
+  intro h
+  cases l with
+  | nil => rfl
+  | cons _ _ => simp [List.isEmpty] at h
+
+-- Helper: count > 0 = false means count = 0
+theorem count_gt_zero_false_means_zero (n : Nat) :
+    decide (n > 0) = false → n = 0 := by
+  intro h
+  simp only [decide_eq_false_iff_not, Nat.not_lt] at h
+  omega
+
+theorem create_ref_preserves_wellformed (env : RefEnv) (ref : Reference) :
   wellFormed env →
   canCreateRef env ref.location ref.refType.capability = true →
-  wellFormed (addRef env ref)
+  wellFormed (addRef env ref) := by
+  intro h_wf h_can
+  unfold wellFormed at h_wf ⊢
+  intro loc refs h_mem
+  rw [addRef_mem_iff] at h_mem
+  cases h_mem with
+  | inl h_eq =>
+    -- Case: loc = ref.location, refs = ref :: getActiveRefs env ref.location
+    obtain ⟨h_loc_eq, h_refs_eq⟩ := h_eq
+    subst h_loc_eq h_refs_eq
+    -- Analyze based on the capability being added
+    cases h_cap : ref.refType.capability with
+    | Shared =>
+      -- Shared case: canCreateRef=true means no Exclusive/Isolated exist
+      unfold canCreateRef at h_can
+      simp only [h_cap, Bool.and_eq_true, Bool.not_eq_true'] at h_can
+      obtain ⟨h_no_excl, h_no_iso⟩ := h_can
+      -- Count exclusive = 0, count isolated = 0 in existing refs
+      have h_excl_zero := count_gt_zero_false_means_zero _ h_no_excl
+      have h_iso_zero := count_gt_zero_false_means_zero _ h_no_iso
+      -- After adding Shared ref, counts stay the same for Exclusive/Isolated
+      refine ⟨?_, ?_, ?_, ?_⟩
+      · -- At most one Exclusive
+        rw [count_cons_diff _ _ _ (by simp [h_cap])]
+        omega
+      · -- At most one Isolated
+        rw [count_cons_diff _ _ _ (by simp [h_cap])]
+        omega
+      · -- Exclusive=1 implies length=1
+        intro h_excl_one
+        rw [count_cons_diff _ _ _ (by simp [h_cap])] at h_excl_one
+        omega
+      · -- Isolated=1 implies length=1
+        intro h_iso_one
+        rw [count_cons_diff _ _ _ (by simp [h_cap])] at h_iso_one
+        omega
+    | Exclusive =>
+      -- Exclusive case: canCreateRef=true means no refs exist
+      unfold canCreateRef at h_can
+      simp only [h_cap, Bool.not_eq_true'] at h_can
+      have h_empty := not_isEmpty_false_means_empty _ h_can
+      rw [h_empty]
+      -- ref :: [] is a single-element list with one Exclusive
+      -- Since ref.refType.capability = Exclusive:
+      -- - filter for Exclusive gives [ref], count = 1
+      -- - filter for Isolated gives [], count = 0
+      have h_excl_count : countRefsWithCapability [ref] RefCapability.Exclusive = 1 := by
+        simp only [countRefsWithCapability, List.filter, h_cap, beq_self_eq_true,
+                   List.length_singleton]
+      have h_iso_count : countRefsWithCapability [ref] RefCapability.Isolated = 0 := by
+        unfold countRefsWithCapability
+        simp only [List.filter, h_cap]
+        -- RefCapability.Exclusive == RefCapability.Isolated = false
+        have h_neq : (RefCapability.Exclusive == RefCapability.Isolated) = false := rfl
+        simp only [h_neq, List.length_nil]
+      refine ⟨?_, ?_, ?_, ?_⟩
+      · -- At most one Exclusive
+        simp only [h_excl_count]
+        exact Nat.le_refl 1
+      · -- At most one Isolated
+        simp only [h_iso_count]
+        exact Nat.zero_le 1
+      · -- Exclusive=1 implies length=1
+        intro _
+        rfl
+      · -- Isolated=1 implies length=1 (vacuously true since Isolated=0)
+        intro h
+        simp only [h_iso_count] at h
+        cases h
+    | Isolated =>
+      -- Isolated case: canCreateRef=true means no refs exist
+      unfold canCreateRef at h_can
+      simp only [h_cap, Bool.not_eq_true'] at h_can
+      have h_empty := not_isEmpty_false_means_empty _ h_can
+      rw [h_empty]
+      -- ref :: [] is a single-element list with one Isolated
+      -- Since ref.refType.capability = Isolated:
+      -- - filter for Exclusive gives [], count = 0
+      -- - filter for Isolated gives [ref], count = 1
+      have h_excl_count : countRefsWithCapability [ref] RefCapability.Exclusive = 0 := by
+        unfold countRefsWithCapability
+        simp only [List.filter, h_cap]
+        -- RefCapability.Isolated == RefCapability.Exclusive = false
+        have h_neq : (RefCapability.Isolated == RefCapability.Exclusive) = false := rfl
+        simp only [h_neq, List.length_nil]
+      have h_iso_count : countRefsWithCapability [ref] RefCapability.Isolated = 1 := by
+        simp only [countRefsWithCapability, List.filter, h_cap, beq_self_eq_true,
+                   List.length_singleton]
+      refine ⟨?_, ?_, ?_, ?_⟩
+      · -- At most one Exclusive
+        simp only [h_excl_count]
+        exact Nat.zero_le 1
+      · -- At most one Isolated
+        simp only [h_iso_count]
+        exact Nat.le_refl 1
+      · -- Exclusive=1 implies length=1 (vacuously true since Exclusive=0)
+        intro h
+        simp only [h_excl_count] at h
+        cases h
+      · -- Isolated=1 implies length=1
+        intro _
+        rfl
+  | inr h_ne =>
+    -- Case: loc ≠ ref.location, refs unchanged from original env
+    obtain ⟨h_loc_ne, h_mem_orig⟩ := h_ne
+    -- Apply original wellFormed
+    exact h_wf loc refs h_mem_orig
 
 -- Integration with memory operations
 

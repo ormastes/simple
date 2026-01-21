@@ -233,10 +233,13 @@ pub enum TokenKind {
     Old,       // old() (previous value in postconditions)
     Result,    // result (return value in ensures) - legacy
     Decreases, // decreases: (termination measure for Lean verification)
+    Forall,    // forall x in range: predicate (quantifier for verification, VER-030)
+    Exists,    // exists x in range: predicate (quantifier for verification, VER-030)
     // Inline assertions (statement-level contract checks)
     Assert, // assert expr or assert expr, "message"
     Assume, // assume expr (trusted assumption for verification)
     Admit,  // admit expr, "reason" (skip proof, tracked)
+    Calc,   // calc: (calculational proof block for equational reasoning, VER-021)
 
     // Infix keywords (for BDD spec framework)
     // These parse as infix method calls: `A to B` → `A.to(B)`

@@ -191,6 +191,46 @@ pub struct AdmitStmt {
     pub message: Option<String>,
 }
 
+/// Proof hint statement for guiding Lean proof tactics (VER-020)
+/// lean hint: "simp"
+/// lean hint: "simp [factorial, Nat.mul_pos, *]"
+/// In verification: provides tactic hint for Lean prover
+/// At runtime: no effect (erased)
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProofHintStmt {
+    pub span: Span,
+    /// The tactic or hint string to pass to Lean
+    pub hint: String,
+}
+
+/// Calculational proof block for step-by-step equational reasoning (VER-021)
+/// ```simple
+/// calc:
+///     sum(0..=n)
+///     == sum(0..n) + n        by: "definition"
+///     == (n-1)*n/2 + n        by: "induction hypothesis"
+///     == n * (n + 1) / 2      by: "factor"
+/// ```
+/// In verification: generates Lean calc proof
+/// At runtime: no effect (erased)
+#[derive(Debug, Clone, PartialEq)]
+pub struct CalcStmt {
+    pub span: Span,
+    /// The calculational steps: each step is (expression, justification)
+    /// The first expression is the starting term
+    pub steps: Vec<CalcStep>,
+}
+
+/// A single step in a calculational proof
+#[derive(Debug, Clone, PartialEq)]
+pub struct CalcStep {
+    pub span: Span,
+    /// The expression in this step
+    pub expr: Expr,
+    /// Optional justification string (by: "reason")
+    pub justification: Option<String>,
+}
+
 /// Context block for DSL support
 /// context expr:
 ///     statements

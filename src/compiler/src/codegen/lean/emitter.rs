@@ -114,6 +114,12 @@ impl LeanEmitter {
                     self.output.push('\n');
                 }
             }
+            LeanType::Subtype { .. } => {
+                if let Some(def) = ty.emit_subtype() {
+                    self.output.push_str(&def);
+                    self.output.push('\n');
+                }
+            }
             _ => {
                 // Primitive and named types don't need definitions
             }

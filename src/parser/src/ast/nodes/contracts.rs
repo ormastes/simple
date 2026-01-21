@@ -71,6 +71,10 @@ pub struct ContractBlock {
     /// Expression that must decrease on each recursive call
     /// Not checked at runtime, only used for Lean termination_by
     pub decreases: Option<ContractClause>,
+    /// Proof reference (proof uses: theorem_name) - for Lean verification (VER-022)
+    /// References an existing Lean theorem from lean{} blocks
+    /// Example: proof uses: list_sum_pos
+    pub proof_uses: Option<String>,
 }
 
 impl ContractBlock {
@@ -81,6 +85,7 @@ impl ContractBlock {
             && self.postconditions.is_empty()
             && self.error_postconditions.is_empty()
             && self.decreases.is_none()
+            && self.proof_uses.is_none()
     }
 
     /// Check if this contract has a termination measure

@@ -16,10 +16,15 @@ import Traits
 
 namespace MixinVerificationGenerated
 
--- Placeholder types for demonstration
-axiom HashMap : Type → Type → Type
-axiom DbConnection : Type
-axiom Error : Type
+-- Placeholder types for demonstration (opaque structures)
+structure HashMap (K V : Type) : Type where
+  data : List (K × V)
+
+structure DbConnection : Type where
+  connectionId : Nat
+
+structure Error : Type where
+  message : String
 
 -- Result type for error handling
 inductive Result (T E : Type) : Type where

@@ -83,6 +83,12 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // Parse optional return constraint for dependent types (VER-011):
+        // `fn f(x: T) -> U where result.len() == x.len():`
+        // This is distinguished from trait bounds by checking if the where clause
+        // starts with 'result' identifier (expression) vs 'TypeParam:' (trait bound)
+        let return_constraint = self.parse_return_constraint()?;
+
         // Parse optional where clause: where T: Clone + Default
         let where_clause = self.parse_where_clause()?;
 
@@ -179,7 +185,51 @@ impl<'a> Parser<'a> {
             is_sync: false,
             is_me_method,
             bounds_block,
+            return_constraint,
         }))
+    }
+
+    /// Parse optional return constraint for dependent function types (VER-011)
+    ///
+    /// Syntax: `fn f(x: T) -> U where result.len() == x.len():`
+    ///
+    /// This is distinguished from trait bounds by checking if the where clause
+    /// starts with 'result' identifier. Return constraints are expressions that
+    /// reference `result` (the return value) and function parameters.
+    fn parse_return_constraint(&mut self) -> Result<Option<Expr>, ParseError> {
+        if !self.check(&TokenKind::Where) {
+            return Ok(None);
+        }
+
+        // Peek ahead to see if this looks like a return constraint (expression)
+        // or a trait bound (TypeParam: Trait)
+        // Use peek_is to check if next token is 'result' identifier
+        // If we see 'where result...' it's a return constraint
+        // If we see 'where T:' it's a trait bound
+
+        // Save state to peek ahead
+        let saved_current = self.current.clone();
+        let saved_previous = self.previous.clone();
+
+        self.advance(); // consume 'where'
+
+        // Check if this is 'result' identifier (return constraint)
+        let is_return_constraint = matches!(
+            &self.current.kind,
+            TokenKind::Identifier { name, .. } if name == "result"
+        );
+
+        if is_return_constraint {
+            // Parse the constraint expression (e.g., result.len() == x.len())
+            let expr = self.parse_expression()?;
+            Ok(Some(expr))
+        } else {
+            // Not a return constraint - restore state for trait bound parsing
+            self.pending_tokens.push_front(self.current.clone());
+            self.current = saved_current;
+            self.previous = saved_previous;
+            Ok(None)
+        }
     }
 
     /// Parse optional where clause: `where T: Trait1 + Trait2, U: Other`

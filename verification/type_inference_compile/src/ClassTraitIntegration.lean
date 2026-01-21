@@ -226,15 +226,77 @@ theorem coherence_unique_impls (env : TypeEnv) (className traitName : String) (i
     h_impl1_in_class h_impl2_in_class h_same_name
 
 -- Theorem: Valid trait implementation satisfies all method requirements
--- REMAINS AXIOM: The validateTraitImpl check uses `any` which means each trait method
--- has SOME matching impl method name. But multiple trait methods could match the same impl
--- method (if they share names). Thus the length inequality doesn't hold in general.
--- Example: trait with methods ["foo", "foo"] and impl with ["foo"] would pass `any` but fail length.
--- A correct statement would require unique method names in the trait.
-axiom validImpl_complete (env : TypeEnv) (impl : TraitImpl) (trait : TraitDef) :
-  validateTraitImpl env impl = true →
-  lookupTrait env.traits impl.trait_name = some trait →
-  trait.methods.length ≤ impl.method_impls.length
+-- With uniqueness preconditions for both trait methods and impl methods
+theorem validImpl_complete (env : TypeEnv) (impl : TraitImpl) (trait : TraitDef)
+    (h_trait_nodup : (trait.methods.map TraitMethod.name).Nodup)
+    (h_impl_nodup : (impl.method_impls.map Prod.fst).Nodup)
+    (h_valid : validateTraitImpl env impl = true)
+    (h_lookup : lookupTrait env.traits impl.trait_name = some trait) :
+    trait.methods.length ≤ impl.method_impls.length := by
+  unfold validateTraitImpl at h_valid
+  cases h_for : impl.for_type with
+  | named className =>
+    simp only [h_for, h_lookup] at h_valid
+    -- h_valid : trait.methods.all (fun tm => impl.method_impls.any (fun (n, _) => n == tm.name)) = true
+    -- Each trait method has a matching impl method by name
+    -- With uniqueness of both, we get the length inequality
+    -- Transform the any predicate
+    have h_all : trait.methods.all (fun tm =>
+        (impl.method_impls.map Prod.fst).any (fun n => n == tm.name)) = true := by
+      rw [List.all_eq_true] at h_valid ⊢
+      intro tm h_mem
+      specialize h_valid tm h_mem
+      rw [List.any_eq_true] at h_valid ⊢
+      obtain ⟨⟨n, ty⟩, h_mem', h_eq⟩ := h_valid
+      use n
+      constructor
+      · exact List.mem_map_of_mem Prod.fst h_mem'
+      · exact h_eq
+    -- Now apply: if for each x ∈ as, there's some b ∈ bs with b == f(x),
+    -- and as.map f has no dups, then |as| ≤ |bs|
+    -- This is the injection principle
+    -- Count distinct names needed = trait.methods.length (by nodup of trait methods)
+    -- Count available names = impl.method_impls.length
+    -- The matching ensures each trait method name appears in impl
+    -- With nodup on trait, each name is distinct
+    -- So we need at least that many impl methods
+    -- Actually, we need to show that each trait method name maps to a distinct impl method name
+    -- But the impl could have the same name for multiple entries...
+    -- With h_impl_nodup, each impl method name is unique
+    -- So the set of impl method names has size = impl.method_impls.length
+    -- And each trait method name (unique by h_trait_nodup) maps to some impl method name
+    -- This gives an injection from trait method names to impl method names
+    -- Therefore |trait.methods| ≤ |impl.method_impls|
+    have h_inj : ∀ tm ∈ trait.methods, tm.name ∈ impl.method_impls.map Prod.fst := by
+      intro tm h_mem
+      rw [List.all_eq_true] at h_all
+      specialize h_all tm h_mem
+      rw [List.any_eq_true] at h_all
+      obtain ⟨n, h_n_mem, h_eq⟩ := h_all
+      simp only [beq_iff_eq] at h_eq
+      rw [← h_eq]
+      exact h_n_mem
+    -- With h_trait_nodup: trait.methods.map TraitMethod.name has no dups
+    -- And each name is in impl.method_impls.map Prod.fst
+    -- This means trait.methods.map TraitMethod.name ⊆ impl.method_impls.map Prod.fst (as a set)
+    -- With nodup on the domain, |domain| ≤ |codomain|
+    have h_subset : ∀ n ∈ trait.methods.map TraitMethod.name, n ∈ impl.method_impls.map Prod.fst := by
+      intro n h_mem
+      rw [List.mem_map] at h_mem
+      obtain ⟨tm, h_tm_mem, h_eq⟩ := h_mem
+      rw [← h_eq]
+      exact h_inj tm h_tm_mem
+    -- Now: |trait.methods| = |trait.methods.map TraitMethod.name| (since map preserves length)
+    -- And trait.methods.map TraitMethod.name ⊆ impl.method_impls.map Prod.fst with nodup
+    -- So |trait.methods.map TraitMethod.name| ≤ |impl.method_impls.map Prod.fst|
+    -- = |impl.method_impls|
+    have h_map_len1 : trait.methods.length = (trait.methods.map TraitMethod.name).length :=
+      (List.length_map trait.methods TraitMethod.name).symm
+    have h_map_len2 : impl.method_impls.length = (impl.method_impls.map Prod.fst).length :=
+      (List.length_map impl.method_impls Prod.fst).symm
+    rw [h_map_len1, h_map_len2]
+    exact List.Nodup.length_le_of_subset h_trait_nodup h_subset
+  | _ => simp only [h_for] at h_valid
 
 -- Theorem: Type conversion preserves structure (since types are now unified, this is trivial)
 theorem tyConversion_roundtrip (ty : Ty) :
