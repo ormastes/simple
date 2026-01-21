@@ -155,7 +155,7 @@ impl<'a> MirLowerer<'a> {
                 Ok(())
             }
 
-            HirStmt::While { condition, body } => {
+            HirStmt::While { condition, body, .. } => {
                 // Create blocks and set initial jump
                 let (cond_id, body_id, exit_id) = self.with_func(|func, current_block| {
                     let cond_id = func.new_block();
@@ -283,6 +283,79 @@ impl<'a> MirLowerer<'a> {
                         message: message.clone(),
                     });
                 })?;
+                Ok(())
+            }
+
+            HirStmt::For {
+                pattern,
+                iterable,
+                body,
+                ..
+            } => {
+                // For loops are lowered similarly to while loops
+                // For now, treat as a simple loop over the iterator
+                // TODO: Full for-loop lowering with iterator protocol
+                let (header_id, body_id, exit_id) = self.with_func(|func, current_block| {
+                    let header_id = func.new_block();
+                    let body_id = func.new_block();
+                    let exit_id = func.new_block();
+
+                    let block = func.block_mut(current_block).unwrap();
+                    block.terminator = Terminator::Jump(header_id);
+                    (header_id, body_id, exit_id)
+                })?;
+
+                self.push_loop(LoopContext {
+                    continue_target: header_id,
+                    break_target: exit_id,
+                })?;
+
+                // Header: check iterator has more elements
+                self.set_current_block(header_id)?;
+                // For now, just emit a placeholder branch
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.terminator = Terminator::Jump(body_id);
+                })?;
+
+                // Body
+                self.set_current_block(body_id)?;
+                for stmt in body {
+                    self.lower_stmt(stmt, contract)?;
+                }
+                self.finalize_block_jump(header_id)?;
+
+                self.pop_loop()?;
+                self.set_current_block(exit_id)?;
+                Ok(())
+            }
+
+            HirStmt::Assume { condition, message } => {
+                // Assume is a verification statement similar to assert
+                // At runtime, we treat it as an assertion
+                let cond_reg = self.lower_expr(condition)?;
+                let func_name = self
+                    .try_contract_ctx()
+                    .map(|ctx| ctx.func_name.clone())
+                    .unwrap_or_else(|_| "<unknown>".to_string());
+
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ContractCheck {
+                        condition: cond_reg,
+                        kind: crate::mir::instructions::ContractKind::Assertion,
+                        func_name,
+                        message: message.clone(),
+                    });
+                })?;
+                Ok(())
+            }
+
+            HirStmt::Admit { condition, message } => {
+                // Admit is a verification-only statement that admits a fact without proof
+                // At runtime, this is a no-op (we trust the admitted fact)
+                let _ = condition;
+                let _ = message;
                 Ok(())
             }
         }

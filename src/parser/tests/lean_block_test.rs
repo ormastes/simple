@@ -17,9 +17,11 @@ fn main() -> i64:
     let module = Parser::new(source).parse().expect("Should parse");
 
     // Find the lean block
-    let lean_blocks: Vec<_> = module.items.iter().filter(|item| {
-        matches!(item, Node::LeanBlock(_))
-    }).collect();
+    let lean_blocks: Vec<_> = module
+        .items
+        .iter()
+        .filter(|item| matches!(item, Node::LeanBlock(_)))
+        .collect();
 
     assert_eq!(lean_blocks.len(), 1, "Should have one lean block");
 
@@ -42,9 +44,11 @@ fn main() -> i64:
 
     let module = Parser::new(source).parse().expect("Should parse");
 
-    let lean_blocks: Vec<_> = module.items.iter().filter(|item| {
-        matches!(item, Node::LeanBlock(_))
-    }).collect();
+    let lean_blocks: Vec<_> = module
+        .items
+        .iter()
+        .filter(|item| matches!(item, Node::LeanBlock(_)))
+        .collect();
 
     assert_eq!(lean_blocks.len(), 1, "Should have one lean block");
 
@@ -66,7 +70,9 @@ fn main() -> i64:
     0
 "#;
 
-    let module = Parser::new(source).parse().expect("Should parse - lean is valid in module paths");
+    let module = Parser::new(source)
+        .parse()
+        .expect("Should parse - lean is valid in module paths");
     assert!(!module.items.is_empty());
 }
 
@@ -91,9 +97,11 @@ fn main() -> i64:
 
     let module = Parser::new(source).parse().expect("Should parse");
 
-    let lean_blocks: Vec<_> = module.items.iter().filter(|item| {
-        matches!(item, Node::LeanBlock(_))
-    }).collect();
+    let lean_blocks: Vec<_> = module
+        .items
+        .iter()
+        .filter(|item| matches!(item, Node::LeanBlock(_)))
+        .collect();
 
     assert_eq!(lean_blocks.len(), 3, "Should have three lean blocks");
 }

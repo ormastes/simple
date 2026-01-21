@@ -188,6 +188,7 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
                 body,
                 is_suspend: stmt.is_suspend,
                 auto_enumerate: stmt.auto_enumerate,
+                invariants: stmt.invariants.clone(),
             })
         }
         Node::While(stmt) => {
@@ -207,6 +208,7 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
                 body,
                 let_pattern,
                 is_suspend: stmt.is_suspend,
+                invariants: stmt.invariants.clone(),
             })
         }
         Node::Loop(stmt) => Node::Loop(LoopStmt {

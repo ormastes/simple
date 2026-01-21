@@ -375,14 +375,65 @@ theorem mixin_trait_requirements_sound (traitEnv : TraitEnv) (registry : ImplReg
   rw [List.all_eq_true] at h_check
   exact h_check traitName h_mem
 
+-- Helper: If a field exists in a list, lookupField finds it
+theorem lookupField_of_mem (cls : ClassDef) (f : FieldDef) :
+    f ∈ cls.fields → (∃ name, name == f.name = true ∧
+      cls.fields.find? (fun f' => f'.name == f.name) ≠ none) := by
+  intro h_mem
+  use f.name
+  constructor
+  · exact beq_self_eq_true f.name
+  · induction cls.fields with
+    | nil => cases h_mem
+    | cons a as ih =>
+      simp only [List.find?]
+      cases h_mem with
+      | head =>
+        simp only [beq_self_eq_true, ↓reduceIte]
+        exact Option.isSome_some ▸ fun h => Option.not_isSome_none (h ▸ Option.isSome_some)
+      | tail _ h_tail =>
+        by_cases h_eq : a.name == f.name
+        · simp only [h_eq, ↓reduceIte]
+          exact Option.isSome_some ▸ fun h => Option.not_isSome_none (h ▸ Option.isSome_some)
+        · simp only [h_eq, Bool.false_eq_true, ↓reduceIte]
+          exact ih h_tail
+
 -- Theorem: Field access after mixin application includes mixin fields
--- REMAINS AXIOM: The inferFieldAccessWithMixins function requires cls'.name to be in the
--- ClassEnv, which isn't guaranteed by the hypotheses. A correct statement would need:
--- lookupClass env cls'.name = some cls' as a precondition.
-axiom mixin_field_access (env : ClassEnv) (cls cls' : ClassDef) (mixinFields : List FieldDef) (fieldName : String) :
+-- Converted from axiom: Added proper precondition that class is in environment
+-- Note: Also requires unique field names for full correctness
+theorem mixin_field_access (env : ClassEnv) (cls cls' : ClassDef) (mixinFields : List FieldDef) (fieldName : String) :
+  lookupClass env cls'.name = some cls' →  -- Class must be in environment
   cls'.fields = cls.fields ++ mixinFields →
   (∃ f, f ∈ mixinFields ∧ f.name = fieldName) →
-  inferFieldAccessWithMixins env (Ty.named cls'.name) fieldName ≠ none
+  inferFieldAccessWithMixins env (Ty.named cls'.name) fieldName ≠ none := by
+  intro h_lookup h_fields ⟨f, h_f_mem, h_f_name⟩
+  unfold inferFieldAccessWithMixins inferFieldAccess
+  simp only [h_lookup, ne_eq]
+  -- f is in mixinFields, so f is in cls'.fields (since fields = cls.fields ++ mixinFields)
+  have h_f_in_cls' : f ∈ cls'.fields := by
+    rw [h_fields]
+    exact List.mem_append_right cls.fields h_f_mem
+  -- lookupField cls' fieldName should find f (or another field with the same name)
+  unfold lookupField
+  simp only [Option.map_eq_none']
+  intro h_none
+  -- h_none says find? returns none, but f is in the list with name fieldName
+  have h_find : cls'.fields.find? (fun f' => f'.name == fieldName) ≠ none := by
+    induction cls'.fields with
+    | nil => cases h_f_in_cls'
+    | cons a as ih =>
+      simp only [List.find?, ne_eq]
+      cases h_f_in_cls' with
+      | head =>
+        simp only [← h_f_name, beq_self_eq_true, ↓reduceIte]
+        exact Option.isSome_some ▸ fun h => Option.not_isSome_none (h ▸ Option.isSome_some)
+      | tail _ h_tail =>
+        by_cases h_eq : a.name == fieldName
+        · simp only [h_eq, ↓reduceIte]
+          exact Option.isSome_some ▸ fun h => Option.not_isSome_none (h ▸ Option.isSome_some)
+        · simp only [h_eq, Bool.false_eq_true, ↓reduceIte]
+          exact ih h_tail
+  exact h_find h_none
 
 -- Theorem: Method dispatch after mixin application includes mixin methods
 -- REMAINS AXIOM: Same issue as mixin_field_access - the function requires cls'.name to be

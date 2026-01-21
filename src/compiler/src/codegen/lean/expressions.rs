@@ -245,12 +245,19 @@ impl LeanExpr {
                 // Generates: sorry with tracking comment
                 let cond_str = condition.to_lean();
                 if let Some(msg) = message {
-                    format!("-- ADMIT: {} (reason: {})\nhave h_admit : {} := sorry", cond_str, msg, cond_str)
+                    format!(
+                        "-- ADMIT: {} (reason: {})\nhave h_admit : {} := sorry",
+                        cond_str, msg, cond_str
+                    )
                 } else {
                     format!("-- ADMIT (no reason given)\nhave h_admit : {} := sorry", cond_str)
                 }
             }
-            LeanExpr::WhileLoop { condition, body, invariants } => {
+            LeanExpr::WhileLoop {
+                condition,
+                body,
+                invariants,
+            } => {
                 // Generate while loop with invariants as comments/theorems
                 let mut out = String::new();
 
@@ -272,7 +279,12 @@ impl LeanExpr {
                 out.push_str("sorry -- loop translation requires manual verification");
                 out
             }
-            LeanExpr::ForLoop { pattern, iterable, body, invariants } => {
+            LeanExpr::ForLoop {
+                pattern,
+                iterable,
+                body,
+                invariants,
+            } => {
                 // Generate for loop with invariants
                 let mut out = String::new();
 
@@ -618,7 +630,11 @@ impl<'a> ExprTranslator<'a> {
                         result = Some(admit_expr);
                     }
                 }
-                HirStmt::While { condition, body, invariants } => {
+                HirStmt::While {
+                    condition,
+                    body,
+                    invariants,
+                } => {
                     let lean_cond = self.translate(condition)?;
                     let lean_body = self.translate_stmts(body, locals)?;
 
@@ -640,7 +656,12 @@ impl<'a> ExprTranslator<'a> {
                         result = Some(while_expr);
                     }
                 }
-                HirStmt::For { pattern, iterable, body, invariants } => {
+                HirStmt::For {
+                    pattern,
+                    iterable,
+                    body,
+                    invariants,
+                } => {
                     let lean_iterable = self.translate(iterable)?;
                     let lean_body = self.translate_stmts(body, locals)?;
 

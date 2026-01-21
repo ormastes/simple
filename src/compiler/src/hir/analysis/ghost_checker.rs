@@ -140,7 +140,11 @@ impl<'a> GhostChecker<'a> {
             HirStmt::Expr(expr) => {
                 self.check_ghost_expr(expr, func_name);
             }
-            HirStmt::If { condition, then_block, else_block } => {
+            HirStmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
                 self.check_ghost_expr(condition, func_name);
                 for stmt in then_block {
                     self.check_ghost_stmt(stmt, func_name);
@@ -204,10 +208,7 @@ impl<'a> GhostChecker<'a> {
             HirExprKind::Yield(_) | HirExprKind::Await(_) => {
                 self.result.errors.push(GhostError {
                     function: func_name.to_string(),
-                    message: format!(
-                        "Ghost function '{}' has async side effects (yield/await)",
-                        func_name
-                    ),
+                    message: format!("Ghost function '{}' has async side effects (yield/await)", func_name),
                     kind: GhostErrorKind::GhostHasSideEffects,
                 });
             }
@@ -229,7 +230,11 @@ impl<'a> GhostChecker<'a> {
             HirExprKind::Unary { operand, .. } => {
                 self.check_ghost_expr(operand, func_name);
             }
-            HirExprKind::If { condition, then_branch, else_branch } => {
+            HirExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 self.check_ghost_expr(condition, func_name);
                 self.check_ghost_expr(then_branch, func_name);
                 if let Some(else_expr) = else_branch {
@@ -291,7 +296,11 @@ impl<'a> GhostChecker<'a> {
             HirStmt::Expr(expr) => {
                 self.check_non_ghost_expr(expr, func_name, in_contract);
             }
-            HirStmt::If { condition, then_block, else_block } => {
+            HirStmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
                 self.check_non_ghost_expr(condition, func_name, in_contract);
                 for stmt in then_block {
                     self.check_non_ghost_stmt(stmt, func_name, in_contract);
@@ -360,7 +369,11 @@ impl<'a> GhostChecker<'a> {
             HirExprKind::Unary { operand, .. } => {
                 self.check_non_ghost_expr(operand, func_name, in_contract);
             }
-            HirExprKind::If { condition, then_branch, else_branch } => {
+            HirExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 self.check_non_ghost_expr(condition, func_name, in_contract);
                 self.check_non_ghost_expr(then_branch, func_name, in_contract);
                 if let Some(else_expr) = else_branch {

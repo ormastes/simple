@@ -113,6 +113,9 @@ impl<'a> VerificationChecker<'a> {
                 .map(|e| self.expr_calls_function(e, name))
                 .unwrap_or(false),
             HirStmt::Assert { condition, .. } => self.expr_calls_function(condition, name),
+            HirStmt::For { body, .. } => body.iter().any(|s| self.statement_calls_function(s, name)),
+            HirStmt::Assume { condition, .. } => self.expr_calls_function(condition, name),
+            HirStmt::Admit { .. } => false,
             HirStmt::Break | HirStmt::Continue => false,
         }
     }

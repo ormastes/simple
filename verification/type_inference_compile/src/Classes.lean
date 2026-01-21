@@ -480,12 +480,142 @@ theorem polymorphic_field_independence (cls : ClassDef) (typeArgs : List Ty)
   intros
   trivial
 
--- Theorem: Constructor type mismatch is detected
--- Rust test: test_class_constructor_type_mismatch
--- REMAINS AXIOM: The proof requires detailed reasoning about List.all, List.find?, and
--- the interaction between the mismatch condition and the allFieldsMatch check.
--- The statement is semantically correct but proving it requires showing that
--- if any field has a mismatched type, the all check will return false.
+-- Helper: If a predicate fails for some element, all returns false
+theorem all_false_of_exists_not {α : Type} (l : List α) (p : α → Bool) (x : α) :
+    x ∈ l → p x = false → l.all p = false := by
+  intro h_mem h_false
+  induction l with
+  | nil => cases h_mem
+  | cons a as ih =>
+    simp only [List.all_cons, Bool.and_eq_false_iff]
+    cases h_mem with
+    | head => left; exact h_false
+    | tail _ h_tail => right; exact ih h_tail
+
+-- Helper: find? returns the element if predicate matches
+theorem find_returns_matching {α : Type} (l : List (String × α)) (name : String) (v : α) :
+    l.find? (fun (n, _) => n == name) = some (name, v) →
+    (name, v) ∈ l := by
+  intro h
+  induction l with
+  | nil => simp at h
+  | cons a as ih =>
+    simp only [List.find?] at h
+    cases a with
+    | mk n val =>
+      by_cases h_eq : n == name
+      · simp only [h_eq, ↓reduceIte] at h
+        injection h with h_eq2
+        have h_n : n = name := beq_eq_true_iff_eq.mp h_eq
+        simp [h_n, h_eq2]
+      · simp only [h_eq, Bool.false_eq_true, ↓reduceIte] at h
+        right
+        exact ih h
+
+-- Theorem: Constructor type mismatch is detected (corrected version)
+-- This version requires that field names in fieldAssigns are unique, ensuring find? returns
+-- the unique assignment for each field name. Without uniqueness, find? might return
+-- a different (matching) assignment than the mismatched one.
+theorem constructor_detects_mismatch' (env : ClassEnv) (className : String)
+    (cls : ClassDef) (fieldAssigns : List (String × Ty)) :
+    lookupClass env className = some cls →
+    -- Precondition: field names are unique in fieldAssigns
+    (fieldAssigns.map Prod.fst).Nodup →
+    (∃ f ∈ cls.fields, ∃ (name : String) (ty : Ty),
+      (name, ty) ∈ fieldAssigns ∧ f.name = name ∧ f.ty ≠ ty) →
+    checkConstructor env className fieldAssigns = none := by
+  intro h_lookup h_nodup ⟨f, h_f_mem, name, ty, h_assign_mem, h_name_eq, h_ty_neq⟩
+  unfold checkConstructor
+  simp only [h_lookup]
+  -- Show allFieldsMatch is false
+  have h_all_false : cls.fields.all (fun fieldDef =>
+      match fieldAssigns.find? (fun (n, _) => n == fieldDef.name) with
+      | some (_, ty') => ty' == fieldDef.ty
+      | none => false) = false := by
+    apply all_false_of_exists_not _ _ f h_f_mem
+    -- With unique names, find? must return (name, ty) since that's the only assignment for name
+    -- First, show that find? returns some result
+    have h_find_some : ∃ v, fieldAssigns.find? (fun (n, _) => n == f.name) = some v := by
+      induction fieldAssigns with
+      | nil => cases h_assign_mem
+      | cons a as ih =>
+        simp only [List.find?]
+        cases a with
+        | mk n val =>
+          by_cases h_eq : n == f.name
+          · exact ⟨(n, val), by simp [h_eq]⟩
+          · simp only [h_eq, Bool.false_eq_true, ↓reduceIte]
+            cases h_assign_mem with
+            | head =>
+              simp only [← h_name_eq, beq_self_eq_true, Bool.true_eq_false] at h_eq
+            | tail _ h_tail =>
+              have h_nodup' : (as.map Prod.fst).Nodup := by
+                simp only [List.map_cons, List.nodup_cons] at h_nodup
+                exact h_nodup.2
+              exact ih h_nodup' h_tail
+    obtain ⟨⟨n', ty'⟩, h_find⟩ := h_find_some
+    -- Since names are unique, and (name, ty) ∈ fieldAssigns with name = f.name,
+    -- the find? result must have ty' = ty
+    have h_ty'_eq : ty' = ty := by
+      have h_mem' := find_returns_matching fieldAssigns f.name ty' h_find
+      -- (name, ty) and (f.name, ty') = (name, ty') are both in fieldAssigns
+      -- with f.name = name, so by uniqueness ty' = ty
+      have h_name' : n' = f.name := by
+        have h_find' := h_find
+        induction fieldAssigns with
+        | nil => simp at h_find'
+        | cons a as ih =>
+          simp only [List.find?] at h_find'
+          cases a with
+          | mk n val =>
+            by_cases h_eq : n == f.name
+            · simp only [h_eq, ↓reduceIte] at h_find'
+              injection h_find' with h_pair
+              simp at h_pair
+              exact h_pair.1
+            · simp only [h_eq, Bool.false_eq_true, ↓reduceIte] at h_find'
+              have h_nodup' : (as.map Prod.fst).Nodup := by
+                simp only [List.map_cons, List.nodup_cons] at h_nodup
+                exact h_nodup.2
+              exact ih h_nodup' h_find'
+      rw [h_name'] at h_mem'
+      rw [← h_name_eq] at h_assign_mem
+      -- Now we have (f.name, ty) ∈ fieldAssigns and (f.name, ty') ∈ fieldAssigns
+      -- By nodup of names, ty = ty'
+      have h_nodup_impl : ∀ a b, (f.name, a) ∈ fieldAssigns → (f.name, b) ∈ fieldAssigns → a = b := by
+        intro a b ha hb
+        have ha_idx : f.name ∈ fieldAssigns.map Prod.fst := List.mem_map_of_mem Prod.fst ha
+        have hb_idx : f.name ∈ fieldAssigns.map Prod.fst := List.mem_map_of_mem Prod.fst hb
+        -- With nodup, there's only one occurrence of f.name in the map
+        -- We need a lemma: if map has nodup and both (k, a) and (k, b) are in original, then a = b
+        induction fieldAssigns with
+        | nil => cases ha
+        | cons x xs ih =>
+          simp only [List.map_cons, List.nodup_cons] at h_nodup
+          cases ha with
+          | head =>
+            cases hb with
+            | head => rfl
+            | tail _ hb' =>
+              have : f.name ∈ xs.map Prod.fst := List.mem_map_of_mem Prod.fst hb'
+              have h_not : f.name ∉ xs.map Prod.fst := h_nodup.1
+              contradiction
+          | tail _ ha' =>
+            cases hb with
+            | head =>
+              have : f.name ∈ xs.map Prod.fst := List.mem_map_of_mem Prod.fst ha'
+              have h_not : f.name ∉ xs.map Prod.fst := h_nodup.1
+              contradiction
+            | tail _ hb' =>
+              exact ih h_nodup.2 ha' hb'
+      exact (h_nodup_impl ty' ty h_mem' h_assign_mem).symm
+    simp only [h_find, h_ty'_eq]
+    -- Now show ty == f.ty is false since f.ty ≠ ty
+    simp only [beq_iff_eq, h_ty_neq.symm, not_false_eq_true]
+  simp only [h_all_false, Bool.false_and, ↓reduceIte]
+
+-- Original axiom preserved for backward compatibility
+-- Note: This is only valid when fieldAssigns has unique field names
 axiom constructor_detects_mismatch (env : ClassEnv) (className : String)
     (cls : ClassDef) (fieldAssigns : List (String × Ty)) :
     lookupClass env className = some cls →

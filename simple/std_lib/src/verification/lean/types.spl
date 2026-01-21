@@ -13,47 +13,47 @@ import verification.lean.emitter as emitter
 # Lean type representation
 enum LeanType:
     # Primitive Lean type (Int, Nat, Bool, String)
-    Primitive(name: text)
+    Primitive(text)
     # Named type reference
-    Named(name: text)
-    # Structure definition
-    Structure(name: text, fields: List<(text, LeanType)>, deriving: List<text>)
-    # Inductive type definition (enum)
-    Inductive(name: text, variants: List<(text, List<LeanType>)>, deriving: List<text>)
-    # Function type (A -> B)
-    Function(params: List<LeanType>, result: LeanType)
+    Named(text)
+    # Structure definition (name, fields, deriving)
+    Structure(text, List<(text, LeanType)>, List<text>)
+    # Inductive type definition (enum) (name, variants, deriving)
+    Inductive(text, List<(text, List<LeanType>)>, List<text>)
+    # Function type (A -> B) (params, result)
+    Function(List<LeanType>, LeanType)
     # Optional type (Option A)
-    Optional(inner: LeanType)
+    Optional(LeanType)
     # List type (List A)
-    ListType(inner: LeanType)
+    ListType(LeanType)
     # Tuple type (A x B)
-    Tuple(elems: List<LeanType>)
-    # Mixin definition (reusable structure extension)
-    Mixin(name: text, fields: List<(text, LeanType)>, methods: List<(text, LeanType)>, type_params: List<text>)
-    # Subtype/Refinement type (e.g., {x : Int // x > 0})
-    Subtype(name: text, base_type: LeanType, predicate: text)
+    Tuple(List<LeanType>)
+    # Mixin definition (name, fields, methods, type_params)
+    Mixin(text, List<(text, LeanType)>, List<(text, LeanType)>, List<text>)
+    # Subtype/Refinement type (name, base_type, predicate)
+    Subtype(text, LeanType, text)
 
 impl LeanType:
     # Convert to Lean syntax string
     fn to_lean() -> text:
         match self:
-            case Primitive(name): name
-            case Named(name): name
-            case Structure(name, _, _): name
-            case Inductive(name, _, _): name
-            case Mixin(name, _, _, _): name
-            case Subtype(name, _, _): name
-            case Function(params, result):
+            case LeanType.Primitive(name): name
+            case LeanType.Named(name): name
+            case LeanType.Structure(name, _, _): name
+            case LeanType.Inductive(name, _, _): name
+            case LeanType.Mixin(name, _, _, _): name
+            case LeanType.Subtype(name, _, _): name
+            case LeanType.Function(params, result):
                 var parts: List<text> = []
                 for p in params:
                     parts = parts + [p.to_lean()]
                 parts = parts + [result.to_lean()]
                 parts.join(" -> ")
-            case Optional(inner):
+            case LeanType.Optional(inner):
                 "Option {inner.to_lean()}"
-            case ListType(inner):
+            case LeanType.ListType(inner):
                 "List {inner.to_lean()}"
-            case Tuple(elems):
+            case LeanType.Tuple(elems):
                 var parts: List<text> = []
                 for e in elems:
                     parts = parts + [e.to_lean()]
@@ -62,12 +62,13 @@ impl LeanType:
     # Emit structure definition
     fn emit_structure() -> Option<text>:
         match self:
-            case Structure(name, fields, deriving):
+            case LeanType.Structure(name, fields, deriving):
                 var out = "structure {name} where\n"
                 for (field_name, field_type) in fields:
                     out = out + "  {field_name} : {field_type.to_lean()}\n"
                 if deriving.len() > 0:
-                    out = out + "deriving {deriving.join(\", \")}\n"
+                    val comma = ", "
+                    out = out + "deriving " + deriving.join(comma) + "\n"
                 Some(out)
             case _:
                 nil
@@ -75,7 +76,7 @@ impl LeanType:
     # Emit inductive definition
     fn emit_inductive() -> Option<text>:
         match self:
-            case Inductive(name, variants, deriving):
+            case LeanType.Inductive(name, variants, deriving):
                 var out = "inductive {name} where\n"
                 for (variant_name, variant_types) in variants:
                     if variant_types.len() == 0:
@@ -84,9 +85,11 @@ impl LeanType:
                         var types_str: List<text> = []
                         for t in variant_types:
                             types_str = types_str + [t.to_lean()]
-                        out = out + "  | {variant_name} : {types_str.join(\" -> \")} -> {name}\n"
+                        val arrow = " -> "
+                        out = out + "  | {variant_name} : " + types_str.join(arrow) + " -> {name}\n"
                 if deriving.len() > 0:
-                    out = out + "deriving {deriving.join(\", \")}\n"
+                    val comma = ", "
+                    out = out + "deriving " + deriving.join(comma) + "\n"
                 Some(out)
             case _:
                 nil
@@ -94,7 +97,7 @@ impl LeanType:
     # Emit mixin definition
     fn emit_mixin() -> Option<text>:
         match self:
-            case Mixin(name, fields, methods, type_params):
+            case LeanType.Mixin(name, fields, methods, type_params):
                 var out = ""
                 # Generate type parameter list
                 var params = ""
@@ -123,27 +126,29 @@ impl LeanType:
     # Emit subtype definition
     fn emit_subtype() -> Option<text>:
         match self:
-            case Subtype(name, base_type, predicate):
-                Some("/-- Refinement type: {name} --/\ndef {name} : Type := \{x : {base_type.to_lean()} // {predicate}\}\n")
+            case LeanType.Subtype(name, base_type, predicate):
+                # Build the subtype syntax: {x : Type // predicate}
+                val subtype_str = String.from_char_code(123) + "x : " + base_type.to_lean() + " // " + predicate + String.from_char_code(125)
+                Some("/-- Refinement type: {name} --/\ndef {name} : Type := " + subtype_str + "\n")
             case _:
                 nil
 
     # Check if this is a primitive type
     fn is_primitive() -> bool:
         match self:
-            case Primitive(_): true
+            case LeanType.Primitive(_): true
             case _: false
 
     # Check if this is a structure
     fn is_structure() -> bool:
         match self:
-            case Structure(_, _, _): true
+            case LeanType.Structure(_, _, _): true
             case _: false
 
     # Check if this is an inductive
     fn is_inductive() -> bool:
         match self:
-            case Inductive(_, _, _): true
+            case LeanType.Inductive(_, _, _): true
             case _: false
 
 # Simple type representation for translation (high-level)
@@ -154,57 +159,57 @@ enum SimpleType:
     UnitType
     NatType
     FloatType
-    ListType(elem: SimpleType)
-    OptionType(inner: SimpleType)
-    TupleType(elems: List<SimpleType>)
-    FunctionType(params: List<SimpleType>, ret: SimpleType)
-    NamedType(name: text)
+    ListType(SimpleType)
+    OptionType(SimpleType)
+    TupleType(List<SimpleType>)
+    FunctionType(List<SimpleType>, SimpleType)
+    NamedType(text)
 
 impl SimpleType:
     fn to_lean() -> text:
         match self:
-            case IntType: "Int"
-            case BoolType: "Bool"
-            case StringType: "String"
-            case UnitType: "Unit"
-            case NatType: "Nat"
-            case FloatType: "Float"
-            case ListType(e): "List ({e.to_lean()})"
-            case OptionType(i): "Option ({i.to_lean()})"
-            case TupleType(es):
+            case SimpleType.IntType: "Int"
+            case SimpleType.BoolType: "Bool"
+            case SimpleType.StringType: "String"
+            case SimpleType.UnitType: "Unit"
+            case SimpleType.NatType: "Nat"
+            case SimpleType.FloatType: "Float"
+            case SimpleType.ListType(e): "List ({e.to_lean()})"
+            case SimpleType.OptionType(i): "Option ({i.to_lean()})"
+            case SimpleType.TupleType(es):
                 var parts: List<text> = []
                 for e in es:
                     parts = parts + [e.to_lean()]
                 "(" + parts.join(" x ") + ")"
-            case FunctionType(ps, r):
+            case SimpleType.FunctionType(ps, r):
                 var p_strs: List<text> = []
                 for p in ps:
                     p_strs = p_strs + [p.to_lean()]
                 p_strs = p_strs + [r.to_lean()]
                 p_strs.join(" -> ")
-            case NamedType(n): n
+            case SimpleType.NamedType(n): n
 
     fn to_lean_type() -> LeanType:
         match self:
-            case IntType: LeanType.Primitive("Int")
-            case BoolType: LeanType.Primitive("Bool")
-            case StringType: LeanType.Primitive("String")
-            case UnitType: LeanType.Primitive("Unit")
-            case NatType: LeanType.Primitive("Nat")
-            case FloatType: LeanType.Primitive("Float")
-            case ListType(e): LeanType.ListType(e.to_lean_type())
-            case OptionType(i): LeanType.Optional(i.to_lean_type())
-            case TupleType(es):
+            case SimpleType.IntType: LeanType.Primitive("Int")
+            case SimpleType.BoolType: LeanType.Primitive("Bool")
+            case SimpleType.StringType: LeanType.Primitive("String")
+            case SimpleType.UnitType: LeanType.Primitive("Unit")
+            case SimpleType.NatType: LeanType.Primitive("Nat")
+            case SimpleType.FloatType: LeanType.Primitive("Float")
+            case SimpleType.ListType(e): LeanType.ListType(e.to_lean_type())
+            case SimpleType.OptionType(i): LeanType.Optional(i.to_lean_type())
+            case SimpleType.TupleType(es):
                 var lean_elems: List<LeanType> = []
                 for e in es:
                     lean_elems = lean_elems + [e.to_lean_type()]
                 LeanType.Tuple(lean_elems)
-            case FunctionType(ps, r):
+            case SimpleType.FunctionType(ps, r):
                 var lean_params: List<LeanType> = []
                 for p in ps:
                     lean_params = lean_params + [p.to_lean_type()]
                 LeanType.Function(lean_params, r.to_lean_type())
-            case NamedType(n): LeanType.Named(n)
+            case SimpleType.NamedType(n): LeanType.Named(n)
 
 # Field definition
 class FieldDef:

@@ -211,17 +211,25 @@ impl Lowerer {
                 let condition = self.lower_expr(&while_stmt.condition, ctx)?;
                 let body = self.lower_block(&while_stmt.body, ctx)?;
                 let invariants = self.lower_contract_clauses(&while_stmt.invariants, ctx)?;
-                Ok(vec![HirStmt::While { condition, body, invariants }])
+                Ok(vec![HirStmt::While {
+                    condition,
+                    body,
+                    invariants,
+                }])
             }
 
             Node::For(for_stmt) => {
                 // Extract pattern name (simple case: single identifier)
-                let pattern = Self::extract_pattern_name(&for_stmt.pattern)
-                    .unwrap_or_else(|| "item".to_string());
+                let pattern = Self::extract_pattern_name(&for_stmt.pattern).unwrap_or_else(|| "item".to_string());
                 let iterable = self.lower_expr(&for_stmt.iterable, ctx)?;
                 let body = self.lower_block(&for_stmt.body, ctx)?;
                 let invariants = self.lower_contract_clauses(&for_stmt.invariants, ctx)?;
-                Ok(vec![HirStmt::For { pattern, iterable, body, invariants }])
+                Ok(vec![HirStmt::For {
+                    pattern,
+                    iterable,
+                    body,
+                    invariants,
+                }])
             }
 
             Node::Loop(loop_stmt) => {
