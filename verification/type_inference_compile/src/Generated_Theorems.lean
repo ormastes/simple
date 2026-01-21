@@ -9,8 +9,8 @@
   All proofs are complete - NO sorry or axiom.
 -/
 
-import TypeInferenceCompile.Generated_Types
-import TypeInferenceCompile.Generated_Lookups
+import Generated_Types
+import Generated_Lookups
 
 -- ════════════════════════════════════════════════════════════════
 -- Empty Lookup Theorems
@@ -220,7 +220,7 @@ theorem trait_bound_satisfaction (registry : ImplRegistry) (ty : Ty) (traitName 
   simp [h]
 
 /-- Nested bounds propagate -/
-theorem nested_bounds_propagate (registry : ImplRegistry) (ty : Ty)
+theorem nested_bounds_propagate (registry : ImplRegistry) (_ty : Ty)
     (innerBounds outerBounds : List (Ty × String)) :
     checkTraitBounds registry innerBounds = true →
     checkTraitBounds registry outerBounds = true →

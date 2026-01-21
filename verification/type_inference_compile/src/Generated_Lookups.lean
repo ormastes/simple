@@ -7,7 +7,7 @@
   DO NOT EDIT: This file is auto-generated. Changes will be overwritten.
 -/
 
-import TypeInferenceCompile.Generated_Types
+import Generated_Types
 
 -- ════════════════════════════════════════════════════════════════
 -- Environment Type Aliases
