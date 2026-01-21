@@ -86,15 +86,13 @@ impl LeanType {
                 name,
                 base_type,
                 predicate,
-            } => {
-                Some(format!(
-                    "/-- Refinement type: {} --/\ndef {} : Type := {{x : {} // {}}}\n",
-                    name,
-                    name,
-                    base_type.to_lean(),
-                    predicate
-                ))
-            }
+            } => Some(format!(
+                "/-- Refinement type: {} --/\ndef {} : Type := {{x : {} // {}}}\n",
+                name,
+                name,
+                base_type.to_lean(),
+                predicate
+            )),
             _ => None,
         }
     }

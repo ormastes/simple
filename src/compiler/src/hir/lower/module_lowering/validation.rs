@@ -61,8 +61,14 @@ impl Lowerer {
                     }
                 }
             }
-            HirStmt::While { condition, body } => {
+            HirStmt::While { condition, body, .. } => {
                 self.check_expr_for_async_calls(condition, caller_name, function_suspension)?;
+                for s in body {
+                    self.check_stmt_for_async_calls(s, caller_name, function_suspension)?;
+                }
+            }
+            HirStmt::For { iterable, body, .. } => {
+                self.check_expr_for_async_calls(iterable, caller_name, function_suspension)?;
                 for s in body {
                     self.check_stmt_for_async_calls(s, caller_name, function_suspension)?;
                 }
@@ -72,7 +78,9 @@ impl Lowerer {
                     self.check_stmt_for_async_calls(s, caller_name, function_suspension)?;
                 }
             }
-            HirStmt::Assert { condition, .. } => {
+            HirStmt::Assert { condition, .. }
+            | HirStmt::Assume { condition, .. }
+            | HirStmt::Admit { condition, .. } => {
                 self.check_expr_for_async_calls(condition, caller_name, function_suspension)?;
             }
             HirStmt::Let { value: None, .. } | HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue => {}

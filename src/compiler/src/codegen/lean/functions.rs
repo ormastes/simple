@@ -47,6 +47,11 @@ impl LeanFunction {
             }
         }
 
+        // Ghost attribute for verification-only functions
+        if self.is_ghost {
+            out.push_str("@[ghost] ");
+        }
+
         // Partial annotation if needed
         if self.is_partial {
             out.push_str("partial ");
@@ -180,6 +185,7 @@ impl<'a> FunctionTranslator<'a> {
             is_partial,
             doc: None, // No doc extraction yet
             termination_by,
+            is_ghost: func.is_ghost,
         })
     }
 
@@ -231,6 +237,7 @@ mod tests {
             is_partial: false,
             doc: Some("Add two integers".to_string()),
             termination_by: None,
+            is_ghost: false,
         };
 
         let output = func.to_lean();

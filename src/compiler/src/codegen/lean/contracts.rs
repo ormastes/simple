@@ -489,10 +489,7 @@ mod tests {
                 "hn".to_string(),
                 LeanProp::Ge(LeanExpr::Var("n".to_string()), LeanExpr::Lit(LeanLit::Int(0))),
             )],
-            conclusion: LeanProp::Gt(
-                LeanExpr::Var("result".to_string()),
-                LeanExpr::Lit(LeanLit::Int(0)),
-            ),
+            conclusion: LeanProp::Gt(LeanExpr::Var("result".to_string()), LeanExpr::Lit(LeanLit::Int(0))),
             proof: None,
             doc: Some("Factorial is always positive".to_string()),
             termination_by: Some(LeanExpr::Var("n".to_string())),

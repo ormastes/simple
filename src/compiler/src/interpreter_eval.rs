@@ -797,13 +797,16 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::ArchitectureRule(_)
             | Node::MockDecl(_)
             | Node::Mixin(_)
-            | Node::LeanBlock(_) => {
+            | Node::LeanBlock(_)
+            | Node::Assume(_)
+            | Node::Admit(_) => {
                 // Module system is handled by the module resolver
                 // HandlePool is processed at compile time for allocation
                 // Bitfield is processed at compile time for bit-level field access
                 // AOP nodes are declarative configuration handled at compile time
                 // Mixin composition is handled at compile time
                 // LeanBlock is embedded Lean code for verification (not runtime)
+                // Assume/Admit are verification statements (similar to assert)
                 // These are no-ops in the interpreter
             }
         }

@@ -652,12 +652,8 @@ fn generate_memory_safety_lean(args: &[String]) -> i32 {
                 }
                 simple_compiler::hir::LowerError::LifetimeViolations(v) => {
                     let module = simple_compiler::hir::HirModule::new();
-                    let lean = simple_compiler::codegen::lean::generate_memory_safety_lean(
-                        &module,
-                        None,
-                        None,
-                        Some(v.len()),
-                    );
+                    let lean =
+                        simple_compiler::codegen::lean::generate_memory_safety_lean(&module, None, None, Some(v.len()));
                     println!("{}", lean);
                     return 0;
                 }
@@ -780,11 +776,7 @@ fn verify_lean_files(opts: &GenLeanOptions) -> i32 {
                         res.exit_code.unwrap_or(-1)
                     );
                 } else {
-                    println!(
-                        "[fail]   {} (exit {})",
-                        path,
-                        res.exit_code.unwrap_or(-1)
-                    );
+                    println!("[fail]   {} (exit {})", path, res.exit_code.unwrap_or(-1));
                     if !res.stderr.is_empty() {
                         println!("{}", res.stderr);
                     }

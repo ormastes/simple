@@ -46,7 +46,11 @@ fn collect_old_expressions(expr: &HirExpr, results: &mut Vec<HirExpr>) {
             collect_old_expressions(index, results);
         }
         // Conditionals
-        HirExprKind::If { condition, then_branch, else_branch } => {
+        HirExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
             collect_old_expressions(condition, results);
             collect_old_expressions(then_branch, results);
             if let Some(else_expr) = else_branch {

@@ -48,12 +48,12 @@ impl<'a> Parser<'a> {
     fn parse_optional_message(&mut self, context: &str) -> Result<Option<String>, ParseError> {
         if self.check(&TokenKind::Comma) {
             self.advance(); // consume comma
-            self.parse_string_message()
-                .map(Some)
-                .map_err(|_| ParseError::syntax_error_with_span(
+            self.parse_string_message().map(Some).map_err(|_| {
+                ParseError::syntax_error_with_span(
                     format!("expected string message after comma in {}", context),
                     self.current.span,
-                ))
+                )
+            })
         } else {
             Ok(None)
         }

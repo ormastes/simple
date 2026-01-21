@@ -186,9 +186,7 @@ impl LeanEmitter {
         // Emit import if present
         if let Some(ref import_path) = block.import_path {
             // Convert path to Lean import format
-            let lean_import = import_path
-                .trim_end_matches(".lean")
-                .replace('/', ".");
+            let lean_import = import_path.trim_end_matches(".lean").replace('/', ".");
             self.emit_line(&format!("-- import «{}»", lean_import));
         }
 
@@ -446,6 +444,7 @@ mod tests {
             is_partial: false,
             doc: None,
             termination_by: None,
+            is_ghost: false,
         };
 
         emitter.emit_function(&func);
@@ -477,6 +476,7 @@ mod tests {
                 is_partial: false,
                 doc: Some("Calculate vector magnitude".to_string()),
                 termination_by: None,
+                is_ghost: false,
             }],
             theorems: vec![],
             invariants: vec![],
