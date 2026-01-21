@@ -11,6 +11,7 @@
 
 use crate::db_lock::FileLock;
 use serde::{Deserialize, Serialize};
+use simple_sdn::{parse_document, SdnValue};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -162,29 +163,234 @@ impl BugRecord {
     }
 }
 
-/// Load bug database from JSON file
+/// Load bug database from SDN file
 pub fn load_bug_db(path: &Path) -> Result<BugDb, String> {
     if !path.exists() {
         return Ok(BugDb::new());
     }
 
+    let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
     let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&content).map_err(|e| e.to_string())
+
+    // Try SDN format first, fall back to JSON for backward compatibility
+    if let Ok(doc) = parse_document(&content) {
+        parse_bug_db_sdn(&doc)
+    } else {
+        // Fallback to JSON format for existing databases
+        serde_json::from_str(&content).map_err(|e| e.to_string())
+    }
 }
 
-/// Save bug database to JSON file (with file locking)
+/// Parse bug database from SDN document
+fn parse_bug_db_sdn(doc: &simple_sdn::SdnDocument) -> Result<BugDb, String> {
+    let root = doc.root();
+    let bugs_table = match root {
+        SdnValue::Table { .. } => Some(root),
+        SdnValue::Dict(dict) => dict.get("bugs"),
+        _ => None,
+    };
+
+    let mut db = BugDb::new();
+
+    if let Some(SdnValue::Table { fields: Some(fields), rows, .. }) = bugs_table {
+        for row in rows {
+            if row.len() < fields.len() {
+                continue; // Skip malformed rows
+            }
+
+            // Helper to get field value
+            let get_field = |name: &str| -> String {
+                fields.iter().position(|f| f == name)
+                    .and_then(|idx| row.get(idx))
+                    .map(|v| match v {
+                        SdnValue::String(s) => s.clone(),
+                        SdnValue::Int(n) => n.to_string(),
+                        SdnValue::Float(f) => f.to_string(),
+                        SdnValue::Bool(b) => b.to_string(),
+                        _ => String::new(),
+                    })
+                    .unwrap_or_default()
+            };
+
+            let bug_id = get_field("bug_id");
+            if bug_id.is_empty() { continue; }
+
+            let status_str = get_field("status");
+            let status = match status_str.as_str() {
+                "open" => BugStatus::Open,
+                "inprogress" | "in_progress" => BugStatus::InProgress,
+                "fixed" => BugStatus::Fixed,
+                "closed" => BugStatus::Closed,
+                "wontfix" | "wont_fix" => BugStatus::WontFix,
+                _ => BugStatus::Open,
+            };
+
+            let priority_str = get_field("priority");
+            let priority = match priority_str.as_str() {
+                "P0" => Priority::P0,
+                "P1" => Priority::P1,
+                "P2" => Priority::P2,
+                "P3" => Priority::P3,
+                _ => Priority::P2,
+            };
+
+            let severity_str = get_field("severity");
+            let severity = match severity_str.as_str() {
+                "critical" => Severity::Critical,
+                "major" => Severity::Major,
+                "minor" => Severity::Minor,
+                "trivial" => Severity::Trivial,
+                _ => Severity::Minor,
+            };
+
+            // Parse JSON-encoded complex fields
+            let timing_impact: Option<TimingImpact> = {
+                let s = get_field("timing_impact");
+                if s.is_empty() { None } else { serde_json::from_str(&s).ok() }
+            };
+
+            let build_impact: Option<BuildImpact> = {
+                let s = get_field("build_impact");
+                if s.is_empty() { None } else { serde_json::from_str(&s).ok() }
+            };
+
+            let resolution: Option<BugResolution> = {
+                let s = get_field("resolution");
+                if s.is_empty() { None } else { serde_json::from_str(&s).ok() }
+            };
+
+            let reproducible_by: Vec<String> = get_field("reproducible_by")
+                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let related_tests: Vec<String> = get_field("related_tests")
+                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let related_bugs: Vec<String> = get_field("related_bugs")
+                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let related_features: Vec<String> = get_field("related_features")
+                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let tags: Vec<String> = get_field("tags")
+                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+
+            let assignee_str = get_field("assignee");
+            let assignee = if assignee_str.is_empty() { None } else { Some(assignee_str) };
+            let reporter_str = get_field("reporter");
+            let reporter = if reporter_str.is_empty() { None } else { Some(reporter_str) };
+
+            let record = BugRecord {
+                bug_id: bug_id.clone(),
+                title: get_field("title"),
+                status,
+                priority,
+                severity,
+                description: get_field("description"),
+                reproducible_by,
+                reproduction_steps: get_field("reproduction_steps"),
+                timing_impact,
+                build_impact,
+                related_tests,
+                related_bugs,
+                related_features,
+                created: get_field("created"),
+                updated: get_field("updated"),
+                assignee,
+                reporter,
+                tags,
+                resolution,
+                valid: get_field("valid") == "true",
+            };
+
+            db.bugs.insert(bug_id, record);
+        }
+    }
+
+    Ok(db)
+}
+
+/// Save bug database to SDN file (with file locking)
 pub fn save_bug_db(path: &Path, db: &BugDb) -> Result<(), String> {
-    // Create directory if it doesn't exist
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    // Acquire exclusive lock
     let _lock = FileLock::acquire(path, 10).map_err(|e| format!("Failed to acquire lock: {:?}", e))?;
 
-    // Serialize and write
-    let content = serde_json::to_string_pretty(db).map_err(|e| e.to_string())?;
-    fs::write(path, content).map_err(|e| e.to_string())?;
+    let mut content = String::new();
+    content.push_str("bugs |bug_id, title, description, status, priority, severity, reproducible_by, reproduction_steps, timing_impact, build_impact, related_tests, related_bugs, related_features, created, updated, assignee, reporter, tags, resolution, valid|\n");
+
+    let mut sorted_bugs: Vec<_> = db.bugs.values().collect();
+    sorted_bugs.sort_by(|a, b| a.bug_id.cmp(&b.bug_id));
+
+    for bug in sorted_bugs {
+        let status_str = match bug.status {
+            BugStatus::Open => "open",
+            BugStatus::InProgress => "in_progress",
+            BugStatus::Fixed => "fixed",
+            BugStatus::Closed => "closed",
+            BugStatus::WontFix => "wont_fix",
+        };
+
+        let priority_str = match bug.priority {
+            Priority::P0 => "P0",
+            Priority::P1 => "P1",
+            Priority::P2 => "P2",
+            Priority::P3 => "P3",
+        };
+
+        let severity_str = match bug.severity {
+            Severity::Critical => "critical",
+            Severity::Major => "major",
+            Severity::Minor => "minor",
+            Severity::Trivial => "trivial",
+        };
+
+        let timing_impact_json = bug.timing_impact.as_ref()
+            .map(|t| serde_json::to_string(t).unwrap_or_default())
+            .unwrap_or_default();
+        let build_impact_json = bug.build_impact.as_ref()
+            .map(|b| serde_json::to_string(b).unwrap_or_default())
+            .unwrap_or_default();
+        let resolution_json = bug.resolution.as_ref()
+            .map(|r| serde_json::to_string(r).unwrap_or_default())
+            .unwrap_or_default();
+
+        let quote = |s: &str| {
+            if s.is_empty() || s.contains(',') || s.contains('"') || s.contains('\n') {
+                format!("\"{}\"", s.replace("\"", "\\\"").replace("\n", "\\n"))
+            } else {
+                s.to_string()
+            }
+        };
+
+        let row = vec![
+            quote(&bug.bug_id),
+            quote(&bug.title),
+            quote(&bug.description),
+            quote(status_str),
+            quote(priority_str),
+            quote(severity_str),
+            quote(&bug.reproducible_by.join(",")),
+            quote(&bug.reproduction_steps),
+            quote(&timing_impact_json),
+            quote(&build_impact_json),
+            quote(&bug.related_tests.join(",")),
+            quote(&bug.related_bugs.join(",")),
+            quote(&bug.related_features.join(",")),
+            quote(&bug.created),
+            quote(&bug.updated),
+            quote(&bug.assignee.clone().unwrap_or_default()),
+            quote(&bug.reporter.clone().unwrap_or_default()),
+            quote(&bug.tags.join(",")),
+            quote(&resolution_json),
+            bug.valid.to_string(),
+        ];
+
+        content.push_str("    ");
+        content.push_str(&row.join(", "));
+        content.push('\n');
+    }
+
+    let temp_path = path.with_extension("sdn.tmp");
+    fs::write(&temp_path, &content).map_err(|e| e.to_string())?;
+    fs::rename(&temp_path, path).map_err(|e| e.to_string())?;
 
     Ok(())
 }

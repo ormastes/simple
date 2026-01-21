@@ -169,6 +169,17 @@ pub use channels::{
 
 // Re-export synchronization primitives FFI functions
 pub use sync::{
+    // Atomic
+    rt_atomic_compare_exchange,
+    rt_atomic_fetch_add,
+    rt_atomic_fetch_and,
+    rt_atomic_fetch_or,
+    rt_atomic_fetch_sub,
+    rt_atomic_free,
+    rt_atomic_load,
+    rt_atomic_new,
+    rt_atomic_store,
+    rt_atomic_swap,
     // Barrier
     rt_barrier_free,
     rt_barrier_new,
@@ -200,7 +211,7 @@ pub use sync::{
 };
 
 // Re-export synchronization types
-pub use sync::{RuntimeBarrier, RuntimeMutex, RuntimeRwLock, RuntimeSemaphore};
+pub use sync::{RuntimeAtomic, RuntimeBarrier, RuntimeMutex, RuntimeRwLock, RuntimeSemaphore};
 
 // Re-export async/generator FFI functions
 pub use async_gen::{

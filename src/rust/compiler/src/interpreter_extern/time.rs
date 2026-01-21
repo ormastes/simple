@@ -21,6 +21,22 @@ pub fn rt_time_now_seconds(_args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Get current time as Unix timestamp (integer seconds since epoch)
+///
+/// Callable from Simple as: `_current_time_unix()`
+///
+/// # Arguments
+/// * `args` - Evaluated arguments (none expected)
+///
+/// # Returns
+/// * i64 representing seconds since Unix epoch (integer)
+pub fn _current_time_unix(_args: &[Value]) -> Result<Value, CompileError> {
+    unsafe {
+        let time = simple_runtime::value::rt_time_now_seconds();
+        Ok(Value::Int(time as i64))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -164,6 +164,29 @@ See `/coding` skill for full details.
 - ✅ Only delete TODO comment when code implementing that feature is complete
 - 📊 **Status**: See `doc/report/todo_status_2026-01-16.md`
 
+### Config Files and Data Format
+- ✅ **USE SDN format** for all config/data files: `*.sdn`
+- ❌ **NEVER use JSON** - use SDN table format instead
+- ❌ **NEVER use TOML/YAML** - use SDN table format instead
+- 📖 **SDN Parser**: Use `simple_sdn::parse_document()` from `simple_sdn` crate
+- 📊 **Examples**: `doc/todo/todo_db.sdn`, `doc/feature/feature_db.sdn`
+
+**Good Example (SDN table format):**
+```sdn
+todos |id, keyword, area, priority, description, file, line|
+    0, TODO, doc, P1, "Add examples", README.md, 42
+    1, FIXME, runtime, P0, "Fix leak", gc.rs, 123
+```
+
+**Bad Example (JSON - DO NOT USE):**
+```json
+{
+  "todos": [
+    {"id": "0", "keyword": "TODO", ...}
+  ]
+}
+```
+
 ### Report
 - **DO NOT ADD REPORT TO JJ** unless request it. See `doc/report/` for more details.
 
@@ -237,6 +260,132 @@ make check-full    # + coverage + duplication
 cargo test --workspace
 ./target/debug/simple script.spl
 ```
+
+---
+
+## Test Filtering and Test Types
+
+### Test Types
+
+| Type | Description | Markers | Auto-Ignored | Location |
+|------|-------------|---------|--------------|----------|
+| **Regular Tests** | Standard unit/integration tests | `it "..."`, `test "..."` | No | `*_spec.spl`, `*_test.spl` |
+| **Slow Tests** | Long-running tests (>5s) | `slow_it "..."` | **Yes** (#[ignore]) | `*_spec.spl` |
+| **Skipped Tests** | Not yet implemented features | Tag: `skip` | No | Any test file |
+| **Rust Doc-Tests** | Executable documentation | Doc comments | Some | Rust source files |
+| **Rust #[ignore] Tests** | Manually ignored Rust tests | `#[ignore]` | **Yes** | Rust test files |
+
+### Listing Tests
+
+```bash
+# List all tests without running
+./target/debug/simple test --list
+
+# List tests with tags displayed
+./target/debug/simple test --list --show-tags
+
+# List only ignored tests (at Rust level)
+./target/debug/simple test --list-ignored
+
+# Count tests by type
+./target/debug/simple test --list | wc -l              # Total tests
+./target/debug/simple test --list-ignored | wc -l     # Ignored tests
+```
+
+### Running Specific Test Types
+
+```bash
+# Run all tests (excludes slow tests by default)
+./target/debug/simple test
+
+# Run only slow tests
+./target/debug/simple test --only-slow
+
+# Run only skipped tests (usually fail - they're unimplemented)
+./target/debug/simple test --only-skipped
+
+# Run tests matching a pattern
+./target/debug/simple test pattern_here
+
+# Run tests from specific file
+./target/debug/simple test path/to/test_spec.spl
+
+# Run with tag filtering (AND logic)
+./target/debug/simple test --tag=integration --tag=database
+```
+
+### Doc-Tests (Rust)
+
+```bash
+# Run all doc-tests (workspace-wide)
+cargo test --doc --workspace
+
+# Run doc-tests for specific crate
+cargo test --doc -p simple-driver
+cargo test --doc -p arch_test
+cargo test --doc -p simple-compiler
+
+# Count total ignored doc-tests
+cargo test --doc --workspace 2>&1 | grep " ... ignored$" | wc -l
+```
+
+### Test Markers Explained
+
+**Simple Language Tests:**
+- `it "description"` - Regular test (runs by default)
+- `slow_it "description"` - Slow test (generates `#[ignore]`, run with `--only-slow`)
+- Tags: `skip`, `integration`, `unit`, custom tags
+
+**Rust Doc-Tests:**
+- ` ```rust` - Executable doc-test
+- ` ```ignore` - Ignored (not recommended - fix instead)
+- ` ```no_run` - Compile-only (for runtime-dependent examples)
+- ` ```text` - Not a code block (for examples)
+
+### Test Filtering Flags
+
+| Flag | Effect | Use Case |
+|------|--------|----------|
+| `--list` | List tests without running | See available tests |
+| `--list-ignored` | List ignored tests | Find tests with #[ignore] |
+| `--show-tags` | Show tags in output | Debug tag filtering |
+| `--only-slow` | Run only slow_it() tests | Run long tests separately |
+| `--only-skipped` | Run only skip-tagged tests | Check unimplemented features |
+| `--tag=name` | Filter by tag | Run specific test categories |
+
+### Examples
+
+```bash
+# Development workflow
+./target/debug/simple test                    # Quick feedback (excludes slow)
+./target/debug/simple test --only-slow        # Before commit (run slow tests)
+cargo test --doc --workspace                  # Verify doc examples
+
+# Investigation
+./target/debug/simple test --list --show-tags           # See all tests with tags
+./target/debug/simple test --only-skipped --list        # See unimplemented features
+cargo test --doc -p simple-driver 2>&1 | grep ignored   # Check ignored doc-tests
+
+# Targeted testing
+./target/debug/simple test my_feature         # Run tests matching "my_feature"
+./target/debug/simple test --tag=integration  # Run integration tests only
+```
+
+### Current Test Statistics
+
+- **Total Tests**: 7,909 (Simple language tests)
+- **Ignored Rust Tests**: 2 (regeneration_spec.spl - 3 slow_it tests)
+- **Skipped Tests**: 1,241 (unimplemented features)
+- **Doc-Tests Ignored**: 31 (down from 43, across all crates)
+  - simple-driver: 0 ignored (✅ all fixed)
+  - arch_test: 0 ignored (✅ all fixed)
+  - simple-compiler: 4 ignored
+  - simple-runtime: 10 ignored
+  - Other crates: 17 ignored
+
+**Status Reports:**
+- Test results: `doc/test/test_result.md` (updated every test run)
+- Doc-test fixes: `doc/report/doctest_fixes_final_2026-01-21.md`
 
 ---
 

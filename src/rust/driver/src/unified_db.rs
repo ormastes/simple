@@ -33,12 +33,55 @@ pub trait Record: Clone {
 /// Generic database for any Record type
 ///
 /// Handles all IO, locking, and synchronization for SDN-backed databases.
-/// Usage:
-/// ```ignore
-/// let db: Database<MyRecord> = Database::load(path)?;
-/// let record = db.get("id")?;
-/// db.insert(record)?;
-/// db.save()?;
+///
+/// # Examples
+///
+/// ```
+/// use simple_driver::unified_db::{Database, Record};
+///
+/// #[derive(Clone, Debug)]
+/// struct MyRecord {
+///     id: String,
+///     value: String,
+/// }
+///
+/// impl Record for MyRecord {
+///     fn id(&self) -> String {
+///         self.id.clone()
+///     }
+///
+///     fn table_name() -> &'static str {
+///         "records"
+///     }
+///
+///     fn from_sdn_row(row: &[String]) -> Result<Self, String> {
+///         Ok(MyRecord {
+///             id: row.get(0).cloned().unwrap_or_default(),
+///             value: row.get(1).cloned().unwrap_or_default(),
+///         })
+///     }
+///
+///     fn to_sdn_row(&self) -> Vec<String> {
+///         vec![self.id.clone(), self.value.clone()]
+///     }
+/// }
+///
+/// // Create a new database
+/// let mut db: Database<MyRecord> = Database::new("/tmp/test_db.sdn");
+///
+/// // Insert a record
+/// let record = MyRecord {
+///     id: "1".to_string(),
+///     value: "test".to_string(),
+/// };
+/// db.insert(record);
+///
+/// // Retrieve the record
+/// assert!(db.get("1").is_some());
+/// assert_eq!(db.get("1").unwrap().value, "test");
+///
+/// // Count records
+/// assert_eq!(db.count(), 1);
 /// ```
 pub struct Database<T: Record> {
     /// In-memory records indexed by ID

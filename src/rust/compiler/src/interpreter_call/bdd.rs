@@ -223,26 +223,33 @@ pub(super) fn eval_bdd_builtin(
 
             if indent == 0 {
                 BDD_LAZY_VALUES.with(|cell| cell.borrow_mut().clear());
-                let (passed, failed) = BDD_COUNTS.with(|cell| {
-                    let counts = cell.borrow();
-                    (counts.0, counts.1)
-                });
-                let total = passed + failed;
-                println!();
-                if failed == 0 {
-                    println!(
-                        "\x1b[32m{} example{}, 0 failures\x1b[0m",
-                        total,
-                        if total == 1 { "" } else { "s" }
-                    );
-                } else {
-                    println!(
-                        "\x1b[31m{} example{}, {} failure{}\x1b[0m",
-                        total,
-                        if total == 1 { "" } else { "s" },
-                        failed,
-                        if failed == 1 { "" } else { "s" }
-                    );
+
+                // Skip summary in list mode
+                let test_mode = std::env::var("SIMPLE_TEST_MODE").unwrap_or_default();
+                let list_mode = test_mode == "list";
+
+                if !list_mode {
+                    let (passed, failed) = BDD_COUNTS.with(|cell| {
+                        let counts = cell.borrow();
+                        (counts.0, counts.1)
+                    });
+                    let total = passed + failed;
+                    println!();
+                    if failed == 0 {
+                        println!(
+                            "\x1b[32m{} example{}, 0 failures\x1b[0m",
+                            total,
+                            if total == 1 { "" } else { "s" }
+                        );
+                    } else {
+                        println!(
+                            "\x1b[31m{} example{}, {} failure{}\x1b[0m",
+                            total,
+                            if total == 1 { "" } else { "s" },
+                            failed,
+                            if failed == 1 { "" } else { "s" }
+                        );
+                    }
                 }
                 BDD_COUNTS.with(|cell| *cell.borrow_mut() = (0, 0));
             }
@@ -275,6 +282,19 @@ pub(super) fn eval_bdd_builtin(
                     *cached = None;
                 }
             });
+
+            // Check for list mode - skip test execution if SIMPLE_TEST_MODE=list
+            let test_mode = std::env::var("SIMPLE_TEST_MODE").unwrap_or_default();
+            let list_mode = test_mode == "list";
+
+            if list_mode {
+                // List mode - just print test name and skip execution
+                let indent = BDD_INDENT.with(|cell| *cell.borrow());
+                let indent_str = "  ".repeat(indent);
+                println!("{}{}", indent_str, name_str);
+                BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = false);
+                return Ok(Some(Value::Nil));
+            }
 
             let before_hooks: Vec<Value> =
                 BDD_BEFORE_EACH.with(|cell| cell.borrow().iter().flat_map(|level| level.clone()).collect());

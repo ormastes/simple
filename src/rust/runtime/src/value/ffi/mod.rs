@@ -103,6 +103,9 @@ pub mod regex;
 // Phase 13: Sandbox operations
 pub mod sandbox;
 
+// Phase 14: Random number generation
+pub mod random;
+
 // Re-export all public FFI functions for backward compatibility
 // Phase 1
 pub use equality::*;
@@ -152,3 +155,6 @@ pub use regex::*;
 
 // Phase 13
 pub use sandbox::*;
+
+// Phase 14
+pub use random::*;

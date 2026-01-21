@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::test_db::{self, TestStatus, TestFailure};
-use super::types::TestFileResult;
+use super::types::{TestFileResult, DebugLevel, debug_log};
 
 /// Update test database from test results
 pub fn update_test_database(
@@ -15,8 +15,14 @@ pub fn update_test_database(
 ) -> Result<(), String> {
     let db_path = Path::new("doc/test/test_db.sdn");
 
+    debug_log!(DebugLevel::Basic, "TestDB", "Updating test database: {}", db_path.display());
+    debug_log!(DebugLevel::Detailed, "TestDB", "  Updating {} test records", test_files.len());
+
     // Load or create test database
     let mut test_db = test_db::load_test_db(db_path).unwrap_or_else(|_| test_db::TestDb::new());
+
+    debug_log!(DebugLevel::Detailed, "TestDB", "  Loaded existing database with {} records",
+        test_db.records.len());
 
     // Update each test result
     for (test_path, result) in test_files.iter().zip(results.iter()) {
@@ -40,6 +46,11 @@ pub fn update_test_database(
         let (status, failure) = convert_result_to_db(result);
         let duration_ms = result.duration_ms as f64;
 
+        debug_log!(DebugLevel::Trace, "TestDB", "  Test: {}", test_id);
+        debug_log!(DebugLevel::Trace, "TestDB", "    Status: {:?}", status);
+        debug_log!(DebugLevel::Trace, "TestDB", "    Duration: {}ms", duration_ms);
+        debug_log!(DebugLevel::Trace, "TestDB", "    Category: {}", category);
+
         test_db::update_test_result(
             &mut test_db,
             &test_id,
@@ -53,12 +64,16 @@ pub fn update_test_database(
         );
     }
 
+    debug_log!(DebugLevel::Detailed, "TestDB", "  Total records in database: {}", test_db.records.len());
+
     // Save updated database
     test_db::save_test_db(db_path, &test_db)?;
+    debug_log!(DebugLevel::Basic, "TestDB", "Saved test database to: {}", db_path.display());
 
     // Generate test result documentation
     let doc_dir = Path::new("doc/test");
     test_db::generate_test_result_docs(&test_db, doc_dir)?;
+    debug_log!(DebugLevel::Basic, "TestDB", "Generated test result documentation in: {}", doc_dir.display());
 
     Ok(())
 }
@@ -95,8 +110,13 @@ fn convert_result_to_db(result: &TestFileResult) -> (TestStatus, Option<TestFail
             stack_trace: None,
         };
         (TestStatus::Failed, Some(failure))
+    } else if result.ignored > 0 {
+        // Tests were ignored (intentionally disabled with ignore_it)
+        (TestStatus::Ignored, None)
     } else if result.passed > 0 {
         (TestStatus::Passed, None)
+    } else if result.skipped > 0 {
+        (TestStatus::Skipped, None)
     } else {
         (TestStatus::Skipped, None)
     }

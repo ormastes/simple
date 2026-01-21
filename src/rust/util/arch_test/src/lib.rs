@@ -11,18 +11,28 @@
 //!
 //! ## Example
 //!
-//! ```rust,ignore
-//! use arch_test::{Architecture, Layer, AccessRule};
+//! ```no_run
+//! use arch_test::{Architecture, MayOnlyAccess, MayNotAccess, MayNotBeAccessedBy};
+//! use std::path::Path;
 //!
 //! let arch = Architecture::new()
 //!     .layer("presentation", &["src/ui/**", "src/controllers/**"])
 //!     .layer("business", &["src/services/**", "src/domain/**"])
 //!     .layer("data", &["src/repos/**", "src/models/**"])
-//!     .rule(Layer("presentation").may_only_access(&["business"]))
-//!     .rule(Layer("business").may_not_access(&["presentation"]))
-//!     .rule(Layer("data").may_not_be_accessed_by(&["presentation"]));
+//!     .rule(MayOnlyAccess {
+//!         layer: "presentation".to_string(),
+//!         allowed: vec!["business".to_string()],
+//!     })
+//!     .rule(MayNotAccess {
+//!         layer: "business".to_string(),
+//!         forbidden: vec!["presentation".to_string()],
+//!     })
+//!     .rule(MayNotBeAccessedBy {
+//!         layer: "data".to_string(),
+//!         forbidden_accessors: vec!["presentation".to_string()],
+//!     });
 //!
-//! let result = arch.check("src/");
+//! let result = arch.check(Path::new("src/"));
 //! assert!(result.is_ok());
 //! ```
 

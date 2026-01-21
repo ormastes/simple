@@ -4,6 +4,52 @@
 //! test options, results, and output formats.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// Debug logging level for test runner
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DebugLevel {
+    /// No debug output
+    None,
+    /// High-level phases only
+    Basic,
+    /// Per-test information
+    Detailed,
+    /// Full data flow tracing
+    Trace,
+}
+
+impl DebugLevel {
+    /// Get debug level from environment variable SIMPLE_TEST_DEBUG
+    pub fn from_env() -> Self {
+        static DEBUG_LEVEL: OnceLock<DebugLevel> = OnceLock::new();
+        *DEBUG_LEVEL.get_or_init(|| {
+            match std::env::var("SIMPLE_TEST_DEBUG").as_deref() {
+                Ok("trace") | Ok("TRACE") => DebugLevel::Trace,
+                Ok("detailed") | Ok("DETAILED") => DebugLevel::Detailed,
+                Ok("basic") | Ok("BASIC") => DebugLevel::Basic,
+                _ => DebugLevel::None,
+            }
+        })
+    }
+
+    /// Check if debug logging is enabled at this level
+    pub fn is_enabled(level: DebugLevel) -> bool {
+        Self::from_env() >= level
+    }
+}
+
+/// Debug logging macro - only logs if debug level is enabled
+macro_rules! debug_log {
+    ($level:expr, $phase:expr, $($arg:tt)*) => {
+        if DebugLevel::is_enabled($level) {
+            eprintln!("[DEBUG:{}] {}", $phase, format!($($arg)*));
+        }
+    };
+}
+
+// Export the macro for use in other modules
+pub(crate) use debug_log;
 
 /// Test level filter
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +125,16 @@ pub struct TestOptions {
     pub refresh_gui_images: bool,
     /// Output directory for GUI screenshots (default: doc/spec/image)
     pub screenshot_output: Option<PathBuf>,
+    /// List tests without running them
+    pub list: bool,
+    /// List ignored tests only
+    pub list_ignored: bool,
+    /// Run only slow tests (slow_it)
+    pub only_slow: bool,
+    /// Run only skipped tests (skip tag)
+    pub only_skipped: bool,
+    /// Show tags in test output
+    pub show_tags: bool,
 }
 
 impl Default for TestOptions {
@@ -109,6 +165,11 @@ impl Default for TestOptions {
             capture_screenshots: false,
             refresh_gui_images: false,
             screenshot_output: None,
+            list: false,
+            list_ignored: false,
+            only_slow: false,
+            only_skipped: false,
+            show_tags: false,
         }
     }
 }
@@ -119,6 +180,8 @@ pub struct TestFileResult {
     pub path: PathBuf,
     pub passed: usize,
     pub failed: usize,
+    pub skipped: usize,
+    pub ignored: usize,
     pub duration_ms: u64,
     pub error: Option<String>,
 }
@@ -129,6 +192,8 @@ pub struct TestRunResult {
     pub files: Vec<TestFileResult>,
     pub total_passed: usize,
     pub total_failed: usize,
+    pub total_skipped: usize,
+    pub total_ignored: usize,
     pub total_duration_ms: u64,
 }
 
@@ -148,6 +213,8 @@ mod tests {
             files: vec![],
             total_passed: 10,
             total_failed: 0,
+            total_skipped: 0,
+            total_ignored: 0,
             total_duration_ms: 100,
         };
         assert!(result.success());
@@ -156,6 +223,8 @@ mod tests {
             files: vec![],
             total_passed: 10,
             total_failed: 1,
+            total_skipped: 0,
+            total_ignored: 0,
             total_duration_ms: 100,
         };
         assert!(!failed_result.success());
