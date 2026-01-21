@@ -353,24 +353,65 @@ pub fn eval_const_expr(expr: &Expr) -> Result<ConstValue, ConstEvalError> {
 
 ## 7. Implementation Phases
 
-### Phase 1: FString Const Keys (Foundation)
-1. Enhance FString AST node to include `const_keys: Vec<String>`
-2. Parser extracts placeholder names during FString parsing
-3. HIR preserves const_keys through lowering
-4. Basic infrastructure for const key tracking
+### Phase 1: FString Const Keys (Foundation) - IMPLEMENTED
 
-### Phase 2: Const Key Sets & Dict
-1. Add `const_keys(...)` type expression to parser
-2. Add `ConstKeySet` to AST and `HirType::ConstKeySet` to HIR
-3. Add `Dict<const_keys(...), V>` syntax
-4. Implement compile-time key checking for dict literals
-5. Add type errors for missing/unknown keys
+**Status: Complete (2026-01-21)**
 
-### Phase 3: Dependent Keys & FString Integration
-1. Add `value.keys` syntax for referencing const keys
-2. Type check: `Dict<template.keys, String>` validates against FString
-3. Method call sugar: `template.format {"name": "Alice"}`
-4. Compiler validates dict keys match FString placeholders
+1. Created `ConstMeta` module (`src/rust/parser/src/ast/nodes/const_meta.rs`) with:
+   - `MetaValue` enum for compile-time values (String, Integer, Float, Bool, StringSet, Dict)
+   - `ConstMeta` struct for metadata dictionary
+   - `TypeMeta` for type-level metadata (shared by all instances)
+   - `ObjMeta` for object-level metadata (instance-specific)
+   - `MetaResolver` for lookup: obj meta -> type meta -> default meta
+   - `extract_fstring_keys()` helper function
+
+2. Updated `Expr::FString` to struct variant with `type_meta`:
+   ```rust
+   Expr::FString {
+       parts: Vec<FStringPart>,
+       type_meta: TypeMeta,  // Contains const_keys
+   }
+   ```
+
+3. Parser extracts placeholder names during FString parsing (`expressions/primary/literals.rs`)
+
+4. Updated all FString pattern matches across the codebase (15+ files)
+
+### Phase 2: Const Key Sets & Dict - IMPLEMENTED
+
+**Status: Complete (2026-01-21)**
+
+1. Added `Type::ConstKeySet` and `Type::DependentKeys` to AST (`src/rust/parser/src/ast/nodes/core.rs`):
+   ```rust
+   ConstKeySet { keys: Vec<String> },
+   DependentKeys { source: String },
+   ```
+
+2. Added parsing for `const_keys("key1", "key2")` in `parser_types.rs`
+
+3. Added `name.keys` syntax for dependent keys in type parser
+
+4. Updated type checker's Type enum in `src/rust/type/src/lib.rs`:
+   ```rust
+   ConstKeySet { keys: Vec<String> },
+   DependentKeys { source: String },
+   ```
+
+5. Updated all match handlers in:
+   - `doc_gen.rs` (format_type)
+   - `checker_unify.rs` (ast_type_to_type)
+   - `monomorphize/util.rs` (ast_type_to_concrete)
+   - `monomorphize/engine.rs` (substitute_ast_type)
+
+6. **Remaining:** Compile-time dict key validation (type checker integration)
+
+### Phase 3: Dependent Keys & FString Integration - PARTIALLY IMPLEMENTED
+
+**Status: Syntax parsing complete**
+
+1. `value.keys` syntax added to type parser
+2. **Remaining:** Type checker resolution of dependent keys to FString const_keys
+3. **Remaining:** Dict key validation against FString placeholders
 
 ### Phase 4: Instantiation Sugar - ALREADY IMPLEMENTED
 

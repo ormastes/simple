@@ -1,0 +1,516 @@
+"""Mock Phase 7 Specification - Advanced Scheduling
+
+**Feature IDs:** Testing Infrastructure - Advanced Scheduling
+**Category:** Testing
+**Status:** Phase 7 (Advanced Scheduling)
+**Priority:** High
+
+## Overview
+
+Phase 7 implements advanced scheduling patterns for testing asynchronous and
+concurrent code. Provides task scheduling with priorities, retry policies with
+backoff strategies, rate limiting, timeout control, execution order tracking,
+concurrency control, and debounce/throttle patterns.
+
+## Features Tested
+
+- Task scheduling with priority-based execution
+- Retry policies with configurable backoff strategies
+- Rate limiting for API simulation
+- Timeout control for async operations
+- Execution order tracking and verification
+- Concurrency control with queuing
+- Debounce and throttle patterns
+"""
+
+import std.spec
+import mock
+
+describe "Mock Library - Phase 7 (Advanced Scheduling)":
+    context "TaskPriority":
+        it "defines priority levels":
+            val critical = mock.TaskPriority.Critical
+            val high = mock.TaskPriority.High
+            val normal = mock.TaskPriority.Normal
+            val low = mock.TaskPriority.Low
+            val background = mock.TaskPriority.Background
+            expect true
+
+    context "TaskScheduler - Basic":
+        it "creates task scheduler":
+            val scheduler = mock.TaskScheduler.new()
+            expect scheduler.get_pending_count() == 0
+
+        it "schedules task with priority":
+            val scheduler = mock.TaskScheduler.new()
+            val id = scheduler.schedule("task1", mock.TaskPriority.Normal, 100)
+            expect id == 0
+            expect scheduler.get_pending_count() == 1
+
+        it "schedules immediate task":
+            val scheduler = mock.TaskScheduler.new()
+            val id = scheduler.schedule_immediate("urgent")
+            expect scheduler.get_pending_count() == 1
+
+        it "schedules delayed task":
+            val scheduler = mock.TaskScheduler.new()
+            val id = scheduler.schedule_delayed("later", 500)
+            expect scheduler.get_pending_count() == 1
+
+        it "schedules background task":
+            val scheduler = mock.TaskScheduler.new()
+            val id = scheduler.schedule_background("bg_task", 1000)
+            expect scheduler.get_pending_count() == 1
+
+    context "TaskScheduler - Execution":
+        it "executes next task by priority":
+            val scheduler = mock.TaskScheduler.new()
+            scheduler.schedule("low", mock.TaskPriority.Low, 100)
+            scheduler.schedule("high", mock.TaskPriority.High, 100)
+            scheduler.schedule("critical", mock.TaskPriority.Critical, 100)
+            match scheduler.execute_next():
+                Some(task): expect task.name == "critical"
+                nil: fail "Expected task"
+
+        it "executes all tasks":
+            val scheduler = mock.TaskScheduler.new()
+            scheduler.schedule("task1", mock.TaskPriority.Normal, 50)
+            scheduler.schedule("task2", mock.TaskPriority.Normal, 50)
+            scheduler.schedule("task3", mock.TaskPriority.Normal, 50)
+            scheduler.execute_all()
+            expect scheduler.get_pending_count() == 0
+
+        it "tracks execution order":
+            val scheduler = mock.TaskScheduler.new()
+            val id1 = scheduler.schedule("critical", mock.TaskPriority.Critical, 10)
+            val id2 = scheduler.schedule("normal", mock.TaskPriority.Normal, 10)
+            val id3 = scheduler.schedule("high", mock.TaskPriority.High, 10)
+            scheduler.execute_all()
+            expect scheduler.verify_execution_order([id1, id3, id2])
+
+        it "gets task by id":
+            val scheduler = mock.TaskScheduler.new()
+            val id = scheduler.schedule("findme", mock.TaskPriority.Normal, 200)
+            match scheduler.get_task(id):
+                Some(task): expect task.name == "findme"
+                nil: fail "Expected task"
+
+        it "resets scheduler":
+            val scheduler = mock.TaskScheduler.new()
+            scheduler.schedule("task", mock.TaskPriority.Normal, 100)
+            scheduler.reset()
+            expect scheduler.get_pending_count() == 0
+
+    context "RetryPolicy - Basic":
+        it "creates retry policy":
+            val policy = mock.RetryPolicy.new(3)
+            expect policy.max_attempts == 3
+
+        it "creates no-retry policy":
+            val policy = mock.RetryPolicy.no_retry()
+            expect policy.max_attempts == 1
+
+        it "creates linear backoff policy":
+            val policy = mock.RetryPolicy.with_linear_backoff(5, 100)
+            expect policy.max_attempts == 5
+            expect policy.base_delay_ms == 100
+
+        it "creates exponential backoff policy":
+            val policy = mock.RetryPolicy.with_exponential_backoff(4, 50)
+            expect policy.max_attempts == 4
+            expect policy.base_delay_ms == 50
+
+    context "RetryPolicy - Backoff Calculation":
+        it "calculates linear backoff":
+            val policy = mock.RetryPolicy.with_linear_backoff(5, 100)
+            expect policy.calculate_delay(1) == 100
+            expect policy.calculate_delay(2) == 200
+            expect policy.calculate_delay(3) == 300
+
+        it "calculates exponential backoff":
+            val policy = mock.RetryPolicy.with_exponential_backoff(5, 100)
+            expect policy.calculate_delay(1) == 100
+            expect policy.calculate_delay(2) == 200
+            expect policy.calculate_delay(3) == 400
+
+        it "respects max delay":
+            val policy = mock.RetryPolicy.with_exponential_backoff(10, 100)
+            policy.set_max_delay(500)
+            expect policy.calculate_delay(5) <= 500
+
+    context "RetryPolicy - Attempt Tracking":
+        it "records successful attempt":
+            val policy = mock.RetryPolicy.new(3)
+            policy.record_attempt(true, nil)
+            expect policy.get_attempt_count() == 1
+            expect policy.was_successful()
+
+        it "records failed attempt":
+            val policy = mock.RetryPolicy.new(3)
+            policy.record_attempt(false, Some("timeout"))
+            expect policy.get_attempt_count() == 1
+            expect not policy.was_successful()
+
+        it "determines should retry":
+            val policy = mock.RetryPolicy.new(3)
+            expect policy.should_retry()
+            policy.record_attempt(false, Some("error"))
+            expect policy.should_retry()
+            policy.record_attempt(false, Some("error"))
+            expect policy.should_retry()
+            policy.record_attempt(false, Some("error"))
+            expect not policy.should_retry()
+
+        it "calculates total delay":
+            val policy = mock.RetryPolicy.with_linear_backoff(3, 100)
+            policy.record_attempt(false, nil)
+            policy.record_attempt(false, nil)
+            policy.record_attempt(true, nil)
+            expect policy.get_total_delay() == 600
+
+        it "resets policy":
+            val policy = mock.RetryPolicy.new(3)
+            policy.record_attempt(false, nil)
+            policy.reset()
+            expect policy.get_attempt_count() == 0
+
+    context "RateLimiter - Basic":
+        it "creates rate limiter":
+            val limiter = mock.RateLimiter.new(10, 1000)
+            expect limiter.max_requests == 10
+            expect limiter.window_ms == 1000
+
+        it "creates per-second limiter":
+            val limiter = mock.RateLimiter.per_second(5)
+            expect limiter.max_requests == 5
+            expect limiter.window_ms == 1000
+
+        it "creates per-minute limiter":
+            val limiter = mock.RateLimiter.per_minute(100)
+            expect limiter.max_requests == 100
+            expect limiter.window_ms == 60000
+
+    context "RateLimiter - Request Handling":
+        it "allows requests within limit":
+            val limiter = mock.RateLimiter.new(3, 1000)
+            expect limiter.try_acquire()
+            expect limiter.try_acquire()
+            expect limiter.try_acquire()
+            expect not limiter.try_acquire()
+
+        it "checks can proceed":
+            val limiter = mock.RateLimiter.new(2, 1000)
+            expect limiter.can_proceed()
+            limiter.try_acquire()
+            limiter.try_acquire()
+            expect not limiter.can_proceed()
+
+        it "gets remaining requests":
+            val limiter = mock.RateLimiter.new(5, 1000)
+            expect limiter.get_remaining_requests() == 5
+            limiter.try_acquire()
+            limiter.try_acquire()
+            expect limiter.get_remaining_requests() == 3
+
+        it "cleans up old requests after window":
+            val limiter = mock.RateLimiter.new(2, 100)
+            limiter.try_acquire()
+            limiter.try_acquire()
+            expect not limiter.can_proceed()
+            limiter.advance_time(150)
+            expect limiter.can_proceed()
+
+        it "calculates wait time":
+            val limiter = mock.RateLimiter.new(1, 100)
+            expect limiter.get_wait_time() == 0
+            limiter.try_acquire()
+            expect limiter.get_wait_time() == 100
+
+        it "resets limiter":
+            val limiter = mock.RateLimiter.new(2, 1000)
+            limiter.try_acquire()
+            limiter.try_acquire()
+            limiter.reset()
+            expect limiter.get_remaining_requests() == 2
+
+    context "TimeoutController - Basic":
+        it "creates timeout controller":
+            val timeout = mock.TimeoutController.new(5000)
+            expect timeout.timeout_ms == 5000
+
+        it "starts and tracks elapsed time":
+            val timeout = mock.TimeoutController.new(100)
+            timeout.start()
+            timeout.advance(50)
+            expect timeout.remaining_time() == 50
+
+        it "detects timeout":
+            val timeout = mock.TimeoutController.new(100)
+            timeout.start()
+            timeout.advance(150)
+            expect timeout.has_timed_out()
+
+        it "completes without timeout":
+            val timeout = mock.TimeoutController.new(100)
+            timeout.start()
+            timeout.advance(50)
+            val result = timeout.complete()
+            expect result.completed
+            expect not result.timed_out
+
+        it "completes with timeout":
+            val timeout = mock.TimeoutController.new(100)
+            timeout.start()
+            timeout.advance(150)
+            val result = timeout.complete()
+            expect not result.completed
+            expect result.timed_out
+
+        it "resets timeout":
+            val timeout = mock.TimeoutController.new(100)
+            timeout.start()
+            timeout.advance(150)
+            timeout.reset()
+            expect not timeout.has_timed_out()
+            expect timeout.remaining_time() == 100
+
+    context "ExecutionOrderTracker - Basic":
+        it "creates execution order tracker":
+            val tracker = mock.ExecutionOrderTracker.new()
+            expect tracker.get_start_order().len() == 0
+
+        it "records start and end events":
+            val tracker = mock.ExecutionOrderTracker.new()
+            tracker.record_start("task1")
+            tracker.advance_time(50)
+            tracker.record_end("task1")
+            expect tracker.get_start_order().len() == 1
+            expect tracker.get_end_order().len() == 1
+
+    context "ExecutionOrderTracker - Verification":
+        it "verifies started before":
+            val tracker = mock.ExecutionOrderTracker.new()
+            tracker.record_start("first")
+            tracker.advance_time(10)
+            tracker.record_start("second")
+            expect tracker.verify_started_before("first", "second")
+            expect not tracker.verify_started_before("second", "first")
+
+        it "verifies completed before":
+            val tracker = mock.ExecutionOrderTracker.new()
+            tracker.record_start("fast")
+            tracker.record_start("slow")
+            tracker.advance_time(50)
+            tracker.record_end("fast")
+            tracker.advance_time(100)
+            tracker.record_end("slow")
+            expect tracker.verify_completed_before("fast", "slow")
+
+        it "gets concurrent tasks at time":
+            val tracker = mock.ExecutionOrderTracker.new()
+            tracker.record_start("task1")
+            tracker.advance_time(10)
+            tracker.record_start("task2")
+            tracker.advance_time(10)
+            tracker.record_start("task3")
+            val concurrent = tracker.get_concurrent_at(15)
+            expect concurrent.len() == 2
+
+        it "gets start and end order":
+            val tracker = mock.ExecutionOrderTracker.new()
+            tracker.record_start("a")
+            tracker.record_start("b")
+            tracker.record_end("a")
+            tracker.record_end("b")
+            val starts = tracker.get_start_order()
+            expect starts[0] == "a"
+            expect starts[1] == "b"
+
+        it "resets tracker":
+            val tracker = mock.ExecutionOrderTracker.new()
+            tracker.record_start("task")
+            tracker.reset()
+            expect tracker.get_start_order().len() == 0
+
+    context "ConcurrencyController - Basic":
+        it "creates concurrency controller":
+            val controller = mock.ConcurrencyController.new(3)
+            expect controller.max_concurrent == 3
+
+        it "allows starting within limit":
+            val controller = mock.ConcurrencyController.new(2)
+            expect controller.try_start("task1")
+            expect controller.try_start("task2")
+            expect not controller.try_start("task3")
+
+        it "checks can start":
+            val controller = mock.ConcurrencyController.new(1)
+            expect controller.can_start()
+            controller.try_start("task")
+            expect not controller.can_start()
+
+    context "ConcurrencyController - Queue Management":
+        it "queues tasks when at limit":
+            val controller = mock.ConcurrencyController.new(1)
+            controller.try_start("active")
+            controller.try_start("waiting")
+            expect controller.get_active_count() == 1
+            expect controller.get_waiting_count() == 1
+
+        it "starts waiting task on completion":
+            val controller = mock.ConcurrencyController.new(1)
+            controller.try_start("first")
+            controller.try_start("second")
+            controller.complete("first")
+            expect controller.get_active_count() == 1
+            expect controller.get_waiting_count() == 0
+            val active = controller.get_active_tasks()
+            expect active[0] == "second"
+
+        it "tracks completed tasks":
+            val controller = mock.ConcurrencyController.new(2)
+            controller.try_start("a")
+            controller.try_start("b")
+            controller.complete("a")
+            expect controller.get_completed_count() == 1
+
+        it "resets controller":
+            val controller = mock.ConcurrencyController.new(2)
+            controller.try_start("task")
+            controller.reset()
+            expect controller.get_active_count() == 0
+
+    context "Debouncer - Basic":
+        it "creates debouncer":
+            val debouncer = mock.Debouncer.new(100)
+            expect debouncer.delay_ms == 100
+
+        it "debounces rapid calls":
+            val debouncer = mock.Debouncer.new(100)
+            debouncer.call("first")
+            debouncer.advance_time(50)
+            debouncer.call("second")
+            debouncer.advance_time(50)
+            debouncer.call("third")
+            debouncer.advance_time(150)
+            val executed = debouncer.get_executed_values()
+            expect executed.len() == 1
+            expect executed[0] == "third"
+
+        it "executes after delay":
+            val debouncer = mock.Debouncer.new(100)
+            debouncer.call("value")
+            expect debouncer.has_pending()
+            debouncer.advance_time(150)
+            expect not debouncer.has_pending()
+            expect debouncer.get_execution_count() == 1
+
+        it "tracks execution count":
+            val debouncer = mock.Debouncer.new(50)
+            debouncer.call("a")
+            debouncer.advance_time(100)
+            debouncer.call("b")
+            debouncer.advance_time(100)
+            expect debouncer.get_execution_count() == 2
+
+        it "resets debouncer":
+            val debouncer = mock.Debouncer.new(100)
+            debouncer.call("value")
+            debouncer.advance_time(150)
+            debouncer.reset()
+            expect debouncer.get_execution_count() == 0
+
+    context "Throttler - Basic":
+        it "creates throttler":
+            val throttler = mock.Throttler.new(100)
+            expect throttler.interval_ms == 100
+
+        it "allows first call":
+            val throttler = mock.Throttler.new(100)
+            expect throttler.call("first")
+            expect throttler.get_execution_count() == 1
+
+        it "throttles rapid calls":
+            val throttler = mock.Throttler.new(100)
+            expect throttler.call("first")
+            expect not throttler.call("second")
+            expect not throttler.call("third")
+            expect throttler.get_execution_count() == 1
+
+        it "allows call after interval":
+            val throttler = mock.Throttler.new(100)
+            throttler.call("first")
+            throttler.advance_time(150)
+            expect throttler.call("second")
+            expect throttler.get_execution_count() == 2
+
+        it "tracks dropped calls":
+            val throttler = mock.Throttler.new(100)
+            throttler.call("ok")
+            throttler.call("dropped1")
+            throttler.call("dropped2")
+            expect throttler.get_dropped_count() == 2
+
+        it "resets throttler":
+            val throttler = mock.Throttler.new(100)
+            throttler.call("value")
+            throttler.call("dropped")
+            throttler.reset()
+            expect throttler.get_execution_count() == 0
+            expect throttler.get_dropped_count() == 0
+
+    context "Complex Scheduling Scenarios":
+        it "simulates API with rate limiting and retry":
+            val limiter = mock.RateLimiter.new(2, 1000)
+            val retry = mock.RetryPolicy.with_exponential_backoff(3, 100)
+            var success = false
+            while retry.should_retry() and not success:
+                if limiter.try_acquire():
+                    success = true
+                    retry.record_attempt(true, nil)
+                else:
+                    retry.record_attempt(false, Some("rate limited"))
+            expect success
+
+        it "tracks concurrent async operations":
+            val controller = mock.ConcurrencyController.new(2)
+            val tracker = mock.ExecutionOrderTracker.new()
+            controller.try_start("op1")
+            tracker.record_start("op1")
+            controller.try_start("op2")
+            tracker.record_start("op2")
+            controller.try_start("op3")
+            tracker.advance_time(100)
+            tracker.record_end("op1")
+            controller.complete("op1")
+            tracker.record_start("op3")
+            expect controller.get_active_tasks().len() == 2
+
+        it "handles timeout with retry":
+            val timeout = mock.TimeoutController.new(100)
+            val retry = mock.RetryPolicy.new(3)
+            var completed = false
+            while retry.should_retry() and not completed:
+                timeout.reset()
+                timeout.start()
+                timeout.advance(150)
+                if timeout.has_timed_out():
+                    retry.record_attempt(false, Some("timeout"))
+                else:
+                    retry.record_attempt(true, nil)
+                    completed = true
+            expect retry.get_attempt_count() == 3
+            expect not retry.was_successful()
+
+        it "priority scheduling with debounce":
+            val scheduler = mock.TaskScheduler.new()
+            val debouncer = mock.Debouncer.new(50)
+            debouncer.call("input1")
+            debouncer.advance_time(30)
+            debouncer.call("input2")
+            debouncer.advance_time(100)
+            val values = debouncer.get_executed_values()
+            if values.len() > 0:
+                scheduler.schedule(values[0], mock.TaskPriority.High, 10)
+            scheduler.execute_all()
+            expect scheduler.get_pending_count() == 0

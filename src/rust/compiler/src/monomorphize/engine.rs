@@ -378,6 +378,10 @@ impl<'a> Monomorphizer<'a> {
                 name: name.clone(),
                 value: Box::new(self.substitute_ast_type(value, bindings)),
             },
+            // Const key set - no type parameters to substitute
+            AstType::ConstKeySet { keys } => AstType::ConstKeySet { keys: keys.clone() },
+            // Dependent keys - no type parameters to substitute
+            AstType::DependentKeys { source } => AstType::DependentKeys { source: source.clone() },
         }
     }
 

@@ -233,15 +233,48 @@ impl<'a> Parser<'a> {
             return Ok(Type::Simple(name));
         }
 
+        // Handle const_keys type: const_keys("key1", "key2")
+        if self.check_ident("const_keys") {
+            self.advance();
+            self.expect(&TokenKind::LParen)?;
+            let mut keys = Vec::new();
+            while !self.check(&TokenKind::RParen) {
+                match &self.current.kind {
+                    TokenKind::String(s) => {
+                        keys.push(s.clone());
+                        self.advance();
+                    }
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "string literal for const key".to_string(),
+                            found: format!("{:?}", self.current.kind),
+                            span: self.current.span.clone(),
+                        });
+                    }
+                }
+                if !self.check(&TokenKind::RParen) {
+                    self.expect(&TokenKind::Comma)?;
+                }
+            }
+            self.expect(&TokenKind::RParen)?;
+            return Ok(Type::ConstKeySet { keys });
+        }
+
         // Simple or generic type (possibly qualified: module.Type or Iterator::Item)
         let mut name = self.expect_identifier()?;
 
         // Check for qualified type name: module.Type, module.submodule.Type, or Self::Item
         // Support both . (module path) and :: (associated type path)
+        // Also check for dependent keys: name.keys
         while self.check(&TokenKind::Dot) || self.check(&TokenKind::DoubleColon) {
             let is_double_colon = self.check(&TokenKind::DoubleColon);
             self.advance(); // consume '.' or '::'
             let segment = self.expect_identifier()?;
+
+            // Check for dependent keys: name.keys
+            if !is_double_colon && segment == "keys" {
+                return Ok(Type::DependentKeys { source: name });
+            }
 
             if is_double_colon {
                 // Use :: for associated types (e.g., Self::Item, Iterator::Item)

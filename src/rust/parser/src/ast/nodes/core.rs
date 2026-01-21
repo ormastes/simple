@@ -357,6 +357,21 @@ pub enum Type {
         /// The type it's bound to (e.g., T or String)
         value: Box<Type>,
     },
+    /// Const key set: compile-time known string keys
+    /// Example: `const_keys("host", "port", "debug")`
+    /// Used with Dict types for compile-time key validation:
+    /// `Dict<const_keys("host", "port"), String>`
+    ConstKeySet {
+        /// The set of compile-time known string keys
+        keys: Vec<String>,
+    },
+    /// Dependent keys: reference to another value's const keys
+    /// Example: `Dict<template.keys, String>` where template is an FString
+    /// The compiler resolves `template.keys` to the FString's const_keys at compile time
+    DependentKeys {
+        /// The source variable whose .keys we reference
+        source: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

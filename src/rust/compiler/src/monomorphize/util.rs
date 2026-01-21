@@ -158,6 +158,8 @@ pub fn ast_type_to_concrete(ty: &AstType, bindings: &HashMap<String, ConcreteTyp
             // Type binding - extract the bound value type
             ast_type_to_concrete(value, bindings)
         }
+        AstType::ConstKeySet { keys } => ConcreteType::Named(format!("const_keys({})", keys.join(","))),
+        AstType::DependentKeys { source } => ConcreteType::Named(format!("{}.keys", source)),
     }
 }
 
