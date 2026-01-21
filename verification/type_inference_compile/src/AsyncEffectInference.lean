@@ -184,26 +184,30 @@ theorem effect_deterministic (env : Env) (e : Expr) :
   ∃ eff : Effect, inferExprEffect env e = eff := by
   exact ⟨inferExprEffect env e, rfl⟩
 
-/-- Suspension implies async (axiomatized due to partial def) -/
+/-- Suspension implies async.
+    Axiomatized because inferExprEffect is partial def.
+    The property holds by direct inspection of the definition. -/
 axiom suspension_implies_async (env : Env) (op : SuspensionOp) (e : Expr) :
   inferExprEffect env (Expr.suspend op e) = Effect.async
 
-/-- Sync safety: if validation passes, no suspension in body (axiomatized due to partial def) -/
+/-- Sync safety: if validation passes, no suspension in body.
+    Axiomatized because containsSuspension is partial. -/
 axiom sync_safety (fn : FnDecl) :
   fn.explicitEffect = some Effect.sync → validateSyncConstraint fn = true →
   containsSuspension fn.body = false
 
-/-- Async propagation: calling async function makes expression async (axiomatized) -/
+/-- Async propagation: calling async function makes expression async.
+    Axiomatized because inferExprEffect is partial def. -/
 axiom async_propagation (env : Env) (fn_name : String) (args : List Expr) :
   env fn_name = some Effect.async → inferExprEffect env (Expr.call fn_name args) = Effect.async
 
-/-- Literals are always sync
-    Note: This follows directly from inferExprEffect definition.
-    Axiomatized because inferExprEffect is a partial def. -/
+/-- Literals are always sync.
+    Axiomatized because inferExprEffect is partial def. -/
 axiom lit_is_sync (env : Env) (n : Nat) :
   inferExprEffect env (Expr.lit n) = Effect.sync
 
-/-- Variables are always sync (follows from inferExprEffect definition) -/
+/-- Variables are always sync.
+    Axiomatized because inferExprEffect is partial def. -/
 axiom var_is_sync (env : Env) (name : String) :
   inferExprEffect env (Expr.var name) = Effect.sync
 

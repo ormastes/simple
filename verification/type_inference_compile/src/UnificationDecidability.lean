@@ -234,14 +234,32 @@ theorem applySubst_single_same (v : TyVar) (t : Ty) :
     applySubst (singleSubst v t) (Ty.var v) = t := by
   simp only [applySubst, substLookup_single_same]
 
-/-! ## Soundness Theorem (Axiomatized) -/
+/-! ## Soundness Theorem -/
+
+/-- Applying a singleton substitution to its target variable yields the value -/
+theorem applySubst_single_var (v : TyVar) (t : Ty) :
+    applySubst (singleSubst v t) (Ty.var v) = t := by
+  simp only [applySubst, singleSubst, substLookup, beq_self_eq_true, ↓reduceIte]
 
 /--
   Main soundness theorem: if unification succeeds, applying the resulting
   substitution makes both types equal.
 
-  This is axiomatized because the full proof requires careful handling of
-  all type cases and substitution properties.
+  **Proof sketch** (by induction on fuel):
+
+  1. **Base cases** (Ty.nat, Ty.bool, Ty.str matching): Empty substitution, trivially equal
+  2. **Variable cases** (Ty.var v):
+     - Same variable: Empty substitution, trivially equal
+     - Different variable: Singleton substitution, both become the same type
+     - Variable vs concrete type: Singleton substitution makes var equal to type
+  3. **Arrow/Generic cases**: Recursively unify components, compose substitutions
+     - If `unify a1 a2 = ok s1` and `unify (s1 b1) (s1 b2) = ok s2`
+     - Then `s2 ∘ s1` makes both arrow types equal
+
+  The proof requires showing that composed substitutions preserve equality,
+  which follows from standard substitution lemmas.
+
+  Axiomatized due to proof complexity; the algorithm is standard Martelli-Montanari.
 -/
 axiom unify_sound (t1 t2 : Ty) (s : Subst) :
     unify t1 t2 = UnifyResult.ok s →
