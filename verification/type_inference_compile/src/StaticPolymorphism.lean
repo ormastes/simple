@@ -293,9 +293,17 @@ axiom monomorphization_unique (fns : List MonomorphizedFn) (fnName : String) (fo
     f1.instantiated_for = forType → f2.instantiated_for = forType →
     f1 = f2
 
--- Theorem: Static and dynamic dispatch are mutually exclusive (axiomatized)
-axiom dispatch_modes_exclusive (param : BindParam) :
-  usesStaticDispatch param = true → usesDynamicDispatch param = false
+-- Theorem: Static and dynamic dispatch are mutually exclusive
+-- Proof: DispatchMode is an enum with only static and dynamic variants
+theorem dispatch_modes_exclusive (param : BindParam) :
+    usesStaticDispatch param = true → usesDynamicDispatch param = false := by
+  intro h_static
+  unfold usesStaticDispatch at h_static
+  unfold usesDynamicDispatch
+  -- If dispatch == static, then dispatch ≠ dynamic
+  cases h_dispatch : param.bind_constraint.dispatch with
+  | static => simp [h_dispatch]
+  | dynamic => simp [h_dispatch] at h_static
 
 -- Theorem: Bind constraint checking is complete (axiomatized)
 axiom bind_check_complete (env : BindEnv) (fn : FnDefBind) (param : BindParam) (argType : Ty) :
