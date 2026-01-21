@@ -147,6 +147,34 @@ pub struct AssertStmt {
     pub message: Option<String>,
 }
 
+/// Assume statement for verification assumptions
+/// assume condition
+/// assume condition, "message"
+/// In verification: creates a hypothesis without proof
+/// At runtime: behaves like assert (debug mode) or is erased (release mode)
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssumeStmt {
+    pub span: Span,
+    /// The boolean condition assumed to be true
+    pub condition: Expr,
+    /// Optional documentation message explaining the assumption
+    pub message: Option<String>,
+}
+
+/// Admit statement for skipping proofs (tracked)
+/// admit condition, "reason"
+/// In verification: marks as axiom, requires tracking
+/// At runtime: behaves like assert
+/// Admits are tracked and reported during compilation
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdmitStmt {
+    pub span: Span,
+    /// The boolean condition being admitted without proof
+    pub condition: Expr,
+    /// Required reason explaining why the proof is being skipped
+    pub message: Option<String>,
+}
+
 /// Context block for DSL support
 /// context expr:
 ///     statements

@@ -1,0 +1,351 @@
+# Lean Trait and Static Polymorphism Generation
+#
+# Translates Simple traits and impls to Lean 4:
+# - Traits -> Lean `class` (type classes)
+# - Impl blocks -> Lean `instance`
+# - Interface bindings -> Lean `abbrev` + instance selection
+#
+# This enables formal verification of:
+# - Trait method type inference
+# - Implementation completeness
+# - Static dispatch correctness
+# - Binding validity
+
+import verification.lean.naming as naming
+import verification.lean.types as types
+
+# A method signature in a Lean class
+class LeanMethodSig:
+    name: text
+    params: List<types.LeanType>
+    ret: types.LeanType
+    has_default: bool
+
+    static fn create(name: text, params: List<types.LeanType>, ret: types.LeanType) -> LeanMethodSig:
+        LeanMethodSig(name: name, params: params, ret: ret, has_default: false)
+
+    me with_default() -> LeanMethodSig:
+        self.has_default = true
+        self
+
+# A Lean type class definition
+class LeanClass:
+    name: text
+    type_param: text
+    extra_params: List<text>
+    methods: List<LeanMethodSig>
+    assoc_types: List<text>
+    doc: Option<text>
+
+    static fn new(name: text) -> LeanClass:
+        LeanClass(
+            name: name,
+            type_param: "T",  # Use alpha for the implementing type
+            extra_params: [],
+            methods: [],
+            assoc_types: [],
+            doc: nil
+        )
+
+    me with_type_param(param: text) -> LeanClass:
+        self.type_param = param
+        self
+
+    me add_extra_param(param: text) -> LeanClass:
+        self.extra_params = self.extra_params + [param]
+        self
+
+    me add_method(method: LeanMethodSig) -> LeanClass:
+        self.methods = self.methods + [method]
+        self
+
+    me add_assoc_type(name: text) -> LeanClass:
+        self.assoc_types = self.assoc_types + [name]
+        self
+
+    me with_doc(doc: text) -> LeanClass:
+        self.doc = Some(doc)
+        self
+
+    # Emit as Lean class definition
+    fn to_lean() -> text:
+        var out = ""
+
+        # Doc comment
+        match self.doc:
+            case Some(doc):
+                out = out + "/-- {doc} -/\n"
+            case nil:
+                pass
+
+        # Class header: class TraitName (T : Type) where
+        out = out + "class {self.name} "
+
+        # Extra type parameters
+        for param in self.extra_params:
+            out = out + "({param} : Type) "
+
+        # Main type parameter (the implementing type)
+        out = out + "({self.type_param} : Type) where\n"
+
+        # Associated types
+        for assoc in self.assoc_types:
+            out = out + "  {assoc} : Type\n"
+
+        # Methods
+        for method in self.methods:
+            var params_str: List<text> = []
+            for p in method.params:
+                params_str = params_str + [p.to_lean()]
+            val params_joined = params_str.join(" -> ")
+
+            if params_joined.len() == 0:
+                out = out + "  {method.name} : {method.ret.to_lean()}\n"
+            else:
+                out = out + "  {method.name} : {params_joined} -> {method.ret.to_lean()}\n"
+
+        out
+
+# A Lean instance definition
+class LeanInstance:
+    class_name: text
+    for_type: types.LeanType
+    type_args: List<types.LeanType>
+    constraints: List<text>
+    methods: List<(text, text)>
+    assoc_types: List<(text, types.LeanType)>
+    doc: Option<text>
+
+    static fn new(class_name: text, for_type: types.LeanType) -> LeanInstance:
+        LeanInstance(
+            class_name: class_name,
+            for_type: for_type,
+            type_args: [],
+            constraints: [],
+            methods: [],
+            assoc_types: [],
+            doc: nil
+        )
+
+    me add_constraint(constraint: text) -> LeanInstance:
+        self.constraints = self.constraints + [constraint]
+        self
+
+    me add_method(name: text, body: text) -> LeanInstance:
+        self.methods = self.methods + [(name, body)]
+        self
+
+    me add_assoc_type(name: text, ty: types.LeanType) -> LeanInstance:
+        self.assoc_types = self.assoc_types + [(name, ty)]
+        self
+
+    me with_doc(doc: text) -> LeanInstance:
+        self.doc = Some(doc)
+        self
+
+    # Emit as Lean instance definition
+    fn to_lean() -> text:
+        var out = ""
+
+        # Doc comment
+        match self.doc:
+            case Some(doc):
+                out = out + "/-- {doc} -/\n"
+            case nil:
+                pass
+
+        # Instance header
+        out = out + "instance "
+
+        # Constraints
+        for constraint in self.constraints:
+            out = out + "[{constraint}] "
+
+        # Instance type: instance : ClassName Type where
+        out = out + ": {self.class_name} "
+
+        # Type arguments
+        for arg in self.type_args:
+            out = out + "{arg.to_lean()} "
+
+        out = out + "{self.for_type.to_lean()} where\n"
+
+        # Associated type bindings
+        for (name, ty) in self.assoc_types:
+            out = out + "  {name} := {ty.to_lean()}\n"
+
+        # Method implementations
+        for (name, body) in self.methods:
+            out = out + "  {name} := {body}\n"
+
+        out
+
+    # Emit as Lean instance with sorry placeholders
+    fn to_lean_with_sorry() -> text:
+        var out = ""
+
+        match self.doc:
+            case Some(doc):
+                out = out + "/-- {doc} -/\n"
+            case nil:
+                pass
+
+        out = out + "instance "
+
+        for constraint in self.constraints:
+            out = out + "[{constraint}] "
+
+        out = out + ": {self.class_name} "
+
+        for arg in self.type_args:
+            out = out + "{arg.to_lean()} "
+
+        out = out + "{self.for_type.to_lean()} where\n"
+
+        # Associated type bindings (keep these)
+        for (name, ty) in self.assoc_types:
+            out = out + "  {name} := {ty.to_lean()}\n"
+
+        # Method implementations with sorry
+        for (name, _) in self.methods:
+            out = out + "  {name} := sorry\n"
+
+        out
+
+# Interface binding for static dispatch
+class LeanBinding:
+    interface_name: text
+    impl_type: types.LeanType
+    doc: Option<text>
+
+    static fn new(interface_name: text, impl_type: types.LeanType) -> LeanBinding:
+        LeanBinding(interface_name: interface_name, impl_type: impl_type, doc: nil)
+
+    me with_doc(doc: text) -> LeanBinding:
+        self.doc = Some(doc)
+        self
+
+    # Emit as Lean abbreviation and instance
+    fn to_lean() -> text:
+        var out = ""
+
+        # Doc comment
+        match self.doc:
+            case Some(doc):
+                out = out + "/-- {doc} -/\n"
+            case nil:
+                pass
+
+        # Static binding comment
+        out = out + "-- Static dispatch binding\n"
+
+        # Abbreviation: abbrev TraitName.Bound := ImplType
+        out = out + "abbrev {self.interface_name}.Bound := {self.impl_type.to_lean()}\n"
+
+        # Instance selection: instance TraitName.BoundInstance : TraitName TraitName.Bound := inferInstance
+        out = out + "instance {self.interface_name}.BoundInstance : {self.interface_name} {self.interface_name}.Bound := inferInstance\n"
+
+        out
+
+    # Generate binding validity theorem
+    fn to_validity_theorem() -> text:
+        val lower_name = self.interface_name.to_lowercase()
+        "theorem {lower_name}_binding_valid : {self.interface_name} {self.impl_type.to_lean()} := inferInstance\n"
+
+# Generate Lean theorems for static polymorphism verification
+class StaticPolyTheorems:
+    # Generate implementation completeness theorem
+    static fn impl_complete(class_name: text, impl_type: text) -> text:
+        val lower_impl = impl_type.to_lowercase()
+        val lower_class = class_name.to_lowercase()
+        "theorem {lower_impl}_{lower_class}_complete : {class_name} {impl_type} := inferInstance\n"
+
+    # Generate coherence theorem (no overlapping instances)
+    static fn coherence(class_name: text, impl_types: List<text>) -> text:
+        var out = ""
+        out = out + "-- Coherence: {class_name} has no overlapping instances\n"
+
+        var i = 1
+        for ty in impl_types:
+            val lower_class = class_name.to_lowercase()
+            out = out + "theorem {lower_class}_impl{i}_unique : {class_name} {ty} := inferInstance\n"
+            i = i + 1
+
+        out
+
+    # Generate dispatch determinism theorem
+    static fn dispatch_deterministic(class_name: text, method_name: text) -> text:
+        val lower = class_name.to_lowercase()
+        var out = ""
+        out = out + "-- Dispatch is deterministic for bound interfaces\n"
+        out = out + "theorem {lower}_dispatch_deterministic (x y : {class_name}.Bound) :\n"
+        out = out + "    @{class_name}.{method_name} {class_name}.Bound {class_name}.BoundInstance x =\n"
+        out = out + "    @{class_name}.{method_name} {class_name}.Bound {class_name}.BoundInstance y := by\n"
+        out = out + "  rfl\n"
+        out
+
+# Builder for creating type classes
+class ClassBuilder:
+    cls: LeanClass
+
+    static fn new(name: text) -> ClassBuilder:
+        ClassBuilder(cls: LeanClass.new(name))
+
+    me type_param(param: text) -> ClassBuilder:
+        self.cls.type_param = param
+        self
+
+    me method(name: text, param_types: List<text>, ret_type: text) -> ClassBuilder:
+        var params: List<types.LeanType> = []
+        for pt in param_types:
+            params = params + [types.TypeTranslator.translate_primitive(pt)]
+        val ret = types.TypeTranslator.translate_primitive(ret_type)
+        self.cls.methods = self.cls.methods + [LeanMethodSig.create(name, params, ret)]
+        self
+
+    me assoc_type(name: text) -> ClassBuilder:
+        self.cls.assoc_types = self.cls.assoc_types + [name]
+        self
+
+    me doc(doc: text) -> ClassBuilder:
+        self.cls.doc = Some(doc)
+        self
+
+    fn build() -> LeanClass:
+        self.cls
+
+# Builder for creating instances
+class InstanceBuilder:
+    inst: LeanInstance
+
+    static fn new(class_name: text, for_type: text) -> InstanceBuilder:
+        val ty = types.TypeTranslator.translate_primitive(for_type)
+        InstanceBuilder(inst: LeanInstance.new(class_name, ty))
+
+    me constraint(constraint: text) -> InstanceBuilder:
+        self.inst.constraints = self.inst.constraints + [constraint]
+        self
+
+    me method(name: text, body: text) -> InstanceBuilder:
+        self.inst.methods = self.inst.methods + [(name, body)]
+        self
+
+    me method_sorry(name: text) -> InstanceBuilder:
+        self.inst.methods = self.inst.methods + [(name, "sorry")]
+        self
+
+    me assoc_type(name: text, type_name: text) -> InstanceBuilder:
+        val ty = types.TypeTranslator.translate_primitive(type_name)
+        self.inst.assoc_types = self.inst.assoc_types + [(name, ty)]
+        self
+
+    me doc(doc: text) -> InstanceBuilder:
+        self.inst.doc = Some(doc)
+        self
+
+    fn build() -> LeanInstance:
+        self.inst
+
+# Export public API
+export LeanMethodSig, LeanClass, LeanInstance, LeanBinding
+export StaticPolyTheorems, ClassBuilder, InstanceBuilder

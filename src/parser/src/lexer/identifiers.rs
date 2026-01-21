@@ -182,6 +182,8 @@ impl<'a> super::Lexer<'a> {
             // If '!' or '(' follows, treat as identifier (for macro/function calls)
             // Note: We don't make "check" a keyword to avoid conflicts with common variable names
             "assert" if self.peek() != Some('!') && self.peek() != Some('(') => TokenKind::Assert,
+            "assume" if self.peek() != Some('!') && self.peek() != Some('(') => TokenKind::Assume,
+            "admit" if self.peek() != Some('!') && self.peek() != Some('(') => TokenKind::Admit,
             // Infix keywords (for BDD spec framework)
             "to" => TokenKind::To,
             "not_to" => TokenKind::NotTo,

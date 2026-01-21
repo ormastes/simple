@@ -68,6 +68,8 @@ pub enum Node {
     Break(BreakStmt),
     Continue(ContinueStmt),
     Assert(AssertStmt),
+    Assume(AssumeStmt),
+    Admit(AdmitStmt),
     Context(ContextStmt),
     With(WithStmt),
     Expression(Expr),

@@ -52,40 +52,87 @@ structure FnDecl where
 /-- Environment mapping function names to their effects -/
 def Env := String → Option Effect
 
-/-- Check if expression contains any suspension operator -/
-partial def containsSuspension : Expr → Bool
+/-- Size of an expression (for termination proofs) -/
+def Expr.size : Expr → Nat
+  | lit _ => 1
+  | var _ => 1
+  | binOp a b => 1 + a.size + b.size
+  | call _ args => 1 + args.foldl (fun acc e => acc + e.size) 0
+  | suspend _ e => 1 + e.size
+  | lambda body => 1 + body.size
+  | ifExpr c t e => 1 + c.size + t.size + e.size
+
+/-- Size of expression list -/
+def Expr.listSize (es : List Expr) : Nat :=
+  es.foldl (fun acc e => acc + e.size) 0
+
+/-- Default fuel for expression -/
+def defaultExprFuel (e : Expr) : Nat := 2 * e.size + 10
+
+/-- Fuel-based containsSuspension -/
+def containsSuspensionFuel (fuel : Nat) : Expr → Bool
   | Expr.lit _ => false
   | Expr.var _ => false
-  | Expr.binOp a b => containsSuspension a || containsSuspension b
-  | Expr.call _ args => args.any containsSuspension
+  | Expr.binOp a b =>
+    match fuel with
+    | 0 => false
+    | fuel' + 1 => containsSuspensionFuel fuel' a || containsSuspensionFuel fuel' b
+  | Expr.call _ args =>
+    match fuel with
+    | 0 => false
+    | fuel' + 1 => args.any (containsSuspensionFuel fuel')
   | Expr.suspend _ _ => true  -- Suspension found!
-  | Expr.lambda body => containsSuspension body
-  | Expr.ifExpr c t e => containsSuspension c || containsSuspension t || containsSuspension e
+  | Expr.lambda body =>
+    match fuel with
+    | 0 => false
+    | fuel' + 1 => containsSuspensionFuel fuel' body
+  | Expr.ifExpr c t e =>
+    match fuel with
+    | 0 => false
+    | fuel' + 1 => containsSuspensionFuel fuel' c || containsSuspensionFuel fuel' t || containsSuspensionFuel fuel' e
 
-/-- Infer effect of expression given environment -/
-partial def inferExprEffect (env : Env) : Expr → Effect
+/-- Check if expression contains any suspension operator -/
+def containsSuspension (e : Expr) : Bool := containsSuspensionFuel (defaultExprFuel e) e
+
+/-- Fuel-based inferExprEffect -/
+def inferExprEffectFuel (env : Env) (fuel : Nat) : Expr → Effect
   | Expr.lit _ => Effect.sync
   | Expr.var _ => Effect.sync
   | Expr.binOp a b =>
-    match inferExprEffect env a, inferExprEffect env b with
-    | Effect.async, _ => Effect.async
-    | _, Effect.async => Effect.async
-    | _, _ => Effect.sync
+    match fuel with
+    | 0 => Effect.sync
+    | fuel' + 1 =>
+      match inferExprEffectFuel env fuel' a, inferExprEffectFuel env fuel' b with
+      | Effect.async, _ => Effect.async
+      | _, Effect.async => Effect.async
+      | _, _ => Effect.sync
   | Expr.call fn args =>
-    -- Check if called function is async
-    let fnEffect := match env fn with
-      | some eff => eff
-      | none => Effect.sync
-    let argsAsync := args.any (fun e => inferExprEffect env e == Effect.async)
-    if fnEffect == Effect.async || argsAsync then Effect.async else Effect.sync
+    match fuel with
+    | 0 => Effect.sync
+    | fuel' + 1 =>
+      let fnEffect := match env fn with
+        | some eff => eff
+        | none => Effect.sync
+      let argsAsync := args.any (fun e => inferExprEffectFuel env fuel' e == Effect.async)
+      if fnEffect == Effect.async || argsAsync then Effect.async else Effect.sync
   | Expr.suspend _ _ => Effect.async  -- Suspension always async
-  | Expr.lambda body => inferExprEffect env body
+  | Expr.lambda body =>
+    match fuel with
+    | 0 => Effect.sync
+    | fuel' + 1 => inferExprEffectFuel env fuel' body
   | Expr.ifExpr c t e =>
-    match inferExprEffect env c, inferExprEffect env t, inferExprEffect env e with
-    | Effect.async, _, _ => Effect.async
-    | _, Effect.async, _ => Effect.async
-    | _, _, Effect.async => Effect.async
-    | _, _, _ => Effect.sync
+    match fuel with
+    | 0 => Effect.sync
+    | fuel' + 1 =>
+      match inferExprEffectFuel env fuel' c, inferExprEffectFuel env fuel' t, inferExprEffectFuel env fuel' e with
+      | Effect.async, _, _ => Effect.async
+      | _, Effect.async, _ => Effect.async
+      | _, _, Effect.async => Effect.async
+      | _, _, _ => Effect.sync
+
+/-- Infer effect of expression given environment -/
+def inferExprEffect (env : Env) (e : Expr) : Effect :=
+  inferExprEffectFuel env (defaultExprFuel e) e
 
 /-- Infer effect of function declaration -/
 def inferFnEffect (env : Env) (fn : FnDecl) : Effect :=
@@ -184,32 +231,45 @@ theorem effect_deterministic (env : Env) (e : Expr) :
   ∃ eff : Effect, inferExprEffect env e = eff := by
   exact ⟨inferExprEffect env e, rfl⟩
 
-/-- Suspension implies async.
-    Axiomatized because inferExprEffect is partial def.
-    The property holds by direct inspection of the definition. -/
-axiom suspension_implies_async (env : Env) (op : SuspensionOp) (e : Expr) :
-  inferExprEffect env (Expr.suspend op e) = Effect.async
+/-- Suspension implies async (for any fuel > 0) -/
+theorem suspension_implies_async_fuel (env : Env) (fuel : Nat) (op : SuspensionOp) (e : Expr) :
+    inferExprEffectFuel env fuel (Expr.suspend op e) = Effect.async := by
+  simp only [inferExprEffectFuel]
 
-/-- Sync safety: if validation passes, no suspension in body.
-    Axiomatized because containsSuspension is partial. -/
-axiom sync_safety (fn : FnDecl) :
-  fn.explicitEffect = some Effect.sync → validateSyncConstraint fn = true →
-  containsSuspension fn.body = false
+/-- Suspension implies async -/
+theorem suspension_implies_async (env : Env) (op : SuspensionOp) (e : Expr) :
+    inferExprEffect env (Expr.suspend op e) = Effect.async := by
+  simp only [inferExprEffect, suspension_implies_async_fuel]
 
-/-- Async propagation: calling async function makes expression async.
-    Axiomatized because inferExprEffect is partial def. -/
-axiom async_propagation (env : Env) (fn_name : String) (args : List Expr) :
-  env fn_name = some Effect.async → inferExprEffect env (Expr.call fn_name args) = Effect.async
+/-- Sync safety: if validation passes, no suspension in body -/
+theorem sync_safety (fn : FnDecl) :
+    fn.explicitEffect = some Effect.sync → validateSyncConstraint fn = true →
+    containsSuspension fn.body = false := by
+  intro h_sync h_valid
+  unfold validateSyncConstraint at h_valid
+  simp only [h_sync, Bool.not_eq_true', ↓reduceIte] at h_valid
+  exact h_valid
 
-/-- Literals are always sync.
-    Axiomatized because inferExprEffect is partial def. -/
-axiom lit_is_sync (env : Env) (n : Nat) :
-  inferExprEffect env (Expr.lit n) = Effect.sync
+/-- Async propagation: calling async function makes expression async -/
+theorem async_propagation (env : Env) (fn_name : String) (args : List Expr) :
+    env fn_name = some Effect.async → inferExprEffect env (Expr.call fn_name args) = Effect.async := by
+  intro h_async
+  simp only [inferExprEffect, inferExprEffectFuel, defaultExprFuel, Expr.size]
+  -- With sufficient fuel, the result is Effect.async when fnEffect is async
+  cases h_fuel : 2 * (1 + args.foldl (fun acc e => acc + e.size) 0) + 10 with
+  | zero => simp
+  | succ fuel' =>
+    simp only [h_async, ↓reduceIte, Bool.or_true]
 
-/-- Variables are always sync.
-    Axiomatized because inferExprEffect is partial def. -/
-axiom var_is_sync (env : Env) (name : String) :
-  inferExprEffect env (Expr.var name) = Effect.sync
+/-- Literals are always sync -/
+theorem lit_is_sync (env : Env) (n : Nat) :
+    inferExprEffect env (Expr.lit n) = Effect.sync := by
+  simp only [inferExprEffect, inferExprEffectFuel]
+
+/-- Variables are always sync -/
+theorem var_is_sync (env : Env) (name : String) :
+    inferExprEffect env (Expr.var name) = Effect.sync := by
+  simp only [inferExprEffect, inferExprEffectFuel]
 
 theorem async_returns_promise (retType : Ty) :
   transformReturnType Effect.async retType = Ty.promise retType ∨
