@@ -168,6 +168,13 @@ pub(crate) fn call_extern_function(
         "_current_time_unix" => time::_current_time_unix(&evaluated),
 
         // ====================================================================
+        // Progress Timing (3 functions)
+        // ====================================================================
+        "rt_progress_init" => time::rt_progress_init(&evaluated),
+        "rt_progress_reset" => time::rt_progress_reset(&evaluated),
+        "rt_progress_get_elapsed_seconds" => time::rt_progress_get_elapsed_seconds(&evaluated),
+
+        // ====================================================================
         // Random Number Generation (7 functions)
         // ====================================================================
         "rt_random_seed" => random::rt_random_seed_fn(&evaluated),

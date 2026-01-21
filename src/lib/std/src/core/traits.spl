@@ -356,13 +356,10 @@ impl SeekFrom:
         Example: SeekFrom::End(-10).description()
                 # → "Seek from end of stream with offset -10"
         """
-        match self:
-            case SeekFrom::Start(pos):
-                "Seek from start of stream to position {pos}"
-            case SeekFrom::End(pos):
-                "Seek from end of stream with offset {pos}"
-            case SeekFrom::Current(pos):
-                "Seek from current position with offset {pos}"
+        return match self:
+            case SeekFrom::Start(pos): "Seek from start of stream to position {pos}"
+            case SeekFrom::End(pos): "Seek from end of stream with offset {pos}"
+            case SeekFrom::Current(pos): "Seek from current position with offset {pos}"
 
     fn summary() -> text:
         """Get comprehensive summary of the seek position.
@@ -380,13 +377,12 @@ impl SeekFrom:
 
 # Read trait - for types that can be read from
 trait Read:
-    fn read(buf: &mut [u8]) -> Result<usize, IoError>
+    fn read(buf: &mut Slice<u8>) -> Result<usize, IoError>
 
-    fn read_exact(buf: &mut [u8]) -> Result<(), IoError>:
+    fn read_exact(buf: &mut Slice<u8>) -> Result<(), IoError>:
         var offset: usize = 0
         while offset < buf.len():
-            # Use Python-style slice: buf[offset:] instead of buf[offset..]
-            val remaining = buf[offset:]
+            val remaining = buf.slice_from(offset)
             match self.read(&mut remaining):
                 case Ok(0): return Err(IoError::UnexpectedEof)
                 case Ok(n): offset = offset + n
@@ -395,16 +391,14 @@ trait Read:
 
     fn read_to_end(buf: &mut Array<u8>) -> Result<usize, IoError>:
         var total: usize = 0
-        # Array repeat syntax [value; count] now supported
-        var chunk = [0u8; 4096]
+        var chunk: Array<u8> = Array.with_capacity(4096)
         loop:
             match self.read(&mut chunk):
                 case Ok(0): return Ok(total)
-                case Ok(n):
-                    # Use Python-style slice syntax: arr[start:end] instead of arr[start..end]
-                    val chunk_slice = chunk[0:n]
+                case Ok(count):
+                    val chunk_slice = chunk.slice(0, count)
                     buf.extend_from_slice(&chunk_slice)
-                    total = total + n
+                    total = total + count
                 case Err(e): return Err(e)
 
     fn read_to_string(s: &mut text) -> Result<usize, IoError>:
@@ -418,14 +412,13 @@ trait Read:
 
 # Write trait - for types that can be written to
 trait Write:
-    fn write(buf: &[u8]) -> Result<usize, IoError>
+    fn write(buf: &Slice<u8>) -> Result<usize, IoError>
     fn flush() -> Result<(), IoError>
 
-    fn write_all(buf: &[u8]) -> Result<(), IoError>:
+    fn write_all(buf: &Slice<u8>) -> Result<(), IoError>:
         var offset: usize = 0
         while offset < buf.len():
-            # Use Python-style slice: buf[offset:] instead of buf[offset..]
-            val remaining = buf[offset:]
+            val remaining = buf.slice_from(offset)
             match self.write(&remaining):
                 case Ok(0): return Err(IoError::WriteZero)
                 case Ok(n): offset = offset + n
@@ -466,15 +459,13 @@ trait BufRead:
             if available.is_empty():
                 return Ok(read)
 
-            # Use Simple lambda syntax: \b: for parameter
             match available.iter().position(\b: b == byte):
                 case Some(i):
-                    # Use Python-style inclusive slice: arr[0:=i] instead of arr[0..=i]
-                    val slice_to_i = available[0:=i]
+                    val slice_to_i = available.slice(0, i + 1)
                     buf.extend_from_slice(&slice_to_i)
                     self.consume(i + 1)
                     return Ok(read + i + 1)
-                case None:
+                case nil:
                     buf.extend_from_slice(available)
                     val len = available.len()
                     self.consume(len)
@@ -482,7 +473,8 @@ trait BufRead:
 
     fn read_line(buf: &mut text) -> Result<usize, IoError>:
         var bytes = Array::new()
-        val n = self.read_until('\n' as u8, &mut bytes)?
+        val newline_byte: u8 = 10
+        val n = self.read_until(newline_byte, &mut bytes)?
         match text::from_utf8(bytes):
             case Ok(s):
                 buf.push_str(&s)

@@ -346,6 +346,48 @@ fn ymd_to_timestamp_days(year: i32, month: i32, day: i32) -> i64 {
     days
 }
 
+// ============================================================================
+// Progress Timing Functions
+// ============================================================================
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Global storage for progress start time (in microseconds since epoch)
+/// Using AtomicU64 for thread safety. 0 means not initialized.
+static PROGRESS_START_MICROS: AtomicU64 = AtomicU64::new(0);
+
+/// Initialize progress timing - stores the current time as the start time
+///
+/// Call this at the beginning of a test/operation to start tracking elapsed time.
+#[no_mangle]
+pub extern "C" fn rt_progress_init() {
+    let now = rt_time_now_unix_micros();
+    PROGRESS_START_MICROS.store(now as u64, Ordering::SeqCst);
+}
+
+/// Reset progress timing - clears the stored start time
+///
+/// Call this at the end of a test/operation to clear the progress state.
+#[no_mangle]
+pub extern "C" fn rt_progress_reset() {
+    PROGRESS_START_MICROS.store(0, Ordering::SeqCst);
+}
+
+/// Get elapsed seconds since progress was initialized
+///
+/// Returns the number of seconds (as f64) since `rt_progress_init()` was called.
+/// Returns 0.0 if progress was never initialized or was reset.
+#[no_mangle]
+pub extern "C" fn rt_progress_get_elapsed_seconds() -> f64 {
+    let start = PROGRESS_START_MICROS.load(Ordering::SeqCst);
+    if start == 0 {
+        return 0.0;
+    }
+    let now = rt_time_now_unix_micros() as u64;
+    let elapsed_micros = now.saturating_sub(start);
+    elapsed_micros as f64 / 1_000_000.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,5 +615,40 @@ mod tests {
         assert_eq!(rt_timestamp_get_day(jan_31), 31);
         assert_eq!(rt_timestamp_get_month(feb_1), 2);
         assert_eq!(rt_timestamp_get_day(feb_1), 1);
+    }
+
+    // ========================================================================
+    // Progress Timing Tests
+    // ========================================================================
+
+    #[test]
+    fn test_progress_init_and_elapsed() {
+        // Reset first to clear any previous state
+        rt_progress_reset();
+
+        // Before init, elapsed should be 0
+        let before = rt_progress_get_elapsed_seconds();
+        assert_eq!(before, 0.0, "Before init, elapsed should be 0");
+
+        // Initialize progress
+        rt_progress_init();
+
+        // Immediately after init, elapsed should be very small (< 0.1s)
+        let after_init = rt_progress_get_elapsed_seconds();
+        assert!(after_init >= 0.0, "Elapsed should be non-negative");
+        assert!(after_init < 0.1, "Elapsed should be small immediately after init");
+
+        // Wait a bit
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Now elapsed should be around 0.1s
+        let after_sleep = rt_progress_get_elapsed_seconds();
+        assert!(after_sleep >= 0.09, "Elapsed should be at least 90ms: got {}", after_sleep);
+        assert!(after_sleep < 0.5, "Elapsed should be less than 500ms: got {}", after_sleep);
+
+        // Reset and verify
+        rt_progress_reset();
+        let after_reset = rt_progress_get_elapsed_seconds();
+        assert_eq!(after_reset, 0.0, "After reset, elapsed should be 0");
     }
 }

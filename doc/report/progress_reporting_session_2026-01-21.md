@@ -117,11 +117,36 @@ Added progress() calls to all three slow_it tests:
 - `skip` - Not yet implemented features
 - `slow_it` - Long-running tests that can be run with `--only-slow`
 
-## Blocking Issues
+## RESOLVED: Basic Progress Reporting Works
 
-### Issue 1: Module-Level Global Variable Scoping
+After debugging, the core progress reporting feature is now working:
 
-**Error:** `semantic: variable 'global_tracker' not found`
+```
+Test Progress Reporting
+  progress function
+[PROGRESS 0s] Starting test...
+    ✓ prints progress message with timestamp
+[PROGRESS 0s] Step 1
+[PROGRESS 0s] Step 2
+[PROGRESS 0s] Step 3
+    ✓ shows elapsed time since test started
+```
+
+**What works:**
+- `progress(message)` - Prints `[PROGRESS 0s] message` to stderr
+- String interpolation in messages
+- `progress_pct()` and `progress_step()` convenience functions
+- Integration with test executor lifecycle
+
+**What's pending:**
+- Elapsed time tracking (shows 0s instead of actual time)
+- Timing requires `get_example_state` which causes stack overflow
+
+## Remaining Issues
+
+### Issue 1: get_example_state Stack Overflow
+
+**Error:** Stack overflow when calling `get_example_state` from progress module
 
 **Description:**
 Module-level global variables defined in one module aren't visible to functions in the same module during semantic analysis. This affects:
