@@ -232,12 +232,21 @@ theorem static_inlinable (fn : MonomorphizedFn) :
   rw [h]
   native_decide
 
--- Theorem: Dynamic dispatch requires vtable (axiomatized due to proof complexity)
-axiom dynamic_requires_vtable (env : BindEnv) (param : BindParam) (argType : Ty) (traitName : String) :
+-- Theorem: Dynamic dispatch requires vtable
+-- If dynamic dispatch validates and traitName is in bounds, vtable exists
+theorem dynamic_requires_vtable (env : BindEnv) (param : BindParam) (argType : Ty) (traitName : String) :
   param.bind_constraint.dispatch = DispatchMode.dynamic →
   traitName ∈ param.bind_constraint.trait_bounds →
   validateDynamicCall env param argType = true →
-  (lookupVtable env.vtable_registry traitName argType).isSome
+  (lookupVtable env.vtable_registry traitName argType).isSome := by
+  intro h_dynamic h_bound h_valid
+  unfold validateDynamicCall at h_valid
+  -- usesDynamicDispatch param = true because dispatch = dynamic
+  have h_uses : usesDynamicDispatch param = true := by
+    unfold usesDynamicDispatch
+    simp [h_dynamic]
+  simp only [h_uses, ↓reduceIte, List.all_eq_true] at h_valid
+  exact h_valid traitName h_bound
 
 -- Theorem: Monomorphization preserves type safety
 theorem monomorphization_type_safe (fn : FnDefBind) (typeArgs : List Ty) (mono : MonomorphizedFn) :
@@ -263,12 +272,20 @@ theorem bind_constraint_sound (env : BindEnv) (ty : Ty) (constraint : BindConstr
   rw [List.all_eq_true] at h_traits
   exact h_traits traitName h_mem
 
--- Theorem: Static dispatch with unsized type fails (axiomatized)
-axiom static_unsized_fails (env : BindEnv) (param : BindParam) (ty : Ty) (fn : FnDefBind) :
+-- Theorem: Static dispatch with unsized type fails
+-- If static dispatch requires Sized but type is unsized, validation fails
+theorem static_unsized_fails (env : BindEnv) (param : BindParam) (ty : Ty) (fn : FnDefBind) :
   param.bind_constraint.dispatch = DispatchMode.static →
   param.bind_constraint.sized = true →
   isSized ty = false →
-  validateStaticCall env fn param ty = false
+  validateStaticCall env fn param ty = false := by
+  intro h_static h_sized h_unsized
+  unfold validateStaticCall
+  -- usesStaticDispatch param = true because dispatch = static
+  have h_uses : usesStaticDispatch param = true := by
+    unfold usesStaticDispatch
+    simp [h_static]
+  simp only [h_uses, ↓reduceIte, h_sized, h_unsized, Bool.false_and]
 
 -- Theorem: Default dispatch mode is dynamic
 theorem default_is_dynamic :
@@ -335,12 +352,17 @@ theorem dispatch_modes_exclusive (param : BindParam) :
   | static => simp [h_dispatch]
   | dynamic => simp [h_dispatch] at h_static
 
--- Theorem: Bind constraint checking is complete (axiomatized)
-axiom bind_check_complete (env : BindEnv) (fn : FnDefBind) (param : BindParam) (argType : Ty) :
+-- Theorem: Bind constraint checking is complete
+-- If checkBindCall passes, all three validation checks pass
+theorem bind_check_complete (env : BindEnv) (fn : FnDefBind) (param : BindParam) (argType : Ty) :
   checkBindCall env fn param argType = true →
   validateBindConstraint env param argType = true ∧
   validateStaticCall env fn param argType = true ∧
-  validateDynamicCall env param argType = true
+  validateDynamicCall env param argType = true := by
+  intro h
+  unfold checkBindCall at h
+  simp only [Bool.and_eq_true] at h
+  exact ⟨h.1, h.2.1, h.2.2⟩
 
 -- Theorem: Sized types enable stack allocation
 theorem sized_enables_stack (ty : Ty) :
