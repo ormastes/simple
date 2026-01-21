@@ -371,7 +371,7 @@ impl<'a> Parser<'a> {
             TokenKind::Return => self.parse_return(),
             TokenKind::Break => self.parse_break(),
             TokenKind::Continue => self.parse_continue(),
-            TokenKind::Assert | TokenKind::Check => self.parse_assert(),
+            TokenKind::Assert => self.parse_assert(),
             TokenKind::Context => {
                 // Check if this is a context statement (context expr:) or function call (context(...)) or BDD DSL (context "string":)
                 let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
