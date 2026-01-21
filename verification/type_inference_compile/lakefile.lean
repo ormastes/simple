@@ -34,3 +34,10 @@ lean_lib StaticPolymorphism
 lean_lib StaticPolymorphismTest
 
 lean_lib UnificationDecidability
+
+-- Auto-generated modules (from Simple auto_gen)
+lean_lib Generated_Types
+
+lean_lib Generated_Lookups
+
+lean_lib Generated_Theorems

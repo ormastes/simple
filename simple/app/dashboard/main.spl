@@ -8,6 +8,8 @@ use tooling.dashboard.cache.{get_cached_data, cache_stats}
 use tooling.dashboard.snapshots.{create_daily_snapshot, cleanup_snapshots}
 use tooling.dashboard.trends.{analyze_weekly_trends, analyze_monthly_trends, format_trend_chart}
 use tooling.dashboard.alerts.{check_alerts, check_alerts_with_trends, format_alerts, should_block_build}
+use tooling.dashboard.export.{ExportFormat, DashboardExporter, export_html_report, export_markdown_report, export_json_report}
+use tooling.dashboard.config.{load_config, create_default_config}
 use dashboard.views.status.{render_status}
 use web_dashboard.server.{DashboardServer}
 
@@ -30,6 +32,8 @@ fn main(args: List<text>):
         "check-alerts" => run_check_alerts()
         "cleanup" => run_cleanup()
         "serve" => run_serve(args.slice(1, args.len()))
+        "export" => run_export(args.slice(1, args.len()))
+        "config-init" => run_config_init()
         "cache-stats" => run_cache_stats()
         "help" => print_help()
         _ =>
@@ -183,6 +187,61 @@ fn parse_port(s: text) -> i32:
             result = result * 10 + (ch - '0')
     return if result > 0: result else: 3000
 
+# Export report
+fn run_export(args: List<text>):
+    if args.len() == 0:
+        print "Error: Please specify output file"
+        print "Usage: simple dashboard export [--format=html|markdown|json] <filename>"
+        return
+
+    # Parse format
+    var format = "html"
+    var filename = args[0]
+
+    if args.len() > 1 and args[0].starts_with("--format="):
+        format = args[0].replace("--format=", "")
+        filename = args[1]
+
+    print "Exporting dashboard report to {filename} (format: {format})...\n"
+
+    match collect_full():
+        Ok(data) =>
+            match analyze_weekly_trends():
+                Ok(trends) =>
+                    val alerts = check_alerts_with_trends(data, trends)
+
+                    val result = match format:
+                        "html" => export_html_report(data, Some(trends), alerts, filename)
+                        "markdown" => export_markdown_report(data, Some(trends), alerts, filename)
+                        "json" => export_json_report(data, Some(trends), alerts, filename)
+                        _ =>
+                            print "Error: Unknown format '{format}'. Use: html, markdown, or json"
+                            return
+
+                    match result:
+                        Ok(_) =>
+                            print "Report exported successfully to: {filename}"
+                        Err(e) =>
+                            print "Error: {e}"
+                Err(_) =>
+                    print "Warning: Could not load trends, exporting current data only\n"
+                    match export_html_report(data, None, [], filename):
+                        Ok(_) => print "Report exported to: {filename}"
+                        Err(e) => print "Error: {e}"
+        Err(e) =>
+            print "Error collecting data: {e}"
+
+# Initialize configuration file
+fn run_config_init():
+    print "Creating default configuration file...\n"
+
+    match create_default_config(".simple/dashboard.toml"):
+        Ok(_) =>
+            print "Created: .simple/dashboard.toml"
+            print "Edit this file to customize dashboard settings"
+        Err(e) =>
+            print "Error: {e}"
+
 # Print help
 fn print_help():
     print "Simple Dashboard CLI\n"
@@ -200,6 +259,9 @@ fn print_help():
     print "  cleanup         Remove old snapshots (>90 days)"
     print "  serve           Start web dashboard server"
     print "    --port=N        Server port (default: 3000)"
+    print "  export          Export dashboard report"
+    print "    --format=FMT    html, markdown, or json (default: html)"
+    print "  config-init     Create default config file (.simple/dashboard.toml)"
     print "  cache-stats     Show cache statistics"
     print "  help            Show this help\n"
     print "\nExamples:"
