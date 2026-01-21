@@ -398,21 +398,12 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let body = if self.check(&TokenKind::Arrow) || self.check(&TokenKind::FatArrow) {
+        let body = if self.check(&TokenKind::Arrow)
+            || self.check(&TokenKind::FatArrow)
+            || self.check(&TokenKind::Colon)
+        {
             self.advance();
-            // Body can be single expression or block
-            if self.check(&TokenKind::Newline) {
-                self.parse_block()?
-            } else {
-                let expr = self.parse_expression()?;
-                Block {
-                    span: self.previous.span,
-                    statements: vec![Node::Expression(expr)],
-                }
-            }
-        } else if self.check(&TokenKind::Colon) {
-            self.advance();
-            // Support inline match arm: `case X: return Y` or `case X: expr`
+            // Support inline match arm: `case X => return Y` or `case X: expr`
             if self.check(&TokenKind::Newline) {
                 self.parse_block()?
             } else {
