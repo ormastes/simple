@@ -236,9 +236,9 @@ theorem monomorphize_requires_matching_arity (gf : GenericFn) (args : List Concr
   · simp [hlen] at h
 
 /-- BEq is reflexive for ConcreteType.
-    Note: The derived BEq instance for nested inductive types (List ConcreteType)
-    requires well-founded recursion. We axiomatize this property which holds by
-    structural induction on ConcreteType and mutual recursion on List ConcreteType. -/
+    The derived BEq instance for nested inductive types requires well-founded recursion
+    on (ConcreteType, List ConcreteType). We axiomatize this property which holds by
+    structural induction but cannot be directly proven due to the derived BEq opacity. -/
 axiom concreteType_beq_refl (ct : ConcreteType) : (ct == ct) = true
 
 /-- BEq is reflexive for List ConcreteType -/
