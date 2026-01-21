@@ -302,23 +302,26 @@ theorem isolated_ne_shared : RefCapability.Isolated ≠ RefCapability.Shared := 
 theorem isolated_ne_exclusive : RefCapability.Isolated ≠ RefCapability.Exclusive := by decide
 
 -- Main theorem: Creating a reference maintains well-formedness
--- Axiomatized for now: The proof requires complex reasoning about list membership
--- and capability counting that is tedious but straightforward.
--- The key invariant is that canCreateRef returns true only when the resulting
--- environment would be well-formed.
+-- This proof is complex due to the case analysis on capabilities and the
+-- interaction between canCreateRef and the wellFormed invariants.
+-- The key insight is that canCreateRef returns true only when adding the
+-- reference would not violate wellFormedness.
 --
--- Proof strategy:
--- Case 1: loc = ref.location
---   - Shared: canCreateRef true means no Exclusive/Isolated exist in existing refs
---     Adding Shared ref keeps counts for Exclusive/Isolated at 0
---   - Exclusive: canCreateRef true means existing refs is empty
---     After adding: refs = [ref], count Exclusive = 1, length = 1
---   - Isolated: same as Exclusive
--- Case 2: loc ≠ ref.location
---   - Original wellFormed hypothesis applies directly
+-- Axiomatized due to proof complexity involving:
+-- 1. Case analysis on capabilities (Shared/Exclusive/Isolated)
+-- 2. Reasoning about list membership after addRef
+-- 3. Tracking capability counts through mutations
+--
+-- Proof sketch:
+-- Case loc = ref.location:
+--   - Shared: canCreateRef=true → no Exclusive/Isolated exist → adding Shared keeps counts at 0
+--   - Exclusive: canCreateRef=true → empty refs → result is [ref] with counts (1,0)
+--   - Isolated: canCreateRef=true → empty refs → result is [ref] with counts (0,1)
+-- Case loc ≠ ref.location:
+--   - Original wellFormed applies since (loc, refs) unchanged
 axiom create_ref_preserves_wellformed (env : RefEnv) (ref : Reference) :
-  wellFormed env ->
-  canCreateRef env ref.location ref.refType.capability = true ->
+  wellFormed env →
+  canCreateRef env ref.location ref.refType.capability = true →
   wellFormed (addRef env ref)
 
 -- Integration with memory operations
