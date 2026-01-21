@@ -119,20 +119,31 @@ def instantiateClass (cls : ClassDef) (typeArgs : List Ty) : Option ClassDef :=
 
 -- Check if ty1 is a subtype of ty2
 -- For now, this is just equality; can be extended for inheritance
-partial def isSubtype (env : ClassEnv) (ty1 ty2 : Ty) : Bool :=
-  match ty1, ty2 with
-  | Ty.named name1, Ty.named name2 =>
-      if name1 == name2 then
-        true
-      else
-        -- Check inheritance chain
-        match lookupClass env name1 with
-        | some cls =>
-            match cls.parent with
-            | some parent => isSubtype env (Ty.named parent) ty2
-            | none => false
-        | none => false
-  | _, _ => ty1 == ty2
+/-- Default fuel for subtype checking (based on env size) -/
+def subtypeFuel (env : ClassEnv) : Nat := env.length + 10
+
+/-- Fuel-based subtype checking -/
+def isSubtypeFuel (env : ClassEnv) (fuel : Nat) (ty1 ty2 : Ty) : Bool :=
+  match fuel with
+  | 0 => ty1 == ty2  -- Fallback: structural equality
+  | fuel' + 1 =>
+    match ty1, ty2 with
+    | Ty.named name1, Ty.named name2 =>
+        if name1 == name2 then
+          true
+        else
+          -- Check inheritance chain
+          match lookupClass env name1 with
+          | some cls =>
+              match cls.parent with
+              | some parent => isSubtypeFuel env fuel' (Ty.named parent) ty2
+              | none => false
+          | none => false
+    | _, _ => ty1 == ty2
+
+/-- Check if ty1 is a subtype of ty2 -/
+def isSubtype (env : ClassEnv) (ty1 ty2 : Ty) : Bool :=
+  isSubtypeFuel env (subtypeFuel env) ty1 ty2
 
 -- Type inference for field access: obj.field
 -- Given: class type, field name
@@ -243,12 +254,33 @@ theorem methodCall_deterministic (env : ClassEnv) (objTy : Ty) (methodName : Str
   cases h2
   rfl
 
--- Theorem: Subtyping is reflexive (axiomatized: isSubtype is partial def)
-axiom subtype_reflexive (env : ClassEnv) (ty : Ty) :
-  isSubtype env ty ty = true
+/-- Subtyping is reflexive (for any fuel > 0) -/
+theorem isSubtypeFuel_reflexive (env : ClassEnv) (fuel : Nat) (ty : Ty) (h : fuel > 0) :
+    isSubtypeFuel env fuel ty ty = true := by
+  cases fuel with
+  | zero => omega
+  | succ fuel' =>
+    simp only [isSubtypeFuel]
+    cases ty with
+    | named name => simp only [beq_self_eq_true, ↓reduceIte]
+    | int => simp only [beq_self_eq_true]
+    | bool => simp only [beq_self_eq_true]
+    | str => simp only [beq_self_eq_true]
+    | var _ => simp only [beq_self_eq_true]
+    | arrow _ _ => simp only [beq_self_eq_true]
+    | generic _ _ => simp only [beq_self_eq_true]
 
--- Theorem: Subtyping is transitive
--- If A <: B and B <: C, then A <: C
+/-- Subtyping is reflexive -/
+theorem subtype_reflexive (env : ClassEnv) (ty : Ty) :
+    isSubtype env ty ty = true := by
+  simp only [isSubtype]
+  apply isSubtypeFuel_reflexive
+  simp only [subtypeFuel]
+  omega
+
+/-- Subtyping transitivity - axiomatized due to complexity
+    Proof requires showing that if A <: B via inheritance chain and B <: C via inheritance chain,
+    then A <: C. This requires lemmas about inheritance chain composition and sufficient fuel. -/
 axiom subtype_transitive (env : ClassEnv) (ty1 ty2 ty3 : Ty) :
   isSubtype env ty1 ty2 = true →
   isSubtype env ty2 ty3 = true →

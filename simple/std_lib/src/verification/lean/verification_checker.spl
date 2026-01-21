@@ -1,0 +1,255 @@
+# Verification Constraint Checker
+#
+# Checks code for verification rule violations before Lean code generation.
+# Enforces the V-* and M-* rules defined in the Lean verification spec.
+#
+# ## Rules Checked
+#
+# - V-TERM: Termination requirement for recursive functions
+# - V-EFFECT: IO/FFI operations in verified code
+# - V-UNSAFE: Unsafe operations (raw pointers, casts)
+# - V-GHOST: Ghost code isolation
+# - V-CONTRACT: Contract purity (no side effects)
+
+import verification.lean.verification_diagnostics as diag
+
+# Known IO function names
+val IO_FUNCTIONS: List<text> = [
+    "print", "println", "read", "readline", "write",
+    "open", "close", "read_file", "write_file",
+    "spawn", "send", "recv", "sleep"
+]
+
+# Prefixes indicating mutating functions
+val MUTATING_PREFIXES: List<text> = [
+    "set_", "push", "pop", "insert", "remove", "clear", "append"
+]
+
+# Known mutating function names
+val MUTATING_FUNCTIONS: List<text> = [
+    "assign"
+]
+
+# Check result
+class CheckResult:
+    errors: diag.VerificationDiagnostics
+    warnings: List<text>
+
+    static fn new() -> CheckResult:
+        CheckResult(
+            errors: diag.VerificationDiagnostics.new(),
+            warnings: []
+        )
+
+    fn has_errors() -> bool:
+        self.errors.has_errors()
+
+    fn error_count() -> i32:
+        self.errors.error_count()
+
+    me add_warning(warning: text):
+        self.warnings = self.warnings + [warning]
+
+# Verification constraint checker
+class VerificationChecker:
+    file: Option<text>
+    result: CheckResult
+
+    static fn new() -> VerificationChecker:
+        VerificationChecker(
+            file: nil,
+            result: CheckResult.new()
+        )
+
+    me with_file(file: text) -> VerificationChecker:
+        self.file = Some(file)
+        self
+
+    # Check if a function name is an IO function
+    fn is_io_function(name: text) -> bool:
+        for io_fn in IO_FUNCTIONS:
+            if name == io_fn:
+                return true
+        false
+
+    # Check if a function name is a mutating function
+    fn is_mutating_function(name: text) -> bool:
+        for prefix in MUTATING_PREFIXES:
+            if name.starts_with(prefix):
+                return true
+        for fn_name in MUTATING_FUNCTIONS:
+            if name == fn_name:
+                return true
+        false
+
+    # Check if a function is potentially recursive
+    fn is_potentially_recursive(func_name: text, called_functions: List<text>) -> bool:
+        for called in called_functions:
+            if called == func_name:
+                return true
+        false
+
+    # Report an IO error
+    me report_io_error(span: diag.Span, func_name: text):
+        var d = diag.VerificationDiagnostic.new(
+            diag.VerificationErrorCode.IoInVerified,
+            span
+        )
+        d = d.with_item(func_name)
+        match self.file:
+            case Some(f):
+                d = d.with_file(f)
+            case nil:
+                pass
+        self.result.errors.push(d)
+
+    # Report a raw pointer error
+    me report_raw_pointer_error(span: diag.Span, func_name: text):
+        var d = diag.VerificationDiagnostic.new(
+            diag.VerificationErrorCode.RawPointerInVerified,
+            span
+        )
+        d = d.with_item(func_name)
+        match self.file:
+            case Some(f):
+                d = d.with_file(f)
+            case nil:
+                pass
+        self.result.errors.push(d)
+
+    # Report an unsafe operation error
+    me report_unsafe_error(span: diag.Span, operation: text):
+        var d = diag.VerificationDiagnostic.new(
+            diag.VerificationErrorCode.UnsafeInVerified,
+            span
+        )
+        d = d.with_context("unsafe operation: {operation}")
+        match self.file:
+            case Some(f):
+                d = d.with_file(f)
+            case nil:
+                pass
+        self.result.errors.push(d)
+
+    # Report an FFI error
+    me report_ffi_error(span: diag.Span, func_name: text):
+        var d = diag.VerificationDiagnostic.new(
+            diag.VerificationErrorCode.FfiInVerified,
+            span
+        )
+        d = d.with_item(func_name)
+        match self.file:
+            case Some(f):
+                d = d.with_file(f)
+            case nil:
+                pass
+        self.result.errors.push(d)
+
+    # Report missing termination error
+    me report_missing_termination(span: diag.Span, func_name: text):
+        var d = diag.VerificationDiagnostic.new(
+            diag.VerificationErrorCode.MissingTermination,
+            span
+        )
+        d = d.with_item(func_name)
+        match self.file:
+            case Some(f):
+                d = d.with_file(f)
+            case nil:
+                pass
+        self.result.errors.push(d)
+
+    # Report contract side effect error
+    me report_contract_side_effect(span: diag.Span, clause_type: text):
+        var d = diag.VerificationDiagnostic.new(
+            diag.VerificationErrorCode.ContractHasSideEffects,
+            span
+        )
+        d = d.with_context("in {clause_type} clause")
+        match self.file:
+            case Some(f):
+                d = d.with_file(f)
+            case nil:
+                pass
+        self.result.errors.push(d)
+
+    # Report ghost access error
+    me report_ghost_access(span: diag.Span, var_name: text):
+        var d = diag.VerificationDiagnostic.new(
+            diag.VerificationErrorCode.GhostAccessesNonGhost,
+            span
+        )
+        d = d.with_item(var_name)
+        match self.file:
+            case Some(f):
+                d = d.with_file(f)
+            case nil:
+                pass
+        self.result.errors.push(d)
+
+    # Check function calls for effects
+    me check_function_call(func_name: text, callee: text, span: diag.Span):
+        if VerificationChecker.is_io_function(callee):
+            self.report_io_error(span, func_name)
+
+    # Check function calls for contract purity
+    me check_contract_call(callee: text, clause_type: text, span: diag.Span):
+        if VerificationChecker.is_mutating_function(callee):
+            self.report_contract_side_effect(span, clause_type)
+
+    # Get the check result
+    fn get_result() -> CheckResult:
+        self.result
+
+# High-level check functions
+
+# Check if a function call is allowed in verified context
+fn check_call_in_verified(func_name: text) -> Option<diag.VerificationErrorCode>:
+    if VerificationChecker.is_io_function(func_name):
+        return Some(diag.VerificationErrorCode.IoInVerified)
+    nil
+
+# Check if a function call is allowed in contract expressions
+fn check_call_in_contract(func_name: text) -> Option<diag.VerificationErrorCode>:
+    if VerificationChecker.is_mutating_function(func_name):
+        return Some(diag.VerificationErrorCode.ContractHasSideEffects)
+    nil
+
+# Check if an operation is unsafe
+fn check_unsafe_operation(operation: text) -> Option<diag.VerificationErrorCode>:
+    match operation:
+        case "raw_pointer_deref": Some(diag.VerificationErrorCode.RawPointerInVerified)
+        case "unsafe_cast": Some(diag.VerificationErrorCode.UnsafeInVerified)
+        case "ffi_call": Some(diag.VerificationErrorCode.FfiInVerified)
+        case _: nil
+
+# Validate a verified function for common violations
+fn validate_verified_function(
+    func_name: text,
+    is_recursive: bool,
+    has_termination: bool,
+    called_io_functions: List<text>,
+    has_unsafe_ops: bool
+) -> CheckResult:
+    var checker = VerificationChecker.new()
+    val span = diag.Span.empty()
+
+    # V-TERM: Check termination
+    if is_recursive and not has_termination:
+        checker.report_missing_termination(span, func_name)
+
+    # V-EFFECT: Check IO
+    for io_fn in called_io_functions:
+        checker.report_io_error(span, io_fn)
+
+    # V-UNSAFE: Check unsafe
+    if has_unsafe_ops:
+        checker.report_unsafe_error(span, "detected unsafe operation")
+
+    checker.get_result()
+
+# Export public API
+export IO_FUNCTIONS, MUTATING_PREFIXES, MUTATING_FUNCTIONS
+export CheckResult, VerificationChecker
+export check_call_in_verified, check_call_in_contract, check_unsafe_operation
+export validate_verified_function

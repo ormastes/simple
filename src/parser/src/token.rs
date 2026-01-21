@@ -235,6 +235,8 @@ pub enum TokenKind {
     Decreases, // decreases: (termination measure for Lean verification)
     // Inline assertions (statement-level contract checks)
     Assert, // assert expr or assert expr, "message"
+    Assume, // assume expr (trusted assumption for verification)
+    Admit,  // admit expr, "reason" (skip proof, tracked)
 
     // Infix keywords (for BDD spec framework)
     // These parse as infix method calls: `A to B` → `A.to(B)`

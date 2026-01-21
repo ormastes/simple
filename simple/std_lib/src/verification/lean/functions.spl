@@ -1,0 +1,347 @@
+# Lean Function Translation
+#
+# Translates Simple functions to Lean 4 definitions:
+# - Verified functions -> Lean `def` with explicit types
+# - Pure functions -> `def` without IO monad
+# - Effectful functions -> wrapped in appropriate monad
+# - Recursive functions -> with termination_by clause
+
+import verification.lean.naming as naming
+import verification.lean.types as types
+
+# Lean expression for function bodies (simplified)
+enum LeanExpr:
+    Var(name: text)
+    Lit(value: text)
+    BinOp(op: text, left: LeanExpr, right: LeanExpr)
+    UnaryOp(op: text, operand: LeanExpr)
+    App(func: text, args: List<LeanExpr>)
+    Lambda(params: List<text>, body: LeanExpr)
+    Let(name: text, value: LeanExpr, body: LeanExpr)
+    If(cond: LeanExpr, then_branch: LeanExpr, else_branch: LeanExpr)
+    Match(scrutinee: LeanExpr, arms: List<(text, LeanExpr)>)
+    Field(obj: LeanExpr, field: text)
+    StructInit(type_name: text, fields: List<(text, LeanExpr)>)
+    ListLit(elems: List<LeanExpr>)
+    TupleLit(elems: List<LeanExpr>)
+    Sorry
+    Unit
+
+impl LeanExpr:
+    fn to_lean() -> text:
+        match self:
+            case Var(name): name
+            case Lit(value): value
+            case BinOp(op, left, right):
+                "({left.to_lean()} {op} {right.to_lean()})"
+            case UnaryOp(op, operand):
+                "({op}{operand.to_lean()})"
+            case App(func, args):
+                var args_str: List<text> = []
+                for a in args:
+                    args_str = args_str + [a.to_lean()]
+                if args_str.len() == 0:
+                    func
+                else:
+                    "({func} {args_str.join(\" \")})"
+            case Lambda(params, body):
+                "fun {params.join(\" \")} => {body.to_lean()}"
+            case Let(name, value, body):
+                "let {name} := {value.to_lean()}\n  {body.to_lean()}"
+            case If(cond, then_b, else_b):
+                "if {cond.to_lean()} then {then_b.to_lean()} else {else_b.to_lean()}"
+            case Match(scrutinee, arms):
+                var result = "match {scrutinee.to_lean()} with\n"
+                for (pattern, expr) in arms:
+                    result = result + "  | {pattern} => {expr.to_lean()}\n"
+                result
+            case Field(obj, field):
+                "{obj.to_lean()}.{field}"
+            case StructInit(type_name, fields):
+                var field_strs: List<text> = []
+                for (name, expr) in fields:
+                    field_strs = field_strs + ["{name} := {expr.to_lean()}"]
+                "\{{ {field_strs.join(\", \")} \}}"
+            case ListLit(elems):
+                var elem_strs: List<text> = []
+                for e in elems:
+                    elem_strs = elem_strs + [e.to_lean()]
+                "[{elem_strs.join(\", \")}]"
+            case TupleLit(elems):
+                var elem_strs: List<text> = []
+                for e in elems:
+                    elem_strs = elem_strs + [e.to_lean()]
+                "({elem_strs.join(\", \")})"
+            case Sorry: "sorry"
+            case Unit: "()"
+
+# A Lean function definition
+class LeanFunction:
+    name: text
+    type_params: List<text>
+    params: List<(text, types.LeanType)>
+    return_type: types.LeanType
+    body: Option<LeanExpr>
+    is_partial: bool
+    doc: Option<text>
+    termination_by: Option<LeanExpr>
+
+    static fn new(name: text) -> LeanFunction:
+        LeanFunction(
+            name: name,
+            type_params: [],
+            params: [],
+            return_type: types.LeanType.Primitive("Unit"),
+            body: nil,
+            is_partial: false,
+            doc: nil,
+            termination_by: nil
+        )
+
+    me with_params(params: List<(text, types.LeanType)>) -> LeanFunction:
+        self.params = params
+        self
+
+    me with_return_type(ty: types.LeanType) -> LeanFunction:
+        self.return_type = ty
+        self
+
+    me with_body(body: LeanExpr) -> LeanFunction:
+        self.body = Some(body)
+        self
+
+    me with_doc(doc: text) -> LeanFunction:
+        self.doc = Some(doc)
+        self
+
+    me with_termination(term: LeanExpr) -> LeanFunction:
+        self.termination_by = Some(term)
+        self
+
+    me partial() -> LeanFunction:
+        self.is_partial = true
+        self
+
+    me add_type_param(param: text) -> LeanFunction:
+        self.type_params = self.type_params + [param]
+        self
+
+    # Emit as Lean definition
+    fn to_lean() -> text:
+        var out = ""
+
+        # Doc comment
+        match self.doc:
+            case Some(doc):
+                for line in doc.split("\n"):
+                    out = out + "/-- {line} -/\n"
+            case nil:
+                pass
+
+        # Partial annotation if needed
+        if self.is_partial:
+            out = out + "partial "
+
+        # Function signature
+        out = out + "def {self.name}"
+
+        # Type parameters
+        if self.type_params.len() > 0:
+            out = out + " \{{self.type_params.join(\" \")}\}"
+
+        # Parameters
+        for (param_name, param_type) in self.params:
+            out = out + " ({param_name} : {param_type.to_lean()})"
+
+        # Return type
+        out = out + " : {self.return_type.to_lean()} :=\n"
+
+        # Body
+        match self.body:
+            case Some(body):
+                out = out + "  {body.to_lean()}\n"
+            case nil:
+                out = out + "  sorry\n"
+
+        # Termination measure
+        match self.termination_by:
+            case Some(term):
+                out = out + "termination_by {term.to_lean()}\n"
+            case nil:
+                pass
+
+        out
+
+    # Emit as axiom (for external/native functions)
+    fn to_axiom() -> text:
+        var out = ""
+
+        # Doc comment
+        match self.doc:
+            case Some(doc):
+                for line in doc.split("\n"):
+                    out = out + "/-- {line} -/\n"
+            case nil:
+                pass
+
+        out = out + "axiom {self.name}"
+
+        # Type parameters
+        if self.type_params.len() > 0:
+            out = out + " \{{self.type_params.join(\" \")}\}"
+
+        # Parameters as function type
+        for (_, param_type) in self.params:
+            out = out + " : {param_type.to_lean()} ->"
+
+        # Return type
+        out = out + " {self.return_type.to_lean()}\n"
+
+        out
+
+# Lean parameter
+class LeanParam:
+    name: text
+    ty: types.LeanType
+    is_implicit: bool
+    is_instance: bool
+
+    static fn create(name: text, ty: types.LeanType) -> LeanParam:
+        LeanParam(name: name, ty: ty, is_implicit: false, is_instance: false)
+
+    static fn implicit(name: text, ty: types.LeanType) -> LeanParam:
+        LeanParam(name: name, ty: ty, is_implicit: true, is_instance: false)
+
+    static fn instance(name: text, ty: types.LeanType) -> LeanParam:
+        LeanParam(name: name, ty: ty, is_implicit: false, is_instance: true)
+
+    fn to_lean() -> text:
+        if self.is_implicit:
+            "\{{self.name} : {self.ty.to_lean()}\}"
+        else if self.is_instance:
+            "[{self.name} : {self.ty.to_lean()}]"
+        else:
+            "({self.name} : {self.ty.to_lean()})"
+
+# Builder for LeanFunction with simple types
+class FunctionBuilder:
+    func: LeanFunction
+
+    static fn new(name: text) -> FunctionBuilder:
+        FunctionBuilder(func: LeanFunction.new(name))
+
+    me param(name: text, type_name: text) -> FunctionBuilder:
+        val ty = types.TypeTranslator.translate_primitive(type_name)
+        self.func.params = self.func.params + [(name, ty)]
+        self
+
+    me param_type(name: text, ty: types.LeanType) -> FunctionBuilder:
+        self.func.params = self.func.params + [(name, ty)]
+        self
+
+    me returns(type_name: text) -> FunctionBuilder:
+        self.func.return_type = types.TypeTranslator.translate_primitive(type_name)
+        self
+
+    me returns_type(ty: types.LeanType) -> FunctionBuilder:
+        self.func.return_type = ty
+        self
+
+    me body_expr(expr: LeanExpr) -> FunctionBuilder:
+        self.func.body = Some(expr)
+        self
+
+    me body_text(body: text) -> FunctionBuilder:
+        self.func.body = Some(LeanExpr.Lit(body))
+        self
+
+    me doc(doc: text) -> FunctionBuilder:
+        self.func.doc = Some(doc)
+        self
+
+    me partial() -> FunctionBuilder:
+        self.func.is_partial = true
+        self
+
+    me termination(expr: LeanExpr) -> FunctionBuilder:
+        self.func.termination_by = Some(expr)
+        self
+
+    fn build() -> LeanFunction:
+        self.func
+
+# Helper functions for building expressions
+fn var(name: text) -> LeanExpr:
+    LeanExpr.Var(name)
+
+fn lit(value: text) -> LeanExpr:
+    LeanExpr.Lit(value)
+
+fn int_lit(n: i32) -> LeanExpr:
+    LeanExpr.Lit("{n}")
+
+fn bool_lit(b: bool) -> LeanExpr:
+    if b:
+        LeanExpr.Lit("true")
+    else:
+        LeanExpr.Lit("false")
+
+fn string_lit(s: text) -> LeanExpr:
+    LeanExpr.Lit("\"{s}\"")
+
+fn binop(op: text, left: LeanExpr, right: LeanExpr) -> LeanExpr:
+    LeanExpr.BinOp(op, left, right)
+
+fn add(left: LeanExpr, right: LeanExpr) -> LeanExpr:
+    binop("+", left, right)
+
+fn sub(left: LeanExpr, right: LeanExpr) -> LeanExpr:
+    binop("-", left, right)
+
+fn mul(left: LeanExpr, right: LeanExpr) -> LeanExpr:
+    binop("*", left, right)
+
+fn div(left: LeanExpr, right: LeanExpr) -> LeanExpr:
+    binop("/", left, right)
+
+fn eq(left: LeanExpr, right: LeanExpr) -> LeanExpr:
+    binop("=", left, right)
+
+fn lt(left: LeanExpr, right: LeanExpr) -> LeanExpr:
+    binop("<", left, right)
+
+fn le(left: LeanExpr, right: LeanExpr) -> LeanExpr:
+    binop("<=", left, right)
+
+fn gt(left: LeanExpr, right: LeanExpr) -> LeanExpr:
+    binop(">", left, right)
+
+fn ge(left: LeanExpr, right: LeanExpr) -> LeanExpr:
+    binop(">=", left, right)
+
+fn app(func: text, args: List<LeanExpr>) -> LeanExpr:
+    LeanExpr.App(func, args)
+
+fn call(func: text, arg: LeanExpr) -> LeanExpr:
+    LeanExpr.App(func, [arg])
+
+fn if_then_else(cond: LeanExpr, then_b: LeanExpr, else_b: LeanExpr) -> LeanExpr:
+    LeanExpr.If(cond, then_b, else_b)
+
+fn let_in(name: text, value: LeanExpr, body: LeanExpr) -> LeanExpr:
+    LeanExpr.Let(name, value, body)
+
+fn lambda(params: List<text>, body: LeanExpr) -> LeanExpr:
+    LeanExpr.Lambda(params, body)
+
+fn sorry() -> LeanExpr:
+    LeanExpr.Sorry
+
+fn unit() -> LeanExpr:
+    LeanExpr.Unit
+
+# Export public API
+export LeanExpr, LeanFunction, LeanParam, FunctionBuilder
+export var, lit, int_lit, bool_lit, string_lit
+export binop, add, sub, mul, div, eq, lt, le, gt, ge
+export app, call, if_then_else, let_in, lambda, sorry, unit
