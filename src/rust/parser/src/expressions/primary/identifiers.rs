@@ -1,5 +1,6 @@
 use crate::ast::Expr;
 use crate::error::ParseError;
+use crate::error_recovery::{ErrorHint, ErrorHintLevel};
 use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
 
@@ -64,7 +65,19 @@ impl<'a> Parser<'a> {
         let name = name.to_string();
         self.advance();
         // Check for path expression: Name::Variant
+        // DEPRECATED: Use dot syntax instead (Name.Variant)
         if self.check(&TokenKind::DoubleColon) {
+            // Emit deprecation warning for :: syntax
+            let colon_span = self.current.span;
+            let warning = ErrorHint {
+                level: ErrorHintLevel::Warning,
+                message: "Deprecated syntax for static method/variant access".to_string(),
+                span: colon_span,
+                suggestion: Some("Use dot syntax (.) instead of double colon (::)".to_string()),
+                help: Some("Example: Type.new() instead of Type::new()".to_string()),
+            };
+            self.error_hints.push(warning);
+
             let mut segments = vec![name];
             while self.check(&TokenKind::DoubleColon) {
                 self.advance(); // consume '::'

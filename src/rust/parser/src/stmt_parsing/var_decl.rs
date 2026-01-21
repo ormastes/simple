@@ -2,6 +2,7 @@
 
 use crate::ast::*;
 use crate::error::ParseError;
+use crate::error_recovery::{ErrorHint, ErrorHintLevel};
 use crate::parser_impl::core::Parser;
 use crate::token::{Span, TokenKind};
 
@@ -209,6 +210,15 @@ impl Parser<'_> {
 
         // Check for Rust-style :: before { or *
         if self.check(&TokenKind::DoubleColon) {
+            // Emit deprecation warning for '::' syntax
+            let warning = ErrorHint {
+                level: ErrorHintLevel::Warning,
+                message: "Deprecated: '::' in module paths".to_string(),
+                span: self.current.span,
+                suggestion: Some("Use '.' instead of '::'".to_string()),
+                help: Some("Example: use std.spec.* instead of use std::spec::*".to_string()),
+            };
+            self.error_hints.push(warning);
             self.advance(); // consume ::
         }
 

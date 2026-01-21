@@ -2,8 +2,9 @@
 //!
 //! Handles running individual test files and parsing their output.
 
-use std::path::Path;
-use std::time::Instant;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::runner::Runner;
 use super::types::TestFileResult;
@@ -33,8 +34,12 @@ pub fn parse_test_output(output: &str) -> (usize, usize) {
 }
 
 /// Run a single test file with options (wrapper for compatibility)
-pub fn run_test_file_with_options(runner: &Runner, path: &Path, _options: &super::types::TestOptions) -> TestFileResult {
-    run_test_file(runner, path)
+pub fn run_test_file_with_options(runner: &Runner, path: &Path, options: &super::types::TestOptions) -> TestFileResult {
+    if options.safe_mode {
+        run_test_file_safe_mode(path, options)
+    } else {
+        run_test_file(runner, path)
+    }
 }
 
 /// Run a single test file
@@ -75,6 +80,186 @@ pub fn run_test_file(runner: &Runner, path: &Path) -> TestFileResult {
                 duration_ms,
                 error: Some(error_msg),
             }
+        }
+    }
+}
+
+/// Run a single test file in a separate process with timeout (safe mode)
+pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions) -> TestFileResult {
+    let start = Instant::now();
+
+    // Find the simple binary path
+    let simple_binary = find_simple_binary();
+
+    // Prepare environment variables
+    let mut env_vars = Vec::new();
+
+    // Check and propagate test mode environment variables
+    if let Ok(mode) = std::env::var("SIMPLE_TEST_MODE") {
+        env_vars.push(("SIMPLE_TEST_MODE", mode));
+    }
+    if let Ok(filter) = std::env::var("SIMPLE_TEST_FILTER") {
+        env_vars.push(("SIMPLE_TEST_FILTER", filter));
+    }
+    if let Ok(show_tags) = std::env::var("SIMPLE_TEST_SHOW_TAGS") {
+        env_vars.push(("SIMPLE_TEST_SHOW_TAGS", show_tags));
+    }
+
+    // Build command - run through test runner, not as direct script execution
+    let mut cmd = Command::new(&simple_binary);
+    cmd.arg("test")  // Run through test runner
+        .arg(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Set environment variables
+    for (key, val) in &env_vars {
+        cmd.env(key, val);
+    }
+
+    // Spawn the process
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms: start.elapsed().as_millis() as u64,
+                error: Some(format!("Failed to spawn process: {}", e)),
+            };
+        }
+    };
+
+    // Wait for process with timeout
+    let timeout_duration = Duration::from_secs(options.safe_mode_timeout);
+    let wait_result = wait_with_timeout(child, timeout_duration);
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    match wait_result {
+        Ok((exit_code, stdout, stderr)) => {
+            // Combine stdout and stderr for output parsing
+            let combined_output = format!("{}\n{}", stdout, stderr);
+
+            // Parse the output to extract test counts
+            let (passed, failed) = parse_test_output(&combined_output);
+
+            // If parsing didn't find anything, fall back to exit code
+            let (passed, failed) = if passed == 0 && failed == 0 {
+                if exit_code == 0 {
+                    (1, 0)
+                } else {
+                    (0, 1)
+                }
+            } else {
+                (passed, failed)
+            };
+
+            TestFileResult {
+                path: path.to_path_buf(),
+                passed,
+                failed,
+                skipped: 0,
+                ignored: 0,
+                duration_ms,
+                error: if exit_code != 0 && failed == 0 {
+                    Some(format!("Process exited with code {}", exit_code))
+                } else {
+                    None
+                },
+            }
+        }
+        Err(e) => {
+            TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms,
+                error: Some(e),
+            }
+        }
+    }
+}
+
+/// Find the simple binary path
+fn find_simple_binary() -> PathBuf {
+    // Try to find the binary in common locations
+    let candidates = vec![
+        PathBuf::from("./target/debug/simple"),
+        PathBuf::from("./target/release/simple"),
+        PathBuf::from("simple"), // In PATH
+    ];
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    // If we're running as the simple binary, use the current executable
+    if let Ok(exe) = std::env::current_exe() {
+        if exe.file_name().and_then(|n| n.to_str()) == Some("simple") {
+            return exe;
+        }
+    }
+
+    // Default to looking in target/debug
+    PathBuf::from("./target/debug/simple")
+}
+
+/// Wait for a process with timeout
+fn wait_with_timeout(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> Result<(i32, String, String), String> {
+    use std::thread;
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::channel();
+    let child_id = child.id();
+
+    // Spawn a thread to wait for the child
+    thread::spawn(move || {
+        let output = child.wait_with_output();
+        let _ = tx.send(output);
+    });
+
+    // Wait for the result with timeout
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(output)) => {
+            let exit_code = output.status.code().unwrap_or(-1);
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            Ok((exit_code, stdout, stderr))
+        }
+        Ok(Err(e)) => {
+            Err(format!("Process failed: {}", e))
+        }
+        Err(_) => {
+            // Timeout - kill the process
+            #[cfg(unix)]
+            {
+                use std::process::Command as StdCommand;
+                let _ = StdCommand::new("kill")
+                    .arg("-9")
+                    .arg(child_id.to_string())
+                    .status();
+            }
+
+            #[cfg(windows)]
+            {
+                use std::process::Command as StdCommand;
+                let _ = StdCommand::new("taskkill")
+                    .args(&["/F", "/PID", &child_id.to_string()])
+                    .status();
+            }
+
+            Err(format!("Test timed out after {} seconds", timeout.as_secs()))
         }
     }
 }

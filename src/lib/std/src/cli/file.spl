@@ -1,55 +1,16 @@
 # CLI File Validation - File argument validation and staging utilities
 #
-# **Supports both sync and async modes:**
+# Supports both sync and async modes:
 # - Sync mode (default): Validates paths only, no file loading
 # - Async mode (via ArgParser.with_async_loading): Starts background loading during parse
-#
-# This module provides SYNCHRONOUS file validation for CLI arguments.
-# It is designed for use during argument parsing (pre-execution validation).
-#
-# **For file I/O operations, use the `file` module:**
-# - `file` module: Async memory-mapped file I/O (default for applications)
-# - `cli.file` module: Path validation + optional async loading
-#
+
 # Extern declarations for file system FFI
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_canonicalize(path: text) -> text
 
 import units.core::Count
 
-# This module provides Python argparse-style file validation for CLI arguments:
-# - Check if files exist (relative or absolute paths)
-# - Validate file types and permissions
-# - Stage multiple files for processing
-# - Normalize file paths
-# - Optionally start async loading in background
-#
-# Example (sync mode):
-#   val parser = ArgParser::new("myapp", "File processor")
-#       .file_arg("input", "i", "Input file", required: true, must_exist: true)
-#       .file_arg("output", "o", "Output file", required: false, must_exist: false)
-#
-#   match parser.parse(sys_get_args()):
-#       case Ok(args):
-#           # Use the async `file` module to load files
-#           for file_info in args.files.staged():
-#               async with await file.open(file_info.path) as mmap:
-#                   process_file(mmap.as_bytes())
-#
-# Example (async mode - background loading):
-#   val parser = ArgParser::new("myapp", "File processor")
-#       .file_arg("input", "i", "Input file", required: true, must_exist: true)
-#       .with_async_loading(true)  # Enable background loading
-#
-#   match parser.parse(sys_get_args()):
-#       case Ok(args):
-#           # Files already loading in background!
-#           val regions = await args.files.wait_all()?
-#           for region in regions:
-#               process_file(region.as_bytes())
-
 # Import async file handle types for background loading
-# The file module re-exports all types from async_handle and mmap
 use file::{AsyncFileHandle, FileState, MmapRegion, OpenOptions, FileError}
 
 # File validation result
@@ -61,125 +22,57 @@ pub enum FileValidation:
     NotWritable(text)
 
 impl FileValidation:
-    # =========================================================================
-    # Helper Methods
-    # =========================================================================
-
+    # Check if file exists (valid)
     pub fn is_exists(self) -> bool:
-        """Check if file exists (valid).
-
-        Returns:
-            true for Valid variant
-
-        Example:
-            FileValidation::Valid("/tmp/file.txt").is_exists()  # → true
-        """
         match self:
             case Valid(_): true
             case _: false
 
+    # Check if file was not found
     pub fn is_not_found(self) -> bool:
-        """Check if file was not found.
-
-        Returns:
-            true for NotFound variant
-
-        Example:
-            FileValidation::NotFound("/missing.txt").is_not_found()  # → true
-        """
         match self:
             case NotFound(_): true
             case _: false
 
+    # Check if path is not a file (e.g., directory)
     pub fn is_not_file(self) -> bool:
-        """Check if path is not a file (e.g., directory).
-
-        Returns:
-            true for NotFile variant
-
-        Example:
-            FileValidation::NotFile("/tmp").is_not_file()  # → true
-        """
         match self:
             case NotFile(_): true
             case _: false
 
+    # Check if file is not readable
     pub fn is_not_readable(self) -> bool:
-        """Check if file is not readable.
-
-        Returns:
-            true for NotReadable variant
-
-        Example:
-            FileValidation::NotReadable("/noaccess").is_not_readable()  # → true
-        """
         match self:
             case NotReadable(_): true
             case _: false
 
+    # Check if file is not writable
     pub fn is_not_writable(self) -> bool:
-        """Check if file is not writable.
-
-        Returns:
-            true for NotWritable variant
-
-        Example:
-            FileValidation::NotWritable("/readonly.txt").is_not_writable()  # → true
-        """
         match self:
             case NotWritable(_): true
             case _: false
 
+    # Check if validation failed
     pub fn is_error(self) -> bool:
-        """Check if validation failed.
-
-        Returns:
-            false for Valid, true for any error variant
-
-        Example:
-            FileValidation::Valid("/file").is_error()  # → false
-            FileValidation::NotFound("/miss").is_error()  # → true
-        """
         match self:
             case Valid(_): false
             case _: true
 
+    # Check if validation passed
     pub fn is_valid(self) -> bool:
-        """Check if validation passed.
-
-        Returns:
-            true for Valid
-
-        Example:
-            FileValidation::Valid("/file").is_valid()  # → true
-        """
         match self:
             case Valid(_): true
             case _: false
 
+    # Check if error is permission-related
     pub fn is_permission_error(self) -> bool:
-        """Check if error is permission-related.
-
-        Returns:
-            true for NotReadable or NotWritable
-
-        Example:
-            FileValidation::NotReadable("/file").is_permission_error()  # → true
-        """
         match self:
             case NotReadable(_): true
             case NotWritable(_): true
             case _: false
 
+    # Get the file path
     pub fn get_path(self) -> text:
-        """Get the file path.
-
-        Returns:
-            Path from any variant
-
-        Example:
-            FileValidation::Valid("/tmp/file.txt").get_path()  # → "/tmp/file.txt"
-        """
         match self:
             case Valid(path): path
             case NotFound(path): path
@@ -187,15 +80,8 @@ impl FileValidation:
             case NotReadable(path): path
             case NotWritable(path): path
 
+    # Convert validation result to string
     pub fn to_string(self) -> text:
-        """Convert validation result to string.
-
-        Returns:
-            Result type name
-
-        Example:
-            FileValidation::NotFound("/miss").to_string()  # → "not-found"
-        """
         match self:
             case Valid(_): "exists"
             case NotFound(_): "not-found"
@@ -203,16 +89,8 @@ impl FileValidation:
             case NotReadable(_): "not-readable"
             case NotWritable(_): "not-writable"
 
+    # Get validation result description
     pub fn description(self) -> text:
-        """Get validation result description.
-
-        Returns:
-            Human-readable description
-
-        Example:
-            FileValidation::NotReadable("/file").description()
-            # → "File exists but is not readable"
-        """
         match self:
             case Valid(_): "File exists and is valid"
             case NotFound(_): "File does not exist"
@@ -220,16 +98,8 @@ impl FileValidation:
             case NotReadable(_): "File exists but is not readable"
             case NotWritable(_): "File exists but is not writable"
 
+    # Get file validation summary
     pub fn summary(self) -> text:
-        """Get file validation summary.
-
-        Returns:
-            Human-readable summary
-
-        Example:
-            FileValidation::NotFound("/missing.txt").summary()
-            # → "FileValidation: not-found (File does not exist): /missing.txt [error]"
-        """
         val name = self.to_string()
         val desc = self.description()
         val path = self.get_path()
@@ -240,47 +110,27 @@ impl FileValidation:
 pub struct FileInfo:
     path: text
     absolute_path: text
-    exists: bool
+    file_exists: bool
     is_file: bool
     is_dir: bool
     is_readable: bool
     is_writable: bool
 
 # Staged files for processing
-#
-# **Supports two modes:**
-# 1. Sync validation only (default) - validates paths, no file loading
-# 2. Async loading (via ArgParser.with_async_loading) - starts loading files in background
-#
-# **Usage:**
-#   # Sync mode (validation only)
-#   val staged = stage_files(args)
-#   for file in staged.staged():
-#       # Use file module to load
-#       async with await file.open(file.path) as mmap:
-#           process(mmap)
-#
-#   # Async mode (background loading)
-#   val staged = stage_files_async(args)  # Files start loading
-#   # Wait for all files
-#   val regions = await staged.wait_all()?
-#   # Or process as ready
-#   for handle in staged.ready_handles():
-#       val mmap = handle.get()?
 pub struct StagedFiles:
     files: Array<FileInfo>
-    handles: Array<AsyncFileHandle>  # Async file handles (if async loading enabled)
+    handles: Array<AsyncFileHandle>
     errors: Array<text>
 
     # Get all successfully staged files
     pub fn staged(self) -> Array<FileInfo>:
         var result = []
-        for file in self.files:
-            if file.exists and file.is_file:
-                result.push(file)
+        for f in self.files:
+            if f.file_exists and f.is_file:
+                result.push(f)
         return result
 
-    # Get async file handles (if async loading enabled)
+    # Get async file handles
     pub fn handles(self) -> Array<AsyncFileHandle>:
         return self.handles
 
@@ -322,7 +172,7 @@ pub struct FileValidator:
     allowed_extensions: Array<text>
 
     # Create a new file validator
-    pub fn new() -> FileValidator:
+    static fn new() -> FileValidator:
         return FileValidator {
             must_exist: false,
             must_be_file: true,
@@ -353,29 +203,21 @@ pub struct FileValidator:
 
     # Validate a file path
     pub fn validate(self, path: text) -> Result<FileInfo, text>:
-        # Check if file exists (using file_exists FFI)
-        val exists = file_exists(path)
-
-        # Get file info
+        val does_exist = file_exists(path)
         val info = get_file_info(path)
 
-        # Validate existence
-        if self.must_exist and not exists:
+        if self.must_exist and not does_exist:
             return Err("File does not exist: {path}")
 
-        # Validate it's a file (not directory)
-        if self.must_be_file and exists and info.is_dir:
+        if self.must_be_file and does_exist and info.is_dir:
             return Err("Path is a directory, not a file: {path}")
 
-        # Validate readable
-        if self.must_be_readable and exists and not info.is_readable:
+        if self.must_be_readable and does_exist and not info.is_readable:
             return Err("File is not readable: {path}")
 
-        # Validate writable
-        if self.must_be_writable and exists and not info.is_writable:
+        if self.must_be_writable and does_exist and not info.is_writable:
             return Err("File is not writable: {path}")
 
-        # Validate extension
         if self.allowed_extensions.len() > 0:
             val ext = get_file_extension(path)
             var valid_ext = false
@@ -389,14 +231,11 @@ pub struct FileValidator:
         return Ok(info)
 
 # File staging manager
-#
-# **SYNC MODE:** Validates file paths synchronously during CLI parsing.
-# Does NOT load file contents - use the `file` module for actual I/O.
 pub struct FileStager:
     validators: Dict<text, FileValidator>
 
     # Create a new file stager
-    pub fn new() -> FileStager:
+    static fn new() -> FileStager:
         return FileStager {
             validators: {}
         }
@@ -406,12 +245,11 @@ pub struct FileStager:
         self.validators.insert(arg_name, validator)
         return self
 
-    # Stage files from parsed arguments (sync mode - no background loading)
+    # Stage files from parsed arguments (sync mode)
     pub fn stage_files(self, args: ParsedArgs) -> StagedFiles:
         var files: Array<FileInfo> = []
         var errors: Array<text> = []
 
-        # Validate options with validators
         for (name, validator) in self.validators:
             val value = args.get_option(name)
             match value:
@@ -422,13 +260,10 @@ pub struct FileStager:
                         case Err(error):
                             errors.push("{name}: {error}")
                 case None:
-                    # Option not provided - skip if optional
                     pass
 
-        # Validate positional files
         val positionals = args.get_all_positionals()
         for path in positionals:
-            # Use default validator for positionals
             val default_validator = FileValidator::new().require_exists()
             match default_validator.validate(path):
                 case Ok(info):
@@ -438,17 +273,16 @@ pub struct FileStager:
 
         return StagedFiles {
             files: files,
-            handles: [],  # No async handles in sync mode
+            handles: [],
             errors: errors
         }
 
-    # Stage files with async loading (background loading)
+    # Stage files with async loading
     pub fn stage_files_async(self, args: ParsedArgs, options: OpenOptions) -> StagedFiles:
         var files: Array<FileInfo> = []
         var handles: Array<AsyncFileHandle> = []
         var errors: Array<text> = []
 
-        # Validate options with validators
         for (name, validator) in self.validators:
             val value = args.get_option(name)
             match value:
@@ -456,25 +290,20 @@ pub struct FileStager:
                     match validator.validate(path):
                         case Ok(info):
                             files.push(info)
-                            # Start loading file in background
                             val handle = AsyncFileHandle::with_options(info.path, options)
                             handle.start_loading()
                             handles.push(handle)
                         case Err(error):
                             errors.push("{name}: {error}")
                 case None:
-                    # Option not provided - skip if optional
                     pass
 
-        # Validate positional files
         val positionals = args.get_all_positionals()
         for path in positionals:
-            # Use default validator for positionals
             val default_validator = FileValidator::new().require_exists()
             match default_validator.validate(path):
                 case Ok(info):
                     files.push(info)
-                    # Start loading file in background
                     val handle = AsyncFileHandle::with_options(info.path, options)
                     handle.start_loading()
                     handles.push(handle)
@@ -489,61 +318,49 @@ pub struct FileStager:
 
 # File utility functions
 
-# Check if a file exists
 fn file_exists(path: text) -> bool:
     return rt_file_exists(path)
 
-# Get file information using FFI
 fn get_file_info(path: text) -> FileInfo:
-    val exists = rt_file_exists(path)
+    val does_exist = rt_file_exists(path)
     val absolute_path = normalize_path(path)
-
-    # For now, use simple heuristics for file/dir detection
-    # A more complete implementation would use rt_file_stat FFI
-    val is_file = exists and not path.ends_with("/")
-    val is_dir = exists and path.ends_with("/")
+    val is_file_val = does_exist and not path.ends_with("/")
+    val is_dir_val = does_exist and path.ends_with("/")
 
     return FileInfo {
         path: path,
         absolute_path: absolute_path,
-        exists: exists,
-        is_file: is_file,
-        is_dir: is_dir,
-        is_readable: exists,  # Assume readable if exists
-        is_writable: exists   # Assume writable if exists
+        file_exists: does_exist,
+        is_file: is_file_val,
+        is_dir: is_dir_val,
+        is_readable: does_exist,
+        is_writable: does_exist
     }
 
-# Normalize file path (handle relative/absolute)
 pub fn normalize_path(path: text) -> text:
     return rt_file_canonicalize(path)
 
-# Get file extension
 pub fn get_file_extension(path: text) -> text:
     val parts = path.split(".")
     if parts.len() > 1:
         return parts[parts.len() - 1]
     return ""
 
-# Check if path is absolute
 pub fn is_absolute_path(path: text) -> bool:
     return path.starts_with("/") or path.starts_with("C:") or path.starts_with("D:")
 
-# Check if path is relative
 pub fn is_relative_path(path: text) -> bool:
     return not is_absolute_path(path)
 
-# Join path components
 pub fn join_paths(base: text, relative: text) -> text:
     if base.ends_with("/"):
         return "{base}{relative}"
     else:
         return "{base}/{relative}"
 
-# Get directory from path
 pub fn get_directory(path: text) -> text:
     val parts = path.split("/")
     if parts.len() > 1:
-        # Remove last component
         var dir = ""
         var i = 0
         while i < parts.len() - 1:
@@ -554,19 +371,16 @@ pub fn get_directory(path: text) -> text:
         return dir
     return "."
 
-# Get filename from path
 pub fn get_filename(path: text) -> text:
     val parts = path.split("/")
     if parts.len() > 0:
         return parts[parts.len() - 1]
     return path
 
-# Get filename without extension
 pub fn get_basename(path: text) -> text:
     val filename = get_filename(path)
     val parts = filename.split(".")
     if parts.len() > 1:
-        # Return everything except last part (extension)
         var base = ""
         var i = 0
         while i < parts.len() - 1:
@@ -577,7 +391,6 @@ pub fn get_basename(path: text) -> text:
         return base
     return filename
 
-# Validate multiple files at once
 pub fn validate_files(paths: Array<text>, validator: FileValidator) -> Result<Array<FileInfo>, Array<text>>:
     var files: Array<FileInfo> = []
     var errors: Array<text> = []
@@ -594,8 +407,6 @@ pub fn validate_files(paths: Array<text>, validator: FileValidator) -> Result<Ar
 
     return Ok(files)
 
-# Create file validator for common cases
-
 # Validator for input files (must exist, readable)
 pub fn input_file_validator() -> FileValidator:
     return FileValidator::new()
@@ -607,7 +418,7 @@ pub fn output_file_validator() -> FileValidator:
     return FileValidator::new()
         .require_writable()
 
-# Validator for config files (must exist, readable, specific extensions)
+# Validator for config files
 pub fn config_file_validator() -> FileValidator:
     return FileValidator::new()
         .require_exists()

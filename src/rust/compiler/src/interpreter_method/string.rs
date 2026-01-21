@@ -2,12 +2,13 @@
 //
 // This module contains all built-in methods for String values (str type):
 // - Basic operations: len, char_count, is_empty, chars, bytes
-// - Searching: contains, starts_with, ends_with, find, index_of, rfind
+// - Searching: contains, starts_with, ends_with, find, index_of, rfind, find_all
 // - Case conversion: to_upper, to_lower, capitalize, swapcase, title
 // - Trimming: trim, strip, trim_start, trim_end, chomp
 // - Prefix/Suffix: removeprefix, removesuffix
 // - Manipulation: reversed, sorted, take, drop, append, prepend, push, pop, clear, squeeze
-// - Slicing: split, split_lines, slice, substring, replace, partition, rpartition
+// - Slicing: split, split_lines, slice, substring, substr, replace, partition, rpartition
+// - Joining: join (join array with string as delimiter)
 // - Parsing: parse_int, parse_float, to_int, to_float
 // - Padding: pad_left, pad_right, center, zfill
 // - Type checking: is_numeric, is_alpha, is_alphanumeric, is_whitespace
@@ -408,6 +409,42 @@ if let Value::Str(ref s) = recv_val {
         "count" => {
             let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
             return Ok(Value::Int(s.matches(&needle).count() as i64));
+        }
+        "substr" => {
+            // substr(start, length) - Extract substring by start position and length
+            // Unlike substring(start, end), this uses length
+            let start = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            let length = eval_arg_usize(args, 1, s.len(), env, functions, classes, enums, impl_methods)?;
+            // Work with char indices for unicode safety
+            let chars: Vec<char> = s.chars().collect();
+            let start = start.min(chars.len());
+            let end = (start + length).min(chars.len());
+            let result: String = chars[start..end].iter().collect();
+            return Ok(Value::Str(result));
+        }
+        "find_all" | "find_indices" => {
+            // find_all(needle) - Return all indices where needle is found
+            let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+            if needle.is_empty() {
+                return Ok(Value::Array(vec![]));
+            }
+            let indices: Vec<Value> = s.match_indices(&needle)
+                .map(|(idx, _)| Value::Int(idx as i64))
+                .collect();
+            return Ok(Value::Array(indices));
+        }
+        "join" => {
+            // join(array) - Join array elements with this string as delimiter
+            // Example: ",".join(["a", "b", "c"]) -> "a,b,c"
+            let arr_val = eval_arg(args, 0, Value::Array(vec![]), env, functions, classes, enums, impl_methods)?;
+            if let Value::Array(arr) = arr_val {
+                let parts: Vec<String> = arr.iter().map(|v| v.to_display_string()).collect();
+                return Ok(Value::Str(parts.join(s)));
+            } else {
+                return Err(crate::error::CompileError::semantic(
+                    "join expects an array argument",
+                ));
+            }
         }
         "with" => {
             // FString.with method: replace placeholders {key} with values from dict

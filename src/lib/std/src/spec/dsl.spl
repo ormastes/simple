@@ -1,8 +1,10 @@
 # BDD DSL - RSpec-style describe/context/it blocks
 # Implements example group registration and hook management
 # Extended with Context Sharing support and Shared Examples (TEST-010, TEST-011)
+# Extended with Resource Limits support for limited_it and slow_it_with_limits
 
 import registry.{ExampleGroup, Example, Hook, ContextDefinition, Given, SharedExampleDefinition}
+import concurrency.resource_limits.{ResourceLimits}
 
 # Current execution context (stack of groups)
 val group_stack: List<ExampleGroup> = []
@@ -123,6 +125,19 @@ fn it(description: text, block: fn()):
         case None:
             panic("it() must be called within a describe or context block")
 
+# it: Define a conditionally enabled test example (overloaded)
+# Usage: it "does something", enabled: is_feature_enabled(): ...
+# The test runs only if 'enabled' is true, otherwise it's skipped
+fn it(description: text, enabled: bool, block: fn()):
+    match current_group:
+        case Some(group):
+            val example = Example.new(description, block)
+            if not enabled:
+                example.skip()
+            group.add_example(example)
+        case None:
+            panic("it() must be called within a describe or context block")
+
 # skip: Define a pending/skipped test example
 # Usage: skip "does something not yet implemented": ...
 fn skip(description: text, block: fn()):
@@ -133,16 +148,46 @@ fn skip(description: text, block: fn()):
         case None:
             panic("skip() must be called within a describe or context block")
 
+# skip_it: Alias for skip() with *_it naming convention
+# Usage: skip_it "does something not yet implemented": ...
+fn skip_it(description: text, block: fn()):
+    skip(description, block)
+
 # slow_it: Define a slow/long-running test example (120+ seconds)
 # Usage: slow_it "generates all verification files": ...
 # These tests are marked as slow and can be run with --only-slow
+# Note: slow_it automatically applies default resource limits (5min CPU, 1GB memory)
 fn slow_it(description: text, block: fn()):
     match current_group:
         case Some(group):
-            val example = Example.new(description, block).slow()
+            # Apply default test limits to slow tests for safety
+            val limits = ResourceLimits.default_test_limits()
+            val example = Example.new(description, block).slow().with_resource_limits(limits)
             group.add_example(example)
         case None:
             panic("slow_it() must be called within a describe or context block")
+
+# limited_it: Define a test example with resource limits
+# Usage: limited_it "processes large dataset", ResourceLimits.strict(): ...
+# These tests run with the specified resource constraints
+fn limited_it(description: text, limits: ResourceLimits, block: fn()):
+    match current_group:
+        case Some(group):
+            val example = Example.new(description, block).with_resource_limits(limits)
+            group.add_example(example)
+        case None:
+            panic("limited_it() must be called within a describe or context block")
+
+# slow_it_with_limits: Define a slow test with resource limits
+# Usage: slow_it_with_limits "long computation", ResourceLimits.default_test_limits(): ...
+# Combines slow test marking with resource constraints
+fn slow_it_with_limits(description: text, limits: ResourceLimits, block: fn()):
+    match current_group:
+        case Some(group):
+            val example = Example.new(description, block).slow().with_resource_limits(limits)
+            group.add_example(example)
+        case None:
+            panic("slow_it_with_limits() must be called within a describe or context block")
 
 # ignore_it: Create a test that is always ignored (never runs)
 # Usage: ignore_it "description": block

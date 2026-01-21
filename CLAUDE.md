@@ -116,12 +116,42 @@ val bad = template.with {"usr": x}   # ERROR: "usr" not in ["user", "city"]
 val missing = template.with {"user": x}  # ERROR: Missing key "city"
 ```
 
+**Constructors (Python-style, zero boilerplate):**
+```simple
+struct Point:
+    x: i64
+    y: i64
+
+# ✅ PRIMARY: Direct construction (works immediately, no impl needed!)
+val p = Point(3, 4)
+val p2 = Point(x: 10, y: 20)  # Named parameters
+
+# Optional: Custom constructor logic
+impl Point:
+    fn new(x: i64, y: i64) -> Point:   # 'static' keyword optional (implicitly static)
+        return Point(x, y)
+```
+
 **Methods (LL(1)-friendly, implicit self):**
 ```simple
 impl MyStruct:
-    static fn new() -> MyStruct:        # Static method (no self)
+    fn new() -> MyStruct:               # Implicitly static (constructor name)
     fn get_value() -> i32:              # Immutable method (self implicit)
     me set_value(v: i32):               # Mutable method ('me' keyword, self implicit)
+```
+
+**Calling Constructors and Static Methods:**
+```simple
+# ✅ RECOMMENDED: Direct construction (Python-style)
+val p = Point(3, 4)
+
+# ✅ Alternative: Static constructor method with dot syntax
+val obj = MyStruct.new()
+val date = Date.today()
+val result = Result.ok(42)
+
+# ❌ DEPRECATED: double-colon syntax (shows warning)
+val obj = MyStruct::new()   # Warning: Use dot syntax instead
 ```
 
 See `/coding` skill for full details.

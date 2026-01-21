@@ -1,11 +1,14 @@
 # Test Execution Engine
 # Executes registered tests with hook support and result capture
+# Extended with resource-limited execution support
 
 import spec.registry.{ExampleGroup, Example, Hook, get_all_groups}
 import spec.runner.filter.{TestFilter}
 import spec.runtime.{Runtime, ExampleState}
 import spec.progress.{init_progress, reset_progress}
 import core.time.{Timer}
+import concurrency.resource_limits.{ResourceLimits, LimitViolation, LimitedResult}
+import concurrency.threads.{spawn_limited, LimitedThreadHandle}
 
 # Test result status
 enum TestStatus:
@@ -13,6 +16,7 @@ enum TestStatus:
     Failed(message: text)
     Pending
     Skipped
+    ResourceLimitViolation(violation: LimitViolation)
 
 # Individual test result
 class TestResult:
@@ -51,6 +55,12 @@ impl TestResult:
         """Mark this test as skipped."""
         self.status = TestStatus.Skipped
 
+    fn mark_resource_limit_violation(violation: LimitViolation, duration_ms: f64) -> void:
+        """Mark this test as failed due to resource limit violation."""
+        self.status = TestStatus.ResourceLimitViolation(violation)
+        self.failure_message = Some(violation.message())
+        self.duration_ms = duration_ms
+
     fn is_passed() -> bool:
         """Check if test passed."""
         match self.status:
@@ -60,9 +70,19 @@ impl TestResult:
                 return false
 
     fn is_failed() -> bool:
-        """Check if test failed."""
+        """Check if test failed (including resource limit violations)."""
         match self.status:
             case TestStatus.Failed(_):
+                return true
+            case TestStatus.ResourceLimitViolation(_):
+                return true
+            case _:
+                return false
+
+    fn is_resource_limit_violation() -> bool:
+        """Check if test failed due to resource limit violation."""
+        match self.status:
+            case TestStatus.ResourceLimitViolation(_):
                 return true
             case _:
                 return false
@@ -267,19 +287,38 @@ impl TestExecutor:
         # Execute before_each hooks
         self.execute_hooks(before_hooks)
 
-        # Execute the test with error handling
-        # TODO: Add proper error handling when try/catch is supported
-        # For now, wrap in helper with basic error detection
-        val test_passed = safe_execute_example(example)
+        # Check if example has resource limits
+        if example.has_resource_limits():
+            # Execute with resource limits in isolated thread
+            match example.get_resource_limits():
+                case Some(limits):
+                    val execution_result = self.execute_with_limits(example, limits)
+                    val duration = timer.elapsed_ms()
 
-        if test_passed:
-            # Mark as passed
-            val duration = timer.elapsed_ms()
-            result.mark_passed(duration)
+                    match execution_result:
+                        case LimitedResult.Success(_):
+                            result.mark_passed(duration)
+                        case LimitedResult.Killed(violation):
+                            result.mark_resource_limit_violation(violation, duration)
+                        case LimitedResult.Error(msg):
+                            result.mark_failed(msg, duration)
+                case None:
+                    # Should not happen, but fall back to normal execution
+                    val test_passed = safe_execute_example(example)
+                    val duration = timer.elapsed_ms()
+                    if test_passed:
+                        result.mark_passed(duration)
+                    else:
+                        result.mark_failed("Test execution failed", duration)
         else:
-            # Mark as failed with generic error
+            # Execute the test normally with error handling
+            val test_passed = safe_execute_example(example)
             val duration = timer.elapsed_ms()
-            result.mark_failed("Test execution failed - error handling not yet supported", duration)
+
+            if test_passed:
+                result.mark_passed(duration)
+            else:
+                result.mark_failed("Test execution failed - error handling not yet supported", duration)
 
         # Execute after_each hooks (always run)
         self.execute_hooks(after_hooks)
@@ -288,6 +327,20 @@ impl TestExecutor:
         reset_progress()
 
         return result
+
+    fn execute_with_limits(example: Example, limits: ResourceLimits) -> LimitedResult<Any>:
+        """Execute an example in an isolated thread with resource limits."""
+        # Wrap the example block in a closure that can be passed to spawn_limited
+        val block_fn = example.block
+
+        # Spawn a limited thread to execute the test
+        val handle = spawn_limited(block_fn, limits) \block:
+            # Execute the test block
+            block()
+            return nil
+
+        # Wait for the thread to complete and get the result
+        return handle.join_result()
 
     fn collect_before_each_hooks(group: ExampleGroup) -> List<Any>:
         """Collect before_each hooks from group hierarchy."""

@@ -11,6 +11,79 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.parse_lambda_body(MoveMode::Copy)
             }
+            TokenKind::Fn => {
+                // Lambda: fn(): expr or fn(x, y): expr (alias for backslash syntax)
+                // This provides more familiar syntax for those coming from other languages
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                // Parse parameters inside parentheses (can be empty for fn():)
+                let params = if self.check(&TokenKind::RParen) {
+                    vec![]
+                } else {
+                    let (params, _capture_all) = self.parse_lambda_params()?;
+                    params
+                };
+                self.expect(&TokenKind::RParen)?;
+                self.expect(&TokenKind::Colon)?;
+
+                // Parse body - can be inline expression or indented block
+                let body = if self.check(&TokenKind::Newline) {
+                    // Enable forced indentation for lambda body
+                    self.lexer.enable_forced_indentation();
+                    self.advance(); // consume newline
+
+                    if self.check(&TokenKind::Indent) {
+                        // Block body
+                        self.advance(); // consume Indent
+
+                        let mut statements = Vec::new();
+                        while !self.check(&TokenKind::Dedent) && !self.check(&TokenKind::Eof) {
+                            // Skip newlines between statements
+                            while self.check(&TokenKind::Newline) {
+                                self.advance();
+                            }
+
+                            if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
+                                break;
+                            }
+
+                            let stmt = self.parse_item()?;
+                            statements.push(stmt);
+
+                            // Skip trailing newlines
+                            while self.check(&TokenKind::Newline) {
+                                self.advance();
+                            }
+                        }
+
+                        // Consume dedent if present
+                        if self.check(&TokenKind::Dedent) {
+                            self.advance();
+                        }
+
+                        // Disable forced indentation after lambda body
+                        self.lexer.disable_forced_indentation();
+
+                        Expr::DoBlock(statements)
+                    } else {
+                        // Disable forced indentation - not a block
+                        self.lexer.disable_forced_indentation();
+
+                        // Single expression after newline
+                        self.parse_expression()?
+                    }
+                } else {
+                    // Inline expression
+                    self.parse_expression()?
+                };
+
+                Ok(Expr::Lambda {
+                    params,
+                    body: Box::new(body),
+                    move_mode: MoveMode::Copy,
+                    capture_all: false,
+                })
+            }
             TokenKind::Pipe => {
                 // Lambda: |x| body or |x, y| body (Ruby/Rust style)
                 self.advance();

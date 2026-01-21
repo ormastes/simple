@@ -384,6 +384,10 @@ impl<'a> Parser<'a> {
             TokenKind::Examples => "examples", // Allow "examples" in export statements
             TokenKind::Outline => "outline",   // Allow "outline" in export statements
             TokenKind::Common => "common",     // Allow "common" in paths (stdlib directory name)
+            TokenKind::Async => "async",       // Allow "async" in paths (e.g., host.async_nogc_mut)
+            TokenKind::Sync => "sync",         // Allow "sync" in paths (e.g., host.sync_nogc_mut)
+            TokenKind::Exists => "exists",     // Allow "exists" in exports (fs.exists)
+            TokenKind::Forall => "forall",     // Allow "forall" in exports
             // Allow math keywords in paths/exports
             TokenKind::Slice => "Slice",
             TokenKind::Tensor => "Tensor",
@@ -486,6 +490,23 @@ impl<'a> Parser<'a> {
             TokenKind::AndThen => "and_then",
             // Allow set operation keywords as method names
             TokenKind::Union => "union",
+            // Special error for 'exists' - reserved for verification quantifiers
+            TokenKind::Exists => {
+                return Err(ParseError::syntax_error_with_span(
+                    "Cannot use 'exists' as a function name.\n\
+                     \n\
+                     'exists' is a reserved keyword for existential quantifiers in verification:\n\
+                     Example: exists x in range: predicate\n\
+                     \n\
+                     To check file/path existence, use 'exist' instead:\n\
+                     - file.exist(path)   # In shell module\n\
+                     - path.exist(path)   # In shell module\n\
+                     - file_exist(path)   # In infra module\n\
+                     \n\
+                     Suggestion: Replace 'exists' with 'exist'".to_string(),
+                    self.current.span,
+                ));
+            }
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",

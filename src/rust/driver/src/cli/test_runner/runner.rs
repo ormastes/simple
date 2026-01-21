@@ -51,7 +51,13 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         initialize_coverage(quiet);
     }
 
-    let runner = create_runner(&options);
+    // Skip runner creation in safe mode (each subprocess creates its own)
+    let runner = if !options.safe_mode {
+        Some(create_runner(&options))
+    } else {
+        None
+    };
+
     let test_path = determine_test_path(&options);
     let test_files = discover_and_filter_tests(&test_path, &options);
 
@@ -62,7 +68,7 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
     // Execute tests (or list them)
     let (mut results, mut total_passed, mut total_failed, mut total_skipped, mut total_ignored) =
-        execute_test_files(&runner, &test_files, &options, quiet);
+        execute_test_files(runner.as_ref(), &test_files, &options, quiet);
 
     // Determine if all tests were run (no filters applied)
     let all_tests_run = options.path.is_none() && options.tag.is_none() && options.level == TestLevel::All && !list_mode;
@@ -199,7 +205,7 @@ fn shuffle_tests(test_files: &mut Vec<PathBuf>, seed: u64) {
 
 /// Execute test files and collect results
 fn execute_test_files(
-    runner: &Runner,
+    runner: Option<&Runner>,
     test_files: &[PathBuf],
     options: &TestOptions,
     quiet: bool,
@@ -212,15 +218,48 @@ fn execute_test_files(
     let mut total_skipped = 0;
     let mut total_ignored = 0;
 
+    // Performance warning for listing with filters (scans many files)
+    let list_mode = options.list || options.list_ignored;
+    if list_mode && test_files.len() > 100 && (options.only_slow || options.only_skipped) {
+        if !quiet {
+            eprintln!("⚠️  Warning: Listing tests with filters scans all files (slow for large test suites)");
+            eprintln!("   Tip: Limit scope with path argument, e.g.:");
+            eprintln!("        simple test test/lib/std/unit/ --only-skipped --list");
+            eprintln!("   Or use test database: cat doc/test/test_db.sdn | grep skip\n");
+        }
+    }
+
     for (idx, path) in test_files.iter().enumerate() {
         if !quiet && !options.list && !options.list_ignored {
             println!("Running: {}", path.display());
         }
 
+        // In safe mode, always show progress
+        if options.safe_mode && !quiet {
+            println!("[{}/{}] {}", idx + 1, test_files.len(), path.display());
+        }
+
         debug_log!(DebugLevel::Detailed, "Execution", "Test {}/{}: {}",
             idx + 1, test_files.len(), path.display());
 
-        let result = super::execution::run_test_file_with_options(runner, path, options);
+        let result = if options.safe_mode {
+            // Safe mode - run in separate process
+            super::execution::run_test_file_safe_mode(path, options)
+        } else if let Some(runner) = runner {
+            // Normal mode - run in same process
+            super::execution::run_test_file(runner, path)
+        } else {
+            // No runner available - this shouldn't happen
+            TestFileResult {
+                path: path.to_path_buf(),
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                ignored: 0,
+                duration_ms: 0,
+                error: Some("No runner available (internal error)".to_string()),
+            }
+        };
         total_passed += result.passed;
         total_failed += result.failed;
         total_skipped += result.skipped;

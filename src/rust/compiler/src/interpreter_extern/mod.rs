@@ -51,6 +51,7 @@ pub mod network;
 pub mod filesystem;
 pub mod terminal;
 pub mod atomic;
+pub mod concurrency;
 pub mod tui;
 pub mod repl;
 pub mod gpu;
@@ -166,6 +167,21 @@ pub(crate) fn call_extern_function(
         // ====================================================================
         "rt_time_now_seconds" => time::rt_time_now_seconds(&evaluated),
         "_current_time_unix" => time::_current_time_unix(&evaluated),
+
+        // ====================================================================
+        // DateTime Operations (11 functions)
+        // ====================================================================
+        "rt_time_now_unix_micros" => time::rt_time_now_unix_micros(&evaluated),
+        "rt_timestamp_get_year" => time::rt_timestamp_get_year(&evaluated),
+        "rt_timestamp_get_month" => time::rt_timestamp_get_month(&evaluated),
+        "rt_timestamp_get_day" => time::rt_timestamp_get_day(&evaluated),
+        "rt_timestamp_get_hour" => time::rt_timestamp_get_hour(&evaluated),
+        "rt_timestamp_get_minute" => time::rt_timestamp_get_minute(&evaluated),
+        "rt_timestamp_get_second" => time::rt_timestamp_get_second(&evaluated),
+        "rt_timestamp_get_microsecond" => time::rt_timestamp_get_microsecond(&evaluated),
+        "rt_timestamp_from_components" => time::rt_timestamp_from_components(&evaluated),
+        "rt_timestamp_add_days" => time::rt_timestamp_add_days(&evaluated),
+        "rt_timestamp_diff_days" => time::rt_timestamp_diff_days(&evaluated),
 
         // ====================================================================
         // Progress Timing (3 functions)
@@ -362,6 +378,25 @@ pub(crate) fn call_extern_function(
         "rt_env_home" => system::rt_env_home(&evaluated),
         "rt_env_temp" => system::rt_env_temp(&evaluated),
         "rt_env_cwd" => system::rt_env_cwd(&evaluated),
+
+        // ====================================================================
+        // Concurrency Operations (15 functions: Thread + Channel)
+        // ====================================================================
+        "rt_thread_available_parallelism" => concurrency::rt_thread_available_parallelism(&evaluated),
+        "rt_thread_sleep" => concurrency::rt_thread_sleep(&evaluated),
+        "rt_thread_yield" => concurrency::rt_thread_yield(&evaluated),
+        "rt_thread_spawn_isolated" => concurrency::rt_thread_spawn_isolated(&evaluated),
+        "rt_thread_spawn_isolated2" => concurrency::rt_thread_spawn_isolated2(&evaluated),
+        "rt_thread_join" => concurrency::rt_thread_join(&evaluated),
+        "rt_thread_is_done" => concurrency::rt_thread_is_done(&evaluated),
+        "rt_thread_id" => concurrency::rt_thread_id(&evaluated),
+        "rt_thread_free" => concurrency::rt_thread_free(&evaluated),
+        "rt_channel_new" => concurrency::rt_channel_new(&evaluated),
+        "rt_channel_send" => concurrency::rt_channel_send(&evaluated),
+        "rt_channel_try_recv" => concurrency::rt_channel_try_recv(&evaluated),
+        "rt_channel_recv" => concurrency::rt_channel_recv(&evaluated),
+        "rt_channel_close" => concurrency::rt_channel_close(&evaluated),
+        "rt_channel_is_closed" => concurrency::rt_channel_is_closed(&evaluated),
 
         // ====================================================================
         // Runtime Config Operations (2 functions)

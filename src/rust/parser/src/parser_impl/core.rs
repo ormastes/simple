@@ -336,6 +336,7 @@ impl<'a> Parser<'a> {
             // Module system (Features #104-111)
             TokenKind::Use => self.parse_use(),
             TokenKind::Import => self.parse_import(), // alias for use
+            TokenKind::From => self.parse_from_import(), // Python-style: from module import {...}
             TokenKind::Mod => self.parse_mod(Visibility::Private, vec![]),
             TokenKind::Common => self.parse_common_use(),
             TokenKind::Export => self.parse_export_use(),
