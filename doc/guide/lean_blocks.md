@@ -206,9 +206,61 @@ simple gen-lean generate --verify
 simple gen-lean --project memory_safety
 ```
 
+## Contracts and Lean Generation
+
+### Automatic Contract Conversion
+
+Contracts on `@verify` functions are automatically converted to Lean theorems:
+
+```simple
+@verify
+fn divide(a: i64, b: i64) -> i64:
+    in: b != 0
+    out(result): result * b == a
+    a / b
+```
+
+Generates:
+```lean
+theorem divide_postcondition (h1 : b ≠ 0) : result * b = a := sorry
+```
+
+### Manual vs Automatic
+
+| Approach | Use Case |
+|----------|----------|
+| `lean{}` blocks | Custom theorems, helper definitions, complex proofs |
+| Contract → Lean | Standard pre/post conditions on `@verify` functions |
+
+### Combining Both
+
+```simple
+lean{
+-- Helper lemma for the proof
+theorem div_mul_cancel (a b : Int) (h : b ≠ 0) : (a / b) * b = a := by
+  exact Int.ediv_mul_cancel (Int.dvd_refl a)
+}
+
+@verify
+fn divide(a: i64, b: i64) -> i64:
+    in: b != 0
+    out(result): result * b == a
+    a / b
+```
+
+## Future Improvements
+
+Planned verification features (see [Verification Improvements](verification_improvements.md)):
+
+- **Ghost code**: `@ghost fn sorted(arr) -> bool` - spec-only functions
+- **Loop invariants**: `invariant: condition` in loops
+- **Refinement types**: `type NonZero = i64 where self != 0`
+- **Proof hints**: `lean hint: "simp [*]"` to guide proofs
+
 ## Related Documentation
 
 - [Design Document](../design/lean_block_design.md) - Full technical specification
+- [Verification Improvements](verification_improvements.md) - Planned features
 - [Verification Guide](verification.md) - Using @verify annotations
 - [Contracts](contracts.md) - Design-by-contract with requires/ensures
 

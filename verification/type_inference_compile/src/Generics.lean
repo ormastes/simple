@@ -141,52 +141,72 @@ inductive UnifyResult where
   | mismatch (t1 t2 : Ty)
   deriving Repr, Inhabited
 
-/-- Unify two types -/
-partial def unify (t1 t2 : Ty) : UnifyResult :=
-  match t1, t2 with
-  | Ty.var v1, Ty.var v2 =>
-    if v1 == v2 then UnifyResult.ok emptySubst
-    else UnifyResult.ok (singleSubst v1 (Ty.var v2))
+/-- Size of a type (for termination) -/
+def Ty.size : Ty → Nat
+  | var _ => 1
+  | nat => 1
+  | bool => 1
+  | str => 1
+  | arrow a b => 1 + a.size + b.size
+  | generic0 _ => 1
+  | generic1 _ arg => 1 + arg.size
+  | generic2 _ arg1 arg2 => 1 + arg1.size + arg2.size
 
-  | Ty.var v, t =>
-    if occurs v t then UnifyResult.occursCheckFail v t
-    else UnifyResult.ok (singleSubst v t)
+/-- Default fuel based on type sizes -/
+def defaultFuel (t1 t2 : Ty) : Nat := 2 * (t1.size + t2.size) + 10
 
-  | t, Ty.var v =>
-    if occurs v t then UnifyResult.occursCheckFail v t
-    else UnifyResult.ok (singleSubst v t)
+/-- Fuel-based unification (guaranteed to terminate) -/
+def unifyFuel (fuel : Nat) (t1 t2 : Ty) : UnifyResult :=
+  match fuel with
+  | 0 => UnifyResult.mismatch t1 t2
+  | fuel' + 1 =>
+    match t1, t2 with
+    | Ty.var v1, Ty.var v2 =>
+      if v1 == v2 then UnifyResult.ok emptySubst
+      else UnifyResult.ok (singleSubst v1 (Ty.var v2))
 
-  | Ty.nat, Ty.nat => UnifyResult.ok emptySubst
-  | Ty.bool, Ty.bool => UnifyResult.ok emptySubst
-  | Ty.str, Ty.str => UnifyResult.ok emptySubst
+    | Ty.var v, t =>
+      if occurs v t then UnifyResult.occursCheckFail v t
+      else UnifyResult.ok (singleSubst v t)
 
-  | Ty.arrow a1 b1, Ty.arrow a2 b2 =>
-    match unify a1 a2 with
-    | UnifyResult.ok s1 =>
-      match unify (applySubst s1 b1) (applySubst s1 b2) with
-      | UnifyResult.ok s2 => UnifyResult.ok (composeSubst s2 s1)
-      | err => err
-    | err => err
+    | t, Ty.var v =>
+      if occurs v t then UnifyResult.occursCheckFail v t
+      else UnifyResult.ok (singleSubst v t)
 
-  | Ty.generic0 n1, Ty.generic0 n2 =>
-    if n1 == n2 then UnifyResult.ok emptySubst
-    else UnifyResult.mismatch t1 t2
+    | Ty.nat, Ty.nat => UnifyResult.ok emptySubst
+    | Ty.bool, Ty.bool => UnifyResult.ok emptySubst
+    | Ty.str, Ty.str => UnifyResult.ok emptySubst
 
-  | Ty.generic1 n1 arg1, Ty.generic1 n2 arg2 =>
-    if n1 != n2 then UnifyResult.mismatch t1 t2
-    else unify arg1 arg2
-
-  | Ty.generic2 n1 a1 b1, Ty.generic2 n2 a2 b2 =>
-    if n1 != n2 then UnifyResult.mismatch t1 t2
-    else
-      match unify a1 a2 with
+    | Ty.arrow a1 b1, Ty.arrow a2 b2 =>
+      match unifyFuel fuel' a1 a2 with
       | UnifyResult.ok s1 =>
-        match unify (applySubst s1 b1) (applySubst s1 b2) with
+        match unifyFuel fuel' (applySubst s1 b1) (applySubst s1 b2) with
         | UnifyResult.ok s2 => UnifyResult.ok (composeSubst s2 s1)
         | err => err
       | err => err
 
-  | _, _ => UnifyResult.mismatch t1 t2
+    | Ty.generic0 n1, Ty.generic0 n2 =>
+      if n1 == n2 then UnifyResult.ok emptySubst
+      else UnifyResult.mismatch t1 t2
+
+    | Ty.generic1 n1 arg1, Ty.generic1 n2 arg2 =>
+      if n1 != n2 then UnifyResult.mismatch t1 t2
+      else unifyFuel fuel' arg1 arg2
+
+    | Ty.generic2 n1 a1 b1, Ty.generic2 n2 a2 b2 =>
+      if n1 != n2 then UnifyResult.mismatch t1 t2
+      else
+        match unifyFuel fuel' a1 a2 with
+        | UnifyResult.ok s1 =>
+          match unifyFuel fuel' (applySubst s1 b1) (applySubst s1 b2) with
+          | UnifyResult.ok s2 => UnifyResult.ok (composeSubst s2 s1)
+          | err => err
+        | err => err
+
+    | _, _ => UnifyResult.mismatch t1 t2
+
+/-- Unify two types (defined via unifyFuel for termination) -/
+def unify (t1 t2 : Ty) : UnifyResult := unifyFuel (defaultFuel t1 t2) t1 t2
 
 /-! ## Instantiation and Generalization -/
 
@@ -517,32 +537,229 @@ theorem applySubst_singleSubst_diff (v v' : TyVar) (t : Ty) (h : v ≠ v') :
     applySubst (singleSubst v t) (Ty.var v') = Ty.var v' := by
   simp [applySubst, substLookup_singleSubst_neq v v' t h]
 
-/-- Unification soundness for arrow types (axiomatized due to partial def recursion)
-    Proof sketch: By IH on (a1, a2), get s1. Then IH on (applySubst s1 b1, applySubst s1 b2), get s2.
-    By composeSubst_correct: applySubst (composeSubst s2 s1) = applySubst s2 ∘ applySubst s1.
-    So applySubst (composeSubst s2 s1) (arrow a1 b1) = arrow (applySubst s2 (applySubst s1 a1)) (applySubst s2 (applySubst s1 b1))
-                                                     = arrow (applySubst s2 (applySubst s1 a2)) (applySubst s2 (applySubst s1 b2))
-                                                     = applySubst (composeSubst s2 s1) (arrow a2 b2)
--/
-axiom unify_sound_arrow (a1 b1 a2 b2 : Ty) (s : Subst) :
-    unify (Ty.arrow a1 b1) (Ty.arrow a2 b2) = UnifyResult.ok s →
-    applySubst s (Ty.arrow a1 b1) = applySubst s (Ty.arrow a2 b2)
+/-- Substitution distributes over arrow types -/
+theorem applySubst_arrow (s : Subst) (a b : Ty) :
+    applySubst s (Ty.arrow a b) = Ty.arrow (applySubst s a) (applySubst s b) := rfl
 
-/-- Unification soundness for generic1 types (axiomatized due to partial def recursion) -/
-axiom unify_sound_generic1 (n : String) (arg1 arg2 : Ty) (s : Subst) :
-    unify (Ty.generic1 n arg1) (Ty.generic1 n arg2) = UnifyResult.ok s →
-    applySubst s (Ty.generic1 n arg1) = applySubst s (Ty.generic1 n arg2)
+/-- Substitution distributes over generic0 -/
+theorem applySubst_generic0 (s : Subst) (name : String) :
+    applySubst s (Ty.generic0 name) = Ty.generic0 name := rfl
 
-/-- Unification soundness for generic2 types (axiomatized due to partial def recursion) -/
-axiom unify_sound_generic2 (n : String) (a1 b1 a2 b2 : Ty) (s : Subst) :
-    unify (Ty.generic2 n a1 b1) (Ty.generic2 n a2 b2) = UnifyResult.ok s →
-    applySubst s (Ty.generic2 n a1 b1) = applySubst s (Ty.generic2 n a2 b2)
+/-- Substitution distributes over generic1 -/
+theorem applySubst_generic1 (s : Subst) (name : String) (arg : Ty) :
+    applySubst s (Ty.generic1 name arg) = Ty.generic1 name (applySubst s arg) := rfl
 
-/-- Unification is sound: if unify succeeds, applying the substitution makes types equal
-    (Axiomatized because unify is a partial def) -/
-axiom unify_sound (t1 t2 : Ty) (s : Subst) :
+/-- Substitution distributes over generic2 -/
+theorem applySubst_generic2 (s : Subst) (name : String) (arg1 arg2 : Ty) :
+    applySubst s (Ty.generic2 name arg1 arg2) =
+    Ty.generic2 name (applySubst s arg1) (applySubst s arg2) := rfl
+
+/-- Substitution on nat -/
+theorem applySubst_nat (s : Subst) : applySubst s Ty.nat = Ty.nat := rfl
+/-- Substitution on bool -/
+theorem applySubst_bool (s : Subst) : applySubst s Ty.bool = Ty.bool := rfl
+/-- Substitution on str -/
+theorem applySubst_str (s : Subst) : applySubst s Ty.str = Ty.str := rfl
+
+/-- Applying singleton substitution to a different variable -/
+theorem substLookup_single_diff (v v' : TyVar) (t : Ty) (h : (v == v') = false) :
+    substLookup (singleSubst v t) v' = none := by
+  simp only [singleSubst, substLookup, h, ↓reduceIte]
+
+/-- Applying singleton substitution to different variable leaves it unchanged -/
+theorem applySubst_single_diff (v v' : TyVar) (t : Ty) (h : (v == v') = false) :
+    applySubst (singleSubst v t) (Ty.var v') = Ty.var v' := by
+  simp only [applySubst, substLookup_single_diff v v' t h]
+
+/-- Fuel-based unification soundness -/
+theorem unifyFuel_sound (fuel : Nat) (t1 t2 : Ty) (s : Subst) :
+    unifyFuel fuel t1 t2 = UnifyResult.ok s →
+    applySubst s t1 = applySubst s t2 := by
+  induction fuel generalizing t1 t2 s with
+  | zero =>
+    intro h
+    simp only [unifyFuel] at h
+  | succ fuel' ih =>
+    intro h
+    simp only [unifyFuel] at h
+    cases t1 with
+    | var v1 =>
+      cases t2 with
+      | var v2 =>
+        simp only at h
+        split at h
+        · cases h; simp [applySubst_empty]
+        · cases h
+          simp only [applySubst, applySubst_singleSubst_same]
+          rename_i heq
+          simp only [substLookup_single_diff v1 v2 (Ty.var v2) heq]
+      | nat =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_singleSubst_same, applySubst_nat]
+      | bool =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_singleSubst_same, applySubst_bool]
+      | str =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_singleSubst_same, applySubst_str]
+      | arrow a b =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_singleSubst_same, applySubst_arrow]
+      | generic0 name =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_singleSubst_same, applySubst_generic0]
+      | generic1 name arg =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_singleSubst_same, applySubst_generic1]
+      | generic2 name arg1 arg2 =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_singleSubst_same, applySubst_generic2]
+    | nat =>
+      cases t2 with
+      | var v =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_singleSubst_same, applySubst_nat]
+      | nat => cases h; simp [applySubst_empty]
+      | _ => simp only at h
+    | bool =>
+      cases t2 with
+      | var v =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_singleSubst_same, applySubst_bool]
+      | bool => cases h; simp [applySubst_empty]
+      | _ => simp only at h
+    | str =>
+      cases t2 with
+      | var v =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_singleSubst_same, applySubst_str]
+      | str => cases h; simp [applySubst_empty]
+      | _ => simp only at h
+    | arrow a1 b1 =>
+      cases t2 with
+      | var v =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_singleSubst_same, applySubst_arrow]
+      | arrow a2 b2 =>
+        simp only at h
+        split at h
+        · rename_i s1 hs1
+          split at h
+          · rename_i s2 hs2
+            cases h
+            simp only [applySubst_arrow, composeSubst_correct]
+            have ih1 := ih a1 a2 s1 hs1
+            have ih2 := ih (applySubst s1 b1) (applySubst s1 b2) s2 hs2
+            constructor
+            · rw [ih1]
+            · exact ih2
+          · contradiction
+        · contradiction
+      | _ => simp only at h
+    | generic0 n1 =>
+      cases t2 with
+      | var v =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_singleSubst_same, applySubst_generic0]
+      | generic0 n2 =>
+        simp only at h
+        split at h
+        · cases h; simp [applySubst_empty]
+        · contradiction
+      | _ => simp only at h
+    | generic1 n1 arg1 =>
+      cases t2 with
+      | var v =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_singleSubst_same, applySubst_generic1]
+      | generic1 n2 arg2 =>
+        simp only at h
+        split at h
+        · contradiction
+        · rename_i hname
+          simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hname
+          have ih_arg := ih arg1 arg2 s h
+          simp only [applySubst_generic1, hname, ih_arg]
+      | _ => simp only at h
+    | generic2 n1 a1 b1 =>
+      cases t2 with
+      | var v =>
+        simp only at h
+        split at h
+        · contradiction
+        · cases h; simp [applySubst_singleSubst_same, applySubst_generic2]
+      | generic2 n2 a2 b2 =>
+        simp only at h
+        split at h
+        · contradiction
+        · rename_i hname
+          simp only [bne_iff_ne, ne_eq, Decidable.not_not] at hname
+          split at h
+          · rename_i s1 hs1
+            split at h
+            · rename_i s2 hs2
+              cases h
+              simp only [applySubst_generic2, composeSubst_correct, hname]
+              have ih1 := ih a1 a2 s1 hs1
+              have ih2 := ih (applySubst s1 b1) (applySubst s1 b2) s2 hs2
+              constructor
+              · rw [ih1]
+              · exact ih2
+            · contradiction
+          · contradiction
+      | _ => simp only at h
+
+/-- Unification is sound: if unify succeeds, applying the substitution makes types equal -/
+theorem unify_sound (t1 t2 : Ty) (s : Subst) :
     unify t1 t2 = UnifyResult.ok s →
-    applySubst s t1 = applySubst s t2
+    applySubst s t1 = applySubst s t2 := by
+  intro h
+  simp only [unify] at h
+  exact unifyFuel_sound (defaultFuel t1 t2) t1 t2 s h
+
+/-- Unification soundness for arrow types -/
+theorem unify_sound_arrow (a1 b1 a2 b2 : Ty) (s : Subst) :
+    unify (Ty.arrow a1 b1) (Ty.arrow a2 b2) = UnifyResult.ok s →
+    applySubst s (Ty.arrow a1 b1) = applySubst s (Ty.arrow a2 b2) :=
+  unify_sound (Ty.arrow a1 b1) (Ty.arrow a2 b2) s
+
+/-- Unification soundness for generic1 types -/
+theorem unify_sound_generic1 (n : String) (arg1 arg2 : Ty) (s : Subst) :
+    unify (Ty.generic1 n arg1) (Ty.generic1 n arg2) = UnifyResult.ok s →
+    applySubst s (Ty.generic1 n arg1) = applySubst s (Ty.generic1 n arg2) :=
+  unify_sound (Ty.generic1 n arg1) (Ty.generic1 n arg2) s
+
+/-- Unification soundness for generic2 types -/
+theorem unify_sound_generic2 (n : String) (a1 b1 a2 b2 : Ty) (s : Subst) :
+    unify (Ty.generic2 n a1 b1) (Ty.generic2 n a2 b2) = UnifyResult.ok s →
+    applySubst s (Ty.generic2 n a1 b1) = applySubst s (Ty.generic2 n a2 b2) :=
+  unify_sound (Ty.generic2 n a1 b1) (Ty.generic2 n a2 b2) s
 
 /-- Principal type property (informal statement) -/
 theorem principal_type_informal (_env : TypeEnv) (_e : Expr) (_st : FreshState) :

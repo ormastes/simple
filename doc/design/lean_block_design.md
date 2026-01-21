@@ -484,53 +484,61 @@ fn hash(data: [u8]) -> [u8; 32]:
 
 ## Future Extensions
 
-### 1. Lean Tactic Mode Integration
+For detailed plans on verification improvements, see [Verification Improvements Plan](verification_improvements_plan.md).
+
+### Planned Features
+
+| Feature | Description | Priority |
+|---------|-------------|----------|
+| Ghost code | `@ghost` functions for spec-only code | High |
+| Loop invariants | `invariant:` clauses in loops | High |
+| Refinement types | `type NonZero = i64 where self != 0` | High |
+| Proof hints | `lean hint: "tactic"` guidance | Medium |
+| Assert/Assume/Admit | Different trust levels | Medium |
+| Incremental verification | Cache proof results | Medium |
+
+### 1. Ghost Code (VER-001)
 
 ```simple
+@ghost
+fn sorted(arr: [i32]) -> bool:
+    forall i in 0..arr.len()-1: arr[i] <= arr[i+1]
+
+@verify
 fn sort(arr: [i32]) -> [i32]:
-    out(result):
-        result.is_permutation_of(arr)
-        result.is_sorted()
-    lean tactic {
-        intro arr
-        induction arr
-        · simp
-        · apply sort_preserves_permutation
-          assumption
-    }
-    # Implementation...
-```
-
-### 2. Auto-Extraction of Specs
-
-```simple
-fn divide(a: i64, b: i64) -> i64:
-    in:
-        b != 0
-    out(ret):
-        ret * b <= a
-        a - ret * b < b.abs()
-    a / b
-```
-
-Auto-generates:
-
-```lean
-theorem divide_spec :
-    ∀ a b, b ≠ 0 →
-    let ret := divide a b
-    ret * b ≤ a ∧ a - ret * b < |b| := by
-    sorry  -- To be filled by user
-```
-
-### 3. Proof Obligations
-
-```simple
-fn binary_search(arr: [i32], target: i32) -> Option<usize>:
-    lean obligations:
-        - termination: "loop decreases (high - low)"
-        - correctness: "result matches specification"
+    out(result): sorted(result)  # Ghost call in contract OK
     # ...
+```
+
+### 2. Loop Invariants (VER-002)
+
+```simple
+@verify
+fn sum(arr: [i32]) -> i64:
+    var total: i64 = 0
+    for i in 0..arr.len():
+        invariant: total == sum_spec(arr, i)
+        total = total + arr[i]
+    total
+```
+
+### 3. Refinement Types (VER-010)
+
+```simple
+type NonZero = i64 where self != 0
+
+fn divide(a: i64, b: NonZero) -> i64:
+    a / b  # No precondition needed - in type
+```
+
+### 4. Proof Hints (VER-020)
+
+```simple
+@verify
+fn factorial(n: i64) -> i64:
+    lean hint: "induction n <;> simp [*]"
+    if n <= 1: 1
+    else: n * factorial(n - 1)
 ```
 
 ## Summary
