@@ -139,6 +139,18 @@ pub struct TestOptions {
     pub safe_mode: bool,
     /// Timeout in seconds for each test file in safe mode (default: 30)
     pub safe_mode_timeout: u64,
+    /// Enable parallel test execution (requires safe_mode)
+    pub parallel: bool,
+    /// Maximum number of threads (0 = auto-detect all cores)
+    pub max_threads: usize,
+    /// CPU usage percentage threshold to trigger throttling (0-100)
+    pub cpu_threshold: u8,
+    /// Number of threads when throttled
+    pub throttled_threads: usize,
+    /// Ignore CPU limits (full parallel mode)
+    pub full_parallel: bool,
+    /// Seconds between CPU usage checks
+    pub cpu_check_interval: u64,
 }
 
 impl Default for TestOptions {
@@ -176,6 +188,12 @@ impl Default for TestOptions {
             show_tags: false,
             safe_mode: false,
             safe_mode_timeout: 30,
+            parallel: false,
+            max_threads: 0, // Auto-detect
+            cpu_threshold: 70,
+            throttled_threads: 1,
+            full_parallel: false,
+            cpu_check_interval: 5,
         }
     }
 }

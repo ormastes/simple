@@ -2,6 +2,7 @@
 //!
 //! Orchestrates test discovery, execution, and reporting.
 
+use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -12,14 +13,105 @@ use super::test_discovery::{discover_tests, matches_tag};
 use super::types::{TestFileResult, TestLevel, TestOptions, TestRunResult, OutputFormat, DebugLevel, debug_log};
 use super::execution::run_test_file;
 use super::doctest::{run_doctests, run_md_doctests};
+use super::parallel::run_tests_parallel;
 use super::diagrams::generate_test_diagrams;
 use super::discovery::print_discovery_summary;
 use super::coverage::save_coverage_data;
 use super::feature_db::update_feature_database;
 use super::test_db_update::update_test_database;
 
+/// Load CPU throttle configuration from simple.test.toml
+fn load_cpu_throttle_config(options: &mut TestOptions) {
+    // Find simple.test.toml in current directory or project root
+    let config_paths = [
+        PathBuf::from("simple.test.toml"),
+        PathBuf::from("../simple.test.toml"),
+        PathBuf::from("../../simple.test.toml"),
+    ];
+
+    for path in &config_paths {
+        if let Ok(content) = fs::read_to_string(path) {
+            parse_cpu_throttle_config(&content, options);
+            debug_log!(DebugLevel::Detailed, "Config", "Loaded config from: {}", path.display());
+            return;
+        }
+    }
+
+    debug_log!(DebugLevel::Trace, "Config", "No simple.test.toml found, using defaults");
+}
+
+/// Parse CPU throttle configuration from TOML content
+fn parse_cpu_throttle_config(content: &str, options: &mut TestOptions) {
+    // Simple TOML parsing for cpu_throttle section
+    let mut in_cpu_throttle = false;
+
+    for line in content.lines() {
+        let line = line.trim();
+
+        if line == "[test.cpu_throttle]" {
+            in_cpu_throttle = true;
+            continue;
+        }
+
+        if line.starts_with('[') {
+            in_cpu_throttle = false;
+            continue;
+        }
+
+        if !in_cpu_throttle {
+            continue;
+        }
+
+        // Parse key = value pairs
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+
+            match key {
+                "enabled" => {
+                    if value == "true" && !options.parallel {
+                        // Enable parallel if config says so and not explicitly disabled
+                        // Only applies if user didn't specify --parallel on CLI
+                    }
+                }
+                "threshold" => {
+                    if let Ok(v) = value.parse::<u8>() {
+                        // Only apply if user didn't override on CLI (still default)
+                        if options.cpu_threshold == 70 {
+                            options.cpu_threshold = v;
+                        }
+                    }
+                }
+                "throttled_threads" => {
+                    if let Ok(v) = value.parse::<usize>() {
+                        if options.throttled_threads == 1 {
+                            options.throttled_threads = v;
+                        }
+                    }
+                }
+                "check_interval" => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        if options.cpu_check_interval == 5 {
+                            options.cpu_check_interval = v;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Run tests with the given options
 pub fn run_tests(options: TestOptions) -> TestRunResult {
+    // Make options mutable to apply config file settings
+    let mut options = options;
+
+    // Load configuration from simple.test.toml (applies defaults if not overridden by CLI)
+    if options.parallel {
+        load_cpu_throttle_config(&mut options);
+    }
+
     let quiet = matches!(options.format, OutputFormat::Json);
     let list_mode = options.list || options.list_ignored;
 
@@ -68,7 +160,14 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
 
     // Execute tests (or list them)
     let (mut results, mut total_passed, mut total_failed, mut total_skipped, mut total_ignored) =
-        execute_test_files(runner.as_ref(), &test_files, &options, quiet);
+        if options.parallel && options.safe_mode && !list_mode {
+            // Parallel execution with CPU-aware thread management
+            debug_log!(DebugLevel::Basic, "Runner", "Using parallel execution mode");
+            run_tests_parallel(&test_files, &options, quiet)
+        } else {
+            // Sequential execution (default)
+            execute_test_files(runner.as_ref(), &test_files, &options, quiet)
+        };
 
     // Determine if all tests were run (no filters applied)
     let all_tests_run = options.path.is_none() && options.tag.is_none() && options.level == TestLevel::All && !list_mode;

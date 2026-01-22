@@ -251,7 +251,7 @@ pytorch_fn!(rt_torch_positional_encoding_new, (d_model: i64, max_len: i64), {
         pe_vec.extend(row);
     }
 
-    let pe_tensor = Tensor::of_slice(&pe_vec).view([max_len, d_model]);
+    let pe_tensor = Tensor::from_slice(&pe_vec).view([max_len, d_model]);
     let pe_handle = store_tensor(pe_tensor);
 
     let handle = store_positional_encoding(pe_handle);

@@ -1,16 +1,110 @@
 # Test for const-eval engine in macros
-# SKIPPED: Macro system has runtime bugs (const reassignment issues).
+# Tests compile-time evaluation: arithmetic, conditionals, loops.
 
 import std.spec
 
+# ============================================================================
+# Module-level macro definitions
+# ============================================================================
+
+# Arithmetic macros
+macro ce_compute(a: Int, b: Int) -> (returns result: Int):
+    emit result:
+        a + b * 2
+
+macro ce_with_zero(a: Int) -> (returns result: Int):
+    emit result:
+        a + 0
+
+macro ce_subtract(a: Int, b: Int) -> (returns result: Int):
+    emit result:
+        a - b
+
+# Conditional macros
+macro ce_max(a: Int, b: Int) -> (returns result: Int):
+    emit result:
+        if a > b:
+            return a
+        else:
+            return b
+
+macro ce_min(a: Int, b: Int) -> (returns result: Int):
+    emit result:
+        if a < b:
+            return a
+        else:
+            return b
+
+macro ce_abs(x: Int) -> (returns result: Int):
+    emit result:
+        if x < 0:
+            return -x
+        else:
+            return x
+
+# Loop macros
+macro ce_gen_funcs(N: Int const) -> (
+    intro funcs:
+        for i in 0..N:
+            enclosing.module.fn "ce_loop_get_{i}"() -> Int
+):
+    emit funcs:
+        for i in 0..N:
+            fn "ce_loop_get_{i}"() -> Int:
+                return i
+
+macro ce_sum_range(n: Int const) -> (returns result: Int):
+    emit result:
+        var sum = 0
+        for i in 0..n:
+            sum = sum + i
+        sum
+
+# ============================================================================
+# Invoke macros that generate functions at module level
+# ============================================================================
+ce_gen_funcs!(3)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
 describe "Const-Eval Engine":
     describe "Arithmetic evaluation":
-        skip "evaluates addition and multiplication":
-            pass
-        skip "evaluates with zero":
-            pass
-        skip "evaluates negative numbers":
-            pass
+        it "evaluates addition and multiplication":
+            val x = ce_compute!(10, 16)
+            # 10 + 16 * 2 = 10 + 32 = 42
+            expect(x).to(eq(42))
+
+        it "evaluates with zero":
+            val x = ce_with_zero!(42)
+            expect(x).to(eq(42))
+
+        it "evaluates subtraction":
+            val x = ce_subtract!(50, 8)
+            expect(x).to(eq(42))
+
     describe "Conditional evaluation":
-        skip "evaluates max correctly":
-            pass
+        it "evaluates max correctly":
+            expect(ce_max!(10, 50)).to(eq(50))
+            expect(ce_max!(100, 5)).to(eq(100))
+            expect(ce_max!(42, 42)).to(eq(42))
+
+        it "evaluates min correctly":
+            expect(ce_min!(10, 50)).to(eq(10))
+            expect(ce_min!(100, 5)).to(eq(5))
+
+        it "evaluates abs correctly":
+            expect(ce_abs!(42)).to(eq(42))
+            expect(ce_abs!(-42)).to(eq(42))
+            expect(ce_abs!(0)).to(eq(0))
+
+    describe "Loop evaluation":
+        it "generates functions with for loop":
+            val sum = ce_loop_get_0() + ce_loop_get_1() + ce_loop_get_2()
+            expect(sum).to(eq(3))
+
+        it "handles range iteration":
+            # 0 + 1 + 2 + 3 + 4 = 10
+            val x = ce_sum_range!(5)
+            expect(x).to(eq(10))

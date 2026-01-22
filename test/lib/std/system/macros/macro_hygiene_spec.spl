@@ -1,14 +1,115 @@
 # Test for macro hygiene - variable capture prevention
-# SKIPPED: Macro system has runtime bugs (const reassignment issues).
+# Tests that macro variables are properly isolated through gensym renaming.
 
 import std.spec
 
+# ============================================================================
+# Module-level macro definitions
+# ============================================================================
+
+macro hyg_make_ten() -> (returns result: Int):
+    emit result:
+        let x = 10
+        x
+
+macro hyg_increment() -> (returns result: Int):
+    emit result:
+        let temp = 1
+        temp
+
+macro hyg_shadow_test() -> (returns result: Int):
+    emit result:
+        let x = 10
+        let x = x + 5
+        let x = x * 2
+        x
+
+macro hyg_multi_vars() -> (returns result: Int):
+    emit result:
+        let a = 1
+        let b = 2
+        let c = 3
+        a + b + c
+
+macro hyg_inner() -> (returns result: Int):
+    emit result:
+        let x = 5
+        x
+
+macro hyg_outer() -> (returns result: Int):
+    emit result:
+        let x = 10
+        x + hyg_inner!()
+
+macro hyg_make_pair() -> (returns result: Int):
+    emit result:
+        let (x, y) = (10, 20)
+        x + y
+
+macro hyg_swap_values() -> (returns result: Int):
+    emit result:
+        let (a, b) = (5, 10)
+        b - a
+
+macro hyg_complex() -> (returns result: Int):
+    emit result:
+        let temp = 1
+        let sum1 = if true: 2 else: 0
+        let sum2 = if true: 3 else: 0
+        let sum3 = if true: 4 else: 0
+        sum1 + sum2 + sum3 + temp
+
+# ============================================================================
+# Tests
+# ============================================================================
+
 describe "Macro Hygiene":
-    skip "prevents variable capture from outer scope":
-        pass
-    skip "generates unique names for repeated expansions":
-        pass
-    skip "allows explicit shadowing with different values":
-        pass
-    skip "isolates macro-generated variables":
-        pass
+    it "prevents variable capture from outer scope":
+        let x = 5
+        val result = hyg_make_ten!()
+        # Should be 5 + 10 = 15, not 10 + 10 = 20
+        expect(x + result).to(eq(15))
+
+    it "generates unique names for repeated expansions":
+        val a = hyg_increment!()
+        val b = hyg_increment!()
+        expect(a + b).to(eq(2))
+
+    it "allows explicit shadowing with different values":
+        val result = hyg_shadow_test!()
+        # ((10 + 5) * 2) = 30
+        expect(result).to(eq(30))
+
+    it "isolates macro-generated variables":
+        let x = 10
+        let y = 20
+        let z = 30
+        val result = hyg_multi_vars!()
+        # 10 + 20 + 30 + 6 = 66
+        expect(x + y + z + result).to(eq(66))
+
+    it "maintains hygiene with nested macro calls":
+        val result = hyg_outer!()
+        # Should be 10 + 5 = 15
+        expect(result).to(eq(15))
+
+    it "isolates pattern matching variables":
+        let x = 100
+        let y = 200
+        val result = hyg_make_pair!()
+        # 100 + 200 + 30 = 330
+        expect(x + y + result).to(eq(330))
+
+    it "isolates tuple destructuring":
+        let a = 1
+        let b = 2
+        val result = hyg_swap_values!()
+        # 1 + 2 + 5 = 8
+        expect(a + b + result).to(eq(8))
+
+    it "handles complex macro with multiple scopes":
+        let x = 100
+        let y = 200
+        let z = 300
+        val result = hyg_complex!()
+        expect(result).to(eq(10))

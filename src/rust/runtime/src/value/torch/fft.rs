@@ -247,9 +247,10 @@ pub extern "C" fn rt_torch_fftshift(tensor_handle: u64, dim: i64) -> u64 {
         drop(registry);
 
         let result = if dim == -1 {
-            tensor.0.fft_fftshift(None)
+            tensor.0.fft_fftshift(None::<&[i64]>)
         } else {
-            tensor.0.fft_fftshift(Some(&[dim]))
+            let dims = vec![dim];
+            tensor.0.fft_fftshift(Some(dims.as_slice()))
         };
         let handle = next_handle();
         TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
@@ -278,9 +279,10 @@ pub extern "C" fn rt_torch_ifftshift(tensor_handle: u64, dim: i64) -> u64 {
         drop(registry);
 
         let result = if dim == -1 {
-            tensor.0.fft_ifftshift(None)
+            tensor.0.fft_ifftshift(None::<&[i64]>)
         } else {
-            tensor.0.fft_ifftshift(Some(&[dim]))
+            let dims = vec![dim];
+            tensor.0.fft_ifftshift(Some(dims.as_slice()))
         };
         let handle = next_handle();
         TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
