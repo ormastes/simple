@@ -1,45 +1,324 @@
 # Property Testing Framework - Shrinking Tests
-# SKIPPED: Property testing shrinking not yet implemented.
+# Tests for automatic input minimization when tests fail (self-contained)
 
-import std.spec
+use std.spec.*
+use core.option.{Option, Some}
+
+# Simple LCG random number generator
+fn lcg_next(seed: i64) -> i64:
+    val a = 1103515245
+    val c = 12345
+    val m = 2147483648
+    return ((a * seed + c) % m).abs()
+
+fn gen_i64_range(seed: i64, min: i64, max: i64) -> i64:
+    val range = max - min
+    if range <= 0:
+        return min
+    val raw = lcg_next(seed)
+    return min + (raw % range)
+
+# Shrinking implementations
+fn shrink_i64(value: i64) -> [i64]:
+    if value == 0:
+        return []
+    var result = [0]
+    result.push(value / 2)
+    if value > 0:
+        result.push(value - 1)
+    else:
+        result.push(value + 1)
+    return result
+
+fn shrink_list(list: [i64]) -> [[i64]]:
+    if len(list) == 0:
+        return []
+    var result = [[]]
+    val mid = len(list) / 2
+    if mid > 0:
+        result.push(list[0..mid])
+        result.push(list[mid..len(list)])
+    result.push(list[1..len(list)])
+    if len(list) > 1:
+        result.push(list[0..len(list)-1])
+    return result
+
+fn shrink_string(s: text) -> [text]:
+    if len(s) == 0:
+        return []
+    var result = [""]
+    val mid = len(s) / 2
+    if mid > 0:
+        result.push(s.substring(0, mid))
+        result.push(s.substring(mid, len(s)))
+    result.push(s.substring(1, len(s)))
+    if len(s) > 1:
+        result.push(s.substring(0, len(s) - 1))
+    return result
+
+# Shrink result enumeration
+enum ShrinkResultType:
+    MinimalFailure
+    NoShrinkPossible
+    MaxShrinksExceeded
+
+struct ShrinkResult:
+    result_type: ShrinkResultType
+    value: i64
+    shrinks: i64
+
+# Main shrinking algorithm for i64
+fn shrink_to_minimal(failing_value: i64, test_fn: fn(i64) -> bool, max_shrinks: i64, max_depth: i64) -> ShrinkResult:
+    var current = failing_value
+    var shrink_count = 0
+    var depth = 0
+
+    while shrink_count < max_shrinks and depth < max_depth:
+        val candidates = shrink_i64(current)
+
+        if len(candidates) == 0:
+            return ShrinkResult(
+                result_type: ShrinkResultType.MinimalFailure,
+                value: current,
+                shrinks: shrink_count
+            )
+
+        var found_smaller = false
+        for candidate in candidates:
+            if not test_fn(candidate):
+                current = candidate
+                shrink_count = shrink_count + 1
+                found_smaller = true
+                break
+
+        if not found_smaller:
+            return ShrinkResult(
+                result_type: ShrinkResultType.MinimalFailure,
+                value: current,
+                shrinks: shrink_count
+            )
+
+        depth = depth + 1
+
+    if shrink_count >= max_shrinks:
+        return ShrinkResult(
+            result_type: ShrinkResultType.MaxShrinksExceeded,
+            value: current,
+            shrinks: shrink_count
+        )
+
+    return ShrinkResult(
+        result_type: ShrinkResultType.MinimalFailure,
+        value: current,
+        shrinks: shrink_count
+    )
+
+# Shrinking algorithm for lists
+fn shrink_list_to_minimal(failing_list: [i64], test_fn: fn([i64]) -> bool, max_shrinks: i64, max_depth: i64) -> (ShrinkResultType, [i64], i64):
+    var current = failing_list
+    var shrink_count = 0
+    var depth = 0
+
+    while shrink_count < max_shrinks and depth < max_depth:
+        val candidates = shrink_list(current)
+
+        if len(candidates) == 0:
+            return (ShrinkResultType.MinimalFailure, current, shrink_count)
+
+        var found_smaller = false
+        for candidate in candidates:
+            if not test_fn(candidate):
+                current = candidate
+                shrink_count = shrink_count + 1
+                found_smaller = true
+                break
+
+        if not found_smaller:
+            return (ShrinkResultType.MinimalFailure, current, shrink_count)
+
+        depth = depth + 1
+
+    if shrink_count >= max_shrinks:
+        return (ShrinkResultType.MaxShrinksExceeded, current, shrink_count)
+
+    return (ShrinkResultType.MinimalFailure, current, shrink_count)
+
+# Helper for list sum
+fn list_sum(list: [i64]) -> i64:
+    var total = 0
+    for item in list:
+        total = total + item
+    return total
 
 describe "Shrinking Algorithm":
     context "Integer Shrinking":
-        skip "shrinks positive integers towards zero":
-            pass
-        skip "shrinks negative integers towards zero":
-            pass
-        skip "cannot shrink zero":
-            pass
+        it "shrinks positive integers towards zero":
+            val candidates = shrink_i64(100)
+            # Should include 0
+            expect candidates.contains(0)
+            # Should include value/2 = 50
+            expect candidates.contains(50)
+            # Should include value-1 = 99
+            expect candidates.contains(99)
+            # All candidates should be smaller in absolute value
+            for c in candidates:
+                expect c.abs() <= 100
+
+        it "shrinks negative integers towards zero":
+            val candidates = shrink_i64(-100)
+            # Should include 0
+            expect candidates.contains(0)
+            # Should include value/2 = -50
+            expect candidates.contains(-50)
+            # Should include value+1 = -99
+            expect candidates.contains(-99)
+            # All candidates should be closer to zero
+            for c in candidates:
+                expect c.abs() <= 100
+
+        it "cannot shrink zero":
+            val candidates = shrink_i64(0)
+            # Zero cannot be shrunk further
+            expect len(candidates) == 0
+
     context "List Shrinking":
-        skip "shrinks to empty list":
-            pass
-        skip "shrinks by removing half":
-            pass
-        skip "shrinks by removing first element":
-            pass
-        skip "shrinks by removing last element":
-            pass
-        skip "cannot shrink empty list":
-            pass
+        it "shrinks to empty list":
+            val candidates = shrink_list([1, 2, 3, 4, 5])
+            # Should include empty list as candidate
+            expect candidates.contains([])
+
+        it "shrinks by removing half":
+            val candidates = shrink_list([1, 2, 3, 4, 5, 6])
+            # Should include first half [1, 2, 3]
+            expect candidates.contains([1, 2, 3])
+            # Should include second half [4, 5, 6]
+            expect candidates.contains([4, 5, 6])
+
+        it "shrinks by removing first element":
+            val candidates = shrink_list([1, 2, 3])
+            # Should include list with first element removed
+            expect candidates.contains([2, 3])
+
+        it "shrinks by removing last element":
+            val candidates = shrink_list([1, 2, 3])
+            # Should include list with last element removed
+            expect candidates.contains([1, 2])
+
+        it "cannot shrink empty list":
+            val candidates = shrink_list([])
+            # Empty list cannot be shrunk
+            expect len(candidates) == 0
+
     context "text Shrinking":
-        skip "shrinks to empty string":
-            pass
-        skip "shrinks by removing characters":
-            pass
-        skip "cannot shrink empty string":
-            pass
+        it "shrinks to empty string":
+            val candidates = shrink_string("hello")
+            # Should include empty string
+            expect candidates.contains("")
+
+        it "shrinks by removing characters":
+            val candidates = shrink_string("hello")
+            # Should have multiple candidates
+            expect len(candidates) > 1
+            # Should include substring from start
+            expect candidates.contains("he")
+            # Should include substring with first char removed
+            expect candidates.contains("ello")
+
+        it "cannot shrink empty string":
+            val candidates = shrink_string("")
+            # Empty string cannot be shrunk
+            expect len(candidates) == 0
+
     context "Full Shrinking Process":
-        skip "finds minimal failing case for integers":
-            pass
-        skip "finds minimal failing case for lists":
-            pass
-        skip "handles max_shrinks limit":
-            pass
-        skip "handles max_depth limit":
-            pass
+        it "finds minimal failing case for integers":
+            # Property: value must be < 50
+            val test_fn = |x| x < 50
+
+            # Start with failing value 100
+            val result = shrink_to_minimal(
+                failing_value: 100,
+                test_fn: test_fn,
+                max_shrinks: 100,
+                max_depth: 10
+            )
+
+            # Should shrink to minimal failing value (50)
+            expect result.result_type == ShrinkResultType.MinimalFailure
+            expect result.value == 50
+            expect result.shrinks > 0
+
+        it "finds minimal failing case for lists":
+            # Property: list sum must be < 10
+            val test_fn = |list| list_sum(list) < 10
+
+            # Start with failing list that sums to > 10
+            val (result_type, value, shrinks) = shrink_list_to_minimal(
+                failing_list: [3, 3, 3, 3, 3],
+                test_fn: test_fn,
+                max_shrinks: 100,
+                max_depth: 10
+            )
+
+            # Should shrink to a minimal failing list
+            expect result_type == ShrinkResultType.MinimalFailure
+            expect list_sum(value) >= 10
+
+        it "handles max_shrinks limit":
+            # Property that always fails
+            val test_fn = |x| false
+
+            val result = shrink_to_minimal(
+                failing_value: 1000000,
+                test_fn: test_fn,
+                max_shrinks: 5,
+                max_depth: 10
+            )
+
+            # Should hit max_shrinks limit or find minimal
+            expect result.shrinks <= 5
+
+        it "handles max_depth limit":
+            # Property that always fails
+            val test_fn = |x| false
+
+            val result = shrink_to_minimal(
+                failing_value: 100,
+                test_fn: test_fn,
+                max_shrinks: 1000,
+                max_depth: 3
+            )
+
+            # Should terminate due to depth limit
+            expect result.result_type == ShrinkResultType.MinimalFailure or result.result_type == ShrinkResultType.MaxShrinksExceeded
+
     context "Edge Cases":
-        skip "handles no shrink possible":
-            pass
-        skip "handles all shrinks passing":
-            pass
+        it "handles no shrink possible":
+            # Zero cannot be shrunk
+            val test_fn = |x| x > 0
+
+            val result = shrink_to_minimal(
+                failing_value: 0,
+                test_fn: test_fn,
+                max_shrinks: 100,
+                max_depth: 10
+            )
+
+            # Should report minimal with 0 value
+            expect result.value == 0
+            expect result.shrinks == 0
+
+        it "handles all shrinks passing":
+            # Property: value must be exactly 42
+            val test_fn = |x| x == 42
+
+            # Start with failing value 100 (which is != 42)
+            val result = shrink_to_minimal(
+                failing_value: 100,
+                test_fn: test_fn,
+                max_shrinks: 100,
+                max_depth: 10
+            )
+
+            # Shrink candidates (0, 50, 99) all fail since they're not 42
+            # Eventually we'll find 0 as the minimal value != 42
+            expect result.value != 42

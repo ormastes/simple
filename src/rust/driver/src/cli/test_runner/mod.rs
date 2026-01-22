@@ -28,6 +28,8 @@ mod discovery;
 mod coverage;
 mod feature_db;
 mod test_db_update;
+mod cpu_monitor;
+mod parallel;
 
 // Re-export public API for backward compatibility
 pub use types::{TestLevel, OutputFormat, TestOptions, TestFileResult, TestRunResult};

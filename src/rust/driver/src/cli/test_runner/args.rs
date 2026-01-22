@@ -136,6 +136,53 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
                     options.safe_mode_timeout = args[i].parse().unwrap_or(30);
                 }
             }
+            // Parallel execution options
+            "--parallel" | "-p" => {
+                options.parallel = true;
+                options.safe_mode = true; // Parallel requires safe mode
+            }
+            "--full-parallel" | "-P" => {
+                options.full_parallel = true;
+                options.parallel = true;
+                options.safe_mode = true; // Parallel requires safe mode
+            }
+            "--threads" | "-j" => {
+                i += 1;
+                if i < args.len() {
+                    options.max_threads = args[i].parse().unwrap_or(0);
+                }
+            }
+            arg if arg.starts_with("--threads=") => {
+                options.max_threads = arg.trim_start_matches("--threads=").parse().unwrap_or(0);
+            }
+            arg if arg.starts_with("-j") && arg.len() > 2 => {
+                // Handle -j4 style (no space)
+                options.max_threads = arg[2..].parse().unwrap_or(0);
+            }
+            "--cpu-threshold" => {
+                i += 1;
+                if i < args.len() {
+                    options.cpu_threshold = args[i].parse().unwrap_or(70);
+                }
+            }
+            arg if arg.starts_with("--cpu-threshold=") => {
+                options.cpu_threshold = arg.trim_start_matches("--cpu-threshold=").parse().unwrap_or(70);
+            }
+            "--throttled-threads" => {
+                i += 1;
+                if i < args.len() {
+                    options.throttled_threads = args[i].parse().unwrap_or(1);
+                }
+            }
+            arg if arg.starts_with("--throttled-threads=") => {
+                options.throttled_threads = arg.trim_start_matches("--throttled-threads=").parse().unwrap_or(1);
+            }
+            "--cpu-check-interval" => {
+                i += 1;
+                if i < args.len() {
+                    options.cpu_check_interval = args[i].parse().unwrap_or(5);
+                }
+            }
             arg if !arg.starts_with("-") && options.path.is_none() => {
                 options.path = Some(PathBuf::from(arg));
             }
@@ -181,5 +228,61 @@ mod tests {
         let args = vec!["test/my_test.spl".to_string()];
         let opts = parse_test_args(&args);
         assert_eq!(opts.path, Some(PathBuf::from("test/my_test.spl")));
+    }
+
+    #[test]
+    fn test_parse_parallel_flags() {
+        let args = vec!["--parallel".to_string()];
+        let opts = parse_test_args(&args);
+        assert!(opts.parallel);
+        assert!(opts.safe_mode); // Parallel enables safe mode
+    }
+
+    #[test]
+    fn test_parse_full_parallel() {
+        let args = vec!["--full-parallel".to_string()];
+        let opts = parse_test_args(&args);
+        assert!(opts.full_parallel);
+        assert!(opts.parallel);
+        assert!(opts.safe_mode);
+    }
+
+    #[test]
+    fn test_parse_threads() {
+        let args = vec!["--threads".to_string(), "4".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.max_threads, 4);
+
+        // Test --threads=N format
+        let args = vec!["--threads=8".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.max_threads, 8);
+
+        // Test -j4 format
+        let args = vec!["-j4".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.max_threads, 4);
+    }
+
+    #[test]
+    fn test_parse_cpu_threshold() {
+        let args = vec!["--cpu-threshold".to_string(), "50".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.cpu_threshold, 50);
+
+        let args = vec!["--cpu-threshold=80".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.cpu_threshold, 80);
+    }
+
+    #[test]
+    fn test_parse_throttled_threads() {
+        let args = vec!["--throttled-threads".to_string(), "2".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.throttled_threads, 2);
+
+        let args = vec!["--throttled-threads=3".to_string()];
+        let opts = parse_test_args(&args);
+        assert_eq!(opts.throttled_threads, 3);
     }
 }

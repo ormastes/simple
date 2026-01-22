@@ -101,7 +101,7 @@ pytorch_fn!(rt_torch_dist_all_reduce, (tensor: RuntimeValue, op: i64), (), {
 });
 
 pytorch_fn!(rt_torch_dist_all_gather, (tensor_list: RuntimeValue, tensor: RuntimeValue), (), {
-    use super::storage::TENSOR_LIST_MAP;
+    use super::storage::update_tensor_list;
 
     // All-gather: gather tensors from all processes
     // In single-process mode, just copy tensor to the list
@@ -124,7 +124,7 @@ pytorch_fn!(rt_torch_dist_all_gather, (tensor_list: RuntimeValue, tensor: Runtim
         if let Some(mut list) = get_tensor_list(list_handle) {
             list.push(store_tensor(t));
             // Update the list in storage
-            TENSOR_LIST_MAP.lock().unwrap().insert(list_handle, list);
+            update_tensor_list(list_handle, list);
         }
     }
 });

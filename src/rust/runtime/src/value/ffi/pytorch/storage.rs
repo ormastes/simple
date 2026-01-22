@@ -33,7 +33,7 @@ pub fn store_tensor(tensor: Tensor) -> i64 {
 
 #[cfg(feature = "pytorch")]
 pub fn get_tensor(handle: i64) -> Option<Tensor> {
-    TENSOR_MAP.lock().unwrap().get(&handle).cloned()
+    TENSOR_MAP.lock().unwrap().get(&handle).map(|t| t.shallow_clone())
 }
 
 #[cfg(feature = "pytorch")]
@@ -112,6 +112,11 @@ pub fn store_tensor_list(handles: Vec<i64>) -> i64 {
 #[cfg(feature = "pytorch")]
 pub fn get_tensor_list(handle: i64) -> Option<Vec<i64>> {
     TENSOR_LIST_MAP.lock().unwrap().get(&handle).cloned()
+}
+
+#[cfg(feature = "pytorch")]
+pub fn update_tensor_list(handle: i64, list: Vec<i64>) {
+    TENSOR_LIST_MAP.lock().unwrap().insert(handle, list);
 }
 
 // ============================================================================

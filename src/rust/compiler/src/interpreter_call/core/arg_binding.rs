@@ -24,6 +24,10 @@ pub(crate) fn bind_args(
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
 ) -> Result<HashMap<String, Value>, CompileError> {
+    // Debug: Print parameter names to understand argument mismatch
+    let param_names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+    eprintln!("DEBUG bind_args: params={:?}, args.len={}, self_mode={:?}", param_names, args.len(), self_mode);
+
     bind_args_with_injected(
         params,
         args,
@@ -52,6 +56,10 @@ pub(crate) fn bind_args_with_injected(
         .iter()
         .filter(|p| !(self_mode.should_skip_self() && p.name == METHOD_SELF))
         .collect();
+
+    // Debug: Print params_to_bind after filtering
+    let filtered_names: Vec<&str> = params_to_bind.iter().map(|p| p.name.as_str()).collect();
+    eprintln!("DEBUG bind_args_with_injected: params_to_bind={:?}, args.len={}", filtered_names, args.len());
 
     // Check if there's a variadic parameter (should be last)
     let variadic_param_idx = params_to_bind.iter().position(|p| p.variadic);
@@ -108,6 +116,7 @@ pub(crate) fn bind_args_with_injected(
                 } else {
                     // No variadic - bind to regular parameters
                     if positional_idx >= params_to_bind.len() {
+                        eprintln!("DEBUG ERROR: positional_idx={} >= params_to_bind.len()={} (spread path)", positional_idx, params_to_bind.len());
                         let ctx = ErrorContext::new()
                             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                             .with_help("check the function signature and provide the correct number of arguments");
@@ -163,6 +172,7 @@ pub(crate) fn bind_args_with_injected(
                 } else {
                     // No variadic parameter - normal positional binding
                     if positional_idx >= params_to_bind.len() {
+                        eprintln!("DEBUG ERROR: positional_idx={} >= params_to_bind.len()={} (normal path)", positional_idx, params_to_bind.len());
                         let ctx = ErrorContext::new()
                             .with_code(codes::ARGUMENT_COUNT_MISMATCH)
                             .with_help("check the function signature and provide the correct number of arguments");

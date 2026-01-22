@@ -247,7 +247,7 @@ pytorch_fn!(rt_torch_gt, (a: RuntimeValue, b: RuntimeValue), {
         None => return RuntimeValue::NIL,
     };
 
-    let result = a_tensor.gt(&b_tensor);
+    let result = a_tensor.gt_tensor(&b_tensor);
     let handle = store_tensor(result);
     RuntimeValue::from_int(handle)
 });

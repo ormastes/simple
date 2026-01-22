@@ -40,7 +40,7 @@ pub(super) use super::ops_matrix::{rt_torch_matmul, rt_torch_transpose};
 pub(super) use super::ops_elementwise::rt_torch_add;
 
 #[cfg(feature = "pytorch")]
-pub(super) use super::ops_shape::rt_torch_clone;
+pub(super) use super::creation::rt_torch_clone;
 
 pub mod batchnorm;
 pub mod conv;

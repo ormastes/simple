@@ -40,13 +40,8 @@ macro_rules! tensor_unary_op {
     };
 }
 
-/// Sum all elements in tensor
-/// Returns handle to scalar tensor, or 0 on failure
-tensor_unary_op!(rt_torch_sum, "rt_torch_sum", |t: &Tensor| t.sum(tch::Kind::Float));
-
-/// Mean of all elements in tensor
-/// Returns handle to scalar tensor, or 0 on failure
-tensor_unary_op!(rt_torch_mean, "rt_torch_mean", |t: &Tensor| t.mean(tch::Kind::Float));
+// Note: rt_torch_sum and rt_torch_mean are defined in data_access.rs
+// to avoid duplicate definitions
 
 /// Maximum value in tensor
 tensor_unary_op!(rt_torch_max, "rt_torch_max", |t: &Tensor| t.max());

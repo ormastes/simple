@@ -162,11 +162,13 @@ pub extern "C" fn rt_torch_scheduler_cosine_new(optimizer_handle: u64, t_max: us
         }
 
         let opt_registry = OPTIMIZER_REGISTRY.lock();
-        let Some(opt) = opt_registry.get(&optimizer_handle) else {
+        if !opt_registry.contains_key(&optimizer_handle) {
             return 0;
-        };
-        let base_lr = opt.lr;
+        }
         drop(opt_registry);
+
+        // Get base learning rate using the public getter function
+        let base_lr = rt_torch_optimizer_get_lr(optimizer_handle);
 
         let state = SchedulerState::CosineAnnealingLR {
             optimizer: optimizer_handle,

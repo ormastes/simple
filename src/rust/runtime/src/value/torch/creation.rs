@@ -11,6 +11,9 @@
 #[cfg(feature = "pytorch")]
 use tch::{Device as TchDevice, Kind as TchKind, Tensor};
 
+#[cfg(feature = "pytorch")]
+use std::sync::Arc;
+
 use super::error::TorchFfiError;
 use super::registry::*;
 
@@ -296,7 +299,7 @@ pub extern "C" fn rt_torch_tensor(
 
         // Create tensor from data
         let data_slice = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
-        let tensor = match Tensor::of_slice(data_slice)
+        let tensor = match Tensor::from_slice(data_slice)
             .to_kind(dtype)
             .to_device(device)
             .reshape(&shape)
@@ -374,6 +377,66 @@ pub extern "C" fn rt_torch_free(tensor_handle: u64) -> i32 {
     #[cfg(not(feature = "pytorch"))]
     {
         let _ = tensor_handle;
+        TorchFfiError::NotAvailable as i32
+    }
+}
+
+// ============================================================================
+// FFI Functions: CUDA Memory Management
+// ============================================================================
+
+/// Get CUDA memory allocated on device (in bytes)
+#[no_mangle]
+pub extern "C" fn rt_torch_cuda_memory_allocated(device: i32) -> i64 {
+    #[cfg(feature = "pytorch")]
+    {
+        if tch::Cuda::is_available() && device >= 0 {
+            tch::Cuda::memory_stats(device as usize).allocated_bytes as i64
+        } else {
+            0
+        }
+    }
+    #[cfg(not(feature = "pytorch"))]
+    {
+        let _ = device;
+        0
+    }
+}
+
+/// Reset peak memory stats for device
+#[no_mangle]
+pub extern "C" fn rt_torch_cuda_reset_peak_memory_stats(device: i32) -> i32 {
+    #[cfg(feature = "pytorch")]
+    {
+        if tch::Cuda::is_available() && device >= 0 {
+            tch::Cuda::reset_peak_memory_stats(device as usize);
+            TorchFfiError::Success as i32
+        } else {
+            TorchFfiError::NotAvailable as i32
+        }
+    }
+    #[cfg(not(feature = "pytorch"))]
+    {
+        let _ = device;
+        TorchFfiError::NotAvailable as i32
+    }
+}
+
+/// Synchronize CUDA device
+#[no_mangle]
+pub extern "C" fn rt_torch_cuda_synchronize(device: i32) -> i32 {
+    #[cfg(feature = "pytorch")]
+    {
+        if tch::Cuda::is_available() && device >= 0 {
+            tch::Cuda::synchronize(device as usize);
+            TorchFfiError::Success as i32
+        } else {
+            TorchFfiError::NotAvailable as i32
+        }
+    }
+    #[cfg(not(feature = "pytorch"))]
+    {
+        let _ = device;
         TorchFfiError::NotAvailable as i32
     }
 }

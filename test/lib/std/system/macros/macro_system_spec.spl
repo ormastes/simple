@@ -1,32 +1,136 @@
 # System test for macro system - Core functionality
-# SKIPPED: Macro system has runtime bugs (const reassignment issues).
+# Tests comprehensive macro system features: expansion, hygiene, templates, const-eval.
 
 import std.spec
 
+# ============================================================================
+# Module-level macro definitions
+# ============================================================================
+
+# Basic expansion macros
+macro sys_ten() -> (returns result: Int):
+    emit result:
+        10
+
+macro sys_multiply(a: Int, b: Int) -> (returns result: Int):
+    emit result:
+        a * b
+
+macro sys_counter() -> (returns result: Int):
+    emit result:
+        let count = 1
+        count
+
+# Hygiene macros
+macro sys_make_ten() -> (returns result: Int):
+    emit result:
+        let x = 10
+        x
+
+macro sys_increment() -> (returns result: Int):
+    emit result:
+        let temp = 1
+        temp
+
+# Template macros
+macro sys_gen_getter(NAME: Str const) -> (
+    intro getter: enclosing.module.fn "sys_get_{NAME}"() -> Int
+):
+    emit getter:
+        fn "sys_get_{NAME}"() -> Int:
+            return 42
+
+macro sys_make_named_adder(name: Str const, amount: Int const) -> (
+    returns result: Int,
+    intro adder: enclosing.module.fn "sys_{name}_adder"(x: Int) -> Int
+):
+    emit adder:
+        fn add_impl(x: Int) -> Int:
+            return x + amount
+
+    emit result:
+        0
+
+# Const-eval macros
+macro sys_add_three(a: Int, b: Int, c: Int) -> (returns result: Int):
+    emit result:
+        a + b + c
+
+macro sys_max(a: Int, b: Int) -> (returns result: Int):
+    emit result:
+        if a > b:
+            return a
+        else:
+            return b
+
+macro sys_gen_getters(N: Int const) -> (
+    intro getters:
+        for i in 0..N:
+            enclosing.module.fn "sys_get_loop_{i}"() -> Int
+):
+    emit getters:
+        for i in 0..N:
+            fn "sys_get_loop_{i}"() -> Int:
+                return i
+
+# ============================================================================
+# Invoke macros that generate functions at module level
+# ============================================================================
+sys_gen_getter!("value")
+let _ = sys_make_named_adder!("my", 10)
+sys_gen_getters!(3)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
 describe "Macro System":
     describe "Basic macro expansion":
-        skip "expands simple expression macros":
-            pass
-        skip "expands macros with const parameters":
-            pass
-        skip "handles multiple macro invocations independently":
-            pass
+        it "expands simple expression macros":
+            val x = sys_ten!()
+            expect(x).to(eq(10))
+
+        it "expands macros with const parameters":
+            val x = sys_multiply!(6, 7)
+            expect(x).to(eq(42))
+
+        it "handles multiple macro invocations independently":
+            val first = sys_counter!()
+            val second = sys_counter!()
+            val third = sys_counter!()
+            expect(first + second + third).to(eq(3))
+
     describe "Hygienic expansion":
-        skip "prevents variable capture from outer scope":
-            pass
-        skip "generates unique names for repeated expansions":
-            pass
+        it "prevents variable capture from outer scope":
+            let x = 5
+            val result = sys_make_ten!()
+            # Outer x should be 5, macro's x should be 10
+            expect(x + result).to(eq(15))
+
+        it "generates unique names for repeated expansions":
+            val a = sys_increment!()
+            val b = sys_increment!()
+            # Each invocation has isolated temp
+            expect(a + b).to(eq(2))
+
     describe "Template substitution":
-        skip "substitutes templates in identifiers":
-            pass
-        skip "substitutes templates in strings":
-            pass
-        skip "substitutes templates in function names":
-            pass
+        it "substitutes templates in identifiers":
+            val x = sys_get_value()
+            expect(x).to(eq(42))
+
+        it "substitutes templates in function names":
+            val x = sys_my_adder(32)
+            expect(x).to(eq(42))
+
     describe "Const-eval engine":
-        skip "evaluates arithmetic in const context":
-            pass
-        skip "evaluates conditionals in const context":
-            pass
-        skip "evaluates loops in const context":
-            pass
+        it "evaluates arithmetic in const context":
+            val x = sys_add_three!(10, 20, 12)
+            expect(x).to(eq(42))
+
+        it "evaluates conditionals in const context":
+            expect(sys_max!(10, 20)).to(eq(20))
+            expect(sys_max!(30, 5)).to(eq(30))
+
+        it "evaluates loops in const context":
+            val sum = sys_get_loop_0() + sys_get_loop_1() + sys_get_loop_2()
+            expect(sum).to(eq(3))
