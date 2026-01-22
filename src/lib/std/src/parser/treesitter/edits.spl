@@ -1,8 +1,8 @@
 # Edit tracking for incremental parsing
 # Tracks document changes to enable efficient reparse
 
-import core.{Option, Result}
-import parser.treesitter.tree.{Span, NodeId, Node, Tree}
+use core.{Option, Result}
+use parser.treesitter.tree.{Span, NodeId, Node, Tree}
 
 # Source position (line, column)
 struct Point:
@@ -118,9 +118,9 @@ fn compute_edits(old_text: str, new_text: str) -> [InputEdit]:
 
 # Diff operation type
 enum DiffOp:
-    Equal { start: i64, len: i64 }      # Characters match
-    Delete { start: i64, len: i64 }     # Delete from old
-    Insert { start: i64, len: i64 }     # Insert from new
+    Equal(start: i64, len: i64)      # Characters match
+    Delete(start: i64, len: i64)     # Delete from old
+    Insert(start: i64, len: i64)     # Insert from new
 
 
 # Myers diff algorithm - O(N*D) where D is the edit distance
@@ -132,21 +132,21 @@ fn myers_diff(old_text: str, new_text: str) -> [DiffOp]:
     if n == 0 and m == 0:
         return []
     if n == 0:
-        return [DiffOp::Insert { start: 0, len: m }]
+        return [DiffOp::Insert(start: 0, len: m)]
     if m == 0:
-        return [DiffOp::Delete { start: 0, len: n }]
+        return [DiffOp::Delete(start: 0, len: n)]
 
     # V array: V[k] = x coordinate of furthest reaching point on diagonal k
     # Diagonal k = x - y, so k ranges from -m to n
     # We use offset to convert k to array index
     val max_d = n + m
     val v_size = 2 * max_d + 1
-    var v: <i64> = []
+    var v: [i64] = []
     for _ in 0..v_size:
         v.push(0)
 
     # Store the path for backtracking
-    var trace: <<i64>> = []
+    var trace: [[i64]] = []
 
     # Forward pass: find shortest edit script length
     var found = false
@@ -154,7 +154,7 @@ fn myers_diff(old_text: str, new_text: str) -> [DiffOp]:
 
     for d in 0..(max_d + 1):
         # Save V state for backtracking
-        var v_copy: <i64> = []
+        var v_copy: [i64] = []
         for i in 0..v_size:
             v_copy.push(v[i])
         trace.push(v_copy)
@@ -195,7 +195,7 @@ fn myers_diff(old_text: str, new_text: str) -> [DiffOp]:
 
 
 # Backtrack through the trace to build diff operations
-fn backtrack_diff(old_text: str, new_text: str, trace: <<i64>>, d: i64, n: i64, m: i64) -> [DiffOp]:
+fn backtrack_diff(old_text: str, new_text: str, trace: [[i64]], d: i64, n: i64, m: i64) -> [DiffOp]:
     var ops: [DiffOp] = []
     var x = n
     var y = m
@@ -222,18 +222,18 @@ fn backtrack_diff(old_text: str, new_text: str, trace: <<i64>>, d: i64, n: i64, 
         while x > prev_x and y > prev_y:
             x = x - 1
             y = y - 1
-            ops.push(DiffOp::Equal { start: x, len: 1 })
+            ops.push(DiffOp::Equal(start: x, len: 1))
 
         # Add the edit operation
         if current_d > 0:
             if x == prev_x:
                 # Insertion
                 y = y - 1
-                ops.push(DiffOp::Insert { start: y, len: 1 })
+                ops.push(DiffOp::Insert(start: y, len: 1))
             else:
                 # Deletion
                 x = x - 1
-                ops.push(DiffOp::Delete { start: x, len: 1 })
+                ops.push(DiffOp::Delete(start: x, len: 1))
 
         current_d = current_d - 1
 
@@ -241,7 +241,7 @@ fn backtrack_diff(old_text: str, new_text: str, trace: <<i64>>, d: i64, n: i64, 
     while x > 0 and y > 0:
         x = x - 1
         y = y - 1
-        ops.push(DiffOp::Equal { start: x, len: 1 })
+        ops.push(DiffOp::Equal(start: x, len: 1))
 
     # Reverse to get forward order
     var result: [DiffOp] = []
@@ -266,14 +266,14 @@ fn merge_diff_ops(ops: [DiffOp]) -> [DiffOp]:
         val next = ops[i]
 
         match (current, next):
-            case (DiffOp::Equal { start: s1, len: l1 }, DiffOp::Equal { start: _, len: l2 }):
-                current = DiffOp::Equal { start: s1, len: l1 + l2 }
+            case (DiffOp::Equal(start: s1, len: l1), DiffOp::Equal(start: _, len: l2)):
+                current = DiffOp::Equal(start: s1, len: l1 + l2)
 
-            case (DiffOp::Delete { start: s1, len: l1 }, DiffOp::Delete { start: _, len: l2 }):
-                current = DiffOp::Delete { start: s1, len: l1 + l2 }
+            case (DiffOp::Delete(start: s1, len: l1), DiffOp::Delete(start: _, len: l2)):
+                current = DiffOp::Delete(start: s1, len: l1 + l2)
 
-            case (DiffOp::Insert { start: s1, len: l1 }, DiffOp::Insert { start: _, len: l2 }):
-                current = DiffOp::Insert { start: s1, len: l1 + l2 }
+            case (DiffOp::Insert(start: s1, len: l1), DiffOp::Insert(start: _, len: l2)):
+                current = DiffOp::Insert(start: s1, len: l1 + l2)
 
             case _:
                 merged.push(current)
@@ -299,7 +299,7 @@ fn diff_ops_to_edits(old_text: str, new_text: str, ops: [DiffOp]) -> [InputEdit]
 
     for op in ops:
         match op:
-            case DiffOp::Equal { start: _, len: l }:
+            case DiffOp::Equal(start: _, len: l):
                 # Flush any pending edit
                 if pending_delete_len > 0 or pending_insert_len > 0:
                     edits.push(InputEdit.new(
@@ -330,7 +330,7 @@ fn diff_ops_to_edits(old_text: str, new_text: str, ops: [DiffOp]) -> [InputEdit]
                     old_byte = old_byte + 1
                     new_byte = new_byte + 1
 
-            case DiffOp::Delete { start: _, len: l }:
+            case DiffOp::Delete(start: _, len: l):
                 if pending_delete_start < 0:
                     pending_delete_start = old_byte
                     pending_start_point = old_point
@@ -345,7 +345,7 @@ fn diff_ops_to_edits(old_text: str, new_text: str, ops: [DiffOp]) -> [InputEdit]
                             old_point = Point.new(old_point.line, old_point.column + 1)
                     old_byte = old_byte + 1
 
-            case DiffOp::Insert { start: _, len: l }:
+            case DiffOp::Insert(start: _, len: l):
                 if pending_insert_start < 0:
                     pending_insert_start = new_byte
                     if pending_delete_start < 0:
