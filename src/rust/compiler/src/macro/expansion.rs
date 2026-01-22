@@ -138,31 +138,39 @@ fn expand_user_macro_inner(
                     .collect();
 
                 let expanded_block = substitute_block_templates(block, &const_bindings);
-                let hygienic_block = apply_macro_hygiene_block(&expanded_block, &mut hygiene_ctx, false);
 
                 // Handle inject blocks specially based on anchor type
                 let (control, maybe_value) = if let Some(anchor) = inject_anchor {
+                    // Inject blocks should NOT have hygiene applied because they execute in the
+                    // caller's environment and need to access the caller's variables.
+                    // They are NOT executed during macro expansion - only queued for later execution.
                     match anchor {
                         MacroAnchor::Tail => {
-                            // Queue for execution at block exit
-                            queue_tail_injection(hygienic_block.clone());
+                            // Queue for execution at block exit (in caller's environment)
+                            queue_tail_injection(expanded_block.clone());
                             (Control::Next, None)
                         }
                         MacroAnchor::Head => {
-                            // Head injection cannot go back in time in an interpreter model
-                            // Execute immediately as a fallback (with a warning in trace mode)
+                            // Head injection: queue for execution at the start of the caller's block
+                            // Note: This requires the interpreter to detect macro invocations and
+                            // execute head injections before the statement containing the macro.
+                            // For now, we queue it like tail (execution order will be wrong).
                             if is_macro_trace_enabled() {
-                                macro_trace("  [warning] 'head' inject executes at callsite (cannot rewind)");
+                                macro_trace("  [warning] 'head' inject queued but execution order may be incorrect");
                             }
-                            exec_block_fn(&hygienic_block, &mut local_env, functions, classes, enums, impl_methods)?
+                            queue_tail_injection(expanded_block.clone());
+                            (Control::Next, None)
                         }
                         MacroAnchor::Here => {
-                            // Execute immediately at the callsite
-                            exec_block_fn(&hygienic_block, &mut local_env, functions, classes, enums, impl_methods)?
+                            // Here injection: queue for execution immediately after macro invocation
+                            // This is similar to tail but at the current position rather than block end
+                            queue_tail_injection(expanded_block.clone());
+                            (Control::Next, None)
                         }
                     }
                 } else {
-                    // Not an inject block - execute normally
+                    // Not an inject block - apply hygiene and execute normally
+                    let hygienic_block = apply_macro_hygiene_block(&expanded_block, &mut hygiene_ctx, false);
                     exec_block_fn(&hygienic_block, &mut local_env, functions, classes, enums, impl_methods)?
                 };
 

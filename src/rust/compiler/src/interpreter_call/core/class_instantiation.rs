@@ -72,9 +72,9 @@ pub(crate) fn instantiate_class(
     let already_in_new = IN_NEW_METHOD.with(|set| set.borrow().contains(class_name));
 
     if let Some(new_method) = class_def.methods.iter().find(|m| m.name == METHOD_NEW) {
-        // Only auto-call new() if it has special attributes like #[inject]
-        // Otherwise, use field-based construction
-        let should_call_new = has_inject_attr(new_method);
+        // Auto-call new() for Python-style construction: ClassName() calls ClassName.new()
+        // Skip if we're already inside new() to prevent infinite recursion
+        let should_call_new = true;  // Always call new() if it exists
 
         if should_call_new && !already_in_new {
             let self_val = Value::Object {

@@ -17,18 +17,19 @@ use crate::value::{Env, Value};
 
 use super::{
     await_value, bind_pattern_value, check_enum_exhaustiveness, control_to_value, create_range_object,
-    dispatch_context_method, evaluate_expr, evaluate_macro_invocation, evaluate_method_call_with_self_update,
-    exec_block, exec_context, exec_for, exec_function, exec_if, exec_loop, exec_match, exec_node, exec_while,
-    exec_with, find_and_exec_method, get_di_config, get_import_alias, get_pattern_name, get_type_name,
-    handle_functional_update, handle_method_call_with_self_update, is_unit_type, iter_to_vec, load_and_merge_module,
-    message_to_value, normalize_index, pattern_matches, preprocess_macro_contract_at_definition, register_trait_impl,
-    slice_collection, spawn_actor_with_expr, spawn_future_with_callable, spawn_future_with_callable_and_env,
-    spawn_future_with_expr, take_macro_introduced_symbols, try_method_missing, type_to_family_name,
-    validate_unit_constraints, validate_unit_type, with_effect_context, Dimension, ExternFunctions, ImplMethods,
-    Macros, TraitImplRegistry, TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units,
-    BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES,
-    BDD_SHARED_EXAMPLES, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, MACRO_DEFINITION_ORDER,
-    MODULE_GLOBALS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
+    dispatch_context_method, enter_class_scope, evaluate_expr, evaluate_macro_invocation,
+    evaluate_method_call_with_self_update, exec_block, exec_context, exec_for, exec_function, exec_if, exec_loop,
+    exec_match, exec_node, exec_while, exec_with, exit_class_scope, find_and_exec_method, get_di_config,
+    get_import_alias, get_pattern_name, get_type_name, handle_functional_update,
+    handle_method_call_with_self_update, is_unit_type, iter_to_vec, load_and_merge_module, message_to_value,
+    normalize_index, pattern_matches, preprocess_macro_contract_at_definition, register_trait_impl, slice_collection,
+    spawn_actor_with_expr, spawn_future_with_callable, spawn_future_with_callable_and_env, spawn_future_with_expr,
+    take_macro_introduced_symbols, try_method_missing, type_to_family_name, validate_unit_constraints,
+    validate_unit_type, with_effect_context, Dimension, ExternFunctions, ImplMethods, Macros, TraitImplRegistry,
+    TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
+    BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
+    COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, SI_BASE_UNITS,
+    UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 
 type Enums = HashMap<String, EnumDef>;
@@ -271,6 +272,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 );
             }
             Node::Class(c) => {
+                // Enter class scope for field introduction tracking
+                enter_class_scope(c.name.clone());
+
                 // Process macro invocations in class body to get introduced fields
                 let mut additional_fields = Vec::new();
                 for macro_invoc in &c.macro_invocations {
@@ -290,6 +294,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         additional_fields.extend(contract_result.introduced_fields);
                     }
                 }
+
+                // Exit class scope
+                exit_class_scope();
 
                 // Create class with additional fields if any were introduced
                 let final_class = if additional_fields.is_empty() {

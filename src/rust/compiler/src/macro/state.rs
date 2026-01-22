@@ -31,6 +31,11 @@ thread_local! {
     /// For macros without const parameters, contracts can be processed once at definition
     /// time and reused for all invocations, avoiding redundant processing.
     static MACRO_CONTRACT_CACHE: RefCell<std::collections::HashMap<String, MacroContractResult>> = RefCell::new(std::collections::HashMap::new());
+
+    /// Current class context for field introduction
+    /// When a macro is invoked inside a class body, this stores the class name
+    /// so that field introductions can be registered to the correct class.
+    static CURRENT_CLASS_CONTEXT: RefCell<Option<String>> = RefCell::new(None);
 }
 
 /// Enable or disable macro expansion tracing
@@ -176,4 +181,34 @@ pub(crate) fn get_cached_macro_contract(macro_name: &str) -> Option<MacroContrac
 /// Check if a cached contract exists for a macro
 pub(crate) fn has_cached_macro_contract(macro_name: &str) -> bool {
     MACRO_CONTRACT_CACHE.with(|cell| cell.borrow().contains_key(macro_name))
+}
+
+/// Enter a class scope for field introduction tracking
+/// Call this when beginning to process a class body
+pub(crate) fn enter_class_scope(class_name: String) {
+    if is_macro_trace_enabled() {
+        macro_trace(&format!("  entering class scope: {}", class_name));
+    }
+    CURRENT_CLASS_CONTEXT.with(|cell| {
+        *cell.borrow_mut() = Some(class_name);
+    });
+}
+
+/// Exit the current class scope
+/// Call this when finished processing a class body
+pub(crate) fn exit_class_scope() {
+    if is_macro_trace_enabled() {
+        if let Some(class_name) = CURRENT_CLASS_CONTEXT.with(|cell| cell.borrow().clone()) {
+            macro_trace(&format!("  exiting class scope: {}", class_name));
+        }
+    }
+    CURRENT_CLASS_CONTEXT.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
+/// Get the current class context, if any
+/// Returns Some(class_name) if currently inside a class body, None otherwise
+pub(crate) fn get_current_class_context() -> Option<String> {
+    CURRENT_CLASS_CONTEXT.with(|cell| cell.borrow().clone())
 }
