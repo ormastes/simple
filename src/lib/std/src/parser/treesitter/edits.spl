@@ -266,13 +266,13 @@ fn merge_diff_ops(ops: [DiffOp]) -> [DiffOp]:
         val next = ops[i]
 
         match (current, next):
-            case (DiffOp::Equal(start: s1, len: l1), DiffOp::Equal(start: _, len: l2)):
+            case (DiffOp::Equal(s1, l1), DiffOp::Equal(_, l2)):
                 current = DiffOp::Equal(start: s1, len: l1 + l2)
 
-            case (DiffOp::Delete(start: s1, len: l1), DiffOp::Delete(start: _, len: l2)):
+            case (DiffOp::Delete(s1, l1), DiffOp::Delete(_, l2)):
                 current = DiffOp::Delete(start: s1, len: l1 + l2)
 
-            case (DiffOp::Insert(start: s1, len: l1), DiffOp::Insert(start: _, len: l2)):
+            case (DiffOp::Insert(s1, l1), DiffOp::Insert(_, l2)):
                 current = DiffOp::Insert(start: s1, len: l1 + l2)
 
             case _:
@@ -299,16 +299,17 @@ fn diff_ops_to_edits(old_text: str, new_text: str, ops: [DiffOp]) -> [InputEdit]
 
     for op in ops:
         match op:
-            case DiffOp::Equal(start: _, len: l):
+            case DiffOp::Equal(_, l):
                 # Flush any pending edit
                 if pending_delete_len > 0 or pending_insert_len > 0:
+                    val edit_start = if pending_delete_start >= 0: pending_delete_start else: old_byte
                     edits.push(InputEdit.new(
-                        start_byte: pending_delete_start if pending_delete_start >= 0 else old_byte,
-                        old_end_byte: old_byte,
-                        new_end_byte: new_byte,
-                        start_point: pending_start_point,
-                        old_end_point: old_point,
-                        new_end_point: new_point
+                        edit_start,
+                        old_byte,
+                        new_byte,
+                        pending_start_point,
+                        old_point,
+                        new_point
                     ))
                     pending_delete_start = -1
                     pending_delete_len = 0
@@ -330,7 +331,7 @@ fn diff_ops_to_edits(old_text: str, new_text: str, ops: [DiffOp]) -> [InputEdit]
                     old_byte = old_byte + 1
                     new_byte = new_byte + 1
 
-            case DiffOp::Delete(start: _, len: l):
+            case DiffOp::Delete(_, l):
                 if pending_delete_start < 0:
                     pending_delete_start = old_byte
                     pending_start_point = old_point
@@ -345,7 +346,7 @@ fn diff_ops_to_edits(old_text: str, new_text: str, ops: [DiffOp]) -> [InputEdit]
                             old_point = Point.new(old_point.line, old_point.column + 1)
                     old_byte = old_byte + 1
 
-            case DiffOp::Insert(start: _, len: l):
+            case DiffOp::Insert(_, l):
                 if pending_insert_start < 0:
                     pending_insert_start = new_byte
                     if pending_delete_start < 0:
@@ -364,13 +365,14 @@ fn diff_ops_to_edits(old_text: str, new_text: str, ops: [DiffOp]) -> [InputEdit]
 
     # Flush final pending edit
     if pending_delete_len > 0 or pending_insert_len > 0:
+        val final_start = if pending_delete_start >= 0: pending_delete_start else: old_byte
         edits.push(InputEdit.new(
-            start_byte: pending_delete_start if pending_delete_start >= 0 else old_byte,
-            old_end_byte: old_byte,
-            new_end_byte: new_byte,
-            start_point: pending_start_point,
-            old_end_point: old_point,
-            new_end_point: new_point
+            final_start,
+            old_byte,
+            new_byte,
+            pending_start_point,
+            old_point,
+            new_point
         ))
 
     return edits
