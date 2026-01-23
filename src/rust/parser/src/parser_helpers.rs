@@ -503,7 +503,8 @@ impl<'a> Parser<'a> {
                      - path.exist(path)   # In shell module\n\
                      - file_exist(path)   # In infra module\n\
                      \n\
-                     Suggestion: Replace 'exists' with 'exist'".to_string(),
+                     Suggestion: Replace 'exists' with 'exist'"
+                        .to_string(),
                     self.current.span,
                 ));
             }

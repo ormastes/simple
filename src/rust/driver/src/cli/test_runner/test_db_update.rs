@@ -15,21 +15,32 @@ pub fn update_test_database(
 ) -> Result<(), String> {
     let db_path = Path::new("doc/test/test_db.sdn");
 
-    debug_log!(DebugLevel::Basic, "TestDB", "Updating test database: {}", db_path.display());
-    debug_log!(DebugLevel::Detailed, "TestDB", "  Updating {} test records", test_files.len());
+    debug_log!(
+        DebugLevel::Basic,
+        "TestDB",
+        "Updating test database: {}",
+        db_path.display()
+    );
+    debug_log!(
+        DebugLevel::Detailed,
+        "TestDB",
+        "  Updating {} test records",
+        test_files.len()
+    );
 
     // Load or create test database
     let mut test_db = test_db::load_test_db(db_path).unwrap_or_else(|_| test_db::TestDb::new());
 
-    debug_log!(DebugLevel::Detailed, "TestDB", "  Loaded existing database with {} records",
-        test_db.records.len());
+    debug_log!(
+        DebugLevel::Detailed,
+        "TestDB",
+        "  Loaded existing database with {} records",
+        test_db.records.len()
+    );
 
     // Update each test result
     for (test_path, result) in test_files.iter().zip(results.iter()) {
-        let test_id = test_path
-            .to_str()
-            .unwrap_or("unknown")
-            .to_string();
+        let test_id = test_path.to_str().unwrap_or("unknown").to_string();
 
         let test_name = test_path
             .file_stem()
@@ -37,10 +48,7 @@ pub fn update_test_database(
             .unwrap_or("unknown")
             .to_string();
 
-        let test_file = test_path
-            .to_str()
-            .unwrap_or("unknown")
-            .to_string();
+        let test_file = test_path.to_str().unwrap_or("unknown").to_string();
 
         let category = categorize_test(test_path);
         let (status, failure) = convert_result_to_db(result);
@@ -64,16 +72,31 @@ pub fn update_test_database(
         );
     }
 
-    debug_log!(DebugLevel::Detailed, "TestDB", "  Total records in database: {}", test_db.records.len());
+    debug_log!(
+        DebugLevel::Detailed,
+        "TestDB",
+        "  Total records in database: {}",
+        test_db.records.len()
+    );
 
     // Save updated database
     test_db::save_test_db(db_path, &test_db)?;
-    debug_log!(DebugLevel::Basic, "TestDB", "Saved test database to: {}", db_path.display());
+    debug_log!(
+        DebugLevel::Basic,
+        "TestDB",
+        "Saved test database to: {}",
+        db_path.display()
+    );
 
     // Generate test result documentation
     let doc_dir = Path::new("doc/test");
     test_db::generate_test_result_docs(&test_db, doc_dir)?;
-    debug_log!(DebugLevel::Basic, "TestDB", "Generated test result documentation in: {}", doc_dir.display());
+    debug_log!(
+        DebugLevel::Basic,
+        "TestDB",
+        "Generated test result documentation in: {}",
+        doc_dir.display()
+    );
 
     Ok(())
 }

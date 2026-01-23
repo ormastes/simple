@@ -22,7 +22,12 @@ pub fn update_feature_database(test_files: &[PathBuf], results: &mut Vec<TestFil
         .cloned()
         .collect();
 
-    debug_log!(DebugLevel::Detailed, "FeatureDB", "  Found {} SSpec files", sspec_files.len());
+    debug_log!(
+        DebugLevel::Detailed,
+        "FeatureDB",
+        "  Found {} SSpec files",
+        sspec_files.len()
+    );
 
     let failed_specs: Vec<PathBuf> = results
         .iter()
@@ -30,13 +35,27 @@ pub fn update_feature_database(test_files: &[PathBuf], results: &mut Vec<TestFil
         .map(|result| result.path.clone())
         .collect();
 
-    debug_log!(DebugLevel::Detailed, "FeatureDB", "  {} failed specs to mark", failed_specs.len());
+    debug_log!(
+        DebugLevel::Detailed,
+        "FeatureDB",
+        "  {} failed specs to mark",
+        failed_specs.len()
+    );
 
     if let Err(e) = crate::feature_db::update_feature_db_from_sspec(&feature_db_path, &sspec_files, &failed_specs) {
-        debug_log!(DebugLevel::Basic, "FeatureDB", "  WARNING: Feature DB update failed (non-fatal): {}", e);
+        debug_log!(
+            DebugLevel::Basic,
+            "FeatureDB",
+            "  WARNING: Feature DB update failed (non-fatal): {}",
+            e
+        );
         // Don't treat feature database update failures as test failures
         // This allows tests to pass even if feature DB update has issues
     } else {
-        debug_log!(DebugLevel::Basic, "FeatureDB", "  Successfully updated feature database");
+        debug_log!(
+            DebugLevel::Basic,
+            "FeatureDB",
+            "  Successfully updated feature database"
+        );
     }
 }

@@ -4,6 +4,11 @@
 use tree.{Tree, Node}
 use query.{Query, QueryCursor, QueryMatch}
 
+# Runtime time function
+@extern("runtime", "rt_time_now_unix_micros")
+fn _rt_time_now_unix_micros() -> i64:
+    pass
+
 # text interning for node kinds
 # Reduces memory usage and speeds up string comparisons
 class StringInterner:
@@ -11,6 +16,7 @@ class StringInterner:
     reverse: Dict<i32, text>
     next_id: i32
 
+impl StringInterner:
     static fn new() -> StringInterner:
         StringInterner(
             strings: {},
@@ -34,16 +40,22 @@ class StringInterner:
         if self.reverse.contains_key(id):
             Some(self.reverse[id])
         else:
-            None
+            nil
 
     fn get_id(s: text) -> Option<i32>:
         if self.strings.contains_key(s):
             Some(self.strings[s])
         else:
-            None
+            nil
 
     fn size() -> i32:
         self.strings.len()
+
+# Cache entry for query results
+class CacheEntry:
+    key: text
+    matches: List<QueryMatch>
+    timestamp: i32
 
 # Query result cache
 # Caches query results to avoid redundant tree traversal
@@ -52,6 +64,7 @@ class QueryCache:
     max_size: i32
     access_count: Dict<text, i32>
 
+impl QueryCache:
     fn new(max_size: i32) -> QueryCache:
         QueryCache(
             cache: {},
@@ -68,15 +81,12 @@ class QueryCache:
             val entry = self.cache[key]
             Some(entry.matches)
         else:
-            None
+            nil
 
     me put(key: text, matches: List<QueryMatch>):
         # Evict if at capacity
         if self.cache.len() >= self.max_size and not self.cache.contains_key(key):
             self.evict_lru()
-
-        @extern("runtime", "rt_time_now_unix_micros")
-        fn _rt_time_now_unix_micros() -> i64
 
         val entry = CacheEntry(
             key: key,
@@ -109,11 +119,6 @@ class QueryCache:
     fn size() -> i32:
         self.cache.len()
 
-class CacheEntry:
-    key: text
-    matches: List<QueryMatch>
-    timestamp: i32
-
 # Arena allocation optimizer
 # Bulk allocation and memory pooling for better performance
 class ArenaOptimizer:
@@ -122,6 +127,7 @@ class ArenaOptimizer:
     allocated_blocks: i32
     total_nodes: i32
 
+impl ArenaOptimizer:
     fn new(pool_size: i32, block_size: i32) -> ArenaOptimizer:
         ArenaOptimizer(
             pool_size: pool_size,
@@ -160,12 +166,19 @@ class ArenaOptimizer:
             "memory_used_mb": (self.total_nodes * 64) / (1024 * 1024)  # Assuming 64 bytes per node
         }
 
+# Query statistics
+class QueryStats:
+    key: text
+    hit_count: i32
+    compile_count: i32
+
 # Query optimizer
 # Pre-compiles and caches queries for better performance
 class QueryOptimizer:
     compiled_queries: Dict<text, Query>
     query_stats: Dict<text, QueryStats>
 
+impl QueryOptimizer:
     static fn new() -> QueryOptimizer:
         QueryOptimizer(
             compiled_queries: {},
@@ -207,7 +220,7 @@ class QueryOptimizer:
         if self.query_stats.contains_key(key):
             Some(self.query_stats[key])
         else:
-            None
+            nil
 
     me clear_cache():
         self.compiled_queries.clear()
@@ -216,11 +229,6 @@ class QueryOptimizer:
     fn cache_size() -> i32:
         self.compiled_queries.len()
 
-class QueryStats:
-    key: text
-    hit_count: i32
-    compile_count: i32
-
 # Debouncer for LSP didChange events
 # Prevents excessive reparsing during rapid typing
 class Debouncer:
@@ -228,6 +236,7 @@ class Debouncer:
     last_trigger_ms: i32
     pending: bool
 
+impl Debouncer:
     fn new(delay_ms: i32) -> Debouncer:
         Debouncer(
             delay_ms: delay_ms,
@@ -255,6 +264,19 @@ class Debouncer:
     me reset():
         self.pending = false
 
+# Performance metrics data types
+class Stats:
+    avg: f32
+    min: f32
+    max: f32
+    count: i32
+
+class MemoryStats:
+    avg_bytes: i32
+    max_bytes: i32
+    min_bytes: i32
+    avg_mb: f32
+
 # Performance metrics collector
 class PerformanceMetrics:
     parse_times: List<f32>
@@ -262,6 +284,7 @@ class PerformanceMetrics:
     query_times: List<f32>
     memory_usage: List<i32>
 
+impl PerformanceMetrics:
     static fn new() -> PerformanceMetrics:
         PerformanceMetrics(
             parse_times: [],
@@ -337,18 +360,6 @@ class PerformanceMetrics:
         print("\nMemory Usage:")
         print("  Average: {mem_stats.avg_mb:.2f} MB")
         print("  Max: {mem_stats.max_bytes / (1024 * 1024):.2f} MB")
-
-class Stats:
-    avg: f32
-    min: f32
-    max: f32
-    count: i32
-
-class MemoryStats:
-    avg_bytes: i32
-    max_bytes: i32
-    min_bytes: i32
-    avg_mb: f32
 
 fn compute_stats(values: List<f32>) -> Stats:
     if values.len() == 0:

@@ -1,22 +1,24 @@
 # Skip Test Summary - Quick Reference
 
-**Total: 772 skipped tests**
+**Total: 733 skipped tests** (was 743, reduced by 10 TreeSitter conversions)
 
 ## Skip Test Tree
 
 ```
-772 Total Skips
-├── 425 Unit Tests (55%)
-│   ├── 151 Parser/Tree-sitter
+733 Total Skips
+├── 386 Unit Tests (53%)
+│   ├── 141 Parser/Tree-sitter
 │   │   ├── 80 Grammar compilation (grammar_simple_spec.spl)
 │   │   ├── 23 Grammar testing framework
 │   │   ├── 20 Python grammar support
 │   │   ├── 15 Rust grammar support
-│   │   └── 13 Other (lexer, query, language detection)
+│   │   ├── 3 Other (lexer, query, language detection)
+│   │   └── ✅ cli_spec.spl, optimize_spec.spl (10 converted 2026-01-23)
 │   │
-│   ├── 42 ML/Torch
-│   │   ├── 36 Tensor operations
-│   │   └── 6 Neural networks
+│   ├── 13 ML/Torch
+│   │   ├── 7 Advanced tensor operations
+│   │   ├── 6 Unimplemented features
+│   │   └── ✅ 29 tests converted using Mock pattern (2026-01-23)
 │   │
 │   ├── 37 Debug Adapter Protocol (DAP)
 │   │   ├── 15 Server implementation
@@ -67,7 +69,7 @@
 │       ├── 5 Host platform
 │       └── 4 Misc
 │
-├── 293 System/Feature Tests (38%)
+├── 293 System/Feature Tests (39%)
 │   ├── 79 Testing Framework
 │   │   ├── 53 Property-based testing
 │   │   ├── 22 Contract testing
@@ -90,7 +92,7 @@
 │   │
 │   └── 80 Other System Tests
 │
-└── 54 Integration Tests (7%)
+└── 54 Integration Tests (8%)
     ├── 24 UI/TUI (ratatui backend)
     ├── 16 ML Integration
     └── 14 Spec Framework
@@ -101,7 +103,7 @@
 
 ### By Priority (Unlock Impact)
 
-1. **Tree-sitter Grammar** - 151 skips → LSP, syntax highlighting
+1. **Tree-sitter Grammar** - 141 skips → LSP, syntax highlighting
 2. **Testing Infrastructure** - 131 skips → Property/snapshot/contract testing
 3. **Async Runtime** - 30 skips → Promise API, concurrency
 4. **DAP** - 37 skips → Debugger support
@@ -111,11 +113,11 @@
 
 #### Blocked on Missing Feature
 - **Async Runtime** → 30 concurrency tests
-- **Tree-sitter Integration** → 151 parser tests
+- **Tree-sitter Integration** → 141 parser tests
 - **Testing Infrastructure** → 79+ testing framework tests
 
 #### Work in Progress
-- **Tree-sitter files** → Recently migrated to [] syntax (2026-01-22)
+- **Tree-sitter files** → cli.spl, optimize.spl, query.spl now parse correctly (2026-01-23)
 - **SDN parser** → Basic implementation exists, needs completion
 
 #### Deferred/Low Priority
@@ -144,22 +146,38 @@
 
 ## Recent Changes
 
+**2026-01-23:**
+- ✅ **TreeSitter Skip Test Conversion Complete**
+  - Converted 10 skip tests → working tests
+  - Files: cli_spec.spl (5), optimize_spec.spl (5)
+  - Fixes: query.spl generic syntax (`Result[T]` → `Result<T>`), `me` method return types, empty case branches, reserved word `match` as variable
+  - Current skip count: **733** (was 743)
+
+- ✅ **ML/Torch Skip Test Conversion Complete**
+  - Converted 29 skip tests → working tests using Mock pattern
+  - Files: dataset_spec.spl (6), simple_math_integration_spec.spl (17), autograd_spec.spl (1), linalg_spec.spl (2), recurrent_spec.spl (1), transformer_spec.spl (1), typed_tensor_spec.spl (2)
+  - Pattern: MockSequentialSampler, MockTensor, MockMask, MockLinAlg, MockPackedSequence, MockTypedTensor
+
 **2026-01-22:**
 - Fixed tree-sitter syntax migration (angle → square brackets)
-- Current skip count: **772**
 - Previous documented count (2026-01-16): 1,241
-- **Reduction: 469 skips (37.8%)**
+- **Reduction so far: 508 skips (40.9%)**
 
 ## Next Steps
 
 1. **Immediate** (this sprint)
+   - ✅ ML/Torch mock tests → 29 tests converted (DONE 2026-01-23)
+   - ✅ TreeSitter cli/optimize tests → 10 tests converted (DONE 2026-01-23)
+   - ✅ TreeSitter lexer tests → 8 tests fixed (DONE 2026-01-23)
+   - ✅ LanguageDetector tests → 4 tests now passing (interpreter issue resolved)
+   - ✅ **All 53 TreeSitter tests now passing!**
    - Complete async runtime basics → unblock 30 tests
    - Implement core tree-sitter grammar → unblock 80+ tests
-   
+
 2. **Short term** (next 2-3 sprints)
    - Complete SDN parser → unblock 28 tests
    - Basic DAP implementation → unblock 37 tests
-   
+
 3. **Medium term** (this quarter)
    - Testing infrastructure (property, snapshot, contract) → unblock 131 tests
    - LSP core features → unblock 25 tests
@@ -169,4 +187,5 @@
 **See also:**
 - `doc/report/skip_test_analysis_2026-01-22.md` - Full analysis with trends
 - `doc/report/skip_test_by_category_2026-01-22.md` - Detailed breakdown by feature
+- `doc/report/treesitter_skip_test_conversion_2026-01-23.md` - TreeSitter conversion details
 - `doc/test/test_result.md` - Latest test run results

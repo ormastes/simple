@@ -107,7 +107,7 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
 
     // Build command - run through test runner, not as direct script execution
     let mut cmd = Command::new(&simple_binary);
-    cmd.arg("test")  // Run through test runner
+    cmd.arg("test") // Run through test runner
         .arg(path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -172,17 +172,15 @@ pub fn run_test_file_safe_mode(path: &Path, options: &super::types::TestOptions)
                 },
             }
         }
-        Err(e) => {
-            TestFileResult {
-                path: path.to_path_buf(),
-                passed: 0,
-                failed: 1,
-                skipped: 0,
-                ignored: 0,
-                duration_ms,
-                error: Some(e),
-            }
-        }
+        Err(e) => TestFileResult {
+            path: path.to_path_buf(),
+            passed: 0,
+            failed: 1,
+            skipped: 0,
+            ignored: 0,
+            duration_ms,
+            error: Some(e),
+        },
     }
 }
 
@@ -213,10 +211,7 @@ fn find_simple_binary() -> PathBuf {
 }
 
 /// Wait for a process with timeout
-fn wait_with_timeout(
-    mut child: std::process::Child,
-    timeout: Duration,
-) -> Result<(i32, String, String), String> {
+fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> Result<(i32, String, String), String> {
     use std::thread;
     use std::sync::mpsc;
 
@@ -237,18 +232,13 @@ fn wait_with_timeout(
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             Ok((exit_code, stdout, stderr))
         }
-        Ok(Err(e)) => {
-            Err(format!("Process failed: {}", e))
-        }
+        Ok(Err(e)) => Err(format!("Process failed: {}", e)),
         Err(_) => {
             // Timeout - kill the process
             #[cfg(unix)]
             {
                 use std::process::Command as StdCommand;
-                let _ = StdCommand::new("kill")
-                    .arg("-9")
-                    .arg(child_id.to_string())
-                    .status();
+                let _ = StdCommand::new("kill").arg("-9").arg(child_id.to_string()).status();
             }
 
             #[cfg(windows)]

@@ -23,13 +23,11 @@ impl DebugLevel {
     /// Get debug level from environment variable SIMPLE_TEST_DEBUG
     pub fn from_env() -> Self {
         static DEBUG_LEVEL: OnceLock<DebugLevel> = OnceLock::new();
-        *DEBUG_LEVEL.get_or_init(|| {
-            match std::env::var("SIMPLE_TEST_DEBUG").as_deref() {
-                Ok("trace") | Ok("TRACE") => DebugLevel::Trace,
-                Ok("detailed") | Ok("DETAILED") => DebugLevel::Detailed,
-                Ok("basic") | Ok("BASIC") => DebugLevel::Basic,
-                _ => DebugLevel::None,
-            }
+        *DEBUG_LEVEL.get_or_init(|| match std::env::var("SIMPLE_TEST_DEBUG").as_deref() {
+            Ok("trace") | Ok("TRACE") => DebugLevel::Trace,
+            Ok("detailed") | Ok("DETAILED") => DebugLevel::Detailed,
+            Ok("basic") | Ok("BASIC") => DebugLevel::Basic,
+            _ => DebugLevel::None,
         })
     }
 

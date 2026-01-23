@@ -643,8 +643,16 @@ mod tests {
 
         // Now elapsed should be around 0.1s
         let after_sleep = rt_progress_get_elapsed_seconds();
-        assert!(after_sleep >= 0.09, "Elapsed should be at least 90ms: got {}", after_sleep);
-        assert!(after_sleep < 0.5, "Elapsed should be less than 500ms: got {}", after_sleep);
+        assert!(
+            after_sleep >= 0.09,
+            "Elapsed should be at least 90ms: got {}",
+            after_sleep
+        );
+        assert!(
+            after_sleep < 0.5,
+            "Elapsed should be less than 500ms: got {}",
+            after_sleep
+        );
 
         // Reset and verify
         rt_progress_reset();

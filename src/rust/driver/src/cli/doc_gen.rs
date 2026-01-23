@@ -14,13 +14,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::bug_db::{add_bug, generate_bug_report, load_bug_db, save_bug_db, update_bug_status, mark_bug_fixed, BugStatus, Priority, Severity};
+use crate::bug_db::{
+    add_bug, generate_bug_report, load_bug_db, save_bug_db, update_bug_status, mark_bug_fixed, BugStatus, Priority,
+    Severity,
+};
 use crate::feature_db::{generate_feature_docs, load_feature_db};
 use crate::task_db::{generate_task_docs, load_task_db};
 use crate::test_db::{generate_test_result_docs, load_test_db};
-use crate::todo_db::{
-    generate_todo_docs, load_todo_db, save_todo_db, update_todo_db_incremental_parallel,
-};
+use crate::todo_db::{generate_todo_docs, load_todo_db, save_todo_db, update_todo_db_incremental_parallel};
 
 /// Run feature-gen command
 pub fn run_feature_gen(args: &[String]) -> i32 {
@@ -555,7 +556,15 @@ pub fn run_bug_add(args: &[String]) -> i32 {
     };
 
     // Add bug
-    if let Err(e) = add_bug(&mut db, bug_id.clone(), title, description, reproducible_by, priority, severity) {
+    if let Err(e) = add_bug(
+        &mut db,
+        bug_id.clone(),
+        title,
+        description,
+        reproducible_by,
+        priority,
+        severity,
+    ) {
         eprintln!("error: {}", e);
         return 1;
     }

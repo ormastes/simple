@@ -91,16 +91,10 @@ pub fn compute_statistics(samples: &[f64]) -> TimingStats {
     let median = percentile(&sorted, 0.5);
 
     // Compute variance and standard deviation
-    let variance = sorted.iter()
-        .map(|x| (x - mean).powi(2))
-        .sum::<f64>() / count as f64;
+    let variance = sorted.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / count as f64;
     let std_dev = variance.sqrt();
 
-    let cv_pct = if mean != 0.0 {
-        (std_dev / mean) * 100.0
-    } else {
-        0.0
-    };
+    let cv_pct = if mean != 0.0 { (std_dev / mean) * 100.0 } else { 0.0 };
 
     let p25 = percentile(&sorted, 0.25);
     let p50 = median;
@@ -214,9 +208,7 @@ pub fn detect_outliers_mad(samples: &[f64]) -> OutlierResult {
     let median = percentile(&sorted, 0.5);
 
     // Compute absolute deviations from median
-    let mut deviations: Vec<f64> = samples.iter()
-        .map(|&x| (x - median).abs())
-        .collect();
+    let mut deviations: Vec<f64> = samples.iter().map(|&x| (x - median).abs()).collect();
     deviations.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     let mad = percentile(&deviations, 0.5);
@@ -301,12 +293,7 @@ pub fn detect_outliers(samples: &[f64], method: OutlierMethod) -> OutlierResult 
 /// Check if timing has regressed beyond threshold
 ///
 /// Returns true if new_value is significantly worse than baseline
-pub fn has_regression(
-    new_value: f64,
-    baseline_mean: f64,
-    baseline_std_dev: f64,
-    std_dev_threshold: f64,
-) -> bool {
+pub fn has_regression(new_value: f64, baseline_mean: f64, baseline_std_dev: f64, std_dev_threshold: f64) -> bool {
     if baseline_std_dev <= 0.0 {
         return false;
     }
@@ -318,11 +305,7 @@ pub fn has_regression(
 /// Check if timing has changed significantly (for baseline updates)
 ///
 /// Returns true if change exceeds percentage threshold
-pub fn has_significant_change(
-    new_value: f64,
-    baseline_value: f64,
-    threshold_pct: f64,
-) -> bool {
+pub fn has_significant_change(new_value: f64, baseline_value: f64, threshold_pct: f64) -> bool {
     if baseline_value == 0.0 {
         return new_value != 0.0;
     }
@@ -391,14 +374,19 @@ mod tests {
         // Z-score method requires more data points to avoid masking effect
         // where a single outlier skews the mean and std_dev
         let samples = vec![
-            10.0, 10.0, 10.0, 10.0, 10.0,
-            10.0, 10.0, 10.0, 10.0, 10.0,
-            200.0,  // outlier - z-score will be >3.0 with this dataset
+            10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0,
+            200.0, // outlier - z-score will be >3.0 with this dataset
         ];
         let result = detect_outliers_zscore(&samples);
 
-        assert!(result.outliers.len() > 0, "Expected at least one outlier to be detected");
-        assert!(result.outliers.contains(&200.0), "Expected 200.0 to be detected as outlier");
+        assert!(
+            result.outliers.len() > 0,
+            "Expected at least one outlier to be detected"
+        );
+        assert!(
+            result.outliers.contains(&200.0),
+            "Expected 200.0 to be detected as outlier"
+        );
     }
 
     #[test]
